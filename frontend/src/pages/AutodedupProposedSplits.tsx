@@ -115,6 +115,7 @@ function defaultTicks(item: ProposedSplit): Set<number> {
 }
 
 type Plan = {
+  propertyId: number;
   statement: SplitStatement;
   units: ProposedSplitAdvert[][];
   kept: ProposedSplitAdvert[];
@@ -127,6 +128,7 @@ function planOf(item: ProposedSplit, ticks: ReadonlySet<number>): Plan {
   const all = groups.flatMap((g) => g.adverts);
   const units = groups.map((g) => g.adverts.filter((a) => ticks.has(a.listing_id))).filter((u) => u.length > 0);
   return {
+    propertyId: item.property_id,
     statement: {
       adverts: all.map((a) => a.listing_id),
       separate: units.map((u) => u.map((a) => a.listing_id)),
@@ -137,14 +139,32 @@ function planOf(item: ProposedSplit, ticks: ReadonlySet<number>): Plan {
   };
 }
 
+/* The separated unit that keeps the property record (its notes, tags and pipeline
+ * card), as the server picks it (E919): none while a kept advert is the
+ * property's own (no merge brought it) or no advert is; else the unit holding
+ * most of its own adverts, the first on a tie. The kept adverts then go home. */
+function recordKeeper(plan: Plan): ProposedSplitAdvert[] | null {
+  const own = (u: ProposedSplitAdvert[]) => u.filter((a) => a.origin_property_id == null).length;
+  if (own(plan.kept) > 0) return null;
+  let keeper: ProposedSplitAdvert[] | null = null;
+  for (const u of plan.units) if (own(u) > (keeper ? own(keeper) : 0)) keeper = u;
+  return keeper;
+}
+
 function planLine(plan: Plan): string {
   if (plan.kept.length === 0) return 'Nelze: jedna skupina musí zůstat.';
   if (plan.units.length === 0) return 'Plán: potvrdit jako jednu nemovitost';
   const tag = (a: ProposedSplitAdvert) => `#${a.listing_id} (${a.source})`;
+  const keeper = recordKeeper(plan);
   return (
     'Plán: ' +
     plan.units.map((u) => `oddělit ${u.map(tag).join(' + ')}`).join(' · ') +
-    ` · zbytek (${plan.kept.map((a) => `#${a.listing_id}`).join(', ')}) potvrdit jako jednu nemovitost`
+    ` · zbytek (${plan.kept.map((a) => `#${a.listing_id}`).join(', ')}) potvrdit jako jednu nemovitost` +
+    (keeper
+      ? ` · záznam #${plan.propertyId} (poznámky, štítky, karta v pipeline) zůstane u ` +
+        `${keeper.map((a) => `#${a.listing_id}`).join(' + ')}, vlastního inzerátu nemovitosti; ` +
+        'zbytek se vrátí tam, odkud přišel'
+      : '')
   );
 }
 
@@ -673,7 +693,11 @@ function OutcomeBody({
         <ul className="space-y-0.5">
           {r.units.map((u) => (
             <li key={u.unit}>
-              {u.role === 'kept' ? 'zůstávají spolu' : 'odděleno'}: {u.listing_ids.map(tag).join(', ')} →{' '}
+              {u.role === 'kept' ? 'zůstávají spolu' : 'odděleno'}
+              {u.role === 'separated' && u.unit === r.record_kept_by
+                ? ' (drží záznam nemovitosti: poznámky, štítky, karta v pipeline)'
+                : ''}
+              : {u.listing_ids.map(tag).join(', ')} →{' '}
               <Link to={propertyPath(u.property_id)} className={linkClass}>
                 {unitLanding(u, o.propertyId)}
               </Link>

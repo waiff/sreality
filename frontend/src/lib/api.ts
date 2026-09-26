@@ -3082,6 +3082,8 @@ export interface SplitUndoBody {
     verdict: string | null;
     note: string | null;
     reasons: string[];
+    /* The pair's must-not-link row before the split (a machine's included), put back by the undo. */
+    must_not_link?: { source: string; reason: string | null } | null;
   }[];
 }
 
