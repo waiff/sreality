@@ -99,7 +99,7 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None,
         return "category_type"
     if not category_main_compatible(a.category_main, b.category_main):
         return "category_main"
-    if proven:
+    if proven or not cfg.attribute_walls:
         return None
     if area_relation(a.area_m2, b.area_m2, cfg) == "reject":
         return "area"
@@ -246,7 +246,7 @@ def cluster_invariants_ok(
                 return "compat_class"
 
     sized = [(fp.listing_id, fp.area_m2) for fp in members
-             if fp.area_m2 is not None and fp.area_m2 > 0.0]
+             if cfg.attribute_walls and fp.area_m2 is not None and fp.area_m2 > 0.0]
     if _apart(sized, closure_of,
               lambda lo, hi: abs(hi - lo) / max(lo, hi) > cfg.cluster_area_spread):
         if not (cfg.d43_printed_area_prevails and relation is not None

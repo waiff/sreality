@@ -185,6 +185,9 @@ class Settings:
     # top CLIP tag equal on both sides) is not stopped by the attribute walls (area, disposition,
     # floor) and is certified K-P. The guards: frames carried by at most `photo_override_own_pop_max`
     # adverts corpus-wide (0 = E9 only), price paths that meet, and no development context.
+    # C7 arm: False deletes the three E5 attribute limbs from pair_veto and the cluster area_spread
+    # limb, leaving the D43 facts as the one reader of attribute differences.
+    attribute_walls: bool = True
     photo_override_frames: int = 0
     photo_override_rooms: tuple[str, ...] = ("kitchen", "bathroom")
     photo_override_own_pop_max: int = 0
