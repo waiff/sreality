@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
 
-from autodedup.dataset import Listing
+from autodedup.dataset import Listing, hamming64
 from autodedup.settings import Settings
 from autodedup.text_facts import address_block_key, unit_designators
 from toolkit.room_taxonomy import category_main_compatible
@@ -61,16 +61,46 @@ def area_relation(
     return "support"
 
 
-def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> str | None:
+ATTRIBUTE_LIMBS: frozenset[str] = frozenset({"area", "disposition", "floor"})
+
+
+def room_proof_frames(a: object, b: object, settings: Settings | None = None) -> int:
+    """C7: one-to-one tight dHash matches between the two sides' room frames, room to room.
+
+    `Fingerprint.room_frames` holds only the frames the rung may count (non-stock, in a proof
+    room, under the own-frame population bar), so a side without it counts nothing."""
+    cfg = settings or Settings()
+    left = getattr(a, "room_frames", None) or ()
+    right = getattr(b, "room_frames", None) or ()
+    if not left or not right:
+        return 0
+    used: set[int] = set()
+    count = 0
+    for room, phash in left:
+        for index, (other_room, other_hash) in enumerate(right):
+            if index in used or other_room != room:
+                continue
+            if hamming64(phash, other_hash) <= cfg.phash_tight:
+                used.add(index)
+                count += 1
+                break
+    return count
+
+
+def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None,
+              proven: bool = False) -> str | None:
     """The name of the first hard guard the pair breaks (E2-E5), or None when it passes.
 
-    Missing data is never a mismatch (E12): every clause needs BOTH sides known."""
+    Missing data is never a mismatch (E12): every clause needs BOTH sides known. `proven` (C7)
+    lifts the three attribute limbs; deal type and category never yield."""
     cfg = settings or Settings()
     if (a.category_type is not None and b.category_type is not None
             and a.category_type != b.category_type):
         return "category_type"
     if not category_main_compatible(a.category_main, b.category_main):
         return "category_main"
+    if proven:
+        return None
     if area_relation(a.area_m2, b.area_m2, cfg) == "reject":
         return "area"
     is_land = LAND_CATEGORY in (a.category_main, b.category_main)
@@ -145,6 +175,9 @@ def _spread_is_printed_one(
             if abs(left - right) / max(left, right) <= cfg.cluster_area_spread:
                 continue
             if _same_closure(left_id, right_id, closure_of):
+                continue
+            proven = getattr(relation, "photo_proven", None)
+            if proven is not None and proven(left_id, right_id):
                 continue
             a, b = listings.get(left_id), listings.get(right_id)
             if a is None or b is None or not _printed_areas_prevail(a, b):

@@ -68,6 +68,7 @@ from autodedup.demonstrate import (
     area_readings,
     body_headline_areas,
     decimals_decide,
+    development_context,
     live_days,
     rendering_equal,
     sequential_postings,
@@ -203,6 +204,7 @@ FEATURE_SLOTS: tuple[str, ...] = (
     "floorplan_conflict",
     "tag_room_clip_min2",
     "phash_tight_matches",
+    "room_proof_frames",
 )
 
 # Every name this module can return, so a caller can tabulate without discovering them.
@@ -313,6 +315,18 @@ def _stamp(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def photo_override(a: Listing, b: Listing, frames: float | None, cfg: Settings) -> bool:
+    """C7: the photo-override rung — N same-room exact frames outrank a stated area,
+    disposition or floor, when the price paths meet and the pair is not a development."""
+    if cfg.photo_override_frames <= 0 or frames is None or frames < cfg.photo_override_frames:
+        return False
+    if cfg.photo_override_price and not price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return False
+    if cfg.photo_override_no_development and development_context(a, b, cfg):
+        return False
+    return True
 
 
 def overlap_days(a: Listing, b: Listing) -> float | None:
@@ -2628,11 +2642,15 @@ def distinguishing_facts(
     # merge already cleared, so a parse gap in the 3-8 % band cannot split a certified merge.
     lenient = mode in (GATE, CLUSTER)
     gate_area_tol = cfg.d43_gate_area_tol if lenient else None
+    # C7: a photo-proven pair's three column facts (area, disposition, floor) yield.
+    proven = photo_override(a, b, _present(feats, "room_proof_frames"), cfg)
     # E280: two columns the two bodies' own printed figures contradict are not two areas.
     printed_prevail = cfg.d43_printed_area_prevails and _printed_areas_prevail(a, b)
     # E293: an empty land column is filled from the bažoš attribute block (identity when off).
     area_a, area_b = effective_area(a, cfg), effective_area(b, cfg)
-    if gate_area_tol is not None:
+    if proven:
+        pass
+    elif gate_area_tol is not None:
         gap = area_rel_diff(area_a, area_b)
         if gap is not None and gap > gate_area_tol and not printed_prevail:
             add("area", area_a, area_b)
@@ -2646,7 +2664,7 @@ def distinguishing_facts(
         add("stated_area", sorted(areas_a), sorted(areas_b))
 
     is_land = LAND_CATEGORY in (a.category_main, b.category_main)
-    if (not is_land and a.disposition is not None and b.disposition is not None
+    if (not is_land and not proven and a.disposition is not None and b.disposition is not None
             and a.disposition != b.disposition):
         add("disposition", a.disposition, b.disposition)
 
@@ -2655,7 +2673,7 @@ def distinguishing_facts(
     # is unknown (bazos posts both ways) a one-floor gap stays the vocabulary difference it is
     # on 45 % of cross-portal known duplicates. With no camp table this is g7's rule exactly.
     reads = cfg.floor_camps_reads
-    if _floor_fact(a, b, cfg):
+    if not proven and _floor_fact(a, b, cfg):
         add("floor", a.floor, b.floor)
 
     if a.total_floors is not None and b.total_floors is not None:

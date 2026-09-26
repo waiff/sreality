@@ -1661,6 +1661,10 @@ def pair_features(
         if (floor_known and source_known)
         else ABSENT
     )
+    if settings.photo_override_frames > 0:
+        from autodedup.guards import room_proof_frames
+
+        feats["room_proof_frames"] = (float(room_proof_frames(fa, fb, settings)), True)
     return feats
 
 

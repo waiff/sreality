@@ -26,7 +26,7 @@ import math
 from typing import Any, Iterable, Sequence
 
 from autodedup.fingerprint import Fingerprint
-from autodedup.guards import pair_veto
+from autodedup.guards import ATTRIBUTE_LIMBS, pair_veto, room_proof_frames
 from autodedup.settings import Settings
 
 # Fan-out fills in this order (E17), so the cap can only ever discard the weakest class.
@@ -199,8 +199,16 @@ class BlockIndex:
         pair = (fp.listing_id, other) if fp.listing_id < other else (other, fp.listing_id)
         if pair in self.vetoed_pairs:
             return True
-        veto = pair_veto(fp, self.fingerprints[other], self.settings)
+        other_fp = self.fingerprints[other]
+        veto = pair_veto(fp, other_fp, self.settings)
         if veto is None:
+            return False
+        # C7: retrieval admits a photo-proven pair past the attribute limbs on the frame count
+        # alone; the decision re-reads the whole rung (price, development) on the two adverts.
+        n = self.settings.photo_override_frames
+        if (n > 0 and veto in ATTRIBUTE_LIMBS
+                and room_proof_frames(fp, other_fp, self.settings) >= n):
+            self.photo_admitted = getattr(self, "photo_admitted", 0) + 1
             return False
         self.vetoed_pairs.add(pair)
         self.veto_counts[veto] = self.veto_counts.get(veto, 0) + 1
@@ -301,6 +309,7 @@ def generate_pairs(
         "listings_with_null_cat_group": null_cat_group,
         "zero_candidate_listings_by_null_attr": zero_by_null_attr,
         "guarded_pairs": dict(sorted(index.veto_counts.items())),
+        "photo_admitted": getattr(index, "photo_admitted", 0),
         "n_guarded_pairs": sum(index.veto_counts.values()),
     }
     return pairs, stats

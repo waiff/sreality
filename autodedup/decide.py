@@ -36,6 +36,7 @@ from autodedup.indistinguishable import (
     GATE,
     distinguishing_facts,
     overlap_days,
+    photo_override,
     price_paths_agree,
     promotion_warrant,
 )
@@ -43,7 +44,7 @@ from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
 ZONES: tuple[str, ...] = ("merge", "band", "reject", "veto")
-CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C", "K-R")
+CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C", "K-R", "K-P")
 SIDES: tuple[str, ...] = ("same", "cross")
 
 MIN_EVIDENCE_FAMILIES: int = 2
@@ -705,7 +706,9 @@ def _decide_layers(
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
         fb.listing_id, fa.listing_id
     )
-    veto = pair_veto(fa, fb, settings)
+    # C7: the photo-override rung, read once on the two adverts and the frame count.
+    proven = photo_override(la, lb, present_value(feats, "room_proof_frames"), settings)
+    veto = pair_veto(fa, fb, settings, proven)
     if veto is not None:
         return Decision(lo, hi, "veto", 0.0, set(), None, veto, f"guard:{veto}")
 
@@ -728,6 +731,8 @@ def _decide_layers(
 
     diverse = len(families) >= settings.min_evidence_families
     certificate = certificate_of(feats, la, lb, settings, kb_refused)
+    if certificate is None and proven:
+        certificate = "K-P"
     if certificate is not None:
         if stratum_t_hi(feats, certificate, settings) is None:
             return Decision(lo, hi, "band", score, families, certificate, None,

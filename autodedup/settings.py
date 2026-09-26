@@ -180,6 +180,16 @@ class Settings:
     # duplicate, and it is the only rule that can separate a developer's own near-identical
     # adverts. Its evidence is 3 facts in 1 development; the mechanism carries it, not the n.
     unit_designator_veto: bool = True
+    # C7 (census experiment, never shipped as dials): the photo-override rung. A pair sharing
+    # `photo_override_frames` or more tight frames INSIDE one room class (`photo_override_rooms`,
+    # top CLIP tag equal on both sides) is not stopped by the attribute walls (area, disposition,
+    # floor) and is certified K-P. The guards: frames carried by at most `photo_override_own_pop_max`
+    # adverts corpus-wide (0 = E9 only), price paths that meet, and no development context.
+    photo_override_frames: int = 0
+    photo_override_rooms: tuple[str, ...] = ("kitchen", "bathroom")
+    photo_override_own_pop_max: int = 0
+    photo_override_price: bool = False
+    photo_override_no_development: bool = False
     # E45: the merge zone needs one UNIT-specific corroboration. K-A + interior_match_ratio >= 0.5
     # scored 88.6% (n=35) against K-A's 52.6% overall; K-B (the disjoint-window re-post shape)
     # scored 100% (n=94).

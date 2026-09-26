@@ -29,6 +29,7 @@ from autodedup.indistinguishable import (
     honest_overlap_days,
     kc_house_number_price_excuse,
     overlap_days,
+    photo_override,
     price_paths_agree,
 )
 from autodedup.settings import Settings
@@ -112,6 +113,17 @@ class ClusterRelation:
                     hit = True
             self._memo[key] = hit
         return hit
+
+    def photo_proven(self, left: int, right: int) -> bool:
+        """C7: the scored pair carries the photo-override rung."""
+        key = (left, right) if left < right else (right, left)
+        slots = self._feats.get(key)
+        a, b = self._listings.get(key[0]), self._listings.get(key[1])
+        if not slots or a is None or b is None:
+            return False
+        slot = slots.get("room_proof_frames")
+        frames = float(slot[0]) if slot and slot[1] else None
+        return photo_override(a, b, frames, self._settings)
 
     def violating_pair(self, ids: Sequence[int]) -> tuple[int, int] | None:
         """The first pair of the member set a stated fact separates, in id order."""

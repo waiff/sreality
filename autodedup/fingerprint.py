@@ -170,6 +170,7 @@ class Fingerprint:
     all_hashes: set[int] = field(default_factory=set)
     catalog_ratio: float | None = None
     anchor_bands: list[tuple[int, int, int]] = field(default_factory=list)
+    room_frames: tuple[tuple[str, int], ...] = ()
     image_ids: list[int] = field(default_factory=list)
     interior_image_ids: list[int] = field(default_factory=list)
     exterior_image_ids: list[int] = field(default_factory=list)
@@ -222,6 +223,19 @@ def build_fingerprint(
         for band_no, band_val in simhash_bands(phash, settings.simhash_bands, settings.band_bits):
             anchor_bands.append((band_no, band_val, phash))
 
+    # C7: the frames the photo-override rung may count — non-stock, in a proof room, and (when
+    # the own-frame bar is set) carried by at most that many adverts corpus-wide.
+    room_frames: list[tuple[str, int]] = []
+    if settings.photo_override_frames > 0:
+        own = settings.photo_override_own_pop_max
+        for image in non_catalog:
+            room = image.room_tag()
+            if room not in settings.photo_override_rooms or image.phash is None:
+                continue
+            if own > 0 and (image.pop is None or image.pop > own):
+                continue
+            room_frames.append((room, int(image.phash)))
+
     by_family: dict[str, list[int]] = {"interior": [], "exterior": [], "plan": []}
     for image in images:
         family = dominant_family(image)
@@ -266,6 +280,7 @@ def build_fingerprint(
         all_hashes={int(img.phash) for img in hashed if img.phash is not None},
         catalog_ratio=(len(catalog) / len(hashed)) if (hashed and pop_measured) else None,
         anchor_bands=anchor_bands,
+        room_frames=tuple(room_frames),
         image_ids=[img.image_id for img in images],
         interior_image_ids=by_family["interior"],
         exterior_image_ids=by_family["exterior"],
