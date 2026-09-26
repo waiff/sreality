@@ -60,6 +60,7 @@ from autodedup.score_sql import (
     STORE_PRESENT_SQL,
 )
 from autodedup.settings import Settings
+from autodedup.store_score import storable
 
 RUN_FILE: str = "run.json"
 SUMMARY_FILE: str = "score.json"
@@ -255,19 +256,6 @@ def present_features(row: dict[str, Any]) -> dict[str, list[Any]]:
         except (TypeError, ValueError):
             continue
     return out
-
-
-def storable(row: dict[str, Any], store_floor: float) -> bool:
-    """What lands in `autodedup.pairs`: the whole band and merge zone whatever it scored, plus
-    the reject tail at or above the floor. The harness applies the same predicate when it
-    writes the artifact, so this is the contract stated rather than re-derived."""
-    zone = str(row.get("zone") or "")
-    if zone in ("merge", "band"):
-        return True
-    try:
-        return float(row.get("score") or 0.0) >= store_floor
-    except (TypeError, ValueError):
-        return False
 
 
 def membership_of(clusters: dict[str, Any]) -> dict[int, int]:

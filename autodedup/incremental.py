@@ -64,11 +64,14 @@ from autodedup.features import (
 )
 from autodedup.features import _attr_map as _feature_attr_map
 from autodedup.fingerprint import Fingerprint, build_fingerprint
+from autodedup.d43 import relation_for
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto
 from autodedup.hazard_context import BlockCell, ContextIndex, ContextStamp, rail_plan
 from autodedup.hazard_context import address_block_key, category_group
 from autodedup.model import LogisticModel
+from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.settings import Settings
+from autodedup.store_score import storable
 from autodedup.text_facts import reference_codes, states_from_price
 
 GENERATION: str = "rt"
@@ -126,15 +129,11 @@ class Evidence:
     n_tags: int = 0
 
     @property
-    def pending(self) -> bool:
-        """Photographs exist and NONE of them is hashed yet — the state E93 holds a merge in.
-
-        Narrower than `complete` on purpose: a gallery with one unhashed frame still carries
-        photo evidence, a gallery with none carries none at all."""
-        return self.n_images > 0 and self.n_phash <= 0
-
-    @property
     def complete(self) -> bool:
+        """Every photograph carries every signal the decision reads: the pHash, the CLIP vector
+        and its tags (D901: the tags stay while their contribution is not negligible). This is
+        what E93 holds a merge for (F3, E908) — a gallery hashed but not yet embedded is still
+        evidence the engine does not have."""
         return self.n_images <= 0 or (self.n_phash >= self.n_images
                                       and self.n_clip >= self.n_images
                                       and self.n_tags >= self.n_images)
@@ -166,8 +165,9 @@ class EvidenceHold:
     """E93: do not act on evidence you do not have yet.
 
     A merge that rests on photographs is HELD in the band — reason `evidence_pending` — while
-    either side's gallery exists and carries no hash at all, and only while that side is still
-    inside the horizon the producers are expected to answer within. Rejects are never held: a
+    either side's gallery is not yet COMPLETE (a photograph without its pHash, its CLIP vector
+    or its tags; F3, E908), and only while that side is still inside the horizon the producers
+    are expected to answer within. Rejects are never held: a
     pair the engine refuses on text, price or geometry is refused on evidence it HAS.
 
     The hold is a LATENCY policy and not a decision one, which is why it is an argument rather
@@ -187,7 +187,7 @@ class EvidenceHold:
         return (self.now - float(first_decided_at)) < self.horizon_s
 
     def holds(self, evidence: Evidence | None, first_decided_at: float | None) -> bool:
-        return bool(evidence is not None and evidence.pending
+        return bool(evidence is not None and not evidence.complete
                     and self.young(first_decided_at))
 
 
@@ -243,6 +243,9 @@ class PairRow:
     # page reads one thing whichever lane wrote it, and a row re-read from the store carries
     # none, which is why the upsert coalesces rather than overwrites.
     feats: Feats | None = None
+    # The three feature slots the D43 cluster relation reads (F2, E909): carried on the way out
+    # AND read back, because the lane clusters with the relation the batch pass clusters with.
+    slots: dict[str, tuple[float, bool]] | None = None
 
     def decision(self) -> Decision:
         return Decision(self.lo, self.hi, self.zone, self.score, set(self.families),
@@ -1213,6 +1216,7 @@ def run_pass(
             context={**census.pair_context(la, lb).to_json(),
                      "block": address_block_key(la)},
             fp_lo=dlo, fp_hi=dhi, feats=feats,
+            slots={name: feats[name] for name in FEATURE_SLOTS if name in feats},
         ))
     store.upsert_pairs(rows)
     result.pairs_written = len(rows)
@@ -1490,10 +1494,18 @@ def _recluster(
     working.ensure(every)
     of_component = {i: index for index, members in enumerate(components) for i in members}
     edges: list[list[PairRow]] = [[] for _ in components]
+    # F2 (E909): the D43 relation the batch pass clusters with, read off the SAME rows the batch
+    # keeps slots for (`storable`) — without it `d43_cluster_invariant` and both repartition
+    # repairs ran here on no relation at all, a looser engine than the one the cohorts validated.
+    slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
     for row in store.pairs_within(every):
         index = of_component.get(row.lo)
         if index is not None and index == of_component.get(row.hi):
             edges[index].append(row)
+            if storable({"zone": row.zone, "score": row.score, "evidence": row.evidence},
+                        settings.store_floor):
+                slots[(row.lo, row.hi)] = dict(row.slots or {})
+    relation = relation_for(settings, working.listings, slots)
     touched = store.clusters_touching(every)
 
     rows: list[dict[str, Any]] = []
@@ -1509,7 +1521,7 @@ def _recluster(
         )
         fps = {i: working.fps[i] for i in members if i in working.fps}
         listings = {i: working.listings[i] for i in members if i in working.listings}
-        clustered = cluster_pairs(decisions, listings, fps, settings, mnl)
+        clustered = cluster_pairs(decisions, listings, fps, settings, mnl, relation)
         rows.extend(cluster_rows(clustered, decisions, fps))
         keep |= set(clustered.clusters)
         # Refused unions AND refused bridges: §8 calls these the highest-value rows in the UI,

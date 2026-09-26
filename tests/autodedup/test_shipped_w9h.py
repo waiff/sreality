@@ -59,6 +59,7 @@ from autodedup.replay import (
     batch_state,
     withheld_state,
 )
+from autodedup.export import encode_clip
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_incremental import _dataset, _settings
@@ -150,7 +151,7 @@ def test_a_listing_decided_before_its_photographs_carries_no_phash_posting() -> 
 
     probes = {probe for probe, _token in store.keys[order[0]]}
     assert "phash" not in probes, "a blind gallery indexes no pHash band"
-    assert store.fp[order[0]].evidence.pending, "and the store SAYS so (E92)"
+    assert not store.fp[order[0]].evidence.complete, "and the store SAYS so (E92)"
     assert store.fp[order[0]].evidence.n_images == 3
 
 
@@ -183,7 +184,8 @@ def test_the_evidence_sweep_re_claims_the_listing_and_its_postings_gain_the_band
     assert scored > 0, "a re-claim re-scores the pairs the blind decision took"
     assert "phash" in {probe for probe, _t in store.keys[order[0]]}, (
         "and the postings now carry the band another listing's photo probe looks up")
-    assert not store.fp[order[0]].evidence.pending
+    evidence = store.fp[order[0]].evidence
+    assert evidence.n_phash == evidence.n_images
     assert store.fp[order[0]].first_decided_at == stamped, (
         "a re-decision does not restart the horizon clock (E92)")
 
@@ -248,6 +250,9 @@ _REPOST_BODY = ("Pronajem krasneho bytu 3+1 o vymere 95 m2 v panelovem dome u pa
                 "jednotka 44. " * 6)
 
 
+_CLIP = encode_clip([0.05] * 512)
+
+
 def _evidence_cohort():
     from autodedup.dataset import Dataset, Meta
     from tests.autodedup.test_incremental import _listing
@@ -259,7 +264,7 @@ def _evidence_cohort():
         listings[listing_id] = _listing(listing_id, **kw)
         images[listing_id] = [
             Image(listing_id=listing_id, image_id=listing_id * 10 + seq, seq=seq,
-                  phash=5_000 + seq, pop=1, tags=[("kitchen", 0.9)])
+                  phash=5_000 + seq, pop=1, clip=_CLIP, tags=[("kitchen", 0.9)])
             for seq in range(6)]
 
     add(101, source="sreality", source_id_native="n101", description=_UNIT_BODY,
@@ -330,8 +335,8 @@ def test_only_merges_wait_and_the_hold_names_what_it_is_holding() -> None:
 
 
 def test_the_hold_does_not_fire_once_the_photographs_are_there() -> None:
-    """Pending is `images exist and NONE is hashed`. A gallery the producers have answered is
-    evidence, and the hold has nothing to say about it."""
+    """A gallery every producer has answered (pHash, CLIP and tags on every photograph) is
+    complete evidence, and the hold has nothing to say about it."""
     delivered = _decide_blind(EvidenceHold(now=1_000.0, horizon_s=48 * 3600.0), deliver=True)
     assert delivered.pairs[(101, 202)].zone == "merge"
     assert delivered.pairs[(101, 202)].certificate == "K-C"
@@ -675,7 +680,7 @@ def test_the_sql_store_writes_and_reads_the_evidence_counts_and_the_first_stamp(
     assert db.rt_fp[("rt", 5)]["ev_complete"] is False
 
     read = SqlStore(db, "rt").rows([5])[5]
-    assert read.evidence == Evidence(4, 0, 0, 0) and read.evidence.pending
+    assert read.evidence == Evidence(4, 0, 0, 0) and not read.evidence.complete
     assert read.first_decided_at == pytest.approx(first.timestamp())
 
     # A refresh replaces the counts and KEEPS the stamp (E92, migration 540).
@@ -690,9 +695,38 @@ def test_evidence_of_counts_what_the_producers_delivered() -> None:
     images = [Image(listing_id=1, image_id=1, seq=0, phash=7, clip="v", tags=[("a", 1.0)]),
               Image(listing_id=1, image_id=2, seq=1)]
     assert evidence_of(images) == Evidence(2, 1, 1, 1)
-    assert not evidence_of(images).complete
-    assert not evidence_of(images).pending, "one hash IS photo evidence"
-    assert evidence_of([]).complete and not evidence_of([]).pending
+    assert not evidence_of(images).complete, "one frame without its signals is incomplete"
+    assert evidence_of([]).complete, "no gallery is complete: there is nothing to wait for"
+
+
+def test_the_hold_waits_for_complete_evidence_not_for_the_first_hash() -> None:
+    """F3 (E908): the engine reads CLIP and the tags, so a gallery that is hashed but not yet
+    embedded is evidence it does not have. W9h held only while NO frame was hashed."""
+    hold = EvidenceHold(now=1_000.0, horizon_s=48 * 3600.0)
+    assert hold.holds(Evidence(3, 3, 0, 0), None), "hashed, not embedded: waits"
+    assert hold.holds(Evidence(3, 3, 3, 2), None), "one frame untagged: waits"
+    assert not hold.holds(Evidence(3, 3, 3, 3), None), "complete: decides"
+    assert not hold.holds(Evidence(0, 0, 0, 0), None), "no photographs: nothing to wait for"
+    assert not hold.holds(Evidence(3, 3, 0, 0), 1_000.0 - 49 * 3600.0), "past the horizon"
+
+
+def test_a_merge_waits_while_the_photographs_are_hashed_but_not_embedded() -> None:
+    """The pass-level half of F3: the pHash job has answered, the CLIP job has not."""
+    ds = _evidence_cohort()
+    for listing_id, gallery in ds.images_by_listing.items():
+        ds.images_by_listing[listing_id] = [replace(image, clip=None) for image in gallery]
+    settings = _settings()
+    store = MemoryStore(now=1_000.0)
+    facts = _LateFacts(ds)
+    facts.delivered = set(ds.listings)
+    work = ScheduleWork(arrival_order(ds))
+    while not work.exhausted():
+        run_pass(store, facts, work, settings, hand_initialised(), _calibrated(ds, settings),
+                 limits=Limits(max_listings=50),
+                 hold=EvidenceHold(now=1_000.0, horizon_s=48 * 3600.0))
+    row = store.pairs[(101, 202)]
+    assert row.zone == "band" and row.reason == EVIDENCE_HOLD_REASON
+    assert row.evidence["held_zone"] == "merge"
 
 
 def test_a_pair_row_that_was_held_says_what_it_was_holding() -> None:

@@ -32,6 +32,8 @@ Nullable parameters carry explicit casts throughout: psycopg sends no type OID f
 
 from __future__ import annotations
 
+from autodedup.indistinguishable import FEATURE_SLOTS
+
 # The lane refuses to start without its own store; unlike the progress ledger, persistence IS
 # the deliverable.
 RT_STORE_PRESENT_SQL = """
@@ -736,7 +738,7 @@ select i.listing_id                as listing_id,
 """
 
 # Arm two: a merge HELD in the band for want of photographs (E93) whose hold is over — neither
-# side is still pending inside the horizon. Nothing about such a pair has moved, so no digest
+# side is still INCOMPLETE inside the horizon (F3, E908). Nothing about such a pair has moved, so no digest
 # and no feed could ever find it again; it is asked for by reason. The horizon is evaluated by
 # the SERVER's clock, because a runner's is not the database's.
 RT_EVIDENCE_RELEASE_SQL = """
@@ -748,10 +750,10 @@ select p.listing_lo, p.listing_hi
          on fhi.generation = p.generation and fhi.listing_id = p.listing_hi
  where p.generation = %(generation)s::text
    and p.decision = %(reason)s::text
-   and not (coalesce(flo.ev_images, 0) > 0 and coalesce(flo.ev_phash, 0) = 0
+   and not (flo.ev_complete is false
             and flo.first_decided_at
                 > now() - make_interval(hours => %(horizon_hours)s::int))
-   and not (coalesce(fhi.ev_images, 0) > 0 and coalesce(fhi.ev_phash, 0) = 0
+   and not (fhi.ev_complete is false
             and fhi.first_decided_at
                 > now() - make_interval(hours => %(horizon_hours)s::int))
  order by p.listing_lo, p.listing_hi
@@ -787,9 +789,16 @@ select count(*)
 # pair under a `context_rule:` reason, so the reason string is lossy, and E33 orders a
 # component's edges certificate-first — a cluster that read its edges back without the
 # certificate would union them in a different order than the cohort pass did.
-_PAIR_COLUMNS = """p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score,
+#
+# The last column is the three feature slots the D43 cluster relation reads (F2, E909), cut out
+# of the stored vector: the lane clusters with the relation the batch pass clusters with, and
+# a slot the vector does not carry was absent, which the relation reads exactly as "no slot".
+_SLOTS = ("jsonb_strip_nulls(jsonb_build_object("
+          + ", ".join(f"'{name}', p.features -> '{name}'" for name in FEATURE_SLOTS)
+          + "))")
+_PAIR_COLUMNS = f"""p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score,
        p.zone, p.decision, p.guard_veto, p.families, p.certificate, p.evidence, p.context,
-       p.fp_lo, p.fp_hi"""
+       p.fp_lo, p.fp_hi, {_SLOTS}"""
 
 RT_PAIRS_TOUCHING_SQL = f"""
 select {_PAIR_COLUMNS}

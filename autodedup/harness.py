@@ -85,6 +85,7 @@ from autodedup.labels import (
 )
 from autodedup.model import CALIBRATION_METHODS, LogisticModel, hand_initialised
 from autodedup.settings import Settings
+from autodedup.store_score import storable
 from autodedup.errors import DEFAULT_TOP, ERRORS_STEM, analyse
 from autodedup.labels import SOURCE_BROWSE_MERGE
 from autodedup.yardstick import DEFAULT_TOP as DEFAULT_YARDSTICK_TOP
@@ -517,9 +518,8 @@ def run_engine(
             vetoed.add((lo, hi))
         # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
         # the only way to adjudicate that refusal later is to read them off the row.
-        if (decision.score >= settings.store_floor
-                or decision.zone in ("merge", "band")
-                or decision.evidence):
+        if storable({"zone": decision.zone, "score": decision.score,
+                     "evidence": decision.evidence}, settings.store_floor):
             stored += 1
             pair_slots[(lo, hi)] = {
                 name: feats[name] for name in D43_FEATURE_SLOTS if name in feats

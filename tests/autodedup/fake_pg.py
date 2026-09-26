@@ -27,6 +27,7 @@ from autodedup import export_sql as E
 from autodedup import incremental_sql as S
 from autodedup import parity as P
 from autodedup.decide import CERTIFICATES
+from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.score_lane import CLUSTER_INSERT_SQL, CLUSTER_MEMBER_INSERT_SQL
 
@@ -330,10 +331,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 block = (row["context"] or {}).get("block")
                 if block not in set(p["blocks"]):
                     continue
+            vector = row.get("features") or {}
             rows.append((lo, hi, list(row["probes"]), row["from_lo"], row["from_hi"],
                          row["score"], row["zone"], row["decision"], row["guard_veto"],
                          row["families"], row["certificate"], row["evidence"],
-                         row["context"], row["fp_lo"], row["fp_hi"]))
+                         row["context"], row["fp_lo"], row["fp_hi"],
+                         {name: vector[name] for name in FEATURE_SLOTS if name in vector}))
         return rows
     if sql == S.RT_MERGE_NEIGHBOURS_SQL:
         ids = set(p["ids"])
@@ -494,8 +497,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         def _pending(listing_id: int) -> bool:
             row = db.rt_fp.get((gen, int(listing_id))) or {}
             stamp = row.get("first_decided_at")
-            return bool(int(row.get("ev_images") or 0) > 0
-                        and int(row.get("ev_phash") or 0) == 0
+            return bool(row.get("ev_complete") is False
                         and stamp is not None and stamp > db.now - horizon)
 
         out = []

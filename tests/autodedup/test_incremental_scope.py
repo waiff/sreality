@@ -58,7 +58,7 @@ from autodedup.incremental_scope import (
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup.replay import DatasetFacts, arrival_order
-from autodedup.score_lane import storable
+from autodedup.store_score import storable
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_incremental import _calibration, _dataset, _drain, _settings
 

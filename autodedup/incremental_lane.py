@@ -188,8 +188,8 @@ from autodedup.score_lane import (
     families_bitmask,
     families_of_bitmask,
     present_features,
-    storable,
 )
+from autodedup.store_score import storable
 from autodedup.model import LogisticModel
 from autodedup.parity_digest import Floors as ParityFloors
 from autodedup.parity_digest import baseline as parity_baseline
@@ -603,6 +603,7 @@ class SqlStore:
             veto=veto, reason=str(row[7] or ""),
             evidence={str(k): str(v) for k, v in evidence.items()},
             context=context, fp_lo=str(row[13] or ""), fp_hi=str(row[14] or ""),
+            slots=_slots(row[15] if len(row) > 15 else None),
         )
 
     def pairs_touching(self, ids: Iterable[int]) -> dict[tuple[int, int], PairRow]:
@@ -645,7 +646,8 @@ class SqlStore:
         keep: list[PairRow] = []
         evicted: list[tuple[int, int]] = []
         for row in rows:
-            if storable({"zone": row.zone, "score": row.score}, self.store_floor):
+            if storable({"zone": row.zone, "score": row.score, "evidence": row.evidence},
+                        self.store_floor):
                 keep.append(row)
             else:
                 evicted.append((row.lo, row.hi))
@@ -794,6 +796,13 @@ class SqlStore:
             "capped": self._cells[cell].capped,
         } for cell in sorted(self._cells_dirty)])
         self._cells_dirty.clear()
+
+
+def _slots(raw: Any) -> dict[str, tuple[float, bool]]:
+    """The relation's three slots as the store hands them back: `{name: [value, true]}`."""
+    value = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    return {str(name): (float(entry[0]), bool(entry[1]) if len(entry) > 1 else True)
+            for name, entry in value.items() if isinstance(entry, (list, tuple)) and entry}
 
 
 def _features_json(row: PairRow) -> str | None:

@@ -53,9 +53,11 @@ from autodedup.incremental_scope import Scope, parse_scope
 from autodedup.incremental_store import MemoryStore
 from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
+from autodedup.d43 import relation_for
+from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.model import LogisticModel
-from autodedup.score_lane import storable
+from autodedup.store_score import storable
 from autodedup.settings import Settings
 from autodedup.store_score import PAIR_SCORE_SQL_TYPE
 
@@ -213,6 +215,10 @@ def batch_state(
     decisions = []
     out: dict[tuple[int, int], dict[str, Any]] = {}
     vetoed: set[tuple[int, int]] = set()
+    # `run_engine`'s relation, built the way it builds it (F2, E909): the three D43 slots of
+    # every pair the store keeps. A reference without it proved the lane equal to an engine
+    # nobody ships.
+    slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
     for (lo, hi) in sorted(pairs):
         fa, fb = fps[lo], fps[hi]
         la, lb = ds.listings[lo], ds.listings[hi]
@@ -221,8 +227,12 @@ def batch_state(
         decisions.append(decision)
         if decision.veto == UNIT_DESIGNATOR_VETO:
             vetoed.add((lo, hi))
+        if storable({"zone": decision.zone, "score": decision.score,
+                     "evidence": decision.evidence}, settings.store_floor):
+            slots[(lo, hi)] = {name: feats[name] for name in FEATURE_SLOTS if name in feats}
         out[(lo, hi)] = _pair_view(decision, sorted(pairs[(lo, hi)]))
-    clustered = cluster_pairs(decisions, ds.listings, fps, settings, frozenset(vetoed))
+    clustered = cluster_pairs(decisions, ds.listings, fps, settings, frozenset(vetoed),
+                              relation_for(settings, ds.listings, slots))
     timings["batch_s"] = time.perf_counter() - clock
     return out, {key: list(members) for key, members in clustered.clusters.items()}, timings
 
