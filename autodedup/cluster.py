@@ -211,8 +211,7 @@ def _repartition_clusters(
                               settings.repartition_shed_max_union,
                               settings.repartition_outer_rounds,
                               settings.repartition_shed_factless_guard,
-                              settings.repartition_reconcile_factless_first,
-                              settings.repartition_keep_factless_moves)
+                              settings.repartition_reconcile_factless_first)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 
