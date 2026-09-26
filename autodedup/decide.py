@@ -687,6 +687,16 @@ def decide_pair(
     decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
     decision = apply_context_rule(decision, feats, la, lb, settings, context)
     decision = apply_d43_rule(decision, la, lb, feats, settings)
+    # C7: the photo-override rung lifts only what the ladder did NOT merge (no relabel of an
+    # existing merge, so no edge re-ranking), never an auto-reject or a veto, and the D43 gate
+    # still reads every stated fact except the three columns the rung outranks.
+    if (decision.zone in ("band", "reject") and not decision.reason.startswith("auto_reject")
+            and photo_override(la, lb, present_value(feats, "room_proof_frames"), settings)):
+        decision = apply_d43_rule(
+            Decision(decision.lo, decision.hi, "merge", decision.score, decision.families,
+                     "K-P", None, "certificate:K-P",
+                     {**decision.evidence, "k_p_lifted_from": decision.reason}),
+            la, lb, feats, settings)
     # D65 last: a cell the operator holds propose-only must survive every promotion above it.
     return apply_merge_policy(decision, la, lb, settings)
 
@@ -731,8 +741,6 @@ def _decide_layers(
 
     diverse = len(families) >= settings.min_evidence_families
     certificate = certificate_of(feats, la, lb, settings, kb_refused)
-    if certificate is None and proven:
-        certificate = "K-P"
     if certificate is not None:
         if stratum_t_hi(feats, certificate, settings) is None:
             return Decision(lo, hi, "band", score, families, certificate, None,
