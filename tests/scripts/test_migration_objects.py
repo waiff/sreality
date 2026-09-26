@@ -125,8 +125,10 @@ def test_every_recent_migration_is_either_probeable_or_openly_unverifiable():
     written — a migration that only drops, only seeds a policy row or only
     rebuilds a read model declares nothing to probe, and says so. It moved 28 ->
     24 when the location simplification sprint's deletion wave (502, 511, 512,
-    513) entered the window alongside the six field-policy seeds already in it.
+    513) entered the window alongside the six field-policy seeds already in it,
+    and 24 -> 21 when the AUTODEDUP go-live rows (562, 563, 568, 569, 570, 571,
+    572: app_settings updates, nothing to probe) entered it in September 2026.
     A broken parser reads ZERO here, nowhere near the floor."""
     migs = load_migrations(_MIGRATIONS, newest=40)
     probeable = [m for m in migs if m.objects]
-    assert len(probeable) >= 24, [m.filename for m in migs if not m.objects]
+    assert len(probeable) >= 21, [m.filename for m in migs if not m.objects]
