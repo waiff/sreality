@@ -137,6 +137,12 @@ NEGATIVE_VERDICTS: tuple[str, ...] = (
     "same_building_different_unit",
     "same_project_different_unit",
 )
+# WHAT THE STORE MAY HOLD (migration 532's CHECK), in ONE place: the verdict route validates
+# against it and `toolkit.property_identity.record_rulings` writes nothing else. The two finer
+# negatives are historical, never offered by the page since D39, and stay valid so a ruling
+# taken under the older vocabulary keeps reading back. `unsure` is the withdrawal: every reader
+# takes it as "no ruling", and it retracts the operator's must-not-link like `same`.
+VERDICT_VALUES: tuple[str, ...] = ("same", *NEGATIVE_VERDICTS, "unsure")
 
 # Does this row carry the verdict the filter asked for? `different` is the widened one; every
 # other value is itself. ONE fragment, so the groups queue and the residual queue cannot come
@@ -1339,6 +1345,25 @@ DELETE FROM autodedup.must_not_link
 WHERE listing_lo = %(listing_lo)s::bigint
   AND listing_hi = %(listing_hi)s::bigint
   AND source = 'operator'
+"""
+
+# Every must-not-link row among these adverts, whatever its source: what the operator's split
+# (E919) finds before it writes, so it and its undo can leave each veto they did not state as
+# they found it.
+MUST_NOT_LINK_PAIRS_SQL = """
+SELECT listing_lo, listing_hi, source, reason
+FROM autodedup.must_not_link
+WHERE listing_lo = ANY(%(ids)s::bigint[]) AND listing_hi = ANY(%(ids)s::bigint[])
+"""
+
+# One row put back exactly as that read found it, source included: a `guard`/`model`/`llm` veto
+# an interim operator ruling rewrote (`MUST_NOT_LINK_UPSERT_SQL`) or retracted is the machine's
+# again. Only `toolkit.property_identity.restore_must_not_link` runs it.
+MUST_NOT_LINK_RESTORE_SQL = """
+INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason)
+VALUES (%(listing_lo)s::bigint, %(listing_hi)s::bigint, %(source)s::text, %(reason)s::text)
+ON CONFLICT (listing_lo, listing_hi)
+DO UPDATE SET source = excluded.source, reason = excluded.reason
 """
 
 # Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`

@@ -147,6 +147,13 @@ class _Ledger:
             if self.mnl.get(key, ("",))[0] == "operator":
                 del self.mnl[key]
             return []
+        if s == " ".join(usql.MUST_NOT_LINK_PAIRS_SQL.split()):
+            ids = set(p["ids"])
+            return [(lo, hi, src, why) for (lo, hi), (src, why) in sorted(self.mnl.items())
+                    if lo in ids and hi in ids]
+        if s == " ".join(usql.MUST_NOT_LINK_RESTORE_SQL.split()):
+            self.mnl[(p["listing_lo"], p["listing_hi"])] = (p["source"], p["reason"])
+            return []
         if s.startswith("SELECT id, property_id FROM listings WHERE property_id = ANY("):
             return [(lid, pid) for lid, pid in sorted(self.listings.items()) if pid in p["ids"]]
         if s.startswith("SELECT id, status, first_seen_at, asset_id, category_type"):

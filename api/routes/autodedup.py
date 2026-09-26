@@ -262,17 +262,10 @@ FAMILY_BITS: tuple[tuple[str, int], ...] = (
 # WHAT THE STORE MAY HOLD, which is no longer what the page offers (D39). The UI asks three
 # questions — same / different / unsure — because the engine consumes every negative
 # identically (one permanent must-not-link, one negative calibration label, §9), so the finer
-# breakdown bought no decision and cost clicks. The two finer values stay VALID here: 532's
-# CHECK is untouched, no row is rewritten, and a ruling taken under the older vocabulary has to
-# keep writing and reading back rather than becoming a 400 against its own history.
-VERDICT_VALUES: tuple[str, ...] = (
-    "same",
-    "different",
-    # E49, migration 532 — historical, never offered by the page since D39.
-    "same_building_different_unit",
-    "same_project_different_unit",
-    "unsure",
-)
+# breakdown bought no decision and cost clicks. ONE definition (`ui_sql.VERDICT_VALUES`), shared
+# with the toolkit's ruling writer: 532's CHECK is untouched, no row is rewritten, and a ruling
+# taken under the older vocabulary keeps writing and reading back.
+VERDICT_VALUES: tuple[str, ...] = usql.VERDICT_VALUES
 # A negative verdict is what writes the permanent must-not-link (§9): "unsure" is not one.
 # ONE definition, shared with the SQL that widens the `different` filter over all three.
 NEGATIVE_VERDICTS: frozenset[str] = frozenset(usql.NEGATIVE_VERDICTS)
