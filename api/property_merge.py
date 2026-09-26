@@ -15,7 +15,7 @@ the HTTP + read layer over them. Mounted under `/properties/*`, admin-gated.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -36,7 +36,14 @@ from toolkit.property_identity import (
     merge_property_set,
     resolve_active_property_id,
 )
-from toolkit.property_split import REASON_MAX, SplitRefused, split_property, undo_split
+from toolkit.property_split import (
+    MAX_ADVERTS,
+    MAX_SEPARATED,
+    REASON_MAX,
+    SplitRefused,
+    split_property,
+    undo_split,
+)
 
 router = APIRouter(prefix="/properties", tags=["properties"])
 
@@ -54,27 +61,37 @@ class AssetUnlinkAction(BaseModel):
     property_id: int
 
 
+class SplitUndoVeto(BaseModel):
+    """The must-not-link row a pair had before the split."""
+
+    source: Literal["guard", "model", "llm", "operator"]
+    reason: str | None = None
+
+
 class SplitUndoRuling(BaseModel):
     listing_lo: int
     listing_hi: int
     verdict: str | None = None
     note: str | None = None
     reasons: list[str] = Field(default_factory=list)
+    must_not_link: SplitUndoVeto | None = None
 
 
 class SplitUndo(BaseModel):
     """The undo a split's response issued, posted back verbatim."""
 
     call_id: str
-    placements: dict[int, int] = Field(default_factory=dict)
-    rulings: list[SplitUndoRuling] = Field(default_factory=list)
+    placements: dict[int, int] = Field(default_factory=dict, max_length=MAX_ADVERTS)
+    rulings: list[SplitUndoRuling] = Field(
+        default_factory=list, max_length=MAX_ADVERTS * (MAX_ADVERTS - 1) // 2)
 
 
 class SplitAction(BaseModel):
     """A statement (`adverts` shown, `separate` units, `keep_together`) or, alone, an `undo`."""
 
-    adverts: list[int] | None = None
-    separate: list[list[int]] = Field(default_factory=list)
+    adverts: list[int] | None = Field(default=None, max_length=MAX_ADVERTS)
+    separate: list[Annotated[list[int], Field(max_length=MAX_ADVERTS)]] = Field(
+        default_factory=list, max_length=MAX_SEPARATED)
     keep_together: bool | None = None
     # The operator's optional free-text reason (decision 8), kept on every ruling's note.
     reason: str | None = Field(default=None, max_length=REASON_MAX)
