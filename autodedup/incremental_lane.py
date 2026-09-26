@@ -1794,7 +1794,7 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     and the pass cannot read two different corpora (the parity gate's whole question, answered
     by construction), and the population is ONE aggregate over `public.images` for the scope's
     hashes, the statement the export always ran. Written together with the calibration row, so
-    the switch is atomic inside the caller's transaction. A cut is not a generation (E907):
+    the switch is atomic inside the caller's transaction. A cut is not a generation (E915):
     stored decisions keep the digest they were taken under and are re-decided only when a feed
     re-claims their listing."""
     clock = time.perf_counter()

@@ -120,7 +120,7 @@ def test_a_photograph_the_cut_never_saw_is_unknown_until_the_re_cut(world, tmp_p
     assert out["recut"]["hashes_measured"] > 0
     assert all(int(row["phash"]) in world.phash_pop for row in world.image_rows)
     assert world.calibration[GENERATION]["digest"] == before, (
-        "a re-hash moves the population, not the cohort statistics (E907: not a generation)")
+        "a re-hash moves the population, not the cohort statistics (E915: not a generation)")
     again = run_incremental(lambda: world)
     assert again["population"]["images_unmeasured"] == 0 and "recut" not in again
 
