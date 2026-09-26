@@ -1,0 +1,3848 @@
+{
+ "bars": {
+  "w7a": {
+   "B0_converged_and_ceiling": true,
+   "B1_ece_le_5pct": true,
+   "B2_auc_ge_w6_gold": false,
+   "B3_f1_ge_w6_gold": false,
+   "R1_structural_negatives_0": true,
+   "R2_ledger_regressions_0": true,
+   "R3_certain_recall_ge_w6_gold": false,
+   "R4_hand_read": true,
+   "passes": false
+  },
+  "w7b": {
+   "B0_converged_and_ceiling": true,
+   "B1_ece_le_5pct": true,
+   "B2_auc_ge_w6_gold": false,
+   "B3_f1_ge_w6_gold": false,
+   "R1_structural_negatives_0": true,
+   "R2_ledger_regressions_0": true,
+   "R3_certain_recall_ge_w6_gold": false,
+   "R4_hand_read": true,
+   "passes": false
+  }
+ },
+ "baseline_parity_with_s14": {
+  "all_sixteen_identical": true,
+  "per_cohort": {
+   "cohort10": {
+    "groups": 3985,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort11": {
+    "groups": 4464,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort12": {
+    "groups": 4346,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort13": {
+    "groups": 4219,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort14": {
+    "groups": 4022,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort15": {
+    "groups": 4322,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort16": {
+    "groups": 3910,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort3": {
+    "groups": 4096,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort4": {
+    "groups": 4460,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort5": {
+    "groups": 4230,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort6": {
+    "groups": 4133,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort7": {
+    "groups": 4334,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort8": {
+    "groups": 4302,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "cohort9": {
+    "groups": 3889,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "region": {
+    "groups": 3201,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   },
+   "trial": {
+    "groups": 1271,
+    "identical": true,
+    "only_here": 0,
+    "only_s14": 0
+   }
+  }
+ },
+ "decision": {
+  "ships": null
+ },
+ "dev_only_diagnostic": {
+  "validation_all": {
+   "diag_l2_001": 0.921,
+   "n": 886,
+   "w6_gold": 0.9337,
+   "w7_0": 0.9186,
+   "w7a": 0.918,
+   "w7b": 0.9177
+  },
+  "validation_fresh": {
+   "diag_l2_001": 0.7962,
+   "n": 390,
+   "w6_gold": 0.7921,
+   "w7_0": 0.7626,
+   "w7a": 0.7602,
+   "w7b": 0.754
+  },
+  "validation_j2": {
+   "diag_l2_001": 0.6829,
+   "n": 187,
+   "w6_gold": 0.6788,
+   "w7_0": 0.6022,
+   "w7a": 0.5849,
+   "w7b": 0.5718
+  },
+  "validation_recipe": {
+   "diag_l2_001": 0.949,
+   "n": 496,
+   "w6_gold": 0.9648,
+   "w7_0": 0.9544,
+   "w7a": 0.9544,
+   "w7b": 0.9559
+  },
+  "what": "validation-fold AUC (no sealed row read): the refit at w6_gold's own l2 0.01 (diag_l2_001) against the grid-chosen penalties"
+ },
+ "fits": {
+  "w7_0": {
+   "calibration": "isotonic_pav",
+   "ceiling": 0.999999999999,
+   "converged": true,
+   "l2": 0.1,
+   "labels_train_val_test": [
+    1580,
+    530,
+    575
+   ],
+   "leakage_check": {
+    "listings_in_multiple_splits": [
+     9416,
+     11155,
+     11168,
+     11561,
+     14169,
+     14373,
+     14433,
+     14581,
+     14943,
+     28957,
+     45562,
+     55672,
+     58318,
+     58594,
+     58725,
+     59609,
+     74933,
+     76159,
+     76619,
+     79475
+    ],
+    "n_groups": 1003,
+    "n_groups_spanning_splits": 0,
+    "n_listings": 2849,
+    "n_listings_in_multiple_splits": 401,
+    "n_rows_touching_a_leaked_listing": 1108,
+    "spanning": []
+   },
+   "oof": {
+    "isotonic": {
+     "auc_merge_end": 0.1830188679245283,
+     "ceiling": 0.9673739174097505,
+     "ece": 0.059643960649873276,
+     "ece_unweighted": 0.06686549771061705
+    },
+    "isotonic_pav": {
+     "auc_merge_end": 0.31981132075471697,
+     "ceiling": 0.999999999999,
+     "ece": 0.038718861142654035,
+     "ece_unweighted": 0.051649482789689775
+    },
+    "platt": {
+     "auc_merge_end": 0.4075471698113208,
+     "ceiling": 0.9999992263327394,
+     "ece": 0.05506985808447333,
+     "ece_unweighted": 0.06935831524413928
+    }
+   },
+   "own_test": {
+    "auc": 0.9722388059701492,
+    "ece": 0.04750972628717119,
+    "ece_weighted": 0.04045222492071961,
+    "log_loss": 0.23588157360336426,
+    "n": 575,
+    "n_positive": 240
+   },
+   "seal": {
+    "n_groups": 1831,
+    "n_listings": 4488,
+    "sha256": "f3b63906ceb08972542e23f4d6611c2f407180cc8682872390b4662d04d69c5a"
+   },
+   "weight_cap": 82.48899755501222
+  },
+  "w7a": {
+   "calibration": "isotonic_pav",
+   "ceiling": 0.999999999999,
+   "converged": true,
+   "l2": 0.1,
+   "labels_train_val_test": [
+    2177,
+    706,
+    752
+   ],
+   "leakage_check": {
+    "listings_in_multiple_splits": [
+     9416,
+     11155,
+     11168,
+     11561,
+     14169,
+     14373,
+     14433,
+     14581,
+     14943,
+     28957,
+     45562,
+     52821,
+     55672,
+     58318,
+     58594,
+     58725,
+     59609,
+     62521,
+     69760,
+     70514
+    ],
+    "n_groups": 1162,
+    "n_groups_spanning_splits": 0,
+    "n_listings": 3334,
+    "n_listings_in_multiple_splits": 444,
+    "n_rows_touching_a_leaked_listing": 1344,
+    "spanning": []
+   },
+   "oof": {
+    "isotonic": {
+     "auc_merge_end": 0.21405405405405406,
+     "ceiling": 0.9718918233449577,
+     "ece": 0.058828200057656044,
+     "ece_unweighted": 0.07096459306677498
+    },
+    "isotonic_pav": {
+     "auc_merge_end": 0.35567567567567565,
+     "ceiling": 0.999999999999,
+     "ece": 0.038458464686590345,
+     "ece_unweighted": 0.056971876783771615
+    },
+    "platt": {
+     "auc_merge_end": 0.46702702702702703,
+     "ceiling": 0.9999990931829867,
+     "ece": 0.06520641782214423,
+     "ece_unweighted": 0.09047542232911572
+    }
+   },
+   "own_test": {
+    "auc": 0.9787152607965298,
+    "ece": 0.036033172215924836,
+    "ece_weighted": 0.03754258585470017,
+    "log_loss": 0.20304652259151745,
+    "n": 752,
+    "n_positive": 393
+   },
+   "seal": {
+    "n_groups": 1831,
+    "n_listings": 4488,
+    "sha256": "f3b63906ceb08972542e23f4d6611c2f407180cc8682872390b4662d04d69c5a"
+   },
+   "weight_cap": 71.12727272727273
+  },
+  "w7b": {
+   "calibration": "isotonic_pav",
+   "ceiling": 0.999999999999,
+   "converged": true,
+   "l2": 0.3,
+   "labels_train_val_test": [
+    2618,
+    886,
+    947
+   ],
+   "leakage_check": {
+    "listings_in_multiple_splits": [
+     9416,
+     11155,
+     11168,
+     11247,
+     11561,
+     14169,
+     14373,
+     14433,
+     14581,
+     14943,
+     24071,
+     24072,
+     28957,
+     45562,
+     50197,
+     52821,
+     55672,
+     58318,
+     58594,
+     58725
+    ],
+    "n_groups": 1219,
+    "n_groups_spanning_splits": 0,
+    "n_listings": 3682,
+    "n_listings_in_multiple_splits": 486,
+    "n_rows_touching_a_leaked_listing": 1536,
+    "spanning": []
+   },
+   "oof": {
+    "isotonic": {
+     "auc_merge_end": 0.4293537787513691,
+     "ceiling": 0.9576574016707115,
+     "ece": 0.0543984083108714,
+     "ece_unweighted": 0.09115690865999801
+    },
+    "isotonic_pav": {
+     "auc_merge_end": 0.5728368017524644,
+     "ceiling": 0.999999999999,
+     "ece": 0.033246279726626714,
+     "ece_unweighted": 0.0808353091847063
+    },
+    "platt": {
+     "auc_merge_end": 0.7015334063526835,
+     "ceiling": 0.9999999441675793,
+     "ece": 0.062172098015038396,
+     "ece_unweighted": 0.10985086979161543
+    }
+   },
+   "own_test": {
+    "auc": 0.9568660022148394,
+    "ece": 0.04455566213158027,
+    "ece_weighted": 0.04987636242003257,
+    "log_loss": 0.25008382244501387,
+    "n": 947,
+    "n_positive": 560
+   },
+   "seal": {
+    "n_groups": 1831,
+    "n_listings": 4488,
+    "sha256": "f3b63906ceb08972542e23f4d6611c2f407180cc8682872390b4662d04d69c5a"
+   },
+   "weight_cap": 43.125
+  }
+ },
+ "hand_read": {
+  "band_to_merge_co_clustered": {
+   "w7a": 0,
+   "w7b": 11
+  },
+  "new_merge_sample_verdict": "20 of 20 ONE UNIT (re-post trains on bazos and cross-portal copies)",
+  "new_merge_sample_w7a": [
+   {
+    "cohort": "cohort7",
+    "pair": [
+     146280,
+     276593
+    ],
+    "reading": "ONE UNIT - Teplice 1+kk rental 'byt c. 5' 38 m2, idnes vs bazos, one body and one unit number."
+   },
+   {
+    "cohort": "cohort9",
+    "pair": [
+     210859,
+     18637567
+    ],
+    "reading": "ONE UNIT - the bazos Stepankovice half-house 4+1 re-post train (unpriced in June, 3,590,000 from August, one body): one property."
+   },
+   {
+    "cohort": "cohort9",
+    "pair": [
+     262284,
+     18686568
+    ],
+    "reading": "ONE UNIT - the bazos Stepankovice half-house 4+1 re-post train (unpriced in June, 3,590,000 from August, one body): one property."
+   },
+   {
+    "cohort": "cohort13",
+    "pair": [
+     332182,
+     424718
+    ],
+    "reading": "ONE UNIT - Vsetin Rezidence u Zamku 'byt c. 31' 2+kk 39 m2 at 3,700,000, sreality vs ceskereality, one unit number."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     210869,
+     18887809
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     476204,
+     18935656
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     319783,
+     18967442
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort9",
+    "pair": [
+     303263,
+     18328563
+    ],
+    "reading": "ONE UNIT - the bazos Stepankovice half-house 4+1 re-post train (unpriced in June, 3,590,000 from August, one body): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     555447,
+     19026151
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     11134045,
+     18935656
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     497942,
+     18636440
+    ],
+    "reading": "ONE UNIT - the bazos Slepotice former railway house 2+1 70 m2 re-post train (3,580,000 in July, 2,990,000 from late August, one body): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     268747,
+     18887809
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     503455,
+     18683855
+    ],
+    "reading": "ONE UNIT - the bazos Slepotice former railway house 2+1 70 m2 re-post train (3,580,000 in July, 2,990,000 from late August, one body): one property."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     522142,
+     18635842
+    ],
+    "reading": "ONE UNIT - the bazos Slepotice former railway house 2+1 70 m2 re-post train (3,580,000 in July, 2,990,000 from late August, one body): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     524149,
+     18952990
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     498331,
+     19002087
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     453034,
+     18820621
+    ],
+    "reading": "ONE UNIT - the bazos Slepotice former railway house 2+1 70 m2 re-post train (3,580,000 in July, 2,990,000 from late August, one body): one property."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     351178,
+     18959990
+    ],
+    "reading": "ONE UNIT - every cohort-16 sample pair is the bazos Jevicko re-post train (one body, 7,790,000, 4+kk, daily re-posts alternating dum / komercni obchodni prostor): one property."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     500103,
+     18641195
+    ],
+    "reading": "ONE UNIT - the bazos Slepotice former railway house 2+1 70 m2 re-post train (3,580,000 in July, 2,990,000 from late August, one body): one property."
+   },
+   {
+    "cohort": "cohort4",
+    "pair": [
+     343958,
+     12408814
+    ],
+    "reading": "ONE UNIT - Plzen-Bozkov building plot 1,335 m2: idnes 8,664,150 total vs realitymix 6,490 per m2 (6,490 x 1,335 = 8,664,150), one body."
+   }
+  ],
+  "new_merges_newly_co_clustered": {
+   "w7a": {
+    "by_cohort": {
+     "cohort10": 33,
+     "cohort11": 56,
+     "cohort12": 21,
+     "cohort13": 42,
+     "cohort14": 5,
+     "cohort15": 28,
+     "cohort16": 534,
+     "cohort3": 22,
+     "cohort4": 43,
+     "cohort5": 177,
+     "cohort6": 22,
+     "cohort7": 24,
+     "cohort8": 25,
+     "cohort9": 305,
+     "g13": 0,
+     "region": 11,
+     "trial": 0
+    },
+    "certain": 489,
+    "labelled_pos": 0,
+    "n": 1348,
+    "structural_neg": 0
+   },
+   "w7b": {
+    "by_cohort": {
+     "cohort10": 33,
+     "cohort11": 56,
+     "cohort12": 22,
+     "cohort13": 42,
+     "cohort14": 5,
+     "cohort15": 30,
+     "cohort16": 534,
+     "cohort3": 24,
+     "cohort4": 43,
+     "cohort5": 178,
+     "cohort6": 22,
+     "cohort7": 24,
+     "cohort8": 26,
+     "cohort9": 305,
+     "g13": 1,
+     "region": 11,
+     "trial": 1
+    },
+    "certain": 491,
+    "labelled_pos": 0,
+    "n": 1357,
+    "structural_neg": 0
+   }
+  },
+  "readings": [
+   {
+    "cohort": "cohort15",
+    "pair": [
+     45106,
+     247020
+    ],
+    "reading": "ONE UNIT - Vinarstvi Turold Mikulov winery, sreality 712 m2 vs idnes 713 m2, one body, estate 1,579 m2 on idnes; the same property on two portals."
+   },
+   {
+    "cohort": "cohort15",
+    "pair": [
+     45106,
+     442105
+    ],
+    "reading": "ONE UNIT - the same Mikulov winery on realitymix (712.7 m2, estate 1,579 m2, the same body)."
+   },
+   {
+    "cohort": "cohort16",
+    "pair": [
+     383640,
+     17658822
+    ],
+    "reading": "ONE UNIT - Zeranovice 6+1 house 250 m2 / estate 560 m2 at 9,900,000, two realitymix adverts of one body (06-28 and 08-19, both live to 09-24)."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     322416,
+     397615
+    ],
+    "reading": "ONE UNIT - Hribsko u Stezer country house 158 m2 at 8,900,000 (bazos after a cut from 9,400,000), bazos vs realitymix, one body, both delisted 07-29/30."
+   },
+   {
+    "cohort": "cohort5",
+    "pair": [
+     11628906,
+     11652822
+    ],
+    "reading": "ONE UNIT - Pardubice-Drazkovice two-flat START house 196 / 195 m2 at 6,435,600, ceskereality vs sreality posted the same day, one body."
+   },
+   {
+    "cohort": "cohort6",
+    "pair": [
+     75043,
+     75144
+    ],
+    "reading": "ONE UNIT - Sadov chalet 15 m2 on a 437 m2 plot at 1,490,000, one broker posting it twice on sreality (Sadov / Karlovy Vary locality) five minutes apart."
+   },
+   {
+    "cohort": "cohort6",
+    "pair": [
+     128279,
+     153296
+    ],
+    "reading": "ONE UNIT - the same Sadov chalet posted twice on idnes by one broker."
+   },
+   {
+    "cohort": "cohort6",
+    "pair": [
+     390549,
+     436248
+    ],
+    "reading": "ONE UNIT - Luby (Chebska) house 364 m2 with a shop and two 2+1 flats at 2,999,990 (after 3,799,999), realitymix vs bazos, one body."
+   },
+   {
+    "cohort": "cohort6",
+    "pair": [
+     400444,
+     401992
+    ],
+    "reading": "ONE UNIT - the same Sadov chalet posted twice on realitymix by one broker."
+   },
+   {
+    "cohort": "cohort6",
+    "pair": [
+     406082,
+     436248
+    ],
+    "reading": "ONE UNIT - the same Luby house, mmreality vs bazos, one body and price path."
+   },
+   {
+    "cohort": "cohort9",
+    "pair": [
+     253366,
+     452379
+    ],
+    "reading": "ONE UNIT - Vresina cultural house 635 m2 for rent at 150,000, idnes vs realitymix, one body (total floors 1 vs 2 is the portals' storey convention)."
+   }
+  ]
+ },
+ "model_level": {
+  "common_sealed_population": {
+   "w6_gold": {
+    "auc": 0.9766,
+    "ece": 0.0314,
+    "f1": 0.9493,
+    "log_loss": 0.2709,
+    "n": 947
+   },
+   "w7_0": {
+    "auc": 0.961,
+    "ece": 0.0352,
+    "f1": 0.9447,
+    "log_loss": 0.2451,
+    "n": 947
+   },
+   "w7a": {
+    "auc": 0.9613,
+    "ece": 0.0319,
+    "f1": 0.943,
+    "log_loss": 0.2465,
+    "n": 947
+   },
+   "w7b": {
+    "auc": 0.9583,
+    "ece": 0.0456,
+    "f1": 0.9463,
+    "log_loss": 0.2473,
+    "n": 947
+   }
+  },
+  "raw_uncalibrated_auc": {
+   "all": {
+    "w6_gold": 0.9765684889122865,
+    "w7_0": 0.9610105935921236,
+    "w7a": 0.9613153787186094,
+    "w7b": 0.9582629094972892
+   },
+   "fresh": {
+    "w6_gold": 0.9333016225358067,
+    "w7_0": 0.860208234237091,
+    "w7a": 0.8648062998784419,
+    "w7b": 0.8425030389514296
+   },
+   "j2": {
+    "w6_gold": 0.8143642072213501,
+    "w7_0": 0.5961538461538461,
+    "w7a": 0.6089089481946625,
+    "w7b": 0.5608320251177394
+   },
+   "operator": {
+    "w6_gold": 0.9973333333333333,
+    "w7_0": 0.9985454545454545,
+    "w7a": 1.0,
+    "w7b": 1.0
+   }
+  },
+  "subsets": {
+   "all": {
+    "n": 947,
+    "n_positive": 561,
+    "w6_gold": {
+     "auc": 0.9766,
+     "ece": 0.0314,
+     "f1_f1": 0.9493
+    },
+    "w7_0": {
+     "auc": 0.961,
+     "ece": 0.0352,
+     "f1_f1": 0.9447
+    },
+    "w7a": {
+     "auc": 0.9613,
+     "ece": 0.0319,
+     "f1_f1": 0.943
+    },
+    "w7b": {
+     "auc": 0.9583,
+     "ece": 0.0456,
+     "f1_f1": 0.9463
+    }
+   },
+   "fresh_never_fitted_by_w6_gold": {
+    "n": 410,
+    "n_positive": 357,
+    "w6_gold": {
+     "auc": 0.9333,
+     "ece": 0.0574,
+     "f1_f1": 0.9581
+    },
+    "w7_0": {
+     "auc": 0.8602,
+     "ece": 0.0446,
+     "f1_f1": 0.9538
+    },
+    "w7a": {
+     "auc": 0.8648,
+     "ece": 0.0418,
+     "f1_f1": 0.9538
+    },
+    "w7b": {
+     "auc": 0.8425,
+     "ece": 0.0538,
+     "f1_f1": 0.9538
+    }
+   },
+   "j2_any": {
+    "n": 210,
+    "n_positive": 182,
+    "w6_gold": {
+     "auc": 0.8144,
+     "ece": 0.1079,
+     "f1_f1": 0.9286
+    },
+    "w7_0": {
+     "auc": 0.5962,
+     "ece": 0.0659,
+     "f1_f1": 0.9203
+    },
+    "w7a": {
+     "auc": 0.6089,
+     "ece": 0.0839,
+     "f1_f1": 0.9203
+    },
+    "w7b": {
+     "auc": 0.5608,
+     "ece": 0.0735,
+     "f1_f1": 0.9203
+    }
+   },
+   "judge_gold": {
+    "n": 226,
+    "n_positive": 120,
+    "w6_gold": {
+     "auc": 0.9664,
+     "ece": 0.0394,
+     "f1_f1": 0.9378
+    },
+    "w7_0": {
+     "auc": 0.955,
+     "ece": 0.054,
+     "f1_f1": 0.9289
+    },
+    "w7a": {
+     "auc": 0.9543,
+     "ece": 0.055,
+     "f1_f1": 0.925
+    },
+    "w7b": {
+     "auc": 0.9579,
+     "ece": 0.059,
+     "f1_f1": 0.9367
+    }
+   },
+   "judge_vision": {
+    "n": 531,
+    "n_positive": 276,
+    "w6_gold": {
+     "auc": 0.9715,
+     "ece": 0.0436,
+     "f1_f1": 0.9306
+    },
+    "w7_0": {
+     "auc": 0.943,
+     "ece": 0.0425,
+     "f1_f1": 0.925
+    },
+    "w7a": {
+     "auc": 0.9429,
+     "ece": 0.0379,
+     "f1_f1": 0.9233
+    },
+    "w7b": {
+     "auc": 0.9365,
+     "ece": 0.0438,
+     "f1_f1": 0.9247
+    }
+   },
+   "operator": {
+    "n": 190,
+    "n_positive": 165,
+    "w6_gold": {
+     "auc": 0.9973,
+     "ece": 0.0284,
+     "f1_f1": 0.9908
+    },
+    "w7_0": {
+     "auc": 0.9985,
+     "ece": 0.065,
+     "f1_f1": 0.9908
+    },
+    "w7a": {
+     "auc": 1.0,
+     "ece": 0.0557,
+     "f1_f1": 0.9908
+    },
+    "w7b": {
+     "auc": 1.0,
+     "ece": 0.0704,
+     "f1_f1": 0.9908
+    }
+   },
+   "operator_browse_merge": {
+    "n": 62,
+    "n_positive": 62,
+    "w6_gold": {
+     "auc": 0.5,
+     "ece": 0.0659,
+     "f1_f1": 0.9752
+    },
+    "w7_0": {
+     "auc": 0.5,
+     "ece": 0.0837,
+     "f1_f1": 0.9752
+    },
+    "w7a": {
+     "auc": 0.5,
+     "ece": 0.0706,
+     "f1_f1": 0.9752
+    },
+    "w7b": {
+     "auc": 0.5,
+     "ece": 0.0795,
+     "f1_f1": 0.9752
+    }
+   },
+   "operator_explicit": {
+    "n": 64,
+    "n_positive": 39,
+    "w6_gold": {
+     "auc": 1.0,
+     "ece": 0.0318,
+     "f1_f1": 1.0
+    },
+    "w7_0": {
+     "auc": 1.0,
+     "ece": 0.0725,
+     "f1_f1": 1.0
+    },
+    "w7a": {
+     "auc": 1.0,
+     "ece": 0.0655,
+     "f1_f1": 1.0
+    },
+    "w7b": {
+     "auc": 1.0,
+     "ece": 0.0757,
+     "f1_f1": 1.0
+    }
+   },
+   "recipe_labels_(w6_gold_in_sample_risk)": {
+    "n": 537,
+    "n_positive": 204,
+    "w6_gold": {
+     "auc": 0.9809,
+     "ece": 0.0215,
+     "f1_f1": 0.9333
+    },
+    "w7_0": {
+     "auc": 0.9708,
+     "ece": 0.0483,
+     "f1_f1": 0.928
+    },
+    "w7a": {
+     "auc": 0.9675,
+     "ece": 0.0479,
+     "f1_f1": 0.9235
+    },
+    "w7b": {
+     "auc": 0.968,
+     "ece": 0.0533,
+     "f1_f1": 0.9323
+    }
+   },
+   "reliable_operator_gold": {
+    "n": 416,
+    "n_positive": 285,
+    "w6_gold": {
+     "auc": 0.9793,
+     "ece": 0.018,
+     "f1_f1": 0.9683
+    },
+    "w7_0": {
+     "auc": 0.9731,
+     "ece": 0.0415,
+     "f1_f1": 0.9647
+    },
+    "w7a": {
+     "auc": 0.9745,
+     "ece": 0.0405,
+     "f1_f1": 0.963
+    },
+    "w7b": {
+     "auc": 0.9755,
+     "ece": 0.0513,
+     "f1_f1": 0.9681
+    }
+   }
+  }
+ },
+ "preregistration": "docs/design/autodedup/refit_w7_preregistration.json (amendment A1 before any seed scan)",
+ "rollout": {
+  "g13": {
+   "arms": {
+    "base": {
+     "band_to_merge_co_clustered": 0,
+     "certain_co": 1636,
+     "certain_dev_free_co": 444,
+     "certain_dev_free_n": 596,
+     "certain_gained": 0,
+     "certain_lost": 0,
+     "certain_n": 2377,
+     "certain_pct": 68.826,
+     "groups": 1134,
+     "groups_gone": 0,
+     "groups_new": 0,
+     "labels_co": {
+      "all": {
+       "gold:j2:gold:n": [
+        6,
+        0
+       ],
+       "gold:j2:gold:y": [
+        47,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        237,
+        7
+       ],
+       "gold:w6:35124676256:y": [
+        265,
+        188
+       ],
+       "gold:w6:35155058503:n": [
+        325,
+        6
+       ],
+       "gold:w6:35155058503:y": [
+        156,
+        119
+       ],
+       "gold:w6:35203586251:n": [
+        8,
+        3
+       ],
+       "gold:w6:35203586251:y": [
+        3,
+        2
+       ],
+       "gold:w6:35205840437:n": [
+        5,
+        3
+       ],
+       "gold:w6:35205840437:y": [
+        48,
+        43
+       ],
+       "operator:browse_merge:y": [
+        1051,
+        11
+       ],
+       "operator:explicit:n": [
+        246,
+        0
+       ],
+       "operator:explicit:y": [
+        200,
+        136
+       ],
+       "operator:implied:y": [
+        323,
+        323
+       ],
+       "vision:j2:vision:n": [
+        259,
+        13
+       ],
+       "vision:j2:vision:y": [
+        709,
+        240
+       ],
+       "vision:w6:35116313682:n": [
+        474,
+        18
+       ],
+       "vision:w6:35116313682:y": [
+        284,
+        230
+       ],
+       "vision:w6:35149028995:n": [
+        662,
+        4
+       ],
+       "vision:w6:35149028995:y": [
+        105,
+        85
+       ],
+       "vision:w6:35185988862:n": [
+        1,
+        0
+       ],
+       "vision:w6:35185988862:y": [
+        10,
+        8
+       ],
+       "vision:w6:35202925670:y": [
+        38,
+        33
+       ]
+      },
+      "sealed_test": {
+       "gold:j2:gold:n": [
+        2,
+        0
+       ],
+       "gold:j2:gold:y": [
+        11,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        38,
+        0
+       ],
+       "gold:w6:35124676256:y": [
+        68,
+        47
+       ],
+       "gold:w6:35155058503:n": [
+        64,
+        1
+       ],
+       "gold:w6:35155058503:y": [
+        36,
+        34
+       ],
+       "gold:w6:35203586251:n": [
+        4,
+        1
+       ],
+       "gold:w6:35205840437:y": [
+        8,
+        8
+       ],
+       "operator:browse_merge:y": [
+        359,
+        11
+       ],
+       "operator:explicit:n": [
+        47,
+        0
+       ],
+       "operator:explicit:y": [
+        46,
+        29
+       ],
+       "operator:implied:y": [
+        67,
+        67
+       ],
+       "vision:j2:vision:n": [
+        51,
+        5
+       ],
+       "vision:j2:vision:y": [
+        182,
+        87
+       ],
+       "vision:w6:35116313682:n": [
+        92,
+        3
+       ],
+       "vision:w6:35116313682:y": [
+        70,
+        61
+       ],
+       "vision:w6:35149028995:n": [
+        142,
+        1
+       ],
+       "vision:w6:35149028995:y": [
+        25,
+        23
+       ],
+       "vision:w6:35185988862:y": [
+        2,
+        1
+       ],
+       "vision:w6:35202925670:y": [
+        7,
+        7
+       ]
+      }
+     },
+     "ledger": {},
+     "ledger_improved": 0,
+     "ledger_regressions": 0,
+     "listings_grouped": 3902,
+     "listings_regrouped": 0,
+     "mnl_co": 0,
+     "structural_neg_co": 0,
+     "transitions": {
+      "band->merge": 0,
+      "band->reject": 0,
+      "merge->band": 0,
+      "merge->reject": 0,
+      "reject->band": 0,
+      "reject->merge": 0
+     }
+    },
+    "w7a": {
+     "band_to_merge_co_clustered": 0,
+     "certain_co": 1625,
+     "certain_dev_free_co": 440,
+     "certain_dev_free_n": 596,
+     "certain_gained": 3,
+     "certain_lost": 14,
+     "certain_n": 2377,
+     "certain_pct": 68.363,
+     "groups": 1126,
+     "groups_gone": 20,
+     "groups_new": 12,
+     "labels_co": {
+      "all": {
+       "gold:j2:gold:n": [
+        6,
+        0
+       ],
+       "gold:j2:gold:y": [
+        47,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        237,
+        7
+       ],
+       "gold:w6:35124676256:y": [
+        265,
+        187
+       ],
+       "gold:w6:35155058503:n": [
+        325,
+        6
+       ],
+       "gold:w6:35155058503:y": [
+        156,
+        118
+       ],
+       "gold:w6:35203586251:n": [
+        8,
+        3
+       ],
+       "gold:w6:35203586251:y": [
+        3,
+        2
+       ],
+       "gold:w6:35205840437:n": [
+        5,
+        3
+       ],
+       "gold:w6:35205840437:y": [
+        48,
+        43
+       ],
+       "operator:browse_merge:y": [
+        1051,
+        15
+       ],
+       "operator:explicit:n": [
+        246,
+        0
+       ],
+       "operator:explicit:y": [
+        200,
+        136
+       ],
+       "operator:implied:y": [
+        323,
+        316
+       ],
+       "vision:j2:vision:n": [
+        259,
+        6
+       ],
+       "vision:j2:vision:y": [
+        709,
+        223
+       ],
+       "vision:w6:35116313682:n": [
+        474,
+        18
+       ],
+       "vision:w6:35116313682:y": [
+        284,
+        228
+       ],
+       "vision:w6:35149028995:n": [
+        662,
+        4
+       ],
+       "vision:w6:35149028995:y": [
+        105,
+        85
+       ],
+       "vision:w6:35185988862:n": [
+        1,
+        0
+       ],
+       "vision:w6:35185988862:y": [
+        10,
+        8
+       ],
+       "vision:w6:35202925670:y": [
+        38,
+        32
+       ]
+      },
+      "sealed_test": {
+       "gold:j2:gold:n": [
+        2,
+        0
+       ],
+       "gold:j2:gold:y": [
+        11,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        38,
+        0
+       ],
+       "gold:w6:35124676256:y": [
+        68,
+        47
+       ],
+       "gold:w6:35155058503:n": [
+        64,
+        1
+       ],
+       "gold:w6:35155058503:y": [
+        36,
+        34
+       ],
+       "gold:w6:35203586251:n": [
+        4,
+        1
+       ],
+       "gold:w6:35205840437:y": [
+        8,
+        8
+       ],
+       "operator:browse_merge:y": [
+        359,
+        15
+       ],
+       "operator:explicit:n": [
+        47,
+        0
+       ],
+       "operator:explicit:y": [
+        46,
+        29
+       ],
+       "operator:implied:y": [
+        67,
+        64
+       ],
+       "vision:j2:vision:n": [
+        51,
+        5
+       ],
+       "vision:j2:vision:y": [
+        182,
+        82
+       ],
+       "vision:w6:35116313682:n": [
+        92,
+        3
+       ],
+       "vision:w6:35116313682:y": [
+        70,
+        59
+       ],
+       "vision:w6:35149028995:n": [
+        142,
+        1
+       ],
+       "vision:w6:35149028995:y": [
+        25,
+        23
+       ],
+       "vision:w6:35185988862:y": [
+        2,
+        1
+       ],
+       "vision:w6:35202925670:y": [
+        7,
+        7
+       ]
+      }
+     },
+     "ledger": {},
+     "ledger_improved": 0,
+     "ledger_regressions": 0,
+     "listings_grouped": 3879,
+     "listings_regrouped": 76,
+     "mnl_co": 0,
+     "structural_neg_co": 0,
+     "transitions": {
+      "band->merge": 0,
+      "band->reject": 176,
+      "merge->band": 46,
+      "merge->reject": 0,
+      "reject->band": 1276,
+      "reject->merge": 2
+     }
+    },
+    "w7b": {
+     "band_to_merge_co_clustered": 0,
+     "certain_co": 1625,
+     "certain_dev_free_co": 440,
+     "certain_dev_free_n": 596,
+     "certain_gained": 5,
+     "certain_lost": 16,
+     "certain_n": 2377,
+     "certain_pct": 68.363,
+     "groups": 1127,
+     "groups_gone": 25,
+     "groups_new": 18,
+     "labels_co": {
+      "all": {
+       "gold:j2:gold:n": [
+        6,
+        0
+       ],
+       "gold:j2:gold:y": [
+        47,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        237,
+        7
+       ],
+       "gold:w6:35124676256:y": [
+        265,
+        187
+       ],
+       "gold:w6:35155058503:n": [
+        325,
+        6
+       ],
+       "gold:w6:35155058503:y": [
+        156,
+        118
+       ],
+       "gold:w6:35203586251:n": [
+        8,
+        3
+       ],
+       "gold:w6:35203586251:y": [
+        3,
+        2
+       ],
+       "gold:w6:35205840437:n": [
+        5,
+        3
+       ],
+       "gold:w6:35205840437:y": [
+        48,
+        43
+       ],
+       "operator:browse_merge:y": [
+        1051,
+        15
+       ],
+       "operator:explicit:n": [
+        246,
+        0
+       ],
+       "operator:explicit:y": [
+        200,
+        135
+       ],
+       "operator:implied:y": [
+        323,
+        316
+       ],
+       "vision:j2:vision:n": [
+        259,
+        7
+       ],
+       "vision:j2:vision:y": [
+        709,
+        233
+       ],
+       "vision:w6:35116313682:n": [
+        474,
+        18
+       ],
+       "vision:w6:35116313682:y": [
+        284,
+        228
+       ],
+       "vision:w6:35149028995:n": [
+        662,
+        4
+       ],
+       "vision:w6:35149028995:y": [
+        105,
+        85
+       ],
+       "vision:w6:35185988862:n": [
+        1,
+        0
+       ],
+       "vision:w6:35185988862:y": [
+        10,
+        8
+       ],
+       "vision:w6:35202925670:y": [
+        38,
+        32
+       ]
+      },
+      "sealed_test": {
+       "gold:j2:gold:n": [
+        2,
+        0
+       ],
+       "gold:j2:gold:y": [
+        11,
+        0
+       ],
+       "gold:w6:35124676256:n": [
+        38,
+        0
+       ],
+       "gold:w6:35124676256:y": [
+        68,
+        47
+       ],
+       "gold:w6:35155058503:n": [
+        64,
+        1
+       ],
+       "gold:w6:35155058503:y": [
+        36,
+        34
+       ],
+       "gold:w6:35203586251:n": [
+        4,
+        1
+       ],
+       "gold:w6:35205840437:y": [
+        8,
+        8
+       ],
+       "operator:browse_merge:y": [
+        359,
+        15
+       ],
+       "operator:explicit:n": [
+        47,
+        0
+       ],
+       "operator:explicit:y": [
+        46,
+        28
+       ],
+       "operator:implied:y": [
+        67,
+        64
+       ],
+       "vision:j2:vision:n": [
+        51,
+        6
+       ],
+       "vision:j2:vision:y": [
+        182,
+        84
+       ],
+       "vision:w6:35116313682:n": [
+        92,
+        3
+       ],
+       "vision:w6:35116313682:y": [
+        70,
+        59
+       ],
+       "vision:w6:35149028995:n": [
+        142,
+        1
+       ],
+       "vision:w6:35149028995:y": [
+        25,
+        23
+       ],
+       "vision:w6:35185988862:y": [
+        2,
+        1
+       ],
+       "vision:w6:35202925670:y": [
+        7,
+        7
+       ]
+      }
+     },
+     "ledger": {},
+     "ledger_improved": 0,
+     "ledger_regressions": 0,
+     "listings_grouped": 3881,
+     "listings_regrouped": 97,
+     "mnl_co": 0,
+     "structural_neg_co": 0,
+     "transitions": {
+      "band->merge": 3,
+      "band->reject": 201,
+      "merge->band": 44,
+      "merge->reject": 0,
+      "reject->band": 1200,
+      "reject->merge": 3
+     }
+    }
+   },
+   "truth": {
+    "certain": 2377,
+    "certain_touching_dev_fold_listing": 1781,
+    "ledger": 0,
+    "structural_neg": 4406
+   }
+  },
+  "per_cohort": {
+   "cohort10": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18141,
+      "certain_dev_free_co": 18113,
+      "certain_dev_free_n": 19307,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 19335,
+      "certain_pct": 93.825,
+      "groups": 3985,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 16,
+       "whole": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 14887,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18073,
+      "certain_dev_free_co": 18045,
+      "certain_dev_free_n": 19307,
+      "certain_gained": 96,
+      "certain_lost": 164,
+      "certain_n": 19335,
+      "certain_pct": 93.473,
+      "groups": 3989,
+      "groups_gone": 87,
+      "groups_new": 91,
+      "ledger": {
+       "cured": 16,
+       "whole": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 14862,
+      "listings_regrouped": 392,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 690,
+       "merge->band": 242,
+       "merge->reject": 0,
+       "reject->band": 4398,
+       "reject->merge": 65
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18084,
+      "certain_dev_free_co": 18056,
+      "certain_dev_free_n": 19307,
+      "certain_gained": 91,
+      "certain_lost": 148,
+      "certain_n": 19335,
+      "certain_pct": 93.53,
+      "groups": 3987,
+      "groups_gone": 87,
+      "groups_new": 89,
+      "ledger": {
+       "cured": 16,
+       "whole": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 14862,
+      "listings_regrouped": 388,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 808,
+       "merge->band": 234,
+       "merge->reject": 0,
+       "reject->band": 4033,
+       "reject->merge": 65
+      }
+     }
+    },
+    "truth": {
+     "certain": 19335,
+     "certain_touching_dev_fold_listing": 28,
+     "ledger": 24,
+     "structural_neg": 13078
+    }
+   },
+   "cohort11": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16680,
+      "certain_dev_free_co": 16670,
+      "certain_dev_free_n": 18040,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 18051,
+      "certain_pct": 92.405,
+      "groups": 4464,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 9
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15183,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16620,
+      "certain_dev_free_co": 16610,
+      "certain_dev_free_n": 18040,
+      "certain_gained": 59,
+      "certain_lost": 119,
+      "certain_n": 18051,
+      "certain_pct": 92.072,
+      "groups": 4445,
+      "groups_gone": 79,
+      "groups_new": 60,
+      "ledger": {
+       "cured": 9
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15131,
+      "listings_regrouped": 312,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 773,
+       "merge->band": 241,
+       "merge->reject": 0,
+       "reject->band": 7077,
+       "reject->merge": 160
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16612,
+      "certain_dev_free_co": 16602,
+      "certain_dev_free_n": 18040,
+      "certain_gained": 49,
+      "certain_lost": 117,
+      "certain_n": 18051,
+      "certain_pct": 92.028,
+      "groups": 4447,
+      "groups_gone": 80,
+      "groups_new": 63,
+      "ledger": {
+       "cured": 9
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15132,
+      "listings_regrouped": 322,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 874,
+       "merge->band": 241,
+       "merge->reject": 0,
+       "reject->band": 6802,
+       "reject->merge": 161
+      }
+     }
+    },
+    "truth": {
+     "certain": 18051,
+     "certain_touching_dev_fold_listing": 11,
+     "ledger": 9,
+     "structural_neg": 15724
+    }
+   },
+   "cohort12": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19382,
+      "certain_dev_free_co": 19323,
+      "certain_dev_free_n": 20866,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 20925,
+      "certain_pct": 92.626,
+      "groups": 4346,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 3,
+       "cured": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16052,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19223,
+      "certain_dev_free_co": 19164,
+      "certain_dev_free_n": 20866,
+      "certain_gained": 29,
+      "certain_lost": 188,
+      "certain_n": 20925,
+      "certain_pct": 91.866,
+      "groups": 4334,
+      "groups_gone": 91,
+      "groups_new": 79,
+      "ledger": {
+       "broken": 3,
+       "cured": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15985,
+      "listings_regrouped": 401,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1502,
+       "merge->band": 376,
+       "merge->reject": 0,
+       "reject->band": 8783,
+       "reject->merge": 85
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19224,
+      "certain_dev_free_co": 19165,
+      "certain_dev_free_n": 20866,
+      "certain_gained": 51,
+      "certain_lost": 209,
+      "certain_n": 20925,
+      "certain_pct": 91.871,
+      "groups": 4333,
+      "groups_gone": 96,
+      "groups_new": 83,
+      "ledger": {
+       "broken": 3,
+       "cured": 8
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15984,
+      "listings_regrouped": 427,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1668,
+       "merge->band": 362,
+       "merge->reject": 0,
+       "reject->band": 7960,
+       "reject->merge": 84
+      }
+     }
+    },
+    "truth": {
+     "certain": 20925,
+     "certain_touching_dev_fold_listing": 59,
+     "ledger": 11,
+     "structural_neg": 14631
+    }
+   },
+   "cohort13": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 26933,
+      "certain_dev_free_co": 26895,
+      "certain_dev_free_n": 28865,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 28903,
+      "certain_pct": 93.184,
+      "groups": 4219,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 1,
+       "cured": 16,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16510,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 26762,
+      "certain_dev_free_co": 26724,
+      "certain_dev_free_n": 28865,
+      "certain_gained": 56,
+      "certain_lost": 227,
+      "certain_n": 28903,
+      "certain_pct": 92.592,
+      "groups": 4223,
+      "groups_gone": 116,
+      "groups_new": 120,
+      "ledger": {
+       "broken": 1,
+       "cured": 17,
+       "whole": 2
+      },
+      "ledger_improved": 1,
+      "ledger_regressions": 0,
+      "listings_grouped": 16463,
+      "listings_regrouped": 556,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 777,
+       "merge->band": 405,
+       "merge->reject": 0,
+       "reject->band": 7214,
+       "reject->merge": 96
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 26778,
+      "certain_dev_free_co": 26740,
+      "certain_dev_free_n": 28865,
+      "certain_gained": 59,
+      "certain_lost": 214,
+      "certain_n": 28903,
+      "certain_pct": 92.648,
+      "groups": 4219,
+      "groups_gone": 114,
+      "groups_new": 114,
+      "ledger": {
+       "broken": 1,
+       "cured": 17,
+       "whole": 2
+      },
+      "ledger_improved": 1,
+      "ledger_regressions": 0,
+      "listings_grouped": 16463,
+      "listings_regrouped": 525,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 969,
+       "merge->band": 388,
+       "merge->reject": 0,
+       "reject->band": 6895,
+       "reject->merge": 96
+      }
+     }
+    },
+    "truth": {
+     "certain": 28903,
+     "certain_touching_dev_fold_listing": 38,
+     "ledger": 20,
+     "structural_neg": 16022
+    }
+   },
+   "cohort14": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19685,
+      "certain_dev_free_co": 19665,
+      "certain_dev_free_n": 21718,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 21742,
+      "certain_pct": 90.539,
+      "groups": 4022,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 4,
+       "cured": 27,
+       "whole": 2
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15502,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19525,
+      "certain_dev_free_co": 19505,
+      "certain_dev_free_n": 21718,
+      "certain_gained": 38,
+      "certain_lost": 198,
+      "certain_n": 21742,
+      "certain_pct": 89.803,
+      "groups": 4013,
+      "groups_gone": 107,
+      "groups_new": 98,
+      "ledger": {
+       "broken": 2,
+       "cured": 30,
+       "whole": 1
+      },
+      "ledger_improved": 3,
+      "ledger_regressions": 0,
+      "listings_grouped": 15413,
+      "listings_regrouped": 470,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1166,
+       "merge->band": 465,
+       "merge->reject": 0,
+       "reject->band": 8294,
+       "reject->merge": 39
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19510,
+      "certain_dev_free_co": 19490,
+      "certain_dev_free_n": 21718,
+      "certain_gained": 44,
+      "certain_lost": 219,
+      "certain_n": 21742,
+      "certain_pct": 89.734,
+      "groups": 4014,
+      "groups_gone": 110,
+      "groups_new": 102,
+      "ledger": {
+       "broken": 3,
+       "cured": 29,
+       "whole": 1
+      },
+      "ledger_improved": 2,
+      "ledger_regressions": 0,
+      "listings_grouped": 15413,
+      "listings_regrouped": 484,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 1,
+       "band->reject": 1390,
+       "merge->band": 451,
+       "merge->reject": 0,
+       "reject->band": 8015,
+       "reject->merge": 40
+      }
+     }
+    },
+    "truth": {
+     "certain": 21742,
+     "certain_touching_dev_fold_listing": 24,
+     "ledger": 33,
+     "structural_neg": 10301
+    }
+   },
+   "cohort15": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18956,
+      "certain_dev_free_co": 18952,
+      "certain_dev_free_n": 20371,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 20380,
+      "certain_pct": 93.013,
+      "groups": 4322,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 20,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15692,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18831,
+      "certain_dev_free_co": 18827,
+      "certain_dev_free_n": 20371,
+      "certain_gained": 28,
+      "certain_lost": 153,
+      "certain_n": 20380,
+      "certain_pct": 92.399,
+      "groups": 4318,
+      "groups_gone": 91,
+      "groups_new": 87,
+      "ledger": {
+       "cured": 20,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15631,
+      "listings_regrouped": 385,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 756,
+       "merge->band": 329,
+       "merge->reject": 0,
+       "reject->band": 6578,
+       "reject->merge": 109
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 2,
+      "certain_co": 18850,
+      "certain_dev_free_co": 18846,
+      "certain_dev_free_n": 20371,
+      "certain_gained": 43,
+      "certain_lost": 149,
+      "certain_n": 20380,
+      "certain_pct": 92.493,
+      "groups": 4317,
+      "groups_gone": 91,
+      "groups_new": 86,
+      "ledger": {
+       "cured": 20,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15634,
+      "listings_regrouped": 377,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 3,
+       "band->reject": 911,
+       "merge->band": 320,
+       "merge->reject": 0,
+       "reject->band": 6840,
+       "reject->merge": 109
+      }
+     }
+    },
+    "truth": {
+     "certain": 20380,
+     "certain_touching_dev_fold_listing": 9,
+     "ledger": 23,
+     "structural_neg": 10226
+    }
+   },
+   "cohort16": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 23762,
+      "certain_dev_free_co": 23724,
+      "certain_dev_free_n": 25629,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 25671,
+      "certain_pct": 92.564,
+      "groups": 3910,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 10,
+       "whole": 7
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15063,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 24102,
+      "certain_dev_free_co": 24064,
+      "certain_dev_free_n": 25629,
+      "certain_gained": 530,
+      "certain_lost": 190,
+      "certain_n": 25671,
+      "certain_pct": 93.888,
+      "groups": 3906,
+      "groups_gone": 95,
+      "groups_new": 91,
+      "ledger": {
+       "cured": 10,
+       "whole": 7
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15000,
+      "listings_regrouped": 535,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1234,
+       "merge->band": 370,
+       "merge->reject": 0,
+       "reject->band": 5694,
+       "reject->merge": 1225
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 1,
+      "certain_co": 24103,
+      "certain_dev_free_co": 24065,
+      "certain_dev_free_n": 25629,
+      "certain_gained": 529,
+      "certain_lost": 188,
+      "certain_n": 25671,
+      "certain_pct": 93.892,
+      "groups": 3906,
+      "groups_gone": 94,
+      "groups_new": 90,
+      "ledger": {
+       "cured": 10,
+       "whole": 7
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15000,
+      "listings_regrouped": 532,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 2,
+       "band->reject": 1616,
+       "merge->band": 360,
+       "merge->reject": 0,
+       "reject->band": 5870,
+       "reject->merge": 1225
+      }
+     }
+    },
+    "truth": {
+     "certain": 25671,
+     "certain_touching_dev_fold_listing": 42,
+     "ledger": 17,
+     "structural_neg": 10080
+    }
+   },
+   "cohort3": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16672,
+      "certain_dev_free_co": 16582,
+      "certain_dev_free_n": 17908,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 18033,
+      "certain_pct": 92.453,
+      "groups": 4096,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 18,
+       "cured": 5,
+       "whole": 1
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 13227,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16549,
+      "certain_dev_free_co": 16459,
+      "certain_dev_free_n": 17908,
+      "certain_gained": 37,
+      "certain_lost": 160,
+      "certain_n": 18033,
+      "certain_pct": 91.771,
+      "groups": 4097,
+      "groups_gone": 95,
+      "groups_new": 96,
+      "ledger": {
+       "broken": 18,
+       "cured": 5,
+       "whole": 1
+      },
+      "ledger_improved": 1,
+      "ledger_regressions": 0,
+      "listings_grouped": 13175,
+      "listings_regrouped": 389,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 785,
+       "merge->band": 255,
+       "merge->reject": 0,
+       "reject->band": 5071,
+       "reject->merge": 60
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 16555,
+      "certain_dev_free_co": 16465,
+      "certain_dev_free_n": 17908,
+      "certain_gained": 41,
+      "certain_lost": 158,
+      "certain_n": 18033,
+      "certain_pct": 91.804,
+      "groups": 4098,
+      "groups_gone": 93,
+      "groups_new": 95,
+      "ledger": {
+       "broken": 18,
+       "cured": 5,
+       "whole": 1
+      },
+      "ledger_improved": 1,
+      "ledger_regressions": 0,
+      "listings_grouped": 13179,
+      "listings_regrouped": 386,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 874,
+       "merge->band": 247,
+       "merge->reject": 0,
+       "reject->band": 4832,
+       "reject->merge": 63
+      }
+     }
+    },
+    "truth": {
+     "certain": 18033,
+     "certain_touching_dev_fold_listing": 125,
+     "ledger": 24,
+     "structural_neg": 19617
+    }
+   },
+   "cohort4": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18458,
+      "certain_dev_free_co": 18427,
+      "certain_dev_free_n": 20312,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 20343,
+      "certain_pct": 90.734,
+      "groups": 4460,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 34,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16560,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18359,
+      "certain_dev_free_co": 18329,
+      "certain_dev_free_n": 20312,
+      "certain_gained": 75,
+      "certain_lost": 174,
+      "certain_n": 20343,
+      "certain_pct": 90.247,
+      "groups": 4473,
+      "groups_gone": 93,
+      "groups_new": 106,
+      "ledger": {
+       "cured": 34,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16531,
+      "listings_regrouped": 438,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 765,
+       "merge->band": 259,
+       "merge->reject": 0,
+       "reject->band": 8067,
+       "reject->merge": 192
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 18351,
+      "certain_dev_free_co": 18321,
+      "certain_dev_free_n": 20312,
+      "certain_gained": 87,
+      "certain_lost": 194,
+      "certain_n": 20343,
+      "certain_pct": 90.208,
+      "groups": 4474,
+      "groups_gone": 98,
+      "groups_new": 112,
+      "ledger": {
+       "cured": 34,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16532,
+      "listings_regrouped": 467,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 1,
+       "band->reject": 912,
+       "merge->band": 255,
+       "merge->reject": 0,
+       "reject->band": 7515,
+       "reject->merge": 197
+      }
+     }
+    },
+    "truth": {
+     "certain": 20343,
+     "certain_touching_dev_fold_listing": 31,
+     "ledger": 37,
+     "structural_neg": 21730
+    }
+   },
+   "cohort5": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19529,
+      "certain_dev_free_co": 19050,
+      "certain_dev_free_n": 20775,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 21273,
+      "certain_pct": 91.802,
+      "groups": 4230,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 2,
+       "cured": 14
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15838,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 19408,
+      "certain_dev_free_co": 18929,
+      "certain_dev_free_n": 20775,
+      "certain_gained": 53,
+      "certain_lost": 174,
+      "certain_n": 21273,
+      "certain_pct": 91.233,
+      "groups": 4226,
+      "groups_gone": 105,
+      "groups_new": 101,
+      "ledger": {
+       "broken": 2,
+       "cured": 14
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15779,
+      "listings_regrouped": 474,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 803,
+       "merge->band": 304,
+       "merge->reject": 0,
+       "reject->band": 4750,
+       "reject->merge": 207
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 2,
+      "certain_co": 19431,
+      "certain_dev_free_co": 18952,
+      "certain_dev_free_n": 20775,
+      "certain_gained": 66,
+      "certain_lost": 164,
+      "certain_n": 21273,
+      "certain_pct": 91.341,
+      "groups": 4226,
+      "groups_gone": 106,
+      "groups_new": 102,
+      "ledger": {
+       "broken": 2,
+       "cured": 14
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 15783,
+      "listings_regrouped": 482,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 2,
+       "band->reject": 939,
+       "merge->band": 290,
+       "merge->reject": 0,
+       "reject->band": 4639,
+       "reject->merge": 208
+      }
+     }
+    },
+    "truth": {
+     "certain": 21273,
+     "certain_touching_dev_fold_listing": 498,
+     "ledger": 16,
+     "structural_neg": 11657
+    }
+   },
+   "cohort6": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 31722,
+      "certain_dev_free_co": 31722,
+      "certain_dev_free_n": 33938,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 33938,
+      "certain_pct": 93.47,
+      "groups": 4133,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 6,
+       "whole": 1
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16863,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 31412,
+      "certain_dev_free_co": 31412,
+      "certain_dev_free_n": 33938,
+      "certain_gained": 110,
+      "certain_lost": 420,
+      "certain_n": 33938,
+      "certain_pct": 92.557,
+      "groups": 4149,
+      "groups_gone": 146,
+      "groups_new": 162,
+      "ledger": {
+       "cured": 6,
+       "whole": 1
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16797,
+      "listings_regrouped": 733,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 1,
+       "band->reject": 885,
+       "merge->band": 535,
+       "merge->reject": 0,
+       "reject->band": 6545,
+       "reject->merge": 98
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 5,
+      "certain_co": 31417,
+      "certain_dev_free_co": 31417,
+      "certain_dev_free_n": 33938,
+      "certain_gained": 118,
+      "certain_lost": 423,
+      "certain_n": 33938,
+      "certain_pct": 92.572,
+      "groups": 4150,
+      "groups_gone": 148,
+      "groups_new": 165,
+      "ledger": {
+       "cured": 6,
+       "whole": 1
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16801,
+      "listings_regrouped": 746,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 9,
+       "band->reject": 1083,
+       "merge->band": 505,
+       "merge->reject": 0,
+       "reject->band": 6261,
+       "reject->merge": 104
+      }
+     }
+    },
+    "truth": {
+     "certain": 33938,
+     "certain_touching_dev_fold_listing": 0,
+     "ledger": 7,
+     "structural_neg": 21444
+    }
+   },
+   "cohort7": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 44354,
+      "certain_dev_free_co": 44354,
+      "certain_dev_free_n": 46461,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 46461,
+      "certain_pct": 95.465,
+      "groups": 4334,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 5
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16553,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 44626,
+      "certain_dev_free_co": 44626,
+      "certain_dev_free_n": 46461,
+      "certain_gained": 503,
+      "certain_lost": 231,
+      "certain_n": 46461,
+      "certain_pct": 96.05,
+      "groups": 4332,
+      "groups_gone": 95,
+      "groups_new": 93,
+      "ledger": {
+       "cured": 5
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16505,
+      "listings_regrouped": 724,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1002,
+       "merge->band": 259,
+       "merge->reject": 0,
+       "reject->band": 6642,
+       "reject->merge": 212
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 44627,
+      "certain_dev_free_co": 44627,
+      "certain_dev_free_n": 46461,
+      "certain_gained": 504,
+      "certain_lost": 231,
+      "certain_n": 46461,
+      "certain_pct": 96.053,
+      "groups": 4331,
+      "groups_gone": 92,
+      "groups_new": 89,
+      "ledger": {
+       "cured": 5
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 16506,
+      "listings_regrouped": 710,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 1203,
+       "merge->band": 250,
+       "merge->reject": 0,
+       "reject->band": 6412,
+       "reject->merge": 212
+      }
+     }
+    },
+    "truth": {
+     "certain": 46461,
+     "certain_touching_dev_fold_listing": 0,
+     "ledger": 5,
+     "structural_neg": 11244
+    }
+   },
+   "cohort8": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 10018,
+      "certain_dev_free_co": 10018,
+      "certain_dev_free_n": 11182,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 11182,
+      "certain_pct": 89.59,
+      "groups": 4302,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "cured": 23
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12555,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 9961,
+      "certain_dev_free_co": 9961,
+      "certain_dev_free_n": 11182,
+      "certain_gained": 28,
+      "certain_lost": 85,
+      "certain_n": 11182,
+      "certain_pct": 89.081,
+      "groups": 4289,
+      "groups_gone": 92,
+      "groups_new": 79,
+      "ledger": {
+       "cured": 23
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12488,
+      "listings_regrouped": 342,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 281,
+       "merge->band": 234,
+       "merge->reject": 0,
+       "reject->band": 2943,
+       "reject->merge": 44
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 9966,
+      "certain_dev_free_co": 9966,
+      "certain_dev_free_n": 11182,
+      "certain_gained": 27,
+      "certain_lost": 79,
+      "certain_n": 11182,
+      "certain_pct": 89.125,
+      "groups": 4292,
+      "groups_gone": 90,
+      "groups_new": 80,
+      "ledger": {
+       "cured": 23
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12493,
+      "listings_regrouped": 336,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 317,
+       "merge->band": 230,
+       "merge->reject": 1,
+       "reject->band": 3183,
+       "reject->merge": 45
+      }
+     }
+    },
+    "truth": {
+     "certain": 11182,
+     "certain_touching_dev_fold_listing": 0,
+     "ledger": 23,
+     "structural_neg": 56828
+    }
+   },
+   "cohort9": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 13630,
+      "certain_dev_free_co": 13629,
+      "certain_dev_free_n": 14909,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 14910,
+      "certain_pct": 91.415,
+      "groups": 3889,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {
+       "broken": 3,
+       "cured": 17,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 13136,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 13655,
+      "certain_dev_free_co": 13654,
+      "certain_dev_free_n": 14909,
+      "certain_gained": 157,
+      "certain_lost": 132,
+      "certain_n": 14910,
+      "certain_pct": 91.583,
+      "groups": 3892,
+      "groups_gone": 81,
+      "groups_new": 84,
+      "ledger": {
+       "broken": 3,
+       "cured": 17,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 13144,
+      "listings_regrouped": 437,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 621,
+       "merge->band": 273,
+       "merge->reject": 0,
+       "reject->band": 5235,
+       "reject->merge": 366
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 1,
+      "certain_co": 13657,
+      "certain_dev_free_co": 13656,
+      "certain_dev_free_n": 14909,
+      "certain_gained": 158,
+      "certain_lost": 131,
+      "certain_n": 14910,
+      "certain_pct": 91.596,
+      "groups": 3893,
+      "groups_gone": 80,
+      "groups_new": 84,
+      "ledger": {
+       "broken": 3,
+       "cured": 17,
+       "whole": 3
+      },
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 13147,
+      "listings_regrouped": 425,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 4,
+       "band->reject": 770,
+       "merge->band": 264,
+       "merge->reject": 0,
+       "reject->band": 5199,
+       "reject->merge": 366
+      }
+     }
+    },
+    "truth": {
+     "certain": 14910,
+     "certain_touching_dev_fold_listing": 1,
+     "ledger": 23,
+     "structural_neg": 36675
+    }
+   },
+   "region": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 21202,
+      "certain_dev_free_co": 18541,
+      "certain_dev_free_n": 19567,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 22421,
+      "certain_pct": 94.563,
+      "groups": 3201,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12681,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 21062,
+      "certain_dev_free_co": 18440,
+      "certain_dev_free_n": 19567,
+      "certain_gained": 61,
+      "certain_lost": 201,
+      "certain_n": 22421,
+      "certain_pct": 93.939,
+      "groups": 3212,
+      "groups_gone": 89,
+      "groups_new": 100,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12635,
+      "listings_regrouped": 469,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 470,
+       "merge->band": 275,
+       "merge->reject": 0,
+       "reject->band": 3518,
+       "reject->merge": 131
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 21058,
+      "certain_dev_free_co": 18435,
+      "certain_dev_free_n": 19567,
+      "certain_gained": 59,
+      "certain_lost": 203,
+      "certain_n": 22421,
+      "certain_pct": 93.921,
+      "groups": 3211,
+      "groups_gone": 91,
+      "groups_new": 101,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 12632,
+      "listings_regrouped": 473,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 581,
+       "merge->band": 263,
+       "merge->reject": 0,
+       "reject->band": 3464,
+       "reject->merge": 131
+      }
+     }
+    },
+    "truth": {
+     "certain": 22421,
+     "certain_touching_dev_fold_listing": 2854,
+     "ledger": 0,
+     "structural_neg": 7354
+    }
+   },
+   "trial": {
+    "arms": {
+     "base": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 1862,
+      "certain_dev_free_co": 512,
+      "certain_dev_free_n": 596,
+      "certain_gained": 0,
+      "certain_lost": 0,
+      "certain_n": 2377,
+      "certain_pct": 78.334,
+      "groups": 1271,
+      "groups_gone": 0,
+      "groups_new": 0,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 4139,
+      "listings_regrouped": 0,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 0,
+       "merge->band": 0,
+       "merge->reject": 0,
+       "reject->band": 0,
+       "reject->merge": 0
+      }
+     },
+     "w7a": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 1853,
+      "certain_dev_free_co": 509,
+      "certain_dev_free_n": 596,
+      "certain_gained": 4,
+      "certain_lost": 13,
+      "certain_n": 2377,
+      "certain_pct": 77.955,
+      "groups": 1266,
+      "groups_gone": 16,
+      "groups_new": 11,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 4124,
+      "listings_regrouped": 60,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 198,
+       "merge->band": 33,
+       "merge->reject": 0,
+       "reject->band": 1759,
+       "reject->merge": 3
+      }
+     },
+     "w7b": {
+      "band_to_merge_co_clustered": 0,
+      "certain_co": 1853,
+      "certain_dev_free_co": 509,
+      "certain_dev_free_n": 596,
+      "certain_gained": 6,
+      "certain_lost": 15,
+      "certain_n": 2377,
+      "certain_pct": 77.955,
+      "groups": 1266,
+      "groups_gone": 18,
+      "groups_new": 13,
+      "ledger": {},
+      "ledger_improved": 0,
+      "ledger_regressions": 0,
+      "listings_grouped": 4125,
+      "listings_regrouped": 66,
+      "mnl_co": 0,
+      "structural_neg_co": 0,
+      "transitions": {
+       "band->merge": 0,
+       "band->reject": 219,
+       "merge->band": 28,
+       "merge->reject": 0,
+       "reject->band": 2051,
+       "reject->merge": 4
+      }
+     }
+    },
+    "truth": {
+     "certain": 2377,
+     "certain_touching_dev_fold_listing": 1781,
+     "ledger": 0,
+     "structural_neg": 0
+    }
+   }
+  },
+  "totals": {
+   "base": {
+    "broken": 31,
+    "certain_co": 320986,
+    "certain_dev_free_co": 316177,
+    "certain_dev_free_n": 340444,
+    "certain_n": 345945,
+    "certain_pct": 92.785,
+    "cured": 210,
+    "groups": 63184,
+    "listings_grouped": 230441,
+    "mnl_co": 0,
+    "structural_neg_co": 0,
+    "whole": 31
+   },
+   "w7a": {
+    "band->merge": 1,
+    "band->reject": 12708,
+    "band_to_merge_co_clustered": 0,
+    "broken": 29,
+    "certain_co": 320021,
+    "certain_dev_free_co": 315258,
+    "certain_dev_free_n": 340444,
+    "certain_gained": 1864,
+    "certain_lost": 2829,
+    "certain_n": 345945,
+    "certain_pct": 92.506,
+    "cured": 214,
+    "groups": 63164,
+    "groups_gone": 1478,
+    "groups_new": 1458,
+    "ledger_improved": 5,
+    "ledger_regressions": 0,
+    "listings_grouped": 229663,
+    "listings_regrouped": 7117,
+    "merge->band": 4855,
+    "merge->reject": 0,
+    "mnl_co": 0,
+    "reject->band": 92568,
+    "reject->merge": 3092,
+    "structural_neg_co": 0,
+    "whole": 29
+   },
+   "w7b": {
+    "band->merge": 22,
+    "band->reject": 15134,
+    "band_to_merge_co_clustered": 11,
+    "broken": 30,
+    "certain_co": 320076,
+    "certain_dev_free_co": 315312,
+    "certain_dev_free_n": 340444,
+    "certain_gained": 1932,
+    "certain_lost": 2842,
+    "certain_n": 345945,
+    "certain_pct": 92.522,
+    "cured": 213,
+    "groups": 63164,
+    "groups_gone": 1488,
+    "groups_new": 1468,
+    "ledger_improved": 4,
+    "ledger_regressions": 0,
+    "listings_grouped": 229686,
+    "listings_regrouped": 7146,
+    "merge->band": 4688,
+    "merge->reject": 1,
+    "mnl_co": 0,
+    "reject->band": 89971,
+    "reject->merge": 3110,
+    "structural_neg_co": 0,
+    "whole": 29
+   }
+  }
+ },
+ "seal": {
+  "fold_rows": {
+   "test": 947,
+   "train": 2618,
+   "validation": 886
+  },
+  "largest_group_share": 0.023140867220849248,
+  "listing_overlap_A1": {
+   "of_which_positive": 111,
+   "test_listings": 944,
+   "test_listings_also_in_dev_rows": 297,
+   "test_rows": 947,
+   "test_rows_touching_a_dev_listing": 397
+  },
+  "map_sha256": "f3b63906ceb08972542e23f4d6611c2f407180cc8682872390b4662d04d69c5a",
+  "n_groups": 1831,
+  "n_listings": 4488,
+  "registered_construction_stopped": {
+   "labelled_rows": 4451,
+   "largest_group_rows": 910,
+   "largest_group_share": 0.20444843855313413
+  },
+  "seal_id": "eecc33b95ad50fd3291ba19172223d7c645abf8f7bbf350ed0bf1a88c49ab139",
+  "seed": 20261002
+ },
+ "substrate": {
+  "kept_with_class": 5462,
+  "missing": 1011,
+  "rows": 4451,
+  "sources": {
+   "j2:gold": {
+    "at_home": 46,
+    "fallback": {},
+    "kept": 61,
+    "kept_abstaining": 8,
+    "missing": 7
+   },
+   "j2:text": {
+    "at_home": 0,
+    "fallback": {},
+    "kept": 0,
+    "kept_abstaining": 0,
+    "missing": 0
+   },
+   "j2:vision": {
+    "at_home": 831,
+    "fallback": {},
+    "kept": 977,
+    "kept_abstaining": 9,
+    "missing": 137
+   },
+   "operator:g13": {
+    "at_home": 616,
+    "fallback": {
+     "cohort10": 8,
+     "cohort11": 4,
+     "cohort12": 25,
+     "cohort13": 19,
+     "cohort14": 10,
+     "cohort15": 3,
+     "cohort16": 22,
+     "cohort3": 88,
+     "cohort4": 10,
+     "cohort5": 131,
+     "cohort6": 10,
+     "region": 3,
+     "trial": 76
+    },
+    "kept": 1820,
+    "kept_abstaining": 0,
+    "missing": 795
+   },
+   "w6:35115036274": {
+    "at_home": 0,
+    "fallback": {},
+    "kept": 0,
+    "kept_abstaining": 0,
+    "missing": 0
+   },
+   "w6:35116313682": {
+    "at_home": 731,
+    "fallback": {
+     "cohort3": 5,
+     "cohort4": 1,
+     "g13": 1
+    },
+    "kept": 813,
+    "kept_abstaining": 55,
+    "missing": 20
+   },
+   "w6:35124676256": {
+    "at_home": 490,
+    "fallback": {
+     "cohort4": 2
+    },
+    "kept": 558,
+    "kept_abstaining": 56,
+    "missing": 10
+   },
+   "w6:35149028995": {
+    "at_home": 738,
+    "fallback": {
+     "cohort3": 1,
+     "g13": 2
+    },
+    "kept": 797,
+    "kept_abstaining": 30,
+    "missing": 26
+   },
+   "w6:35155058503": {
+    "at_home": 462,
+    "fallback": {
+     "cohort4": 3
+    },
+    "kept": 533,
+    "kept_abstaining": 52,
+    "missing": 16
+   },
+   "w6:35185988862": {
+    "at_home": 10,
+    "fallback": {
+     "cohort4": 1
+    },
+    "kept": 11,
+    "kept_abstaining": 0,
+    "missing": 0
+   },
+   "w6:35202925670": {
+    "at_home": 38,
+    "fallback": {},
+    "kept": 38,
+    "kept_abstaining": 0,
+    "missing": 0
+   },
+   "w6:35203586251": {
+    "at_home": 11,
+    "fallback": {},
+    "kept": 14,
+    "kept_abstaining": 3,
+    "missing": 0
+   },
+   "w6:35205840437": {
+    "at_home": 53,
+    "fallback": {},
+    "kept": 54,
+    "kept_abstaining": 1,
+    "missing": 0
+   }
+  }
+ },
+ "weight_deltas_vs_w6_gold": {
+  "w7_0": {
+   "intercept": [
+    -0.4153,
+    -1.11
+   ],
+   "ref_code_shared": [
+    {
+     "delta": 0.0277,
+     "feature": "ref_code_shared",
+     "kind": "weight",
+     "scale_w6_gold": 1.0,
+     "scale_w7_0": 0.1145,
+     "w6_gold": 0.0,
+     "w7_0": 0.0277
+    },
+    {
+     "delta": 0.0032,
+     "feature": "ref_code_shared",
+     "kind": "presence",
+     "scale_w6_gold": 1.0,
+     "scale_w7_0": 0.1145,
+     "w6_gold": 0.0,
+     "w7_0": 0.0032
+    }
+   ],
+   "top10": [
+    {
+     "delta": 0.4911,
+     "feature": "dispo_equal",
+     "kind": "weight",
+     "scale_w6_gold": 0.4528,
+     "scale_w7_0": 0.4599,
+     "w6_gold": -0.6057,
+     "w7_0": -0.1146
+    },
+    {
+     "delta": -0.4372,
+     "feature": "numeric_fact_overlap",
+     "kind": "weight",
+     "scale_w6_gold": 2.1442,
+     "scale_w7_0": 2.506,
+     "w6_gold": 0.5852,
+     "w7_0": 0.148
+    },
+    {
+     "delta": -0.3036,
+     "feature": "interior_match_ratio",
+     "kind": "weight",
+     "scale_w6_gold": 0.4222,
+     "scale_w7_0": 0.4203,
+     "w6_gold": 0.4815,
+     "w7_0": 0.1779
+    },
+    {
+     "delta": 0.2841,
+     "feature": "overlap_days",
+     "kind": "weight",
+     "scale_w6_gold": 24.8261,
+     "scale_w7_0": 24.9878,
+     "w6_gold": -0.3933,
+     "w7_0": -0.1093
+    },
+    {
+     "delta": 0.2739,
+     "feature": "plan_match_ratio",
+     "kind": "weight",
+     "scale_w6_gold": 0.3598,
+     "scale_w7_0": 0.3417,
+     "w6_gold": -0.1859,
+     "w7_0": 0.088
+    },
+    {
+     "delta": 0.2705,
+     "feature": "area_rel_diff",
+     "kind": "weight",
+     "scale_w6_gold": 0.0237,
+     "scale_w7_0": 0.0238,
+     "w6_gold": -0.4852,
+     "w7_0": -0.2148
+    },
+    {
+     "delta": -0.2498,
+     "feature": "attr_agreements_rare",
+     "kind": "weight",
+     "scale_w6_gold": 4.0803,
+     "scale_w7_0": 3.9774,
+     "w6_gold": 0.2813,
+     "w7_0": 0.0314
+    },
+    {
+     "delta": -0.2223,
+     "feature": "same_street_key",
+     "kind": "weight",
+     "scale_w6_gold": 0.4539,
+     "scale_w7_0": 0.4717,
+     "w6_gold": 0.3373,
+     "w7_0": 0.1149
+    },
+    {
+     "delta": 0.2216,
+     "feature": "dispo_equal",
+     "kind": "presence",
+     "scale_w6_gold": 0.4528,
+     "scale_w7_0": 0.4599,
+     "w6_gold": -0.2743,
+     "w7_0": -0.0527
+    },
+    {
+     "delta": 0.2169,
+     "feature": "tag_dhash_min",
+     "kind": "weight",
+     "scale_w6_gold": 11.6605,
+     "scale_w7_0": 11.7586,
+     "w6_gold": -0.4187,
+     "w7_0": -0.2018
+    }
+   ]
+  },
+  "w7a": {
+   "intercept": [
+    -0.4153,
+    -0.3407
+   ],
+   "ref_code_shared": [
+    {
+     "delta": 0.0237,
+     "feature": "ref_code_shared",
+     "kind": "weight",
+     "scale_w6_gold": 1.0,
+     "scale_w7a": 0.1127,
+     "w6_gold": 0.0,
+     "w7a": 0.0237
+    },
+    {
+     "delta": 0.0027,
+     "feature": "ref_code_shared",
+     "kind": "presence",
+     "scale_w6_gold": 1.0,
+     "scale_w7a": 0.1127,
+     "w6_gold": 0.0,
+     "w7a": 0.0027
+    }
+   ],
+   "top10": [
+    {
+     "delta": 0.5179,
+     "feature": "dispo_equal",
+     "kind": "weight",
+     "scale_w6_gold": 0.4528,
+     "scale_w7a": 0.4655,
+     "w6_gold": -0.6057,
+     "w7a": -0.0878
+    },
+    {
+     "delta": -0.4056,
+     "feature": "numeric_fact_overlap",
+     "kind": "weight",
+     "scale_w6_gold": 2.1442,
+     "scale_w7a": 2.5452,
+     "w6_gold": 0.5852,
+     "w7a": 0.1796
+    },
+    {
+     "delta": -0.2961,
+     "feature": "interior_match_ratio",
+     "kind": "weight",
+     "scale_w6_gold": 0.4222,
+     "scale_w7a": 0.4484,
+     "w6_gold": 0.4815,
+     "w7a": 0.1853
+    },
+    {
+     "delta": 0.2954,
+     "feature": "overlap_days",
+     "kind": "weight",
+     "scale_w6_gold": 24.8261,
+     "scale_w7a": 29.7149,
+     "w6_gold": -0.3933,
+     "w7a": -0.098
+    },
+    {
+     "delta": 0.2665,
+     "feature": "plan_match_ratio",
+     "kind": "weight",
+     "scale_w6_gold": 0.3598,
+     "scale_w7a": 0.3778,
+     "w6_gold": -0.1859,
+     "w7a": 0.0806
+    },
+    {
+     "delta": 0.2631,
+     "feature": "area_rel_diff",
+     "kind": "weight",
+     "scale_w6_gold": 0.0237,
+     "scale_w7a": 0.0219,
+     "w6_gold": -0.4852,
+     "w7a": -0.2221
+    },
+    {
+     "delta": -0.2485,
+     "feature": "attr_agreements_rare",
+     "kind": "weight",
+     "scale_w6_gold": 4.0803,
+     "scale_w7a": 3.8774,
+     "w6_gold": 0.2813,
+     "w7a": 0.0327
+    },
+    {
+     "delta": 0.2334,
+     "feature": "dispo_equal",
+     "kind": "presence",
+     "scale_w6_gold": 0.4528,
+     "scale_w7a": 0.4655,
+     "w6_gold": -0.2743,
+     "w7a": -0.0409
+    },
+    {
+     "delta": 0.2156,
+     "feature": "same_source",
+     "kind": "weight",
+     "scale_w6_gold": 0.4746,
+     "scale_w7a": 0.4774,
+     "w6_gold": -0.2437,
+     "w7a": -0.0281
+    },
+    {
+     "delta": -0.2104,
+     "feature": "same_street_key",
+     "kind": "weight",
+     "scale_w6_gold": 0.4539,
+     "scale_w7a": 0.4857,
+     "w6_gold": 0.3373,
+     "w7a": 0.1269
+    }
+   ]
+  },
+  "w7b": {
+   "intercept": [
+    -0.4153,
+    -0.236
+   ],
+   "ref_code_shared": [
+    {
+     "delta": 0.0209,
+     "feature": "ref_code_shared",
+     "kind": "weight",
+     "scale_w6_gold": 1.0,
+     "scale_w7b": 0.1064,
+     "w6_gold": 0.0,
+     "w7b": 0.0209
+    },
+    {
+     "delta": 0.0022,
+     "feature": "ref_code_shared",
+     "kind": "presence",
+     "scale_w6_gold": 1.0,
+     "scale_w7b": 0.1064,
+     "w6_gold": 0.0,
+     "w7b": 0.0022
+    }
+   ],
+   "top10": [
+    {
+     "delta": 0.5637,
+     "feature": "dispo_equal",
+     "kind": "weight",
+     "scale_w6_gold": 0.4528,
+     "scale_w7b": 0.469,
+     "w6_gold": -0.6057,
+     "w7b": -0.042
+    },
+    {
+     "delta": -0.4737,
+     "feature": "numeric_fact_overlap",
+     "kind": "weight",
+     "scale_w6_gold": 2.1442,
+     "scale_w7b": 2.5959,
+     "w6_gold": 0.5852,
+     "w7b": 0.1115
+    },
+    {
+     "delta": 0.3653,
+     "feature": "overlap_days",
+     "kind": "weight",
+     "scale_w6_gold": 24.8261,
+     "scale_w7b": 30.4101,
+     "w6_gold": -0.3933,
+     "w7b": -0.028
+    },
+    {
+     "delta": -0.3469,
+     "feature": "interior_match_ratio",
+     "kind": "weight",
+     "scale_w6_gold": 0.4222,
+     "scale_w7b": 0.4542,
+     "w6_gold": 0.4815,
+     "w7b": 0.1345
+    },
+    {
+     "delta": 0.3383,
+     "feature": "area_rel_diff",
+     "kind": "weight",
+     "scale_w6_gold": 0.0237,
+     "scale_w7b": 0.021,
+     "w6_gold": -0.4852,
+     "w7b": -0.1469
+    },
+    {
+     "delta": -0.2644,
+     "feature": "tfidf_cos",
+     "kind": "weight",
+     "scale_w6_gold": 0.4253,
+     "scale_w7b": 0.4216,
+     "w6_gold": 0.4428,
+     "w7b": 0.1785
+    },
+    {
+     "delta": -0.2627,
+     "feature": "same_street_key",
+     "kind": "weight",
+     "scale_w6_gold": 0.4539,
+     "scale_w7b": 0.4919,
+     "w6_gold": 0.3373,
+     "w7b": 0.0746
+    },
+    {
+     "delta": 0.2585,
+     "feature": "tag_dhash_min",
+     "kind": "weight",
+     "scale_w6_gold": 11.6605,
+     "scale_w7b": 11.1866,
+     "w6_gold": -0.4187,
+     "w7b": -0.1602
+    },
+    {
+     "delta": -0.2582,
+     "feature": "attr_agreements_rare",
+     "kind": "weight",
+     "scale_w6_gold": 4.0803,
+     "scale_w7b": 4.1198,
+     "w6_gold": 0.2813,
+     "w7b": 0.023
+    },
+    {
+     "delta": 0.2546,
+     "feature": "dispo_equal",
+     "kind": "presence",
+     "scale_w6_gold": 0.4528,
+     "scale_w7b": 0.469,
+     "w6_gold": -0.2743,
+     "w7b": -0.0197
+    }
+   ]
+  }
+ },
+ "what": "Refit W7 result record - every number re-read from refit_w7/ (eval_common.json, eval_extra.json, diag_dev.json, composite/substrate.json, seal_scan.json, rollout_table.json, handread_w7.json)"
+}
