@@ -1184,8 +1184,10 @@ GENERATION_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
 )
 
-# One row per pass. It is the picker's vocabulary AND, since migration 538, what scopes the
-# engine stat strip: the newest row here names the pass whose pairs the zone histogram counts.
+# One row per pass: the picker's vocabulary, the batch passes (the evaluation lab) newest first
+# and a real-time generation last. An UNNAMED view reads the live stream once it is live
+# (`LIVE_STREAM_SQL`), else this order's first pass (`LATEST_GENERATION_SQL`) — see
+# api/routes/autodedup.py `_resolve_generation`.
 GENERATION_COUNTS_SQL = """
 SELECT
     c.generation,
@@ -1198,16 +1200,22 @@ GROUP BY c.generation
 ORDER BY (left(c.generation, 2) = 'rt'), max(c.last_changed_at) DESC
 """
 
-# WHICH pass a validation view reads when the caller names none. The first row of
-# GENERATION_COUNTS_SQL by construction — the generation whose clusters changed most recently —
-# because the list the picker offers and the default the queue opens on must never disagree
-# about which pass is current. A hard-coded default is what put a superseded generation's
-# proposals in front of the operator; the store names the newest pass, so the store is asked.
-# A REAL-TIME shadow generation (`rt…`) is rewritten every pass, so by recency it would always
-# be "newest" and every validation view would open on it — which is how the operator's pair
-# links 404'd on 2026-09-20 (the pairs lived in g6; the default had silently become `rt`).
-# The default is the newest BATCH pass; a real-time generation is offered by the picker, last,
-# and is only ever read when it is named.
+# WHICH pass a validation view reads when the caller names none, step one (E914): the live
+# stream `rt` — the generation the worker's lane reconciles production from — but only once it
+# IS live: a seed of this design built it (`rt_seed_version:rt` = `incremental.SEED_VERSION`)
+# and its build phase ended (`rt_bootstrap:rt` false). The 09-21 `rt` was seeded before F2 and
+# holds groups this build would not draw; opening every review page on it mid-trial would show
+# hundreds of properties as split proposals the live engine never made.
+LIVE_STREAM_SQL = """
+SELECT s.key, s.value
+FROM autodedup.settings s
+WHERE s.key = ANY(%(keys)s::text[])
+"""
+
+# Step two, when the stream is not live: the newest BATCH pass. A real-time generation is
+# rewritten every pass, so by recency alone it would always be "newest" — which is how the
+# operator's pair links 404'd on 2026-09-20 (the pairs lived in g6; the default had silently
+# become `rt`). It is ordered last, and read only when named or when it is live.
 LATEST_GENERATION_SQL = """
 SELECT c.generation
 FROM autodedup.clusters c
@@ -1620,7 +1628,8 @@ WHERE v.kind = 'cluster'
 
 # Every advert of every LIVE property the generation touches (`autodedup/proposed_splits.py`
 # decides which are proposals), with the group it holds (NULL = none) and whether the generation
-# SAW it (a group member or a scored pair's side); with `property_id`, that property only.
+# SAW it (a group member, a scored pair's side, or — for the live stream — a fingerprint the lane
+# holds); with `property_id`, that property only.
 PROPOSED_SPLIT_ADVERTS_SQL = """
 WITH grouped AS (
     SELECT s.listing_id, max(s.cluster_key) AS cluster_key
@@ -1631,6 +1640,9 @@ WITH grouped AS (
         SELECT e.listing_id, NULL::bigint FROM autodedup.pairs p
          CROSS JOIN LATERAL (VALUES (p.listing_lo), (p.listing_hi)) AS e(listing_id)
          WHERE p.generation = %(generation)s::text
+        UNION ALL
+        SELECT f.listing_id, NULL::bigint FROM autodedup.rt_fp f
+         WHERE f.generation = %(generation)s::text
     ) s
     GROUP BY s.listing_id
 ), touched AS (

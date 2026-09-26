@@ -25,8 +25,9 @@ from typing import Any, Mapping, Sequence
 
 from autodedup import export_sql as E
 from autodedup import incremental_sql as S
-from autodedup import parity as P
+from autodedup import apply_sql as A
 from autodedup.decide import CERTIFICATES
+from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.score_lane import CLUSTER_INSERT_SQL, CLUSTER_MEMBER_INSERT_SQL
 
@@ -58,6 +59,9 @@ class FakePg:
         self.lease: dict[str, dict[str, Any]] = {}
         self.settings: dict[str, Any] = {}
         self.mnl: set[tuple[int, int]] = set()
+        self.ml: set[tuple[int, int]] = set()
+        # `public.app_settings`: the apply scope row the reconcile reads (A9). Absent = closed.
+        self.app_settings: dict[str, Any] = {}
         # `public`, read-only: what the four feeds page over AND what the fact source reads.
         # The rows carry whatever column a statement asks for, so a listing row here is the
         # same dict the feeds and `COHORT_LISTINGS_SQL` both read.
@@ -230,9 +234,6 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return []
     if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_LOCK_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
         return [("set",)]
-    if sql == S.RT_SETTING_SQL:
-        key = str(p["key"])
-        return [(db.settings[key],)] if key in db.settings else []
 
     # ---------------------------------------------------------------- lease
     if sql == S.RT_LEASE_TAKE_SQL:
@@ -247,6 +248,10 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         if held and held["holder"] == p["holder"]:
             held["expires_at"] = db.now
         return []
+    if sql == S.RT_LEASE_READ_SQL:
+        held = db.lease.get(p["name"])
+        return ([(held["holder"], held.get("taken_at"), held["expires_at"],
+                  held["expires_at"] > db.now)] if held else [])
 
     # ---------------------------------------------------------------- postings
     if sql == S.RT_LOOKUP_MANY_SQL:
@@ -330,10 +335,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 block = (row["context"] or {}).get("block")
                 if block not in set(p["blocks"]):
                     continue
+            vector = row.get("features") or {}
             rows.append((lo, hi, list(row["probes"]), row["from_lo"], row["from_hi"],
                          row["score"], row["zone"], row["decision"], row["guard_veto"],
                          row["families"], row["certificate"], row["evidence"],
-                         row["context"], row["fp_lo"], row["fp_hi"]))
+                         row["context"], row["fp_lo"], row["fp_hi"],
+                         {name: vector[name] for name in FEATURE_SLOTS if name in vector}))
         return rows
     if sql == S.RT_MERGE_NEIGHBOURS_SQL:
         ids = set(p["ids"])
@@ -494,8 +501,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         def _pending(listing_id: int) -> bool:
             row = db.rt_fp.get((gen, int(listing_id))) or {}
             stamp = row.get("first_decided_at")
-            return bool(int(row.get("ev_images") or 0) > 0
-                        and int(row.get("ev_phash") or 0) == 0
+            return bool(row.get("ev_complete") is False
                         and stamp is not None and stamp > db.now - horizon)
 
         out = []
@@ -512,29 +518,36 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_PHASH_POP_SQL:
         wanted = set(p["hashes"])
         return sorted((h, n) for h, n in db.phash_pop.items() if h in wanted)
+    if sql == S.RT_PHASH_POP_COUNT_SQL:
+        return [(len(db.phash_pop),)]
     if sql == S.RT_PHASH_POP_WRITE_SQL:
         db.phash_pop[int(p["phash"])] = int(p["n_listings"])
         return []
 
-    # --------------------------------------------- the read-only parity instrument
-    if sql == P.PARITY_PRESENT_SQL:
-        return [(i,) for i in sorted(set(p["ids"]) & set(db.listings))]
-    if sql == P.PARITY_CHANGE_SQL:
-        wanted = set(p["ids"])
-        seen: dict[int, list[Any]] = {}
-        for row in db.snapshots:
-            listing_id = row.get("listing_id")
-            if listing_id not in wanted:
-                continue
-            bucket = seen.setdefault(listing_id, [])
-            bucket.append(row.get("scraped_at") or db.now)
-        return [(listing_id, max(stamps), len(stamps))
-                for listing_id, stamps in sorted(seen.items())]
-    if sql == P.PARITY_PHASH_POP_SQL:
-        return [(len(db.phash_pop),)]
+    # --------------------------------------------- A10: the calibration cut (E912)
+    if sql == S.RT_CUT_SCOPE_IDS_SQL:
+        return sorted({(listing_id,) for (g, _block, listing_id) in db.scope_ids if g == gen})
+    if sql == S.RT_CUT_HASHES_SQL:
+        wanted = set(int(i) for i in p["ids"])
+        return sorted({(int(row["phash"]),) for row in db.image_rows
+                       if row.get("listing_id") in wanted and row.get("phash") is not None})
+    if sql == E.COHORT_PHASH_POP_SQL:
+        wanted = set(int(h) for h in p["hashes"])
+        carriers: dict[int, set[int]] = {}
+        for row in db.image_rows:
+            if row.get("phash") is not None and int(row["phash"]) in wanted:
+                carriers.setdefault(int(row["phash"]), set()).add(int(row["listing_id"]))
+        return [tuple([phash, len(ids)]) for phash, ids in sorted(carriers.items())]
+
+    # --------------------------------------------- the reconcile's scope row (A9)
+    if sql == A.SETTING_SQL:
+        key = str(p["key"])
+        return [(db.app_settings[key],)] if key in db.app_settings else []
 
     if sql == S.RT_MUST_NOT_LINK_SQL:
         return sorted(db.mnl)
+    if sql == S.RT_MUST_LINK_SQL:
+        return sorted(db.ml)
 
     # ---------------------------------------------------------------- the clean reset (E97)
     #

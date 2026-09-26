@@ -39,7 +39,8 @@ Feats = Mapping[str, tuple[float, bool]]
 class ClusterRelation:
     """`ok(a, b)` = no stated fact separates the two adverts, memoised per unordered pair."""
 
-    __slots__ = ("_listings", "_feats", "_settings", "_memo", "_mode", "_certificates")
+    __slots__ = ("_listings", "_feats", "_settings", "_memo", "_mode", "_closure_of",
+                 "_certificates")
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class ClusterRelation:
         feats: Mapping[tuple[int, int], Feats] | None = None,
         settings: Settings | None = None,
         mode: str = CLUSTER,
+        closure_of: Mapping[int, int] | None = None,
         certificates: Mapping[tuple[int, int], str] | None = None,
     ) -> None:
         self._listings = listings
@@ -56,6 +58,16 @@ class ClusterRelation:
         # E303: the certificate each scored pair earned, read only by its price limb.
         self._certificates = certificates or {}
         self._memo: dict[tuple[int, int], bool] = {}
+        # E910: two adverts the operator ruled one property (one must-link closure) are never
+        # separated by a stated fact — the ruling is the operator reading that fact already.
+        self._closure_of = closure_of or {}
+
+    def bound(self, closure_of: Mapping[int, int]) -> "ClusterRelation":
+        """The same relation with the operator's must-link closures exempt (E910)."""
+        out = ClusterRelation(self._listings, self._feats, self._settings, self._mode,
+                              closure_of, self._certificates)
+        out._memo = self._memo
+        return out
 
     def strict(self) -> "ClusterRelation":
         """E193: the same relation read at PROMOTION's bar, with its own memo.
@@ -65,7 +77,7 @@ class ClusterRelation:
         read at 3 % rather than the gate's 8 %, and the geocode and storey slacks the gate
         carries for a merge it already certified are not extended to a join nobody certified."""
         return ClusterRelation(self._listings, self._feats, self._settings, PROMOTE,
-                               self._certificates)
+                               self._closure_of, self._certificates)
 
     def listings(self) -> Mapping[int, Listing]:
         """The adverts this relation reads (E280's cluster-grain area limb needs the bodies)."""
@@ -73,6 +85,9 @@ class ClusterRelation:
 
     def ok(self, left: int, right: int) -> bool:
         key = (left, right) if left < right else (right, left)
+        closure = self._closure_of.get(left)
+        if closure is not None and closure == self._closure_of.get(right):
+            return True
         hit = self._memo.get(key)
         if hit is None:
             a, b = self._listings.get(key[0]), self._listings.get(key[1])

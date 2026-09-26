@@ -2,8 +2,13 @@
 
 A LIVE property of two or more adverts that the generation touches is a proposal when a pair of
 its adverts is STATED apart: the generation groups the two apart (a seen advert no group holds is
-a group of its own) and scored that pair reject/veto/band or a conflict names it -- a pair it never
-scored is not spoken for, like an advert it never saw -- or the pair carries a stored negative (a
+a group of its own) and scored that pair reject/veto/band or a conflict names it -- in a batch pass
+a pair it never scored is not spoken for, like an advert it never saw, while in the live stream
+(`rt`) two adverts it read and holds apart with no stored row between them are listed as `not
+compared` (Decision 9: a grouping the stream does not support is a proposal, never a split): no
+row cannot say whether the pair was scored below the store's floor or never retrieved at all, so
+it is never read as a band decision, and the page never takes an advert away on it (the batch
+split moves only adverts a STATED reason holds apart) -- or the pair carries a stored negative (a
 must-not-link, or a negative operator ruling). A pair whose newest ruling is `same` is never
 proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
 refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
@@ -20,9 +25,11 @@ from typing import Any
 
 from autodedup import apply_sql as A
 from autodedup import ui_sql as U
+from autodedup.incremental import GENERATION
 from toolkit.property_identity import MOVED, detach_outcomes, listing_origins
 
 NO_STATED_FACT = "no stated fact"
+NOT_COMPARED = "not compared"
 _SPLIT_ZONES = frozenset({"reject", "veto", "band"})  # a merge-zone pair speaks FOR one property
 
 
@@ -66,11 +73,14 @@ def proposed_splits(
             "reasons": list(v["reasons"] or [])})
 
     candidates: dict[int, list[tuple[int, int]]] = {}
+    apart: set[tuple[int, int]] = set()
     for pid, (canonical, adverts) in props.items():
         group = {lid: i for i, (_k, lids) in enumerate(_groups(adverts, canonical)) for lid in lids}
         lids = sorted(a[0] for a in adverts)
+        apart |= {(lo, hi) for i, lo in enumerate(lids) for hi in lids[i + 1:]
+                  if lo in group and hi in group and group[lo] != group[hi]}
         pairs = [(lo, hi) for i, lo in enumerate(lids) for hi in lids[i + 1:]
-                 if (lo in group and hi in group and group[lo] != group[hi])
+                 if (lo, hi) in apart
                  or (lo, hi) in negatives
                  or (rulings.get((lo, hi)) or {}).get("verdict") in U.NEGATIVE_VERDICTS]
         if pairs or property_id is not None:
@@ -91,6 +101,9 @@ def proposed_splits(
         if c["listing_lo"] is not None and (c["detail"] or {}).get("generation") in (None, generation):
             reasons[(c["listing_lo"], c["listing_hi"])] = (
                 "conflict", f"{c['kind']}: {c['invariant'] or 'no invariant named'}")
+    if generation == GENERATION:
+        for pair in apart:
+            reasons.setdefault(pair, ("not_compared", NOT_COMPARED))
 
     def stated(pair: tuple[int, int]) -> bool:
         verdict = (rulings.get(pair) or {}).get("verdict")

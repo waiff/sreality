@@ -31,10 +31,15 @@ LANE_WRITERS: tuple[str, ...] = (
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
-    "legacy_retire.py", "parity.py",
-    "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
+    "legacy_retire.py",
+    "progress_sql.py", "reconcile.py", "refit_substrate.py", "replay.py", "rt_equivalence.py",
+    "rt_lease.py", "score_lane.py",
+    "score_sql.py",
     "seals.py",
     "structural_truth.py", "town_probe.py",
+    # E299: writes yardstick.json / yardstick.md; reads the group file, where the operator's
+    # identity is already a digest, and never names an identity column.
+    "yardstick.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
@@ -100,7 +105,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "d43.py", "fingerprint.py", "floor_convention.py", "guards.py",
         "hazard_context.py", "incremental.py",
             "indistinguishable.py", "proposed_splits.py", "repartition.py",
-        "incremental_scope.py", "incremental_store.py", "parity_digest.py",
+        "incremental_scope.py", "incremental_store.py",
         "model.py", "normalize.py", "oss_pod.py", "revocation.py", "settings.py",
         "stock.py", "store_score.py",
             "text_facts.py",

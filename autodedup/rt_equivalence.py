@@ -63,7 +63,6 @@ from autodedup.incremental import GENERATION
 from autodedup.incremental_lane import (
     SCOPE_SETTING,
     lane_settings,
-    parity_baseline_key,
     read_scope_setting,
     resolve_scope_parents,
     scope_setting_key,
@@ -311,13 +310,15 @@ def store_score_type(conn: Any) -> str:
     return str(rows[0][0]).strip().lower()
 
 
-def batch_settings(conn: Any, generation: str) -> dict[str, Any] | None:
-    """The settings the batch generation's newest successful score pass recorded."""
+def batch_settings(conn: Any, generation: str) -> tuple[dict[str, Any] | None, Any]:
+    """The settings the batch generation's newest successful score pass recorded, and when
+    that pass finished."""
     rows = _rows(conn, RT_EQUIV_BATCH_SETTINGS_SQL, {"generation": generation})
     if not rows or rows[0][0] is None:
-        return None
+        return None, (rows[0][2] if rows else None)
     blob = rows[0][0]
-    return dict(blob) if isinstance(blob, Mapping) else json.loads(blob or "{}")
+    return (dict(blob) if isinstance(blob, Mapping) else json.loads(blob or "{}"),
+            rows[0][2])
 
 
 def differences(left: Pair, right: Pair, tol: float) -> list[str]:
@@ -589,18 +590,18 @@ def run_equivalence(
                          else json.loads(settings_blob or "{}"))
         store_floor = float(live_settings.get("store_floor") or DEFAULT_STORE_FLOOR)
         live_model = None if rows[0][6] is None else str(rows[0][6])
-        control = lane_settings(conn, [scope_setting_key(generation), SCOPE_SETTING,
-                                       parity_baseline_key(generation)])
+        control = lane_settings(conn, [scope_setting_key(generation)])
         try:
             scope = resolve_scope(None, read_scope_setting(control, generation))
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
-        baseline = control.get(parity_baseline_key(generation))
-        exported_raw = (baseline or {}).get("exported_at") if isinstance(baseline, Mapping) \
-            else None
         in_scope, scope_source = scope_listings(conn, generation, scope)
         score_type = store_score_type(conn)
-        batch_blob = batch_settings(conn, batch)
+        batch_blob, batch_finished = batch_settings(conn, batch)
+        # The batch cohort's cut: the export time when the dispatch names it, else the batch
+        # pass's own finish — LATER than the export, so an arrival between the two reads as
+        # unexplained rather than excused (the instrument fails closed without the stamp).
+        exported_raw = str(args.get("exported_at") or "").strip() or batch_finished
         live_pairs = read_pairs(conn, generation)
         batch_pairs = read_pairs(conn, batch)
         live_clusters = read_clusters(conn, generation)

@@ -1,7 +1,7 @@
 """POST /listings/lookup — batch (source, native id) → MF facts + latest estimate.
 
 The Chrome extension overlays the Browse-card 'Výnos MF' yield
-(`mf_gross_yield_pct`) and the MF reference rent (`mf_reference_rent_czk`) on
+(`mf_gross_yield_pct`) and the MF reference rent (`mf_reference_rent`) on
 portal detail + index pages, across every scraped portal, and deep-links each
 listing to its SPA page (`/listing/{sreality_id}`). The public views expose
 only `(source, sreality_id)`, so a non-sreality card — which only knows its own
@@ -27,7 +27,7 @@ Rows come back keyed by column name (dict_row) — no positional index math, so
 projecting one more column is a one-line change that can't silently misalign.
 
 TWO connections since the extension's own JWT went live (Wave 1): the shared
-market facts (`listings` + `properties`) are read on the SERVICE-ROLE
+market facts (`listings` + `properties_public`) are read on the SERVICE-ROLE
 connection — those tables are RLS-enabled-with-zero-policies by design (they
 carry broker PII inline, so a blanket `authenticated` read policy is the exact
 leak A6 walled off; see the A5 correction in
@@ -67,7 +67,7 @@ _LISTING_COLS: tuple[str, ...] = (
     "price_czk", "price_per_m2", "price_per_m2_basis",
     "disposition", "subtype",
     "display_label", "is_active", "last_seen_at",
-    "mf_reference_rent_czk", "mf_reference_rent_per_m2_czk", "mf_gross_yield_pct",
+    "mf_reference_rent_czk", "mf_gross_yield_pct", "mf_reference_rent",
 )
 
 _MARKET_SQL = """
@@ -95,30 +95,19 @@ SELECT
                          l.category_main, l.category_type) AS price_per_m2,
     measure_price_per_m2_basis(l.category_main, l.category_type) AS price_per_m2_basis,
     l.area_basis,
-    -- MF figures are PROPERTY-grain (the golden record), so every portal's advert
-    -- of one flat shows the SAME number. coalesce to the listing's own value only
-    -- for the brief pre-attach window (property_id NULL ~5 min) — a fresh listing
-    -- is a singleton, whose golden record already equals its own per-listing value.
-    coalesce(pr.mf_reference_rent_czk, l.mf_reference_rent_czk) AS mf_reference_rent_czk,
-    -- The SAME reference rent, per m², computed AT THE GRAIN OF ITS NUMERATOR:
-    -- a CASE, not a coalesce of two ratios, so the numerator and the denominator
-    -- always come from one row. The extension divided the property-grain rent by
-    -- the listing-grain area, which is wrong for every merged group.
-    -- Routed through the named measure on an EXPLICIT rent basis: this is a
-    -- monthly rent, so it takes the rent floor (< 1000 Kč -> no number). Reading
-    -- the basis off the listing would resolve `prodej` and apply the 100 000 Kč
-    -- sale floor, withholding every reference rent there is.
-    case when pr.mf_reference_rent_czk is not null
-         then measure_price_per_m2(pr.mf_reference_rent_czk::numeric,
-                                   pr.area_m2::numeric, 'byt', 'pronajem')
-         else measure_price_per_m2(l.mf_reference_rent_czk::numeric,
-                                   l.area_m2::numeric, 'byt', 'pronajem')
-    end AS mf_reference_rent_per_m2_czk,
-    coalesce(pr.mf_gross_yield_pct,    l.mf_gross_yield_pct)    AS mf_gross_yield_pct
+    -- MF is PROPERTY-grain: every portal's advert of one flat shows the SAME
+    -- number, read off the same `properties_public` row the listing page, the
+    -- kanban and the Watchdog matcher read. `mf_reference_rent` is the whole
+    -- result (a value's breakdown, a range with its note, or a note alone); the
+    -- panel renders it by shape and derives nothing. A pre-attach advert
+    -- (property_id NULL) has no property, so no MF.
+    pp.mf_reference_rent_czk,
+    pp.mf_gross_yield_pct,
+    pp.mf_reference_rent
 FROM req
 LEFT JOIN listings l
     ON l.source = req.source AND l.source_id_native = req.source_id
-LEFT JOIN properties pr ON pr.id = l.property_id
+LEFT JOIN properties_public pp ON pp.property_id = l.property_id
 LEFT JOIN listing_location ll ON ll.listing_id = l.id
 """
 

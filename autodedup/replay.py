@@ -32,14 +32,14 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, load
 from autodedup.decide import decide_pair
 from autodedup.features import FeatureContext, pair_features
 from autodedup.fingerprint import build_all
-from autodedup.harness import load_model, load_settings
-from autodedup.hazard_context import ContextIndex
+from autodedup.harness import load_model, load_must_not_link, load_settings
+from autodedup.hazard_context import ContextIndex, ContextStamp
 from autodedup.incremental import (
     EVIDENCE_HOLD_REASON,
     Calibration,
@@ -53,9 +53,11 @@ from autodedup.incremental_scope import Scope, parse_scope
 from autodedup.incremental_store import MemoryStore
 from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
+from autodedup.d43 import relation_for
+from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.model import LogisticModel
-from autodedup.score_lane import storable
+from autodedup.store_score import storable
 from autodedup.settings import Settings
 from autodedup.store_score import PAIR_SCORE_SQL_TYPE
 
@@ -200,7 +202,9 @@ def arrival_order(ds: Dataset, shuffle_seed: int | None = None) -> list[int]:
 
 
 def batch_state(
-    ds: Dataset, settings: Settings, model: LogisticModel
+    ds: Dataset, settings: Settings, model: LogisticModel,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
+    must_not_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, float]]:
     """The reference: the cohort pass's decisions and clusters, in this process."""
     timings: dict[str, float] = {}
@@ -213,6 +217,10 @@ def batch_state(
     decisions = []
     out: dict[tuple[int, int], dict[str, Any]] = {}
     vetoed: set[tuple[int, int]] = set()
+    # `run_engine`'s relation, built the way it builds it (F2, E909): the three D43 slots of
+    # every pair the store keeps. A reference without it proved the lane equal to an engine
+    # nobody ships.
+    slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
     for (lo, hi) in sorted(pairs):
         fa, fb = fps[lo], fps[hi]
         la, lb = ds.listings[lo], ds.listings[hi]
@@ -221,10 +229,28 @@ def batch_state(
         decisions.append(decision)
         if decision.veto == UNIT_DESIGNATOR_VETO:
             vetoed.add((lo, hi))
+        if storable({"zone": decision.zone, "score": decision.score,
+                     "evidence": decision.evidence}, settings.store_floor):
+            slots[(lo, hi)] = {name: feats[name] for name in FEATURE_SLOTS if name in feats}
         out[(lo, hi)] = _pair_view(decision, sorted(pairs[(lo, hi)]))
-    clustered = cluster_pairs(decisions, ds.listings, fps, settings, frozenset(vetoed))
+    clustered = cluster_pairs(decisions, ds.listings, fps, settings, must_not_link,
+                              relation_for(settings, ds.listings, slots),
+                              must_link=must_link, machine_vetoes=frozenset(vetoed))
     timings["batch_s"] = time.perf_counter() - clock
     return out, {key: list(members) for key, members in clustered.clusters.items()}, timings
+
+
+# What the real-time lane adds to a row's evidence for its own rails — E64's context stamp on a
+# promotion, E93's hold, the shared reference codes a K-R certificate names for its read-back —
+# and a batch decision never carries: it says nothing about the decision.
+LANE_EVIDENCE_KEYS: frozenset[str] = frozenset(
+    {*ContextStamp(0, 0).to_evidence(), "held_zone", "held_reason", "held_certificate",
+     "ref_codes"})
+
+
+def decision_evidence(evidence: Mapping[str, Any] | None) -> bool:
+    """Whether a row carries evidence of the decision's own (E61's veto names its two units)."""
+    return any(key not in LANE_EVIDENCE_KEYS for key in (evidence or {}))
 
 
 def _pair_view(decision: Any, probes: Sequence[str]) -> dict[str, Any]:
@@ -236,6 +262,9 @@ def _pair_view(decision: Any, probes: Sequence[str]) -> dict[str, Any]:
         "veto": decision.veto,
         "families": sorted(decision.families),
         "probes": list(probes),
+        # Whether the DECISION carries evidence: `storable` keeps an evidence-bearing row (E61's
+        # designator vetoes) whatever it scored, so the stored grain is compared on it too.
+        "evidence": decision_evidence(decision.evidence),
     }
 
 
@@ -248,8 +277,12 @@ def incremental_state(
     batch_size: int,
     limits: Limits,
     score_column: str = PAIR_SCORE_SQL_TYPE,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
+    must_not_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
     store = MemoryStore(score_sql_type=score_column)
+    store.ml = set(must_link)
+    store.mnl = set(must_not_link)
     facts = DatasetFacts(ds)
     work = ScheduleWork(order)
     passes: list[PassResult] = []
@@ -274,6 +307,7 @@ def incremental_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
+            "evidence": decision_evidence(row.evidence),
         }
         for key, row in store.pairs.items()
     }
@@ -309,6 +343,8 @@ def withheld_state(
     batch_size: int,
     limits: Limits,
     score_column: str = PAIR_SCORE_SQL_TYPE,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
+    must_not_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
     """The incremental path run against production's actual evidence timeline (E92/E93).
 
@@ -319,6 +355,8 @@ def withheld_state(
     the lane has. The final state must be the batch engine's, exactly — the hold changes WHEN
     a decision is reached, never which one."""
     store = MemoryStore(now=WITHHELD_T0, score_sql_type=score_column)
+    store.ml = set(must_link)
+    store.mnl = set(must_not_link)
     facts = WithheldFacts(ds)
     hold = EvidenceHold(now=WITHHELD_T0, horizon_s=WITHHELD_HORIZON_S)
     passes: list[PassResult] = []
@@ -365,6 +403,7 @@ def withheld_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
+            "evidence": decision_evidence(row.evidence),
         }
         for key, row in store.pairs.items()
     }
@@ -464,7 +503,15 @@ def run(argv: Sequence[str] | None = None) -> int:
     # the scope: the SAME listings on both sides, the batch pass included. Passing it here
     # restricts the dataset once, before either path sees it.
     parser.add_argument("--scope", default=None)
+    # E910: the operator's `same` rulings (the labels lane's must_link.jsonl) bind BOTH sides,
+    # so G1's "re-run with rulings" arm is the same comparison with the rulings in force.
+    parser.add_argument("--must-link", default=None)
+    # The operator's negatives, which the lane reads off `autodedup.must_not_link` every pass:
+    # the labels lane's must_not_link.jsonl, so both sides cluster under them.
+    parser.add_argument("--must-not-link", default=None)
     ns = parser.parse_args(argv)
+    must_link = load_must_not_link(ns.must_link)
+    must_not_link = load_must_not_link(ns.must_not_link)
 
     settings = load_settings(ns.settings)
     model = load_model(ns.model)
@@ -487,7 +534,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     fps = build_all(ds, settings)
     calibration = Calibration.build(fps, ds.listings, settings)
 
-    reference, batch_clusters, timings = batch_state(ds, settings, model)
+    reference, batch_clusters, timings = batch_state(ds, settings, model, must_link,
+                                                     must_not_link)
     # The SHIPPED budget, not an unreachable one: `max_pairs` is the only cap the cohort pass
     # has no equivalent of, so a replay that raised it out of reach would prove equivalence
     # for a configuration production never runs.
@@ -495,7 +543,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                     max_component=ns.max_component)
     order = arrival_order(ds)
     pairs, clusters, stats = incremental_state(
-        ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
+        ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column,
+        must_link, must_not_link,
     )
     # The third arm, and it always runs: production's entrant order at production's claim
     # size, against the same batch reference (E116).
@@ -503,7 +552,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                          max_component=ns.max_component)
     live_pairs, live_clusters, live_stats = incremental_state(
         ds, settings, model, calibration, entrant_order(ds), ns.live_claim_size, live_limits,
-        ns.score_column,
+        ns.score_column, must_link, must_not_link,
     )
 
     report: dict[str, Any] = {
@@ -538,10 +587,16 @@ def run(argv: Sequence[str] | None = None) -> int:
         },
     }
 
+    # The groups themselves, beside the comparison: G1 against a batch pass that ran
+    # elsewhere (g12's own clusters.json) is read off these, not re-derived.
+    dumped: dict[str, dict[int, list[int]]] = {
+        "batch": batch_clusters, "arrival": clusters, "live": live_clusters}
     if ns.withhold_photos:
         w_pairs, w_clusters, w_stats = withheld_state(
-            ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
+            ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column,
+            must_link, must_not_link,
         )
+        dumped["withheld"] = w_clusters
         report["withheld_photos"] = {
             "stats": w_stats,
             "pairs_vs_batch": compare_pairs(reference, w_pairs),
@@ -553,8 +608,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     if ns.shuffle_seed is not None:
         shuffled = arrival_order(ds, ns.shuffle_seed)
         s_pairs, s_clusters, s_stats = incremental_state(
-            ds, settings, model, calibration, shuffled, ns.batch_size, limits, ns.score_column
+            ds, settings, model, calibration, shuffled, ns.batch_size, limits, ns.score_column,
+            must_link, must_not_link,
         )
+        dumped["shuffled"] = s_clusters
         report["shuffled"] = {
             "seed": ns.shuffle_seed,
             "stats": s_stats,
@@ -565,6 +622,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     (out_dir / "replay.json").write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
     )
+    (out_dir / "clusters.json").write_text(json.dumps(
+        {arm: {str(k): sorted(v) for k, v in sorted(groups.items())}
+         for arm, groups in dumped.items()}, sort_keys=True), encoding="utf-8")
     print(json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=2,
                      sort_keys=True)[:4000])
     return 0

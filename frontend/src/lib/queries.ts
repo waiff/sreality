@@ -44,6 +44,7 @@ import type {
   PropertySource,
   PropertyStatusEventPublic,
   Ppm2Box,
+  ReferenceRent,
   ScrapeRun,
   ScraperHealthChecks,
   SoldComparable,
@@ -1467,7 +1468,7 @@ const DETAIL_COLS =
    * the published label rather than re-deriving it. (No apostrophes in here: a
    * guardrail test parses these constants by quote pairing.) */
   'price_per_m2,price_per_m2_basis,' +
-  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent,source_url';
+  'description,source_url';
 
 /* THE PROPERTY as its Browse card shows it (decision 11): the `properties_public`
  * row, whose every advert field is its canonical advert's and every physical fact
@@ -1485,11 +1486,15 @@ const PROPERTY_COLS =
   'estate_area,usable_area,garden_area,category_sub_cb,' +
   'furnished,terrace,cellar,garage,parking_lots,ownership,' +
   'price_per_m2,price_per_m2_basis,' +
-  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent,' +
+  /* MF is property-grain: the page renders `mf_reference_rent` by shape
+   * (lib/mfReference) and pairs a value with the property yield. */
+  'description,mf_gross_yield_pct,mf_reference_rent,' +
   'price_change_count,total_price_change_pct';
 
 export interface PropertyPublic extends ListingPublic {
   property_id: number;
+  mf_gross_yield_pct: number | null;
+  mf_reference_rent: ReferenceRent | null;
   price_change_count: number | null;
   total_price_change_pct: number | null;
 }

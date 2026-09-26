@@ -11,15 +11,18 @@ W2-a shrank this file by more than half, and the deletions say what the wave did
 CONFIG fixtures are gone (`location_field_policy`, `location_uncertainty_policy`,
 `location_collision_policy`, `location_constants` — policy is code now), and so are the
 registry answers whose questions went with them (parcels, the pin clusters, the boundary
-distance, the ČástObce point lookup). What is left is the NINE questions the protocol still
+distance, the ČástObce point lookup). What is left is the questions the protocol still
 declares — the sliver fallback among them, because rule 25 does not allow a border pin to
 have no town.
+
+A fixture point's `katastr_kod` stands in for the KÚ point-in-polygon the SQL makes, and the
+door rule is derived from it exactly as `_doors_katastr` decides it: one KÚ over every door.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from location_data.resolver.geo import haversine_m
@@ -79,7 +82,14 @@ class MiniMirror:
         lat = sum(p.lat for p in points) / len(points)
         lon = sum(p.lon for p in points) / len(points)
         extent = max(haversine_m(lat, lon, p.lat, p.lon) for p in points)
-        return StreetPoint(lat=lat, lon=lon, extent_m=extent, point_count=len(points))
+        return StreetPoint(lat=lat, lon=lon, extent_m=extent, point_count=len(points),
+                           katastr_kod=_doors_katastr(points))
+
+    def part_katastr_kod(self, unit_id: int) -> int | None:
+        return _doors_katastr([
+            p for p in self.points
+            if p.cast_obce_unit_id == unit_id and p.lat is not None and p.lon is not None
+        ])
 
     def admin_units_by_name(self, name_norm: str, *, levels: Sequence[str] = ()) -> list[AdminUnit]:
         return [
@@ -100,7 +110,7 @@ class MiniMirror:
             if unit is None:
                 break
             chain.append(unit)
-        return chain
+        return [self._with_sole_katastr(u) for u in chain]
 
     def admin_chain_by_code(self, level: str, code: int) -> list[AdminUnit]:
         unit = next((u for u in self.units if u.level == level and u.code == code), None)
@@ -139,6 +149,22 @@ class MiniMirror:
     # ---- fixture helper, not part of the protocol
     def _unit_by_id(self, unit_id: int) -> AdminUnit | None:
         return next((u for u in self.units if u.unit_id == unit_id), None)
+
+    def _with_sole_katastr(self, unit: AdminUnit) -> AdminUnit:
+        """What `_ADMIN_CHAIN_TAIL` answers on an obec row: its one KÚ child, else None."""
+        if unit.level != "obec":
+            return unit
+        kus = [u.code for u in self.units
+               if u.level == "katastralni_uzemi" and u.parent_id == unit.unit_id]
+        return replace(unit, sole_katastr_kod=kus[0] if len(kus) == 1 else None)
+
+
+def _doors_katastr(doors: Sequence[AddressPoint]) -> int | None:
+    """`resolve_db._doors_katastr` in python: the one KÚ holding every door, else None."""
+    codes = {p.katastr_kod for p in doors}
+    if len(codes) != 1 or None in codes:
+        return None
+    return codes.pop()
 
 
 # --------------------------------------------------------------------------- fixtures

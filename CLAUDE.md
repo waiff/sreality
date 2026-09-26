@@ -181,12 +181,12 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
     survivor, re-syncs the browse read model, and enforces **category compatibility** (sale≠rent,
     flat≠house — except the sanctioned **dům↔komerční**). `db.mark_inactive` / `active_count` are
-    source-scoped. **Merges are ordered by the operator, or by the dark AUTODEDUP apply lane (`autodedup/apply.py`,
-    source `autodedup`) only inside the area `app_settings.autodedup_apply_scope` names.** **The old automatic decision
-    engine was REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers
-    (pHash, CLIP, `/labeling`) stay live; the rebuild is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`).
-    **Never resurrect or consult the removed engine or its design docs**; the operator owns the apply scope (the one
-    rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
+    source-scoped. **Merges are ordered by the operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, never a split,
+    only inside `app_settings.autodedup_apply_scope`): the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`; interval 0,
+    then `mode=unapply`, is the brake), and batch `mode=apply` stays until C2.** **The old automatic decision engine was REMOVED wholesale (2026-08,
+    the "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers (pHash, CLIP, `/labeling`) stay live; the rebuild is **simulation-first**
+    (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`). **Never resurrect or consult the removed engine or its design docs**; the operator owns the
+    apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
     `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` +
     `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot;
@@ -245,19 +245,19 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     source trees + every migration statement; it names its own blind spots, so read them before trusting
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
 24. **Folded into 25** (kept so the citations don't break — rules are never renumbered).
-25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at least
-    as much as it adds.** `listing_location` (26 columns, mig 501) is the ONLY place a listing's location
-    is stored — `listings`/`properties` carry none (mig 508), and there is no serving flag and no
-    granularity floor — so a place read joins `ll on ll.listing_id = l.id`, casting `ll.geom::geography`
-    for metres (uncast = DEGREES). ONE hourly lane (`claims_intake`) writes `location_claims` off the
-    stored payload + page body; ONE four-step resolver (bind → fill → grade → check) writes the answer
-    table; ELEVEN claim types, ≤ 1 contract entry each, the `obec_name` entry mandatory and live; every
-    display is `location_display_label`, every place filter `<level>_id = any(codes)` at four levels.
-    CONSUMERS (browse/map/feed/watchdog/dedup) serve a listing only when its location is resolved or
-    determined foreign — ONE predicate (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id
-    surfaces stay reachable. Invariant: **every served listing has a row, every active Czech listing has
-    a town** (`location_town_coverage` red until zero; foreign is a determination, never a default); a
-    field is added only after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
+25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at least as much as
+    it adds.** `listing_location` (27 columns, migs 501/566) is the ONLY place a listing's location is stored —
+    `listings`/`properties` carry none (mig 508), and there is no serving flag and no granularity floor — so a
+    place read joins `ll on ll.listing_id = l.id`, casting `ll.geom::geography` for metres (uncast = DEGREES).
+    ONE hourly lane (`claims_intake`) writes `location_claims` off the stored payload + page body; ONE four-step
+    resolver (bind → fill → grade → check) writes the answer table; ELEVEN claim types, ≤ 1 contract entry each,
+    the `obec_name` entry mandatory and live; every display is `location_display_label`, every place filter
+    `<level>_id = any(codes)` at four levels. CONSUMERS (browse/map/feed/watchdog/dedup) serve a listing only
+    when its location is resolved or determined foreign — ONE predicate
+    (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id surfaces stay reachable. Invariant:
+    **every served listing has a row, every active Czech listing has a town** (`location_town_coverage` red until
+    zero; foreign is a determination, never a default); a field is added only by operator ruling (katastr_kod,
+    2026-09) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 ## Coding conventions
 
 - Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.

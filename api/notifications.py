@@ -139,7 +139,8 @@ class WatchdogFilterSpec(BaseModel):
     # undecidable basis, or a sub-floor price fall out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
-    # MF gross rental yield % (migration 133). Sale apartments only.
+    # MF gross rental yield %: properties_public's read-time mf_reference() (migrations 565 + 567).
+    # Sale flats with a value only -- a town-level range carries no yield.
     min_mf_gross_yield_pct: float | None = None
     max_mf_gross_yield_pct: float | None = None
     min_area_m2: float | None = None
@@ -705,12 +706,13 @@ def delete_subscription(
 # --- dispatches (the notification feed) -----------------------------------
 
 
-# EVERY column here reads `listings_public`, not `listings` — and that is a FIX,
-# not a style choice. This feed runs on the tenant pool, i.e. under
+# EVERY column here reads an owner-rights view (`listings_public`; the MF yield
+# `properties_public`), never `listings` — and that is a FIX, not a style
+# choice. This feed runs on the tenant pool, i.e. under
 # `SET LOCAL ROLE authenticated`, and `listings` has carried RLS with NO POLICY
 # since migration 001: under that role the table is empty, so the LEFT JOIN this
-# projection used to sit on matched nothing and every one of these fourteen
-# columns arrived NULL in the feed. `listings_public` is an owner-rights view
+# projection used to sit on matched nothing and every one of these columns
+# arrived NULL in the feed. `listings_public` is an owner-rights view
 # over the same rows with no WHERE of its own (migration 494), so it returns
 # exactly what a BYPASSRLS reader always saw here and what the browser role never
 # did. It is also the only way this query can reach the resolved location at all:
@@ -725,8 +727,11 @@ _LISTING_PROJECTION = (
     "lp.sreality_id, lp.category_main, lp.category_type, lp.price_czk, "
     "lp.price_unit, lp.area_m2, lp.disposition, lp.subtype, "
     "lp.display_label, "
-    "lp.is_active, lp.first_seen_at, lp.last_seen_at, lp.mf_gross_yield_pct, "
-    "lp.source, lp.source_url"
+    "lp.is_active, lp.first_seen_at, lp.last_seen_at, "
+    "lp.source, lp.source_url, "
+    # MF is property-grain, like the dispatch itself (rule 16): the feed shows
+    # the number the matcher filtered on, off the same properties_public row.
+    "pp.mf_gross_yield_pct"
 )
 
 # The unified feed projection + FROM, shared by list_dispatches + _fetch_dispatch
@@ -761,6 +766,7 @@ _DISPATCH_FROM = (
     # ONE join, to the VIEW: the bare `listings` join it replaced was invisible to
     # the tenant role (RLS, no policy) — see _LISTING_PROJECTION.
     "LEFT JOIN listings_public lp ON lp.id = d.listing_id "
+    "LEFT JOIN properties_public pp ON pp.property_id = d.property_id "
     "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
 )
 

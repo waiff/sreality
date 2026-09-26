@@ -59,6 +59,7 @@ import { useDialog } from '@/lib/useDialog';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
+import { mfShape } from '@/lib/mfReference';
 import { PickButton } from '@/components/controls';
 import { canRerun, type RerunOverrides } from '@/lib/rerun';
 import { listingPath } from '@/lib/listingUrl';
@@ -154,7 +155,7 @@ export function RunBody({
     <>
       {!embedded && <EstimateHeadline run={run} />}
       <YieldBlock run={run} subject={subject} />
-      {!embedded && run.reference_rent && (
+      {!embedded && mfShape(run.reference_rent).kind !== 'none' && (
         <>
           <Hairline />
           <SectionLabel>Reference · Cenová mapa MF</SectionLabel>

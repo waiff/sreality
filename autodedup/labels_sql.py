@@ -5,9 +5,15 @@ operator ruled, at pair grain and at cluster grain — `clusters` + `cluster_mem
 a confirmed group into the member pairs it asserts, `pairs`, which is the engine's own view of
 the same pair at read time, and `must_not_link`, the permanent negatives.
 
-Nothing here reads a `public.*` relation and nothing reads a legacy dedup table (ruling D7).
-Every statement is a SELECT: the lane exports what the operator already decided and must never
-be able to change it.
+Since migration 564 (E299) two more: `operator_merges`, the operator's own Browse merges copied
+ONCE into the engine's schema, and `verdicts.operator_merge_group_id`, the column that says which
+of those merges a `same` pair ruling was made by.
+
+Nothing here reads a legacy dedup table (ruling D7) — not even `property_merge_events`, which
+564 copied so that nothing would ever read it again. ONE statement reads `public`: where each
+operator-merge member sits today (its advert row and its live `listing_location`), the reads
+PROGRAM.md section 0 permits the engine. Every statement is a SELECT: the lane exports what the
+operator already decided and must never be able to change it.
 
 `distinct on` is the latest-wins reader in both places. A pair can carry one row per
 `decided_by` (migration 528's partial unique index is on `(kind, listing_lo, listing_hi,
@@ -29,9 +35,14 @@ select to_regclass('autodedup.verdicts')       is not null
 # Every explicitly ruled pair, latest verdict per pair. Deliberately NOT scoped to a
 # generation: an operator ruling is about two adverts, not about the pass that proposed them,
 # and a pair ruled under g3 says exactly as much about g4's model as one ruled today.
+#
+# `verdict_id` is appended (never reordered) so the lane can ask OPERATOR_MERGE_LINKS_SQL which
+# of these rows a Browse merge wrote — read through the id rather than by naming 564's column
+# here, because this statement must keep working on a store 564 has not reached yet.
 PAIR_VERDICTS_SQL = """
 select distinct on (v.listing_lo, v.listing_hi)
-       v.listing_lo, v.listing_hi, v.verdict, v.note, v.reasons, v.decided_by, v.decided_at
+       v.listing_lo, v.listing_hi, v.verdict, v.note, v.reasons, v.decided_by, v.decided_at,
+       v.id as verdict_id
   from autodedup.verdicts v
  where v.kind = 'pair'
    and v.listing_lo is not null
@@ -149,4 +160,56 @@ with ranked as (
 select r.cluster_key, r.sample_rank
   from ranked r
  where r.cluster_key = any(%(keys)s::bigint[])
+"""
+
+
+# --- the operator's Browse merges (migration 564, E299) ------------------------------------
+
+# Probed before either object is read. The lane is dispatched from `main`, and `main` can
+# carry this code before 564 is applied to the store: an export that died on a missing
+# column would lose every label it could have written, so the group file is skipped — and
+# the summary says so — instead.
+OPERATOR_MERGES_PRESENT_SQL = """
+select to_regclass('autodedup.operator_merges') is not null
+   and exists (
+         select 1
+           from information_schema.columns c
+          where c.table_schema = 'autodedup'
+            and c.table_name = 'verdicts'
+            and c.column_name = 'operator_merge_group_id'
+       ) as present
+"""
+
+# Every copied group, whatever its status: a corrected group is still the operator's record,
+# and the consumer decides what an `undone` or `withdrawn` row counts for.
+OPERATOR_MERGES_SQL = """
+select m.merge_group_id, m.merged_at, m.survivor_property_id, m.retired_property_ids,
+       m.member_ids, m.member_sides, m.member_property_ids, m.n_pairs, m.decided_by,
+       m.source, m.status, m.status_note, m.status_at, m.copied_at
+  from autodedup.operator_merges m
+ order by m.merged_at, m.merge_group_id
+"""
+
+# The pair-grain link: which `same` pair rulings a Browse merge wrote. Joined to
+# PAIR_VERDICTS_SQL's rows by id in Python, so a pair whose LATEST ruling was typed by hand
+# after the merge reads as that ruling, not as the merge.
+OPERATOR_MERGE_LINKS_SQL = """
+select v.id as verdict_id, v.operator_merge_group_id
+  from autodedup.verdicts v
+ where v.kind = 'pair'
+   and v.operator_merge_group_id is not null
+ order by v.id
+"""
+
+# Where each member IS today: its advert row (portal, category, current property) and its
+# live `listing_location` row (primary key listing_id), the blocks the export lane is
+# dispatched by. Read at export time, never stored: this is what tells the operator which
+# cohort to export so a group can be measured at all.
+OPERATOR_MERGE_MEMBERS_SQL = """
+select l.id as listing_id, l.source, l.category_type, l.category_main, l.property_id,
+       ll.obec_kod, ll.cast_obce_kod
+  from public.listings l
+  left join public.listing_location ll on ll.listing_id = l.id
+ where l.id = any(%(ids)s::bigint[])
+ order by l.id
 """

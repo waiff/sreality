@@ -1,8 +1,9 @@
-"""The answer row: 26 columns, and the list is the contract.
+"""The answer row: 27 columns, and the list is the contract.
 
-`listing_location` (migration 501) replaces `listing_location_current`'s 81. The test that
-matters is the one below: the builder's keys and the migration's columns are the SAME list,
-so a column added to one and not the other fails here rather than at the first INSERT.
+`listing_location` (migration 501) replaces `listing_location_current`'s 81; migration 566
+added the 27th, `katastr_kod` (MF program, operator ruling D5). The test that matters is the
+one below: the builder's keys and the migrations' columns are the SAME list, so a column
+added to one and not the other fails here rather than at the first INSERT.
 
 The row is a CACHE, never truth — truncating it is always legal and the drain is its only
 writer.
@@ -17,12 +18,11 @@ from location_data.resolver import core, projection
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
-MIGRATION = (
-    Path(__file__).resolve().parents[2] / "migrations"
-    / "501_location_w2a_listing_location.sql"
-)
+_MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+MIGRATION = _MIGRATIONS / "501_location_w2a_listing_location.sql"
+ADDED = (_MIGRATIONS / "566_listing_location_katastr_kod.sql",)
 
-# The 26, spelled out. Transcribing them is the point: this list and the DDL are two
+# The 27, spelled out. Transcribing them is the point: this list and the DDL are two
 # independent statements of the same contract, and they are compared below.
 EXPECTED_COLUMNS = (
     "listing_id",
@@ -33,10 +33,21 @@ EXPECTED_COLUMNS = (
     "match_confidence", "granularity", "uncertainty_radius_m",
     "country_status", "disputed",
     "resolver_version", "resolved_at", "claim_set_hash", "registry_version",
+    "katastr_kod",
 )
 
 
 def _ddl_columns() -> list[str]:
+    """501's CREATE TABLE, then each later `add column` in migration order — DDL order."""
+    return _created_columns() + [
+        column
+        for path in ADDED
+        for column in re.findall(
+            r"add column if not exists (\w+)", path.read_text(encoding="utf-8"))
+    ]
+
+
+def _created_columns() -> list[str]:
     sql = MIGRATION.read_text(encoding="utf-8")
     sql = re.sub(r"--[^\n]*", "", sql)
     body = sql.split("create table listing_location (", 1)[1]
@@ -74,9 +85,9 @@ def _address_claims():
     ]
 
 
-def test_the_table_is_exactly_these_twenty_six_columns():
+def test_the_table_is_exactly_these_twenty_seven_columns():
     assert _ddl_columns() == list(EXPECTED_COLUMNS)
-    assert len(EXPECTED_COLUMNS) == 26
+    assert len(EXPECTED_COLUMNS) == 27
     assert list(projection.LISTING_LOCATION_COLUMNS) == list(EXPECTED_COLUMNS)
 
 

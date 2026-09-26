@@ -23,6 +23,7 @@ read it here.
 from __future__ import annotations
 
 import struct
+from typing import Any, Mapping
 
 # The declared type of `autodedup.pairs.score`, as migration 541 leaves it. The rail that keeps
 # this honest is `tests/autodedup/test_store_precision.py`, which reads the migrations.
@@ -52,6 +53,20 @@ def narrow(score: float, sql_type: str = PAIR_SCORE_SQL_TYPE) -> float:
     if sql_type != "real":
         raise ValueError(f"unknown score column type {sql_type!r}")
     return float(struct.unpack("f", struct.pack("f", float(score)))[0])
+
+
+def storable(row: Mapping[str, Any], store_floor: float) -> bool:
+    """What every store keeps of a decided pair: the merge and band zones whatever they scored,
+    any row that carries evidence (E61's designator veto names its two units there), and the
+    reject tail at or above `store_floor`. ONE predicate for the harness, the score lane and the
+    real-time store, because the D43 cluster relation reads its feature slots off exactly these
+    rows (F2): a store that kept a different set would cluster a different relation."""
+    if str(row.get("zone") or "") in ("merge", "band") or row.get("evidence"):
+        return True
+    try:
+        return float(row.get("score") or 0.0) >= store_floor
+    except (TypeError, ValueError):
+        return False
 
 
 def is_lossless(sql_type: str = PAIR_SCORE_SQL_TYPE) -> bool:

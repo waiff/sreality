@@ -56,6 +56,14 @@ DROPPED = {
 }
 
 
+# Kept by 517 with a reader then; the MF readers left in the MF render-by-shape
+# PR (MF is property-grain: properties_public), and the columns leave the view
+# with the stored MF columns in the destructive MF cleanup. Delete this set there.
+READERLESS_UNTIL_MF_CLEANUP = {
+    "mf_reference_rent_czk", "mf_gross_yield_pct", "mf_reference_rent",
+}
+
+
 def _detail_cols() -> list[str]:
     """`DETAIL_COLS` from frontend/src/lib/queries.ts, by quote pairing.
 
@@ -73,10 +81,11 @@ def test_listings_public_is_exactly_its_readers() -> None:
     cols = _columns(_sql(W6C), "listings_public")
     assert len(cols) == len(set(cols)), f"517 projects a duplicate column: {cols}"
     assert len(cols) == 44, f"517 leaves listings_public {len(cols)} columns wide, expected 44"
-    assert set(cols) == set(_detail_cols()), (
+    read = set(cols) - READERLESS_UNTIL_MF_CLEANUP
+    assert read == set(_detail_cols()), (
         "listings_public and the SPA's DETAIL_COLS disagree — "
-        f"only in the view: {sorted(set(cols) - set(_detail_cols()))}; "
-        f"only in DETAIL_COLS: {sorted(set(_detail_cols()) - set(cols))}"
+        f"only in the view: {sorted(read - set(_detail_cols()))}; "
+        f"only in DETAIL_COLS: {sorted(set(_detail_cols()) - read)}"
     )
 
 

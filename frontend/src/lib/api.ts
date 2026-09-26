@@ -3123,7 +3123,9 @@ export interface ProposedSplit {
   splits: {
     listing_lo: number;
     listing_hi: number;
-    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none';
+    /* `not_compared`: the live stream holds the two apart with no stored pair
+     * between them — nothing stated, so a split never takes an advert on it. */
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none' | 'not_compared';
     reason: string;
     ruling: {
       verdict: string;
@@ -3139,7 +3141,14 @@ export interface ProposedSplit {
 export const getProposedSplits = (
   f: { generation?: string | null; after?: number | null; limit?: number } = {},
 ): Promise<
-  AutodedupEnvelope<{ generation: string | null; total: number; items: ProposedSplit[]; next_after: number | null }>
+  AutodedupEnvelope<{
+    generation: string | null;
+    total: number;
+    items: ProposedSplit[];
+    next_after: number | null;
+    /* Why a live stream that is not live yet (building, or seeded before W5) proposes nothing. */
+    withheld?: string | null;
+  }>
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 

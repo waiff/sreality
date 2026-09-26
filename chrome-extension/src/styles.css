@@ -309,8 +309,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.mf-figure--muted { color: var(--ink-4); }
-
 .mf-ledger {
   display: flex;
   align-items: baseline;
@@ -337,6 +335,26 @@
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
+
+/* The (i) behind a range: its title + aria-label carry the result's note. */
+.mf-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.9rem;
+  height: 0.9rem;
+  margin-left: 0.3rem;
+  border: 1px solid var(--ink-4);
+  border-radius: 50%;
+  font-size: 0.58rem;
+  font-style: italic;
+  line-height: 1;
+  color: var(--ink-3);
+  cursor: help;
+  vertical-align: 0.1em;
+}
+
+.mf-info:hover { color: var(--copper); border-color: var(--copper); }
 
 /* ---- action bar (bookmark + open in app) ---------------------------- */
 

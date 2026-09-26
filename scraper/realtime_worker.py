@@ -85,16 +85,17 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
              an unmigrated database skips with one warning.
 - autodedup: every `realtime_autodedup_interval_seconds` (DARK: the seeded row is
-             0), ONE bounded pass of THE autodedup real-time shadow lane
-             (autodedup.incremental_lane.run_incremental — the function
-             autodedup_realtime.yml runs); the engine sizes the claim by its measured
-             rate under half of a hard per-pass deadline, halved again after each
-             deadline trip; a refusal or a trip counts as a failed pass. Writes only
-             the `rt` shadow generation inside schema autodedup — never a production
-             merge. One integer is cadence AND kill switch; the engine's own lease row
-             and cursors are shared with the GH lane (and `rt_seed` takes the same
-             lease), so no two of them overlap. An absent autodedup store skips with
-             one warning.
+             0), ONE bounded pass of THE autodedup lane
+             (autodedup.incremental_lane.run_incremental, its only caller): the pass
+             decides and groups the `rt` generation inside schema autodedup, then
+             RECONCILES production — the groups it re-clustered become merges through
+             toolkit.property_identity.merge_property_set, inside the area
+             app_settings.autodedup_apply_scope names; it never splits. The engine
+             bounds its own time (a pass past its deadline rolls back and halves its
+             rate); a refusal counts as a failed pass. One integer is cadence AND
+             kill switch; `rt_seed`, `apply` and `unapply` take the same lease, so
+             there is one writer at a time. An absent autodedup store skips with one
+             warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -121,12 +122,10 @@ import importlib
 import logging
 import os
 import signal
-import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -402,63 +401,27 @@ TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
 _TEXT_EXTRACT_PASS_LOCK = threading.Lock()
 _TEXT_EXTRACT_WEDGE_LOGGED = False
 
-# autodedup lane (AUTODEDUP rollout §7.3): THE real-time shadow pass of the dedup engine
-# (autodedup.incremental_lane.run_incremental — the function autodedup_realtime.yml runs via
-# `python -m autodedup.lane --mode incremental`, imported and never copied) from here, because
-# GitHub fires that `*/10` schedule hours apart and decisions within minutes cannot ride it.
-#
-# SHADOW ONLY. The pass writes the `rt` generation inside schema `autodedup` (fingerprints,
-# probe postings, pairs, groups, cursors) and nothing else: no `public.listings` row, no
-# `property_id`, no merge. Turning engine groups into production merges is a separate adapter
-# over toolkit/property_identity.merge_property_set, and this lane neither calls nor imports it.
-#
-# ONE LANE, TWO SCHEDULES, ONE POSITION. The engine keeps its watermark in
-# `autodedup.scan_cursor` and takes the `autodedup.rt_lease` row by CAS, both keyed by name
-# and not by caller, so this lane and the workflow read and advance the SAME cursors under the
-# SAME lease: whichever takes the lease passes, the other returns `skipped: leased`. That is
-# the location_resolve precedent (a shared lease, the GH lane stays the backstop) rather than
-# the intake's (two cursors): a listing decided twice into one generation is not free, and the
-# engine's cursors are not per-caller. The engine's own gates bind this caller exactly as they
-# bind the workflow — the `autodedup.settings.realtime_enabled` stop button, the unseeded skip,
-# the storage budget, the parity gate, the pair budget.
+# autodedup lane (E914): THE one production path of the dedup engine
+# (autodedup.incremental_lane.run_incremental, imported and never copied). One pass decides,
+# groups and RECONCILES under the engine's own lease (`autodedup.rt_lease`): the groups it
+# re-clustered become production merges through toolkit.property_identity.merge_property_set,
+# inside the area app_settings.autodedup_apply_scope names; it never splits. The engine bounds
+# its own time — a pass past its deadline rolls back (nothing written, no cursor moved) and
+# records its rate halved — so this lane wraps nothing.
 #
 # ONE integer is cadence AND kill switch (the sold_comps lane's shape): the seeded row is 0, and
 # the lane is registered with default_interval=0 so a settings read that RAISES cannot wake it.
+# 0 is the brake; `mode=unapply` undoes what the lane merged.
 AUTODEDUP_INTERVAL_SETTING = "realtime_autodedup_interval_seconds"
-# The HARD per-pass deadline, in seconds of wall clock. The engine's time budget bounds what a
-# pass CLAIMS, not how long it runs, and a pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps its
-# thread — and its open transaction and its lease — running. So after this deadline the pass's
-# connection refuses every further statement except the lease release: the transaction rolls
-# back (nothing written, no cursor moved — the engine's own refusal contract), the lease is
-# freed and the thread ends. Sized so that the deadline plus one statement at the engine's
-# `statement_timeout` (120 s) stays under check_worker_lane_stall's 1200 s in_flight warn,
-# under LANE_PASS_TIMEOUT_SECONDS, and under the engine's LEASE_TTL_S (2100 s) — so the GH lane
-# cannot take the lease while a pass here is still writing.
-AUTODEDUP_PASS_DEADLINE_SECONDS = 1050.0
-# The time budget the engine sizes this lane's claims by (E98: claim <= budget x the rate the
-# generation measured itself at), handed in as `max_pass_budget_s`. The engine's own default
-# (`PASS_BUDGET_S`, 900 s) is sized for the workflow's 25-minute timeout and would fill all but
-# ~15% of this deadline. A pass stopped at the deadline rolls back without recording a rate, so
-# the next one would claim the same work at the same size and trip again, holding the shared
-# lease the whole time. Half the deadline leaves the pass room to run twice as slow as its
-# measured rate before the deadline stops it.
-AUTODEDUP_PASS_BUDGET_SECONDS = AUTODEDUP_PASS_DEADLINE_SECONDS / 2
 # Longest refusal/abort text carried into the heartbeat row.
 AUTODEDUP_REASON_CHARS = 300
 _AUTODEDUP_PASS_LOCK = threading.Lock()
 _AUTODEDUP_WEDGE_LOGGED = False
 # log-once-per-process guard: the autodedup store is absent.
 _AUTODEDUP_STORE_WARNED = False
-# Logged on the TRANSITION, never per pass: at a 60 s interval a lease held by the GH lane or a
+# Logged on the TRANSITION, never per pass: at a 60 s interval a lease held by a seed or a
 # standing refusal would otherwise write the same line 1,440 times a day.
 _AUTODEDUP_LAST_OUTCOME: str | None = None
-# The in-process back-off after a deadline trip: the time budget the engine sizes its claim by is
-# divided by this, doubling per trip, down to a one-second budget (a one-listing claim at any rate
-# below two listings a second). It returns to 1 only after a clean pass that claimed enough for
-# the engine to re-measure its rate (`PASS_RATE_MIN_CLAIM`): a smaller pass teaches the engine
-# nothing, and going back to a full claim on the same stale rate is exactly the trip that set
-# it. A restart resets it.
-_AUTODEDUP_BACKOFF = 1
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -1917,75 +1880,6 @@ async def _text_extract_pass(
     _record_pass(state, "text_extract", last)
 
 
-class _AutodedupDeadline(Exception):
-    """An autodedup pass ran past AUTODEDUP_PASS_DEADLINE_SECONDS; its transaction rolls back."""
-
-
-class _DeadlineCursor:
-    """A cursor that refuses to START a statement once its pass is past the deadline."""
-
-    def __init__(self, cursor: Any, guard: "_DeadlineConnection") -> None:
-        self._cursor = cursor
-        self._guard = guard
-
-    def __enter__(self) -> "_DeadlineCursor":
-        self._cursor.__enter__()
-        return self
-
-    def __exit__(self, *exc: Any) -> Any:
-        return self._cursor.__exit__(*exc)
-
-    def __iter__(self) -> Any:
-        return iter(self._cursor)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._cursor, name)
-
-    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
-        self._guard.check(query)
-        return self._cursor.execute(query, *args, **kwargs)
-
-    def executemany(self, query: Any, *args: Any, **kwargs: Any) -> Any:
-        self._guard.check(query)
-        return self._cursor.executemany(query, *args, **kwargs)
-
-
-class _DeadlineConnection:
-    """The autodedup pass's connection, with a wall-clock deadline on every statement.
-
-    Past the deadline the next statement raises instead of running, so the engine's one
-    transaction rolls back on its way out (nothing written, no cursor moved — its own refusal
-    contract) and the thread ends, instead of outliving LANE_PASS_TIMEOUT_SECONDS with a
-    transaction and a lease open. `exempt` statements still run after it: the lease release,
-    the one statement a stopped pass must still send. Everything else is the real connection
-    (transaction(), close(), info) untouched."""
-
-    def __init__(self, conn: Any, deadline: float, *, exempt: tuple[Any, ...] = (),
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self._conn = conn
-        self._deadline = deadline
-        self._exempt = exempt
-        self._clock = clock
-        self.tripped = False
-
-    def check(self, query: Any) -> None:
-        # A tuple, not a set: `in` compares by equality, so an unhashable query cannot raise.
-        if query in self._exempt:
-            return
-        if self._clock() >= self._deadline:
-            self.tripped = True
-            raise _AutodedupDeadline(
-                f"autodedup pass stopped at its {AUTODEDUP_PASS_DEADLINE_SECONDS:.0f} s "
-                "deadline; a transaction still open rolls back, so nothing half-written "
-                "survives and no cursor moves past undecided work")
-
-    def cursor(self, *args: Any, **kwargs: Any) -> _DeadlineCursor:
-        return _DeadlineCursor(self._conn.cursor(*args, **kwargs), self)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._conn, name)
-
-
 def _autodedup_store_present(conn: Any) -> bool:
     from autodedup.incremental_sql import RT_STORE_PRESENT_SQL
 
@@ -2001,31 +1895,46 @@ def _autodedup_outcome(
     summary: dict[str, Any] | None = None,
     skipped: str | None = None,
     refused: str | None = None,
-    deadline: bool = False,
 ) -> dict[str, Any]:
     """The heartbeat's `last` for one tick — the same keys on every path, so a skipping or
     refusing lane never reads as a quiet one: `scored` pairs, `grouped` groups written,
-    `skipped` 0/1 with its `reason`, `errors` 0/1 with the refusal or abort text."""
+    `merged` production merges the reconcile made, `skipped` 0/1 with its `reason`, `errors`
+    0/1 with the refusal or abort text."""
     last: dict[str, Any] = {
-        "ran": False, "claimed": 0, "scored": 0, "grouped": 0, "skipped": 0, "errors": 0,
-        "seconds": round(time.monotonic() - started, 1),
-        # The divisor of the NEXT pass's time budget: above 1 the lane is backing off a deadline.
-        "backoff": _AUTODEDUP_BACKOFF,
+        "ran": False, "claimed": 0, "scored": 0, "grouped": 0, "merged": 0, "skipped": 0,
+        "errors": 0, "seconds": round(time.monotonic() - started, 1),
     }
     if skipped is not None:
         last.update(skipped=1, reason=skipped)
     elif refused is not None:
-        last.update(errors=1, refused=refused[:AUTODEDUP_REASON_CHARS],
-                    deadline_exceeded=deadline)
+        last.update(errors=1, refused=refused[:AUTODEDUP_REASON_CHARS])
     elif summary is not None and summary.get("skipped"):
-        # The engine's own green skips: `leased` (the GH lane is passing), `unseeded` (no
-        # generation to pass over yet), `dark` (the autodedup.settings stop button).
+        # The engine's own green skips: `leased` (a seed or a dispatch holds the lease),
+        # `unseeded` (no generation to pass over yet).
         last.update(skipped=1, reason=str(summary["skipped"]),
                     detail=str(summary.get("reason") or "")[:AUTODEDUP_REASON_CHARS])
     elif summary is not None:
         counts = summary.get("counts") or {}
         latency = summary.get("latency_s") or {}
         aborted = str(summary.get("aborted") or "")
+        reconciled = summary.get("reconcile") or {}
+        merged = (reconciled.get("counts") or {})
+        # What the reconcile did, and did NOT do, this pass (review A12, B3): the groups it
+        # looked at and its seconds (G2 reads the rate with them in), the ones the chokepoint
+        # or an error refused, the ones waiting on a block not fully read, and why it was
+        # skipped (a pre-W5 generation names the re-seed).
+        last.update(
+            reconcile_groups=int(merged.get("groups") or 0),
+            reconcile_seconds=reconciled.get("seconds"),
+            reconcile_refused=int(merged.get("refused") or 0),
+            reconcile_failed=int(merged.get("failed") or 0),
+            reconcile_waiting=int(merged.get("block_not_fully_read") or 0),
+            reconcile_skipped_at_apply=int(merged.get("skipped_at_apply") or 0),
+            reconcile_quarantined=int(merged.get("quarantined") or 0),
+            reconcile_deferred=int(merged.get("deferred_run_cap") or 0),
+        )
+        if reconciled.get("reason"):
+            last["reconcile_reason"] = str(reconciled["reason"])[:AUTODEDUP_REASON_CHARS]
         last.update(
             ran=True,
             claimed=int(counts.get("claimed") or 0),
@@ -2033,9 +1942,13 @@ def _autodedup_outcome(
             grouped=int(counts.get("clusters_written") or 0),
             held=int(counts.get("held") or 0),
             retired=int(counts.get("retired") or 0),
-            # A pair set that would not fit even a one-listing claim: the pass wrote nothing,
-            # and the engine calls that a block worth an operator's eye.
+            merged=int(merged.get("applied") or 0),
+            reconcile=str(reconciled.get("skipped") or reconciled.get("stopped") or "ran")
+            [:AUTODEDUP_REASON_CHARS],
+            # A pass that rolled back — past its deadline, or a pair set that would not fit
+            # even a one-listing claim: nothing written, and the next pass claims half.
             errors=1 if aborted else 0,
+            deadline_exceeded=aborted == "deadline",
             latency_p50_s=latency.get("p50"),
             latency_p95_s=latency.get("p95"),
             bound_by=(summary.get("claim_bound") or {}).get("bound_by"),
@@ -2046,21 +1959,20 @@ def _autodedup_outcome(
 
 
 def _autodedup_sync() -> dict[str, Any]:
-    """One bounded pass of THE autodedup real-time shadow lane
-    (`autodedup.incremental_lane.run_incremental`), on one connection behind the deadline.
+    """One bounded pass of THE autodedup lane (`autodedup.incremental_lane.run_incremental`).
 
     Lazy import keeps autodedup off the worker's startup path and off every dark wake. The
-    engine REFUSES by raising SystemExit — a storage budget, a parity breach, a scope it cannot
-    walk, a missing migration — and a SystemExit that reached the event loop would stop the
-    whole worker, so a refusal is caught HERE and recorded as an error, never re-raised. Any
-    other exception is the signal, and _lane_loop records the failed pass.
+    engine REFUSES by raising SystemExit — a storage budget, a scope it cannot walk, a missing
+    migration — and a SystemExit that reached the event loop would stop the whole worker, so a
+    refusal is caught HERE and recorded as an error, never re-raised. Any other exception is
+    the signal, and _lane_loop records the failed pass.
     """
-    global _AUTODEDUP_WEDGE_LOGGED, _AUTODEDUP_STORE_WARNED, _AUTODEDUP_BACKOFF
+    global _AUTODEDUP_WEDGE_LOGGED, _AUTODEDUP_STORE_WARNED
 
     started = time.monotonic()
     if not _AUTODEDUP_PASS_LOCK.acquire(blocking=False):
         # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its thread still
-        # holds its connection. The deadline makes that a short window, not a wedge.
+        # holds its connection. The engine's own deadline makes that a short window.
         if not _AUTODEDUP_WEDGE_LOGGED:
             _AUTODEDUP_WEDGE_LOGGED = True
             LOG.warning(
@@ -2070,10 +1982,7 @@ def _autodedup_sync() -> dict[str, Any]:
     _AUTODEDUP_WEDGE_LOGGED = False
     try:
         from autodedup import incremental_lane
-        from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
 
-        backoff = _AUTODEDUP_BACKOFF
-        budget = AUTODEDUP_PASS_BUDGET_SECONDS / backoff
         conn = db.connect()
         try:
             if not _autodedup_store_present(conn):
@@ -2084,31 +1993,11 @@ def _autodedup_sync() -> dict[str, Any]:
                         "absent on this database; the lane skips every tick")
                 return _autodedup_outcome(started, skipped="store_absent")
             _AUTODEDUP_STORE_WARNED = False
-            guarded = _DeadlineConnection(
-                conn, started + AUTODEDUP_PASS_DEADLINE_SECONDS,
-                exempt=(RT_LEASE_RELEASE_SQL,))
-            # The pass writes its summary file where the workflow uploads one; here nobody
-            # reads it (the heartbeat is the readout), so it lives for the pass and no longer.
-            with tempfile.TemporaryDirectory(prefix="autodedup-rt-") as out_dir:
-                try:
-                    # No argument at all: a pass runs under the scope and scorer its
-                    # generation was SEEDED with (a differing one is a re-scope the engine
-                    # refuses), and the claim is the engine's own — its measured rate times
-                    # this budget. `enabled=True`: the interval above 0 is the lane's switch.
-                    summary = incremental_lane.run_incremental(
-                        lambda: guarded, {}, Path(out_dir),
-                        enabled=True, max_pass_budget_s=budget)
-                except SystemExit as exc:
-                    return _autodedup_outcome(started, refused=str(exc))
-                except _AutodedupDeadline as exc:
-                    _AUTODEDUP_BACKOFF = min(backoff * 2, int(AUTODEDUP_PASS_BUDGET_SECONDS))
-                    return _autodedup_outcome(started, refused=str(exc), deadline=True)
-            last = _autodedup_outcome(started, summary=summary)
-            if (backoff > 1 and last["ran"] and not last["errors"]
-                    and last["claimed"] >= incremental_lane.PASS_RATE_MIN_CLAIM):
-                _AUTODEDUP_BACKOFF = 1
-                last["backoff"] = 1
-            return last
+            try:
+                summary = incremental_lane.run_incremental(lambda: conn)
+            except SystemExit as exc:
+                return _autodedup_outcome(started, refused=str(exc))
+            return _autodedup_outcome(started, summary=summary)
         finally:
             # run_incremental closes the connection it was handed; a second close is a
             # no-op, and this one covers every path that never got that far.
@@ -2127,7 +2016,7 @@ def _autodedup_note(last: dict[str, Any]) -> None:
     elif last.get("skipped"):
         key = "skipped:" + str(last.get("reason"))
     else:
-        key = "ran"
+        key = "ran:" + str(last.get("reconcile") or "")
     if key == _AUTODEDUP_LAST_OUTCOME:
         return
     _AUTODEDUP_LAST_OUTCOME = key
@@ -2137,7 +2026,8 @@ def _autodedup_note(last: dict[str, Any]) -> None:
     elif last.get("skipped"):
         LOG.info("AUTODEDUP lane skipping: %s %s", last.get("reason"), last.get("detail") or "")
     else:
-        LOG.info("AUTODEDUP lane passing")
+        LOG.info("AUTODEDUP lane passing (reconcile: %s%s)", last.get("reconcile"),
+                 f" - {last['reconcile_reason']}" if last.get("reconcile_reason") else "")
 
 
 async def _autodedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
@@ -2147,18 +2037,18 @@ async def _autodedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> N
     _autodedup_note(last)
     # Only when the pass decided something: at a 60 s cadence an unconditional line is
     # ~1,440 "claimed=0" a day. The heartbeat records every pass either way.
-    if last.get("claimed"):
+    if last.get("claimed") or last.get("merged"):
         LOG.info(
-            "AUTODEDUP lane claimed=%d scored=%d grouped=%d held=%d retired=%d "
+            "AUTODEDUP lane claimed=%d scored=%d grouped=%d merged=%d held=%d retired=%d "
             "p50=%ss p95=%ss bound_by=%s %.1fs",
-            last["claimed"], last["scored"], last["grouped"], last.get("held", 0),
-            last.get("retired", 0), last.get("latency_p50_s"), last.get("latency_p95_s"),
-            last.get("bound_by"), last["seconds"],
+            last["claimed"], last["scored"], last["grouped"], last.get("merged", 0),
+            last.get("held", 0), last.get("retired", 0), last.get("latency_p50_s"),
+            last.get("latency_p95_s"), last.get("bound_by"), last["seconds"],
         )
     if last.get("refused"):
-        # A refusal or a deadline trip is a pass that RAISED; the lane caught it only so a
-        # SystemExit could not stop the event loop. So it is counted where every lane's raised
-        # passes are (`failed_passes`, `last_failure_at`), with the text kept in `last`.
+        # A refusal is a pass that RAISED; the lane caught it only so a SystemExit could not
+        # stop the event loop. So it is counted where every lane's raised passes are
+        # (`failed_passes`, `last_failure_at`), with the text kept in `last`.
         _record_pass_failed(state, "autodedup", float(last["seconds"]))
         state["lanes"]["autodedup"]["last"] = last
         return

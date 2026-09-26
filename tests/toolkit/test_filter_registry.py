@@ -388,7 +388,7 @@ def test_codegen_check_passes() -> None:
 
 def test_mf_gross_yield_filter_registered():
     """The MF gross yield filter is a Browse+Watchdog float range on the
-    mf_gross_yield_pct column (migration 133)."""
+    read-time mf_gross_yield_pct column (migration 567)."""
     for fid in ("min_mf_gross_yield_pct", "max_mf_gross_yield_pct"):
         f = fr.REGISTRY[fid]
         assert f.pg_column == "mf_gross_yield_pct"

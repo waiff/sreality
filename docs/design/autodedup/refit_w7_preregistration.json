@@ -1,0 +1,111 @@
+{
+  "what": "Refit W7 of the AUTODEDUP logistic scorer on the operator's 2026-09-25 ruling: use the Browse merge groups (operator tier, provenance browse_merge, migration 564) and the LLM verdicts on the contested g13 trial pairs (judge_version j2-w30c) to update the engine. DECISIONS.md item 8 (refits per wave with the confirmation discipline).",
+  "written": "2026-09-26, BEFORE any candidate was fitted, before the seal was cut, and before any candidate replay. Looked at before writing: label counts and verdict tallies of every input file, which local cohort export holds both listings of each labelled pair (refit_w7/cohort_ids.json, scripts/coverage.py), the g13 score/judge artifact identity (md5 b9e981b7..., the same export 36155223243), and two w6_gold runs of the W1 trial cohort that were started while this file was written (substrate + baseline; incumbent numbers only, no candidate exists).",
+  "branch": "feature/autodedup-refit-w7 (worktree .claude/worktrees/refit-w7, cut from origin/main 77acd220)",
+  "cost": "$0: no LLM, no DB, no network, no workflow dispatch; every pass local and offline",
+  "incumbent": {
+    "model": "autodedup/models/w6_gold.json (weights identical to w5_gold, 59 features, irls, l2 0.01, isotonic_pav; recorded sealed ECE 5.75% on the LOST seal ab2bd7ee..., disclosed and not waived)",
+    "settings": "autodedup/settings/w29.json (t_lo 0.18235, t_hi 1.0, t_hi_by_stratum model|cross = model|same = 0.9788, K-C|same 0.0, K-A propose-only)"
+  },
+  "lessons_carried_from_the_refused_w9_gold": [
+    "M64/D25(i): a refit must beat the incumbent AT THE INCUMBENT'S CUTS. Every replay here runs w29 with its thresholds untouched; no stratum row, no t_lo, no cut is re-searched on any side of any seal.",
+    "M66: a calibration claim compares ONE label population on ONE seal. Every model-level bar (ECE, AUC, F1) is read on ONE common population: the sealed-test rows of the composite substrate under the FULL label store, scored by w6_gold, w7a and w7b alike.",
+    "M60: isotonic_pav lost out-of-fold (13.82% vs platt 5.67%) with a saturated 1.0 ceiling. Calibration is chosen by `--calibration auto` (out-of-fold, design-weighted validation ECE), never by the sealed side; a chosen map whose ceiling is below the 0.9788 model cut cannot state the operating point and refuses the candidate.",
+    "M65: one label loader. The fit, the seal and the measurement read the same label files through autodedup.labels; no second loader re-admits a reserved draw.",
+    "D16 vi: judge run 35205840437 (the adaptive boundary draw) is MEASUREMENT only - it is unioned into the seal so its pairs cannot straddle, and it is never in a fit.",
+    "M67/E69: the seal is cut from the incumbent's clusters AND every labelled pair; for each candidate the harness's components_spanning_split is reported (a report, not a veto)."
+  ],
+  "label_sources": {
+    "precedence": "operator > gold > vision > text (labels.TIER_PRECEDENCE, the harness default); within a tier a later file wins, and the j2-w30c files are passed AFTER the older runs so the newer judge version is the one that stands",
+    "judge_recipe_w6_gold": {
+      "files": "/home/hejtm/autodedup-artifacts/w6/labelfiles/<run>.judgements.jsonl with --sample <run>.sample.json in the same order",
+      "runs": [
+        "35124676256 (gold j1)",
+        "35116313682 (vision j1)",
+        "35115036274 (text j1)",
+        "35155058503 (gold j1)",
+        "35149028995 (vision j1)",
+        "35202925670 (vision j2)",
+        "35203586251 (gold j2)"
+      ],
+      "note": "exactly the seven files w5_gold/w6_gold were fitted on (w6_gold provenance.w5d.judgement_runs)",
+      "weights": "labels.TIER_WEIGHTS: gold unanimous 1.0 / majority 0.67, vision 0.6, text 0.3, times the pooled Horvitz-Thompson design weight of each draw, capped at 10x the median (evaluate.WEIGHT_CAP_MEDIAN_MULTIPLE)"
+    },
+    "measurement_only": {
+      "35205840437": "gold j2 adaptive boundary draw (D16 vi): seal union + measurement, never fitted",
+      "35185988862": "vision j2 draw that w6_gold's recipe did not use: seal union + measurement, never fitted (keeps w7a = recipe + operator tier exact)"
+    },
+    "operator_tier": {
+      "file": "/home/hejtm/autodedup-artifacts/w14/labels_g13_36225845749/autodedup-labels-36225845749/operator_labels.jsonl (lane run 36225845749, generation g13)",
+      "counts": "1,820 rows: browse_merge 1,051, explicit 446, implied 323; same 1,574, negatives 246 (different 200, same_building_different_unit 26, same_project_different_unit 20)",
+      "weights": "harness defaults: explicit 1.0, implied 1.0 (--implied-weight unset), browse_merge 1.0 (--browse-merge-weight unset); no --exclude flag; inside the tier explicit > browse_merge > implied (labels.SOURCE_RANK)",
+      "must_not_link": "must_not_link.jsonl of the same run (246 pairs, identical to the g7 export's 246) is applied by every engine run exactly as S14 applied it"
+    },
+    "judge_tiers_j2_w30c": {
+      "files": [
+        "/home/hejtm/autodedup-artifacts/w14/judge_trial/vision_36220814481/autodedup-judge-36220814481/judgements.jsonl (1,145 pairs: same 856, different 234, sbdu 46, abstain 9)",
+        "/home/hejtm/autodedup-artifacts/w14/judge_trial/text_36223717746/autodedup-judge-36223717746/judgements.jsonl (1,145 pairs: same 752, different 116, sbdu 145, abstain 132)",
+        "/home/hejtm/autodedup-artifacts/w14/judge_trial/gold_36225151443/autodedup-judge-36225151443/judgements.jsonl (65 pairs; the 65 consolidated rows with n_votes are the labels: same 51, different 3, sbdu 3, abstain 8)"
+      ],
+      "samples": "the sample.json beside each file (population == selected in every stratum: design weight 1.0)",
+      "format": "already the judgements.jsonl shape autodedup.labels.parse_judgement reads (verdict is a dict; same_building_different_unit is a negative; insufficient_evidence abstains); NO converter is needed and none is written. same_project_different_unit does not occur in the judge files (it is an operator-only verdict and labels.OPERATOR_NEGATIVE_VERDICTS already maps it to 0)",
+      "weights": "labels.TIER_WEIGHTS (gold 1.0/0.67, vision 0.6, text 0.3) x design weight 1.0"
+    },
+    "not_used": [
+      "the g7 operator export 35609425873 (its 446 explicit rows are the same rulings; its 577 implied pairs were read off g7's clusters and are superseded by g13's 323)",
+      "judgements_all.jsonl (a union that re-admits the reserved draw and 20+ files outside the recipe)",
+      "structural_labels (their negatives' universe is every within-address-block pair; they measure, they are not fitted, as in every earlier wave)"
+    ]
+  },
+  "substrate": {
+    "why": "the harness fits on stored pair ROWS (features + zone). The labels live on several exports: the w6 judge draws on the W1 trial cohort (export 35200225251), the j2 verdicts and the g13 operator rulings on the g13 trial export (36155223243), and the Browse merges spread over 124 blocks, 370 of their 1,051 pairs inside some local cohort export and 681 in none.",
+    "runs": "one engine run per export with settings = autodedup/settings/w29.json except store_floor 0.0 (every blocked pair stored with its features; store_floor only decides what is WRITTEN) and model w6_gold (the model moves only score/zone columns, never a feature): trial, g13, region, cohort3, cohort4, cohort5, cohort6, cohort10, cohort11, cohort12, cohort13, cohort14, cohort15, cohort16 (the exports that hold at least one labelled pair). Code = this branch.",
+    "composite": "autodedup/refit_substrate.py (new, tested) writes ONE run directory the unchanged `harness fit`/`evaluate` read: every labelled pair's row is taken from its HOME export - the export its winning label was made against (DECISIONS.md 8: a ruling keeps the evidence of its moment) - falling back in a fixed order when the home did not block the pair. Homes: w6 judge runs -> trial, then g13, region, cohort16..cohort3; j2 tiers and the operator tier -> g13, then cohort16..cohort3, region, trial. The winning label is the one the label store keeps (precedence above). A labelled pair no substrate blocked is dropped and counted per source.",
+    "features": "the current code's 60 features (hand_initialised order, incl. ref_code_shared which w6_gold does not score); disclosed as a difference from w6_gold's 59"
+  },
+  "seal": {
+    "kind": "cluster split (evaluate.split_of: 60/20/20 by group hash)",
+    "map": "union-find over listing ids of (a) every labelled pair with a class (y not None) of EVERY source above, measurement-only draws included, across all exports, and (b) the merge edges and the cluster memberships of the fourteen w6_gold substrate runs. One listing is in ONE group whichever export it appears in, so a judged trial pair or a trial-area operator ruling can never sit in train while a pair sharing a listing sits in test - in any cohort.",
+    "seed_rule": "the first seed s = 20261001, 20261002, ... (never used by an earlier seal) for which, over the labelled rows of the composite substrate under the full label store: train share in [55%, 65%], validation in [15%, 25%], test in [15%, 25%]; the test fold holds >= 15% of the operator-tier rows and >= 15% of the j2-tier rows; and no single group holds more than 10% of the labelled rows (if the map has such a group the rule STOPS and is reported, no seed is taken). At most 200 seeds are scanned. Only shares are read while scanning - no model, no score, no label outcome.",
+    "reads": "the sealed test side is read ONCE, after all three fits exist, for the model-level bars; the seal is then SPENT and recorded in autodedup/seals.py with what spent it",
+    "commit": "the map is committed under autodedup/splits/<seal>.json (test_seals census) whether or not a candidate ships, because the reported numbers name it"
+  },
+  "candidates": {
+    "w7_0 (CONTROL, never shippable)": "w6_gold's recipe on the new substrate and seal: the seven judge files only. Separates the refit on today's code/features from what the new labels add.",
+    "w7a": "w7_0 + the operator tier (g13 export, harness default weights).",
+    "w7b": "w7a + the three j2-w30c judge tiers (vision, text, gold consolidated)."
+  },
+  "fit_recipe": "PYTHONPATH=<worktree> python3 -m autodedup.harness fit <composite> --judgements ... --sample ... [--operator-labels ...] --split-map <seal map> --method irls --l2-grid --calibration auto --version <name>; weight cap = harness default (10x median); max-iter default; convergence required (a non-converged fit refuses the candidate).",
+  "model_level_bars": {
+    "population": "the COMMON sealed population: every composite row whose group falls in the seal's test fold and carries a class under the FULL label store (all sources, precedence above, measurement-only draws included). Every model is scored on exactly these rows with its own predict_proba (w6_gold as shipped, isotonic_pav).",
+    "B1_ece": "10-bin unweighted ECE (model.expected_calibration_error, the harness gate's definition) <= 5.00%",
+    "B2_auc": "AUC >= w6_gold's AUC on the same rows",
+    "B3_f1": "F1 of `calibrated probability >= 0.5` >= w6_gold's F1 on the same rows",
+    "disclosed_not_bars": "design-weighted ECE, log loss, the reliable (operator + gold) subset, the fresh-label subset no model was ever fitted on (w6_gold's own training labels are ~60% of the recipe's test rows, so the common population is CONSERVATIVE against the challengers), per-source numbers, each candidate's own harness fit report (its own label store), the engine-decision F1 of `harness evaluate --model`, the chosen calibration map and its ceiling, and the 10 feature weights that moved most against w6_gold",
+    "B0_refusals": "a fit that does not converge, or a chosen calibration map whose ceiling is below 0.9788, refuses the candidate before any bar is read"
+  },
+  "rollout_bars": {
+    "ground": "the SIXTEEN cohorts S14 measured (trial, region, cohort3..cohort16), each replayed under autodedup/settings/w29.json with the candidate model and with w6_gold, on THIS branch's code, runs under refit_w7/runs/<cohort>/{base,w7a,w7b}; references exactly as s14/scripts/measure14.py reads them (certain = REF[which].certain, structural negatives = REF[which].structural (+ structural_ext), the fused ledger = measure14.fusions(which))",
+    "R1": "structural negatives co-clustered = 0, summed over the sixteen",
+    "R2": "fused-ledger regressions against the w6_gold baseline = 0, summed over the sixteen (a regression = a ledger entry whose state worsens cured -> broken -> whole, or stays broken with more pairs still together; measure14's own definition)",
+    "R3": "pooled certain recall (certain pairs co-clustered, summed over the sixteen) >= the w6_gold baseline's pooled count",
+    "R4": "every band->merge promotion (a pair w6_gold banded that the candidate merges) is listed with both adverts' facts; the ones that end CO-CLUSTERED are hand-read from the raw adverts (all of them when <= 60, else every one that carries a labelled negative of any tier plus a seeded random 60, seed 20261001). A promotion read as two units by a stated fact, or any promotion co-clustering a labelled negative or an operator must-not-link, fails the candidate.",
+    "reported_not_bars": "per-cohort certain recall, groups, groups changed, zone transitions (band->merge, merge->band, reject->band, band->reject, merge->reject, reject->merge, over the union of stored pairs; an unstored pair counts as reject), certain pairs touching a TRAIN-fold listing (leak disclosure), and the baseline's parity with S14's stored runs",
+    "g13_trial_export": "replayed the same way (base / w7a / w7b under w29); reported: the same zone/group table, operator Browse-merge and explicit-same pairs co-clustered, must-not-link co-clustered, j2-labelled pairs co-clustered by verdict - label-based rows ONLY on sealed-test pairs, because the other folds were trained on"
+  },
+  "decision_rule": "A candidate ships iff B0 and B1-B3 and R1-R4 all hold. If both w7a and w7b pass, w7b ships (it carries both sources the operator ruled should update the engine). If exactly one passes, it ships. If neither passes, nothing ships: no autodedup/models/w7_gold.json, no settings file, and the candidates are recorded under refit_w7/ with the numbers that refused them. A shipping candidate becomes autodedup/models/w7_gold.json with provenance (label files, counts, seal, substrate, bars read); w6_gold.json stays byte-identical; ONE settings file autodedup/settings/w30m.json = origin/feature/autodedup-w30:autodedup/settings/w30.json (sha 8b31d17e at writing) gains a model reference ONLY if the settings row carries one - it does not today (Settings has no model field; the model is chosen by the score lane's model= argument), so w30m.json would be a byte copy of w30.json whose dials main cannot yet load; that is decided and reported at the end, not engineered around here.",
+  "stop_conditions": [
+    "a giant group (>10% of labelled rows) in the seal map, or no seed in 200 meeting the share rule: STOP and report",
+    "the baseline replay on this branch not reproducing S14's stored w29+w6_gold clusters on a cohort: reported as code drift and the bars read against THIS branch's baseline only"
+  ],
+  "amendments": [
+    {
+      "id": "A1",
+      "written": "2026-09-26 ~10:05 local, after the composite substrate was built and the pre-registered seal construction hit its own STOP, BEFORE any seed was scanned and BEFORE any candidate was fitted (no model exists; nothing but group sizes was read)",
+      "what_stopped": "the map as registered (every classed labelled pair of every source unioned, plus the fourteen substrate runs' merge edges and cluster memberships) puts 910 of the 4,451 composite rows (20.44%) in ONE group (root 261) and 569 in the next (root 335): the registered 10% stop fired (refit_w7/seal_scan.json).",
+      "diagnosis": "refit_w7/scripts/seal_diag.py: the positives alone give a top group of 2.31% (103 rows), the cluster memberships alone 2.31%, positives + memberships + 401,021 merge edges 2.31%; adding the 3,896 labelled NEGATIVES gives 19.7%. The judge draws sample negatives inside address blocks and developments, so unioning them fuses whole blocks - the exact failure W14's seal measured for structural negatives (e1d8bb98..., SPENT registry: 'unioning them fuses whole blocks').",
+      "amended_map": "union-find over listing ids of every labelled POSITIVE (y = 1) of every source + the merge edges + the cluster memberships of the fourteen substrate runs. A labelled NEGATIVE is not an edge: its row goes to the fold of evaluate.group_of(key) (the smaller root), as harness evaluate/fit already do for any pair a map does not join. A negative is two properties by its own label, so it cannot put ONE property on both sides of the holdout; what it can do is put one LISTING's features in a train negative and a test row - that listing-level overlap is COUNTED and reported beside the sealed numbers, not hidden.",
+      "unchanged": "every other clause: the 10% stop (now read on the amended map), the seed rule, the bars, the decision rule"
+    }
+  ]
+}

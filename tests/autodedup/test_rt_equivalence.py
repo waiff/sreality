@@ -21,7 +21,7 @@ from typing import Any, Mapping
 import pytest
 
 from autodedup.harness import model_of_version
-from autodedup.incremental_lane import parity_baseline_key, scope_setting_key
+from autodedup.incremental_lane import scope_setting_key
 from autodedup.rt_equivalence import (
     EQUIVALENCE_FILE,
     SCORE_DEFECT,
@@ -91,8 +91,6 @@ def _db(ids: range = range(1, 5)) -> FakePg:
                             "artifact_url": None, "settings": {"store_floor": 0.02},
                             "model_version": "w6_gold"}
     db.settings[scope_setting_key(LIVE)] = [{"grain": "obec", "code": 563510}]
-    db.settings[parity_baseline_key(LIVE)] = {"rows": {}, "n": 0,
-                                              "exported_at": EXPORTED.isoformat()}
     for listing_id in ids:
         db.scope_ids[(LIVE, "obec:563510", listing_id)] = {"resolved_at": NOW}
         db.rt_fp[(LIVE, listing_id)] = _fp_row()
@@ -101,7 +99,8 @@ def _db(ids: range = range(1, 5)) -> FakePg:
 
 
 def _run(db: FakePg, tmp_path, **args: str) -> dict:
-    return run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH, **args}, tmp_path)
+    return run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH,
+                                        "exported_at": EXPORTED.isoformat(), **args}, tmp_path)
 
 
 # ------------------------------------------------------------------ the agreeing case
