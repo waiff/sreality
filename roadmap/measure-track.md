@@ -560,3 +560,26 @@ dum/prodej no longer reads ~5 701 Kč/m² on a ~905 m² median area.
   until the labels are on screen).
 - Renaming the anon-exposed `price_stat_*` rate columns that are named like absolute
   prices (breaks the SPA's direct read — commented in W4, renamed never or much later).
+
+## MF reference rent — one read-time measure (2026-09, in progress)
+
+Order C → D → A → B → F (operator-approved 2026-09-25). North star: MF is one read-time SQL
+measure returning a value, the town's published range, or a reason; readers render its SHAPE.
+- **Done — PR-C (readers):** lookup, extension panel + index badge, SPA card and Watchdog feed
+  read the PROPERTY's result from `properties_public` and render it by shape through ONE rule
+  (`frontend/src/lib/mfReference.ts`, imported by the extension); the listing-grain coalesces,
+  the per-m² CASE (`mf_reference_rent_per_m2_czk`, W5 above), the run fallback and both
+  client reason literals are gone. `range.per_m2_*` are TOTAL rates (the town's published
+  span + the flat's adjustments, the twin of `total_per_m2`); `rent_*_czk` = per-m² × area.
+- **Done — PR-D (the measure):** `mf_reference()` over the ingest-refreshed `rent_map_cells`
+  matview (migration 563: six codes, their notes only there, VK clamp 1..4, NULL condition keeps
+  adjustments) and the view swap (564: `browse_projection` + `properties_public` call it,
+  `listing_feed_public` reads the property's yield from `browse_list`, Q8 b). Deleted: the hourly
+  `recompute_mf_yields` job + script + test, the ingest's monolith call, `recompute_mf_one` and its
+  five merge/detach/split calls, the Python PIP implementation (`_REFERENCE_RENT_SQL`,
+  `disposition_to_vk`, the amenity derivations in estimations + `/estimate_yield`), the dead
+  comparables MF bounds. Live matrix + inlining plan test + notes rail: `tests/test_mf_reference.py`.
+- **Next:** PR-A registry publish-complete; PR-B `listing_location.katastr_kod` (its view swap
+  passes `ll.katastr_kod` instead of NULL); PR-F drops the stored `mf_*` columns, the 507
+  functions and `rent_map_*_public` right after the program is verified in production (operator
+  2026-09-25; explicit OK + `pg_dump` first).
