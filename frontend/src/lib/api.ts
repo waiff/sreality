@@ -3141,7 +3141,14 @@ export interface ProposedSplit {
 export const getProposedSplits = (
   f: { generation?: string | null; after?: number | null; limit?: number } = {},
 ): Promise<
-  AutodedupEnvelope<{ generation: string | null; total: number; items: ProposedSplit[]; next_after: number | null }>
+  AutodedupEnvelope<{
+    generation: string | null;
+    total: number;
+    items: ProposedSplit[];
+    next_after: number | null;
+    /* Why a live stream that is not live yet (building, or seeded before W5) proposes nothing. */
+    withheld?: string | null;
+  }>
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 

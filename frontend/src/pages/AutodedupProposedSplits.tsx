@@ -199,7 +199,9 @@ export default function AutodedupProposedSplits() {
       )}
       {page && items.length === 0 && (
         <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Žádné návrhy rozdělení.
+          {page.withheld
+            ? `Živý proud engine ještě není v provozu — návrhy zatím nejsou (${page.withheld}).`
+            : 'Žádné návrhy rozdělení.'}
         </p>
       )}
 

@@ -2908,16 +2908,27 @@ def verdict_candidate_split(
 # ------------------------------------------------------------------ proposed splits (Decision 9)
 
 
+# Why the live stream proposes nothing yet (review B1): while it builds, or before a seed of
+# this design built it, its groups are a half-read or stale shadow — the 09-21 `rt` would have
+# offered ~749 live properties for a batch split the engine never proposed.
+STREAM_NOT_LIVE = (
+    f"{GENERATION} is not the live stream yet: it is still building "
+    f"(autodedup.settings rt_bootstrap:{GENERATION}) or no seed of this version built it "
+    f"(rt_seed_version:{GENERATION}); it proposes no split until it is live")
+
+
 def _proposed(conn: Any, generation: str | None, property_id: int | None = None) -> Any:
-    """(generation, proposals) off `_resolve_generation`'s pass by default, or None: store not
-    ready.
+    """(generation, proposals, withheld) off `_resolve_generation`'s pass by default, or None:
+    store not ready. `withheld` names why a named live stream proposes nothing yet.
     Propose-only: the split itself is `POST /properties/{id}/detach`, advert by advert."""
     if not store_ready(conn):
         return None
     try:
         generation = _resolve_generation(conn, generation)
+        if generation == GENERATION and not _live_stream(conn):
+            return generation, [], STREAM_NOT_LIVE
         return generation, (splits.proposed_splits(conn, generation, property_id=property_id)
-                            if generation else [])
+                            if generation else []), None
     except _STORE_BEHIND:
         return None
 
@@ -2934,10 +2945,11 @@ def proposed_splits(
     _reject_unknown_filters(request, frozenset({"generation", "after", "limit"}))
     if (found := _proposed(conn, generation)) is None:
         return _not_ready()
-    generation, items = found
+    generation, items, withheld = found
     page = [i for i in items if after is None or i["property_id"] > after][: limit + 1]
     return {"data": {"generation": generation, "total": len(items), "items": page[:limit],
-                     "next_after": page[limit - 1]["property_id"] if len(page) > limit else None},
+                     "next_after": page[limit - 1]["property_id"] if len(page) > limit else None,
+                     "withheld": withheld},
             "store_ready": True}
 
 
@@ -2950,6 +2962,8 @@ def proposed_split(
     _reject_unknown_filters(request, frozenset({"generation"}))
     if (found := _proposed(conn, generation, property_id)) is None:
         return _not_ready()
+    if found[2]:
+        raise HTTPException(status_code=409, detail=found[2])
     if not found[1]:
         raise HTTPException(status_code=404, detail="no live property of two or more adverts")
     return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}
