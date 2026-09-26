@@ -30,19 +30,29 @@ failing on (E119).
     matches the facts as they stand now), `calibration_cohort` (the corpus-frequency features
     moved, which two differently-cut calibrations always do), `clock_anchor` (the two
     generations do not agree what the window's end is) — and `unexplained`.
+  * **`evidence_hold`** (E918) is a shared pair the live lane HOLDS in the band for complete
+    photo evidence (E908) — a hold, not a decision. It is named only while the lane's own
+    release rule still keeps it (inside the 48 h cap) and only when the decision it holds is
+    the batch's; the verdict does not fail on it and its notes say how many wait and how long.
   * **One-sided pairs** keep their own causes, now reported PER SIDE: `scope`,
     `not_in_live_store`, `arrival_after_export`, `retention`, `store_floor`, `unexplained`.
-  * **Clusters** are compared component by component: a component whose two sides hold
-    DIFFERENT merge edges is `upstream_pair` (the pair grain already accounted for it), one
-    holding a listing the batch cohort never had is `arrival`, and one where both sides hold
-    the SAME edges and partition them differently is `unexplained` — which is the shape E114
-    wore, and the reason this attribution exists at all.
+    `arrival_after_export` (E918) is read against the batch cohort ITSELF — the export
+    artifact the batch pass names in `params.export_run` — and the cut is the export's START
+    from its own `autodedup.iterations` row, not the minute typed on the command line
+    (`arrival_of`, `_cohort_cut`).
+  * **Clusters** are compared component by component: a component whose moved merge edges all
+    touch an arrival is `arrival`, one whose moved edges are arrivals or held batch merges is
+    `evidence_hold`, one with any other moved edge is `upstream_pair` (the pair grain already
+    accounted for it), and one where both sides hold the SAME edges and partition them
+    differently is `unexplained` — which is the shape E114 wore, and the reason this
+    attribution exists at all.
 
 The verdict fails on `unexplained` and on defects. It does not fail on a difference that has
 been named and evidenced, because a check that cannot tell drift from a bug is a description.
 
 It writes NOTHING — not a `public` row, not an `autodedup` row, not an `iterations` row. Its
-deliverable is `out/rt_equivalence.json`.
+deliverable is `out/rt_equivalence.json`; the export artifact it reads the cohort from is
+downloaded into a temporary directory and gone before that file is written.
 """
 
 from __future__ import annotations
@@ -843,10 +853,15 @@ def run_equivalence(
             close()
 
     cut, cut_source = _cohort_cut(window, exported_raw, batch_finished)
-    cohort, cohort_source, cohort_error = batch_cohort(
-        str(args.get("cohort") or "").strip() or None, export_run, fetch_cohort)
     batch_held = {i for key in batch_pairs for i in key}
     batch_held |= {i for members in batch_clusters.values() for i in members}
+    # The artifact is read only when some listing could be an arrival at all: a comparison
+    # that asks about nothing outside the batch store does not pull a 280 MB cohort to say so.
+    cohort_skipped = ("no cut to read arrivals against" if cut is None
+                      else None if set(endpoints) - batch_held
+                      else "every listing the comparison asks about is in the batch store")
+    cohort, cohort_source, cohort_error = (None, None, None) if cohort_skipped else batch_cohort(
+        str(args.get("cohort") or "").strip() or None, export_run, fetch_cohort)
     arrived: dict[int, str] = {}
     for listing_id in endpoints:
         clock = arrival_of(listing_id, cut=cut, seen=seen, resolved=resolved,
@@ -1002,6 +1017,7 @@ def run_equivalence(
                 # handful; hundreds here is a scope the export never covered.
                 "scope_absent": None if cohort is None else len(in_scope - cohort),
                 "error": cohort_error,
+                "skipped": cohort_skipped,
             },
         },
         "model_version": {"calibration": live_model, "live_pairs": live_versions,

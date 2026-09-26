@@ -319,7 +319,25 @@ def test_an_advert_the_export_never_had_is_an_arrival_by_the_artifact(tmp_path) 
     assert out["pairs"]["causes_by_side"]["live"] == {"arrival_after_export": 1}
     assert out["arrivals"]["by_clock"] == {"resolved_at": 1}
     assert out["arrivals"]["cohort"] == {"source": f"export_run:{EXPORT_RUN}", "listings": 4,
-                                         "scope_absent": 1, "error": None}
+                                         "scope_absent": 1, "error": None, "skipped": None}
+    assert out["verdict"]["ok"] is True
+
+
+def test_the_artifact_is_not_fetched_when_nothing_could_be_an_arrival(tmp_path) -> None:
+    """Every listing the comparison asks about is in the batch store, so none can be an
+    arrival and the cohort is not pulled to say so."""
+    db = _db()
+    _with_export(db)
+    db.pairs[(LIVE, 1, 2)] = _held()
+    db.pairs[(BATCH, 1, 2)] = _pair(certificate=None, decision="model")
+    _incomplete(db, 2, age=timedelta(hours=2))
+    calls: list[str] = []
+
+    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4], calls))
+
+    assert calls == []
+    assert out["arrivals"]["cohort"]["skipped"] == (
+        "every listing the comparison asks about is in the batch store")
     assert out["verdict"]["ok"] is True
 
 
