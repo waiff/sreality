@@ -143,6 +143,11 @@ def main() -> None:
     print(f"[{cohort}] census written; never fired: "
           f"{[r for r in READERS if not census.get(r)]}", flush=True)
 
+    if (out_dir / "CENSUS_ONLY").is_file():
+        print(f"[{cohort}] census only (marker), no knockouts", flush=True)
+        print(f"[{cohort}] readers done", flush=True)
+        return
+
     # ---- reader knockouts
     for reader in READERS:
         if not census.get(reader):

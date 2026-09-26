@@ -35,7 +35,7 @@ def delta_cell(r) -> str:
     opd = r["op_diff_together"] - r["op_diff_together_base"]
     opm = r["op_merge_pairs_together"] - r["op_merge_pairs_together_base"]
     return (f"{d:+d} merges, {r['merge_flips']} flips ({100*r['merge_flip_share']:.2f}%), "
-            f"{r['groups_differing']} groups differ, copairs +{r['copairs_gained']}/-{r['copairs_lost']}, "
+            f"groups +{r['groups_differing']}/-{r.get('groups_base_only', 0)}, copairs +{r['copairs_gained']}/-{r['copairs_lost']}, "
             f"op same {ops:+d}, op diff {opd:+d}, yardstick {opm:+d}")
 
 
@@ -47,7 +47,8 @@ def short_cell(r) -> str:
     d = r["merge"] - r["merge_base"]
     ops = r["op_same_together"] - r["op_same_together_base"]
     opd = r["op_diff_together"] - r["op_diff_together_base"]
-    return f"{d:+d} / {r['merge_flips']} / {r['groups_differing']} / {ops:+d} / {opd:+d}"
+    return (f"{d:+d} / {r['merge_flips']} / +{r['groups_differing']}-{r.get('groups_base_only', 0)} / "
+            f"{ops:+d} / {opd:+d}")
 
 
 def main() -> None:
@@ -55,17 +56,17 @@ def main() -> None:
     lines: list[str] = []
     red = {c: load(OUT / f"redundancy_{c}.json") for c in COHORTS}
     # --- feature table
-    lines.append("| # | feature | fam | w | pw | mean | scale | pres c17 | logodds SD c17 (stored region) | single mean-ablation trial: dMerge/flips/groups/opSame/opDiff | c17 |")
+    import c2_meta
+    lines.append("| # | feature | fam | measures | w | pw | pres c17 | logodds SD c17 (stored region) | consumers outside the model | single mean-ablation trial: dMerge/flips/groups/opSame/opDiff | c17 |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for i, name in enumerate(FEATURE_ORDER):
         w = model.weights.get(name)
         pw = model.presence_weights.get(name)
         f17 = (red.get("c17") or red.get("trial") or {}).get("features", {}).get(name, {})
         lines.append(
-            f"| {i} | {name} | {FAMILY_OF[name]} | {'' if w is None else f'{w:+.4f}'} | "
-            f"{'' if pw is None else f'{pw:+.4f}'} | {'' if w is None else f'{model.means[name]:.4g}'} | "
-            f"{'' if w is None else f'{model.scales[name]:.4g}'} | {f17.get('present_share', '')} | "
-            f"{f17.get('logodds_sd_region', '')} | {short_cell(arm('trial', 'single_' + name))} | "
+            f"| {i} | {name} | {FAMILY_OF[name]} | {c2_meta.MEANS[name]} | {'' if w is None else f'{w:+.4f}'} | "
+            f"{'' if pw is None else f'{pw:+.4f}'} | {f17.get('present_share', '')} | "
+            f"{f17.get('logodds_sd_region', '')} | {c2_meta.CONSUMERS[name]} | {short_cell(arm('trial', 'single_' + name))} | "
             f"{short_cell(arm('c17', 'single_' + name))} |")
     lines.append("")
     # --- family table
@@ -86,10 +87,22 @@ def main() -> None:
     lines.append("")
     # --- readers
     cen = {c: load(OUT / f"readers_{c}" / "census.json") for c in COHORTS}
-    lines.append("| reader | trial gate/promote/cluster fires (sole) | c17 | c18 | knockout trial | knockout c17 | knockout c18 |")
-    lines.append("|---|---|---|---|---|---|---|")
+    import c2_meta
+    hist = {}
+    for hp in sorted((OUT / "history").glob("*.json")):
+        h = load(hp)
+        if h:
+            hist[h["cohort"]] = h
+    lines.append("| # | reader | code | predicate / tolerance | repeats | trial g/p/c fires (sole) | c17 | c18 | cohorts 3-16 g/p/c fires (n cohorts) | KO trial dMerge/flips/groups/opSame/opDiff | KO c17 | KO c18 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     import c2_readers
-    for r in c2_readers.READERS:
+    for idx, r in enumerate(c2_readers.READERS, 1):
+        code, tol, rep = c2_meta.READER_META[r]
+        hg = sum(h["fires"]["gate"].get(r, 0) for h in hist.values())
+        hp_ = sum(h["fires"]["promote"].get(r, 0) for h in hist.values())
+        hc = sum(h["fires"]["cluster"].get(r, 0) for h in hist.values())
+        hn = sum(1 for h in hist.values() if any(h["fires"][m].get(r) for m in ("gate", "promote", "cluster")))
+        hcell = f"{hg}/{hp_}/{hc} ({hn}/{len(hist)})" if hist else "-"
         cells = []
         for c in COHORTS:
             v = ((cen.get(c) or {}).get("readers") or {}).get(r)
@@ -101,7 +114,7 @@ def main() -> None:
                 f"{v.get('decide_promote_fires', 0)}({v.get('decide_promote_sole', 0)}) / "
                 f"{v.get('cluster_cluster_fires', 0)}({v.get('cluster_cluster_sole', 0)})")
         kos = [short_cell(load(OUT / f"readers_{c}" / f"ko_{r}.json")) for c in COHORTS]
-        lines.append(f"| {r} | {' | '.join(cells)} | {' | '.join(kos)} |")
+        lines.append(f"| {idx} | {r} | {code} | {tol} | {rep} | {' | '.join(cells)} | {hcell} | {' | '.join(kos)} |")
     lines.append("")
     for name in list(c2_readers.SETTINGS_ARMS) + ["demo_area_off", "demo_price_off", "d50_pair_off"]:
         cells = [delta_cell(load(OUT / f"readers_{c}" / f"{name}.json")) for c in COHORTS]
