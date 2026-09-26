@@ -12,3 +12,8 @@ engine (package `autodedup/`, schema `autodedup`, lane `.github/workflows/autode
   rebuild). Different schema, package, workflow, concurrency group and settings prefix;
   neither reads the other's data, and neither reads the removed legacy engine
   (CLAUDE.md rule 15).
+- **Refit W7** (the operator's Browse merges + the j2-w30c verdicts on the contested g13
+  pairs): `refit_w7_preregistration.json` (written before any fit) and
+  `refit_w7_results.json` (the measured outcome — both candidates refused by the
+  pre-registered bars; `w6_gold` stays). The multi-export fit directory is built by
+  `autodedup/refit_substrate.py`.
