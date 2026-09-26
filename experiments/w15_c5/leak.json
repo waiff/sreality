@@ -1,0 +1,338 @@
+{
+ "tier_stats": {
+  "gold": {
+   "pairs": 1156,
+   "pos": 467,
+   "neg": 577,
+   "abstain": 112
+  },
+  "vision": {
+   "pairs": 2938,
+   "pos": 1018,
+   "neg": 1772,
+   "abstain": 148
+  },
+  "text": {
+   "pairs": 1100,
+   "pos": 373,
+   "neg": 475,
+   "abstain": 252
+  }
+ },
+ "precedence": {
+  "pairs": 2959,
+  "y": {
+   "0": 1736,
+   "1": 1024,
+   "None": 199
+  },
+  "tier_y": {
+   "vision|0": 1159,
+   "gold|0": 577,
+   "vision|1": 557,
+   "vision|None": 87,
+   "gold|1": 467,
+   "gold|None": 112
+  }
+ },
+ "judgement_zone_strata": {
+  "reject": 3791,
+  "band": 1539,
+  "merge": 2281,
+  "catalog-only": 1103
+ },
+ "train": {
+  "pairs": 2760,
+  "listings": 2908
+ },
+ "training_cohort": {
+  "listings": 5687,
+  "blocks": {
+   "vysocany": 1421,
+   "negctl": 800,
+   "jablonec": 2725,
+   "turnov": 741
+  }
+ },
+ "cohorts": {
+  "trial_g15": {
+   "listings": 5195,
+   "n_blocks": 3,
+   "overlap_training_cohort": 4886,
+   "overlap_training_pair_listings": 2465,
+   "training_pairs_inside": 2366,
+   "operator_pairs_inside": 673,
+   "operator_by_source": {
+    "implied|same": 323,
+    "explicit|neg": 162,
+    "explicit|same": 167,
+    "browse_merge|same": 21
+   },
+   "operator_pairs_also_training_pairs": 65,
+   "path": "/home/hejtm/autodedup-artifacts/w14/s15/score_g15/autodedup-score-36244048665/artifact/cohort.jsonl.gz"
+  },
+  "c17": {
+   "listings": 17897,
+   "n_blocks": 7,
+   "overlap_training_cohort": 21,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 44,
+   "operator_by_source": {
+    "browse_merge|same": 41,
+    "explicit|same": 3
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/s15/cohort17_export_36221961445/autodedup-export-36221961445/cohort.jsonl.gz"
+  },
+  "c18": {
+   "listings": 17422,
+   "n_blocks": 9,
+   "overlap_training_cohort": 175,
+   "overlap_training_pair_listings": 98,
+   "training_pairs_inside": 89,
+   "operator_pairs_inside": 64,
+   "operator_by_source": {
+    "browse_merge|same": 45,
+    "explicit|neg": 12,
+    "explicit|same": 7
+   },
+   "operator_pairs_also_training_pairs": 3,
+   "path": "/home/hejtm/autodedup-artifacts/w14/s15/cohort18_export_36237638871/autodedup-export-36237638871/cohort.jsonl.gz"
+  },
+  "c3": {
+   "listings": 17306,
+   "n_blocks": 51,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 19,
+   "training_pairs_inside": 6,
+   "operator_pairs_inside": 93,
+   "operator_by_source": {
+    "browse_merge|same": 92,
+    "explicit|same": 1
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort3/export/cohort.jsonl.gz"
+  },
+  "c4": {
+   "listings": 19886,
+   "n_blocks": 37,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 15,
+   "training_pairs_inside": 7,
+   "operator_pairs_inside": 10,
+   "operator_by_source": {
+    "browse_merge|same": 9,
+    "explicit|same": 1
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort4/export/cohort.jsonl.gz"
+  },
+  "c5": {
+   "listings": 19641,
+   "n_blocks": 107,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 140,
+   "operator_by_source": {
+    "browse_merge|same": 140
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort5/export/cohort.jsonl.gz"
+  },
+  "c6": {
+   "listings": 19874,
+   "n_blocks": 66,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 10,
+   "operator_by_source": {
+    "browse_merge|same": 10
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort6/export/cohort.jsonl.gz"
+  },
+  "c7": {
+   "listings": 19936,
+   "n_blocks": 56,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 0,
+   "operator_by_source": {},
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort7/export/cohort.jsonl.gz"
+  },
+  "c8": {
+   "listings": 18889,
+   "n_blocks": 121,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 0,
+   "operator_by_source": {},
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort8/export/cohort.jsonl.gz"
+  },
+  "c9": {
+   "listings": 18214,
+   "n_blocks": 124,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 0,
+   "operator_by_source": {},
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort9/export/cohort.jsonl.gz"
+  },
+  "c10": {
+   "listings": 18450,
+   "n_blocks": 8,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 11,
+   "operator_by_source": {
+    "browse_merge|same": 11
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort10/export/cohort.jsonl.gz"
+  },
+  "c11": {
+   "listings": 19630,
+   "n_blocks": 8,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 4,
+   "operator_by_source": {
+    "browse_merge|same": 4
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort11/export/cohort.jsonl.gz"
+  },
+  "c12": {
+   "listings": 19980,
+   "n_blocks": 8,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 25,
+   "operator_by_source": {
+    "browse_merge|same": 25
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort12/export/cohort.jsonl.gz"
+  },
+  "c13": {
+   "listings": 20164,
+   "n_blocks": 61,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 19,
+   "operator_by_source": {
+    "browse_merge|same": 19
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort13/export/cohort.jsonl.gz"
+  },
+  "c14": {
+   "listings": 19190,
+   "n_blocks": 79,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 11,
+   "operator_by_source": {
+    "browse_merge|same": 11
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort14/export/cohort.jsonl.gz"
+  },
+  "c15": {
+   "listings": 19075,
+   "n_blocks": 92,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 3,
+   "operator_by_source": {
+    "browse_merge|same": 3
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort15/export/cohort.jsonl.gz"
+  },
+  "c16": {
+   "listings": 19253,
+   "n_blocks": 126,
+   "overlap_training_cohort": 0,
+   "overlap_training_pair_listings": 0,
+   "training_pairs_inside": 0,
+   "operator_pairs_inside": 22,
+   "operator_by_source": {
+    "browse_merge|same": 22
+   },
+   "operator_pairs_also_training_pairs": 0,
+   "path": "/home/hejtm/autodedup-artifacts/w14/cohort16/export/cohort.jsonl.gz"
+  }
+ },
+ "operator_vs_training_labels": {
+  "operator_pairs": 1820,
+  "also_judged": 77,
+  "agree": 70,
+  "disagree_examples": [
+   [
+    14093,
+    149907,
+    "same",
+    "vision",
+    0
+   ],
+   [
+    395476,
+    18696265,
+    "same_building_different_unit",
+    "vision",
+    1
+   ],
+   [
+    395476,
+    18854133,
+    "same_building_different_unit",
+    "gold",
+    1
+   ],
+   [
+    412787,
+    10515371,
+    "same",
+    "gold",
+    0
+   ],
+   [
+    522698,
+    13221982,
+    "same",
+    "gold",
+    0
+   ],
+   [
+    555448,
+    18626270,
+    "same",
+    "gold",
+    0
+   ],
+   [
+    11675826,
+    13483633,
+    "same",
+    "vision",
+    0
+   ]
+  ]
+ }
+}
