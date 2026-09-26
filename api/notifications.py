@@ -139,7 +139,8 @@ class WatchdogFilterSpec(BaseModel):
     # undecidable basis, or a sub-floor price fall out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
-    # MF gross rental yield % (migration 133). Sale apartments only.
+    # MF gross rental yield %: properties_public's read-time mf_reference() (migrations 565 + 567).
+    # Sale flats with a value only -- a town-level range carries no yield.
     min_mf_gross_yield_pct: float | None = None
     max_mf_gross_yield_pct: float | None = None
     min_area_m2: float | None = None

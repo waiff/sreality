@@ -7,8 +7,8 @@ store the operator pays for by the megabyte. `rt_scope` is therefore a REQUIRED 
 rather than a tuning knob: an empty, separator-only or missing scope is a hard error, a scope
 with no blocks is not constructible at all (W9d-1), and a whole-corpus run has to be spelled `all`
 AND fit the storage guard (`incremental_lane.storage_guard`). A PASS goes further still: its
-scope is the one `rt_seed` PERSISTED, and a dispatch argument that differs is a re-scope the
-operator has to ask for by name (`resolve_pass_scope`, W9d-2).
+scope is the one `rt_seed` PERSISTED and nothing else (`incremental_lane.pass_scope`, W9d-2);
+moving it is a re-seed.
 
 Two grains, and they are the two the cohort already uses: `obec` is
 `listing_location.obec_kod` (a town) and `cast_obce` is `cast_obce_kod` (a quarter). The
@@ -221,37 +221,6 @@ def resolve_scope(arg: Any = None, setting: Any = None) -> Scope:
     if setting is not None:
         return parse_scope(setting)
     return DEFAULT_SCOPE
-
-
-def resolve_pass_scope(arg: Any = None, setting: Any = None,
-                      rescope: bool = False) -> tuple[Scope, bool]:
-    """A PASS's scope: the persisted one, and a dispatch argument only as an explicit RE-SCOPE.
-
-    `resolve_scope` is the SEED's resolution order, where an argument chooses the scope the
-    generation is cut for. A pass is the other way round (W9d-2): the `rt_scope` row `rt_seed`
-    wrote is what the store was built under, and a narrower argument is DESTRUCTIVE — the drift
-    sweep retires everything the argument leaves out, one dispatch, no undo, and the next
-    scheduled pass reads the wider row again with nothing to re-add the retired listings. So a
-    differing argument is refused unless `rt_rescope=true` says so, and a rescope is PERSISTED
-    rather than applied for one pass. A missing row under a seeded generation is a hard error:
-    falling back to the default would be the same destruction with no argument at all."""
-    if setting is None:
-        raise ScopeError(
-            "this generation has a frozen calibration but no rt_scope row — the row IS the "
-            "scope its store was built under. Re-seed it (`--mode rt_seed`) or write the row; "
-            "refusing to fall back to the default scope")
-    persisted = parse_scope(setting)
-    if arg is None or str(arg).strip() == "":
-        return persisted, False
-    asked = parse_scope(arg)
-    if asked.key() == persisted.key():
-        return persisted, False
-    if not rescope:
-        raise ScopeError(
-            f"the dispatch argument {asked.label()!r} is not the scope this generation was "
-            f"seeded with ({persisted.label()!r}); everything outside it would be RETIRED. "
-            "Pass rt_rescope=true to move the generation's scope, or re-seed")
-    return asked, True
 
 
 def guard_agrees(scope: Scope, max_schema_mb: float) -> bool:

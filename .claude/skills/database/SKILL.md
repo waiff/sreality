@@ -426,7 +426,7 @@ So: wrap a gate that sits alongside a column predicate; a standalone gate is alr
   park nearby are not). The granular columns from migration 022 (`terrace`, `garage`,
   `parking_lots`) carry the finer facts; the union of balcony and terrace, if a surface
   wants one, is computed in the filter layer, never at ingest.
-- **A listing has ONE location and it lives in `listing_location`** (26 cols, migration 501).
+- **A listing has ONE location and it lives in `listing_location`** (27 cols, migrations 501/566).
   `listings` and `properties` carry NO place column at all: read a listing's place by joining
   `listing_location ll on ll.listing_id = l.id` (from `properties p`, on `p.repr_listing_ref_id`
   — a property's place is its representative listing's). The codes are `ll.obec_kod` /

@@ -56,6 +56,7 @@ class MemoryStore:
         self.cluster_row: dict[int, dict[str, Any]] = {}
         self.conflicts: list[dict[str, Any]] = []
         self.mnl: set[tuple[int, int]] = set()
+        self.ml: set[tuple[int, int]] = set()
         self.cell: dict[tuple[str, str], CellRow] = {}
         self._merge_adj: dict[int, set[int]] = {}
 
@@ -173,6 +174,9 @@ class MemoryStore:
 
     def must_not_link(self) -> set[tuple[int, int]]:
         return set(self.mnl)
+
+    def must_link(self) -> set[tuple[int, int]]:
+        return set(self.ml)
 
     # ---------------------------------------------------------------------- live census
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:

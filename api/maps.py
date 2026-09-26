@@ -15,13 +15,13 @@ is what `listing_location` answers with, so chip and listing now come from one
 registry version.
 
 WHICH LEVELS A POINT CAN RESOLVE TO. The mirror loads polygons for stat,
-region_soudrznosti, kraj, okres, orp, pou, obec, spravni_obvod,
-katastralni_uzemi and zsj (`location_data/ruian_boundaries.LAYERS`). It draws
+region_soudrznosti, kraj, okres, orp, pou, obec and katastralni_uzemi
+(`location_data/ruian_boundaries.LAYERS`). It draws
 NONE for `cast_obce` or `momc` — RÚIAN publishes no part-of-municipality
 boundary — so a point can never be PIP'd to a quarter. Therefore:
 
-  * point  -> obec / okres / kraj, by point-in-polygon (the same two-branch
-    pip-then-authoritative form the resolver uses, `resolve_db.py`);
+  * point  -> obec / okres / kraj, by point-in-polygon — the resolver's own
+    containing-obec statement (`resolve_db.CONTAINING_OBEC_SQL`), run verbatim;
   * cast_obce -> BY NAME, against the mirror's name index
     (`ruian_name_index`), narrowed to the obec the point PIP'd into, so
     "Žižkov" can only mean Praha's Žižkov when the pick sits in Praha.
@@ -41,6 +41,7 @@ import requests
 from fastapi import HTTPException
 
 from location_data.resolver.normalize import normalize_match_key
+from location_data.resolver.resolve_db import CONTAINING_OBEC_SQL
 from scraper.geocoding import KEY_LEVEL_STATUS, mapy_api_keys
 
 LOG = logging.getLogger(__name__)
@@ -158,28 +159,11 @@ def _fetch_suggest(
 
 _CURRENT_VERSION_SQL = "SELECT id FROM registry_versions WHERE is_current LIMIT 1"
 
-# One point, two branches under one LIMIT — the subdivided `pip` pieces first,
-# the raw polygon as the partially-loaded-pack fallback. Copied in shape from
-# `location_data/resolver/resolve_db._CONTAINING_OBEC_SQL`, whose header records
-# why an `IN ('pip','authoritative')` list plans 800× worse than a UNION ALL.
-_PIP_BRANCH = """
-    SELECT u.id, u.code
-      FROM ruian_admin_unit_geometries g
-      JOIN ruian_admin_units u ON u.id = g.unit_id
-     WHERE g.registry_version_id = %(version)s
-       AND g.purpose = '{purpose}'
-       AND u.level = 'obec'
-       AND ST_Covers(g.geom, ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326))
-     LIMIT 1
-"""
-
+# The obec covering ONE point is the resolver's statement, verbatim (one point in
+# its arrays), so a chip, a listing and an estimation subject can never be put in
+# different towns by two copies of the same question. Its chain is walked here.
 _CONTAINING_CHAIN_SQL = f"""
-WITH RECURSIVE hit AS (
-  ({_PIP_BRANCH.format(purpose="pip")})
-  UNION ALL
-  ({_PIP_BRANCH.format(purpose="authoritative")})
-  LIMIT 1
-), chain AS (
+WITH RECURSIVE hit AS ({CONTAINING_OBEC_SQL}), chain AS (
   SELECT u.id, u.parent_id, u.level::text AS level, u.code, u.name
     FROM ruian_admin_units u JOIN hit h ON h.id = u.id
   UNION ALL
@@ -239,12 +223,29 @@ def _containing_chain(
     """{level: (unit_id, code, name)} for the obec covering the point and each
     of its ancestors. Empty when the point is outside every obec polygon."""
     with conn.cursor() as cur:
-        cur.execute(_CONTAINING_CHAIN_SQL, {"version": version, "lat": lat, "lng": lng})
+        cur.execute(_CONTAINING_CHAIN_SQL, ([0], [lat], [lng], version))
         rows = cur.fetchall()
     return {
         str(level): (int(unit_id), int(code), name)
         for unit_id, level, code, name in rows
     }
+
+
+def containing_obec_kod(conn: Any, *, lat: float | None, lng: float | None) -> int | None:
+    """The RÚIAN code of the obec covering a point, or None (outside every obec / no current
+    registry) -- the one containing-obec statement, for subjects with no stored location
+    (an estimation of a URL-parsed advert or a typed point). Any query error raises, unlike
+    `_registry_version`: read as "no obec" it would become a confident `location_unknown`
+    frozen into a run."""
+    if lat is None or lng is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(_CURRENT_VERSION_SQL)
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    obec = _containing_chain(conn, version=int(row[0]), lat=lat, lng=lng).get("obec")
+    return obec[1] if obec else None
 
 
 def _lookup_name(

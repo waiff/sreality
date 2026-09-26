@@ -50,11 +50,10 @@ from autodedup import iterations
 from autodedup.apply import run_apply, run_unapply
 from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
-from autodedup.incremental_lane import run_incremental, run_rt_seed
+from autodedup.incremental_lane import run_rt_seed
 from autodedup.iterations import run_record
 from autodedup.judge_lane import run_judge
 from autodedup.labels_lane import run_labels
-from autodedup.parity import run_parity
 from autodedup.rt_equivalence import run_equivalence
 from autodedup.score_lane import run_score
 from autodedup.town_probe import run_town
@@ -67,9 +66,7 @@ MODES: dict[str, Mode] = {
     "export": run_export,
     "judge": run_judge,
     "score": run_score,
-    "incremental": run_incremental,
     "rt_seed": run_rt_seed,
-    "rt_parity": run_parity,
     "rt_equivalence": run_equivalence,
     "labels": run_labels,
     "record": run_record,
@@ -78,13 +75,11 @@ MODES: dict[str, Mode] = {
     "unapply": run_unapply,
 }
 
-# `incremental`, `rt_seed`, `rt_parity`, `rt_equivalence` and `town` are deliberately ABSENT
-# below, so they run unwrapped — and for the three read-only instruments that is a CONTRACT,
-# not an economy: an `iterations` row would be the one write each promises never to make. The pass is
-# a `*/10` schedule: a ledger row per pass would file 144 iterations a day, and
-# `autodedup.iterations` is the operator's NARRATIVE of the program (one line per unit of
-# work a person can read), not a machine log — `autodedup.runs` and the workflow's own run
-# summary carry the per-pass detail.
+# `rt_seed`, `rt_equivalence` and `town` are deliberately ABSENT below, so they run unwrapped
+# — and for the two read-only instruments that is a CONTRACT, not an economy: an `iterations`
+# row would be the one write each promises never to make. The real-time pass itself is not a
+# mode at all: the worker's `autodedup` lane runs it (E914), and `autodedup.iterations` is the
+# operator's NARRATIVE of the program, not a machine log.
 #
 # What each mode's ledger row says: the wave it belongs to, the sentence the progress page
 # shows, and the "Tools used" chips PROGRAM.md section 14 lists per wave. A mode missing

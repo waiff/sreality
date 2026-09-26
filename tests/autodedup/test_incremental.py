@@ -4,12 +4,11 @@ Five things a replay over one cohort cannot prove on its own, and each is a rail
 restatement: retrieval matches `BlockIndex.candidates` EXACTLY rather than approximately; an
 unchanged listing costs nothing (idempotence); a re-probed neighbourhood makes the fan-out cap
 order-insensitive; the E64 rail is owed only where a census limb is on; and the dark switch is
-off unless the repository variable says otherwise.
+off unless the worker's interval says otherwise.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import replace
 from typing import Iterable
 
@@ -27,7 +26,6 @@ from autodedup.incremental import (
     retrieve,
     run_pass,
 )
-from autodedup.incremental_lane import ENV_FLAG, env_enabled
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup.replay import DatasetFacts, ScheduleWork, arrival_order, batch_state
@@ -239,34 +237,21 @@ def test_a_certificate_is_never_re_opened_by_the_rail() -> None:
     assert actions == []
 
 
-# --------------------------------------------------------------------------- dark switch
+# --------------------------------------------------------------------------- one switch
 
 
-def test_the_lane_is_dark_unless_the_variable_says_true() -> None:
-    assert env_enabled({}) is False
-    assert env_enabled({ENV_FLAG: ""}) is False
-    assert env_enabled({ENV_FLAG: "1"}) is False
-    assert env_enabled({ENV_FLAG: "TRUE"}) is True
-    assert env_enabled({ENV_FLAG: "true"}) is True
+def test_the_worker_interval_is_the_only_switch() -> None:
+    """E914: the pass is not a dispatch mode and takes no switch argument — the worker's
+    `realtime_autodedup_interval_seconds` (0 = stop) is the one control."""
+    import inspect
 
+    from autodedup import incremental_lane, lane
 
-def test_the_lane_mode_returns_dark_without_touching_a_connection() -> None:
-    from autodedup.incremental_lane import run_incremental
-    import pathlib
-    import tempfile
-
-    def _boom():  # pragma: no cover - called means the dark switch failed
-        raise AssertionError("the dark lane opened a connection")
-
-    saved = os.environ.pop(ENV_FLAG, None)
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            out = run_incremental(_boom, {}, pathlib.Path(tmp))
-        assert out["skipped"] == "dark"
-        assert out["spent_usd"] == 0.0
-    finally:
-        if saved is not None:
-            os.environ[ENV_FLAG] = saved
+    assert "incremental" not in lane.MODES and "rt_parity" not in lane.MODES
+    params = inspect.signature(incremental_lane.run_incremental).parameters
+    assert set(params) == {"conn_factory", "deadline_s"}
+    for gone in ("ENV_FLAG", "DB_FLAG", "env_enabled", "db_enabled", "parity_gate"):
+        assert not hasattr(incremental_lane, gone), gone
 
 
 def test_the_pass_spends_nothing(tmp_path) -> None:

@@ -26,6 +26,7 @@ import pytest
 from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import lane
+from autodedup.incremental_sql import RT_LEASE_READ_SQL, RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
 from toolkit import property_identity
 from toolkit.property_identity import (
     AssetLinkConflict,
@@ -101,6 +102,8 @@ class FakeDb:
         self.closed = False
         self.now = T0
         self.depth = 0
+        # `autodedup.rt_lease`: the one-writer rail a live apply or unapply takes (A9).
+        self.lease: dict[str, dict[str, Any]] = {}
 
     # --- plumbing
     _STATE = ("listings", "properties", "ledger", "events", "settings")
@@ -153,6 +156,20 @@ class FakeDb:
 
     # --- the statements
     def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:  # noqa: C901
+        if sql == RT_LEASE_TAKE_SQL:
+            held = self.lease.get(p["name"])
+            if held and held["holder"] != p["holder"] and held["live"]:
+                return []
+            self.lease[p["name"]] = {"holder": p["holder"], "live": True}
+            return [(p["holder"],)]
+        if sql == RT_LEASE_RELEASE_SQL:
+            held = self.lease.get(p["name"])
+            if held and held["holder"] == p["holder"]:
+                held["live"] = False
+            return []
+        if sql == RT_LEASE_READ_SQL:
+            held = self.lease.get(p["name"])
+            return [(held["holder"], "T0", "T1", held["live"])] if held else []
         if sql == S.SETTING_SQL:
             return [(self.settings[p["key"]],)] if p["key"] in self.settings else []
         if sql == S.CLUSTERS_SQL:
@@ -189,10 +206,12 @@ class FakeDb:
             ids = set(p["listing_ids"])
             return [row for row in self.mnl if row[0] in ids and row[1] in ids]
         if sql == S.PAIR_VERDICTS_SQL:
+            # Newest ruling per pair (list order is decision order), then the verdicts asked.
             ids = set(p["listing_ids"])
-            return [(v["lo"], v["hi"], v["verdict"]) for v in self.verdicts
-                    if v["kind"] == "pair" and v["verdict"] in p["negatives"]
-                    and v["lo"] in ids and v["hi"] in ids]
+            newest = {(v["lo"], v["hi"]): v["verdict"] for v in self.verdicts
+                      if v["kind"] == "pair" and v["lo"] in ids and v["hi"] in ids}
+            return [(lo, hi, verdict) for (lo, hi), verdict in newest.items()
+                    if verdict in p["negatives"]]
         if sql == S.CLUSTER_VERDICTS_SQL:
             ids = set(p["listing_ids"])
             return [(v["cluster_key"], v["verdict"], v.get("generation"), v.get("member_ids"),
@@ -204,12 +223,16 @@ class FakeDb:
                              and v["verdict"] in p["negatives"]
                              and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
+            ids = set(p["listing_ids"])
             return [(r["generation"], r["cluster_key"], r["retired_property_id"],
-                     r["outcome"], r["undone_at"] is not None, r["undone_by"])
+                     r["outcome"], r["undone_at"] is not None, r["undone_by"],
+                     list(r["member_ids"] or ()))
                     for r in self.ledger
-                    if not r["dry_run"] and r["outcome"] in ("applied", "refused")
-                    and (r["generation"] == p["generation"]
-                         or r["retired_property_id"] in p["property_ids"])]
+                    if not r["dry_run"]
+                    and ((r["outcome"] == "refused" and r["generation"] == p["generation"]
+                          and ids & set(r["member_ids"] or ()))
+                         or (r["outcome"] == "applied"
+                             and r["retired_property_id"] in p["property_ids"]))]
         if sql == S.ENGINE_MERGES_SQL:
             ids, seen, out = set(p["listing_ids"]), set(), []
             for r in self.ledger:
@@ -1083,15 +1106,25 @@ def test_an_engine_merge_ruled_different_afterwards_is_reported_not_counted_away
     assert f"generation={GEN},cluster_key=10" in text
 
 
-def test_real_time_generations_are_refused(tmp_path: Path) -> None:
+def test_the_live_stream_is_planned_here_never_applied(tmp_path: Path) -> None:
+    """One stream, one writer (A9): the lane reconciles `rt` itself, under its lease. A dry run
+    may PLAN it — that is G3's prediction of the lane's first reconcile — and nothing here
+    applies it."""
     db = FakeDb()
+    db.live_scope()
     _pair_group(db, 10, [10, 11], [100, 200], gen="rt")
-    with pytest.raises(ValueError, match="real-time"):
-        A.plan_apply(db, "rt", A.Scope())
-    for gen in ("rt", "RT", "rt_seed_g12"):
+    plan = A.plan_apply(db, "rt", A.Scope())
+    assert [g.cluster_key for g in plan.to_apply] == [10]
+    with pytest.raises(A.ApplyRefused, match="real-time"):
+        A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    for args in ({"generation": "rt", "dry_run": "0"},
+                 {"generation": "rt", "retire_legacy": "1"}):
         with pytest.raises(SystemExit, match="real-time"):
-            A.run_apply(_factory(db), {"generation": gen}, tmp_path)
-    assert db.ledger == [] and not db.statements
+            A.run_apply(_factory(db), args, tmp_path)
+    assert all(row["dry_run"] for row in db.ledger)
+    assert db.listings[11]["property_id"] == 200
+    out = A.run_apply(_factory(db), {"generation": "rt"}, tmp_path)
+    assert out["dry_run"] and [g["cluster_key"] for g in out["planned"]] == [10]
 
 
 # ------------------------------------------------------------------ undo
@@ -1899,7 +1932,8 @@ def test_the_run_summary_names_every_refusal(tmp_path: Path, monkeypatch: Any) -
 
 
 def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
-    # Inert when off: no module, schedule or worker calls it, only an operator's dispatch.
+    # Two callers and no more: an operator's dispatch (lane.py) and the real-time lane's
+    # reconcile (A9), which the worker runs only while its interval is above 0.
     import re
 
     root = Path(A.__file__).resolve().parent.parent
@@ -1911,7 +1945,7 @@ def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
         for path in (root / top).rglob("*.py")
         if importer.search(path.read_text(encoding="utf-8"))
     )
-    assert callers == ["autodedup/lane.py"]
+    assert callers == ["autodedup/lane.py", "autodedup/reconcile.py"]
     workflow = (root / ".github" / "workflows" / "autodedup.yml").read_text(encoding="utf-8")
     trigger = workflow.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
     assert "schedule" not in trigger and "workflow_dispatch" in trigger

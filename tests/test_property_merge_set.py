@@ -88,8 +88,7 @@ def test_two_different_asset_links_refuse_the_set_before_anything_merges():
 def test_the_survivor_is_recomputed_once_for_the_whole_set():
     db = _Ledger({1: 1, 2: 2, 3: 3, 4: 3, 5: 4})
     _merge(db, [4, 3, 2, 1])
-    assert len(db.sql("WITH batch AS")) == 1
-    assert db.sql("recompute_property_mf") == [(1,)]
+    assert [p["pid"] for p in db.sql("WITH batch AS")] == [1]
     assert db.sql("DELETE FROM browse_list") == [([1, 2, 3, 4],)]
     assert db.sql("status = 'merged_away'") == [(1, 2), (1, 3), (1, 4)]
 

@@ -1176,7 +1176,9 @@ renumber.** Navigate by area:
     guard, and `toolkit/property_identity.py` lost its candidate-table stamps.
     **Consequences to hold in mind.** Nothing auto-merges any more, so cross-portal duplicates
     accumulate in Browse until the new engine ships — that build-up was accepted explicitly
-    (the one engine path since, AUTODEDUP's apply lane, is dark; see "Who orders a merge").
+    (since then AUTODEDUP merges only inside its scope row's area: the batch `mode=apply` is
+    live in the trial area, and the worker lane merges there once its interval is above 0; see
+    "Who orders a merge").
     The **publication gate is gone**: since migration 273 a new property stayed invisible in
     Browse/map/stats/watchdogs until something stamped `published_at`, and the only stamper for
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
@@ -1293,6 +1295,25 @@ renumber.** Navigate by area:
     Browse (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
+    **AUTODEDUP one lane (W5, dark: interval 0).** The engine's ONE production path is the
+    always-on worker's `autodedup` lane (`scraper/realtime_worker.py`; its interval
+    `realtime_autodedup_interval_seconds`, 0 = stop, is the only switch): one pass of
+    `autodedup.incremental_lane.run_incremental` decides and groups the live `rt` generation —
+    under the batch pass's D43 relation and the operator's rulings, a `same` pair ruling being a
+    must-link and a `different` one a must-not-link — commits, and then RECONCILES production
+    under its lease (`autodedup/reconcile.py`, PROGRAM.md E908–E915): the groups it re-clustered
+    go through the apply path below (`apply.plan_groups` / `apply.apply_group`, the same
+    refusals, the same chokepoint, `source='autodedup'`, ledger rows `generation='rt'`,
+    `run_id='rt:<holder>'`), only inside `autodedup_apply_scope` and never as a split — a
+    grouping the stream no longer supports is a proposal. It reconciles only a generation a
+    seed of this version built (`rt_seed_version:rt` = `incremental.SEED_VERSION`) whose build
+    phase ended, and review pages default to `rt` under the same condition (else the newest batch
+    pass). The brake is the interval (0), then `mode=unapply` — a live apply or unapply refuses
+    while the interval is above 0. Its calibration is cut from the database (`rt_seed`, and a
+    re-cut inside the pass's remaining time when the pHash population drifts); a pass past its own
+    deadline rolls back and halves its rate. The
+    batch `apply` mode stays until the lane has run three live days and checkpoint C2 passes;
+    `legacy_retire` until W8.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
     it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope
@@ -1320,7 +1341,10 @@ renumber.** Navigate by area:
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
-    rows before it merges; `rt…` generations are refused. An engine merge the operator took
+    rows before it merges; the live `rt` generation may be planned by a dry run but is never
+    applied here (the lane reconciles it, above), and a live run holds the lane's lease
+    `autodedup.rt_lease` (one writer). An engine
+    merge the operator took
     apart stays apart: its separated LISTINGS are never re-united by a later generation, even
     once the restored property has been merged into another one, and an `unapply` that finds
     the merge already partly taken apart records its undo as the operator's. `unapply` skips a
@@ -1336,8 +1360,12 @@ renumber.** Navigate by area:
     the live run would treat it; an undone group may merge again on a later apply (undo is a
     brake, not a ruling). **Splits are propose-only (decision 9):** `GET
     /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
-    lists each live multi-advert property a generation touches with a pair STATED apart: grouped
-    apart AND scored reject/veto/band or named by a conflict (a pair never scored is not spoken
+    lists each live multi-advert property a generation touches (unnamed: the live `rt` stream
+    once a W5 seed built it and its build ended, else the newest batch pass) with a pair STATED
+    apart: grouped
+    apart AND scored reject/veto/band or named by a conflict (in the live stream, a pair the
+    lane holds apart with no stored row is listed `not compared` — never read as a band
+    decision, and the batch split never takes an advert on it; in a batch pass a pair never scored is not spoken
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
@@ -1351,7 +1379,7 @@ renumber.** Navigate by area:
     checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
     own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
     in its group (a detach rules it different from every advert left behind), is `splittable`
-    and is stated apart from the staying group; the optional shared reason rides each ruling,
+    and is stated apart from the staying group (a `not compared` pair states nothing); the optional shared reason rides each ruling,
     with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
@@ -2152,6 +2180,13 @@ renumber.** Navigate by area:
     unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
     publishing relations return byte-identical figures.
 
+    **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
+    `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
+    published range or a reason (six codes, notes only in that migration), rendered by its shape.
+    Estimations call it; after 567 applies the serving views call it too, with the stored
+    `katastr_kod` (the feed reads the property's yield from `browse_list`); until then they read
+    the stored, writer-less `mf_*` columns. Rules: the `llm-pipelines` skill.
+
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
     fallback)` picks `area_m2` and stamps `area_basis`; the land arm is
@@ -2498,7 +2533,7 @@ renumber.** Navigate by area:
     projection columns, 40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and
     never flipped a consumer, so nothing exercised it end to end and nothing was ever deleted; 733
     verified findings came out of that shape, not out of any one bug. The corrective, and the
-    as-built state: ONE answer table (`listing_location`, 26 columns) written by ONE four-step
+    as-built state: ONE answer table (`listing_location`, 27 columns) written by ONE four-step
     resolver (bind → fill → grade → check); ONE hourly lane over the stored payload and the stored
     page body; ELEVEN claim types, at most one contract entry per type, the town entry mandatory and
     naming a reader; ONE label function and ONE four-level code predicate for every place display
@@ -2512,16 +2547,17 @@ renumber.** Navigate by area:
     listing has a town (`check_location_town_coverage` is red until both are zero), and foreign is a
     determination — a country field, a foreign section, a pin outside the country — never the
     default for "no town found". **Speed**: Browse and the map read `browse_list`, which copies the
-    fields at rebuild, so no consumer query joins the store; a field is added only after a measured
-    slowdown and only there. Full as-built detail — the store's 26 columns by role, the lane's two
-    halves and their cursors, the contract rails, the resolver's four stages, the served-listing
-    predicate, what deliberately stays outside the store, and the incident lessons — is
-    `docs/architecture.md` § Location data.
+    fields at rebuild, so no consumer query joins the store; a field is added only by operator
+    ruling (katastr_kod, 2026-09) or after a measured slowdown, and only there. Full as-built
+    detail — the store's 27 columns by role, the lane's two halves and their cursors, the contract
+    rails, the resolver's four stages, the served-listing predicate, what deliberately stays
+    outside the store, and the incident lessons — is `docs/architecture.md` § Location data.
 
 ## Broker identity merges — auto-merge and the suppression rail
 
-Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP apply lane that
-merges only inside the area `autodedup_apply_scope` names), broker identities DO auto-merge. The nightly
+Unlike property merges (rule #15: operator-ordered, plus AUTODEDUP — the batch `mode=apply` and
+the worker lane — merging only inside the area `autodedup_apply_scope` names), broker identities
+DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:
@@ -2689,9 +2725,10 @@ addresses, bazos ran 5.56 listings per pin with 51.5 % in clusters of 20+, and a
 around a town-centroid pin is exactly the false-merge class the grade axes exist to prevent.
 
 **ONE STORE.** `listing_location` (migration 501) is the only place a listing's location is stored:
-**26 columns** in five roles — the listing (`listing_id`); one position (`geom`,
+**27 columns** in five roles — the listing (`listing_id`); one position (`geom`,
 `geometry(Point,4326)`); nine names (`country_code`, kraj, okres, obec, část obce, street, čp, čo,
-psč); six RÚIAN codes (kraj, okres, obec, část obce, ulice, `ruian_adm_kod`); three grade columns,
+psč); seven RÚIAN codes (kraj, okres, obec, část obce, ulice, `ruian_adm_kod`, and `katastr_kod` —
+the single KÚ of the BOUND entity, never a pin's: migration 566, resolver v5.4); three grade columns,
 all NOT NULL (`match_confidence`, `granularity`, `uncertainty_radius_m`); two status columns
 (`country_status` NOT NULL, `disputed`); and four housekeeping (`resolver_version`, `resolved_at`,
 `claim_set_hash`, `registry_version`). `location_data/resolver/projection.py`'s column tuple IS that
@@ -3124,7 +3161,8 @@ absolute counts, listings with no row and non-foreign listings with no `obec_kod
 WHOLE corpus, and is RED until both are zero — its per-portal series changed meaning on 2026-09-14
 and numbers either side of that date are not comparable. That is the invariant the whole shape exists
 for; the mandatory town entry, BIND's tail rungs and the sweep's fourth arm are all rails that serve
-it.
+it. Its KÚ arm (MF PR-B) is the same kind of zero: a Czech address-grain row written by the current
+`RESOLVER_VERSION` without a `katastr_kod` means KÚ geometry is missing at the registry version.
 
 **ONE LABEL, ONE CODE PREDICATE.** Every surface renders `location_display_label(...)` (migration
 503, one IMMUTABLE SQL function over seven columns): foreign country code, else street + čp/čo +
@@ -3219,10 +3257,10 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
 
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
-* `admin_boundaries` — price stats, the rent map and city proximity still read its geometry and
-  population. Its LOCATION role died with trigger 289; re-keying those three onto
-  `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id` is an FK to it,
-  and already the RÚIAN obec code.
+* `admin_boundaries` — price stats, the rent-map choropleth (not the MF calc, since 565) and city
+  proximity read its geometry and population. Its LOCATION role died with trigger 289; re-keying
+  those three onto `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id`
+  is an FK to it, and already the RÚIAN obec code.
 * `portal_raw_pages` / `portal_raw_payloads` — the preservation substrate, and the intake's second
   source; not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,
@@ -3251,14 +3289,14 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   filters read them); and `scraper/street.py`, whose extraction is a CLAIM now, not a column.
 
 **THE RÚIAN MIRROR IS VERSIONED, NOT MUTATED.** `ruian_*` (migration 381) holds ČÚZK's address
-points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load
-stamps one `registry_versions` row (`ruian:YYYY-MM-DD`) and publishes by **pointer swap** behind
-blocking assertions, so it never half-changes the world underneath a resolution that pinned a
-version. Křovák S-JTSK → WGS84 goes through ONE audited conversion on an explicitly chosen 1 m PROJ
-pipeline (`location_data/krovak.py`; the 6 m one is never used), guarded by a golden-point test;
-boundary packs carry three geometries per unit (authoritative, subdivided pip, render). Freshness is
-the monthly baseline — the VFR daily-delta lane ships as chain-verification only and fails loudly
-until the `ST_ZZSZ` element schema is pinned down.
+points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. ONE monthly
+`full` load stamps one `registry_versions` row (`ruian:YYYY-MM-DD`): stage → blocking assertions →
+merge → boundaries (the state SHP pack is the vintage's third archived artifact, a resume restores
+all three from R2; three geometries per unit — authoritative, subdivided pip, render — an unchanged
+unit's authoritative row carried) → gazetteer → a **completeness assertion** (the state and every
+member obec and KÚ have pip + authoritative) → **pointer swap**: only a complete version goes live.
+Křovák S-JTSK → WGS84 is ONE audited 1 m PROJ conversion (`location_data/krovak.py`, golden-point
+test); `location_town_coverage` goes red when the registry stops moving (40 d current / 24 h staged).
 
 **OPS RULES THE INCIDENTS WROTE.** The heavy lanes — registry load and claim intake — share the OUTER
 `location-batch` concurrency group so **at most one runs at a time** (each keeps its own inner group

@@ -13,7 +13,7 @@ pair by dividing by the smaller number.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
 
 from autodedup.dataset import Listing
 from autodedup.settings import Settings
@@ -127,7 +127,8 @@ def floor_relation(a: GuardSide, b: GuardSide) -> str:
 
 
 def _spread_is_printed_one(
-    members: Sequence["Fingerprint"], cfg: Settings, relation: "ClusterRelation"
+    members: Sequence["Fingerprint"], cfg: Settings, relation: "ClusterRelation",
+    closure_of: Mapping[int, int] | None = None,
 ) -> bool:
     """E280 at cluster grain: every pair of members whose COLUMNS are further apart than the
     spread prints the same floor-area figures in both bodies, so the spread is the portals'."""
@@ -143,10 +144,37 @@ def _spread_is_printed_one(
         for right_id, right in sized[index + 1:]:
             if abs(left - right) / max(left, right) <= cfg.cluster_area_spread:
                 continue
+            if _same_closure(left_id, right_id, closure_of):
+                continue
             a, b = listings.get(left_id), listings.get(right_id)
             if a is None or b is None or not _printed_areas_prevail(a, b):
                 return False
     return True
+
+
+def _same_closure(left: int, right: int, closure_of: Mapping[int, int] | None) -> bool:
+    if not closure_of:
+        return False
+    key = closure_of.get(left)
+    return key is not None and key == closure_of.get(right)
+
+
+def _apart(values: Sequence[tuple[int, Any]], closure_of: Mapping[int, int] | None,
+           far: Callable[[Any, Any], bool]) -> bool:
+    """Whether two stated values of DIFFERENT closures are `far` apart (E910). Without a ruling
+    every advert is its own closure, and every `far` here is decided by the extreme pair (a
+    relative gap, or plain inequality), so that case is the old O(n) min/max rule exactly; only
+    a set holding two adverts of one closure reads pair by pair."""
+    if not values:
+        return False
+    keys = [closure_of[i] for i, _v in values if i in closure_of] if closure_of else []
+    if len(keys) == len(set(keys)):
+        ordered = [v for _i, v in values]
+        return far(min(ordered), max(ordered))
+    return any(far(left, right)
+               for index, (left_id, left) in enumerate(values)
+               for right_id, right in values[index + 1:]
+               if not _same_closure(left_id, right_id, closure_of))
 
 
 def cluster_invariants_ok(
@@ -154,6 +182,7 @@ def cluster_invariants_ok(
     settings: Settings | None = None,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
     relation: "ClusterRelation | None" = None,
+    closure_of: Mapping[int, int] | None = None,
 ) -> str | None:
     """E34 on the MERGED member set: the violated invariant's name, or None when it holds.
 
@@ -161,6 +190,13 @@ def cluster_invariants_ok(
     pairwise gate alone lets A-B and B-C pass while A and C differ on the floor. It is the last
     limb because it is the expensive one and it reads the two BODIES, which a fingerprint
     cannot.
+
+    E910: `closure_of` maps a member to its must-link closure (the operator's `same` rulings,
+    Decision 8), and an advert it does not name is a closure of its own. The hard limbs (size,
+    deal type, category) and the operator's must-not-links read the whole set; the spreads
+    (area, disposition, floor) are read across closures only, because the operator has ruled
+    two adverts of one closure one property — with no ruling that is every pair, today's rule
+    exactly. The relation must be bound to the same closures by the caller.
     """
     cfg = settings or Settings()
     if len(members) > cfg.max_cluster_size:
@@ -176,22 +212,25 @@ def cluster_invariants_ok(
             if not category_main_compatible(left, right):
                 return "compat_class"
 
-    areas = [fp.area_m2 for fp in members if fp.area_m2 is not None and fp.area_m2 > 0.0]
-    if areas and (max(areas) - min(areas)) / max(areas) > cfg.cluster_area_spread:
+    sized = [(fp.listing_id, fp.area_m2) for fp in members
+             if fp.area_m2 is not None and fp.area_m2 > 0.0]
+    if _apart(sized, closure_of,
+              lambda lo, hi: abs(hi - lo) / max(lo, hi) > cfg.cluster_area_spread):
         if not (cfg.d43_printed_area_prevails and relation is not None
-                and _spread_is_printed_one(members, cfg, relation)):
+                and _spread_is_printed_one(members, cfg, relation, closure_of)):
             return "area_spread"
 
     is_land = any(fp.category_main == LAND_CATEGORY for fp in members)
     if cfg.cluster_disposition and not is_land:
-        dispositions = {fp.disposition for fp in members if fp.disposition is not None}
-        if len(dispositions) > 1:
+        stated = [(fp.listing_id, fp.disposition) for fp in members
+                  if fp.disposition is not None]
+        if _apart(stated, closure_of, lambda a, b: a != b):
             return "disposition"
 
     if cfg.cluster_floor_spread:
-        floors = [fp.floor for fp in members
+        floors = [(fp.listing_id, fp.floor) for fp in members
                   if fp.category_main == FLAT_CATEGORY and fp.floor is not None]
-        if floors and max(floors) != min(floors):
+        if _apart(floors, closure_of, lambda a, b: a != b):
             return "floor_spread"
 
     ids = [fp.listing_id for fp in members]
