@@ -1952,7 +1952,7 @@ _SUBJECT_MF_FACTS_SQL = """
            COALESCE(p.has_balcony, l.has_balcony), COALESCE(p.terrace, l.terrace),
            COALESCE(p.furnished, l.furnished), COALESCE(p.garage, l.garage),
            COALESCE(p.has_lift, l.has_lift), COALESCE(p.building_type, l.building_type),
-           ll.obec_kod, ll.country_status::text
+           ll.obec_kod, ll.katastr_kod, ll.country_status::text
       FROM listings l
       LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active'
       LEFT JOIN listing_location ll ON ll.listing_id = COALESCE(p.repr_listing_ref_id, l.id)
@@ -1960,7 +1960,8 @@ _SUBJECT_MF_FACTS_SQL = """
 """
 _MF_FACT_KEYS = (
     "category_main", "category_type", "price_czk", "condition", "has_balcony", "terrace",
-    "furnished", "garage", "has_lift", "building_type", "obec_kod", "country_status",
+    "furnished", "garage", "has_lift", "building_type", "obec_kod", "katastr_kod",
+    "country_status",
 )
 
 
