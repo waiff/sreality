@@ -303,7 +303,7 @@ def build_fingerprint(
 def build_all(ds: Dataset, settings: Settings) -> dict[int, Fingerprint]:
     """Fingerprints for the whole cohort, in listing-id order so every pass is reproducible."""
     stock = StockIndex.of_dataset(ds, settings)
-    shared = (colive_shared_frames(ds) if settings.photo_override_frames > 0
+    shared = (colive_shared_frames(ds, settings) if settings.photo_override_frames > 0
               and settings.photo_override_exclusive else frozenset())
     return {
         listing_id: build_fingerprint(
@@ -313,9 +313,10 @@ def build_all(ds: Dataset, settings: Settings) -> dict[int, Fingerprint]:
     }
 
 
-def colive_shared_frames(ds: Dataset, min_days: float = 1.0) -> frozenset[int]:
+def colive_shared_frames(ds: Dataset, settings: Settings, min_days: float = 1.0) -> frozenset[int]:
     """C7: frames two adverts of ONE portal carried while both were live (a project's template
-    shoot, not one unit's photographs): exact dHash, carriers read inside the cohort."""
+    shoot, not one unit's photographs); carriers read inside the cohort, by exact dHash or, with
+    `photo_override_exclusive_bits`, by every hash within that many bits (numpy, experiment only)."""
     from autodedup.indistinguishable import honest_overlap_days as overlap_days
 
     carriers: dict[int, list[Listing]] = {}
@@ -326,6 +327,25 @@ def colive_shared_frames(ds: Dataset, min_days: float = 1.0) -> frozenset[int]:
         for image in images:
             if image.phash is not None:
                 carriers.setdefault(int(image.phash), []).append(listing)
+    bits = settings.photo_override_exclusive_bits
+    if bits > 0:
+        import numpy as np
+
+        rooms = settings.photo_override_rooms
+        queries = sorted({int(im.phash) for ims in ds.images_by_listing.values() for im in ims
+                          if im.phash is not None and im.room_tag() is not None
+                          and ("*" in rooms or im.room_tag() in rooms)})
+        keys = list(carriers)
+        table = np.array([k & 0xFFFFFFFFFFFFFFFF for k in keys], dtype=np.uint64)
+        widened: dict[int, list[Listing]] = {}
+        for start in range(0, len(queries), 256):
+            chunk = queries[start:start + 256]
+            q = np.array([k & 0xFFFFFFFFFFFFFFFF for k in chunk], dtype=np.uint64)[:, None]
+            near = np.bitwise_count(np.bitwise_xor(table[None, :], q)) <= bits
+            for row, phash in enumerate(chunk):
+                idx = np.nonzero(near[row])[0]
+                widened[phash] = [x for i in idx for x in carriers[keys[i]]]
+        carriers = widened
     out: set[int] = set()
     for phash, listings in carriers.items():
         if len(listings) < 2:
