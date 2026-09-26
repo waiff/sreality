@@ -1058,6 +1058,10 @@ class Settings:
     # E303 (prepared, awaiting a ruling): the cluster-grain price limb accepts a cross-portal
     # K-C pair on one street and house number within the cross-portal price tolerance.
     d43_cluster_price_kc_house_number: bool = False
+    # E304 (W30 experiment, OFF in w30; ON only in the arm w30x): E156 extended to the local
+    # search — a member is never MOVED off a cell it holds by a merge edge, exactly as it is
+    # never dropped from one (the 128 factless certain losses of S15, M669).
+    repartition_keep_factless_moves: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -1572,6 +1576,9 @@ class Settings:
                 "d43_rental_colive_min_overlap_days must not be negative: "
                 f"{self.d43_rental_colive_min_overlap_days}"
             )
+        if self.repartition_keep_factless_moves and not self.repartition_keep_factless:
+            raise ValueError("repartition_keep_factless_moves (E304) extends "
+                             "repartition_keep_factless (E156): switch E156 on first")
         if self.d43_floor_total_camp_shift_mixed and not self.d43_floor_total_camp_shift:
             raise ValueError("d43_floor_total_camp_shift_mixed (E301b) extends "
                              "d43_floor_total_camp_shift (E301): switch E301 on first")

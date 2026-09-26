@@ -84,6 +84,7 @@ def partition(
     outer_rounds: int = 1,
     shed_factless_guard: str = "off",
     reconcile_factless_first: bool = False,
+    keep_factless_moves: bool = False,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
@@ -97,6 +98,11 @@ def partition(
     same body, sreality against mmreality, cut to two singletons by a conflict neither of them
     was party to. A member separated from a group it has an edge to must carry a fact AGAINST
     that group; where it does not, and the union holds, it goes back.
+
+    E304 (`keep_factless_moves`, W30 experiment): neither the local search, nor a shed, nor
+    E156's own reconciliation may MOVE a member off a cell it holds by a merge edge. Every cell satisfies the invariants, so such a
+    member carries no fact against any member of it, and a move on weight alone is exactly the
+    factless separation E156 refuses for a drop.
     """
     ordered = sorted(edges, key=lambda edge: edge.rank)
     home: dict[int, int] = {member: index for index, member in enumerate(sorted(members))}
@@ -141,6 +147,8 @@ def partition(
         moved = False
         for member in sorted(members):
             current = home[member]
+            if keep_factless_moves and _held(neighbours, home, member):
+                continue
             best_gain, best_target = 0.0, None
             seen: set[int] = {current}
             for edge in neighbours[member]:
@@ -177,9 +185,10 @@ def partition(
         # E263: the weighing may decide between two factless separations; it may not keep one
         # when the move it refuses would sever only edges a fact already carries.
         blocked_for = shed_blockers if reconcile_factless_first else None
+        held_by = neighbours if keep_factless_moves else None
         if keep_factless:
             for _round in range(max_rounds):
-                if not _reconcile(ordered, home, cells, invariants, weigh, blocked_for):
+                if not _reconcile(ordered, home, cells, invariants, weigh, blocked_for, held_by):
                     break
                 touched = True
         if rejoin_cells:
@@ -189,15 +198,16 @@ def partition(
                     break
                 touched = True
                 if keep_factless:
-                    _reconcile(ordered, home, cells, invariants, weigh, blocked_for)
+                    _reconcile(ordered, home, cells, invariants, weigh, blocked_for, held_by)
         if shed_blockers is not None:
             for _round in range(max_rounds):
                 if not _shed(ordered, neighbours, home, cells, invariants, shed_blockers,
-                             shed_max, shed_max_union, shed_factless_guard):
+                             shed_max, shed_max_union, shed_factless_guard,
+                             keep_factless_moves):
                     break
                 touched = True
                 if keep_factless:
-                    _reconcile(ordered, home, cells, invariants, weigh, blocked_for)
+                    _reconcile(ordered, home, cells, invariants, weigh, blocked_for, held_by)
         return touched
 
     # E253: the repairs feed each other — a cell a shed has just made smaller is a cell the
@@ -208,6 +218,15 @@ def partition(
             break
 
     return [sorted(cell) for cell in cells if cell]
+
+
+def _held(neighbours: Mapping[int, Sequence[Edge]], home: Mapping[int, int], member: int) -> bool:
+    """E304: does this member sit in its cell by a merge edge to another member of it?"""
+    for edge in neighbours[member]:
+        other = edge.hi if edge.lo == member else edge.lo
+        if other != member and home[other] == home[member]:
+            return True
+    return False
 
 
 def _rejoin(
@@ -258,6 +277,7 @@ def _reconcile(
     invariants: Invariants,
     neighbours: Mapping[int, Sequence[Edge]] | None = None,
     blockers: Blockers | None = None,
+    held: Mapping[int, Sequence[Edge]] | None = None,
 ) -> bool:
     """E156: put back every separation no fact justifies. True when something moved.
 
@@ -283,6 +303,9 @@ def _reconcile(
                 continue
             current = home[member]
             if current == target:
+                continue
+            # E304: putting one separation back may not open another one.
+            if held is not None and _held(held, home, member):
                 continue
             if invariants(sorted(cells[target] + [member])) is not None:
                 continue
@@ -365,6 +388,7 @@ def _shed(
     shed_max: int,
     max_union: int,
     factless_guard: str = "off",
+    keep_held: bool = False,
 ) -> bool:
     """E253: let a cell SHED the members that block a cut merge edge. True when one did.
 
@@ -413,6 +437,9 @@ def _shed(
                  if factless_guard != "off" else frozenset())
         cover = _cover(conflicts, keep, shed_max, dirty)
         if cover is None:
+            continue
+        # E304: a shed is a move too — never of a member that holds its own cell by an edge.
+        if keep_held and any(_held(neighbours, home, member) for member in cover):
             continue
         kept = [member for member in union if member not in cover]
         if invariants(kept) is not None:

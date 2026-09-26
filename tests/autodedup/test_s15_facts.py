@@ -401,3 +401,44 @@ def test_w29_replays_byte_identical_on_the_trial_cohort(tmp_path: Path) -> None:
     with gzip.open(tmp_path / "pairs.jsonl.gz") as got, \
             gzip.open(S14_TRIAL_RUN / "pairs.jsonl.gz") as stored:
         assert got.read() == stored.read()
+
+
+# --- E304 (W30 experiment, off in w30): the search may not move a member off a cell it holds ---
+def _conflicting(pairs: set[tuple[int, int]]):
+    def invariants(members):
+        present = set(members)
+        return "fact" if any(a in present and b in present for a, b in pairs) else None
+    return invariants
+
+
+def test_E304_no_member_is_moved_off_a_cell_it_holds_by_a_factless_edge() -> None:
+    from autodedup.repartition import Edge, partition
+
+    # 1 and 2 are one advert; 2 also scores into 3 and 4, and 1 carries a fact against both.
+    # The greedy pass keeps {1, 2} and {3, 4}; the search (E156 alone) and the shed (the
+    # engine's w29/w30 repartition) both hand 2 to {3, 4} on weight, cutting 1 x 2 for no fact.
+    edges = [Edge(1, 2, 0.99, False), Edge(3, 4, 0.98, False),
+             Edge(2, 3, 0.97, False), Edge(2, 4, 0.97, False)]
+    pairs = {(1, 3), (1, 4)}
+    invariants = _conflicting(pairs)
+
+    def blockers(members):
+        return [p for p in pairs if p[0] in members and p[1] in members]
+    engine = dict(keep_factless=True, rejoin_cells=True, shed_blockers=blockers, shed_max=3,
+                  outer_rounds=3, shed_factless_guard="core", reconcile_factless_first=True)
+    members = [1, 2, 3, 4]
+    assert sorted(partition(members, edges, invariants, keep_factless=True)) == [[1], [2, 3, 4]]
+    assert sorted(partition(members, edges, invariants, **engine)) == [[1], [2, 3, 4]]
+    for kwargs in ({"keep_factless": True}, engine):
+        kept = partition(members, edges, invariants, keep_factless_moves=True, **kwargs)
+        assert sorted(kept) == [[1, 2], [3, 4]]
+        assert all(invariants(cell) is None for cell in kept)
+
+
+def test_E304_is_off_in_w30_and_needs_E156() -> None:
+    assert not S15.repartition_keep_factless_moves
+    assert not Settings().repartition_keep_factless_moves
+    with pytest.raises(ValueError, match="E304"):
+        variant(repartition_keep_factless=False, repartition_keep_factless_moves=True,
+                repartition_reconcile_factless_first=False)
+    assert variant(repartition_keep_factless_moves=True).repartition_keep_factless_moves
