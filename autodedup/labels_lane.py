@@ -97,6 +97,9 @@ from autodedup.labels_sql import (
 
 LABELS_FILE: str = "operator_labels.jsonl"
 MUST_NOT_LINK_FILE: str = "must_not_link.jsonl"
+# E910: the pairs whose NEWEST pair ruling is `same` — the must-links the real-time lane reads
+# (`incremental_sql.RT_MUST_LINK_SQL`), for `harness run --must-link` and the replay.
+MUST_LINK_FILE: str = "must_link.jsonl"
 # The labels file's own shape version. Version 2 appended `merge_group_id` and the third
 # `source` value `browse_merge` (E299); every version-1 field is unchanged.
 LABELS_FORMAT: int = 2
@@ -691,11 +694,16 @@ def run_labels(
         )
     ]
 
+    ml_records = [{"listing_lo": key[0], "listing_hi": key[1]}
+                  for key, row in sorted(latest_by_pair.items())
+                  if str(row.get("verdict") or "") == OPERATOR_POSITIVE_VERDICT]
     labels_path = out_dir / LABELS_FILE
     mnl_path = out_dir / MUST_NOT_LINK_FILE
+    ml_path = out_dir / MUST_LINK_FILE
     merges_path = out_dir / OPERATOR_MERGES_FILE
     _write_jsonl(labels_path, records)
     _write_jsonl(mnl_path, mnl_records)
+    _write_jsonl(ml_path, ml_records)
     # Written on every path, empty without migration 564, so a consumer's path never moves.
     _write_jsonl(merges_path, merge_records)
 
@@ -709,12 +717,13 @@ def run_labels(
         "engine_view": sum(1 for r in records if r["engine"] is not None),
         "sample_ranked": sum(1 for r in records if r["sample_rank"] is not None),
         "must_not_link": len(mnl_records),
+        "must_link": len(ml_records),
         **{f"cluster_{name}": value for name, value in cluster_counts.items()},
     }
     generation_stats = generation_rows[0] if generation_rows else {}
     summary = {
         "artifacts": {"labels": str(labels_path), "must_not_link": str(mnl_path),
-                      "operator_merges": str(merges_path)},
+                      "must_link": str(ml_path), "operator_merges": str(merges_path)},
         "bytes": {
             "labels": labels_path.stat().st_size,
             "must_not_link": mnl_path.stat().st_size,

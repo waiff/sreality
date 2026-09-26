@@ -30,8 +30,8 @@ it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detac
 an operator's native split's one closed row). A detach and its read-only preview,
 `detach_outcomes`, read it inside the toolkit. The apply path's own ledger is the only history
 it consults.
-The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, deleted
-in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
+The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, kept until
+W8) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
 deal types (plus any that mixes deal types).
 """
 
@@ -48,8 +48,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import apply_sql as S
-from autodedup import legacy_retire
+from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
+from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
     AssetLinkConflict,
@@ -62,6 +63,9 @@ from toolkit.property_identity import (
 from toolkit.room_taxonomy import category_main_compatible
 
 SCOPE_SETTING: str = "autodedup_apply_scope"
+# The worker lane's one switch (migrations 557/568): 0 = stopped. A live apply or unapply runs
+# only while it is 0 (`_Writer`).
+LANE_INTERVAL_SETTING: str = "realtime_autodedup_interval_seconds"
 MERGE_SOURCE: str = "autodedup"
 UNAPPLY_BY_PREFIX: str = "autodedup-unapply:"
 # `undone_by` on a ledger row whose merge someone else had already undone when `unapply` came
@@ -77,11 +81,12 @@ ID_CHUNK: int = 5000
 SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
-# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, deleted in W5.
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy", *SCOPE_KEYS})
+# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, kept until W8.
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy",
+                                        rt_lease.RELEASE_ARG, *SCOPE_KEYS})
 # What `unapply` selects by: a generation (and one of its groups), a run, a time window.
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
-UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
+UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", rt_lease.RELEASE_ARG, *UNAPPLY_SELECTORS})
 
 # A scope block, spelled as the export lane spells it: `town:<code>` (an advert's
 # listing_location.obec_kod) / `quarter:<code>` (its cast_obce_kod).
@@ -117,10 +122,6 @@ SKIP_CHANGED_SINCE_PLAN = "changed_since_plan"
 # Reported, never acted on — `unapply` is the operator's call (E905).
 RULED_AFTER_MERGE = "ruled_different_after_merge"
 
-# The real-time lane's generations (`rt…`, `left(generation, 2) = 'rt'` on the review pages)
-# are rewritten every few minutes by a workflow in another concurrency group and spell their
-# blocks differently, so no plan read across several statements can hold still. Refused.
-REALTIME_PREFIX: str = "rt"
 
 
 class ApplyRefused(RuntimeError):
@@ -422,10 +423,6 @@ def scope_closed(conn: Any) -> str | None:
     return "; ".join(problems) or None
 
 
-def is_realtime_generation(generation: str) -> bool:
-    return generation.strip().lower().startswith(REALTIME_PREFIX)
-
-
 @dataclass
 class Negatives:
     """The operator's negatives over a set of listings, indexed by each ruling's lowest
@@ -629,15 +626,28 @@ def _members(conn: Any, generation: str) -> dict[int, list[Member]]:
 
 
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
-    """Read-only: which groups of `generation` would merge, into what, and which are refused."""
-    if is_realtime_generation(generation):
-        raise ValueError(
-            f"generation {generation!r} belongs to the real-time lane: it is rewritten while a "
-            "plan reads it and cannot be applied from this lane"
-        )
-    cluster_rows = _cluster_rows(conn, generation)
-    members_by = _members(conn, generation)
-    listing_group = {m.listing_id: key for key, ms in members_by.items() for m in ms}
+    """Read-only: which groups of `generation` would merge, into what, and which are refused.
+
+    The live stream may be PLANNED (a dry run is how G3 predicts the lane's first reconcile)
+    but never applied from here: the lane reconciles it itself, under its lease (A9)."""
+    return plan_groups(conn, generation, _cluster_rows(conn, generation),
+                       _members(conn, generation), scope)
+
+
+def plan_groups(
+    conn: Any, generation: str, cluster_rows: Sequence[Mapping[str, Any]],
+    members_by: Mapping[int, list[Member]], scope: Scope, *,
+    group_of: Callable[[set[int]], Mapping[int, int]] | None = None, cap: bool = True,
+) -> Plan:
+    """The plan for the groups handed in — `plan_apply`'s for a whole batch generation, and the
+    real-time lane's reconcile (A9) for the groups a pass re-clustered or swept. ONE set of
+    refusals for both (E903): the reconcile is this function under the lane's lease.
+
+    `group_of` answers which group of the generation holds a listing, for the carried adverts
+    E37 reads at property grain; by default the groups handed in are the whole generation.
+    `cap=False` leaves the run cap to the caller (the reconcile is bounded by its time)."""
+    listing_group: dict[int, int] = {m.listing_id: key for key, ms in members_by.items()
+                                     for m in ms}
 
     counts: Counter[str] = Counter(clusters=len(cluster_rows))
     out_of_scope: Counter[str] = Counter()
@@ -686,6 +696,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     every_listing: set[int] = {m.listing_id for _c, ms in everyone for m in ms}
     for pid in all_props:
         every_listing |= children.get(pid, set())
+    if group_of is not None:
+        listing_group = {**dict(group_of(every_listing)), **listing_group}
     negatives = Negatives.read(conn, every_listing,
                                [int(c["cluster_key"]) for c, _m in everyone])
     all_merges = _engine_merges(conn, every_listing)
@@ -697,16 +709,20 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
                 merges_by_listing.setdefault(lid, []).append(merge)
             if not merge.undone_by_engine:
                 standing_by_listing.setdefault(lid, []).append(merge)
-    refused_keys: set[int] = set()
+    # A chokepoint refusal is remembered by the MEMBER SET it refused, not by the key it was
+    # filed under: a real-time generation's keys move as its groups do (A9), and a batch
+    # generation's key names exactly one member set, so the two readings agree there.
+    refused_sets: set[frozenset[int]] = set()
     # Properties this engine retired whose merge `unapply` did not undo: active again, someone
     # else restored them.
     restored: set[int] = set()
     if candidates:
-        for gen, key, retired, outcome, undone, undone_by in _rows(
+        for gen, _key, retired, outcome, undone, undone_by, members in _rows(
                 conn, S.LEDGER_HISTORY_SQL, {
-                    "generation": generation, "property_ids": sorted(all_props)}):
+                    "generation": generation, "property_ids": sorted(all_props),
+                    "listing_ids": sorted(every_listing)}):
             if outcome == "refused" and gen == generation:
-                refused_keys.add(int(key))
+                refused_sets.add(frozenset(int(x) for x in (members or ())))
             elif (outcome == "applied" and retired is not None
                   and not _undone_by_engine(undone, undone_by)):
                 restored.add(int(retired))
@@ -785,7 +801,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         # authority. Only the engine's own undo releases a property, to any later apply; a
         # merge the operator undid first stays restored-elsewhere even once `unapply` has
         # noted it (E905).
-        if key in refused_keys:
+        if frozenset(member_set) in refused_sets:
             reasons.append(SKIP_REFUSED_BEFORE)
         separated = _separated_merges(
             extended, prop_of,
@@ -809,7 +825,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
 
     groups.sort(key=lambda g: g.cluster_key)
     eligible = [g for g in groups if not g.reasons]
-    deferred = [g.cluster_key for g in eligible[scope.max_clusters_per_run:]]
+    deferred = [g.cluster_key for g in eligible[scope.max_clusters_per_run:]] if cap else []
     if deferred:
         dropped = set(deferred)
         groups = [g for g in groups if g.cluster_key not in dropped]
@@ -903,17 +919,28 @@ def _terminal(exc: MergeError) -> bool:
     return "mismatch" in str(exc)
 
 
-def _brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:
+def group_brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:
     return {"cluster_key": group.cluster_key, "survivor_id": group.survivor_id,
             "retired_ids": group.retired_ids, **extra}
 
 
-def _ruled_brief(group: GroupPlan) -> dict[str, Any]:
+def ruled_brief(group: GroupPlan) -> dict[str, Any]:
     merges = group.detail.get("engine_merges") or []
     note = ("merged by this engine - to undo: " + "; ".join(m["unapply"] for m in merges)
             if merges else "on one property by a merge this engine did not make")
-    return _brief(group, negatives=group.detail.get("negatives") or [],
+    return group_brief(group, negatives=group.detail.get("negatives") or [],
                   engine_merges=merges, note=note)
+
+
+def file_skipped(conn: Any, run_id: str, generation: str, groups: Sequence[GroupPlan]) -> int:
+    """The ledger rows of groups refused at plan time, one transaction: every refusal is on
+    record (the batch run's and the lane reconcile's alike). Returns how many rows it filed."""
+    rows = [row for g in groups for row in _rows_for(
+        run_id, generation, g, dry_run=False, outcome="skipped", error=g.reasons[0])]
+    if rows:
+        with conn.transaction():
+            _exec_many(conn, S.LEDGER_INSERT_SQL, rows)
+    return len(rows)
 
 
 class _SkipAtApply(Exception):
@@ -987,6 +1014,11 @@ def apply_plan(
     group, so a refusal anywhere in a group rolls the whole group back."""
     run_id = run_id or new_run_id()
     if not dry_run:
+        if plan.generation.strip() == GENERATION:
+            raise ApplyRefused(
+                f"generation {plan.generation!r} belongs to the real-time lane, which reconciles "
+                "it itself under its own lease (A9) — a dry run may plan it, nothing here "
+                "applies it")
         problems = plan.scope.live_problems()
         if problems:
             raise ApplyRefused("; ".join(problems))
@@ -998,10 +1030,10 @@ def apply_plan(
         "dry_run": dry_run,
         "scope": plan.scope.to_json(),
         "counts": dict(plan.counts),
-        "planned": [_brief(g) for g in plan.to_apply],
-        "skipped": [_brief(g, reasons=g.reasons) for g in plan.skipped
+        "planned": [group_brief(g) for g in plan.to_apply],
+        "skipped": [group_brief(g, reasons=g.reasons) for g in plan.skipped
                     if not g.ruled_after_merge],
-        RULED_AFTER_MERGE: [_ruled_brief(g) for g in plan.skipped
+        RULED_AFTER_MERGE: [ruled_brief(g) for g in plan.skipped
                             if g.ruled_after_merge],
         "deferred": list(plan.deferred),
         "applied": [],
@@ -1019,8 +1051,7 @@ def apply_plan(
             _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows + planned_rows)
         return result
 
-    with conn.transaction():
-        _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows)
+    file_skipped(conn, run_id, gen, plan.skipped)
 
     counts = result["counts"]
     counts.update(applied=0, skipped_at_apply=0, refused=0, failed=0, listings_moved=0)
@@ -1036,73 +1067,20 @@ def apply_plan(
                 result["stopped"] = f"app_settings.{SCOPE_SETTING} admits no live merge: {closed}"
                 counts["not_attempted"] = len(todo) - index
                 break
-            group_id = str(uuid.uuid4())
-            markers = {
-                "engine": "autodedup", "generation": gen, "cluster_key": group.cluster_key,
-                "run_id": run_id, "model_version": group.model_version,
-                "feature_version": group.feature_version, "members": group.member_ids,
-                "scope": plan.scope.to_json(),
-            }
             try:
-                with conn.transaction():
-                    late_reasons, late_detail = recheck_group(conn, group, plan.scope)
-                    if late_reasons:
-                        raise _SkipAtApply(late_reasons, late_detail)
-                    try:
-                        res = merge(
-                            conn, group.property_ids, source=MERGE_SOURCE,
-                            reason=f"autodedup {gen} {group.cluster_key}",
-                            merge_group_id=group_id, confidence=group.confidence,
-                            markers=markers,
-                        )
-                    except AssetLinkConflict as exc:
-                        raise _SkipAtApply([SKIP_ASSET_LINKED], {"asset_links": str(exc)}) \
-                            from exc
-                    data = res.get("data") or {}
-                    group.survivor_id = int(data["survivor_id"])
-                    group.retired_ids = [int(r) for r in data["retired_ids"]]
-                    moved = [len(group.listings_by_property.get(r, ()))
-                             for r in group.retired_ids]
-                    _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                        run_id, gen, group, dry_run=False, outcome="applied",
-                        merge_group_id=group_id, moved=moved))
-            except _SkipAtApply as skip:
-                group.reasons = skip.reasons
-                group.detail = {**group.detail, **skip.detail, "at_apply": True}
-                counts["skipped_at_apply"] += 1
-                result["skipped_at_apply"].append(_brief(group, reasons=skip.reasons))
-                with conn.transaction():
-                    _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                        run_id, gen, group, dry_run=False, outcome="skipped",
-                        error=skip.reasons[0]))
-                continue
-            except MergeError as exc:
-                outcome = "refused" if _terminal(exc) else "failed"
-                counts[outcome] += 1
-                result[outcome].append(_brief(group, error=str(exc)))
-                with conn.transaction():
-                    _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                        run_id, gen, group, dry_run=False, outcome=outcome, error=str(exc)))
-                continue
+                outcome, brief = apply_group(conn, group, plan.scope, run_id=run_id,
+                                             generation=gen, merge=merge)
             except Exception as exc:
-                # Not a refusal the chokepoint names: record what can be recorded and stop,
-                # rather than carry on merging over a database in a state nobody has looked at.
                 error = f"{type(exc).__name__}: {exc}"
                 counts["failed"] += 1
                 counts["not_attempted"] = len(todo) - index - 1
-                result["failed"].append(_brief(group, error=error))
+                result["failed"].append(group_brief(group, error=error))
                 result["aborted"] = f"stopped at group {group.cluster_key}: {error}"
-                try:
-                    with conn.transaction():
-                        _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                            run_id, gen, group, dry_run=False, outcome="failed", error=error))
-                except Exception:  # noqa: BLE001 — the original error is the one to surface
-                    pass
                 raise
-            counts["applied"] += 1
-            counts["listings_moved"] += sum(moved)
-            result["applied"].append(_brief(group, merge_group_id=group_id,
-                                            listings_moved=sum(moved)))
+            counts[outcome] += 1
+            result[outcome].append(brief)
+            if outcome == "applied":
+                counts["listings_moved"] += int(brief["listings_moved"])
     except BaseException as exc:
         # Any stop — an error, or a cancelled job (SIGINT raises KeyboardInterrupt) — after
         # groups merged for real: the result rides on the error, so the lane still publishes
@@ -1114,6 +1092,81 @@ def apply_plan(
         _attach_partial(exc, result)
         raise
     return result
+
+
+def apply_group(
+    conn: Any, group: GroupPlan, scope: Scope, *, run_id: str, generation: str,
+    merge: Callable[..., dict[str, Any]] = merge_property_set,
+    last: tuple[str, str | None] | None = None,
+    guards: Sequence[tuple[str, Mapping[str, Any]]] = (),
+) -> tuple[str, dict[str, Any]]:
+    """ONE planned group through THE chokepoint, in its own transaction, with its ledger rows:
+    `applied`, `skipped_at_apply` (the in-transaction re-check or two asset links refused it),
+    `refused` / `failed` (the chokepoint named why). The batch run and the real-time lane's
+    reconcile (A9) both merge through here. An error the chokepoint does not name is recorded
+    and RAISED: nothing carries on merging over a database nobody has looked at.
+
+    `last` is the member set's newest ledger outcome: a skip or refusal that repeats it files
+    nothing (the lane re-tries a group every sweep; an asset-link conflict would otherwise file
+    a row every few minutes). `guards` are statements run first inside the group's transaction
+    (the lane's local statement and lock timeouts)."""
+    group_id = str(uuid.uuid4())
+    markers = {
+        "engine": "autodedup", "generation": generation, "cluster_key": group.cluster_key,
+        "run_id": run_id, "model_version": group.model_version,
+        "feature_version": group.feature_version, "members": group.member_ids,
+        "scope": scope.to_json(),
+    }
+    try:
+        with conn.transaction():
+            for sql, params in guards:
+                _exec(conn, sql, params)
+            late_reasons, late_detail = recheck_group(conn, group, scope)
+            if late_reasons:
+                raise _SkipAtApply(late_reasons, late_detail)
+            try:
+                res = merge(
+                    conn, group.property_ids, source=MERGE_SOURCE,
+                    reason=f"autodedup {generation} {group.cluster_key}",
+                    merge_group_id=group_id, confidence=group.confidence,
+                    markers=markers,
+                )
+            except AssetLinkConflict as exc:
+                raise _SkipAtApply([SKIP_ASSET_LINKED], {"asset_links": str(exc)}) from exc
+            data = res.get("data") or {}
+            group.survivor_id = int(data["survivor_id"])
+            group.retired_ids = [int(r) for r in data["retired_ids"]]
+            moved = [len(group.listings_by_property.get(r, ())) for r in group.retired_ids]
+            _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                run_id, generation, group, dry_run=False, outcome="applied",
+                merge_group_id=group_id, moved=moved))
+    except _SkipAtApply as skip:
+        group.reasons = skip.reasons
+        group.detail = {**group.detail, **skip.detail, "at_apply": True}
+        if last != ("skipped", skip.reasons[0]):
+            with conn.transaction():
+                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                    run_id, generation, group, dry_run=False, outcome="skipped",
+                    error=skip.reasons[0]))
+        return "skipped_at_apply", group_brief(group, reasons=skip.reasons)
+    except MergeError as exc:
+        outcome = "refused" if _terminal(exc) else "failed"
+        if outcome == "failed" or last != (outcome, str(exc)):
+            with conn.transaction():
+                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                    run_id, generation, group, dry_run=False, outcome=outcome,
+                    error=str(exc)))
+        return outcome, group_brief(group, error=str(exc))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        try:
+            with conn.transaction():
+                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                    run_id, generation, group, dry_run=False, outcome="failed", error=error))
+        except Exception:  # noqa: BLE001 — the original error is the one to surface
+            pass
+        raise
+    return "applied", group_brief(group, merge_group_id=group_id, listings_moved=sum(moved))
 
 
 def _attach_partial(exc: BaseException, result: dict[str, Any]) -> None:
@@ -1546,57 +1599,120 @@ def _step_summary(result: Mapping[str, Any], *, mode: str) -> None:
         pass
 
 
+def lane_interval(conn: Any) -> int:
+    """`app_settings.realtime_autodedup_interval_seconds` as the worker reads it: an absent or
+    unreadable row is 0 (the lane idle), anything else its integer."""
+    value = read_setting(conn, LANE_INTERVAL_SETTING)
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+class _Writer:
+    """THE lane's lease (`autodedup.rt_lease`), held by a live dispatch: one writer of
+    production merges at a time (A9). The worker's lane reconciles under it, so a live apply or
+    unapply takes it for its run and refuses while a pass holds it — and refuses outright while
+    the lane is RUNNING (its interval above 0): an unapply would be re-merged by the lane's next
+    sweep minutes later, and an apply would race it. The brake is interval 0, THEN unapply. A
+    dry run of the live stream takes the lease too, so the plan it predicts is not moved under
+    it by a pass (review B8); it needs no stopped lane."""
+
+    def __init__(self, conn: Any, live: bool, *, lease: bool | None = None,
+                 release: str | None = None) -> None:
+        self.conn = conn
+        self.live = live
+        self.lease = live if lease is None else lease
+        self.release = (release or "").strip() or None
+        self.holder = f"dispatch:{new_run_id()}"
+        self.held = False
+        self.released: dict[str, Any] | None = None
+
+    def __enter__(self) -> "_Writer":
+        if self.live:
+            interval = lane_interval(self.conn)
+            if interval > 0:
+                raise SystemExit(
+                    f"refused: app_settings.{LANE_INTERVAL_SETTING} is {interval} — the worker's "
+                    "autodedup lane is running and would re-merge (or race) what this run "
+                    f"changes. Set {LANE_INTERVAL_SETTING} to 0 on /settings first, then run "
+                    "again. Nothing was written.")
+        if not self.lease:
+            return self
+        if self.release:
+            self.released = rt_lease.release_stale(self.conn, self.release)
+        if not rt_lease.take(self.conn, self.holder, rt_lease.DISPATCH_TTL_S):
+            raise SystemExit(
+                f"refused: autodedup.rt_lease is {rt_lease.describe(self.conn)}. Set "
+                f"app_settings.{LANE_INTERVAL_SETTING} to 0, wait for the lease to clear, and "
+                "run again. Nothing was written.")
+        self.held = True
+        return self
+
+    def __exit__(self, _type: Any, exc: BaseException | None, _tb: Any) -> None:
+        if self.held:
+            rt_lease.release_after(self.conn, self.holder, exc)
+
+
 def run_apply(
     conn_factory: Callable[[], Any], args: dict[str, str], out_dir: Path
 ) -> dict[str, Any]:
     _check_args(args, APPLY_ARGS)
     generation = _generation_arg(args)
-    if is_realtime_generation(generation):
-        raise SystemExit(
-            f"generation={generation}: a real-time lane generation cannot be applied from "
-            "this lane (it is rewritten while a plan reads it)"
-        )
     dry_run = _dry_run_arg(args)
+    if generation.strip() == GENERATION and (not dry_run or _retire_arg(args)):
+        raise SystemExit(
+            f"generation={generation}: the real-time lane's generation is reconciled by the "
+            "lane itself, under its own lease (A9) — a dry run may plan it (the G3 "
+            "prediction), nothing here applies it"
+        )
     retire = _retire_arg(args)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
     conn = conn_factory()
-    retired: dict[str, Any] | None = None
     try:
-        try:
-            scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
-        except ValueError as exc:
-            raise SystemExit(f"scope: {exc}") from exc
-        plan = plan_apply(conn, generation, scope)
-        if retire:
-            retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
-                                     out_dir=out_dir)
-            if not dry_run:
-                plan = plan_apply(conn, generation, scope)
-            retired = legacy_retire.note_deferred(
-                out_dir, retired, deferred=plan.deferred,
-                planned=[g.cluster_key for g in plan.to_apply],
-                cap=plan.scope.max_clusters_per_run)
-        try:
-            result = apply_plan(conn, plan, dry_run)
-        except ApplyRefused as exc:
-            raise SystemExit(str(exc)) from exc
-        except BaseException as exc:
-            # A live run that stops mid-way (a crash, or a cancelled job's KeyboardInterrupt)
-            # has merged for real: publish what it did, then fail.
-            partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
-            if isinstance(partial, dict):
-                _publish_apply(out_dir, _with_retire(partial, retired), plan)
-            raise
+        with _Writer(conn, live=not dry_run, lease=not dry_run or generation == GENERATION,
+                     release=args.get(rt_lease.RELEASE_ARG)):
+            return _apply_run(conn, generation, dry_run, retire, override, out_dir)
     finally:
         _close(conn)
+
+
+def _apply_run(conn: Any, generation: str, dry_run: bool, retire: bool,
+               override: Mapping[str, Any], out_dir: Path) -> dict[str, Any]:
+    retired: dict[str, Any] | None = None
+    try:
+        scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
+    except ValueError as exc:
+        raise SystemExit(f"scope: {exc}") from exc
+    plan = plan_apply(conn, generation, scope)
+    if retire:
+        retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
+                                 out_dir=out_dir)
+        if not dry_run:
+            plan = plan_apply(conn, generation, scope)
+        retired = legacy_retire.note_deferred(
+            out_dir, retired, deferred=plan.deferred,
+            planned=[g.cluster_key for g in plan.to_apply],
+            cap=plan.scope.max_clusters_per_run)
+    try:
+        result = apply_plan(conn, plan, dry_run)
+    except ApplyRefused as exc:
+        raise SystemExit(str(exc)) from exc
+    except BaseException as exc:
+        # A live run that stops mid-way (a crash, or a cancelled job's KeyboardInterrupt)
+        # has merged for real: publish what it did, then fail.
+        partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
+        if isinstance(partial, dict):
+            _publish_apply(out_dir, _with_retire(partial, retired), plan)
+        raise
     return _publish_apply(out_dir, _with_retire(result, retired), plan)
 
 
 def _retire_legacy(
     conn: Any, generation: str, scope: Scope, plan: Plan, *, dry_run: bool, out_dir: Path,
 ) -> dict[str, Any]:
-    """A2 (temporary, deleted in W5): the old engine's merges in the scope undone first, in this
+    """A2 (temporary, kept until W8): the old engine's merges in the scope undone first, in this
     same dispatch, so the plan that follows reads them apart. Refused before anything moves when
     the run narrows by listing (the step reads blocks only) or when `plan`, read first, holds no
     proposed group inside the scope: a typo'd or unstored generation would re-merge nothing."""
@@ -1667,8 +1783,9 @@ def run_unapply(
         raise SystemExit("unapply needs generation=, run=, since= or until= (e.g. generation=g12)")
     conn = conn_factory()
     try:
-        result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key, run=run,
-                         since=since, until=until)
+        with _Writer(conn, live=not dry_run, release=args.get(rt_lease.RELEASE_ARG)):
+            result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key,
+                             run=run, since=since, until=until)
     except BaseException as exc:
         # A live undo that stops mid-way has undone groups for real: publish them, then fail.
         partial = getattr(exc, PARTIAL_RESULT_ATTR, None)

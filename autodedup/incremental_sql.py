@@ -32,6 +32,8 @@ Nullable parameters carry explicit casts throughout: psycopg sends no type OID f
 
 from __future__ import annotations
 
+from autodedup.indistinguishable import FEATURE_SLOTS
+
 # The lane refuses to start without its own store; unlike the progress ledger, persistence IS
 # the deliverable.
 RT_STORE_PRESENT_SQL = """
@@ -62,15 +64,6 @@ RT_IDLE_GUARD_SQL = """
 select set_config('idle_in_transaction_session_timeout', %(idle_timeout_ms)s::text, true)
 """
 
-# The SECOND kill switch, in the database rather than in the repository: an operator can stop
-# the lane without a workflow edit. Absent means "not blocked" — the repository variable is
-# what makes the lane dark by default, and this row is what stops one that is already on.
-RT_SETTING_SQL = """
-select s.value
-  from autodedup.settings s
- where s.key = %(key)s::text
-"""
-
 # ------------------------------------------------------------------ mutual exclusion
 #
 # Lease-row CAS, never pg_advisory_lock: a session lock strands over the transaction pooler.
@@ -92,6 +85,13 @@ update autodedup.rt_lease
    set expires_at = now()
  where name = %(name)s::text
    and holder = %(holder)s::text
+"""
+
+# Who holds it, for a refusal that names the holder (`autodedup/rt_lease.py`).
+RT_LEASE_READ_SQL = """
+select l.holder, l.taken_at, l.expires_at, l.expires_at > now() as live
+  from autodedup.rt_lease l
+ where l.name = %(name)s::text
 """
 
 # ------------------------------------------------------------------ the watermark feeds
@@ -584,19 +584,6 @@ RT_PHASH_POP_COUNT_SQL = """
 select count(*) as n from autodedup.phash_pop
 """
 
-# The change stamp of a listing's CONTENT, for the parity gate and for the instrument that
-# shares its definition: rule #2 appends a `listing_snapshots` row only when the content hash
-# moves, so the newest snapshot is when this row last really changed. There is no
-# `last_change_at` column on `listings` to read instead.
-RT_PARITY_CHANGE_SQL = """
-select s.listing_id           as listing_id,
-       max(s.scraped_at)      as last_change_at,
-       count(*)               as n_snapshots
-from listing_snapshots s
-where s.listing_id = any(%(ids)s::bigint[])
-group by s.listing_id
-"""
-
 # ------------------------------------------------------------------ probe postings
 #
 # One statement per PASS rather than per probe key (E74): a listing carries 17.3 index keys and
@@ -736,7 +723,7 @@ select i.listing_id                as listing_id,
 """
 
 # Arm two: a merge HELD in the band for want of photographs (E93) whose hold is over — neither
-# side is still pending inside the horizon. Nothing about such a pair has moved, so no digest
+# side is still INCOMPLETE inside the horizon (F3, E908). Nothing about such a pair has moved, so no digest
 # and no feed could ever find it again; it is asked for by reason. The horizon is evaluated by
 # the SERVER's clock, because a runner's is not the database's.
 RT_EVIDENCE_RELEASE_SQL = """
@@ -748,10 +735,10 @@ select p.listing_lo, p.listing_hi
          on fhi.generation = p.generation and fhi.listing_id = p.listing_hi
  where p.generation = %(generation)s::text
    and p.decision = %(reason)s::text
-   and not (coalesce(flo.ev_images, 0) > 0 and coalesce(flo.ev_phash, 0) = 0
+   and not (flo.ev_complete is false
             and flo.first_decided_at
                 > now() - make_interval(hours => %(horizon_hours)s::int))
-   and not (coalesce(fhi.ev_images, 0) > 0 and coalesce(fhi.ev_phash, 0) = 0
+   and not (fhi.ev_complete is false
             and fhi.first_decided_at
                 > now() - make_interval(hours => %(horizon_hours)s::int))
  order by p.listing_lo, p.listing_hi
@@ -787,9 +774,16 @@ select count(*)
 # pair under a `context_rule:` reason, so the reason string is lossy, and E33 orders a
 # component's edges certificate-first — a cluster that read its edges back without the
 # certificate would union them in a different order than the cohort pass did.
-_PAIR_COLUMNS = """p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score,
+#
+# The last column is the three feature slots the D43 cluster relation reads (F2, E909), cut out
+# of the stored vector: the lane clusters with the relation the batch pass clusters with, and
+# a slot the vector does not carry was absent, which the relation reads exactly as "no slot".
+_SLOTS = ("jsonb_strip_nulls(jsonb_build_object("
+          + ", ".join(f"'{name}', p.features -> '{name}'" for name in FEATURE_SLOTS)
+          + "))")
+_PAIR_COLUMNS = f"""p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score,
        p.zone, p.decision, p.guard_veto, p.families, p.certificate, p.evidence, p.context,
-       p.fp_lo, p.fp_hi"""
+       p.fp_lo, p.fp_hi, {_SLOTS}"""
 
 RT_PAIRS_TOUCHING_SQL = f"""
 select {_PAIR_COLUMNS}
@@ -975,6 +969,23 @@ select c.generation, c.digest, c.n_listings, c.payload, c.artifact_url, c.settin
  where c.generation = %(generation)s::text
 """
 
+# A10 (E912): the calibration is cut over what the scope snapshot holds, and the pHash
+# population over those listings' hashes — the export's own statement (`COHORT_PHASH_POP_SQL`),
+# now run by the lane rather than by a GitHub job whose artifact aged out in 14 days.
+RT_CUT_SCOPE_IDS_SQL = """
+select distinct s.listing_id
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+ order by s.listing_id
+"""
+
+RT_CUT_HASHES_SQL = """
+select distinct i.phash
+  from public.images i
+ where i.listing_id = any(%(ids)s::bigint[])
+   and i.phash is not null
+"""
+
 RT_CALIBRATION_WRITE_SQL = """
 insert into autodedup.rt_calibration (generation, digest, n_listings, payload, artifact_url,
                                       settings, model_version, built_at)
@@ -1005,10 +1016,26 @@ select listing_lo, listing_hi
   from autodedup.must_not_link
 """
 
+# Decision 8 / E910: the operator's `same` rulings are MUST-LINKS. Per unordered pair the NEWEST
+# pair ruling stands (a pair ruled same and later different is a negative, and the reverse a
+# must-link); only a pair whose newest word is `same` is read. Browse merges reach this table as
+# `same` rulings (migrations 559/560/564), so one read covers both of the operator's hands.
+RT_MUST_LINK_SQL = """
+select v.listing_lo, v.listing_hi
+  from (select distinct on (x.listing_lo, x.listing_hi)
+               x.listing_lo, x.listing_hi, x.verdict
+          from autodedup.verdicts x
+         where x.kind = 'pair'
+           and x.listing_lo is not null
+           and x.listing_hi is not null
+         order by x.listing_lo, x.listing_hi, x.decided_at desc, x.id desc) v
+ where v.verdict = 'same'
+"""
+
 
 # ------------------------------------------------------------------ the clean reset (E97)
 #
-# `rt_seed reseed=true fresh=true`: the twelve statements that empty ONE generation and
+# `rt_seed fresh=true`: the twelve statements that empty ONE generation and
 # nothing else, run inside the seed's own transaction so a refusal anywhere after them puts
 # every row back. Each is a `delete ... returning` wrapped in a count, because the summary has
 # to say what it removed per table — a reset whose receipt is "ok" is the reset that left

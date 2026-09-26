@@ -21,6 +21,7 @@ from api import dependencies as deps
 from api import main as api_main
 from autodedup import apply_sql as asql
 from autodedup import ui_sql as usql
+from autodedup.incremental import SEED_VERSION, bootstrap_key, seed_version_key
 from toolkit import property_identity as pi
 
 AT = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
@@ -69,6 +70,8 @@ class _Conn:
         # 103 came from 13 by the merge that retired 13 into 10: its split takes it back there.
         self.moves = [(103, 5, "grp", 10, 13, "operator", AT)]
         self.status = {13: ("merged_away", 10)}
+        # `autodedup.settings` rows of the live stream (E914); empty = `rt` is not live yet.
+        self.live: dict[str, Any] = {}
 
     def cursor(self) -> "_Conn":
         return self
@@ -83,6 +86,8 @@ class _Conn:
         self.calls.append((sql, params))
         if "to_regclass" in sql:
             self.rows = [(self.ready,)]
+        elif sql == usql.LIVE_STREAM_SQL:
+            self.rows = [(k, v) for k, v in self.live.items() if k in params["keys"]]
         elif sql == usql.PROPOSED_SPLIT_ADVERTS_SQL:
             self.rows = [r for r in ADVERTS if params["property_id"] in (None, r[0])]
         elif sql == pi._LIVE_MOVES_SQL:
@@ -196,3 +201,51 @@ def test_an_unmigrated_store_renders_and_unknown_filters_are_refused(client, con
     assert client.get("/autodedup/proposed-splits?block=1").status_code == 400
     conn.ready = False
     assert client.get("/autodedup/proposed-splits").json() == {"data": None, "store_ready": False}
+
+
+def test_the_live_stream_lists_an_unstored_pair_as_not_compared(client, conn):
+    """REVIEW (minor 9). The live stream keeps only the pairs worth keeping, so two adverts it
+    read and holds apart with no stored row are listed `not compared`: no row cannot tell a pair
+    scored below the store's floor from one never retrieved, so it is never `below band`, and
+    the page never takes an advert away on it. A `same` ruling still wins (decision 8)."""
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    one = client.get("/autodedup/proposed-splits/50?generation=rt").json()["data"]
+    assert one["generation"] == "rt"
+    assert one["splits"] == [
+        {"listing_lo": 501, "listing_hi": 502, "reason_source": "not_compared",
+         "reason": "not compared", "ruling": None},
+        {"listing_lo": 502, "listing_hi": 503, "reason_source": "not_compared",
+         "reason": "not compared", "ruling": None}]
+    assert all(s["reason"] != "below band" for s in one["splits"])
+
+
+def test_an_unnamed_proposals_page_reads_the_newest_batch_pass_until_rt_is_live(client, conn):
+    """REVIEW BLOCKER 1: the 09-21 `rt` (pre-F2) must not become the page's default mid-trial.
+    Without the W5 seed marker and a finished build, the default is the newest batch pass;
+    with both, it is the live stream."""
+    assert client.get("/autodedup/proposed-splits").json()["data"]["generation"] == "g12"
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): True}
+    assert client.get("/autodedup/proposed-splits").json()["data"]["generation"] == "g12"
+    conn.live = {bootstrap_key(): False}
+    assert client.get("/autodedup/proposed-splits").json()["data"]["generation"] == "g12"
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    assert client.get("/autodedup/proposed-splits").json()["data"]["generation"] == "rt"
+
+
+@pytest.mark.parametrize("live", [
+    {},                                                         # the 09-21 rt, pre-W5
+    {seed_version_key(): SEED_VERSION, bootstrap_key(): True},  # a W5 seed, still building
+])
+def test_a_named_live_stream_that_is_not_live_proposes_nothing_and_says_why(client, conn, live):
+    """REVIEW B1: while `rt` builds (or before a W5 seed built it) its groups are a half-read or
+    stale shadow; the proposals route returns nothing, with the reason, rather than offering a
+    batch split of properties the engine never proposed."""
+    conn.live = dict(live)
+    data = client.get("/autodedup/proposed-splits?generation=rt").json()["data"]
+    assert (data["items"], data["total"]) == ([], 0)
+    assert "rt_bootstrap:rt" in data["withheld"]
+    assert not any(sql == usql.PROPOSED_SPLIT_ADVERTS_SQL for sql, _ in conn.calls)
+    one = client.get("/autodedup/proposed-splits/50?generation=rt")
+    assert one.status_code == 409 and "not the live stream" in one.json()["detail"]
+    batch = client.get("/autodedup/proposed-splits?generation=g12").json()["data"]
+    assert batch["withheld"] is None and batch["total"] == 2

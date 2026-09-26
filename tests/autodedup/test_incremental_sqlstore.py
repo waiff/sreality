@@ -34,7 +34,6 @@ from autodedup.incremental_lane import (
     LEASE_TTL_S,
     SqlStore,
     SqlWork,
-    db_enabled,
 )
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
 from autodedup.hazard_context import ContextStamp
@@ -532,18 +531,16 @@ def test_a_pass_is_bounded_in_statements() -> None:
     assert store.statements < 120, store.statements
 
 
-def test_the_database_kill_switch_stops_a_lane_that_is_already_on() -> None:
-    db = FakePg()
-    assert db_enabled(db) is True           # absent means not blocked
-    db.settings["realtime_enabled"] = False
-    assert db_enabled(db) is False
-    db.settings["realtime_enabled"] = {"enabled": True}
-    assert db_enabled(db) is True
+def test_the_lease_outlives_the_longest_pass() -> None:
+    """A lease that expires while its holder still runs invites a second writer: the pass's own
+    deadline, one statement past it and the re-cut reserve all fit inside it (E913)."""
+    from autodedup.incremental_lane import (
+        PASS_DEADLINE_S,
+        RECUT_RESERVE_S,
+        STATEMENT_TIMEOUT_MS,
+    )
 
-
-def test_the_lease_outlives_the_job_timeout() -> None:
-    """A lease that expires while its holder still runs invites a second writer."""
-    assert LEASE_TTL_S > 25 * 60
+    assert LEASE_TTL_S > PASS_DEADLINE_S + STATEMENT_TIMEOUT_MS / 1000 + RECUT_RESERVE_S
 
 
 def test_the_store_serves_a_fingerprint_row_it_has_not_flushed_yet() -> None:
@@ -559,47 +556,34 @@ def test_the_store_serves_a_fingerprint_row_it_has_not_flushed_yet() -> None:
 # ------------------------------------------------------------- E76: seeding a generation
 
 
-def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, monkeypatch):
-    """Without the seed the lane has no calibration at all and would walk history from id 0."""
-    from autodedup.incremental_lane import ENV_FLAG, CURSOR_REVIVE, run_rt_seed
-    from tests.autodedup.test_dataset import RECORDS, _write
+def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path) -> None:
+    """Without the seed the lane has no calibration at all and would walk history from id 0.
+    The calibration is cut from `public` (A10) over the listings the scope's blocks hold."""
+    from autodedup.incremental_lane import CURSOR_REVIVE, run_rt_seed
 
-    artifact = _write(tmp_path / "cohort.jsonl.gz", RECORDS)
     conn = FakePg()
     # The default scope holds a QUARTER, and the entrant sweep reaches one only through its
     # parent obec — so the seed proves the register can place it (W9d-3), live: 490245 -> 554782.
     conn.admin_parents[490245] = 554782
-    conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
+    _seed_public(conn, 9_001)
     conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})
-    # This fixture's `public` holds no cohort listing at all, so the vacuity floors W9h put
-    # on the gate (E94) would refuse the seed. They are switched off BY NAME here — an
-    # operator settings row, the only way any rail on this lane moves — because what is under
-    # test is the seed's mechanics; the gate itself is proved in `test_rt_gate.py` and
-    # `test_shipped_w9h.py`.
-    conn.settings["rt_parity_min_checked"] = 0
-    conn.settings["rt_parity_min_checked_share"] = 0
-    # DARK: seeding is the step BEFORE the switch, so it never consults the variable (W9e/R1).
-    monkeypatch.delenv(ENV_FLAG, raising=False)
+    conn.phash_pop.clear()
 
-    out = run_rt_seed(lambda: conn, {"artifact": str(artifact), "backfill": "true", "settings": "default",
-         "model": "prior"}, tmp_path)
+    out = run_rt_seed(lambda: conn, {"settings": "default", "model": "prior"}, tmp_path)
 
-    assert out["calibration_digest"] and out["calibration_n_listings"] >= 1
-    assert out["backfilled"] >= 1
+    assert out["calibration"]["digest"] and out["calibration"]["n_listings"] == 1
+    assert conn.phash_pop == {7_919: 1}, "measured over public.images, not copied"
     # The cursors start at the corpus's maxima, not at zero.
     assert conn.cursors[CURSOR_NEW]["last_listing_id"] == 9_001
     assert conn.cursors[CURSOR_CHANGED]["last_snapshot_id"] == 4_242
     assert conn.cursors[CURSOR_REVIVE]["last_listing_id"] == 0
-    # The calibration is readable back as the one the lane would run under.
     stored = conn.calibration[GEN]
-    assert stored["digest"] == out["calibration_digest"]
-    assert conn.rt_fp and conn.fp_key
-    # And it is idempotent: a second seed of a seeded generation is refused, because a re-seed
-    # re-cuts the calibration every stored decision was taken under (W9e/R1).
+    assert stored["digest"] == out["calibration"]["digest"]
+    assert not conn.rt_fp, "the build is the passes' — every listing arrives (E98)"
+    # A second seed of a seeded generation is a rebuild, said by name (E97).
     with pytest.raises(SystemExit) as raised:
-        run_rt_seed(lambda: conn, {"artifact": str(artifact), "settings": "default",
-                                   "model": "prior"}, tmp_path)
-    assert "reseed" in str(raised.value)
+        run_rt_seed(lambda: conn, {"settings": "default", "model": "prior"}, tmp_path)
+    assert "fresh=true" in str(raised.value)
 
 
 # --------------------------------------------- E77: the lane's facts ARE the export's facts

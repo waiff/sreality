@@ -27,6 +27,8 @@ from api.routes import autodedup as routes
 from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
+from autodedup.incremental import GENERATION as LIVE
+from autodedup.incremental import SEED_VERSION, bootstrap_key, seed_version_key
 
 
 # Every W5 statement the routes may execute, mapped to the canned-row bucket it reads.
@@ -136,6 +138,10 @@ class _Cursor:
             raise self._conn.raises[sql]
         if "to_regclass" in sql:
             self._rows = [(self._conn.ready,)]
+        elif sql == usql.LIVE_STREAM_SQL:
+            # The live stream's two rows in `autodedup.settings` (E914): absent = not live.
+            keys = (params or {}).get("keys") or []
+            self._rows = [(k, v) for k, v in self._conn.live_settings.items() if k in keys]
         elif sql == usql.LATEST_GENERATION_SQL:
             # WHICH pass a view opens on is now a read, not a constant — so the fake answers
             # it like the store does, and a store with no clustering yet answers nothing.
@@ -196,6 +202,8 @@ class _FakeConn:
         # The newest generation `autodedup.clusters` holds. `g3` and not `g1`: the queue that
         # opened on the first pass forever is the defect these routes were fixed for.
         self.latest_generation: str | None = "g3"
+        # `autodedup.settings` as the lane writes it; empty = `rt` is not the live stream.
+        self.live_settings: dict[str, Any] = {}
         self.iteration_rows: list[tuple[Any, ...]] = []
         self.wave_rows: list[tuple[Any, ...]] = []
         self.canned: dict[str, list[tuple[Any, ...]]] = {}
@@ -3909,12 +3917,60 @@ def test_the_progress_strip_counts_only_a_ruling_that_applies(client, conn):
         assert "m.generation = %(generation)s::text" in flat
 
 
-def test_a_real_time_generation_is_never_the_default_pass() -> None:
+def test_a_real_time_generation_is_never_the_default_pass_until_it_is_live() -> None:
     """`rt` is rewritten every ten minutes, so recency alone would make it the default and the
-    operator's links into a batch generation would 404 (2026-09-20)."""
+    operator's links into a batch generation would 404 (2026-09-20). It becomes the default
+    only as THE live stream (E914) — the seed marker, read separately."""
     from autodedup import ui_sql
 
     for statement in (ui_sql.LATEST_GENERATION_SQL, ui_sql.GENERATION_COUNTS_SQL):
         order_by = statement.split("ORDER BY", 1)[1]
         assert "left(c.generation, 2) = 'rt'" in order_by
         assert order_by.index("'rt'") < order_by.index("last_changed_at")
+
+
+# ------------------------------------------------------------------ W5: the live stream default
+
+
+def _live(conn: "_FakeConn", *, version: Any = SEED_VERSION, bootstrap: Any = False) -> None:
+    conn.live_settings = {seed_version_key(): version, bootstrap_key(): bootstrap}
+
+
+@pytest.mark.parametrize("settings", [
+    {},                                                    # the 09-21 `rt`: no marker at all
+    {"rt_bootstrap:rt": False},                            # built, but by a pre-W5 seed
+    {"rt_seed_version:rt": "w4", "rt_bootstrap:rt": False},  # an older seed design
+    {"rt_seed_version:rt": SEED_VERSION, "rt_bootstrap:rt": True},  # W5 seed, still building
+])
+def test_the_default_stays_the_newest_batch_pass_without_a_live_stream(client, conn, settings):
+    """REVIEW BLOCKER 1. Production `rt` was seeded 09-21 with pre-F2 settings: opening every
+    review page on it mid-trial would show ~749 live properties as split proposals the engine
+    never made. Without the W5 seed marker AND a finished build, an unnamed view is the newest
+    batch pass — the queue, the picker's "nejnovější" and the proposals page alike."""
+    conn.live_settings = dict(settings)
+    body = client.get("/autodedup/groups").json()
+    assert body["data"]["generation"] == "g3"
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g3"
+    conn.canned = {"generations": [_generation("g3"), _generation("rt", n_clusters=4)]}
+    assert client.get("/autodedup/generations").json()["data"]["latest"] == "g3"
+
+
+def test_the_live_stream_is_the_default_once_seeded_and_built(client, conn):
+    """E914: once `rt_seed` of THIS design built it and the build ended, an unnamed view is the
+    live stream, and "nejnovější" says so; a named batch pass still reads as asked."""
+    _live(conn)
+    body = client.get("/autodedup/groups").json()
+    assert body["data"]["generation"] == LIVE
+    assert all(sql != usql.LATEST_GENERATION_SQL for sql, _ in conn.calls)
+    conn.canned = {"generations": [_generation("g3"), _generation("rt", n_clusters=4)]}
+    assert client.get("/autodedup/generations").json()["data"]["latest"] == LIVE
+    client.get("/autodedup/groups", params={"generation": "g12"})
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g12"
+
+
+def test_the_live_stream_check_reads_the_two_rows_the_lane_writes(client, conn):
+    _live(conn)
+    client.get("/autodedup/residual")
+    (params,) = [p for sql, p in conn.calls if sql == usql.LIVE_STREAM_SQL]
+    assert sorted(params["keys"]) == sorted([f"rt_seed_version:{LIVE}", f"rt_bootstrap:{LIVE}"])
+    assert _last_call(conn, usql.RESIDUAL_SQL)["generation"] == LIVE

@@ -95,13 +95,19 @@ select n.listing_lo, n.listing_hi, n.source
    and n.listing_hi = any(%(listing_ids)s::bigint[])
 """
 
+# Per pair only the NEWEST ruling stands (the lane's must-link read, RT_MUST_LINK_SQL, is the
+# same rule): a pair ruled different and later ruled same is no longer a negative, and one ruled
+# same and later different is one. `negatives` names the verdicts wanted, of the newest only.
 PAIR_VERDICTS_SQL = """
 select v.listing_lo, v.listing_hi, v.verdict
-  from autodedup.verdicts v
- where v.kind = 'pair'
-   and v.verdict = any(%(negatives)s::text[])
-   and v.listing_lo = any(%(listing_ids)s::bigint[])
-   and v.listing_hi = any(%(listing_ids)s::bigint[])
+  from (select distinct on (x.listing_lo, x.listing_hi)
+               x.listing_lo, x.listing_hi, x.verdict
+          from autodedup.verdicts x
+         where x.kind = 'pair'
+           and x.listing_lo = any(%(listing_ids)s::bigint[])
+           and x.listing_hi = any(%(listing_ids)s::bigint[])
+         order by x.listing_lo, x.listing_hi, x.decided_at desc, x.id desc) v
+ where v.verdict = any(%(negatives)s::text[])
 """
 
 # A group ruling is about a SET of listings (E58), so it is fetched by the listings it names,
@@ -123,16 +129,19 @@ select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_by, v.dec
 """
 
 # The engine's own history that can refuse a group: a live merge of one of these properties
-# (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group.
+# (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group's
+# MEMBER SET in this generation (a real-time generation's keys move with its groups, A9).
 # `undone_by` tells the two restorers apart: only `unapply`'s own stamp is the engine's undo.
 LEDGER_HISTORY_SQL = """
 select a.generation, a.cluster_key, a.retired_property_id, a.outcome,
-       a.undone_at is not null as undone, a.undone_by
+       a.undone_at is not null as undone, a.undone_by, a.member_ids
   from autodedup.applied_merges a
  where not a.dry_run
-   and a.outcome in ('applied', 'refused')
-   and (a.generation = %(generation)s::text
-        or a.retired_property_id = any(%(property_ids)s::bigint[]))
+   and ((a.outcome = 'refused'
+         and a.generation = %(generation)s::text
+         and a.member_ids && %(listing_ids)s::bigint[])
+        or (a.outcome = 'applied'
+            and a.retired_property_id = any(%(property_ids)s::bigint[])))
 """
 
 # Every engine merge whose group named one of these listings, undone or not. A LIVE one is the
@@ -234,4 +243,91 @@ update autodedup.applied_merges
    and not dry_run
    and outcome = 'applied'
    and undone_at is null
+"""
+
+# ------------------------------------------------------------------ A9: the lane's reconcile
+#
+# The real-time lane reconciles the groups a pass re-clustered plus a slice swept past its own
+# `rt_reconcile` cursor, under the lane's lease (autodedup/reconcile.py). The plan and the
+# merge are the statements above; these are the reads that pick the groups and the one that
+# keeps a waiting group from filing the same skip every pass.
+
+RC_SWEEP_SQL = """
+select c.cluster_key
+  from autodedup.clusters c
+ where c.generation = %(generation)s::text
+   and c.cluster_key > %(after)s::bigint
+ order by c.cluster_key
+ limit %(limit)s
+"""
+
+RC_CLUSTERS_SQL = """
+select c.cluster_key, c.size, c.status, c.min_edge_score, c.model_version, c.feature_version
+  from autodedup.clusters c
+ where c.generation = %(generation)s::text
+   and c.cluster_key = any(%(keys)s::bigint[])
+ order by c.cluster_key
+"""
+
+# MEMBERS_SQL for the groups the reconcile picked, in the same column order (`apply.Member`).
+RC_MEMBERS_SQL = """
+select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main,
+       ll.obec_kod, ll.cast_obce_kod
+  from autodedup.cluster_members m
+  left join public.listings l on l.id = m.listing_id
+  left join public.listing_location ll on ll.listing_id = l.id
+ where m.generation = %(generation)s::text
+   and m.cluster_key = any(%(keys)s::bigint[])
+ order by m.cluster_key, m.listing_id
+"""
+
+# Which group of the generation holds each carried advert (E37 at property grain): the
+# reconcile plans a few groups, the refusal reads the whole generation's membership.
+RC_GROUP_OF_SQL = """
+select m.listing_id, m.cluster_key
+  from autodedup.cluster_members m
+ where m.generation = %(generation)s::text
+   and m.listing_id = any(%(listing_ids)s::bigint[])
+"""
+
+# A group qualifies only when its adverts' blocks are FULLY READ: every advert the scope
+# snapshot holds there has a fingerprint (the build reached it). A block the lane has not read
+# yet may hold a member the group is still missing.
+RC_UNREAD_BLOCKS_SQL = """
+select distinct s.block_key
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and not exists (select 1
+                     from autodedup.rt_fp f
+                    where f.generation = s.generation
+                      and f.listing_id = s.listing_id)
+"""
+
+RC_MEMBER_BLOCKS_SQL = """
+select s.listing_id, s.block_key
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.listing_id = any(%(listing_ids)s::bigint[])
+"""
+
+# The newest `depth` outcomes per member set, ONE per pass (a group with two retired properties
+# files two rows in one pass, under one run id): the newest is what a repeated skip or refusal
+# is compared with, so the ledger records CHANGES rather than one row a minute (A9); the run of
+# failures before it is what quarantines a group the lane cannot merge.
+RC_OUTCOME_HISTORY_SQL = """
+select h.member_ids, h.outcome, h.error, h.at
+  from (select e.member_ids, e.outcome, e.error, e.at,
+               row_number() over (partition by e.member_ids order by e.last_id desc) as rn
+          from (select a.member_ids, a.run_id,
+                       max(a.id)                                    as last_id,
+                       max(a.applied_at)                            as at,
+                       (array_agg(a.outcome order by a.id desc))[1] as outcome,
+                       (array_agg(a.error order by a.id desc))[1]   as error
+                  from autodedup.applied_merges a
+                 where a.generation = %(generation)s::text
+                   and not a.dry_run
+                   and a.member_ids && %(listing_ids)s::bigint[]
+                 group by a.member_ids, a.run_id) e) h
+ where h.rn <= %(depth)s::integer
+ order by h.member_ids, h.rn
 """

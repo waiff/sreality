@@ -3,11 +3,10 @@
 Two defects of DESIGN, not of mechanism, and the replay-equivalence proof was structurally
 blind to both: it starts from an EMPTY store and feeds every listing as an arrival.
 
-E97 — a backfilled seed writes fingerprints and postings and NOT ONE PAIR, and `reseed=true`
-      deletes nothing, so the 15,923 pairs of the defective 2026-09-20 pass survived the
-      re-seed under a scorer no longer in force. `fresh=true` is the clean reset, and it is
-      THIS generation's rows or nothing.
-E98 — with `backfill=false` every in-scope listing is an arrival, and the entrant feed delivers
+E97 — a re-seed that deleted nothing let the 15,923 pairs of the defective 2026-09-20 pass
+      survive under a scorer no longer in force. `fresh=true` is the clean reset, and it is
+      THIS generation's rows or nothing; a seeded generation is rebuilt only with it.
+E98 — every in-scope listing is an arrival (the seed backfills nothing), and the entrant feed delivers
       a seventh of a claim a pass behind a 1 h / 6 h cadence. The bootstrap phase raises the
       entrant claim to the whole slice and walks every never-walked block in one pass, under
       the same rolling-day cap; the claim is bounded by a TIME budget as well as by counts;
@@ -26,15 +25,14 @@ import pytest
 from autodedup.incremental_lane import (
     CURSOR_ENTER,
     CURSOR_NEW,
-    ENV_FLAG,
     LANE_NAME,
     PASS_BUDGET_S,
+    PASS_DEADLINE_S,
     PASS_RATE_PER_S,
     RESET_CURSORS,
     SEED_LEASE_TTL_S,
     SqlWork,
     bootstrap_setting_key,
-    parity_baseline_key,
     pass_rate_key,
     reset_generation,
     run_rt_seed,
@@ -42,7 +40,7 @@ from autodedup.incremental_lane import (
 )
 from autodedup.incremental_scope import Scope, ScopeBlock
 from tests.autodedup.fake_pg import FakePg
-from tests.autodedup.test_incremental import _dataset
+from tests.autodedup.lane_world import seed as seed_public
 
 GEN = "rt"
 OTHER = "g6"
@@ -147,59 +145,49 @@ def test_the_generation_free_tables_survive_the_reset() -> None:
     assert db.calibration[GEN]["digest"] == "d", "the seed rewrites this row, the reset does not"
 
 
-def test_fresh_without_reseed_is_refused(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = _populated(FakePg())
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    with pytest.raises(SystemExit, match="only valid with reseed=true"):
-        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true", **SCORER},
-                    tmp_path)
+def _with_public(db: FakePg) -> FakePg:
+    """`public` rows inside the scope, so the seed has something to cut a calibration over."""
+    db.admin_parents[490245] = 554782
+    seed_public(db)
+    return db
+
+
+def test_a_seeded_generation_is_rebuilt_only_with_fresh(tmp_path) -> None:
+    db = _with_public(_populated(FakePg()))
+    with pytest.raises(SystemExit, match="fresh=true"):
+        run_rt_seed(lambda: db, dict(SCORER), tmp_path)
     assert (GEN, 11, 12) in db.pairs, "a refused seed writes nothing"
 
 
-def test_fresh_refuses_a_generation_this_lane_never_seeded(tmp_path, monkeypatch) -> None:
-    """The reset deletes by generation NAME. A batch generation (g4..g7) carries no real-time
-    calibration, so `generation=g7 reseed=true fresh=true` would otherwise empty the pass the
-    operator reviewed."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = _populated(FakePg())
-    db.calibration.pop(OTHER, None)  # a BATCH generation: pairs and clusters, no calibration
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    with pytest.raises(SystemExit, match="never seeded by this lane"):
-        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "generation": OTHER,
-                                 "fresh": "true", "reseed": "true", **SCORER}, tmp_path)
-    assert [key for key in db.pairs if key[0] == OTHER], "a refused seed deletes nothing"
+def test_the_seed_resets_the_lanes_own_generation_only(tmp_path) -> None:
+    """The reset deletes by generation NAME, so the seed takes none: it is the lane's one
+    stream, `rt`, and a batch generation can never be emptied by it."""
+    db = _with_public(_populated(FakePg()))
+    with pytest.raises(SystemExit, match="unknown arg"):
+        run_rt_seed(lambda: db, {"generation": OTHER, "fresh": "true", **SCORER}, tmp_path)
+    run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
+    assert [key for key in db.pairs if key[0] == OTHER], "another generation is untouched"
 
 
-def test_a_fresh_seed_reports_what_it_removed(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = _populated(FakePg())
-    db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    out = run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
-                                   "reseed": "true", **SCORER}, tmp_path)
+def test_a_fresh_seed_reports_what_it_removed(tmp_path) -> None:
+    db = _with_public(_populated(FakePg()))
+    out = run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
 
     assert out["fresh"] is True
     assert out["reset"]["pairs"] == 1 and out["reset"]["clusters"] == 1
     assert not [key for key in db.pairs if key[0] == GEN]
-    assert db.calibration[GEN]["digest"], "the seed re-cuts the calibration after the reset"
+    assert db.calibration[GEN]["digest"] != "d", "the seed re-cuts the calibration"
     assert db.cursors, "and restarts the cursors it just deleted"
 
 
-def test_a_seed_that_refuses_after_the_reset_puts_every_row_back(tmp_path, monkeypatch) -> None:
-    """The reset runs INSIDE the seed's transaction. A parity baseline that cannot clear the
-    floors refuses the seed — and a generation emptied by a seed that then refused would be a
-    state with no recovery but another export."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
+def test_a_seed_that_refuses_after_the_reset_puts_every_row_back(tmp_path) -> None:
+    """The reset runs INSIDE the seed's transaction: a scope that holds nothing to cut a
+    calibration over refuses the seed, and a generation emptied by a seed that then refused
+    would be a state with no recovery."""
     db = _populated(FakePg())
     db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 5  # nothing to compare: the seed must refuse
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    with pytest.raises(SystemExit):
-        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
-                                 "reseed": "true", **SCORER}, tmp_path)
+    with pytest.raises(SystemExit, match="holds no listing"):
+        run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
 
     assert (GEN, 11, 12) in db.pairs
     # The lease row is the seed's own by now (it took the expired one), and it went back free.
@@ -221,49 +209,56 @@ def test_the_reset_keeps_the_seeds_own_lease() -> None:
     assert db.lease[LANE_NAME]["holder"] == SEED_HOLDER
 
 
-def test_a_seed_refuses_while_a_pass_holds_the_lease(tmp_path, monkeypatch) -> None:
-    """With two callers (the workflow and the worker's `autodedup` lane) the repository
-    variable no longer stops every pass. A pass mid-transaction when a fresh seed's reset ran
-    would land old-scorer rows in the generation the seed just emptied (E97), so the seed takes
-    the lane's own lease and refuses, having written nothing, while a pass holds it."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = _populated(FakePg())
-    db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
+def test_a_seed_refuses_while_a_pass_holds_the_lease(tmp_path) -> None:
+    """A pass mid-transaction when a fresh seed's reset ran would land old-scorer rows in the
+    generation the seed just emptied (E97), so the seed takes the lane's own lease and refuses,
+    having written nothing, while a pass holds it."""
+    db = _with_public(_populated(FakePg()))
     held = {"holder": "worker:1:1", "expires_at": db.now + timedelta(minutes=10)}
     db.lease[LANE_NAME] = dict(held)
     cursors = {k: dict(v) for k, v in db.cursors.items()}
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
 
-    with pytest.raises(SystemExit, match="holds autodedup.rt_lease"):
-        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
-                                 "reseed": "true", **SCORER}, tmp_path)
+    with pytest.raises(SystemExit, match="rt_lease is held by 'worker:1:1'") as raised:
+        run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
 
+    assert "release_lease=worker:1:1" in str(raised.value), "it names the way out"
     assert (GEN, 11, 12) in db.pairs and db.calibration[GEN]["digest"] == "d"
     assert db.cursors == cursors
     assert db.lease[LANE_NAME] == held, "the pass keeps its lease"
 
 
+def test_a_seed_may_end_the_lease_a_dead_holder_left_and_only_that_one(tmp_path) -> None:
+    """Review A11/B13: a killed dispatch holds the lease for its whole TTL (5 h). The operator
+    names the holder the refusal printed; a holder that is not the one on record is refused
+    and nothing moves."""
+    db = _with_public(_populated(FakePg()))
+    db.lease[LANE_NAME] = {"holder": "dispatch:gh-1", "expires_at": db.now + timedelta(hours=4)}
+
+    with pytest.raises(SystemExit, match="not that holder's"):
+        run_rt_seed(lambda: db, {"fresh": "true", "release_lease": "dispatch:gh-2", **SCORER},
+                    tmp_path)
+    assert db.lease[LANE_NAME]["holder"] == "dispatch:gh-1"
+    assert db.calibration[GEN]["digest"] == "d"
+
+    out = run_rt_seed(lambda: db, {"fresh": "true", "release_lease": "dispatch:gh-1", **SCORER},
+                      tmp_path)
+    assert out["lease_released"]["released"] == "dispatch:gh-1"
+    assert db.lease[LANE_NAME]["expires_at"] <= db.now, "the seed freed its own lease after"
+
+
 def test_a_fresh_seed_holds_the_lease_through_its_transaction(tmp_path, monkeypatch) -> None:
     from autodedup import incremental_lane
 
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = _populated(FakePg())
-    db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
+    db = _with_public(_populated(FakePg()))
     inside: list[dict[str, Any]] = []
-    original = incremental_lane.write_population
+    original = incremental_lane.cut_calibration
 
-    def spy(conn: Any, dataset: Any) -> Any:
+    def spy(conn: Any, *args: Any, **kwargs: Any) -> Any:
         inside.append(dict(conn.lease[LANE_NAME]))
-        return original(conn, dataset)
+        return original(conn, *args, **kwargs)
 
-    monkeypatch.setattr(incremental_lane, "write_population", spy)
-    out = run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
-                                   "reseed": "true", **SCORER}, tmp_path)
+    monkeypatch.setattr(incremental_lane, "cut_calibration", spy)
+    out = run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
 
     assert out["reset"]["rt_lease"] == 0, "the reset kept the seed's own lease"
     assert inside and inside[0]["holder"].startswith("rt_seed:")
@@ -414,51 +409,23 @@ def test_a_measured_rate_lets_the_count_bind_again() -> None:
 
 
 def test_the_shipped_budget_and_rate_are_the_conservative_ones() -> None:
-    """A default read upward would be a pass that dies on the runner's timeout having written
-    nothing. 900 s of a 1,500 s job, at the only live rate this program has measured."""
-    assert PASS_BUDGET_S == 900.0
+    """A default read upward would be a pass that dies at its deadline having written nothing:
+    half the pass's own deadline (E913), at the only rate measured before any was recorded."""
+    assert PASS_BUDGET_S == PASS_DEADLINE_S / 2 == 525.0
     assert PASS_RATE_PER_S == pytest.approx(0.1)
-    assert int(PASS_BUDGET_S * PASS_RATE_PER_S) == 90
+    assert int(PASS_BUDGET_S * PASS_RATE_PER_S) == 52
 
 
 # ------------------------------------------------------------------ the seed writes the phase
 
 
-def test_the_seed_persists_the_phase_as_data(tmp_path, monkeypatch) -> None:
-    """The passes that do the building are the `*/10` schedule's and none of them carries an
-    argument, so the phase has to be a row."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = FakePg()
-    db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    out = run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "rt_bootstrap": "true",
-                                   **SCORER}, tmp_path)
+def test_the_seed_persists_the_phase_as_data(tmp_path) -> None:
+    """The passes that do the building carry no argument, so the phase has to be a row — and
+    every seed opens it: the build is the arrival path, never a backfill (E98)."""
+    db = _with_public(FakePg())
+    db.settings[bootstrap_setting_key(GEN)] = False
+    out = run_rt_seed(lambda: db, dict(SCORER), tmp_path)
 
     assert out["bootstrap"] is True
     assert db.settings[bootstrap_setting_key(GEN)] is True
-    assert out["backfilled"] == 0, "the phase builds through the arrival path, not a backfill"
-
-
-def test_a_seed_without_the_phase_writes_the_row_false(tmp_path, monkeypatch) -> None:
-    """A re-seed must never leave a stale phase on: the row is written on EVERY seed."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = FakePg()
-    db.admin_parents[490245] = 554782
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
-    db.settings[bootstrap_setting_key(GEN)] = True
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", **SCORER}, tmp_path)
-
-    assert db.settings[bootstrap_setting_key(GEN)] is False
-
-
-def test_the_phase_and_a_backfill_are_refused_together(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    db = FakePg()
-    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    with pytest.raises(SystemExit, match="backfill=false"):
-        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "rt_bootstrap": "true",
-                                 "backfill": "true", **SCORER}, tmp_path)
+    assert not db.rt_fp, "the phase builds through the arrival path, not a backfill"

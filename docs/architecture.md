@@ -1176,7 +1176,9 @@ renumber.** Navigate by area:
     guard, and `toolkit/property_identity.py` lost its candidate-table stamps.
     **Consequences to hold in mind.** Nothing auto-merges any more, so cross-portal duplicates
     accumulate in Browse until the new engine ships — that build-up was accepted explicitly
-    (the one engine path since, AUTODEDUP's apply lane, is dark; see "Who orders a merge").
+    (since then AUTODEDUP merges only inside its scope row's area: the batch `mode=apply` is
+    live in the trial area, and the worker lane merges there once its interval is above 0; see
+    "Who orders a merge").
     The **publication gate is gone**: since migration 273 a new property stayed invisible in
     Browse/map/stats/watchdogs until something stamped `published_at`, and the only stamper for
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
@@ -1293,6 +1295,25 @@ renumber.** Navigate by area:
     Browse (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
+    **AUTODEDUP one lane (W5, dark: interval 0).** The engine's ONE production path is the
+    always-on worker's `autodedup` lane (`scraper/realtime_worker.py`; its interval
+    `realtime_autodedup_interval_seconds`, 0 = stop, is the only switch): one pass of
+    `autodedup.incremental_lane.run_incremental` decides and groups the live `rt` generation —
+    under the batch pass's D43 relation and the operator's rulings, a `same` pair ruling being a
+    must-link and a `different` one a must-not-link — commits, and then RECONCILES production
+    under its lease (`autodedup/reconcile.py`, PROGRAM.md E908–E915): the groups it re-clustered
+    go through the apply path below (`apply.plan_groups` / `apply.apply_group`, the same
+    refusals, the same chokepoint, `source='autodedup'`, ledger rows `generation='rt'`,
+    `run_id='rt:<holder>'`), only inside `autodedup_apply_scope` and never as a split — a
+    grouping the stream no longer supports is a proposal. It reconciles only a generation a
+    seed of this version built (`rt_seed_version:rt` = `incremental.SEED_VERSION`) whose build
+    phase ended, and review pages default to `rt` under the same condition (else the newest batch
+    pass). The brake is the interval (0), then `mode=unapply` — a live apply or unapply refuses
+    while the interval is above 0. Its calibration is cut from the database (`rt_seed`, and a
+    re-cut inside the pass's remaining time when the pHash population drifts); a pass past its own
+    deadline rolls back and halves its rate. The
+    batch `apply` mode stays until the lane has run three live days and checkpoint C2 passes;
+    `legacy_retire` until W8.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
     it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope
@@ -1320,7 +1341,10 @@ renumber.** Navigate by area:
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
-    rows before it merges; `rt…` generations are refused. An engine merge the operator took
+    rows before it merges; the live `rt` generation may be planned by a dry run but is never
+    applied here (the lane reconciles it, above), and a live run holds the lane's lease
+    `autodedup.rt_lease` (one writer). An engine
+    merge the operator took
     apart stays apart: its separated LISTINGS are never re-united by a later generation, even
     once the restored property has been merged into another one, and an `unapply` that finds
     the merge already partly taken apart records its undo as the operator's. `unapply` skips a
@@ -1336,8 +1360,12 @@ renumber.** Navigate by area:
     the live run would treat it; an undone group may merge again on a later apply (undo is a
     brake, not a ruling). **Splits are propose-only (decision 9):** `GET
     /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
-    lists each live multi-advert property a generation touches with a pair STATED apart: grouped
-    apart AND scored reject/veto/band or named by a conflict (a pair never scored is not spoken
+    lists each live multi-advert property a generation touches (unnamed: the live `rt` stream
+    once a W5 seed built it and its build ended, else the newest batch pass) with a pair STATED
+    apart: grouped
+    apart AND scored reject/veto/band or named by a conflict (in the live stream, a pair the
+    lane holds apart with no stored row is listed `not compared` — never read as a band
+    decision, and the batch split never takes an advert on it; in a batch pass a pair never scored is not spoken
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
@@ -1351,7 +1379,7 @@ renumber.** Navigate by area:
     checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
     own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
     in its group (a detach rules it different from every advert left behind), is `splittable`
-    and is stated apart from the staying group; the optional shared reason rides each ruling,
+    and is stated apart from the staying group (a `not compared` pair states nothing); the optional shared reason rides each ruling,
     with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
@@ -2527,8 +2555,9 @@ renumber.** Navigate by area:
 
 ## Broker identity merges — auto-merge and the suppression rail
 
-Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP apply lane that
-merges only inside the area `autodedup_apply_scope` names), broker identities DO auto-merge. The nightly
+Unlike property merges (rule #15: operator-ordered, plus AUTODEDUP — the batch `mode=apply` and
+the worker lane — merging only inside the area `autodedup_apply_scope` names), broker identities
+DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:
