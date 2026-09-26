@@ -45,7 +45,7 @@ from autodedup import proposed_splits as splits
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
-from autodedup.incremental import GENERATION
+from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
 from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
 
@@ -225,11 +225,11 @@ def stats(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
 
 # ============================================================ the validation UI (W5, §12)
 
-# An unnamed generation is THE live stream, `rt` (`_resolve_generation`, E914): the one the
-# worker's pass keeps current and reconciles production from. `g1` once was the default and
-# every view opened on a pass the engine had moved past; the live stream cannot be moved past.
-# The answer is echoed back so the page can say which pass it is showing, and the batch passes
-# stay nameable as the evaluation lab.
+# There is NO constant default generation. `g1` was one — the first hand-prior pass, which
+# over-merged developer units and was superseded twice — and every validation view opened on it
+# long after the engine had moved on. An unnamed generation is resolved against the store
+# (`_resolve_generation`): THE live stream `rt` once it is live (E914), else the newest batch
+# pass; the answer is echoed back so the page can say which pass it is showing.
 GROUP_PAGE_SIZE = 25
 GROUP_MAX_PAGE_SIZE = 100
 RESIDUAL_MIN_SCORE = 0.20
@@ -427,13 +427,27 @@ def _rows(columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> list[dict[st
 
 
 def _resolve_generation(conn: Any, generation: str | None) -> str | None:
-    """The pass a view reads: the one the caller named, else THE live stream.
+    """The pass a view reads: the one the caller named, else THE live stream once it is live,
+    else the newest batch pass.
 
-    Production reads one generation, the real-time lane's (Decision 5, E914): it is the one
-    kept current by the pass that also merges, so it is what an unnamed view means. The batch
-    passes stay nameable as the evaluation lab. `conn` is kept so every caller reads alike."""
-    del conn
-    return generation or GENERATION
+    Production reads one generation, the real-time lane's (Decision 5, E914) — but only once a
+    seed of this design built it and its build ended (`incremental.stream_live`). Before that,
+    `rt` is a stale or half-built shadow, and an unnamed view reads the newest batch pass as it
+    always did. None comes back only from a store that holds no cluster at all — an empty queue
+    is then the honest answer, where a fabricated generation name would be an empty queue that
+    looks like a filter result."""
+    if generation:
+        return generation
+    if _live_stream(conn):
+        return GENERATION
+    rows = _fetch(conn, usql.LATEST_GENERATION_SQL)
+    return str(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else None
+
+
+def _live_stream(conn: Any) -> bool:
+    """`rt` is THE live stream: seeded at `incremental.SEED_VERSION`, its build phase over."""
+    return stream_live({str(key): value for key, value in _fetch(
+        conn, usql.LIVE_STREAM_SQL, {"keys": [seed_version_key(), bootstrap_key()]})})
 
 
 def _families(mask: Any) -> list[str]:
@@ -995,10 +1009,12 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
 
     THE PAIR HISTOGRAMS ARE ONE PASS'S (E58): `autodedup.pairs` holds every generation ever
     scored, and an unscoped zone count adds four engines together — the mix that made the
-    validation panel read a band g4 never assigned (M42). The pass is the live stream, the
-    same default every queue opens on, and it is named in the answer."""
+    validation panel read a band g4 never assigned (M42). The pass is the one an unnamed queue
+    opens on (`_resolve_generation`), and it is named in the answer."""
     generations = _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
-    generation = _resolve_generation(conn, None)
+    # The list's first row IS the newest batch pass (LATEST_GENERATION_SQL's own order).
+    generation = (GENERATION if _live_stream(conn)
+                  else generations[0]["generation"] if generations else None)
     scope = {"generation": generation}
     zones = {
         row["zone"]: int(row["n"])
@@ -1062,10 +1078,14 @@ def generations(
         items = _json_safe(
             _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
         )
+        # What the empty filter resolves to: "nejnovější" names the live stream only when it
+        # is live, else the newest batch pass (the list's own first row).
+        latest = (GENERATION if _live_stream(conn)
+                  else items[0]["generation"] if items else None)
     except _STORE_BEHIND:
         return _not_ready()
     return {
-        "data": {"items": items, "latest": _resolve_generation(conn, None)},
+        "data": {"items": items, "latest": latest},
         "store_ready": True,
     }
 
@@ -2889,7 +2909,8 @@ def verdict_candidate_split(
 
 
 def _proposed(conn: Any, generation: str | None, property_id: int | None = None) -> Any:
-    """(generation, proposals) off the newest batch pass by default, or None: store not ready.
+    """(generation, proposals) off `_resolve_generation`'s pass by default, or None: store not
+    ready.
     Propose-only: the split itself is `POST /properties/{id}/detach`, advert by advert."""
     if not store_ready(conn):
         return None

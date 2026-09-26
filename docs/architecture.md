@@ -1354,10 +1354,12 @@ renumber.** Navigate by area:
     the live run would treat it; an undone group may merge again on a later apply (undo is a
     brake, not a ruling). **Splits are propose-only (decision 9):** `GET
     /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
-    lists each live multi-advert property a generation touches (the live `rt` stream unless
-    one is named) with a pair STATED apart: grouped
+    lists each live multi-advert property a generation touches (unnamed: the live `rt` stream
+    once a W5 seed built it and its build ended, else the newest batch pass) with a pair STATED
+    apart: grouped
     apart AND scored reject/veto/band or named by a conflict (in the live stream, a pair the
-    lane holds apart with no stored row reads `below band`; in a batch pass a pair never scored is not spoken
+    lane holds apart with no stored row is listed `not compared` — never read as a band
+    decision, and the batch split never takes an advert on it; in a batch pass a pair never scored is not spoken
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
@@ -1371,7 +1373,7 @@ renumber.** Navigate by area:
     checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
     own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
     in its group (a detach rules it different from every advert left behind), is `splittable`
-    and is stated apart from the staying group; the optional shared reason rides each ruling,
+    and is stated apart from the staying group (a `not compared` pair states nothing); the optional shared reason rides each ruling,
     with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;

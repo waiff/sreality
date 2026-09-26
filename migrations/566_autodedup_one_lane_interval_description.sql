@@ -16,9 +16,11 @@ update app_settings
        'Seconds between two passes of the duplicate engine inside the always-on worker; 0 stops '
        'it. A pass decides new and changed adverts against their neighbours, groups them, and '
        'MERGES each group it re-grouped into one property through the normal merge function - '
-       'only inside the area autodedup_apply_scope names, never splitting anything. 60 is a '
-       'sensible running value (a pass only looks at adverts at least five minutes old). To stop '
-       'it: 0 here; to undo what it merged: the autodedup lane, mode=unapply.'
+       'only inside the area autodedup_apply_scope names, never splitting anything. Keep it at 0 '
+       'until the engine has been re-seeded for this version (autodedup lane, mode=rt_seed '
+       'fresh=true) and its gates G1-G3 have passed; only then raise it (60: a pass only looks '
+       'at adverts at least five minutes old). To stop it: 0 here; to undo what it merged: the '
+       'autodedup lane, mode=unapply (which refuses while this is above 0).'
  where key = 'realtime_autodedup_interval_seconds';
 
 reset lock_timeout;

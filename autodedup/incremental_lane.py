@@ -72,6 +72,7 @@ from autodedup.hazard_context import ContextStamp, address_block_key, category_g
 from autodedup.incremental import (
     EVIDENCE_HOLD_REASON,
     GENERATION,
+    SEED_VERSION,
     Calibration,
     CellRow,
     Evidence,
@@ -83,8 +84,12 @@ from autodedup.incremental import (
     PassDeadline,
     SET_CAP,
     WorkItem,
+    bootstrap_key,
     key_token,
     run_pass_bounded,
+    seed_current,
+    seed_version_key,
+    setting_flag,
 )
 from autodedup.incremental_scope import (
     CORPUS_PROJECTION_MB,
@@ -214,11 +219,13 @@ CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
 CURSOR_EVIDENCE: str = "rt_evidence"
 # The rows the lane still keeps in `autodedup.settings` are WRITTEN BY IT, never set by hand:
-# the scope the seed cut the generation for, the build phase the seed opens and the pass
-# closes, the rate each pass measures, and the storage watermark (E914).
+# the scope the seed cut the generation for, the seed's version and the build phase the seed
+# opens and the pass closes (both named in `incremental`, which the API reads too), the rate
+# each pass measures, and the storage watermark (E914).
 SCOPE_SETTING: str = "rt_scope"
-BOOTSTRAP_SETTING: str = "rt_bootstrap"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
+# The reconcile's skip over a generation no seed of this design built.
+SEED_MISMATCH: str = "seed_version"
 STORAGE_WATERMARK: str = "rt_storage_last"
 # THE ONE CLAIM BOUND (E75): how many listings a pass may claim before the time budget cuts it.
 PASS_LIMITS: Limits = Limits(max_listings=500, max_component=400)
@@ -1561,22 +1568,12 @@ def scope_setting_key(generation: str) -> str:
 
 def bootstrap_setting_key(generation: str) -> str:
     """`rt_bootstrap:<generation>` — the phase is a property of ONE generation's build."""
-    return f"{BOOTSTRAP_SETTING}:{generation}"
+    return bootstrap_key(generation)
 
 
 def pass_rate_key(generation: str) -> str:
     """`rt_pass_rate_per_s:<generation>` — what a pass of THIS generation measured itself at."""
     return f"{PASS_RATE_SETTING}:{generation}"
-
-
-def setting_flag(value: Any) -> bool:
-    """A settings row read as a boolean: `true`, `True` and `"true"` all mean on; anything
-    else — a missing row included — means off."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() == "true"
-    return False
 
 
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
@@ -1883,7 +1880,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     "generation": generation, "spent_usd": 0.0}
         control = lane_settings(conn, [scope_setting_key(generation),
                                        bootstrap_setting_key(generation),
-                                       pass_rate_key(generation)])
+                                       pass_rate_key(generation),
+                                       seed_version_key(generation)])
         try:
             scope = pass_scope(read_scope_setting(control, generation))
             parents = resolve_scope_parents(conn, scope)
@@ -1952,9 +1950,18 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                                    else {"counts": {}, "aborted": stopped})
         summary["aborted"] = stopped
         # A9: the reconcile, after the pass committed and under the same lease. Off during
-        # the build (a half-built store is missing groups), off after a pass that rolled back.
+        # the build (a half-built store is missing groups), off after a pass that rolled back,
+        # and off over a generation no seed of this design built (the 09-21 `rt` predates F2:
+        # its groups are not the ones this build would draw).
         if stopped:
             summary["reconcile"] = {"skipped": f"pass_{stopped}"}
+        elif not seed_current(control, generation):
+            summary["reconcile"] = {
+                "skipped": SEED_MISMATCH,
+                "reason": (f"autodedup.settings {seed_version_key(generation)} is "
+                           f"{control.get(seed_version_key(generation))!r}, not "
+                           f"{SEED_VERSION!r}: re-seed with `mode=rt_seed "
+                           "args=settings=w29,model=w6_gold,fresh=true` before it merges")}
         elif bootstrap:
             summary["reconcile"] = {"skipped": "bootstrap"}
         else:
@@ -2124,6 +2131,11 @@ def run_rt_seed(
             _exec(conn, RT_SETTING_WRITE_SQL, {
                 "key": bootstrap_setting_key(generation), "value": json.dumps(True),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
+            # The one row that lets the reconcile merge from this generation (and the review
+            # pages default to it) once the build ends: written by the seed, never by hand.
+            _exec(conn, RT_SETTING_WRITE_SQL, {
+                "key": seed_version_key(generation), "value": json.dumps(SEED_VERSION),
+                "updated_by": f"{LANE_NAME}:rt_seed"})
         summary = {
             "generation": generation,
             "calibration": cut,
@@ -2135,6 +2147,7 @@ def run_rt_seed(
             "fresh": bool(fresh),
             "reset": reset,
             "bootstrap": True,
+            "seed_version": SEED_VERSION,
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,

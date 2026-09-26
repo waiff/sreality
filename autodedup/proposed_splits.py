@@ -4,9 +4,11 @@ A LIVE property of two or more adverts that the generation touches is a proposal
 its adverts is STATED apart: the generation groups the two apart (a seen advert no group holds is
 a group of its own) and scored that pair reject/veto/band or a conflict names it -- in a batch pass
 a pair it never scored is not spoken for, like an advert it never saw, while in the live stream
-(`rt`, which keeps only the pairs worth keeping) a pair with no stored row reads `below band`,
-because the lane has read both adverts and holds them apart (Decision 9: a grouping the stream no
-longer supports is a proposal, never a split) -- or the pair carries a stored negative (a
+(`rt`) two adverts it read and holds apart with no stored row between them are listed as `not
+compared` (Decision 9: a grouping the stream does not support is a proposal, never a split): no
+row cannot say whether the pair was scored below the store's floor or never retrieved at all, so
+it is never read as a band decision, and the page never takes an advert away on it (the batch
+split moves only adverts a STATED reason holds apart) -- or the pair carries a stored negative (a
 must-not-link, or a negative operator ruling). A pair whose newest ruling is `same` is never
 proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
 refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
@@ -27,7 +29,7 @@ from autodedup.incremental import GENERATION
 from toolkit.property_identity import MOVED, detach_outcomes, listing_origins
 
 NO_STATED_FACT = "no stated fact"
-BELOW_BAND = "below band"
+NOT_COMPARED = "not compared"
 _SPLIT_ZONES = frozenset({"reject", "veto", "band"})  # a merge-zone pair speaks FOR one property
 
 
@@ -101,7 +103,7 @@ def proposed_splits(
                 "conflict", f"{c['kind']}: {c['invariant'] or 'no invariant named'}")
     if generation == GENERATION:
         for pair in apart:
-            reasons.setdefault(pair, ("pair", BELOW_BAND))
+            reasons.setdefault(pair, ("not_compared", NOT_COMPARED))
 
     def stated(pair: tuple[int, int]) -> bool:
         verdict = (rulings.get(pair) or {}).get("verdict")

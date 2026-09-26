@@ -532,3 +532,44 @@ def test_a_score_pass_never_writes_or_prunes_the_live_stream() -> None:
     conn = _Conn()
     out = score_lane.prune_generations(conn, keep=1, current="g12")
     assert out["pruned"] == ["g11"] and all("rt" not in d for d in conn.deleted)
+
+
+# ------------------------------------------------------------------ the seed version (review A2)
+
+
+def test_the_seed_writes_the_version_the_reconcile_requires(tmp_path) -> None:
+    from autodedup.incremental import SEED_VERSION, seed_version_key
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    out = lane_world.seed_lane(conn, tmp_path)
+    assert out["seed_version"] == SEED_VERSION
+    assert conn.settings[seed_version_key()] == SEED_VERSION
+
+
+@pytest.mark.parametrize("stale", [None, "w4"])
+def test_the_reconcile_is_skipped_over_a_generation_no_w5_seed_built(tmp_path, stale) -> None:
+    """REVIEW BLOCKER 2. Production `rt` was seeded 09-21, before F2: its groups are not the
+    ones this build draws. A calibration alone must not let the reconcile merge from it — the
+    seed's version row must match, and the pass says why it did not reconcile."""
+    from autodedup.incremental import SEED_VERSION, bootstrap_key, seed_version_key
+    from autodedup.incremental_lane import SEED_MISMATCH, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    conn.settings[bootstrap_key()] = False
+    if stale is None:
+        conn.settings.pop(seed_version_key())
+    else:
+        conn.settings[seed_version_key()] = stale
+
+    out = run_incremental(lambda: conn)
+
+    assert out["aborted"] == "" and out["reconcile"]["skipped"] == SEED_MISMATCH
+    assert "mode=rt_seed" in out["reconcile"]["reason"]
+    assert not any("applied_merges" in sql for sql in conn.statements), "no ledger read"
+
+    conn.settings[seed_version_key()] = SEED_VERSION
+    ran = run_incremental(lambda: conn)
+    assert ran["reconcile"]["skipped"] == "scope_closed", "with the version it reconciles"

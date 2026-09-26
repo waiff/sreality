@@ -1184,9 +1184,10 @@ GENERATION_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
 )
 
-# One row per pass: the picker's vocabulary. Production reads ONE stream, the real-time lane's
-# `rt` (Decision 5, E914) — an unnamed generation IS that one — and the batch passes (g4..g12)
-# stay listed as the evaluation lab, newest first.
+# One row per pass: the picker's vocabulary, the batch passes (the evaluation lab) newest first
+# and a real-time generation last. An UNNAMED view reads the live stream once it is live
+# (`LIVE_STREAM_SQL`), else this order's first pass (`LATEST_GENERATION_SQL`) — see
+# api/routes/autodedup.py `_resolve_generation`.
 GENERATION_COUNTS_SQL = """
 SELECT
     c.generation,
@@ -1196,7 +1197,30 @@ SELECT
     max(c.last_changed_at)                            AS last_changed_at
 FROM autodedup.clusters c
 GROUP BY c.generation
-ORDER BY max(c.last_changed_at) DESC
+ORDER BY (left(c.generation, 2) = 'rt'), max(c.last_changed_at) DESC
+"""
+
+# WHICH pass a validation view reads when the caller names none, step one (E914): the live
+# stream `rt` — the generation the worker's lane reconciles production from — but only once it
+# IS live: a seed of this design built it (`rt_seed_version:rt` = `incremental.SEED_VERSION`)
+# and its build phase ended (`rt_bootstrap:rt` false). The 09-21 `rt` was seeded before F2 and
+# holds groups this build would not draw; opening every review page on it mid-trial would show
+# hundreds of properties as split proposals the live engine never made.
+LIVE_STREAM_SQL = """
+SELECT s.key, s.value
+FROM autodedup.settings s
+WHERE s.key = ANY(%(keys)s::text[])
+"""
+
+# Step two, when the stream is not live: the newest BATCH pass. A real-time generation is
+# rewritten every pass, so by recency alone it would always be "newest" — which is how the
+# operator's pair links 404'd on 2026-09-20 (the pairs lived in g6; the default had silently
+# become `rt`). It is ordered last, and read only when named or when it is live.
+LATEST_GENERATION_SQL = """
+SELECT c.generation
+FROM autodedup.clusters c
+ORDER BY (left(c.generation, 2) = 'rt'), c.last_changed_at DESC
+LIMIT 1
 """
 
 VERDICT_COUNT_COLUMNS: tuple[str, ...] = ("kind", "verdict", "n")

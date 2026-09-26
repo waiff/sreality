@@ -225,6 +225,59 @@ describe('<AutodedupProposedSplits> the list', () => {
   });
 });
 
+describe('<AutodedupProposedSplits> a pair the live stream never compared', () => {
+  it('lists it as neporovnáno and never takes an advert away on it', async () => {
+    vi.mocked(api.getProposedSplits).mockResolvedValue({
+      store_ready: true,
+      data: {
+        generation: 'rt',
+        total: 2,
+        items: [
+          {
+            property_id: 80,
+            canonical_listing_id: 801,
+            proposed: true,
+            groups: [
+              { cluster_key: 11, adverts: [advert(801, 'sreality', null)] },
+              { cluster_key: null, adverts: [advert(802, 'idnes', 81)] },
+            ],
+            unseen: [],
+            splits: [pair(801, 802, 'not_compared', 'not compared')],
+            ruled: false,
+          },
+          {
+            /* One stated pair and one never compared: only the stated advert leaves. */
+            property_id: 90,
+            canonical_listing_id: 901,
+            proposed: true,
+            groups: [
+              { cluster_key: 12, adverts: [advert(901, 'sreality', null)] },
+              { cluster_key: null, adverts: [advert(902, 'idnes', 91)] },
+              { cluster_key: null, adverts: [advert(903, 'bazos', 92)] },
+            ],
+            unseen: [],
+            splits: [pair(901, 902), pair(901, 903, 'not_compared', 'not compared')],
+            ruled: false,
+          },
+        ],
+        next_after: null,
+      },
+    });
+    setup();
+
+    const p80 = await screen.findByTestId('proposal-80');
+    expect(within(p80).getByText(/neporovnáno: not compared/)).toBeInTheDocument();
+    expect(within(p80).getByRole('checkbox')).toBeDisabled();
+    expect(within(p80).getByText('engine tyto inzeráty neporovnal — rozdělení nenavrhuje')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Vybrat nemovitost #90' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Rozdělit vybrané' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Ano, rozdělit' }));
+    await waitFor(() => expect(api.detachListing).toHaveBeenCalledTimes(1));
+    expect(api.detachListing).toHaveBeenCalledWith(90, 902, undefined);
+  });
+});
+
 describe('<AutodedupProposedSplits> Rozdělit vybrané', () => {
   it('asks twice, detaches each advert that may leave with the shared reason, and reports each', async () => {
     vi.mocked(api.detachListing).mockImplementation(async (propertyId, listingId) => {

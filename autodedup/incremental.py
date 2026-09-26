@@ -76,6 +76,48 @@ from autodedup.text_facts import reference_codes, states_from_price
 
 GENERATION: str = "rt"
 
+# THE LIVE STREAM (W5, E914). `rt` is what production reads — the reconcile's input and the
+# review pages' unnamed generation — only once a seed of THIS design built it and its build
+# phase ended. `rt_seed` writes `rt_seed_version:<generation>` = SEED_VERSION next to
+# `rt_bootstrap:<generation>` = true; the pass that empties the backlog writes the latter
+# false. The 09-21 `rt` was seeded before F2 and carries no version row, so it is never
+# reconciled from and never shown as the default. A key in `autodedup.settings`, not a column
+# of the calibration row, because the calibration re-cuts itself (A10) and the version must
+# survive that. Bump it when a change makes an existing `rt` unfit to merge from.
+SEED_VERSION: str = "w5"
+SEED_VERSION_SETTING: str = "rt_seed_version"
+BOOTSTRAP_SETTING: str = "rt_bootstrap"
+
+
+def seed_version_key(generation: str = GENERATION) -> str:
+    return f"{SEED_VERSION_SETTING}:{generation}"
+
+
+def bootstrap_key(generation: str = GENERATION) -> str:
+    return f"{BOOTSTRAP_SETTING}:{generation}"
+
+
+def setting_flag(value: Any) -> bool:
+    """A settings row read as a boolean: `true`, `True` and `"true"` all mean on; anything
+    else — a missing row included — means off."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def seed_current(control: Mapping[str, Any], generation: str = GENERATION) -> bool:
+    """A seed of this design (SEED_VERSION) built the generation."""
+    return str(control.get(seed_version_key(generation)) or "") == SEED_VERSION
+
+
+def stream_live(control: Mapping[str, Any], generation: str = GENERATION) -> bool:
+    """The generation is THE live stream: seeded at SEED_VERSION and out of its build."""
+    return (seed_current(control, generation)
+            and not setting_flag(control.get(bootstrap_key(generation))))
+
+
 # A `(probe, key)` tuple flattened to one text token, so the posting list is a two-column
 # index lookup in SQL and the same string in the in-memory twin. Unit separator, because a
 # street key may hold anything a portal prints but never a control character.

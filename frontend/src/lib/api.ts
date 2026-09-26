@@ -3123,7 +3123,9 @@ export interface ProposedSplit {
   splits: {
     listing_lo: number;
     listing_hi: number;
-    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none';
+    /* `not_compared`: the live stream holds the two apart with no stored pair
+     * between them — nothing stated, so a split never takes an advert on it. */
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none' | 'not_compared';
     reason: string;
     ruling: {
       verdict: string;

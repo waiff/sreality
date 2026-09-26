@@ -53,6 +53,7 @@ const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], st
   pair: 'dvojice',
   must_not_link: 'zákaz sloučení',
   none: 'bez uvedeného důvodu',
+  not_compared: 'neporovnáno',
 };
 
 /* Which group stays and which adverts a split takes away. The group holding the
@@ -61,12 +62,13 @@ const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], st
  * property's own being born anew. An advert leaves only when it is alone in its
  * group (a detach rules it different from every advert left behind, a group-mate
  * included), its detach would move it (`splittable`) and a split pair states it
- * apart from the staying group. */
+ * apart from the staying group. A `not_compared` pair states nothing: the live
+ * stream never compared the two, so no advert is taken away on it. */
 function splitPlan(item: ProposedSplit): { kept: number; take: ProposedSplitAdvert[] } {
   const kept = Math.max(0, item.groups.findIndex((g) => g.adverts.some((a) => a.origin_property_id == null)));
   const stays = new Set(item.groups[kept]?.adverts.map((a) => a.listing_id));
   const apart = new Set(
-    item.splits.flatMap((s) =>
+    item.splits.filter((s) => s.reason_source !== 'not_compared').flatMap((s) =>
       stays.has(s.listing_lo) ? [s.listing_hi] : stays.has(s.listing_hi) ? [s.listing_lo] : [],
     ),
   );
@@ -385,7 +387,9 @@ function ProposalCard({
         )}
         {take.length === 0 && (
           <span className="text-[0.72rem] text-[var(--color-ink-4)]">
-            nelze rozdělit: žádný inzerát nelze oddělit samostatně
+            {item.splits.every((s) => s.reason_source === 'not_compared')
+              ? 'engine tyto inzeráty neporovnal — rozdělení nenavrhuje'
+              : 'nelze rozdělit: žádný inzerát nelze oddělit samostatně'}
           </span>
         )}
       </div>
