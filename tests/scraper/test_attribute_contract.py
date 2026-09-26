@@ -182,3 +182,15 @@ def test_known_gaps_cover_every_declared_zero() -> None:
         assert key in _emitted_keys(census), (
             f"{name}: the gap names {key!r}, which that portal does not emit"
         )
+
+
+def test_idnes_top_of_select_floor_is_a_placeholder_not_a_storey() -> None:
+    """"20. patro a vyšší" is the last option of idnes's floor select and what a broker
+    feed leaves there; 1,736 active flats described "v přízemí" carried floor = 20 on
+    2026-09-23, which the bake-off then took as labels."""
+    from scraper.attribute_contract import source_value
+    from scraper.floor import floor_from_portal
+
+    assert source_value("idnes", "floor", {"podlaží": "20. patro a vyšší"}) is None
+    assert floor_from_portal("word", source_value(
+        "idnes", "floor", {"podlaží": "2. patro (3. NP)"})) == 2

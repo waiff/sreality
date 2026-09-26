@@ -29,7 +29,7 @@ from selectolax.parser import HTMLParser, Node
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.attribute_contract import floor_convention, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
@@ -469,6 +469,7 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
+    disposition: str | None = None,
 ) -> PortalAreas:
     """idnes's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -496,6 +497,7 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=usable,
         plot=estate_area,
         fallback=parse_area_text(title),
@@ -547,7 +549,9 @@ def parse_detail(
     if params_text.get("cena"):
         params_text["cena"] = _strip_mortgage_cta(params_text["cena"])
 
-    areas = areas_from_params(params_text, title=title, category_main=category_main)
+    disposition = vocabulary.disposition(SOURCE, title)
+    areas = areas_from_params(params_text, title=title, category_main=category_main,
+                              disposition=disposition)
 
     # Amenities: each row is a check icon OR free text (size / orientation /
     # parking kind), so everything goes through _truthy_field. idnes has no
@@ -593,7 +597,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(SOURCE, title),
+        disposition=disposition,
         locality=locality,
         district=None,
         # Street is the FIRST comma-segment of locality ("Bělehradská, Pardubice
@@ -603,7 +607,7 @@ def parse_detail(
         lat=lat,
         lon=lon,
         floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
-        total_floors=_parse_int(read("total_floors")),
+        total_floors=total_floors_from_portal(_parse_int(read("total_floors"))),
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         # A flat labels its condition row "Stav bytu"; a house or a commercial unit
         # labels it "Stav budovy".

@@ -459,7 +459,8 @@ def ad_haystack(title: str | None, description: str | None) -> str:
     return f"{title or ''}\n{description or ''}"
 
 
-def areas_from_text(haystack: str | None, *, category_main: str | None) -> PortalAreas:
+def areas_from_text(haystack: str | None, *, category_main: str | None,
+                    disposition: str | None = None) -> PortalAreas:
     """bazos's area, such as it is — spelled here once and nowhere else.
 
     bazos has no structured area field at all: no interior measure and no
@@ -471,6 +472,7 @@ def areas_from_text(haystack: str | None, *, category_main: str | None) -> Porta
     """
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, plot=None, fallback=parse_area_text(haystack),
+        disposition=disposition,
     )
     return PortalAreas(area_m2=area_m2, area_basis=area_basis)
 
@@ -540,7 +542,8 @@ def parse_detail(
 
     posted_text = _text(tree.css_first("span.velikost10"))
 
-    areas = areas_from_text(haystack, category_main=category_main)
+    disposition = vocabulary.disposition("bazos", haystack)
+    areas = areas_from_text(haystack, category_main=category_main, disposition=disposition)
 
     raw = {
         "id": source_id,
@@ -565,7 +568,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
-        disposition=vocabulary.disposition("bazos", haystack),
+        disposition=disposition,
         floor=floor,
         total_floors=total_floors,
         locality=locality,

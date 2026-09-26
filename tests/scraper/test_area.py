@@ -254,3 +254,56 @@ def test_every_emitted_basis_is_in_the_declared_vocabulary():
     # all — a legal answer, and not a token. Every token emitted must be declared.
     assert emitted - {None} <= AREA_BASES
     assert {"usable", "floor", "total", "plot", "unknown"} <= emitted
+
+
+def test_dotted_thousands_are_one_number_and_a_decimal_point_still_is_one():
+    """Brokers key "1.910 m2" / "12.100 m2" / "1.994,71 m²"; a dot followed by exactly
+    three digits is a thousands group (Czech decimals take a comma), so it read as 1,91
+    until 2026-09-23 — 121 active area-less rows carried the form and bazos held 313
+    active parcels under 5 m². A dot with any other tail keeps its decimal meaning."""
+    from scraper.area import parse_area_text
+
+    assert parse_area_text("Celková plocha pozemku činí 1.910 m2") == 1910.0
+    assert parse_area_text("výměra 12.100 m2") == 12100.0
+    assert parse_area_text("1.994,71 m²") == 1994.71
+    assert parse_area_text("byt 1.5 m2 sklep") == 1.5
+    assert parse_area_text("2.5m2") == 2.5
+
+
+
+def test_a_headline_under_eight_square_metres_a_room_is_a_part_of_the_unit():
+    """Mechová 3+1 (bazos 14012930): the only m² in the advert is the cellar's 2 m², and a
+    3+1 of 8 m² (bazos 18453993) is a room. Both are absence; the band is the advert's own
+    room count, so a 12 m² chata that states no disposition keeps its area."""
+    from scraper.area import derive_headline_area
+
+    assert derive_headline_area(category_main="byt", fallback=2.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", fallback=8.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", fallback=76.0, disposition="3+1") == (76.0, "unknown")
+    assert derive_headline_area(category_main="byt", usable=18.0, disposition="2+kk") == (18.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=12.0) == (12.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=8.0, disposition="1+1") == (8.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=7.9, disposition="1+1") == (None, None)
+    assert derive_headline_area(category_main="komercni", usable=6.0, disposition="3+1") == (6.0, "usable")
+
+
+def test_a_flat_at_a_thousand_square_metres_is_a_site_area_and_the_next_measure_speaks():
+    from scraper.area import derive_headline_area
+
+    assert derive_headline_area(category_main="byt", usable=1800.0) == (None, None)
+    assert derive_headline_area(category_main="byt", usable=1800.0, floor=55.0) == (55.0, "floor")
+    assert derive_headline_area(category_main="dum", usable=1800.0) == (1800.0, "usable")
+
+
+def test_bazos_mechova_cellar_is_not_the_flat():
+    from scraper.bazos_parser import ad_haystack, areas_from_text
+    from scraper import vocabulary
+
+    haystack = ad_haystack(
+        "Prodej bytu 3+1 s balkonem",
+        "Byt 3+1 v Mechové ulici. K bytu náleží sklepní kóje s okýnkem o velikosti 2 m² "
+        "a podíl na třináctimetrové sklepní místnosti.")
+    disposition = vocabulary.disposition("bazos", haystack)
+    assert disposition == "3+1"
+    areas = areas_from_text(haystack, category_main="byt", disposition=disposition)
+    assert (areas.area_m2, areas.area_basis) == (None, None)
