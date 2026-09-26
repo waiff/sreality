@@ -382,6 +382,16 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_merge_safety_live.py -q
 
+      # Migration 564's one-time copy, EXECUTED: the operator's Browse merges become
+      # autodedup.operator_merges rows with 560's members and sides, and each merge's own
+      # "same" ruling is linked to its group by a column. PREPARE cannot see which rows a
+      # CTE chain returns; only seeded merges can.
+      - name: The operator's merges are engine data (migration 564)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_operator_merges_live.py -q
+
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left
