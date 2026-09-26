@@ -1,10 +1,12 @@
-"""Load the ČÚZK boundary SHP pack into `ruian_admin_unit_geometries` (04 C4).
+"""The `boundaries` phase of the registry load: the ČÚZK state SHP pack into
+`ruian_admin_unit_geometries` for the version being STAGED (04 C4).
 
-Product: `https://services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip` — the STATE pack, 253 MB,
-13 layers, EPSG:5514, refreshed daily-to-weekly (verified live: last-modified
-Fri 07 Aug 2026 18:31:50 GMT, 253,094,090 bytes). The per-obec pack and the ATOM
-`updated`-diff incremental path (C4.2) belong to the weekly `boundary_delta` job; this
-module is the monthly `boundary_baseline` reconcile.
+Product: `https://services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip` — the STATE pack, ~253 MB,
+12 layers, EPSG:5514, refreshed IN PLACE daily-to-weekly (last-modified moved from 07 Aug to
+24 Sep 2026 under the same URL). The URL carries no vintage, so `ruian_load` fetches the pack
+as the vintage's third artifact: archived to R2 beside the CSV zips, its sha256 recorded on the
+`registry_versions` row, and a resumed load that downloads different bytes refuses to go on
+rather than build one version out of two packs.
 
 THREE geometries per boundary (C4.3), never one:
 
@@ -20,30 +22,31 @@ sliver fallback exists to paper over. Do not repeat that: `render` never decides
 containment.
 
 The pack is also the name source for the levels the address CSVs carry no name for
-(stát, region soudržnosti, kraj, okres, ORP, POU, katastrální území), so this job upgrades
-the placeholder names the CSV loader wrote AND rebuilds the gazetteer afterwards — the
-gazetteer skips placeholder-named units, so without the rebuild those levels would never be
-searchable no matter which job ran last.
+(stát, region soudržnosti, kraj, okres, ORP, POU, katastrální území), so this phase upgrades
+the placeholder names the CSV loader wrote; the loader rebuilds the gazetteer once, after it
+— the gazetteer skips placeholder-named units.
 
-The pack takes ~an hour of per-piece PostGIS work on one session-mode connection, which is
-long enough for the session to be dropped under it (it was, 45 minutes into OBCE_P: an SSL
-EOF at obec 576069). So the per-unit loop is RESUMABLE and RECONNECTING, both bounded:
-a dropped session is reconnected and the unit retried once (`MAX_RECONNECTS` per run, past
-which the environment — not the pack — is what is broken), and a unit whose geometries are
-already committed for this registry version is skipped, so a re-dispatch always moves
-forward. Failure-path bookkeeping opens its own connection: the original incident reported
-"the connection is closed" from the discrepancy INSERT and lost the SSL drop that caused it.
+CARRY-FORWARD. A monthly pack moves few boundaries, while deriving one unit costs ~1.35 s per
+KÚ (`ST_MaximumInscribedCircle` over the raw vertex set, `ST_Subdivide`). A unit whose
+validated source geometry is `ST_OrderingEquals` to its newest earlier `authoritative` row
+gets that version's rows — authoritative, render and every pip piece — copied in ONE
+INSERT…SELECT; only changed and new units are derived. Vertex-exact, so a PROJ or GEOS
+change that moves a coordinate recomputes the unit instead of carrying a stale one.
 
-CLI:  python -m location_data.ruian_boundaries [--levels obec,okres] [--dry-run]
+The per-unit loop is RESUMABLE and RECONNECTING, both bounded, because an hour of per-piece
+PostGIS work on one session-mode connection is long enough for the session to be dropped
+under it (it was, 45 minutes into OBCE_P: an SSL EOF at obec 576069): a dropped session is
+reconnected and the unit retried once (`MAX_RECONNECTS` per run, past which the environment
+— not the pack — is what is broken), and a unit whose geometries are already committed for
+this registry version is skipped, so a re-dispatch always moves forward. Failure-path
+bookkeeping opens its own connection: the original incident reported "the connection is
+closed" from the discrepancy INSERT and lost the SSL drop that caused it.
 """
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import logging
-import sys
-import tempfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,7 +60,7 @@ import shapely.geometry
 import shapely.ops
 from shapely.geometry.base import BaseGeometry
 
-from location_data import krovak, loader_db, name_index, ruian_csv
+from location_data import krovak, loader_db, name_index
 from scraper import db
 
 LOG = logging.getLogger("location_data.ruian_boundaries")
@@ -102,6 +105,13 @@ class Layer:
 # latitudes is only ~71.7 km, so a single degree tolerance means two different ground
 # distances per axis and `generalization_tolerance_m` could not honestly record either.
 # The figures below are the ones the current production loader effectively uses.
+#
+# Eight of the pack's 12 layers are mirror admin units, and these are they. The pack has NO
+# správní obvod layer: STU_P is 642 stavební úřady keyed by an office `ID` and PRARES_P is 93
+# katastrální pracoviště, and while both were mapped to `spravni_obvod` they wrote an office
+# polygon onto whichever Praha správní obvod shared its number (51, 60, 78 and 205, the last
+# renamed "Kutná Hora") and counted the other 731 as `skipped_no_unit` (run 36130715419).
+# VO_P (volební okrsky) and ZSJ_P are not mirror levels this load serves.
 LAYERS: tuple[Layer, ...] = (
     Layer("STATY_P", "stat", 111.0, 1),
     Layer("REGION_P", "region_soudrznosti", 111.0, 8),
@@ -111,13 +121,11 @@ LAYERS: tuple[Layer, ...] = (
     Layer("POU_P", "pou", 55.0),
     Layer("OBCE_P", "obec", 55.0),
     Layer("KATUZE_P", "katastralni_uzemi", 22.0),
-    Layer("STU_P", "spravni_obvod", 55.0),
-    Layer("PRARES_P", "spravni_obvod", 55.0),
-    Layer("ZSJ_P", "zsj", 22.0),
 )
 
-DEFAULT_LAYERS = ("stat", "region_soudrznosti", "kraj", "okres", "orp", "pou", "obec",
-                  "katastralni_uzemi", "spravni_obvod")
+# The levels a version may not publish without: every member unit carries both a `pip` and
+# an `authoritative` row (`missing_geometry`). `spravni_obvod` is not one — see LAYERS.
+COMPLETE_LEVELS = ("obec", "katastralni_uzemi")
 
 # A degenerate feature is skipped and counted, never fatal; the discrepancy rows are capped
 # so one broken layer cannot write a million rows.
@@ -219,64 +227,19 @@ def assert_feature_counts(layer: Layer, features: list[BoundaryFeature]) -> None
         )
 
 
-def check_pip_supported(conn: psycopg.Connection) -> None:
-    """C4.3 needs MANY `pip` rows per unit (one per ST_Subdivide piece) and a CHECK that
-    admits 'pip'. 01 §3.3 currently ships neither. Fail before downloading 253 MB rather
-    than silently degrading the containment authority to a simplified polygon."""
-    # Single '%' on purpose: these run WITHOUT bind parameters, so psycopg does no
-    # placeholder processing and a doubled '%%' would reach Postgres literally.
-    check = loader_db.scalar(
-        conn,
-        """
-        SELECT pg_get_constraintdef(c.oid)
-          FROM pg_constraint c
-          JOIN pg_class t ON t.oid = c.conrelid
-         WHERE t.relname = 'ruian_admin_unit_geometries' AND c.contype = 'c'
-           AND pg_get_constraintdef(c.oid) ILIKE '%purpose%'
-        """,
-    )
-    # A NULL probe is an ABSENT constraint, not a passing one: it means the migration this
-    # loader depends on has not been applied (or the table does not exist), and loading on
-    # into an unconstrained table is exactly the silent degradation this check exists to stop.
-    if check is None or "pip" not in str(check):
-        raise BoundarySchemaError(
-            "ruian_admin_unit_geometries.purpose CHECK is missing or does not admit 'pip' "
-            f"(probe returned {check!r}) — 04 C4.3 requires the CHECK to be "
-            "('authoritative','pip','render'). Apply migration 381, or re-run with "
-            "--allow-missing-pip to load authoritative+render only."
-        )
-    unique = loader_db.scalar(
-        conn,
-        """
-        SELECT indexdef FROM pg_indexes
-         WHERE tablename = 'ruian_admin_unit_geometries'
-           AND indexdef ILIKE '%unique%' AND indexdef ILIKE '%purpose%'
-        """,
-    )
-    definition = str(unique or "")
-    if unique is None or "WHERE" not in definition.upper() or "pip" not in definition:
-        raise BoundarySchemaError(
-            "ruian_admin_unit_geometries needs a PARTIAL unique index on "
-            "(unit_id, registry_version_id, purpose) excluding purpose='pip' — 04 C4.3's "
-            "'pip' purpose is one row per ST_Subdivide piece, so a total unique index (or "
-            f"none at all) cannot hold the pack. Probe returned {unique!r}. Re-run with "
-            "--allow-missing-pip to skip pip rows."
-        )
+# The validated source geometry, stated ONCE: what `_INSERT_AUTHORITATIVE` stores and what
+# `_CARRY_SOURCE_SQL` compares against the previous version's stored row.
+_SOURCE_GEOM = "ST_Multi(ST_CollectionExtract(ST_MakeValid(ST_GeomFromWKB(%(wkb)s, 4326)), 3))"
 
-
-# No ON CONFLICT anywhere: `pip` is many rows per unit, so 01 §3.3's
-# UNIQUE (unit_id, registry_version_id, purpose) has to become partial, and a partial
-# unique index is not usable as a bare conflict target. Delete-then-insert per unit is
-# idempotent under either shape.
-_DELETE_UNIT = """
-DELETE FROM ruian_admin_unit_geometries
- WHERE unit_id = %(unit_id)s AND registry_version_id = %(version_id)s
-"""
-
-_INSERT_AUTHORITATIVE = """
+# No DELETE and no ON CONFLICT: a unit only reaches `load_feature` when it has no
+# `authoritative` row for this version (`done_codes`), and every row of a unit commits in
+# ONE transaction, so there is nothing of it to replace. The DELETE this replaced
+# (`unit_id` + `registry_version_id`) had no index to use — `pip` rows are outside both
+# btree indexes — and scanned the whole table once per unit: 5.3 s cold at two versions,
+# growing with every version stored.
+_INSERT_AUTHORITATIVE = f"""
 WITH g AS (
-  SELECT ST_Multi(ST_CollectionExtract(
-           ST_MakeValid(ST_GeomFromWKB(%(wkb)s, 4326)), 3)) AS geom
+  SELECT {_SOURCE_GEOM} AS geom
 ), m AS (
   SELECT geom, ST_Transform(geom, 5514) AS geom5514 FROM g
 ), c AS (
@@ -344,9 +307,46 @@ SELECT a.unit_id, a.registry_version_id, 'pip', 0, 'none',
    AND a.purpose = 'authoritative'
 """
 
-_MARK_HAS_POLYGON = """
-UPDATE ruian_admin_units SET has_polygon = true
- WHERE id = %(unit_id)s AND NOT has_polygon
+# Carry-forward, step 1: the newest EARLIER version holding this unit, if its stored
+# `authoritative` geometry is vertex-for-vertex the pack's. One index read
+# (`ruian_aug_auth`) and one comparison; `_SOURCE_GEOM` is the exact expression the
+# authoritative row was stored with, so an unchanged boundary compares equal.
+_CARRY_SOURCE_SQL = f"""
+SELECT prev.registry_version_id
+  FROM (SELECT a.registry_version_id, a.geom
+          FROM ruian_admin_unit_geometries a
+         WHERE a.unit_id = %(unit_id)s AND a.purpose = 'authoritative'
+           AND a.registry_version_id < %(version_id)s
+         ORDER BY a.registry_version_id DESC
+         LIMIT 1) prev
+ WHERE ST_OrderingEquals(prev.geom, {_SOURCE_GEOM})
+"""
+
+# Carry-forward, step 2: that version's rows, all three purposes, restamped to this version
+# in one INSERT…SELECT. Located by index, never by a scan: the non-pip rows through
+# `ruian_aug_unique_nonpip`, the pip pieces through `ruian_aug_pip_gist` inside the unit's
+# own bounding box (a piece is a subset of the authoritative polygon it was cut from).
+_CARRY_FORWARD_SQL = """
+INSERT INTO ruian_admin_unit_geometries
+       (unit_id, registry_version_id, purpose, generalization_tolerance_m,
+        simplify_algorithm, geom, area_m2, representative_point, inscribed_radius_m,
+        centroid_point, containment_radius_m, max_radius_m)
+SELECT g.unit_id, %(version_id)s, g.purpose, g.generalization_tolerance_m,
+       g.simplify_algorithm, g.geom, g.area_m2, g.representative_point,
+       g.inscribed_radius_m, g.centroid_point, g.containment_radius_m, g.max_radius_m
+  FROM ruian_admin_unit_geometries g
+ WHERE g.id IN (
+         SELECT n.id FROM ruian_admin_unit_geometries n
+          WHERE n.unit_id = %(unit_id)s AND n.registry_version_id = %(from_version_id)s
+            AND n.purpose <> 'pip'
+         UNION ALL
+         SELECT p.id
+           FROM ruian_admin_unit_geometries a
+           JOIN ruian_admin_unit_geometries p
+             ON p.purpose = 'pip' AND p.geom && a.geom
+            AND p.unit_id = a.unit_id AND p.registry_version_id = a.registry_version_id
+          WHERE a.unit_id = %(unit_id)s AND a.registry_version_id = %(from_version_id)s
+            AND a.purpose = 'authoritative')
 """
 
 
@@ -393,10 +393,10 @@ def load_feature(
     layer: Layer,
     version_id: int,
     *,
-    with_pip: bool,
     unit_timeout_s: int | None = None,
-) -> tuple[bool, bool]:
-    """(loaded, name_upgraded) for one feature; (False, False) when no unit matches.
+) -> tuple[str | None, bool]:
+    """(how, name_upgraded) for one feature — `how` is "carried" or "derived", None when no
+    unit matches.
 
     Every statement of the unit runs under a bounded `statement_timeout`, armed with
     `SET LOCAL` INSIDE this transaction (the loader's session default is 0, for COPY).
@@ -405,40 +405,30 @@ def load_feature(
     """
     unit_id = unit_id_for(conn, feature.level, feature.code)
     if unit_id is None:
-        return False, False
+        return None, False
     budget = (
         loader_db.env_timeout_s(UNIT_TIMEOUT_ENV, DEFAULT_UNIT_TIMEOUT_S)
         if unit_timeout_s is None
         else unit_timeout_s
     )
+    unit = {"unit_id": unit_id, "version_id": version_id}
     with loader_db.bounded(conn, budget) as cur:
         upgraded = upgrade_name(cur, unit_id, feature.name)
-        cur.execute(_DELETE_UNIT, {"unit_id": unit_id, "version_id": version_id})
-        cur.execute(_INSERT_AUTHORITATIVE,
-                    {"wkb": feature.wkb, "unit_id": unit_id, "version_id": version_id})
-        cur.execute(_INSERT_RENDER, {
-            "unit_id": unit_id, "version_id": version_id,
-            "tolerance_m": layer.render_tolerance_m,
-        })
-        if with_pip:
-            cur.execute(_INSERT_PIP, {
-                "unit_id": unit_id, "version_id": version_id,
-                "max_vertices": SUBDIVIDE_MAX_VERTICES,
-            })
-        cur.execute(_MARK_HAS_POLYGON, {"unit_id": unit_id})
-    return True, upgraded
+        cur.execute(_CARRY_SOURCE_SQL, {**unit, "wkb": feature.wkb})
+        carried_from = cur.fetchone()
+        if carried_from is not None:
+            cur.execute(_CARRY_FORWARD_SQL, {**unit, "from_version_id": carried_from[0]})
+            return "carried", upgraded
+        cur.execute(_INSERT_AUTHORITATIVE, {**unit, "wkb": feature.wkb})
+        cur.execute(_INSERT_RENDER, {**unit, "tolerance_m": layer.render_tolerance_m})
+        cur.execute(_INSERT_PIP, {**unit, "max_vertices": SUBDIVIDE_MAX_VERTICES})
+    return "derived", upgraded
 
 
-def _fetch_pack(work_dir: Path, *, reuse: bool) -> Path:
-    dest = work_dir / "ruian_shp_stat.zip"
-    if reuse and dest.exists():
-        LOG.info("BOUNDARY reusing cached %s", dest)
-    else:
-        artifact = ruian_csv.download(ruian_csv.session(), "shp_stat", STATE_PACK_URL, dest)
-        LOG.info("BOUNDARY downloaded bytes=%d sha256=%s", artifact.bytes, artifact.sha256[:16])
-    extracted = work_dir / "shp"
+def _extract(pack: Path) -> Path:
+    extracted = pack.parent / "shp"
     extracted.mkdir(exist_ok=True)
-    with zipfile.ZipFile(dest) as zf:
+    with zipfile.ZipFile(pack) as zf:
         zf.extractall(extracted)
     return extracted
 
@@ -454,9 +444,9 @@ def _record_degenerate(
 
 
 # A unit already carrying an `authoritative` row for this registry_version was written by
-# `load_feature`'s per-unit transaction, which commits the name upgrade, the DELETE, all
-# THREE geometries and the has_polygon flag together — so its presence is proof the whole
-# unit landed and the unit can be skipped whole. Prefetched ONCE per layer (a per-unit
+# `load_feature`'s per-unit transaction, which commits the name upgrade and all THREE
+# geometries (derived or carried) together — so its presence is proof the whole unit
+# landed and the unit can be skipped whole. Prefetched ONCE per layer (a per-unit
 # EXISTS probe would add 6,258 round-trips to the obec layer), scoped to the layer's level
 # so the set stays small and a code can never be mistaken for another level's. Driven from
 # the units side so the two indexes migration 381 already ships do the work:
@@ -529,12 +519,12 @@ def run_resilient(
 ) -> tuple[_T, psycopg.Connection]:
     """`op(conn)` with ONE reconnect-and-retry, returning (result, live_conn).
 
-    For the loader's between-unit work — the per-layer done-set probe, the degenerate
-    rows, the closing ANALYZE + gazetteer rebuild. Reading a 6,258-feature shapefile is
+    For the phase's between-unit work — the per-layer done-set probe, the degenerate
+    rows, the closing ANALYZE. Reading a 6,258-feature shapefile is
     minutes of DB silence, which is exactly when a session-mode backend gets recycled out
     from under an otherwise-healthy load, so these must survive a drop as much as the unit
-    loop does. Every `op` here is idempotent (a read, an ON CONFLICT upsert, ANALYZE, or a
-    delete-and-repopulate), so replaying it costs nothing.
+    loop does. Every `op` here is idempotent (a read, an ON CONFLICT upsert or ANALYZE),
+    so replaying it costs nothing.
     """
     try:
         return op(conn), conn
@@ -565,67 +555,54 @@ def load_feature_resilient(
     layer: Layer,
     version_id: int,
     *,
-    with_pip: bool,
     reconnector: Reconnector,
-) -> tuple[bool, bool, psycopg.Connection, psycopg.Error | None]:
+) -> tuple[str | None, bool, psycopg.Connection, psycopg.Error | None]:
     """`load_feature` with ONE reconnect-and-retry when the session drops mid-unit.
 
-    Returns (loaded, name_upgraded, live_conn, error). The caller MUST rebind its handle
+    Returns (how, name_upgraded, live_conn, error). The caller MUST rebind its handle
     (`db.run_resilient`'s contract): `live_conn` may be a fresh session. A failure is
     RETURNED rather than raised precisely so the fresh session comes back with it — a
     raise would strand the caller on the dead handle it passed in, which is how the
     original incident turned one dropped connection into a dead run. The retry is safe to
-    replay because `load_feature` is delete-then-insert inside ONE transaction, so a unit
-    whose transaction died half-written has nothing committed to collide with. A
-    non-psycopg exception is a bug and still propagates.
+    replay because `load_feature` writes the unit inside ONE transaction, so a unit whose
+    transaction died half-written has nothing committed to collide with. A non-psycopg
+    exception is a bug and still propagates.
     """
     try:
-        loaded, upgraded = load_feature(conn, feature, layer, version_id, with_pip=with_pip)
-        return loaded, upgraded, conn, None
+        how, upgraded = load_feature(conn, feature, layer, version_id)
+        return how, upgraded, conn, None
     except psycopg.Error as exc:
         # One unloadable geometry fails identically on any connection: reconnecting for it
         # would spend the budget on the data instead of on the outage.
         if _is_unit_fault(exc) or not db.is_transient_db_error(exc):
-            return False, False, conn, exc
+            return None, False, conn, exc
         dropped = exc
     conn = reconnector(conn, dropped)  # raises LoadAborted past the budget
     try:
-        loaded, upgraded = load_feature(conn, feature, layer, version_id, with_pip=with_pip)
+        how, upgraded = load_feature(conn, feature, layer, version_id)
     except psycopg.Error as exc:
-        return False, False, conn, exc
-    return loaded, upgraded, conn, None
+        return None, False, conn, exc
+    return how, upgraded, conn, None
 
 
 def load_layers(
     conn: psycopg.Connection,
     extracted: Path,
     *,
-    levels: tuple[str, ...],
     version_id: int,
-    with_pip: bool,
     reconnector: Reconnector | None = None,
-    resume: bool = True,
 ) -> tuple[dict[str, int], psycopg.Connection]:
-    """Load every requested layer. Returns (counts, live_conn) — the connection may have
-    been replaced mid-pack, so the caller MUST rebind its handle."""
-    counts = {"loaded": 0, "skipped_no_unit": 0, "degenerate": 0, "failed": 0, "names": 0,
-              "resumed": 0}
+    """Load every layer into `version_id`. Returns (counts, live_conn) — the connection may
+    have been replaced mid-pack, so the caller MUST rebind its handle."""
+    counts = {"loaded": 0, "carried": 0, "skipped_no_unit": 0, "degenerate": 0, "failed": 0,
+              "names": 0, "resumed": 0}
     reconnector = reconnector or Reconnector(loader_db.open_loader_connection)
-    # Two layers share the `spravni_obvod` level, so a done-set prefetched after the first
-    # of them has run would contain codes THIS run just wrote; subtracting them keeps a
-    # code that collides across the pair from being skipped as if it were already loaded.
-    loaded_here: dict[str, set[int]] = {}
     for layer in LAYERS:
-        if layer.level not in levels:
-            continue
         features, degenerate = read_layer(extracted, layer)
         assert_feature_counts(layer, features)
-        done: set[int] = set()
-        if resume:
-            done, conn = run_resilient(
-                conn, lambda c: done_codes(c, version_id, layer.level), reconnector,
-            )
-            done -= loaded_here.get(layer.level, set())
+        done, conn = run_resilient(
+            conn, lambda c: done_codes(c, version_id, layer.level), reconnector,
+        )
         LOG.info("BOUNDARY layer=%s level=%s features=%d degenerate=%d already_loaded=%d",
                  layer.token, layer.level, len(features), len(degenerate), len(done))
         if degenerate:
@@ -649,14 +626,14 @@ def load_layers(
             if attempted % PROGRESS_EVERY == 1:
                 LOG.info("BOUNDARY layer=%s at code=%s (%d/%d attempted)",
                          layer.token, feature.code, attempted, len(features) - len(done))
-            loaded, upgraded, conn, error = load_feature_resilient(
-                conn, feature, layer, version_id,
-                with_pip=with_pip, reconnector=reconnector,
+            how, upgraded, conn, error = load_feature_resilient(
+                conn, feature, layer, version_id, reconnector=reconnector,
             )
             if error is not None:
                 # One unloadable geometry is a discrepancy row, not the end of a 253 MB
-                # pack. The row goes on its OWN connection: after a failed retry `conn` is
-                # a fresh handle we have not proven yet, and the 2026-08 run showed what a
+                # pack — and the completeness assertion then holds the version back. The
+                # row goes on its OWN connection: after a failed retry `conn` is a fresh
+                # handle we have not proven yet, and the 2026-08 run showed what a
                 # bookkeeping INSERT on a dead session does to the error you actually need.
                 counts["failed"] += 1
                 LOG.warning("BOUNDARY level=%s code=%s failed: %s",
@@ -668,10 +645,12 @@ def load_layers(
                     own_connection=True,
                 )
                 continue
-            counts["loaded" if loaded else "skipped_no_unit"] += 1
+            if how is None:
+                counts["skipped_no_unit"] += 1
+                continue
+            counts["loaded"] += 1
+            counts["carried"] += how == "carried"
             counts["names"] += int(upgraded)
-            if loaded:
-                loaded_here.setdefault(layer.level, set()).add(feature.code)
         if skipped:
             counts["resumed"] += skipped
             LOG.info("BOUNDARY layer=%s resumed skipped=%d of %d", layer.token, skipped,
@@ -684,108 +663,72 @@ def _analyze(conn: psycopg.Connection) -> None:
         cur.execute("ANALYZE ruian_admin_unit_geometries")
 
 
-def run(
-    *,
-    levels: tuple[str, ...],
-    work_dir: Path,
-    dry_run: bool,
-    reuse: bool,
-    allow_missing_pip: bool,
-    skip_gazetteer: bool = False,
-    resume: bool = True,
-) -> int:
-    with_pip = not allow_missing_pip
-    if dry_run:
-        extracted = _fetch_pack(work_dir, reuse=reuse)
-        for layer in LAYERS:
-            if layer.level not in levels:
-                continue
-            features, degenerate = read_layer(extracted, layer)
-            assert_feature_counts(layer, features)
-            LOG.info("BOUNDARY layer=%s level=%s features=%d degenerate=%d", layer.token,
-                     layer.level, len(features), len(degenerate))
-        return 0
+def load_pack(
+    conn: psycopg.Connection, pack: Path, version_id: int,
+) -> tuple[dict[str, int], psycopg.Connection]:
+    """The loader's `boundaries` phase: every layer of `pack` into `version_id`, then ANALYZE.
 
-    # try/finally, not `with`: an assertion failure, a missing registry_version or a
-    # mid-pack exception must not leak a session-mode backend holding statement_timeout=0
-    # — and `load_layers` may hand back a DIFFERENT connection than it was given, so the
-    # handle that gets closed has to be the live one, not the dead original.
-    conn = loader_db.open_loader_connection()
-    try:
-        if with_pip:
-            check_pip_supported(conn)
-        version_id = loader_db.scalar(
-            conn, "SELECT id FROM registry_versions WHERE is_current LIMIT 1"
-        )
-        if version_id is None:
-            LOG.error("BOUNDARY no current registry_version — run the baseline load first")
-            return 1
-        extracted = _fetch_pack(work_dir, reuse=reuse)
-        # ONE reconnect budget for the whole run: a session that keeps dying should abort
-        # the load, not buy itself a fresh allowance at every phase boundary.
-        reconnector = Reconnector(loader_db.open_loader_connection, limit=MAX_RECONNECTS)
-        counts, conn = load_layers(conn, extracted, levels=levels,
-                                   version_id=int(version_id), with_pip=with_pip,
-                                   reconnector=reconnector, resume=resume)
-        _, conn = run_resilient(conn, _analyze, reconnector)
-        # The pack is the ONLY name source for kraj / okres / ORP / POU / KÚ / ZSJ, and the
-        # gazetteer skips placeholder-named units — so without this rebuild those levels are
-        # never searchable, whatever order the two jobs run in. `resumed` counts too: those
-        # units were name-upgraded by the pass that died, which by definition never reached
-        # this rebuild, and `name_index.rebuild` is a full idempotent recompute.
-        if (counts["names"] or counts["resumed"]) and not skip_gazetteer:
-            rebuilt, conn = run_resilient(
-                conn, lambda c: name_index.rebuild(c, int(version_id)), reconnector,
-            )
-            LOG.info("BOUNDARY gazetteer rebuilt rows=%d after %d name upgrades (%d resumed)",
-                     rebuilt, counts["names"], counts["resumed"])
-    finally:
-        conn.close()
-    LOG.info("BOUNDARY done %s pip=%s", counts, with_pip)
-    return 0
+    Returns (counts, live_conn); the caller MUST rebind its handle. ONE reconnect budget for
+    the whole phase: a session that keeps dying aborts the load instead of buying itself a
+    fresh allowance per layer.
+    """
+    reconnector = Reconnector(loader_db.open_loader_connection, limit=MAX_RECONNECTS)
+    counts, conn = load_layers(conn, _extract(pack), version_id=version_id,
+                               reconnector=reconnector)
+    _, conn = run_resilient(conn, _analyze, reconnector)
+    LOG.info("BOUNDARY done version=%s %s", version_id, counts)
+    return counts, conn
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--levels", default=",".join(DEFAULT_LAYERS),
-                        help="comma-separated ruian_level values to load")
-    parser.add_argument("--work-dir", default=None)
-    parser.add_argument("--reuse-downloads", action="store_true")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="download + read + assert feature counts, write nothing")
-    parser.add_argument("--allow-missing-pip", action="store_true",
-                        help="load authoritative+render only (PIP falls back to the "
-                             "authoritative geometry; state why in the PR)")
-    parser.add_argument("--no-resume", action="store_true",
-                        help="re-load units that already have geometry for the current "
-                             "registry version (default: skip them, so a re-dispatch "
-                             "after a crash makes forward progress)")
-    parser.add_argument("--skip-gazetteer", action="store_true",
-                        help="do not rebuild ruian_name_index after upgrading names "
-                             "(the upgraded levels stay unsearchable until it is run)")
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    levels = tuple(x.strip() for x in args.levels.split(",") if x.strip())
-    with tempfile.TemporaryDirectory(prefix="ruian-shp-") as tmp:
-        work_dir = Path(args.work_dir) if args.work_dir else Path(tmp)
-        work_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            return run(
-                levels=levels, work_dir=work_dir, dry_run=args.dry_run,
-                reuse=args.reuse_downloads, allow_missing_pip=args.allow_missing_pip,
-                skip_gazetteer=args.skip_gazetteer, resume=not args.no_resume,
-            )
-        except BoundarySchemaError as exc:
-            LOG.error("BOUNDARY %s", exc)
-            return 1
-        except loader_db.LoadAborted as exc:
-            LOG.error("BOUNDARY %s", exc)
-            return 1
+def dry_run(pack: Path) -> None:
+    """Read every layer and assert its feature count; write nothing."""
+    extracted = _extract(pack)
+    for layer in LAYERS:
+        features, degenerate = read_layer(extracted, layer)
+        assert_feature_counts(layer, features)
+        LOG.info("BOUNDARY layer=%s level=%s features=%d degenerate=%d", layer.token,
+                 layer.level, len(features), len(degenerate))
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# Membership is the version's, not "whatever is valid today": a unit is in version V when V
+# is inside its [first_version_id, last_version_id] span and it was not closed BY V (a close
+# stamps last_version_id = V together with valid_to). A missing unit is excused only by a
+# `degenerate_boundary_geometry` row — the pack itself holds no usable polygon for it; a
+# `boundary_load_failed` row excuses nothing, the unit is simply retried by the next run.
+# `landed` is one pass over this version's rows rather than a per-unit probe: `pip` rows sit
+# outside both btree indexes, so a per-unit EXISTS would scan the table once per unit.
+_MISSING_GEOMETRY_SQL = """
+WITH member AS (
+  SELECT u.id, u.level, u.code
+    FROM ruian_admin_units u
+   WHERE u.level::text = ANY(%(levels)s)
+     AND u.first_version_id <= %(version_id)s AND u.last_version_id >= %(version_id)s
+     AND (u.valid_to IS NULL OR u.last_version_id > %(version_id)s)
+), landed AS (
+  SELECT g.unit_id
+    FROM ruian_admin_unit_geometries g
+   WHERE g.registry_version_id = %(version_id)s AND g.purpose IN ('pip', 'authoritative')
+   GROUP BY g.unit_id
+  HAVING count(DISTINCT g.purpose) = 2
+)
+SELECT m.level::text, count(*), (array_agg(m.code ORDER BY m.code))[1:10]
+  FROM member m
+ WHERE NOT EXISTS (SELECT 1 FROM landed l WHERE l.unit_id = m.id)
+   AND NOT EXISTS (
+         SELECT 1 FROM registry_load_discrepancies d
+          WHERE d.registry_version_id = %(version_id)s AND d.entity_kind = m.level
+            AND d.entity_code = m.code AND d.discrepancy = 'degenerate_boundary_geometry')
+ GROUP BY m.level
+ ORDER BY 1
+"""
+
+
+def missing_geometry(
+    conn: psycopg.Connection, version_id: int,
+) -> list[tuple[str, int, list[int]]]:
+    """(level, units, first codes) of every `COMPLETE_LEVELS` member of `version_id` still
+    lacking a `pip` or an `authoritative` row; empty when the version may publish."""
+    with conn.cursor() as cur:
+        cur.execute(_MISSING_GEOMETRY_SQL,
+                    {"levels": list(COMPLETE_LEVELS), "version_id": version_id})
+        return [(str(level), int(n), list(codes or [])) for level, n, codes in cur.fetchall()]

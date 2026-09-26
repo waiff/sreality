@@ -7,18 +7,24 @@ generation skew between them is handled by COUNTING — a `Kód ADM` present in 
 absent in the other becomes a `registry_load_discrepancies` row, never a silent preference.
 
 Mechanism, in order (04 C1.7):
-  1. HEAD-probe the vintage; download both zips, hashing as they stream.
-  2. Archive both zips + a manifest to R2 (04 C1.8) BEFORE touching the database — an
+  1. HEAD-probe the vintage; download both zips and the state SHP boundary pack, hashing as
+     they stream.
+  2. Archive all three + a manifest to R2 (04 C1.8) BEFORE touching the database — an
      unarchived vintage stops being reproducible the moment ČÚZK rotates the directory.
   3. COPY into per-version UNLOGGED staging relations, no indexes, no constraints.
   4. Index + ANALYZE the staging relations.
   5. Run the blocking assertions AGAINST STAGING (golden point, counts, envelopes).
   6. Merge into the mirror: admin units, streets, address points + change log.
-  7. Rebuild the gazetteer for this version.
-  8. Publish = flip `is_current` in one short transaction.
+  7. Boundaries for this version (`ruian_boundaries.load_pack`), unchanged units carried.
+  8. Rebuild the gazetteer for this version — once, after the pack has named the units.
+  9. The completeness assertion: every member obec and KÚ has its pip + authoritative rows.
+ 10. Publish = flip `is_current` in one short transaction; refresh `rent_map_cells`.
 
-A load is never partially visible: `is_current` moves only in the last step, and every step
-is idempotent, so a killed run resumes from its checkpoint rather than restarting.
+What is NOT atomic: steps 6-8 write the mirror in place, so a reader keyed on `valid_to IS
+NULL` rather than on a pinned registry version sees a staged version's unit, street and
+address-point changes before step 10. What is: a registry version becomes current only in
+step 10 and only complete — every step is idempotent, so a killed run resumes from its
+checkpoint, and a resume whose download differs from the recorded sha256 refuses.
 
 CLI:  python -m location_data.ruian_load [--vintage YYYYMMDD] [--dry-run] [--work-dir DIR]
 Required: LOCATION_DB_DIRECT_URL or SUPABASE_DB_SESSION_URL, plus the R2_* archive vars.
@@ -41,7 +47,15 @@ from pathlib import Path
 import psycopg
 import requests
 
-from location_data import archive, krovak, load_assertions, loader_db, name_index, ruian_csv
+from location_data import (
+    archive,
+    krovak,
+    load_assertions,
+    loader_db,
+    name_index,
+    ruian_boundaries,
+    ruian_csv,
+)
 from location_data.load_assertions import Assertion, PriorLoad, StagingStats
 
 LOG = logging.getLogger("location_data.ruian_load")
@@ -183,6 +197,43 @@ def artifact_mismatches(
     return out
 
 
+def recorded_version(conn: psycopg.Connection, label: str) -> tuple | None:
+    """(id, is_current, artifact_sha256, artifact_bytes) of this vintage's version row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, is_current, artifact_sha256, artifact_bytes FROM registry_versions "
+            "WHERE label = %s",
+            (label,),
+        )
+        return cur.fetchone()
+
+
+def refuse_changed_artifacts(
+    conn: psycopg.Connection,
+    recorded: tuple,
+    artifacts: dict[str, ruian_csv.Artifact],
+    label: str,
+) -> None:
+    """The sha256 recorded when a vintage was first seen pins its artifacts. The CSV zips are
+    stamped with the vintage, but the boundary pack is refreshed IN PLACE under one URL, so
+    a resume that downloaded different bytes would build one version out of two packs.
+    Refuse instead — before the archive, so the R2 copy stays the recorded bytes. The
+    version stays staged and inert; the next vintage loads normally."""
+    mismatches = artifact_mismatches(recorded[2], recorded[3], artifacts)
+    if mismatches:
+        loader_db.abort(
+            conn, int(recorded[0]),
+            reason="artifact_republished",
+            detail={
+                "assertion": "artifact_bytes_are_immutable",
+                "label": label,
+                "artifacts": mismatches,
+                "hint": "this vintage was started from other bytes and cannot be finished "
+                        "from these; it stays staged (unpublished)",
+            },
+        )
+
+
 def ensure_version(
     conn: psycopg.Connection,
     vintage: datetime.date,
@@ -190,9 +241,9 @@ def ensure_version(
     proj: dict[str, str],
     *,
     archive_keys: dict[str, str] | None = None,
-    allow_republished: bool = False,
 ) -> tuple[int, bool]:
-    """Get or create the (not yet current) `registry_versions` row for this load event."""
+    """Get or create the (not yet current) `registry_versions` row for this load event and
+    record its artifacts."""
     label = version_label(vintage)
     urls: dict[str, str] = {name: a.url for name, a in artifacts.items()}
     urls.update(archive_keys or {})
@@ -204,29 +255,10 @@ def ensure_version(
         json.dumps({name: a.last_modified for name, a in artifacts.items()}),
     )
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, is_current, artifact_sha256, artifact_bytes FROM registry_versions "
-            "WHERE label = %s",
-            (label,),
-        )
+        cur.execute("SELECT id, is_current FROM registry_versions WHERE label = %s", (label,))
         row = cur.fetchone()
         if row is not None:
             version_id, is_current = int(row[0]), bool(row[1])
-            mismatches = artifact_mismatches(row[2], row[3], artifacts)
-            if mismatches and not allow_republished:
-                loader_db.abort(
-                    conn, version_id,
-                    reason="artifact_republished",
-                    detail={
-                        "assertion": "artifact_bytes_are_immutable",
-                        "label": label,
-                        "artifacts": mismatches,
-                        "hint": "ČÚZK republished this vintage; re-run with "
-                                "--allow-republished to adopt the new bytes",
-                    },
-                )
-            if mismatches:
-                LOG.warning("RUIAN adopting republished artefacts for %s: %s", label, mismatches)
             cur.execute(
                 """
                 UPDATE registry_versions
@@ -259,8 +291,8 @@ def prior_load(
     """Statistics of the last successfully published baseline — every growth-sensitive
     assertion is anchored to it, never to a 2026 constant (04 §4.5.3).
 
-    `exclude_version_id` keeps a resumed run (published, then killed before the gazetteer)
-    from anchoring its assertions to its own counts."""
+    `exclude_version_id` keeps a version from anchoring its own assertions to its own
+    counts."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1009,6 +1041,14 @@ def publish(conn: psycopg.Connection, version_id: int) -> None:
         )
 
 
+def refresh_rent_map_cells(conn: psycopg.Connection) -> None:
+    """MF's rent cells (migration 563) read the obec→KÚ membership of the current registry
+    version, so they are rebuilt the moment a version goes live — CONCURRENTLY, so readers
+    never block. Not guarded: this module merges only after 563 is applied."""
+    with conn.cursor() as cur:
+        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY rent_map_cells")
+
+
 # ---------- dry run ----------
 
 
@@ -1057,14 +1097,17 @@ def dry_run_stats(zip_path: Path, *, limit: int | None = None) -> StagingStats:
 def fetch_artifacts(
     sess: requests.Session, vintage: datetime.date, work_dir: Path, *, reuse: bool,
 ) -> dict[str, ruian_csv.Artifact]:
-    stamp = vintage.strftime("%Y%m%d")
-    wanted = {
-        "csv_strukt_adr": ruian_csv.STRUKT_URL.format(vintage=stamp),
-        "csv_ob_adr": ruian_csv.OB_ADR_URL.format(vintage=stamp),
+    """The vintage's three artifacts: both CSV products and the state SHP boundary pack.
+    The pack's URL carries no vintage, so it is saved under its artifact name."""
+    csv = {
+        "csv_strukt_adr": ruian_csv.STRUKT_URL.format(vintage=vintage.strftime("%Y%m%d")),
+        "csv_ob_adr": ruian_csv.OB_ADR_URL.format(vintage=vintage.strftime("%Y%m%d")),
     }
+    wanted = {name: (url, url.rsplit("/", 1)[-1]) for name, url in csv.items()}
+    wanted["shp_stat"] = (ruian_boundaries.STATE_PACK_URL, "ruian_shp_stat.zip")
     out: dict[str, ruian_csv.Artifact] = {}
-    for name, url in wanted.items():
-        dest = work_dir / url.rsplit("/", 1)[-1]
+    for name, (url, filename) in wanted.items():
+        dest = work_dir / filename
         if reuse and dest.exists():
             digest = hashlib.sha256()
             with dest.open("rb") as fh:
@@ -1088,8 +1131,6 @@ def run(
     reuse: bool,
     keep_staging: bool,
     limit: int | None,
-    allow_unarchived: bool = False,
-    allow_republished: bool = False,
 ) -> int:
     sess = ruian_csv.session()
     if vintage is None:
@@ -1097,44 +1138,48 @@ def run(
         if vintage is None:
             LOG.error("RUIAN no published vintage found in the last 3 month-ends")
             return 1
+    label = version_label(vintage)
     LOG.info("RUIAN vintage=%s", vintage.isoformat())
-    artifacts = fetch_artifacts(sess, vintage, work_dir, reuse=reuse)
     proj = krovak.proj_environment()
     LOG.info("RUIAN proj=%s pipeline=%s", proj["proj_version"], proj["proj_pipeline"])
 
     if dry_run:
+        artifacts = fetch_artifacts(sess, vintage, work_dir, reuse=reuse)
         stats = dry_run_stats(artifacts["csv_ob_adr"].path, limit=limit)
         assertions = load_assertions.evaluate(stats, None, proj_pipeline=proj["proj_pipeline"])
         report(assertions)
+        ruian_boundaries.dry_run(artifacts["shp_stat"].path)
         return 1 if load_assertions.blocking_failures(assertions) else 0
 
-    # BEFORE any staging (04 §C1.8): a vintage that is not archived is a registry_version
-    # that stops being reproducible the moment ČÚZK rotates the CSV directory, so a failed
-    # upload aborts the load rather than publishing an unreproducible version.
-    archive_keys: dict[str, str] = {}
+    # try/finally, not `with`: the boundaries phase may hand back a DIFFERENT connection than
+    # it was given (a reconnect mid-pack), and the handle closed has to be the live one.
+    conn = loader_db.open_loader_connection()
     try:
-        archive_keys = archive.archive_version(version_label(vintage), artifacts)
-    except archive.ArchiveError as exc:
-        if not allow_unarchived:
+        recorded = recorded_version(conn, label)
+        # Publish is the last step and runs only after the completeness assertion, so a
+        # current version is complete by construction. Checked BEFORE any download: a
+        # re-dispatch of a finished vintage would otherwise fetch today's boundary pack and
+        # be refused below over a version that has nothing left to do.
+        if recorded is not None and recorded[1]:
+            LOG.info("RUIAN %s is already current — nothing to do", label)
+            return 0
+        artifacts = fetch_artifacts(sess, vintage, work_dir, reuse=reuse)
+        if recorded is not None:
+            refuse_changed_artifacts(conn, recorded, artifacts, label)
+
+        # BEFORE any staging (04 §C1.8): a vintage that is not archived is a registry_version
+        # that stops being reproducible the moment ČÚZK rotates the CSV directory or
+        # refreshes the pack, so a failed upload aborts the load rather than publishing an
+        # unreproducible version.
+        try:
+            archive_keys = archive.archive_version(label, artifacts)
+        except archive.ArchiveError as exc:
             LOG.error("RUIAN %s", exc)
             return 1
-        LOG.warning("RUIAN loading UNARCHIVED (--allow-unarchived): %s", exc)
 
-    with loader_db.open_loader_connection() as conn:
-        version_id, already_current = ensure_version(
-            conn, vintage, artifacts, proj,
-            archive_keys=archive_keys, allow_republished=allow_republished,
-        )
+        version_id, _ = ensure_version(conn, vintage, artifacts, proj, archive_keys=archive_keys)
         stage = Staging.for_version(version_id)
         progress = loader_db.read_progress(conn, version_id)
-        # Resume on the phase checkpoint, NOT on is_current: a run killed between the
-        # pointer swap and the gazetteer rebuild leaves a current version with zero
-        # ruian_name_index rows, and short-circuiting on is_current would make that
-        # unrecoverable without hand-editing the row.
-        if already_current and loader_db.phase_done(progress, "published"):
-            LOG.info("RUIAN version %s is already current and complete — nothing to do",
-                     version_id)
-            return 0
         prior = prior_load(conn, exclude_version_id=version_id)
 
         create_staging(conn, stage)
@@ -1195,22 +1240,44 @@ def run(
             loader_db.write_progress(conn, version_id, phase="points", counts=counts)
             LOG.info("RUIAN address points %s", counts)
 
-        # The gazetteer is rebuilt BEFORE the pointer swap: publishing first and dying
-        # mid-rebuild would leave the version every resolution binds to with zero
-        # ruian_name_index rows. The rebuild is delete-then-insert per version, so a
-        # resumed run repeats it harmlessly.
-        if not loader_db.phase_done(progress, "gazetteer"):
-            rebuilt = name_index.rebuild(conn, version_id)
-            loader_db.write_progress(conn, version_id, phase="gazetteer",
-                                     counts={"name_index": rebuilt})
-            LOG.info("RUIAN gazetteer rows=%d", rebuilt)
+        # Boundaries and the gazetteer are NOT checkpoint-gated: the pack skips every unit
+        # already committed for this version and retries the ones that failed, and the
+        # gazetteer is a full recompute that must follow whatever names that retry upgraded.
+        # Both run before the pointer swap, so no current version ever lacks either.
+        boundaries, conn = ruian_boundaries.load_pack(
+            conn, artifacts["shp_stat"].path, version_id,
+        )
+        loader_db.write_progress(conn, version_id, phase="boundaries",
+                                 counts={f"boundary_{k}": v for k, v in boundaries.items()})
+        rebuilt = name_index.rebuild(conn, version_id)
+        loader_db.write_progress(conn, version_id, phase="gazetteer",
+                                 counts={"name_index": rebuilt})
+        LOG.info("RUIAN gazetteer rows=%d", rebuilt)
+
+        completeness = load_assertions.boundary_completeness(
+            ruian_boundaries.missing_geometry(conn, version_id)
+        )
+        report([completeness])
+        if not completeness.ok:
+            loader_db.abort(
+                conn, version_id,
+                reason="assertion_failed",
+                detail={
+                    "assertion": completeness.name,
+                    "expected": completeness.expected,
+                    "actual": completeness.actual,
+                },
+            )
 
         publish(conn, version_id)
         loader_db.write_progress(conn, version_id, phase="published")
-        LOG.info("RUIAN published version=%s label=%s", version_id, version_label(vintage))
+        LOG.info("RUIAN published version=%s label=%s", version_id, label)
+        refresh_rent_map_cells(conn)
 
         if not keep_staging:
             drop_staging(conn, stage)
+    finally:
+        conn.close()
     return 0
 
 
@@ -1221,17 +1288,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reuse-downloads", action="store_true",
                         help="reuse already-downloaded zips in --work-dir")
     parser.add_argument("--dry-run", action="store_true",
-                        help="download + parse + assert, no database access")
+                        help="download + parse + assert (CSVs and boundary pack), no database")
     parser.add_argument("--keep-staging", action="store_true",
                         help="keep the per-version staging relations after publish")
     parser.add_argument("--limit", type=int, default=None,
                         help="stage only the first N address points (testing)")
-    parser.add_argument("--allow-unarchived", action="store_true",
-                        help="load even if the R2 vintage archive (04 C1.8) failed — the "
-                             "version becomes unreproducible once ČÚZK rotates; state why")
-    parser.add_argument("--allow-republished", action="store_true",
-                        help="adopt artefact bytes that differ from the ones already "
-                             "recorded under this vintage label")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1259,10 +1320,8 @@ def main(argv: list[str] | None = None) -> int:
             return run(
                 vintage=vintage, work_dir=work_dir, dry_run=args.dry_run,
                 reuse=args.reuse_downloads, keep_staging=args.keep_staging, limit=args.limit,
-                allow_unarchived=args.allow_unarchived,
-                allow_republished=args.allow_republished,
             )
-        except loader_db.LoadAborted as exc:
+        except (loader_db.LoadAborted, ruian_boundaries.BoundarySchemaError) as exc:
             LOG.error("RUIAN load aborted: %s", exc)
             return 1
 

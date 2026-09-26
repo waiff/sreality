@@ -191,5 +191,17 @@ def evaluate(
     return out
 
 
+def boundary_completeness(missing: list[tuple[str, int, list[int]]]) -> Assertion:
+    """The publish gate: every member obec and KÚ of the staged version carries its `pip` and
+    `authoritative` geometry. `missing` is `ruian_boundaries.missing_geometry`'s answer —
+    (level, units, first codes) for each level that falls short, degenerate units excused."""
+    return Assertion(
+        name="boundary_completeness",
+        ok=not missing,
+        expected="0 member units without pip + authoritative geometry",
+        actual="; ".join(f"{level} {n} (e.g. {codes})" for level, n, codes in missing) or "0",
+    )
+
+
 def blocking_failures(assertions: list[Assertion]) -> list[Assertion]:
     return [a for a in assertions if a.blocking and not a.ok]
