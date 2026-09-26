@@ -317,7 +317,7 @@ def test_resolve_okres_matches_the_okres_code(client):
 
 def test_resolve_cast_obce_is_placed_by_name_inside_the_pipped_obec(client):
     """RUIAN publishes no part-of-municipality polygon (ruian_boundaries.LAYERS
-    loads ten levels and neither cast_obce nor momc is one), so a quarter can
+    loads eight levels and neither cast_obce nor momc is one), so a quarter can
     never be point-in-polygon'd: the POINT places the obec and the NAME places
     the part inside it. That is the whole reason the pick's `name` is sent."""
     _override_conn(scripted=[

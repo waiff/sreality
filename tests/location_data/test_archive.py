@@ -1,4 +1,5 @@
-"""Vintage archival (04 §C1.8): keys, manifest, immutability, and the abort contract."""
+"""Vintage archival (04 §C1.8): keys, manifest, the restore a resume reads, and the abort
+contract."""
 
 from __future__ import annotations
 
@@ -12,20 +13,19 @@ from location_data.ruian_csv import Artifact
 
 
 class _Store:
-    def __init__(self, existing: dict[str, int] | None = None):
-        self.existing = dict(existing or {})
+    def __init__(self, objects: dict[str, bytes] | None = None):
         self.uploads: list[tuple[str, str]] = []
-        self.objects: dict[str, bytes] = {}
-
-    def object_size(self, key: str) -> int | None:
-        return self.existing.get(key)
+        self.objects: dict[str, bytes] = dict(objects or {})
 
     def upload_file(self, key: str, path: str, content_type: str = "application/zip") -> None:
         self.uploads.append((key, path))
-        self.existing[key] = Path(path).stat().st_size
+        self.objects[key] = Path(path).read_bytes()
 
     def upload_bytes(self, key: str, data: bytes, content_type: str = "application/json") -> None:
         self.objects[key] = data
+
+    def download_file(self, key: str, path: str) -> None:
+        Path(path).write_bytes(self.objects[key])
 
 
 def _artifact(tmp_path: Path, name: str, body: bytes = b"payload") -> Artifact:
@@ -64,21 +64,24 @@ def test_the_manifest_carries_the_licence_text_in_force(tmp_path: Path):
     assert manifest["licence"]["attribution"]
 
 
-def test_an_already_archived_artefact_is_not_re_uploaded(tmp_path: Path):
-    artifact = _artifact(tmp_path, "OB_ADR_csv")
+def test_an_orphan_left_by_a_run_that_never_recorded_its_version_is_replaced(tmp_path: Path):
+    """Archiving runs only for a vintage no version row records, so an object already under
+    the key is unreferenced — the next run's bytes, which it then records, replace it."""
+    artifact = _artifact(tmp_path, "OB_ADR_csv", b"today")
     key = archive.artefact_key("ruian:2026-07-31", artifact.path.name)
-    store = _Store({key: artifact.bytes})
+    store = _Store({key: b"yesterday"})
     archive.archive_version("ruian:2026-07-31", {"csv_ob_adr": artifact}, store=store)
-    assert store.uploads == []
+    assert store.objects[key] == b"today"
 
 
-def test_a_key_holding_different_bytes_is_never_overwritten(tmp_path: Path):
-    artifact = _artifact(tmp_path, "OB_ADR_csv")
-    key = archive.artefact_key("ruian:2026-07-31", artifact.path.name)
-    store = _Store({key: artifact.bytes + 1})
+def test_restore_downloads_each_artefact_under_its_archived_filename(tmp_path: Path):
+    key = archive.artefact_key("ruian:2026-09-30", "ruian_shp_stat.zip")
+    store = _Store({key: b"pack"})
+    paths = archive.restore({"shp_stat": key}, tmp_path, store=store)
+    assert paths == {"shp_stat": tmp_path / "ruian_shp_stat.zip"}
+    assert paths["shp_stat"].read_bytes() == b"pack"
     with pytest.raises(archive.ArchiveError):
-        archive.archive_version("ruian:2026-07-31", {"csv_ob_adr": artifact}, store=store)
-    assert store.uploads == []
+        archive.restore({"shp_stat": key + ".gone"}, tmp_path, store=store)
 
 
 def test_any_store_failure_becomes_an_archive_error(tmp_path: Path):
@@ -98,4 +101,4 @@ def test_missing_r2_credentials_name_the_env_vars(monkeypatch):
     with pytest.raises(archive.ArchiveError) as exc:
         archive.open_store()
     assert "R2_ACCOUNT_ID" in str(exc.value)
-    assert "--allow-unarchived" in str(exc.value)
+    assert "never proceeds unarchived" in str(exc.value)

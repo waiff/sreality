@@ -15,8 +15,8 @@ is what `listing_location` answers with, so chip and listing now come from one
 registry version.
 
 WHICH LEVELS A POINT CAN RESOLVE TO. The mirror loads polygons for stat,
-region_soudrznosti, kraj, okres, orp, pou, obec, spravni_obvod,
-katastralni_uzemi and zsj (`location_data/ruian_boundaries.LAYERS`). It draws
+region_soudrznosti, kraj, okres, orp, pou, obec and katastralni_uzemi
+(`location_data/ruian_boundaries.LAYERS`). It draws
 NONE for `cast_obce` or `momc` — RÚIAN publishes no part-of-municipality
 boundary — so a point can never be PIP'd to a quarter. Therefore:
 
