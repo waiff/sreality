@@ -710,10 +710,10 @@ rules. Identify which one a task belongs to before you start.
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
   the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA
   (`{VITE_APP_BASE_URL}/listing/{source}/{native}` — an advert alias that lands on the
-  property page with that advert's row open) + subject facts; for sale apartments it ALSO
-  shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
-  the comparables estimation as the deeper tool/fallback (MF + estimation gated to
-  byt+prodej, the bookmark + link + facts are not). The estimation's editable **net-yield
+  property page with that advert's row open) + subject facts; for a flat it shows the
+  property's MF result by SHAPE (value + "Výnos MF" on a sale flat, range + (i) note, note,
+  nothing before attach) and, for sale apartments, the comparables estimation as the deeper
+  tool/fallback (the bookmark + link + facts are not gated). The estimation's editable **net-yield
   calculator** (rent / fond oprav+SVJ / cena / **rekonstrukce**, with the renovation joining
   the price as the acquisition-cost denominator — migration 213) mirrors the SPA's `YieldBlock`
   by value: the yield % is **computed-on-read client-side in BOTH** `computeYield` (extension)

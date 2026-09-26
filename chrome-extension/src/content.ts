@@ -1,9 +1,9 @@
 /* Listing-page content script for every portal we scrape.
  *
- * Detail pages → a floating panel (closed shadow root) that shows our
- * precomputed "Výnos MF" gross yield + MF reference rent for sale apartments,
- * with the comparables estimation as the deeper tool / fallback. The panel is
- * visibly deactivated for anything that isn't an apartment for sale.
+ * Detail pages → a floating panel (closed shadow root) that shows the
+ * property's MF reference rent for flats (with the "Výnos MF" gross yield on a
+ * sale flat), rendered by the SHAPE of the one result, and the comparables
+ * estimation for sale apartments as the deeper tool / fallback.
  *
  * Index/search pages → small per-card badges (see index_overlay.ts).
  *
@@ -12,7 +12,7 @@
 
 import styles from './styles.css?inline';
 import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
-import { EXTENSION_RELOADED_DETAIL, runIndexOverlay } from './index_overlay';
+import { EXTENSION_RELOADED_DETAIL, mfYieldText, runIndexOverlay } from './index_overlay';
 import type {
   AgentQuota,
   ApiMessage,
@@ -33,6 +33,8 @@ import type {
 // Shared product brand — the ONE definition (frontend/src/lib/brand.ts), the
 // same one the SPA uses. Rebranding there updates the panel wordmark here too.
 import { APP_NAME } from '../../frontend/src/lib/brand';
+// The MF result's ONE shape rule, shared with the SPA (a zero-dependency module).
+import { mfShape } from '../../frontend/src/lib/mfReference';
 
 const DEFAULT_RENOVATION_CZK = 0;
 /* Back-compat ONLY, never a second live definition of the fond rate: the value
@@ -120,10 +122,11 @@ interface PanelState {
   /* The signed-in operator's email (Wave 1 extension login), or null when
    * signed out / not yet loaded. Drives the sign-out control in the header. */
   authEmail: string | null;
-  /* Our scraped facts + MF rent/yield for the subject listing. */
+  /* Our scraped facts + its property's MF result for the subject listing. */
   listing: PortalListing | null;
-  /* byt+prodej? Gates the MF + estimation blocks; the app link + facts show
-   * regardless. null = unknown (not in our DB and no URL category hint). */
+  /* byt+prodej? Gates the estimation block; the MF block renders by the
+   * result's shape and the app link + facts show regardless. null = unknown
+   * (not in our DB and no URL category hint). */
   isSaleApt: boolean | null;
   /* Optional comparables estimation (full row) for the editable yield block. */
   run: EstimationRun | null;
@@ -559,15 +562,14 @@ function acquisitionHint(state: PanelState): string {
     : 'Jednorázový rozpočet, přičte se k ceně';
 }
 
-/* The two yield figures shown in the minimized bar: the precomputed MF gross
- * yield (sale apts) and the operator's live comparables yield (when an estimation
- * is loaded). Either may be absent — the bar degrades to whatever exists. */
+/* The two yield figures shown in the minimized bar: the MF gross yield (a
+ * value's, or a range's two) and the operator's live comparables yield (when an
+ * estimation is loaded). Either may be absent — the bar degrades to whatever
+ * exists. */
 function minimizedYieldCells(state: PanelState): { label: string; value: string }[] {
   const cells: { label: string; value: string }[] = [];
-  const mf = state.listing?.mf_gross_yield_pct ?? null;
-  if (state.isSaleApt !== false && mf != null) {
-    cells.push({ label: 'MF', value: fmtPct(mf) });
-  }
+  const mf = mfYieldText(state.listing);
+  if (mf != null) cells.push({ label: 'MF', value: mf });
   if (state.run?.status === 'success') {
     const y = computeYield(state);
     if (y != null) cells.push({ label: 'Odhad', value: fmtPct(y) });
@@ -860,13 +862,13 @@ function mountPanel(): {
     }
 
     /* active — read top-down: sign-out control → WHAT it is (subject) → the
-     * stamped MF yield → act on it (bookmark / open in app) → the deeper
-     * estimate. MF + estimate are gated to apartments for sale; the subject +
-     * actions are not. */
+     * property's MF result → act on it (bookmark / open in app) → the deeper
+     * estimate. MF renders by the result's shape (any flat that has one); the
+     * estimate is gated to apartments for sale; the subject + actions are not. */
     renderAuthStrip(body, state);
     renderSubjectFacts(body, state);
+    renderMfBlock(body, state);
     if (state.isSaleApt !== false) {
-      renderMfBlock(body, state);
       renderActionsBar(body, state);
       renderEstimation(body, state);
     } else {
@@ -1438,54 +1440,73 @@ function mountPanel(): {
   }
 
   /* The stamped valuation: eyebrow → big copper yield figure → a hairline-ruled
-   * ledger line carrying the MF reference rent (the signature of the panel). */
+   * ledger line carrying the MF reference rent (the signature of the panel).
+   * Everything comes off the property's ONE result, by its shape: a value
+   * (its yield + rent + the per-m² rate it was built from), the town's range
+   * (both ends, with the result's note behind an (i)), a note alone, or
+   * nothing. The yield figure appears only when the result has one (a sale
+   * flat); a rental flat shows its rent. No reason text is written here. */
   function renderMfBlock(body: HTMLElement, state: PanelState): void {
     const l = state.listing;
+    if (l == null || !l.found) {
+      body.appendChild(note('Tato nemovitost zatím není v naší databázi.'));
+      return;
+    }
+    const shape = mfShape(l.mf_reference_rent);
+    if (shape.kind === 'none') return;
     const mf = document.createElement('div');
     mf.className = 'mf';
-
-    const eyebrow = document.createElement('p');
-    eyebrow.className = 'mf-eyebrow';
-    eyebrow.textContent = 'Výnos MF (hrubý)';
-    eyebrow.title = 'Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)';
-    mf.appendChild(eyebrow);
-
-    const pct = l?.mf_gross_yield_pct ?? null;
-    const figure = document.createElement('p');
-    figure.className = 'mf-figure' + (pct == null ? ' mf-figure--muted' : '');
-    figure.textContent = fmtPct(pct);
-    mf.appendChild(figure);
-
-    if (l?.mf_reference_rent_czk != null) {
-      /* The per-m² figure comes from the SERVER's named measure, not from a
-       * division here. `mf_reference_rent_czk` is PROPERTY-grain (the golden
-       * record shared by every portal's advert of one flat) while `area_m2` is
-       * LISTING-grain, so the quotient this replaces divided one grain by
-       * another — wrong for every merged multi-portal group, independent of any
-       * basis question. The server computes both halves off one row and applies
-       * the rent basis's own validity floor, so `null` here means "no figure",
-       * never "compute it yourself". */
-      const perM2 = l.mf_reference_rent_per_m2_czk ?? null;
-      const ledger = document.createElement('div');
-      ledger.className = 'mf-ledger';
-      const lab = document.createElement('span');
-      lab.className = 'mf-ledger-label';
-      lab.textContent = 'MF nájem';
-      const val = document.createElement('span');
-      val.className = 'mf-ledger-value';
-      val.textContent =
-        `${fmtCzk(l.mf_reference_rent_czk)}/měs` +
-        (perM2 != null
-          ? ` · ${Math.round(perM2).toLocaleString('cs-CZ')} ${CZK_PER_M2_MONTH}`
-          : '');
-      ledger.appendChild(lab);
-      ledger.appendChild(val);
-      mf.appendChild(ledger);
-    } else if (l?.found) {
-      mf.appendChild(note('MF nájem nedostupný (chybí území nebo cena).'));
-    } else {
-      mf.appendChild(note('Tato nemovitost zatím není v naší databázi.'));
+    if (shape.kind === 'note') {
+      mf.appendChild(note(shape.note));
+      body.appendChild(mf);
+      return;
     }
+
+    const pct = mfYieldText(l);
+    if (pct != null) {
+      const eyebrow = document.createElement('p');
+      eyebrow.className = 'mf-eyebrow';
+      eyebrow.textContent = 'Výnos MF (hrubý)';
+      eyebrow.title = 'Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)';
+      mf.appendChild(eyebrow);
+      const figure = document.createElement('p');
+      figure.className = 'mf-figure';
+      figure.textContent = pct;
+      mf.appendChild(figure);
+    }
+
+    const ledger = document.createElement('div');
+    ledger.className = 'mf-ledger';
+    const lab = document.createElement('span');
+    lab.className = 'mf-ledger-label';
+    lab.textContent = 'MF nájem';
+    const val = document.createElement('span');
+    val.className = 'mf-ledger-value';
+    /* The per-m² rate is the result's own (a value's total, a range's two
+     * totals), never a quotient taken here. */
+    const num = (n: number): string => Math.round(n).toLocaleString('cs-CZ');
+    if (shape.kind === 'value') {
+      val.textContent =
+        `${fmtCzk(shape.ref.monthly_rent_czk)}/měs · ` +
+        `${num(shape.ref.total_per_m2)} ${CZK_PER_M2_MONTH}`;
+    } else {
+      const r = shape.range;
+      val.textContent =
+        `${num(r.rent_min_czk)}–${fmtCzk(r.rent_max_czk)}/měs · ` +
+        `${num(r.per_m2_min)}–${num(r.per_m2_max)} ${CZK_PER_M2_MONTH}`;
+      if (shape.note != null) {
+        const info = document.createElement('span');
+        info.className = 'mf-info';
+        info.setAttribute('role', 'img');
+        info.title = shape.note;
+        info.setAttribute('aria-label', shape.note);
+        info.textContent = 'i';
+        val.appendChild(info);
+      }
+    }
+    ledger.appendChild(lab);
+    ledger.appendChild(val);
+    mf.appendChild(ledger);
     body.appendChild(mf);
   }
 

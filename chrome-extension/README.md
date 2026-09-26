@@ -1,8 +1,8 @@
 # Limen Reality — Chrome extension (Realitní výnos / MF panel)
 
-Overlays our **MF reference rent** (`mf_reference_rent_czk`) and the
-**"Výnos MF"** gross yield (`mf_gross_yield_pct`) — the same precomputed
-figures the SPA's Browse cards show for sale apartments — on listing pages
+Overlays the property's **MF reference rent** (`mf_reference_rent`, rendered by
+its shape) and the **"Výnos MF"** gross yield (`mf_gross_yield_pct`) — the same
+figures the SPA shows — on listing pages
 across **every portal we scrape** (sreality, bazos, bezrealitky, idnes,
 maxima, remax, mmreality, ceskereality).
 
@@ -11,10 +11,12 @@ maxima, remax, mmreality, ceskereality).
   stage / remove), a **save-to-collection** control, **operator notes** (see the
   existing notes + add a new one), and an **"Otevřít v aplikaci"** deep-link to
   that listing's page in our app (`/listing/{sreality_id}`) plus its subject
-  facts. For **apartments for sale** it additionally shows the Výnos MF headline +
-  MF reference rent, with a comparables-based estimation as the deeper tool /
-  fallback. (MF + estimation are gated to byt+prodej; the rest are not.) Listings
-  not in our DB show a short "není v databázi" note.
+  facts. For a **flat** it shows the property's MF result by its shape — a value
+  (Výnos MF headline on a sale flat + the rent), the town's published range with
+  its note behind an (i), or the reason note alone — and nothing before the
+  advert is attached to a property. **Apartments for sale** additionally get a
+  comparables-based estimation as the deeper tool / fallback. Listings not in
+  our DB show a short "není v databázi" note.
   - The **notes** are property-grain (rule #18), the same notes the SPA's
     listing-detail `CurationBlock` shows. The panel lists the property's existing
     notes (most-recent-first) and an add box ("Přidat poznámku…" → **Uložit
@@ -55,8 +57,9 @@ maxima, remax, mmreality, ceskereality).
     Absent while the property is a LIVE deal (a card at a non-terminal stage); a
     deal closed into "Passed"/"Lost" keeps it. Adding a card, or moving one back
     into a live stage, lifts the dismissal.
-- **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
-  we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
+- **Index / search pages** get a small per-card badge: `Výnos MF X.X %` (or the
+  town's `X.X–Y.Y %` range, its note in the tooltip) when the property's MF
+  result has a yield, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL. Badges come only from a
   successful lookup; when it fails the page is not left silent — one small
   notice in the **bottom-left** corner (the panel owns the bottom-right) says
@@ -86,11 +89,10 @@ oprav / listing price) with the SPA's `/estimation/:id` page via the
 "One measure, one definition, one label" — the panel **reads** per-m² numbers,
 it never derives them:
 
-- The MF ledger line renders the server's `mf_reference_rent_per_m2_czk`
-  (the named measure, migration 425). It used to divide `mf_reference_rent_czk`
-  by `area_m2` in the browser, which mixed grains — the rent is
-  **property**-grain (the golden record) and the area is **listing**-grain, so
-  the quotient was wrong for every merged multi-portal group.
+- The MF ledger line renders the per-m² rate carried in the property's own MF
+  result (`total_per_m2`, or a range's two totals). It used to divide the rent
+  by the listing's `area_m2` in the browser, which mixed grains — the rent is
+  **property**-grain and the area **listing**-grain.
 - Both monthly per-m² figures (the MF reference rent and the *Fond oprav + SVJ*
   rate) are labelled **Kč/m²/měs**, the same unit string
   `toolkit/measures.PPM2_UNIT_CS` uses. A bare `Kč/m²` is the *capital* unit.
@@ -376,10 +378,11 @@ Odhlásit" line then appears at the top of the panel on every listing; click
 2. At the top, for **any** listing we have: a **Přidat do pipeline** bookmark
    (click to add the property to the deal pipeline / again to remove — it fills
    in and shows the current stage) and an **Otevřít v aplikaci** link.
-3. For a **sale apartment** we have, it shows **Výnos MF X.X %** + the MF
-   reference rent (per month and per m²) and the subject facts.
-4. For anything that isn't an apartment for sale, the MF/estimation block is
-   **visibly deactivated** with a short note (the bookmark + app link still show).
+3. For a **flat** we have, it shows the property's MF result by shape:
+   **Výnos MF X.X %** (sale flats) + the reference rent per month and per m²; the
+   town's range with an (i) note; or the reason note alone.
+4. For anything that isn't an apartment for sale, the estimation block is
+   replaced by a short note (the bookmark + app link still show).
 5. Below the MF headline, the **comparables estimation** block: if a
    successful estimation exists it loads the editable yield scenario; if not,
    a **Spustit odhad** button `POST`s to `/estimations` and polls until done.
@@ -389,7 +392,8 @@ Odhlásit" line then appears at the top of the panel on every listing; click
 **On a search / index page** (any supported portal):
 
 1. Each sale-apartment card we recognise gets a small badge.
-2. `Výnos MF X.X %` when we have the yield (rent in the tooltip); otherwise a
+2. `Výnos MF X.X %` (or a range) when we have the yield (rent or note in the
+   tooltip); otherwise a
    clickable **Odhadnout výnos** badge that runs one estimation for that card
    and swaps in the result.
 3. Cards aren't matched by portal-specific markup — the overlay scans each
