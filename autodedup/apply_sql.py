@@ -95,13 +95,19 @@ select n.listing_lo, n.listing_hi, n.source
    and n.listing_hi = any(%(listing_ids)s::bigint[])
 """
 
+# Per pair only the NEWEST ruling stands (the lane's must-link read, RT_MUST_LINK_SQL, is the
+# same rule): a pair ruled different and later ruled same is no longer a negative, and one ruled
+# same and later different is one. `negatives` names the verdicts wanted, of the newest only.
 PAIR_VERDICTS_SQL = """
 select v.listing_lo, v.listing_hi, v.verdict
-  from autodedup.verdicts v
- where v.kind = 'pair'
-   and v.verdict = any(%(negatives)s::text[])
-   and v.listing_lo = any(%(listing_ids)s::bigint[])
-   and v.listing_hi = any(%(listing_ids)s::bigint[])
+  from (select distinct on (x.listing_lo, x.listing_hi)
+               x.listing_lo, x.listing_hi, x.verdict
+          from autodedup.verdicts x
+         where x.kind = 'pair'
+           and x.listing_lo = any(%(listing_ids)s::bigint[])
+           and x.listing_hi = any(%(listing_ids)s::bigint[])
+         order by x.listing_lo, x.listing_hi, x.decided_at desc, x.id desc) v
+ where v.verdict = any(%(negatives)s::text[])
 """
 
 # A group ruling is about a SET of listings (E58), so it is fetched by the listings it names,
@@ -304,13 +310,24 @@ select s.listing_id, s.block_key
    and s.listing_id = any(%(listing_ids)s::bigint[])
 """
 
-# The newest ledger row per member set: a group waiting on the same first reason as last pass
-# files nothing new (A9), so the ledger records CHANGES rather than one row a minute.
-RC_LAST_OUTCOME_SQL = """
-select distinct on (a.member_ids) a.member_ids, a.outcome, a.error
-  from autodedup.applied_merges a
- where a.generation = %(generation)s::text
-   and not a.dry_run
-   and a.member_ids && %(listing_ids)s::bigint[]
- order by a.member_ids, a.id desc
+# The newest `depth` outcomes per member set, ONE per pass (a group with two retired properties
+# files two rows in one pass, under one run id): the newest is what a repeated skip or refusal
+# is compared with, so the ledger records CHANGES rather than one row a minute (A9); the run of
+# failures before it is what quarantines a group the lane cannot merge.
+RC_OUTCOME_HISTORY_SQL = """
+select h.member_ids, h.outcome, h.error, h.at
+  from (select e.member_ids, e.outcome, e.error, e.at,
+               row_number() over (partition by e.member_ids order by e.last_id desc) as rn
+          from (select a.member_ids, a.run_id,
+                       max(a.id)                                    as last_id,
+                       max(a.applied_at)                            as at,
+                       (array_agg(a.outcome order by a.id desc))[1] as outcome,
+                       (array_agg(a.error order by a.id desc))[1]   as error
+                  from autodedup.applied_merges a
+                 where a.generation = %(generation)s::text
+                   and not a.dry_run
+                   and a.member_ids && %(listing_ids)s::bigint[]
+                 group by a.member_ids, a.run_id) e) h
+ where h.rn <= %(depth)s::integer
+ order by h.member_ids, h.rn
 """

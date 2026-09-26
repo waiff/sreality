@@ -1919,6 +1919,22 @@ def _autodedup_outcome(
         aborted = str(summary.get("aborted") or "")
         reconciled = summary.get("reconcile") or {}
         merged = (reconciled.get("counts") or {})
+        # What the reconcile did, and did NOT do, this pass (review A12, B3): the groups it
+        # looked at and its seconds (G2 reads the rate with them in), the ones the chokepoint
+        # or an error refused, the ones waiting on a block not fully read, and why it was
+        # skipped (a pre-W5 generation names the re-seed).
+        last.update(
+            reconcile_groups=int(merged.get("groups") or 0),
+            reconcile_seconds=reconciled.get("seconds"),
+            reconcile_refused=int(merged.get("refused") or 0),
+            reconcile_failed=int(merged.get("failed") or 0),
+            reconcile_waiting=int(merged.get("block_not_fully_read") or 0),
+            reconcile_skipped_at_apply=int(merged.get("skipped_at_apply") or 0),
+            reconcile_quarantined=int(merged.get("quarantined") or 0),
+            reconcile_deferred=int(merged.get("deferred_run_cap") or 0),
+        )
+        if reconciled.get("reason"):
+            last["reconcile_reason"] = str(reconciled["reason"])[:AUTODEDUP_REASON_CHARS]
         last.update(
             ran=True,
             claimed=int(counts.get("claimed") or 0),
@@ -2000,7 +2016,7 @@ def _autodedup_note(last: dict[str, Any]) -> None:
     elif last.get("skipped"):
         key = "skipped:" + str(last.get("reason"))
     else:
-        key = "ran"
+        key = "ran:" + str(last.get("reconcile") or "")
     if key == _AUTODEDUP_LAST_OUTCOME:
         return
     _AUTODEDUP_LAST_OUTCOME = key
@@ -2010,7 +2026,8 @@ def _autodedup_note(last: dict[str, Any]) -> None:
     elif last.get("skipped"):
         LOG.info("AUTODEDUP lane skipping: %s %s", last.get("reason"), last.get("detail") or "")
     else:
-        LOG.info("AUTODEDUP lane passing")
+        LOG.info("AUTODEDUP lane passing (reconcile: %s%s)", last.get("reconcile"),
+                 f" - {last['reconcile_reason']}" if last.get("reconcile_reason") else "")
 
 
 async def _autodedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:

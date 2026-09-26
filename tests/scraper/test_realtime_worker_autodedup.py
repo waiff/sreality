@@ -240,7 +240,9 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "ran": True, "claimed": 12, "scored": 40, "grouped": 3, "merged": 2, "skipped": 0,
         "errors": 0, "seconds": last["seconds"], "held": 1, "retired": 0, "reconcile": "ran",
         "deadline_exceeded": False, "latency_p50_s": 310.2, "latency_p95_s": 355.0,
-        "bound_by": "count",
+        "bound_by": "count", "reconcile_groups": 0, "reconcile_seconds": None,
+        "reconcile_refused": 0, "reconcile_failed": 0, "reconcile_waiting": 0,
+        "reconcile_skipped_at_apply": 0, "reconcile_quarantined": 0, "reconcile_deferred": 0,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -500,3 +502,33 @@ def test_a_claim_the_budget_cut_still_measures_the_rate(world, tmp_path) -> None
 
     assert out["claim_bound"]["bound_by"] == "time" and out["counts"]["claimed"] == 1
     assert world.settings[key] > 0.0001
+
+
+
+def test_the_heartbeat_says_what_the_reconcile_did_and_did_not_do(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Review A12/B3: the groups the reconcile read and its seconds (G2 reads the rate with
+    them in), what the chokepoint or an error refused, what waits on an unread block — and
+    why it did not run at all, logged once on the change."""
+    conn = _Conn()
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, _summary(reconcile={
+        "seconds": 4.2, "counts": {"groups": 9, "applied": 3, "refused": 1, "failed": 2,
+                                   "block_not_fully_read": 4, "skipped_at_apply": 1,
+                                   "quarantined": 1, "deferred_run_cap": 5}}))
+    last = rw._autodedup_sync()
+    assert (last["reconcile_groups"], last["reconcile_seconds"], last["merged"]) == (9, 4.2, 3)
+    assert (last["reconcile_refused"], last["reconcile_failed"], last["reconcile_waiting"],
+            last["reconcile_skipped_at_apply"], last["reconcile_quarantined"],
+            last["reconcile_deferred"]) == (1, 2, 4, 1, 1, 5)
+
+    _stub_engine(monkeypatch, _summary(reconcile={
+        "skipped": incremental_lane.SEED_MISMATCH,
+        "reason": "autodedup.settings rt_seed_version:rt is None: re-seed"}))
+    monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
+    with caplog.at_level(logging.INFO, logger=rw.LOG.name):
+        last = rw._autodedup_sync()
+        rw._autodedup_note(last)
+    assert last["reconcile"] == "seed_version" and "re-seed" in last["reconcile_reason"]
+    assert any("reconcile: seed_version" in r.getMessage() for r in caplog.records)

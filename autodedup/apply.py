@@ -919,17 +919,28 @@ def _terminal(exc: MergeError) -> bool:
     return "mismatch" in str(exc)
 
 
-def _brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:
+def group_brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:
     return {"cluster_key": group.cluster_key, "survivor_id": group.survivor_id,
             "retired_ids": group.retired_ids, **extra}
 
 
-def _ruled_brief(group: GroupPlan) -> dict[str, Any]:
+def ruled_brief(group: GroupPlan) -> dict[str, Any]:
     merges = group.detail.get("engine_merges") or []
     note = ("merged by this engine - to undo: " + "; ".join(m["unapply"] for m in merges)
             if merges else "on one property by a merge this engine did not make")
-    return _brief(group, negatives=group.detail.get("negatives") or [],
+    return group_brief(group, negatives=group.detail.get("negatives") or [],
                   engine_merges=merges, note=note)
+
+
+def file_skipped(conn: Any, run_id: str, generation: str, groups: Sequence[GroupPlan]) -> int:
+    """The ledger rows of groups refused at plan time, one transaction: every refusal is on
+    record (the batch run's and the lane reconcile's alike). Returns how many rows it filed."""
+    rows = [row for g in groups for row in _rows_for(
+        run_id, generation, g, dry_run=False, outcome="skipped", error=g.reasons[0])]
+    if rows:
+        with conn.transaction():
+            _exec_many(conn, S.LEDGER_INSERT_SQL, rows)
+    return len(rows)
 
 
 class _SkipAtApply(Exception):
@@ -1019,10 +1030,10 @@ def apply_plan(
         "dry_run": dry_run,
         "scope": plan.scope.to_json(),
         "counts": dict(plan.counts),
-        "planned": [_brief(g) for g in plan.to_apply],
-        "skipped": [_brief(g, reasons=g.reasons) for g in plan.skipped
+        "planned": [group_brief(g) for g in plan.to_apply],
+        "skipped": [group_brief(g, reasons=g.reasons) for g in plan.skipped
                     if not g.ruled_after_merge],
-        RULED_AFTER_MERGE: [_ruled_brief(g) for g in plan.skipped
+        RULED_AFTER_MERGE: [ruled_brief(g) for g in plan.skipped
                             if g.ruled_after_merge],
         "deferred": list(plan.deferred),
         "applied": [],
@@ -1040,8 +1051,7 @@ def apply_plan(
             _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows + planned_rows)
         return result
 
-    with conn.transaction():
-        _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows)
+    file_skipped(conn, run_id, gen, plan.skipped)
 
     counts = result["counts"]
     counts.update(applied=0, skipped_at_apply=0, refused=0, failed=0, listings_moved=0)
@@ -1064,7 +1074,7 @@ def apply_plan(
                 error = f"{type(exc).__name__}: {exc}"
                 counts["failed"] += 1
                 counts["not_attempted"] = len(todo) - index - 1
-                result["failed"].append(_brief(group, error=error))
+                result["failed"].append(group_brief(group, error=error))
                 result["aborted"] = f"stopped at group {group.cluster_key}: {error}"
                 raise
             counts[outcome] += 1
@@ -1087,12 +1097,19 @@ def apply_plan(
 def apply_group(
     conn: Any, group: GroupPlan, scope: Scope, *, run_id: str, generation: str,
     merge: Callable[..., dict[str, Any]] = merge_property_set,
+    last: tuple[str, str | None] | None = None,
+    guards: Sequence[tuple[str, Mapping[str, Any]]] = (),
 ) -> tuple[str, dict[str, Any]]:
     """ONE planned group through THE chokepoint, in its own transaction, with its ledger rows:
     `applied`, `skipped_at_apply` (the in-transaction re-check or two asset links refused it),
     `refused` / `failed` (the chokepoint named why). The batch run and the real-time lane's
     reconcile (A9) both merge through here. An error the chokepoint does not name is recorded
-    and RAISED: nothing carries on merging over a database nobody has looked at."""
+    and RAISED: nothing carries on merging over a database nobody has looked at.
+
+    `last` is the member set's newest ledger outcome: a skip or refusal that repeats it files
+    nothing (the lane re-tries a group every sweep; an asset-link conflict would otherwise file
+    a row every few minutes). `guards` are statements run first inside the group's transaction
+    (the lane's local statement and lock timeouts)."""
     group_id = str(uuid.uuid4())
     markers = {
         "engine": "autodedup", "generation": generation, "cluster_key": group.cluster_key,
@@ -1102,6 +1119,8 @@ def apply_group(
     }
     try:
         with conn.transaction():
+            for sql, params in guards:
+                _exec(conn, sql, params)
             late_reasons, late_detail = recheck_group(conn, group, scope)
             if late_reasons:
                 raise _SkipAtApply(late_reasons, late_detail)
@@ -1124,17 +1143,20 @@ def apply_group(
     except _SkipAtApply as skip:
         group.reasons = skip.reasons
         group.detail = {**group.detail, **skip.detail, "at_apply": True}
-        with conn.transaction():
-            _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                run_id, generation, group, dry_run=False, outcome="skipped",
-                error=skip.reasons[0]))
-        return "skipped_at_apply", _brief(group, reasons=skip.reasons)
+        if last != ("skipped", skip.reasons[0]):
+            with conn.transaction():
+                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                    run_id, generation, group, dry_run=False, outcome="skipped",
+                    error=skip.reasons[0]))
+        return "skipped_at_apply", group_brief(group, reasons=skip.reasons)
     except MergeError as exc:
         outcome = "refused" if _terminal(exc) else "failed"
-        with conn.transaction():
-            _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                run_id, generation, group, dry_run=False, outcome=outcome, error=str(exc)))
-        return outcome, _brief(group, error=str(exc))
+        if outcome == "failed" or last != (outcome, str(exc)):
+            with conn.transaction():
+                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                    run_id, generation, group, dry_run=False, outcome=outcome,
+                    error=str(exc)))
+        return outcome, group_brief(group, error=str(exc))
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         try:
@@ -1144,7 +1166,7 @@ def apply_group(
         except Exception:  # noqa: BLE001 — the original error is the one to surface
             pass
         raise
-    return "applied", _brief(group, merge_group_id=group_id, listings_moved=sum(moved))
+    return "applied", group_brief(group, merge_group_id=group_id, listings_moved=sum(moved))
 
 
 def _attach_partial(exc: BaseException, result: dict[str, Any]) -> None:

@@ -227,3 +227,48 @@ def test_the_re_cluster_costs_the_same_statements_whatever_the_component_count(w
                                             "clusters_touching": 1}
     assert small == large, "the statement count must not grow with the components"
     assert large < 12, "and it is a handful, not ten a component"
+
+
+# ------------------------------------------------------- the re-cut inside the pass's time (A5/B6)
+
+
+def test_a_cut_inside_a_pass_never_outlives_its_deadline(world, tmp_path, monkeypatch) -> None:
+    """Review A5/B6: the pHash aggregate is a sequential scan of public.images (~13.3M rows);
+    inside a pass every statement of the cut is bounded by the time left, and past the deadline
+    the cut refuses between chunks instead of running on."""
+    import time as _time
+
+    _seed(world, tmp_path)
+    timeouts: list[int] = []
+    original = incremental_lane._exec
+
+    def spy(conn, sql, params=None):
+        if sql == incremental_lane.RT_STATEMENT_GUARD_SQL:
+            timeouts.append(int(params["statement_timeout_ms"]))
+        return original(conn, sql, params)
+
+    monkeypatch.setattr(incremental_lane, "_exec", spy)
+    incremental_lane.cut_calibration(world, Settings(), None, GENERATION,
+                                     deadline=_time.perf_counter() + 20.0)
+    assert timeouts and max(timeouts) <= 20_000, "never past the 20 s the pass had left"
+    with pytest.raises(incremental_lane.CalibrationRefusal, match="ran out"):
+        incremental_lane.cut_calibration(world, Settings(), None, GENERATION,
+                                         deadline=_time.perf_counter() - 1.0)
+
+
+def test_a_re_cut_that_fails_rolls_back_and_the_pass_still_reports(world, tmp_path,
+                                                                    monkeypatch) -> None:
+    _seed(world, tmp_path)
+    for row in world.image_rows:
+        row["phash"] = int(row["phash"]) + 7
+    for name, value in (("RECUT_MIN_IMAGES", 1), ("RECUT_MIN_AGE_H", 0.0)):
+        monkeypatch.setattr(incremental_lane, name, value)
+    before = dict(world.phash_pop)
+
+    def cancelled(*_a, **_k):
+        raise RuntimeError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(incremental_lane, "cut_calibration", cancelled)
+    out = run_incremental(lambda: world)
+    assert "statement timeout" in out["recut"]["skipped"] and out["aborted"] == ""
+    assert world.phash_pop == before

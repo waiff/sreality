@@ -1775,9 +1775,24 @@ class CalibrationRefusal(Exception):
     """The scope holds nothing the cut could be taken over."""
 
 
+def _cut_bound(conn: Any, deadline: float | None) -> None:
+    """The cut's statement timeout: the export's own (CUT_STATEMENT_TIMEOUT_MS) at a seed, and
+    never past the pass's deadline inside a pass (review A5/B6) — the pHash aggregate is a
+    sequential scan of `public.images`, and an unbounded one could outlive the worker's stall
+    warning. Past the deadline the cut stops between chunks and its transaction rolls back."""
+    if deadline is None:
+        timeout_ms = CUT_STATEMENT_TIMEOUT_MS
+    else:
+        left_ms = int((deadline - time.perf_counter()) * 1000)
+        if left_ms <= 0:
+            raise CalibrationRefusal("the pass's time ran out mid-cut; the next pass re-tries")
+        timeout_ms = min(CUT_STATEMENT_TIMEOUT_MS, left_ms)
+    _exec(conn, RT_STATEMENT_GUARD_SQL, {"statement_timeout_ms": timeout_ms})
+
+
 def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
-                    generation: str = GENERATION, *, chunk: int = CUT_CHUNK
-                    ) -> dict[str, Any]:
+                    generation: str = GENERATION, *, chunk: int = CUT_CHUNK,
+                    deadline: float | None = None) -> dict[str, Any]:
     """Cut the generation's calibration from the database, over what its scope snapshot holds.
 
     Only the cohort statistics are cut (E70's price deciles, exploded keys, token and attribute
@@ -1798,15 +1813,19 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
             "cut a calibration over. Refusing rather than freezing an empty one.")
     hashes: set[int] = set()
     for start in range(0, len(ids), chunk):
+        if deadline is not None:
+            _cut_bound(conn, deadline)
         hashes |= {int(row[0]) for row in _rows(conn, RT_CUT_HASHES_SQL,
                                                 {"ids": ids[start:start + chunk]})}
-    _exec(conn, RT_STATEMENT_GUARD_SQL, {"statement_timeout_ms": CUT_STATEMENT_TIMEOUT_MS})
+    _cut_bound(conn, deadline)
     population = ({int(row[0]): int(row[1]) for row in _rows(
         conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
     facts = SqlFacts(conn, population=population, clip=False)
     listings: dict[int, Listing] = {}
     fps: dict[int, Any] = {}
     for start in range(0, len(ids), chunk):
+        if deadline is not None:
+            _cut_bound(conn, deadline)
         for listing_id, (listing, images) in facts.facts(ids[start:start + chunk]).items():
             listings[listing_id] = listing
             fps[listing_id] = build_fingerprint(listing, images, settings)
@@ -1963,10 +1982,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         elif bootstrap:
             summary["reconcile"] = {"skipped": "bootstrap"}
         else:
+            reconcile_started = time.perf_counter()
             summary["reconcile"] = reconcile.run(
                 conn, generation, result.cluster_keys if result is not None else [],
                 run_id=f"{reconcile.RUN_PREFIX}{holder}", deadline=deadline,
                 blocks=[block.key for block in work.enter_blocks])
+            # What the reconcile cost inside the pass, so G2's rate is read with it in (B3).
+            summary["reconcile"]["seconds"] = round(time.perf_counter() - reconcile_started, 3)
         elapsed = time.perf_counter() - started
         if not stopped and result is not None:
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
@@ -1986,13 +2008,19 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         built_at = _stamp(rows[0][7])
         age_h = (None if built_at is None
                  else (datetime.now(timezone.utc) - built_at).total_seconds() / 3600.0)
-        # A10: the population has drifted — re-cut the calibration, atomically.
+        # A10: the population has drifted — re-cut the calibration, atomically, inside what
+        # is left of the pass's own time (every statement bounded by it); a cut that runs out
+        # rolls back and the next pass re-tries it.
         if (not stopped and coverage is not None and coverage < COVERAGE_FLOOR
                 and facts.images_with_phash >= RECUT_MIN_IMAGES
                 and (age_h is None or age_h >= RECUT_MIN_AGE_H)
                 and deadline - time.perf_counter() >= RECUT_RESERVE_S):
-            with _transaction(conn):
-                summary["recut"] = cut_calibration(conn, settings, model.version, generation)
+            try:
+                with _transaction(conn):
+                    summary["recut"] = cut_calibration(conn, settings, model.version,
+                                                       generation, deadline=deadline)
+            except Exception as exc:  # noqa: BLE001 — best effort: the pass already committed
+                summary["recut"] = {"skipped": f"{type(exc).__name__}: {exc}"[:300]}
         summary["fact_reads"] = facts.reads
         summary["statements"] = store.statements + facts.statements + work.statements
         summary["settings"] = settings.to_dict()
@@ -2141,6 +2169,9 @@ def run_rt_seed(
             _exec(conn, RT_SETTING_WRITE_SQL, {
                 "key": seed_version_key(generation), "value": json.dumps(SEED_VERSION),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
+            # A new build measures its own rate from the conservative start (review B3): the
+            # 09-21 row still read 0.585503, so G2 would have "passed" before any W5 pass ran.
+            _write_rate(conn, generation, PASS_RATE_PER_S, "rt_seed")
         summary = {
             "generation": generation,
             "calibration": cut,
@@ -2153,6 +2184,7 @@ def run_rt_seed(
             "reset": reset,
             "bootstrap": True,
             "seed_version": SEED_VERSION,
+            "pass_rate_per_s": PASS_RATE_PER_S,
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,

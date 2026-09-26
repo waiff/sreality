@@ -206,10 +206,12 @@ class FakeDb:
             ids = set(p["listing_ids"])
             return [row for row in self.mnl if row[0] in ids and row[1] in ids]
         if sql == S.PAIR_VERDICTS_SQL:
+            # Newest ruling per pair (list order is decision order), then the verdicts asked.
             ids = set(p["listing_ids"])
-            return [(v["lo"], v["hi"], v["verdict"]) for v in self.verdicts
-                    if v["kind"] == "pair" and v["verdict"] in p["negatives"]
-                    and v["lo"] in ids and v["hi"] in ids]
+            newest = {(v["lo"], v["hi"]): v["verdict"] for v in self.verdicts
+                      if v["kind"] == "pair" and v["lo"] in ids and v["hi"] in ids}
+            return [(lo, hi, verdict) for (lo, hi), verdict in newest.items()
+                    if verdict in p["negatives"]]
         if sql == S.CLUSTER_VERDICTS_SQL:
             ids = set(p["listing_ids"])
             return [(v["cluster_key"], v["verdict"], v.get("generation"), v.get("member_ids"),

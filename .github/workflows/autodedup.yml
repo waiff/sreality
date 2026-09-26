@@ -255,8 +255,11 @@ name: "AUTODEDUP: engine lane"
 #             must-not-link, another generation, a `public` table or a production merge. The
 #             seed takes the lane's lease (`autodedup.rt_lease`) and refuses, writing nothing,
 #             while a pass holds it: set app_settings.realtime_autodedup_interval_seconds to 0
-#             first. The calibration re-cuts ITSELF afterwards, in the worker's pass, whenever
-#             the share of photographs whose population it can measure falls below 0.85.
+#             first. It writes rt_seed_version:rt (the lane reconciles, and the review pages
+#             default to rt, only under the seed version this build carries, once the build
+#             phase ends) and resets the pass rate. The calibration re-cuts ITSELF afterwards,
+#             in the worker's pass, whenever the share of photographs whose population it can
+#             measure falls below 0.85.
 #
 #             The real-time PASS is not a mode (E914): the always-on worker's `autodedup` lane
 #             runs it, decides, groups and RECONCILES production inside the scope row (A9),
@@ -318,8 +321,10 @@ name: "AUTODEDUP: engine lane"
 #             REPORTED (ruled_different_after_merge, with the unapply args when the engine
 #             made that merge), never acted on. The real-time generation (`rt`) may be
 #             PLANNED by a dry run (G3's prediction of the lane's first reconcile) and is never
-#             applied from here: the worker's lane reconciles it itself, under its lease (A9).
-#             `dry_run=0` takes that same lease (one writer) and merges for real through
+#             applied from here: the worker's lane reconciles it itself, under its lease (A9);
+#             that dry run holds the lease too, so no pass moves the plan under it.
+#             `dry_run=0` is refused while realtime_autodedup_interval_seconds is above 0 (the
+#             lane would race it), takes that same lease (one writer) and merges for real through
 #             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
 #             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE
 #             rollout control (seeded by migration 558 with no area, edited on /settings),
@@ -363,7 +368,9 @@ name: "AUTODEDUP: engine lane"
 #   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run
 #             or a lane pass (run=, e.g. run=rt:<holder>) or a time window (since= / until=)
 #             applied, newest first. The brake on the lane: interval 0, then this. `dry_run=0`
-#             takes the lane's lease (one writer) and undoes them in that order and marks them
+#             is refused while realtime_autodedup_interval_seconds is above 0 (the lane would
+#             re-merge what it undoes), takes the lane's lease (one writer) and undoes them in
+#             that order and marks them
 #             undone in
 #             autodedup.applied_merges; `cluster_key=` (with generation=) undoes one group.
 #             NOT gated by the scope - undo is the way back - and an undone group may merge
@@ -422,7 +429,7 @@ name: "AUTODEDUP: engine lane"
 # its pairs are skipped rather than flooding the label set, default 12),
 # sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
-# settings (required), model (required), rt_scope and fresh; rt_equivalence accepts
+# settings (required), model (required), rt_scope, fresh and release_lease; rt_equivalence accepts
 # generation (default rt), batch (REQUIRED - the batch generation to compare against),
 # exported_at (the batch cohort's export time; default the batch pass's finish, which fails
 # closed) and tol (the score tolerance, default 1e-6); apply accepts generation (REQUIRED),
@@ -431,7 +438,10 @@ name: "AUTODEDUP: engine lane"
 # quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -
 # separate args, not one JSON `scope=`, because this workflow's charset check refuses braces
 # and quotes; unapply accepts dry_run and at least one of generation (with cluster_key), run
-# and since / until (ISO times, e.g. `since=2026-09-25T08:00Z`).
+# and since / until (ISO times, e.g. `since=2026-09-25T08:00Z`). rt_seed, apply and unapply
+# also accept release_lease=<holder>: a refusal over autodedup.rt_lease names its holder, and
+# when that writer is dead (its job ended, its worker restarted) this ends ITS lease first -
+# only that holder's; any other is refused.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json

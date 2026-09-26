@@ -21,7 +21,9 @@ from autodedup.incremental_lane import SqlStore
 from autodedup.incremental_sql import (
     RT_CURSOR_READ_SQL,
     RT_CURSOR_SET_SQL,
+    RT_LOCK_GUARD_SQL,
     RT_SCOPE_SCAN_SEEN_SQL,
+    RT_STATEMENT_GUARD_SQL,
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.indistinguishable import FEATURE_SLOTS
@@ -288,6 +290,7 @@ class LaneDb(FakeDb):
         self.walked: set[str] = {BLOCK}
         self.snapshot: dict[int, str] = {}
         self.read: set[int] = set()
+        self.guards: list[dict] = []
 
     def dispatch(self, sql: str, p: dict) -> list[tuple]:  # noqa: C901
         if sql == RT_CURSOR_READ_SQL:
@@ -315,20 +318,32 @@ class LaneDb(FakeDb):
         if sql == AS.RC_MEMBER_BLOCKS_SQL:
             return [(lid, block) for lid, block in self.snapshot.items()
                     if lid in p["listing_ids"]]
-        if sql == AS.RC_LAST_OUTCOME_SQL:
-            newest: dict[tuple[int, ...], tuple] = {}
+        if sql == AS.RC_OUTCOME_HISTORY_SQL:
+            # One event per (member set, run), newest first, `depth` of them per set.
+            events: dict[tuple[int, ...], dict[str, tuple]] = {}
             for row in self.ledger:
-                members = tuple(sorted(row["member_ids"] or ()))
+                members = tuple(row["member_ids"] or ())
                 if (row["generation"] == p["generation"] and not row["dry_run"]
                         and set(members) & set(p["listing_ids"])):
-                    newest[members] = (list(members), row["outcome"], row["error"])
-            return list(newest.values())
+                    events.setdefault(members, {})[row["run_id"]] = (
+                        row["id"], list(members), row["outcome"], row["error"],
+                        row["applied_at"])
+            out = []
+            for members in sorted(events):
+                ranked = sorted(events[members].values(), key=lambda e: -e[0])[:p["depth"]]
+                out += [e[1:] for e in ranked]
+            return out
+        if sql in (RT_STATEMENT_GUARD_SQL, RT_LOCK_GUARD_SQL):
+            self.guards.append(dict(p))
+            return [("set",)]
         return super().dispatch(sql, p)
 
 
-def _lane(db: LaneDb, *, deadline: float = 10 ** 9, touched=(), merge=None) -> dict:
-    return reconcile.run(db, RT, list(touched), run_id="rt:test", deadline=deadline,
-                         blocks=[BLOCK], merge=merge or db.merge([]), clock=lambda: 0.0)
+def _lane(db: LaneDb, *, deadline: float = 10 ** 9, touched=(), merge=None,
+          run_id: str = "rt:test") -> dict:
+    return reconcile.run(db, RT, list(touched), run_id=run_id, deadline=deadline,
+                         blocks=[BLOCK], merge=merge or db.merge([]), clock=lambda: 0.0,
+                         now=lambda: db.now)
 
 
 def _read(db: LaneDb, *lids: int) -> None:
@@ -641,3 +656,154 @@ def test_a_failing_release_never_masks_the_error_that_ended_the_run() -> None:
     assert any("expires by itself" in note for note in original.__notes__)
     with pytest.raises(ConnectionError):
         rt_lease.release_after(_Dead(), "worker:1:1", None)
+
+
+
+# ------------------------------------------------------------------ the reconcile, hardened (A5-A7)
+
+
+def test_the_whole_scope_row_is_re_read_before_every_group() -> None:
+    """Review A6/B7: narrowing the blocks between two groups stops the second at its re-check,
+    because the re-check reads the row as it is NOW, not the one the plan read."""
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _pair_group(db, 20, [20, 21], [300, 400], gen=RT)
+    _read(db, 10, 11, 20, 21)
+    calls: list = []
+    inner = db.merge(calls)
+
+    def merge_then_narrow(conn, property_ids, **kw):
+        out = inner(conn, property_ids, **kw)
+        db.settings[AP.SCOPE_SETTING] = {"category_types": ["pronajem"],
+                                         "blocks": ["town:563510"]}
+        return out
+
+    out = _lane(db, merge=merge_then_narrow)
+
+    assert out["counts"]["applied"] == 1 and out["counts"]["skipped_at_apply"] == 1
+    assert out["skipped_at_apply"][0]["reasons"] == [AP.SKIP_CARRIES_OUT_OF_SCOPE]
+    assert db.listings[21]["property_id"] == 400
+
+
+def test_the_scope_rows_run_cap_bounds_the_merges_of_one_pass() -> None:
+    """Review A6: `max_clusters_per_run` is not dropped by the lane; the rest wait a pass."""
+    db = LaneDb()
+    db.live_scope(max_clusters_per_run=1)
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _pair_group(db, 20, [20, 21], [300, 400], gen=RT)
+    _read(db, 10, 11, 20, 21)
+
+    first = _lane(db, run_id="rt:1")
+    second = _lane(db, run_id="rt:2")
+
+    assert (first["counts"]["applied"], first["counts"]["deferred_run_cap"]) == (1, 1)
+    assert second["counts"]["applied"] == 1
+    assert db.listings[11]["property_id"] == 100 and db.listings[21]["property_id"] == 300
+
+
+def test_an_apply_time_skip_that_repeats_files_no_new_row() -> None:
+    """Review A7: an asset-link conflict surfaces only at the merge, so the plan's dedupe never
+    saw it; the lane re-tries the group every sweep and must not file a row each time."""
+    db = LaneDb()
+    db.live_scope()
+    db.prop(100, asset=1)
+    db.prop(200, asset=2)
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+
+    first = _lane(db, run_id="rt:1")
+    rows = len(db.ledger)
+    second = _lane(db, run_id="rt:2")
+
+    assert first["counts"]["skipped_at_apply"] == second["counts"]["skipped_at_apply"] == 1
+    assert first["skipped_at_apply"][0]["reasons"] == [AP.SKIP_ASSET_LINKED]
+    assert rows == 1 and len(db.ledger) == rows, "one row for the one outcome"
+
+
+def test_an_error_nothing_names_is_counted_and_quarantines_after_three_passes() -> None:
+    """Review A7: an error inside one group never escapes the pass (the worker would fail every
+    minute); it is filed as `failed`, and a member set that failed QUARANTINE_AFTER passes in a
+    row is reported, not attempted, until QUARANTINE_RETRY_H after its last failure."""
+    from datetime import timedelta
+
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _pair_group(db, 20, [20, 21], [300, 400], gen=RT)
+    _read(db, 10, 11, 20, 21)
+    good = db.merge([])
+
+    def broken(conn, property_ids, **kw):
+        if 100 in property_ids:
+            raise RuntimeError("an error nothing names")
+        return good(conn, property_ids, **kw)
+
+    for n in range(1, reconcile.QUARANTINE_AFTER + 1):
+        out = _lane(db, merge=broken, run_id=f"rt:{n}")
+        assert out["counts"]["failed"] == 1 and "RuntimeError" in out["failed"][0]["error"]
+    assert db.listings[21]["property_id"] == 300, "the other group merged on the first pass"
+    rows = len(db.ledger)
+
+    held = _lane(db, merge=broken, run_id="rt:held")
+    assert held["counts"][reconcile.QUARANTINED] == 1 and held["counts"]["failed"] == 0
+    assert held[reconcile.QUARANTINED][0]["cluster_key"] == 10 and len(db.ledger) == rows
+
+    db.now += timedelta(hours=reconcile.QUARANTINE_RETRY_H + 1)
+    retried = _lane(db, run_id="rt:retry")
+    assert retried["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+
+
+def test_each_group_transaction_carries_its_own_local_timeouts() -> None:
+    """Review A5: the pass's guards ended with its commit; each group sets its own."""
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+    _lane(db)
+    assert {"statement_timeout_ms": reconcile.GROUP_STATEMENT_TIMEOUT_MS} in db.guards
+    assert {"lock_timeout_ms": reconcile.GROUP_LOCK_TIMEOUT_MS} in db.guards
+    assert reconcile.GROUP_STATEMENT_TIMEOUT_MS / 1000 < reconcile.GROUP_MARGIN_S
+
+
+def test_a_pair_ruling_is_read_newest_first_by_the_plan_as_by_the_lane() -> None:
+    """Review A8: a pair ruled different and LATER ruled same no longer refuses the merge (the
+    lane's clustering already reads it as a must-link, RT_MUST_LINK_SQL); ruled same and later
+    different, it does."""
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _pair_group(db, 20, [20, 21], [300, 400], gen=RT)
+    _read(db, 10, 11, 20, 21)
+    db.verdicts += [{"kind": "pair", "lo": 10, "hi": 11, "verdict": "different"},
+                    {"kind": "pair", "lo": 10, "hi": 11, "verdict": "same"},
+                    {"kind": "pair", "lo": 20, "hi": 21, "verdict": "same"},
+                    {"kind": "pair", "lo": 20, "hi": 21, "verdict": "different"}]
+
+    out = _lane(db)
+
+    assert out["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    assert out["counts"]["skipped_by_reason"] == {AP.SKIP_PAIR_VERDICT: 1}
+
+
+def test_a_seed_resets_the_rate_and_a_pass_times_its_reconcile(tmp_path, monkeypatch) -> None:
+    """Review B3: the 09-21 rate row (0.585503) would have "passed" G2 before any W5 pass ran;
+    a seed starts the build's rate from the conservative default, and every pass that
+    reconciles says how long the reconcile took."""
+    from autodedup.incremental import SEED_VERSION, bootstrap_key, seed_version_key
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    conn.settings[pass_rate_key("rt")] = 0.585503
+    out = lane_world.seed_lane(conn, tmp_path)
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S == out["pass_rate_per_s"]
+
+    conn.settings[bootstrap_key()] = False
+    assert conn.settings[seed_version_key()] == SEED_VERSION
+    seen: list = []
+    monkeypatch.setattr(reconcile, "run", lambda *a, **k: seen.append(k) or {
+        "counts": {"groups": 7, "applied": 2}})
+    ran = run_incremental(lambda: conn)
+    assert seen and ran["reconcile"]["counts"]["groups"] == 7
+    assert ran["reconcile"]["seconds"] >= 0
