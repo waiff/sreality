@@ -55,7 +55,6 @@ from autodedup.labels import (
     OPERATOR_POSITIVE_VERDICT,
     SOURCE_BROWSE_MERGE,
     PairKey,
-    load_operator_merges,
     pair_key,
     parse_operator_merge,
 )
@@ -193,16 +192,6 @@ def load_operator_pairs(
                     out.n_contradicted += 1
                     continue
                 out.add(pair.key, group, SOURCE_BROWSE_MERGE)
-    return out
-
-
-def load_merges_file(path: str | Path) -> OperatorPairs:
-    """A convenience for the one-file case the lane writes."""
-    merges = load_operator_merges(path)
-    out = OperatorPairs(sources=[str(path)], n_groups_read=len(merges))
-    for merge in merges:
-        for pair in merge.ruled_pairs:
-            out.add(pair.key, merge.merge_group_id, SOURCE_BROWSE_MERGE)
     return out
 
 
@@ -377,6 +366,7 @@ def measure_pair(
     clusters: Mapping[int, list[int]],
     conflicts: Sequence[Mapping[str, Any]],
     relation: ClusterRelation,
+    slots: Mapping[PairKey, Feats],
 ) -> dict[str, Any]:
     lo, hi = ruled.key
     listings = engine.dataset.listings
@@ -453,18 +443,13 @@ def measure_pair(
         blocker = relation.violating_pair(sorted(union))
         if blocker is not None:
             a, b = listings.get(blocker[0]), listings.get(blocker[1])
-            facts = (_fact_names(a, b, relation_feats(relation, blocker), settings, CLUSTER)
+            facts = (_fact_names(a, b, slots.get(blocker), settings, CLUSTER)
                      if a is not None and b is not None else [])
             # The relation's one refusal that is not a stated fact: E157's price limb.
             entry["blocker"] = {"lo": blocker[0], "hi": blocker[1],
                                 "facts": facts or [PRICE_CONFLICT]}
     entry["sides"] = [side_facts(la), side_facts(lb)]
     return entry
-
-
-def relation_feats(relation: ClusterRelation, key: PairKey) -> Feats | None:
-    feats = getattr(relation, "_feats", {}) or {}
-    return feats.get(key)
 
 
 # --- the whole yardstick -------------------------------------------------------------------
@@ -514,7 +499,8 @@ def measure(
     relation = ClusterRelation(listings, slots, settings)
     entries = [
         measure_pair(pair, engine=engine, stored=stored, member_of=member_of,
-                     clusters=clusters, conflicts=conflicts, relation=relation)
+                     clusters=clusters, conflicts=conflicts, relation=relation,
+                     slots=slots)
         for _, pair in sorted(in_cohort.items())
     ]
 
