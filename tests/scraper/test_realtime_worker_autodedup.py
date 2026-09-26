@@ -194,6 +194,18 @@ def test_the_seeded_setting_ships_the_lane_dark() -> None:
     assert not re.search(r"\b(create|alter|drop|delete|update|truncate)\b", body, re.I)
 
 
+def test_the_settings_row_says_the_lane_merges() -> None:
+    """W5 (E911): /settings is where the lane is turned on, and 557's description still said it
+    "never merges anything". 566 rewrites the DESCRIPTION only — never an operator's value."""
+    sql = (MIGRATION.parent / "566_autodedup_one_lane_interval_description.sql").read_text(
+        encoding="utf-8")
+    body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    assert "set description =" in body and "MERGES" in body
+    assert f"where key = '{rw.AUTODEDUP_INTERVAL_SETTING}'" in body
+    assert "value" not in body.split("set description", 1)[1].split("where", 1)[0]
+    assert not re.search(r"\b(create|alter|drop|delete|insert|truncate)\b", body, re.I)
+
+
 # ------------------------------------------------------------------------------ the bounds
 
 
