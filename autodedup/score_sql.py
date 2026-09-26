@@ -254,8 +254,10 @@ insert into autodedup.cluster_conflicts (
 # rows) and ~4 MB of `cluster_conflicts` (10,850 rows). Call it **~40 MB a generation** here;
 # at M20's production dial it scales with the pair count, not with the listing count.
 
-# Which passes the store holds, oldest first, by when their clusters were last written. The
-# lane keeps the newest `n` of these and its own, whatever order they land in.
+# Which passes the store holds, oldest first, by when their clusters were last written (every
+# upsert stamps `now()`, so a re-scored generation is the newest whatever its name). The lane
+# keeps the newest `n` BATCH generations of these and its own; the live stream `rt`, which the
+# worker rewrites every pass, is dropped from the ranking in Python and never pruned (E917).
 GENERATIONS_SQL = """
 select c.generation, max(c.last_changed_at) as last_changed_at
   from autodedup.clusters c

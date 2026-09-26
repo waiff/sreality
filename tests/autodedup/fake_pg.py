@@ -90,6 +90,9 @@ class FakePg:
         # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
         # one input (E79). Tests move it to put the lane over budget.
         self.schema_bytes = 64 * 1_048_576
+        # `pg_total_relation_size` of each table a fresh seed empties (E916): what the seed's
+        # projection apportions by the generation's share of the rows. Absent = 0 bytes.
+        self.table_bytes: dict[str, int] = {}
         # The declared type of `autodedup.pairs.score` (migration 541) and the settings each
         # batch generation's score pass recorded — what `rt_equivalence` reads to say whether
         # the store can carry the number the clustering ranks on, and whether the two sides
@@ -224,6 +227,22 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 ("rt_fp", sum(1 for g, _i in db.rt_fp if g == gen)),
                 ("pairs", sum(1 for g, _lo, _hi in db.pairs if g == gen)),
                 ("rt_block_cell", sum(1 for g, _k, _c in db.cells if g == gen))]
+    if sql == S.RT_GENERATION_BYTES_SQL:
+        held = {
+            "pairs": [key[0] for key in db.pairs],
+            "cluster_members": [row[0] for row in db.cluster_members],
+            "cluster_conflicts": [(_jsonb(row.get("detail")) or {}).get("generation")
+                                  for row in db.cluster_conflicts],
+            "clusters": [key[0] for key in db.clusters],
+            "rt_fp": [key[0] for key in db.rt_fp],
+            "fp_key": [row[0] for row in db.fp_key],
+            "rt_block_cell": [key[0] for key in db.cells],
+            "rt_scope_ids": [key[0] for key in db.scope_ids],
+            "rt_scope_scan": [row["generation"] for row in db.scope_scans],
+            "rt_retire_event": [row["generation"] for row in db.retire_events],
+        }
+        return [(name, int(db.table_bytes.get(name, 0)), len(gens),
+                 sum(1 for g in gens if g == gen)) for name, gens in held.items()]
     if sql == S.RT_ROW_ESTIMATE_SQL:
         return [("fp_key", len(db.fp_key)), ("rt_fp", len(db.rt_fp)),
                 ("pairs", len(db.pairs)), ("rt_block_cell", len(db.cells))]

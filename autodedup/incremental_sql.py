@@ -494,6 +494,77 @@ select c.relname as table_name, greatest(c.reltuples, 0)::bigint as n
    and c.relname in ('fp_key', 'rt_fp', 'pairs', 'rt_block_cell')
 """
 
+# What ONE generation holds of every table `rt_seed fresh=true` empties (E916), so the seed's
+# storage guard can check the size the schema will have once those rows are gone rather than
+# the size it has while they are still there. A DELETE does not shrink `pg_total_relation_size`
+# (the dead tuples stay in the file until VACUUM marks them reusable, and only VACUUM FULL
+# returns them), so re-measuring after the reset would read the same number; the projection is
+# each table's total size times the generation's share of its rows. The table list is the
+# reset's own (`incremental_lane.RESET_TABLES`) and a test holds the two equal, so the
+# projection can never subtract a table the reset does not empty. `cluster_conflicts` carries
+# its generation in `detail`, as the reset reads it.
+RT_GENERATION_BYTES_SQL = """
+select 'pairs' as table_name,
+       pg_total_relation_size('autodedup.pairs'::regclass)::bigint as bytes,
+       count(*)::bigint as n_rows,
+       count(*) filter (where generation = %(generation)s::text)::bigint as n_generation
+  from autodedup.pairs
+union all
+select 'cluster_members',
+       pg_total_relation_size('autodedup.cluster_members'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.cluster_members
+union all
+select 'cluster_conflicts',
+       pg_total_relation_size('autodedup.cluster_conflicts'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where detail ->> 'generation' = %(generation)s::text)::bigint
+  from autodedup.cluster_conflicts
+union all
+select 'clusters',
+       pg_total_relation_size('autodedup.clusters'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.clusters
+union all
+select 'rt_fp',
+       pg_total_relation_size('autodedup.rt_fp'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.rt_fp
+union all
+select 'fp_key',
+       pg_total_relation_size('autodedup.fp_key'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.fp_key
+union all
+select 'rt_block_cell',
+       pg_total_relation_size('autodedup.rt_block_cell'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.rt_block_cell
+union all
+select 'rt_scope_ids',
+       pg_total_relation_size('autodedup.rt_scope_ids'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.rt_scope_ids
+union all
+select 'rt_scope_scan',
+       pg_total_relation_size('autodedup.rt_scope_scan'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.rt_scope_scan
+union all
+select 'rt_retire_event',
+       pg_total_relation_size('autodedup.rt_retire_event'::regclass)::bigint,
+       count(*)::bigint,
+       count(*) filter (where generation = %(generation)s::text)::bigint
+  from autodedup.rt_retire_event
+"""
+
 RT_SETTINGS_MANY_SQL = """
 select s.key, s.value
   from autodedup.settings s

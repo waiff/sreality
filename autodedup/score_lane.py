@@ -61,7 +61,7 @@ from autodedup.score_sql import (
 )
 from autodedup.settings import Settings
 from autodedup.incremental import GENERATION as LIVE_GENERATION
-from autodedup.incremental_sql import RT_MUST_LINK_SQL
+from autodedup.incremental_sql import RT_MUST_LINK_SQL, RT_SCHEMA_SIZE_SQL
 from autodedup.store_score import storable
 
 RUN_FILE: str = "run.json"
@@ -700,33 +700,59 @@ def persist(
     }
 
 
+def schema_mb(conn: Any) -> float | None:
+    """What schema `autodedup` costs on disk now — the storage guard's own read (E79). A
+    receipt, not a gate: it runs after the prune has committed, so an unreadable catalog reads
+    None rather than failing a pass whose work is already stored."""
+    try:
+        rows = _fetchall(conn, RT_SCHEMA_SIZE_SQL)
+        value = _value(rows[0], "bytes") if rows else None
+        return None if value is None else round(int(value) / 1_048_576.0, 2)
+    except Exception:  # noqa: BLE001 — see the docstring
+        return None
+
+
 def prune_generations(
     conn: Any, *, keep: int | None, current: str
 ) -> dict[str, Any]:
-    """Drop the OLDEST generations beyond `keep`, newest first, never the one just written.
+    """Keep the `keep` NEWEST batch generations and the one just written; drop the rest.
+
+    "Newest" is `GENERATIONS_SQL`'s order, oldest first by `max(clusters.last_changed_at)`,
+    which every upsert of this lane stamps `now()` — so a re-scored generation is the newest
+    whatever its name, and the one just written can never be pruned. The live stream (`rt`)
+    is not ranked at all (E917): the worker's lane rewrites its clusters every pass, so it was
+    always the newest and silently took one of the `keep` slots. It is never pruned here.
 
     Off unless the operator asks: a generation is the evidence a published number rests on
     (M47 is what losing one costs), so the lane's default is to keep every pass it ever wrote
     and let the store grow at roughly 40 MB a generation on the trial cohort. `pairs` is
     pruned too — it is 90 % of that — and `cluster_conflicts` by the generation its `detail`
-    carries, which is the only place that table records one."""
+    carries, which is the only place that table records one. The receipt names what went and
+    the schema's size either side of the DELETE — which does not shrink it: the freed space is
+    reused by the next generation's writes, never returned to the disk (E916)."""
     if keep is None:
         return {"pruned": [], "kept": None}
     rows = _fetchall(conn, GENERATIONS_SQL)
-    ordered = [str(_value(row, "generation")) for row in rows]
-    # Oldest first from the statement, so the tail is what survives — and never the live
-    # stream, which the worker's lane owns (E914).
-    survivors = set(ordered[-keep:]) | {current, LIVE_GENERATION}
-    doomed = [name for name in ordered if name not in survivors]
-    if not doomed:
-        return {"pruned": [], "kept": keep}
-    params = {"generations": doomed}
-    with conn.transaction():
-        _execute(conn, PRUNE_MEMBERS_SQL, params)
-        _execute(conn, PRUNE_CONFLICTS_SQL, params)
-        _execute(conn, PRUNE_CLUSTERS_SQL, params)
-        _execute(conn, PRUNE_PAIRS_SQL, params)
-    return {"pruned": doomed, "kept": keep}
+    ranked = [str(_value(row, "generation")) for row in rows]
+    ranked = [name for name in ranked if name != LIVE_GENERATION]
+    survivors = set(ranked[-keep:]) | {current}
+    doomed = [name for name in ranked if name not in survivors]
+    before = schema_mb(conn)
+    if doomed:
+        params = {"generations": doomed}
+        with conn.transaction():
+            _execute(conn, PRUNE_MEMBERS_SQL, params)
+            _execute(conn, PRUNE_CONFLICTS_SQL, params)
+            _execute(conn, PRUNE_CLUSTERS_SQL, params)
+            _execute(conn, PRUNE_PAIRS_SQL, params)
+    return {
+        "pruned": doomed,
+        "kept": keep,
+        "ranked_oldest_first": ranked,
+        "survivors": [name for name in ranked if name in survivors],
+        "schema_mb_before": before,
+        "schema_mb_after": schema_mb(conn) if doomed else before,
+    }
 
 
 def _close(conn: Any) -> None:
@@ -765,6 +791,7 @@ def run_score(
                 "autodedup.runs/pairs/clusters are absent — apply migration 528 before "
                 "scoring; this lane's deliverable IS the stored pass"
             )
+        schema_mb_before = schema_mb(conn)
         # E27/E33: read FIRST, because it is an input to the clustering this row will record.
         # N4: the operator's own rows are a SEPARATE receipt from the machine's, and the
         # settings row decides whether they bind — never a silent default nobody can audit.
@@ -837,6 +864,7 @@ def run_score(
             fail_run(conn, run_id, exc)
             raise
 
+        schema_mb_after = schema_mb(conn)
         counts.update({
             "pairs_scored": engine.get("pairs_scored"),
             "pairs_stored_in_artifact": engine.get("pairs_stored"),
@@ -862,6 +890,11 @@ def run_score(
                 source: len(pairs) for source, pairs in mnl_by_source.items()
             },
             "counts": counts,
+            # E917: what the prune dropped, by name, and what the schema cost before this pass
+            # wrote anything and after its prune — a re-score's growth is visible in one place.
+            "prune": counts["prune"],
+            "storage": {"schema_mb_before": schema_mb_before,
+                        "schema_mb_after": schema_mb_after},
             "timings": engine.get("timings") or {},
             "band_width": engine.get("band_width"),
             "clusters_stats": engine.get("clusters") or {},

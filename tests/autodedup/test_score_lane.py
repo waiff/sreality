@@ -43,6 +43,7 @@ from autodedup.score_sql import (
     RUN_START_SQL,
     STORE_PRESENT_SQL,
 )
+from autodedup.incremental_sql import RT_SCHEMA_SIZE_SQL
 from tests.autodedup.test_engine_e2e import DUP_A, DUP_B, build_records
 
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -95,6 +96,8 @@ class FakeCursor:
             self._rows = list(self._conn.judged)
         elif sql is GENERATIONS_SQL:
             self._rows = list(self._conn.generations)
+        elif sql is RT_SCHEMA_SIZE_SQL:
+            self._rows = self._conn.schema_size()
         else:
             self._rows = []
 
@@ -119,7 +122,16 @@ class FakeConn:
         self.judged = list(state.get("judged", ()))
         self.generations = list(state.get("generations", ()))
         self.raises: dict[str, str] = dict(state.get("raises", {}))
+        # What `pg_total_relation_size` over the schema reads, one value per read in order and
+        # the last one repeated; absent = the catalog answers nothing.
+        self.schema_bytes: list[int] = state.setdefault("schema_bytes", [])
         self.closed = False
+
+    def schema_size(self) -> list[tuple[int]]:
+        if not self.schema_bytes:
+            return []
+        value = self.schema_bytes.pop(0) if len(self.schema_bytes) > 1 else self.schema_bytes[0]
+        return [(value,)]
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -457,9 +469,10 @@ def test_the_sweep_never_reaches_outside_its_own_generation(lane, tmp_path: Path
 
 
 def test_nothing_is_pruned_unless_the_operator_asks(lane, tmp_path: Path) -> None:
-    lane(tmp_path / "out", export_run="1", generation="g9")
+    summary = lane(tmp_path / "out", export_run="1", generation="g9")
     for sql in (PRUNE_MEMBERS_SQL, PRUNE_CLUSTERS_SQL, PRUNE_PAIRS_SQL, PRUNE_CONFLICTS_SQL):
         assert _params(lane.executed, sql) == []
+    assert summary["prune"] == {"pruned": [], "kept": None}
 
 
 def test_keep_generations_drops_the_oldest_and_never_this_pass(lane, tmp_path: Path) -> None:
@@ -471,9 +484,59 @@ def test_keep_generations_drops_the_oldest_and_never_this_pass(lane, tmp_path: P
     assert "g5" not in doomed
     for sql in (PRUNE_MEMBERS_SQL, PRUNE_PAIRS_SQL, PRUNE_CONFLICTS_SQL):
         assert _params(lane.executed, sql) == [{"generations": ["g1", "g2"]}]
-    assert summary["counts"]["prune"] == {"pruned": ["g1", "g2"], "kept": 2}
+    assert summary["counts"]["prune"]["pruned"] == ["g1", "g2"]
+    assert summary["counts"]["prune"]["kept"] == 2
+    assert summary["prune"] is summary["counts"]["prune"]
     # The prune runs AFTER the generation it is keeping is on disk.
     assert _index(lane.executed, CLUSTER_INSERT_SQL) < _index(lane.executed, PRUNE_CLUSTERS_SQL)
+
+
+def test_keep_generations_ranks_by_last_write_oldest_first_not_by_name() -> None:
+    """The documented order (PROGRAM.md's g7_rtbase note, `GENERATIONS_SQL`): oldest first by the
+    last time a generation's clusters were written, and every upsert stamps that time — so a
+    re-scored generation is the newest whatever its name. Name order would drop g9 here."""
+    assert "order by max(c.last_changed_at) asc" in GENERATIONS_SQL
+    assert "last_changed_at      = now()" in CLUSTER_INSERT_SQL.split("do update set")[1]
+    executed: list[tuple[str, Any]] = []
+    conn = FakeConn(executed, {"generations": [("g10",), ("g9",), ("g11",)]})
+    out = score_lane.prune_generations(conn, keep=2, current="g11")
+    assert out["pruned"] == ["g10"]
+    assert out["ranked_oldest_first"] == ["g10", "g9", "g11"]
+    assert out["survivors"] == ["g9", "g11"]
+
+
+def test_keep_generations_never_counts_the_live_stream(lane, tmp_path: Path) -> None:
+    """E917: the worker's lane rewrites `rt`'s clusters every pass, so `rt` is always the
+    newest. Ranked with the batch passes it took one of the `keep` slots, and a re-score of
+    g5 with keep=2 dropped g3 as well — two batch generations kept became one."""
+    lane.state["generations"] = [("g1",), ("g2",), ("g3",), ("g5",), ("rt",)]
+    summary = lane(tmp_path / "out", export_run="1", generation="g5", keep_generations="2")
+    prune = summary["prune"]
+    assert prune["pruned"] == ["g1", "g2"]
+    assert prune["ranked_oldest_first"] == ["g1", "g2", "g3", "g5"]
+    assert prune["survivors"] == ["g3", "g5"]
+    for sql in (PRUNE_MEMBERS_SQL, PRUNE_CLUSTERS_SQL, PRUNE_PAIRS_SQL, PRUNE_CONFLICTS_SQL):
+        assert _params(lane.executed, sql) == [{"generations": ["g1", "g2"]}]
+
+
+def test_the_summary_reports_what_was_pruned_and_the_schema_either_side(
+    lane, tmp_path: Path
+) -> None:
+    """The 2026-09-26 re-score of g15 with keep_generations=4 left no readable receipt of what
+    it dropped or what the schema cost. The summary and `score.json` say both — and that a
+    DELETE does not shrink the schema is visible, not a surprise."""
+    mb = 1_048_576
+    lane.state["generations"] = [("g1",), ("g2",), ("g3",)]
+    # pass start, prune before, prune after, pass end
+    lane.state["schema_bytes"] = [400 * mb, 440 * mb, 440 * mb, 440 * mb]
+    summary = lane(tmp_path / "out", export_run="1", generation="g3", keep_generations="1")
+    assert summary["prune"]["pruned"] == ["g1", "g2"]
+    assert summary["prune"]["schema_mb_before"] == 440.0
+    assert summary["prune"]["schema_mb_after"] == 440.0
+    assert summary["storage"] == {"schema_mb_before": 400.0, "schema_mb_after": 440.0}
+    on_disk = json.loads((tmp_path / "out" / score_lane.SUMMARY_FILE).read_text())
+    assert on_disk["prune"]["pruned"] == ["g1", "g2"]
+    assert on_disk["storage"]["schema_mb_before"] == 400.0
 
 
 def test_keep_generations_refuses_a_value_that_is_not_a_count() -> None:

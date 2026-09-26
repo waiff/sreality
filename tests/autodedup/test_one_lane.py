@@ -534,6 +534,7 @@ def test_a_score_pass_never_writes_or_prunes_the_live_stream() -> None:
                     return False
 
                 def execute(self, sql, params=None):
+                    self.rows = []
                     if "group by c.generation" in sql:
                         self.rows = [("rt",), ("g11",), ("g12",)]
                     elif params:
