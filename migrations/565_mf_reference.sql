@@ -54,7 +54,9 @@
 -- Yield = round(rent x 12 / price x 100, 2) only for category_type = 'prodej' and a
 -- price of at least 100 000 (507's floor); otherwise the rent stands with no yield.
 -- `katastr_kod` arrives with PR-B; until then every caller passes NULL, which is exactly
--- "the location is known to town level".
+-- "the location is known to town level". Callers from this migration on: estimations and
+-- /estimate_yield. The serving views keep reading the stored mf_* columns until PR-B's
+-- view swap calls this function with `ll.katastr_kod` (operator sequencing, 2026-09-26).
 --
 -- DETAIL SHAPE (numbers and the note only; clients format):
 --   value  -> monthly_rent_czk present (+ territory, vk, is_novostavba, source_revision,
@@ -65,9 +67,9 @@
 --   note   -> status + note only.
 -- NULL-valued keys are stripped, so presence alone decides the shape.
 --
--- APPLY with apply_migration.yml (or the MCP) BEFORE 566. Idempotent: every statement
--- is `if not exists`, `create or replace`, `on conflict do nothing` or a grant, so a
--- retried file resumes.
+-- APPLY with apply_migration.yml (or the MCP) BEFORE the code that calls it merges.
+-- Idempotent: every statement is `if not exists`, `create or replace`, `on conflict do
+-- nothing`, a grant or a stamp, so a retried file resumes.
 
 set lock_timeout = '5s';
 
@@ -158,6 +160,11 @@ insert into public.derived_artifacts
 values ('rent_map_cells', 'api/rent_map.py + fetch_rent_map.yml', 'api-request',
         'on-demand + 0 3 5 * *', interval '40 days', true)
 on conflict (name) do nothing;
+
+-- Born populated, so stamped now: the next ingest of an UNCHANGED file no-ops before its
+-- refresh, and Health would otherwise read "never" until a new revision arrives.
+select public.stamp_derived_artifact('rent_map_cells',
+                                     (select count(*) from public.rent_map_cells), null);
 
 -- ---------------------------------------------------------------------------
 -- 2. The measure.
@@ -344,6 +351,17 @@ begin
   end if;
   if has_table_privilege('anon', 'public.rent_map_cells', 'SELECT') then
     missing := missing || 'anon can read rent_map_cells';
+  end if;
+  -- An inlined function's relations are checked as the CALLER: a missing grant here makes
+  -- every authenticated read of a view that calls it fail, not merely slow.
+  if not has_table_privilege('authenticated', 'public.rent_map_cells', 'SELECT')
+     or not has_function_privilege('authenticated', 'public.mf_reference(text, text, text, '
+          'numeric, bigint, text, boolean, boolean, text, boolean, boolean, text, bigint, '
+          'bigint, public.country_status)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.mf_reference(text, text, text, numeric, '
+          'bigint, text, boolean, boolean, text, boolean, boolean, text, bigint, bigint, '
+          'public.country_status)', 'EXECUTE') then
+    missing := missing || 'mf_reference / rent_map_cells grants are not authenticated-only';
   end if;
   if array_length(missing, 1) is not null then
     raise exception '565 did not land: %', array_to_string(missing, '; ');
