@@ -335,7 +335,9 @@ pass of `autodedup.incremental_lane.run_incremental` — its ONLY caller (the Gi
 its repository variable and the `realtime_enabled` stop button are deleted). One integer,
 `realtime_autodedup_interval_seconds`, is its cadence AND kill switch (the sold_comps lane's shape;
 no flag, no count): migration 557 seeds it at `0` (stopped) so /settings can set it, an absent row
-reads as 0, and 60 is the running value. The lane hands the engine a connection and nothing else.
+reads as 0, and 60 is the running value once `rt_seed` has rebuilt `rt` for this version and G1–G3
+have passed (migration 568's /settings text says so). The lane hands the engine a connection and
+nothing else.
 
 - **It decides, groups AND merges.** A pass claims what moved, decides it with the batch engine's
   own functions, re-clusters under the batch pass's D43 relation and the operator's rulings (`same`
@@ -344,14 +346,21 @@ reads as 0, and 60 is the running value. The lane hands the engine a connection 
   re-clustered, plus a slice swept past the `rt_reconcile` cursor, go through the batch apply's own
   plan and refusals and merge through `toolkit.property_identity.merge_property_set`
   (`source='autodedup'`, ledger `autodedup.applied_merges`, `run_id='rt:<holder>'`) — only inside
-  the area `app_settings.autodedup_apply_scope` names (re-read before every group), never during the
-  build phase, and never as a split (a grouping the stream stops supporting is a proposal on
-  `/autodedup/proposed-splits`). The worker itself never names the chokepoint.
+  the area `app_settings.autodedup_apply_scope` names (the whole row re-read before every group,
+  its `max_clusters_per_run` a pass's cap), never during the build phase, never over a generation
+  no seed of this version built (`rt_seed_version:rt` must equal `incremental.SEED_VERSION`; the
+  09-21 `rt` has no such row, so the pass reports `reconcile: seed_version`), and never as a split
+  (a grouping the stream stops supporting is a proposal on `/autodedup/proposed-splits`). A skip or
+  refusal files a ledger row only when the member set's outcome changes; an error inside a group
+  never escapes the pass (3 in a row quarantine the set for 24 h); each group's transaction sets
+  its own 25 s statement / 5 s lock timeouts. The worker itself never names the chokepoint.
 - **One writer.** The engine keeps its watermark in `autodedup.scan_cursor` and its lease in
   `autodedup.rt_lease`. `rt_seed` holds that lease through its transaction, and a LIVE dispatched
   `apply` / `unapply` holds it for its run, so a worker pass that fires meanwhile is a green
-  `skipped: leased`. The brake: set the interval to 0, then `mode=unapply` (by `run=rt:<holder>` or
-  a `since=` window).
+  `skipped: leased`; every refusal names the holder, and `release_lease=<holder>` ends the lease a
+  dead writer left. The brake: set the interval to 0, then `mode=unapply` (by `run=rt:<holder>` or
+  a `since=` window) — a live `apply` or `unapply` REFUSES while the interval is above 0, because
+  the lane's next sweep would re-merge what it undoes.
 - **The engine bounds its own time (E913).** A pass reads its deadline (1,050 s) between steps and
   every 256 pair decisions; past it the one transaction rolls back (nothing written, no cursor
   moved), the lease is freed and the pass records its rate HALVED, so the next claim is half the
@@ -359,18 +368,23 @@ reads as 0, and 60 is the running value. The lane hands the engine a connection 
   worker's statement-refusing deadline wrapper and in-process back-off are gone. Deadline + one
   120 s statement stays under the 1,200 s stall warn and `LANE_PASS_TIMEOUT_SECONDS`; the 2,400 s
   lease also covers the reconcile's last group and a calibration re-cut.
-- **Its calibration follows the corpus (A10).** `rt_seed` cuts it from the database (no export);
-  a pass whose pHash population coverage falls below 0.85 re-cuts it (at most every 6 h).
+- **Its calibration follows the corpus (A10).** `rt_seed` cuts it from the database (no export)
+  and resets the measured rate; a pass whose pHash population coverage falls below 0.85 re-cuts
+  it (at most every 6 h) inside its own remaining time — every statement bounded by it, a cut
+  that runs out rolls back and the next pass re-tries.
 - **A refusal is an error, never a crash.** The engine refuses by raising `SystemExit` (a storage
   budget, a scope it cannot walk, a missing migration); carried out of `asyncio.to_thread` that
   would stop the event loop and every lane, so the lane records it as `errors: 1` with the text,
   counts it as a failed pass (`failed_passes`, `last_failure_at`) and logs it on the transition
   only. A pass that rolled back (deadline or pair budget) ran and counts as an error. Heartbeat
   `details.autodedup.last` = `{ran, claimed, scored (pairs), grouped (groups written), merged
-  (production merges the reconcile made), reconcile (ran / its skip or stop reason), skipped (0/1)
-  + reason, errors (0/1) + refused/aborted, deadline_exceeded, seconds, held, retired,
-  latency_p50_s, latency_p95_s, bound_by}`; an absent store (migrations 539/540) =
-  `skipped: store_absent` + one warning.
+  (production merges the reconcile made), reconcile (ran / its skip or stop reason) +
+  reconcile_reason, reconcile_groups, reconcile_seconds, reconcile_refused, reconcile_failed,
+  reconcile_waiting (a block not fully read), reconcile_skipped_at_apply, reconcile_quarantined,
+  reconcile_deferred (the run cap), skipped (0/1) + reason, errors (0/1) + refused/aborted,
+  deadline_exceeded, seconds, held, retired, latency_p50_s, latency_p95_s, bound_by}`; an absent
+  store (migrations 539/540) = `skipped: store_absent` + one warning. A change of the reconcile
+  state is logged once.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,
   E73), and a photo-dependent merge waits until every photograph carries its pHash, CLIP vector
   and tags (E908; CLIP p50 2.5 h). So a text-certified duplicate merges in ~6–7 minutes and a

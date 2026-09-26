@@ -1305,9 +1305,13 @@ renumber.** Navigate by area:
     go through the apply path below (`apply.plan_groups` / `apply.apply_group`, the same
     refusals, the same chokepoint, `source='autodedup'`, ledger rows `generation='rt'`,
     `run_id='rt:<holder>'`), only inside `autodedup_apply_scope` and never as a split — a
-    grouping the stream no longer supports is a proposal. The brake is the interval (0), then
-    `mode=unapply`. Its calibration is cut from the database (`rt_seed`, and a re-cut when the
-    pHash population drifts); a pass past its own deadline rolls back and halves its rate. The
+    grouping the stream no longer supports is a proposal. It reconciles only a generation a
+    seed of this version built (`rt_seed_version:rt` = `incremental.SEED_VERSION`) whose build
+    phase ended, and review pages default to `rt` under the same condition (else the newest batch
+    pass). The brake is the interval (0), then `mode=unapply` — a live apply or unapply refuses
+    while the interval is above 0. Its calibration is cut from the database (`rt_seed`, and a
+    re-cut inside the pass's remaining time when the pHash population drifts); a pass past its own
+    deadline rolls back and halves its rate. The
     batch `apply` mode stays until the lane has run three live days and checkpoint C2 passes;
     `legacy_retire` until W8.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
