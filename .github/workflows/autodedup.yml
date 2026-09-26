@@ -316,8 +316,9 @@ name: "AUTODEDUP: engine lane"
 #             active again. Group size is capped by the engine alone, when it builds the
 #             group. A group already on one property that an operator negative covers is
 #             REPORTED (ruled_different_after_merge, with the unapply args when the engine
-#             made that merge), never acted on. The real-time generation (`rt`) is
-#             refused: the worker's lane reconciles it itself, under its lease (A9).
+#             made that merge), never acted on. The real-time generation (`rt`) may be
+#             PLANNED by a dry run (G3's prediction of the lane's first reconcile) and is never
+#             applied from here: the worker's lane reconciles it itself, under its lease (A9).
 #             `dry_run=0` takes that same lease (one writer) and merges for real through
 #             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
 #             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE

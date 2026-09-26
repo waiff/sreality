@@ -1335,8 +1335,9 @@ renumber.** Navigate by area:
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
-    rows before it merges; the live `rt` generation is refused here (the lane reconciles it,
-    below), and a live run holds the lane's lease `autodedup.rt_lease` (one writer). An engine
+    rows before it merges; the live `rt` generation may be planned by a dry run but is never
+    applied here (the lane reconciles it, above), and a live run holds the lane's lease
+    `autodedup.rt_lease` (one writer). An engine
     merge the operator took
     apart stays apart: its separated LISTINGS are never re-united by a later generation, even
     once the restored property has been merged into another one, and an `unapply` that finds

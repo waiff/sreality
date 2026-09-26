@@ -1101,15 +1101,25 @@ def test_an_engine_merge_ruled_different_afterwards_is_reported_not_counted_away
     assert f"generation={GEN},cluster_key=10" in text
 
 
-def test_the_live_stream_is_refused_here_the_lane_reconciles_it(tmp_path: Path) -> None:
-    """One stream, one writer (A9): the lane reconciles `rt` itself, under its lease."""
+def test_the_live_stream_is_planned_here_never_applied(tmp_path: Path) -> None:
+    """One stream, one writer (A9): the lane reconciles `rt` itself, under its lease. A dry run
+    may PLAN it — that is G3's prediction of the lane's first reconcile — and nothing here
+    applies it."""
     db = FakeDb()
+    db.live_scope()
     _pair_group(db, 10, [10, 11], [100, 200], gen="rt")
-    with pytest.raises(ValueError, match="real-time"):
-        A.plan_apply(db, "rt", A.Scope())
-    with pytest.raises(SystemExit, match="real-time"):
-        A.run_apply(_factory(db), {"generation": "rt"}, tmp_path)
-    assert db.ledger == [] and not db.statements
+    plan = A.plan_apply(db, "rt", A.Scope())
+    assert [g.cluster_key for g in plan.to_apply] == [10]
+    with pytest.raises(A.ApplyRefused, match="real-time"):
+        A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    for args in ({"generation": "rt", "dry_run": "0"},
+                 {"generation": "rt", "retire_legacy": "1"}):
+        with pytest.raises(SystemExit, match="real-time"):
+            A.run_apply(_factory(db), args, tmp_path)
+    assert all(row["dry_run"] for row in db.ledger)
+    assert db.listings[11]["property_id"] == 200
+    out = A.run_apply(_factory(db), {"generation": "rt"}, tmp_path)
+    assert out["dry_run"] and [g["cluster_key"] for g in out["planned"]] == [10]
 
 
 # ------------------------------------------------------------------ undo

@@ -622,12 +622,10 @@ def _members(conn: Any, generation: str) -> dict[int, list[Member]]:
 
 
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
-    """Read-only: which groups of `generation` would merge, into what, and which are refused."""
-    if generation.strip() == GENERATION:
-        raise ValueError(
-            f"generation {generation!r} belongs to the real-time lane, which reconciles it "
-            "itself under its own lease (A9) — it cannot be applied from this lane"
-        )
+    """Read-only: which groups of `generation` would merge, into what, and which are refused.
+
+    The live stream may be PLANNED (a dry run is how G3 predicts the lane's first reconcile)
+    but never applied from here: the lane reconciles it itself, under its lease (A9)."""
     return plan_groups(conn, generation, _cluster_rows(conn, generation),
                        _members(conn, generation), scope)
 
@@ -1001,6 +999,11 @@ def apply_plan(
     group, so a refusal anywhere in a group rolls the whole group back."""
     run_id = run_id or new_run_id()
     if not dry_run:
+        if plan.generation.strip() == GENERATION:
+            raise ApplyRefused(
+                f"generation {plan.generation!r} belongs to the real-time lane, which reconciles "
+                "it itself under its own lease (A9) — a dry run may plan it, nothing here "
+                "applies it")
         problems = plan.scope.live_problems()
         if problems:
             raise ApplyRefused("; ".join(problems))
@@ -1607,12 +1610,13 @@ def run_apply(
 ) -> dict[str, Any]:
     _check_args(args, APPLY_ARGS)
     generation = _generation_arg(args)
-    if generation.strip() == GENERATION:
+    dry_run = _dry_run_arg(args)
+    if generation.strip() == GENERATION and (not dry_run or _retire_arg(args)):
         raise SystemExit(
             f"generation={generation}: the real-time lane's generation is reconciled by the "
-            "lane itself, under its own lease (A9) — it cannot be applied from here"
+            "lane itself, under its own lease (A9) — a dry run may plan it (the G3 "
+            "prediction), nothing here applies it"
         )
-    dry_run = _dry_run_arg(args)
     retire = _retire_arg(args)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
