@@ -262,8 +262,8 @@ function Header({
           kick off a deterministic monthly-rent calculation in the
           background — the result appears here when it lands. The
           <em> Portal</em> column links to the listing on the portal it was
-          last seen on; the <em>MF yield</em> column shows the
-          Ministry-of-Finance reference gross yield already on the listing.
+          last seen on; the <em>MF yield</em> column shows the property's
+          Ministry-of-Finance reference gross yield, the one the filter matched.
         </p>
         {matcherResult ? (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)]">

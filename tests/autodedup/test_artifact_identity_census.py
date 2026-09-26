@@ -35,6 +35,9 @@ LANE_WRITERS: tuple[str, ...] = (
     "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
     "seals.py",
     "structural_truth.py", "town_probe.py",
+    # E299: writes yardstick.json / yardstick.md; reads the group file, where the operator's
+    # identity is already a digest, and never names an identity column.
+    "yardstick.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.

@@ -90,7 +90,10 @@ OPERATOR_RELATION: dict[str, str] = {
     "same_building_different_unit": "same_building_different_unit",
     "same_project_different_unit": "different_property",
 }
-OPERATOR_SOURCES: tuple[str, ...] = ("explicit", "implied")
+# `browse_merge` (E299): a pair the operator united by merging properties in Browse. Off by
+# default like `implied` — neither was typed against the pair — and before migration 564 those
+# pairs left the labels lane as `explicit`, so a default-reference number moves when 564 lands.
+OPERATOR_SOURCES: tuple[str, ...] = ("explicit", "implied", "browse_merge")
 
 
 @dataclass(slots=True)

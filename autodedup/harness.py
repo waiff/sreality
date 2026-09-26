@@ -9,6 +9,7 @@
     python3 -m autodedup.harness evaluate runs/r1 --judgements j.jsonl --out runs/r1/eval
     python3 -m autodedup.harness fit runs/r1 --judgements j.jsonl --out runs/r1/fit
     python3 -m autodedup.harness errors runs/r1 --judgements j.jsonl --top 5
+    python3 -m autodedup.harness yardstick out/cohort.jsonl.gz runs/r1 --groups operator_merges.jsonl
 
 No database, no network, no secrets: the artifact is the whole input. The artifact carries no
 PII by contract (PROGRAM.md E28), so everything here is safe to print and to paste into a PR.
@@ -85,6 +86,12 @@ from autodedup.labels import (
 from autodedup.model import CALIBRATION_METHODS, LogisticModel, hand_initialised
 from autodedup.settings import Settings
 from autodedup.errors import DEFAULT_TOP, ERRORS_STEM, analyse
+from autodedup.labels import SOURCE_BROWSE_MERGE
+from autodedup.yardstick import DEFAULT_TOP as DEFAULT_YARDSTICK_TOP
+from autodedup.yardstick import load_operator_pairs
+from autodedup.yardstick import measure as measure_yardstick
+from autodedup.yardstick import render_lines as render_yardstick
+from autodedup.yardstick import write_report as write_yardstick
 
 PAIRS_FILE: str = "pairs.jsonl.gz"
 RUN_FILE: str = "run.json"
@@ -677,6 +684,55 @@ def run_engine(
     return summary
 
 
+def score_pairs(
+    dataset: Dataset,
+    settings: Settings,
+    model: LogisticModel,
+    keys: Iterable[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    """The engine's row for pairs a run did NOT store, in `run_engine`'s row shape plus
+    `stored: false` — the same fingerprints, features and decision `cmd_pair` prints.
+
+    A named judge list asks about pairs by id, and the pairs most worth asking about are often
+    ones the run never kept: below `store_floor`, or never paired at all because blocking keyed
+    the two adverts to different grains. `probes` is what blocking found the pair by, empty when
+    it never did. The K-B family guard and the development hold are properties of a whole pair
+    set and are NOT re-run, so a K-B row here is the pre-guard decision."""
+    wanted = sorted({
+        (min(lo, hi), max(lo, hi)) for lo, hi in keys
+        if lo != hi and lo in dataset.listings and hi in dataset.listings
+    })
+    if not wanted:
+        return []
+    fps = build_all(dataset, settings)
+    generated, _ = generate_pairs(fps, settings)
+    ctx = FeatureContext.build(fps, settings, dataset)
+    ctx.index_attrs(fps, dataset.listings)
+    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
+    rows: list[dict[str, Any]] = []
+    for lo, hi in wanted:
+        fa, fb = fps[lo], fps[hi]
+        la, lb = dataset.listings[lo], dataset.listings[hi]
+        probes = sorted(generated.get((lo, hi), ()))
+        feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
+        decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
+        row = decision.to_json()
+        if decision.certificate == "K-R":
+            row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
+        row.update({
+            "context": hazard.pair_context(la, lb).to_json(),
+            "block": pair_block(la, lb),
+            "block_key": pair_block_key(fa, fb),
+            "source_pair": source_pair(fa, fb),
+            "cross_source": fa.source != fb.source,
+            "probes": probes,
+            "feats": {name: [value, present] for name, (value, present) in feats.items()},
+            "stored": False,
+        })
+        rows.append(row)
+    return rows
+
+
 def cmd_run(args: argparse.Namespace, out: Any) -> int:
     settings = load_settings(args.settings)
     model = load_model(args.model)
@@ -818,6 +874,16 @@ def judge_stratum(row: dict[str, Any]) -> str:
             f"|{row.get('block') or '(none)'}|{side}")
 
 
+def drawn_stratum(row: dict[str, Any]) -> str:
+    """The stratum a judge draw files a pair under: the one a named pair list STAMPED on the row
+    (which contested set it was listed for, and why), else W3's `judge_stratum` grid.
+
+    `sample.json` carries the stamp on each drawn pair, which `labels.load_sample` reads as-is,
+    so a stamped draw needs no key function to be recomputed."""
+    stamped = row.get("stratum")
+    return str(stamped) if stamped else judge_stratum(row)
+
+
 def _shuffle_key(seed: int, row: dict[str, Any]) -> str:
     payload = f"{seed}:{row.get('lo')}:{row.get('hi')}".encode("utf-8")
     return hashlib.blake2b(payload, digest_size=8).hexdigest()
@@ -883,13 +949,13 @@ def stratified_sample(
 def sample_pairs(
     rows: Sequence[dict[str, Any]], n: int, seed: int = SAMPLE_SEED
 ) -> dict[str, Any]:
-    """The judge lane's sample (PROGRAM.md §9): `judge_stratum` at a floor of 8.
+    """The judge lane's sample (PROGRAM.md §9): `drawn_stratum` at a floor of 8.
 
     A pure function of (rows, n, seed), so the text and vision tiers of one seed judge the SAME
     pairs — which is the only way tier-vs-tier agreement (metric 8) measures the tiers rather
     than two different draws."""
     return stratified_sample(
-        rows, n, seed, key_fn=judge_stratum, floor=JUDGE_STRATUM_FLOOR
+        rows, n, seed, key_fn=drawn_stratum, floor=JUDGE_STRATUM_FLOOR
     )
 
 
@@ -1009,6 +1075,11 @@ def _add_operator_label_args(command: argparse.ArgumentParser) -> None:
                          help="weight for implied operator labels (default: 1.0, the same as"
                               " an explicit one); 0 excludes them from the fit's arithmetic"
                               " while leaving them in the reports")
+    command.add_argument("--exclude-browse-merge", action="store_true",
+                         help="drop the pair labels a Browse merge wrote (source browse_merge,"
+                              " E299) and keep the pairs the operator ruled one by one")
+    command.add_argument("--browse-merge-weight", type=float, default=None,
+                         help="weight for browse_merge operator labels (default: 1.0)")
 
 
 def judgement_paths(args: argparse.Namespace) -> list[str] | None:
@@ -1039,10 +1110,13 @@ def operator_tier(args: argparse.Namespace) -> dict[Any, Any]:
         raise SystemExit(f"no such operator-labels file(s): {missing}")
     rows = load_all_operator_labels(paths)
     weight = getattr(args, "implied_weight", None)
+    merge_weight = getattr(args, "browse_merge_weight", None)
     return operator_label_pairs(
         rows,
         include_implied=not getattr(args, "exclude_implied", False),
         implied_weight=(WEIGHT_OPERATOR if weight is None else float(weight)),
+        include_browse_merge=not getattr(args, "exclude_browse_merge", False),
+        browse_merge_weight=(WEIGHT_OPERATOR if merge_weight is None else float(merge_weight)),
     )
 
 
@@ -1408,7 +1482,99 @@ def build_parser() -> argparse.ArgumentParser:
                                     " (default: the run's own t_hi and the rungs above it)")
     errors_parser.set_defaults(func=cmd_errors, precedence_default=TIER_PRECEDENCE)
 
+    # --- E299: `yardstick` (autodedup/yardstick.py) -------------------------------------
+    yard = sub.add_parser(
+        "yardstick",
+        help="one generation measured against the operator's own Browse merges (E299)",
+    )
+    yard.add_argument("artifact", help="the cohort.jsonl.gz the generation was scored on")
+    yard.add_argument("run", help="the generation: a run directory (pairs.jsonl.gz, clusters.json,"
+                                  " run.json) or its pairs.jsonl.gz with --clusters")
+    yard.add_argument("--groups", action="append", required=True,
+                      help="operator_merges.jsonl from the labels lane, a JSON dump of"
+                           " autodedup.operator_merges, or operator_labels.jsonl (its"
+                           " browse_merge rows); repeatable")
+    yard.add_argument("--clusters", default=None,
+                      help="clusters.json (default: beside the pairs file)")
+    yard.add_argument("--settings", default=None,
+                      help="settings name (w29) or JSON path (default: the run.json's own)")
+    yard.add_argument("--model", default=None,
+                      help="model name (w6_gold) or JSON path (default: the run.json's"
+                           " model_version)")
+    yard.add_argument("--label-source", action="append", default=None,
+                      help="operator_labels.jsonl sources to measure (default: browse_merge);"
+                           " repeatable")
+    yard.add_argument("--include-not-live", action="store_true",
+                      help="also measure groups whose status is undone or withdrawn")
+    yard.add_argument("--out", default=None,
+                      help="directory for yardstick.json / yardstick.md (default: the run's)")
+    yard.add_argument("--top", type=int, default=DEFAULT_YARDSTICK_TOP,
+                      help="how many misses the printed list shows (the JSON holds all)")
+    yard.set_defaults(func=cmd_yardstick)
+
     return parser
+
+
+def _settings_arg(raw: str) -> Settings:
+    """A path to a Settings JSON, else a name under autodedup/settings."""
+    return Settings.from_json(raw) if Path(raw).is_file() else named_settings(raw)
+
+
+def _model_arg(raw: str) -> LogisticModel:
+    """A path to a model JSON, else a name under autodedup/models."""
+    return load_model(raw) if Path(raw).is_file() else named_model(raw)
+
+
+def cmd_yardstick(args: argparse.Namespace, out: Any) -> int:
+    run = Path(args.run)
+    run_dir = run if run.is_dir() else run.parent
+    pairs_path = run / PAIRS_FILE if run.is_dir() else run
+    clusters_path = Path(args.clusters) if args.clusters else run_dir / CLUSTERS_FILE
+    for path in (pairs_path, clusters_path):
+        if not path.is_file():
+            print(f"no such file: {path}", file=sys.stderr)
+            return 1
+    missing = [path for path in args.groups if not Path(path).is_file()]
+    if missing:
+        print(f"no such operator-groups file(s): {missing}", file=sys.stderr)
+        return 1
+    run_json: dict[str, Any] = {}
+    if (run_dir / RUN_FILE).is_file():
+        run_json = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    settings = (_settings_arg(args.settings) if args.settings
+                else run_settings(run_dir, None))
+    model = (_model_arg(args.model) if args.model
+             else model_of_version(run_json.get("model_version")))
+    try:
+        operator = load_operator_pairs(
+            args.groups, label_sources=tuple(args.label_source or (SOURCE_BROWSE_MERGE,)),
+            include_not_live=args.include_not_live,
+        )
+    except (ValueError, KeyError) as exc:
+        print(f"unreadable operator groups: {exc}", file=sys.stderr)
+        return 1
+    clock = time.perf_counter()
+    dataset = load(args.artifact)
+    report = measure_yardstick(
+        dataset, settings, model,
+        pairs_path=pairs_path,
+        clusters_payload=json.loads(clusters_path.read_text(encoding="utf-8")),
+        operator=operator,
+        inputs={
+            "cohort": str(args.artifact), "pairs": str(pairs_path),
+            "clusters": str(clusters_path), "groups": list(args.groups),
+            "generation": run_json.get("generation"),
+            "model_version": model.version,
+            "settings": args.settings or "run.json",
+        },
+    )
+    report["inputs"]["seconds"] = round(time.perf_counter() - clock, 1)
+    json_path, text_path = write_yardstick(
+        report, Path(args.out) if args.out else run_dir, args.top)
+    for line in render_yardstick(report, args.top):
+        print(line, file=out)
+    print(f"\nwrote {json_path} and {text_path}", file=out)
+    return 0
 
 
 # --- W4b: the `errors` command (analysis lives in autodedup/errors.py) ---------------------

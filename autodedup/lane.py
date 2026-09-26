@@ -144,8 +144,9 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         "approach": (
             "The operator's own rulings — every explicit pair verdict plus the member pairs "
             "of every confirmed group, each with the engine's view of that pair and the "
-            "permanent must-not-links — exported as one artifact, so a fit reads the top "
-            "label tier from a file instead of an ad-hoc query."
+            "permanent must-not-links, plus the operator's Browse merges as groups (E299) — "
+            "exported as one artifact, so a fit reads the top label tier from a file instead "
+            "of an ad-hoc query."
         ),
         "tools": [
             "autodedup.labels_lane", "autodedup.labels", "autodedup.lane", "GitHub Actions",

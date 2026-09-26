@@ -411,3 +411,57 @@ def test_operator_labels_load_from_a_jsonl_artifact(tmp_path: Path) -> None:
     assert [row.key for row in rows] == [(1, 2), (3, 4)]
     assert rows[1].is_implied and rows[1].engine["zone"] == "band"
     assert lb.operator_label_pairs(rows)[(1, 2)].to_json()["source"] == lb.SOURCE_EXPLICIT
+
+
+# --- E299: the Browse-merge provenance and the group grain ------------------------------------
+
+
+def test_explicit_beats_browse_merge_beats_implied_in_any_order() -> None:
+    explicit = operator_row(1, 2, "different")
+    merged = operator_row(1, 2, "same", source=lb.SOURCE_BROWSE_MERGE, merge_group_id="g-1")
+    implied = operator_row(1, 2, "same", source=lb.SOURCE_IMPLIED, cluster_key=900)
+    for rows in ([implied, merged, explicit], [explicit, merged, implied],
+                 [merged, explicit, implied], [implied, explicit, merged]):
+        out = lb.operator_label_pairs([lb.parse_operator_label(r) for r in rows])
+        assert out[(1, 2)].y == 0 and out[(1, 2)].source == lb.SOURCE_EXPLICIT
+    for rows in ([implied, merged], [merged, implied]):
+        out = lb.operator_label_pairs([lb.parse_operator_label(r) for r in rows])
+        assert out[(1, 2)].source == lb.SOURCE_BROWSE_MERGE
+
+
+def test_browse_merge_labels_can_be_excluded_or_weighted_on_their_own() -> None:
+    rows = [lb.parse_operator_label(operator_row(1, 2, "same")),
+            lb.parse_operator_label(operator_row(
+                3, 4, "same", source=lb.SOURCE_BROWSE_MERGE, merge_group_id="g-1")),
+            lb.parse_operator_label(
+                operator_row(5, 6, "same", source=lb.SOURCE_IMPLIED, cluster_key=900))]
+    assert rows[1].is_browse_merge and rows[1].merge_group_id == "g-1"
+    assert rows[0].merge_group_id is None
+    assert set(lb.operator_label_pairs(rows, include_browse_merge=False)) == {(1, 2), (5, 6)}
+    weighted = lb.operator_label_pairs(rows, browse_merge_weight=0.4, implied_weight=0.2)
+    assert weighted[(3, 4)].weight == 0.4 and weighted[(5, 6)].weight == 0.2
+    assert weighted[(1, 2)].weight == lb.WEIGHT_OPERATOR
+
+
+def test_a_version_one_row_still_parses() -> None:
+    """Format 2 only APPENDED `merge_group_id`; a row written before it reads as before."""
+    row = operator_row(1, 2, "same")
+    row.pop("merge_group_id", None)
+    parsed = lb.parse_operator_label(row)
+    assert parsed.merge_group_id is None and parsed.source == lb.SOURCE_EXPLICIT
+
+
+def test_a_merge_pair_s_standing_decides_whether_it_is_still_same() -> None:
+    assert lb.MergePair(1, 2, standing=lb.STANDING_BROWSE_MERGE, verdict="same").same
+    assert lb.MergePair(1, 2, standing=lb.STANDING_UNRULED).same
+    assert lb.MergePair(1, 2, standing=lb.STANDING_EXPLICIT, verdict="same").same
+    assert not lb.MergePair(1, 2, standing=lb.STANDING_EXPLICIT, verdict="different").same
+    assert not lb.MergePair(1, 2, standing=lb.STANDING_EXPLICIT, verdict="unsure").same
+    assert not lb.MergePair(1, 2, standing=lb.STANDING_MUST_NOT_LINK).same
+    assert not lb.MergePair(1, 2, standing=lb.STANDING_UNRULED, must_not_link=True).same
+
+
+def test_misaligned_member_arrays_are_refused() -> None:
+    with pytest.raises(ValueError):
+        lb.parse_operator_merge({"merge_group_id": "g", "member_ids": [1, 2],
+                                 "member_sides": [1]})

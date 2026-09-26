@@ -180,7 +180,7 @@ the `/estimations` + `/estimate_yield` API payloads, and as a Browse map choropl
   saved alerts. Real-data distribution sanity: median ~3.5%, p99 ~10%. The same recompute pass also
   stores the full formula **breakdown** as `listings.mf_reference_rent jsonb` (migration 134: territory,
   VK, novostavba flag, `base_per_m2`, per-amenity `adjustments[]`, `total_per_m2`, area,
-  `monthly_rent_czk`) — exposed on `listings_public` and rendered on the sale **listing-detail header**
-  so the operator sees the exact numbers behind the stored rent/yield (always consistent — one pass
-  writes all three columns).
+  `monthly_rent_czk`). Readers take it PROPERTY-grain off `properties_public` (SPA property page,
+  extension lookup `mf_reference_rent`, Watchdog feed) and render it by SHAPE — `lib/mfReference.mfShape`,
+  shared with the extension: value / range + (i) note / note / none; no listing-grain fallback.
 

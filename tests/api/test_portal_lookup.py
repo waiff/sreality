@@ -48,8 +48,7 @@ def _mk_market_row(source: str, source_id: str, found: bool, **cols: Any) -> dic
         "disposition": None, "subtype": None,
         "display_label": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
-        "mf_reference_rent_per_m2_czk": None,
-        "mf_gross_yield_pct": None,
+        "mf_gross_yield_pct": None, "mf_reference_rent": None,
     }
     row.update(cols)
     return row
@@ -190,6 +189,61 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     assert idn["pipeline"] is None  # no property → nothing to bookmark
     assert idn["collection_ids"] is None  # no property → null, not []
     assert idn["dismissed"] is None  # no property → nothing to dismiss
+
+
+# Today's stored breakdown (no `status` key): the panel renders it as a value.
+_MF_DETAIL = {
+    "vk": 3, "area_m2": 75, "base_per_m2": 184, "total_per_m2": 236,
+    "territory": {"kraj": "Kraj Vysočina", "name": "Moravské Budějovice",
+                  "level": "ku", "ruian_code": 698903},
+    "adjustments": [{"attribute": "balcony", "czk_per_m2": 5}],
+    "is_novostavba": False, "source_revision": 2, "monthly_rent_czk": 17_700,
+    "adjustments_sum_per_m2": 52,
+}
+
+
+def test_lookup_serves_the_property_mf_result_and_none_before_attach() -> None:
+    """Post-Gate-2 adverts (sreality_id NULL). The attached one carries its
+    PROPERTY's MF result whole — the jsonb the panel renders by shape; the
+    pre-attach one (property_id NULL) has no property, so no MF at all: no
+    coalesce to a listing-grain value, no per-m² quotient of the client's own."""
+    market_rows = [
+        _mk_market_row("bezrealitky", "attached", True, listing_id=31,
+                       property_id=900, category_main="byt", category_type="prodej",
+                       mf_reference_rent_czk=17_700,
+                       mf_gross_yield_pct=Decimal("5.25"),
+                       mf_reference_rent=_MF_DETAIL),
+        _mk_market_row("bezrealitky", "fresh", True, listing_id=32,
+                       property_id=None, category_main="byt", category_type="prodej"),
+    ]
+    out = pl.lookup_portal_listings(
+        _FakeConn(market_rows), _FakeConn([]),
+        _items(("bezrealitky", "attached"), ("bezrealitky", "fresh")),
+    )
+    attached, fresh = out["data"]
+    assert attached["sreality_id"] is None  # post-Gate-2
+    assert attached["mf_reference_rent"] == _MF_DETAIL
+    assert attached["mf_reference_rent_czk"] == 17_700
+    assert attached["mf_gross_yield_pct"] == 5.25
+    for key in ("mf_reference_rent", "mf_reference_rent_czk", "mf_gross_yield_pct"):
+        assert fresh[key] is None, key
+    for entry in (attached, fresh):
+        assert "mf_reference_rent_per_m2_czk" not in entry
+
+
+def test_lookup_reads_mf_from_properties_public_by_property_id() -> None:
+    """ONE source for MF: the property row every other surface reads. The
+    listing-grain fallback and the per-m² re-derivation are gone."""
+    code = "\n".join(line.split("--")[0] for line in pl._MARKET_SQL.splitlines())
+    assert "LEFT JOIN properties_public pp ON pp.property_id = l.property_id" in code
+    assert "JOIN properties " not in code
+    assert "l.mf_" not in code
+    assert "coalesce(" not in code.lower()
+    assert "'pronajem'" not in code
+    for col in ("mf_reference_rent_czk", "mf_gross_yield_pct", "mf_reference_rent"):
+        assert f"pp.{col}" in code
+        assert col in pl._LISTING_COLS
+    assert "mf_reference_rent_per_m2_czk" not in pl._LISTING_COLS
 
 
 def test_lookup_binds_one_value_pair_per_item() -> None:

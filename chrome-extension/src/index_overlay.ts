@@ -5,8 +5,9 @@
  *
  * Per sale-apartment card a single badge, ALWAYS clickable → opens the full
  * yield panel (MF rent/yield + the editable comparables calculator + run/view
- * estimation). Badge label: "Výnos MF X %" when we have it, else "Odhad X %"
- * when an estimation already exists, else "Odhadnout výnos".
+ * estimation). Badge label: "Výnos MF X %" (or the town's "X–Y %" range) when
+ * the property's MF result has a yield, else "Odhad X %" when an estimation
+ * already exists, else "Odhadnout výnos".
  *
  * Sale-apartment gating: by our row's category when found; for listings not yet
  * in our DB, by the portal's URL category hint (sreality/idnes encode it in the
@@ -19,6 +20,8 @@
 // The shared product brand (frontend/src/lib/brand.ts) — the notice's wordmark
 // is the same string as the panel header's.
 import { APP_NAME } from '../../frontend/src/lib/brand';
+// The MF result's ONE shape rule, shared with the SPA (a zero-dependency module).
+import { mfShape } from '../../frontend/src/lib/mfReference';
 import { detailRef, portalForHost, type Portal, type PortalRef } from './portals';
 import type { ApiMessage, ApiResult, AuthState, PortalListing } from './types';
 
@@ -149,6 +152,23 @@ function fmtPct(n: number | null): string {
   return n == null
     ? '—'
     : `${n.toLocaleString('cs-CZ', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %`;
+}
+
+/* The MF yield every extension surface prints (this badge, the panel's figure
+ * and its minimized bar), by the SHAPE of the property's result: a value's
+ * yield, or a range's two; null for a reason, no result, or no yield (a rental
+ * flat, a price too low to divide by). */
+export function mfYieldText(listing: PortalListing | null): string | null {
+  if (listing == null || !listing.found) return null;
+  const shape = mfShape(listing.mf_reference_rent);
+  if (shape.kind === 'value') {
+    return listing.mf_gross_yield_pct != null ? fmtPct(listing.mf_gross_yield_pct) : null;
+  }
+  if (shape.kind !== 'range') return null;
+  const { yield_min_pct: lo, yield_max_pct: hi } = shape.range;
+  if (lo == null || hi == null) return null;
+  const low = lo.toLocaleString('cs-CZ', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${low}–${fmtPct(hi)}`;
 }
 
 function fmtCzk(n: number | null): string {
@@ -488,12 +508,19 @@ function process(hit: Hit, listing: PortalListing, portal: Portal, openPanel: Op
   badge.setAttribute('role', 'button');
   badge.title = 'Klikni pro odhad výnosu';
 
-  if (listing.found && listing.mf_gross_yield_pct != null) {
+  /* A value's or a range's yield on the badge; the result's note (the range's
+   * (i), or a reason) rides in its title — the badge falls through to the
+   * estimate or the CTA when there is no MF yield to show. */
+  const shape = mfShape(listing.found ? listing.mf_reference_rent : null);
+  if (shape.kind === 'value') {
+    badge.title = `MF nájem ${fmtCzk(shape.ref.monthly_rent_czk)}/měs · klikni pro odhad`;
+  } else if (shape.kind !== 'none' && shape.note != null) {
+    badge.title = shape.note;
+  }
+  const mfYield = mfYieldText(listing);
+  if (mfYield != null) {
     badge.classList.add('__mf_badge--yield');
-    badge.textContent = `Výnos MF ${fmtPct(listing.mf_gross_yield_pct)}`;
-    if (listing.mf_reference_rent_czk != null) {
-      badge.title = `MF nájem ${fmtCzk(listing.mf_reference_rent_czk)}/měs · klikni pro odhad`;
-    }
+    badge.textContent = `Výnos MF ${mfYield}`;
   } else if (listing.latest_estimation?.gross_yield_pct != null) {
     badge.classList.add('__mf_badge--est');
     badge.textContent = `Odhad ${fmtPct(listing.latest_estimation.gross_yield_pct)}`;
