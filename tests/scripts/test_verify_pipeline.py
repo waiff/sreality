@@ -2004,9 +2004,9 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     from scripts.verify_pipeline import check_location_town_coverage
 
     conn = _ShapeDriftConn([
-        ("bazos", 40_000, 0, 120, 39_500, 120),
-        ("idnes", 30_000, 900, 11_000, 18_000, 11_900),
-        ("sreality", 200_000, 0, 0, 199_000, 0),
+        ("bazos", 40_000, 0, 120, 39_500, 120, 0),
+        ("idnes", 30_000, 900, 11_000, 18_000, 11_900, 0),
+        ("sreality", 200_000, 0, 0, 199_000, 0, 0),
     ])
     out = check_location_town_coverage(conn, T)
     assert out["status"] == "fail"
@@ -2029,8 +2029,8 @@ def test_location_town_coverage_measures_every_listing_not_only_the_live_ones() 
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 40_000, 0),
-        ("remax", 30_000, 4_200, 0, 25_800, 4_200),
+        ("bazos", 40_000, 0, 0, 40_000, 0, 0),
+        ("remax", 30_000, 4_200, 0, 25_800, 4_200, 0),
     ]), T)
     assert out["status"] == "fail"
     assert out["value"] == 4_200
@@ -2046,12 +2046,46 @@ def test_location_town_coverage_is_ok_only_at_zero() -> None:
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 39_000, 0), ("idnes", 30_000, 0, 0, 10_000, 0)]), T)
+        ("bazos", 40_000, 0, 0, 39_000, 0, 0), ("idnes", 30_000, 0, 0, 10_000, 0, 0)]), T)
     assert out["status"] == "ok" and out["value"] == 0
     assert out["details"]["hidden"] == 0
     assert "Consumers currently hide" not in out["message"]
     assert out["details"]["cells"][1]["town_share"] == 10_000 / 30_000
     assert "Every one of 70,000 listings" in out["message"]
+
+
+def test_location_town_coverage_ku_arm_is_red_while_an_address_row_lacks_a_ku() -> None:
+    """MF PR-B. An address point lies in exactly one KÚ, so a Czech address-grain row the
+    CURRENT resolver wrote without one means KÚ geometry is missing at the registry version —
+    the 2026-09-13 failure class, caught on the row instead of on a dead MF job."""
+    from location_data.resolver.version import RESOLVER_VERSION
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    conn = _ShapeDriftConn([
+        ("bezrealitky", 20_000, 0, 0, 20_000, 0, 37),
+        ("sreality", 200_000, 0, 0, 200_000, 0, 0),
+    ])
+    out = check_location_town_coverage(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 37
+    assert out["details"]["address_no_ku"] == 37
+    assert out["details"]["cz_no_town"] == 0
+    assert f"37 Czech address-grain rows at {RESOLVER_VERSION} have no KÚ: bezrealitky 37." \
+        in out["message"]
+
+
+def test_location_town_coverage_ku_arm_reads_the_rank_table_and_the_current_version() -> None:
+    """Address grain is `is_address_grain` (never the enum's order — 380 and 535 disagree),
+    the version is the constant (older rows are the re-resolve's backlog), and the one excuse
+    is a degenerate KÚ in the row's obec at the CURRENT registry version."""
+    from scripts.verify_pipeline import _LOCATION_TOWN_COVERAGE_SQL
+
+    flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
+    assert "gr.is_address_grain and ll.resolver_version = %s and ll.katastr_kod is null" in flat
+    assert "d.discrepancy = 'degenerate_boundary_geometry'" in flat
+    assert "(select id from registry_versions where is_current)" in flat
+    assert "boundary_load_failed" not in flat
+    assert _LOCATION_TOWN_COVERAGE_SQL.count("%s") == 1
 
 
 def test_location_town_coverage_counts_undetermined_as_czech() -> None:
@@ -2087,7 +2121,7 @@ def test_location_town_coverage_covers_every_listing() -> None:
     assert "l.is_active" not in " ".join(drain._SWEEP_SQL.split()).lower()
     # The cells the operator reads, and nothing the old scope needed.
     for kept in ("as listings_n", "as no_row_n", "as cz_no_town_n", "as town_n",
-                 "as hidden_n"):
+                 "as hidden_n", "as address_no_ku_n"):
         assert kept in flat, kept
     assert "display_no_row" not in flat and "active_n" not in flat
     assert "filter (where l.is_active" not in flat
