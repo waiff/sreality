@@ -38,9 +38,9 @@ The ~62 % cache plateau was those point-keyed questions; with the rest gone, the
 misses are two per distinct pin.
 
 The registry view here answers exactly the questions `types.RegistryView` declares, so the
-pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is deliberate:
-containment wants the `ST_Subdivide`d `pip` geometries, and preferring `pip` when rows exist
-degrades to the authoritative polygon when the boundary loader has not populated them.
+pure core cannot reach past it into SQL. Containment reads the `ST_Subdivide`d `pip` pieces
+only: they tile the authoritative polygon and every unit of every loaded version carries both
+(checked 2026-09-26), so there is no "partially loaded pack" left to fall back from.
 """
 
 from __future__ import annotations
@@ -435,32 +435,28 @@ SELECT DISTINCT obec_kod FROM ruian_address_points
 _PT = "ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)"
 _POINTS = "unnest(%s::int[], %s::double precision[], %s::double precision[]) AS p(idx, lat, lon)"
 
-# `purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist (geom) WHERE purpose =
-# 'pip'` — an IN-list does not imply the partial index's predicate — so the planner fell back
-# to the unpartitioned index and ran ST_Covers against RAW obec polygons: 194 ms and 1,225
-# buffers, nearly all of it detoasting geometry the pip pieces exist to avoid. Split into two
-# branches under one LIMIT instead: `Limit -> Append` stops at the first row, so the
-# authoritative branch is `never executed` whenever a pip piece covers the point. Measured:
-# 0.24 ms/point. The authoritative branch stays because boundaries load per unit.
-_CONTAINING_OBEC_BRANCH = f"""
+# THE ONE CONTAINING-OBEC STATEMENT. `api/maps.py` runs this same text for a Mapy pick and
+# for an estimation subject that has no stored location, so a chip, a listing and an
+# estimation can never disagree about which town a point is in.
+#
+# `purpose = 'pip'` is what lets `ruian_aug_pip_gist (geom) WHERE purpose = 'pip'` serve it:
+# the subdivided pieces are small, so ST_Covers never detoasts a raw obec polygon (194 ms and
+# 1,225 buffers when an IN-list forced exactly that). Measured: 0.24 ms/point. The
+# authoritative fallback branch it used to carry (and the copy in `api/maps.py`) is gone: it
+# was reachable only for a version loaded with `--allow-missing-pip`, and pip = authoritative
+# for every unit of every loaded version (checked 2026-09-26).
+CONTAINING_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
     SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
-       AND g.purpose = '{{purpose}}'
+       AND g.purpose = 'pip'
        AND u.level = 'obec'
        AND ST_Covers(g.geom, {_PT})
      LIMIT 1
-"""
-
-_CONTAINING_OBEC_SQL = f"""
-SELECT p.idx, c.*
-  FROM {_POINTS}
-  CROSS JOIN LATERAL (
-    ({_CONTAINING_OBEC_BRANCH.format(purpose="pip")})
-    UNION ALL
-    ({_CONTAINING_OBEC_BRANCH.format(purpose="authoritative")})
-    LIMIT 1
   ) c
 """
 
@@ -473,37 +469,29 @@ SELECT p.idx, c.*
 #   deliberate under-estimate of metres per degree of longitude (69,900 at CZ's northernmost
 #   51.1°), so the box strictly CONTAINS the geodesic circle and cannot hide a row the exact
 #   `ST_DWithin` would have kept.
-# * the subdivided `pip` pieces preferred over the raw polygon, same two-branch form and same
-#   reason as `containing_obec`: the pieces TILE the polygon, so the minimum distance over
-#   them is the distance to the polygon — and with the small pieces the geography cast is
-#   cheap. All 6,258 obce carry pip rows today, so the authoritative branch is the
-#   partially-loaded-pack fallback only. Measured: 2.95 ms/point.
+# * the subdivided `pip` pieces, never the raw polygon, for the same reason as
+#   `containing_obec`: the pieces TILE the polygon, so the minimum distance over them is the
+#   distance to the polygon — and with the small pieces the geography cast is cheap.
+#   Measured: 2.95 ms/point.
 #
 # It is reached only when `containing_obec` misses (~1 % of listings), which is also why it is
 # NOT in `warm_points`: warming it would run this lateral for all 250 of a slice's points to
 # answer the two or three that ask.
-_NEAREST_OBEC_BRANCH = f"""
+_NEAREST_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
     SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[],
            ST_Distance(g.geom::geography, {_PT}::geography) AS d
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
-       AND g.purpose = '{{purpose}}'
+       AND g.purpose = 'pip'
        AND u.level = 'obec'
        AND g.geom && ST_Expand({_PT}, %s / 60000.0)
        AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
      ORDER BY 13
      LIMIT 1
-"""
-
-_NEAREST_OBEC_SQL = f"""
-SELECT p.idx, c.*
-  FROM {_POINTS}
-  CROSS JOIN LATERAL (
-    ({_NEAREST_OBEC_BRANCH.format(purpose="pip")})
-    UNION ALL
-    ({_NEAREST_OBEC_BRANCH.format(purpose="authoritative")})
-    LIMIT 1
   ) c
 """
 
@@ -786,8 +774,7 @@ class SqlRegistryView:
             return {}
         idx, lats, lons = _point_arrays(points)
         rows = self._rows(
-            "containing_obec", _CONTAINING_OBEC_SQL,
-            (idx, lats, lons, self._version, self._version),
+            "containing_obec", CONTAINING_OBEC_SQL, (idx, lats, lons, self._version)
         )
         return {int(r[0]): _admin_unit(r[1:]) for r in rows}
 
@@ -802,7 +789,7 @@ class SqlRegistryView:
         idx, lats, lons = _point_arrays([(lat, lon)])
         rows = self._rows(
             "nearest_obec_within", _NEAREST_OBEC_SQL,
-            (idx, lats, lons, self._version, max_m, max_m, self._version, max_m, max_m),
+            (idx, lats, lons, self._version, max_m, max_m),
         )
         if not rows:
             return None

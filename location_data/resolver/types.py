@@ -259,8 +259,9 @@ class RegistryView(Protocol):
     def obec_codes_for_psc(self, psc: str) -> Sequence[int]: ...
 
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
-        """`ST_Covers` against the AUTHORITATIVE polygon (never the simplified one). It does
-        double duty: BIND's reverse-geocode rung and CHECK's pin-inside-the-town test."""
+        """`ST_Covers` against the `pip` pieces, which tile the authoritative polygon (never
+        the simplified one). It does double duty: BIND's reverse-geocode rung and CHECK's
+        pin-inside-the-town test."""
 
     def nearest_obec_within(
         self, lat: float, lon: float, max_m: float

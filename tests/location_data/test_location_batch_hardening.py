@@ -429,13 +429,13 @@ def test_the_level_predicate_casts_the_parameter_not_the_column():
 def test_containing_obec_lets_the_partial_pip_index_do_its_job():
     """`purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist ... WHERE
     purpose = 'pip'`, so ST_Covers ran against raw obec polygons (194 ms, 1,225 buffers).
-    Two branches under one LIMIT keep the same preference and let Append stop at the
-    first row (0.24 ms/point measured across a 50-point batch)."""
-    flat = _flat(resolve_db._CONTAINING_OBEC_SQL)
-    assert "purpose in ('pip', 'authoritative')" not in flat
+    The pip pieces alone answer it (0.24 ms/point measured across a 50-point batch); the
+    authoritative fallback branch went with the partially-loaded pack it served (MF PR-B,
+    pip = authoritative for every unit of every loaded version)."""
+    flat = _flat(resolve_db.CONTAINING_OBEC_SQL)
     assert "g.purpose = 'pip'" in flat
-    assert "g.purpose = 'authoritative'" in flat
-    assert flat.count("union all") == 1
+    assert "authoritative" not in flat
+    assert "union all" not in flat
 
 
 def test_every_point_keyed_question_binds_one_array_shape():
@@ -444,8 +444,8 @@ def test_every_point_keyed_question_binds_one_array_shape():
     drift — which is what makes warming invisible to the pure core. A placeholder mismatch
     here is a runtime error on the first coordinate the drain resolves."""
     for sql, expected in (
-        (resolve_db._CONTAINING_OBEC_SQL, 5),      # 3 arrays + a version per branch
-        (resolve_db._NEAREST_OBEC_SQL, 9),         # 3 arrays + (version, box, radius) x2
+        (resolve_db.CONTAINING_OBEC_SQL, 4),       # 3 arrays + a version
+        (resolve_db._NEAREST_OBEC_SQL, 6),         # 3 arrays + (version, box, radius)
         (resolve_db._IN_CZ_SQL, 4),                # 3 arrays + a version
     ):
         assert sql.count("%s") == expected, _flat(sql)
@@ -469,20 +469,19 @@ def test_the_geography_predicate_carries_an_index_usable_bbox():
     assert "st_dwithin(" in flat, flat
 
 
-def test_nearest_obec_prefers_the_subdivided_pieces_like_containment_does():
+def test_nearest_obec_reads_the_subdivided_pieces_like_containment_does():
     """The pip pieces TILE the authoritative polygon, so the minimum distance over them IS
     the distance to the polygon — and they are small enough that the geography cast is cheap
-    (2.95 ms/point vs 6,752). The authoritative branch stays for a partially loaded boundary
-    pack, exactly as in `_CONTAINING_OBEC_SQL`."""
+    (2.95 ms/point vs 6,752). No authoritative branch, exactly as in `CONTAINING_OBEC_SQL`."""
     flat = _flat(resolve_db._NEAREST_OBEC_SQL)
     assert "g.purpose = 'pip'" in flat
-    assert "g.purpose = 'authoritative'" in flat
-    assert flat.count("union all") == 1
+    assert "authoritative" not in flat
+    assert "union all" not in flat
 
 
 def test_the_sliver_fallback_is_asked_lazily_not_warmed():
     """It is reached only when `containing_obec` missed — ~1 % of listings — so warming it
-    would run a two-branch geography lateral for all 250 of a slice's points to answer the
+    would run a geography lateral for all 250 of a slice's points to answer the
     two or three that ask. The other two point-keyed questions ARE warmed."""
     warm = inspect.getsource(resolve_db.warm_points)
     assert "containing_obec_bulk" in warm and "in_czechia_polygon_bulk" in warm

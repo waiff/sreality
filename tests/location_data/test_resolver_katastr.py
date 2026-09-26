@@ -264,7 +264,7 @@ def test_the_ku_is_only_ever_asked_of_a_registry_geometry():
     take the listing's own lat/lon arrays) never name the KÚ level."""
     from location_data.resolver import resolve_db
 
-    for sql in (resolve_db._CONTAINING_OBEC_SQL, resolve_db._NEAREST_OBEC_SQL,
+    for sql in (resolve_db.CONTAINING_OBEC_SQL, resolve_db._NEAREST_OBEC_SQL,
                 resolve_db._IN_CZ_SQL):
         assert "katastralni_uzemi" not in _flat(sql)
     for sql in (resolve_db._ADDRESS_POINT_SQL, resolve_db._STREET_POINT_SQL,
