@@ -469,6 +469,7 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
+    disposition: str | None,
 ) -> PortalAreas:
     """idnes's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -496,6 +497,7 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=usable,
         plot=estate_area,
         fallback=parse_area_text(title),
@@ -547,7 +549,9 @@ def parse_detail(
     if params_text.get("cena"):
         params_text["cena"] = _strip_mortgage_cta(params_text["cena"])
 
-    areas = areas_from_params(params_text, title=title, category_main=category_main)
+    disposition = vocabulary.disposition(SOURCE, title)
+    areas = areas_from_params(params_text, title=title, category_main=category_main,
+                              disposition=disposition)
 
     # Amenities: each row is a check icon OR free text (size / orientation /
     # parking kind), so everything goes through _truthy_field. idnes has no
@@ -593,7 +597,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(SOURCE, title),
+        disposition=disposition,
         locality=locality,
         district=None,
         # Street is the FIRST comma-segment of locality ("Bělehradská, Pardubice

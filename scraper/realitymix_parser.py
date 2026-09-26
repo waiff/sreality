@@ -436,6 +436,7 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
+    disposition: str | None,
 ) -> PortalAreas:
     """realitymix's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -457,6 +458,7 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=usable_area,
         floor=parse_area_text(floor_text),
         total=parse_area_text(total_text),
@@ -498,7 +500,9 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     # geocode them (the ~28% no-#print-map case) and so they have a display label.
     locality = full_address or obec or _fallback_locality(source_url, street_name)
 
-    areas = areas_from_params(params, title=title, category_main=category_main)
+    disposition = vocabulary.disposition(SOURCE, read("disposition"), title)
+    areas = areas_from_params(params, title=title, category_main=category_main,
+                              disposition=disposition)
 
     description = _text(
         tree.css_first("div.advert-description__text-inner-inner")
@@ -528,7 +532,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(SOURCE, read("disposition"), title),
+        disposition=disposition,
         locality=locality,
         district=okres,
         street=street_name,

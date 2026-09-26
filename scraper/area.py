@@ -35,6 +35,11 @@ never stamps a basis for a value the row will not hold; a parcel of 16,809,800 m
 is real on the portal and belongs in `estate_area` (numeric(9,1)), not in the
 headline.
 
+The dwelling band is scaled by what the advert states (`dwelling_area_band`): a byt or
+dum of N rooms is at least N x MIN_AREA_PER_ROOM_M2, and a byt stays under
+MAX_FLAT_AREA_M2. A measure outside the band is declined like any other, so the
+resolver tries the next one and a prose figure that named the cellar reads as absence.
+
 BOTH bounds live HERE, not at the write boundary, because a refused measure has
 to reach the content hash — a value dropped after hashing would leave `listings`
 disagreeing with its own newest snapshot forever (rule 2/8).
@@ -157,6 +162,21 @@ LAND_CATEGORIES: frozenset[str] = frozenset({"pozemek"})
 BOUNDED_CATEGORIES: frozenset[str] = frozenset({"byt", "dum", "komercni"})
 MIN_AREA_M2 = 5.0
 
+# The same bound scaled by what the advert itself states: no flat or house of N rooms
+# is under 8 m2 a room. Below it the figure is a PART of the unit — bazos's first
+# "m2" in the prose is the cellar ("sklepní kóje o velikosti 2 m²", Mechová 3+1), a
+# balcony or one room ("pokoj 13 m²" in a 76 m² 3+1). Measured on the 40,514 listings
+# of the trial + cohorts 17/18 (2026-09-26): 32 bazos rows, 0 of 19,345 dispositioned
+# byt/dum rows on the eight structured portals. A flat bound on houses instead (dum
+# under 20 m²) would take 133 real chaty the structured portals agree on.
+MIN_AREA_PER_ROOM_M2 = 8.0
+ROOMED_CATEGORIES: frozenset[str] = frozenset({"byt", "dum"})
+_ROOMS_RE = re.compile(r"^([1-9])\+(?:kk|1)$")
+
+# And from above, for a FLAT only: no Czech flat reaches 1,000 m², and every stored one
+# that does is a project's site area or a keyed typo (23,000 / 5,989 / 4,095 / 1,800).
+MAX_FLAT_AREA_M2 = 1_000.0
+
 # The first value `listings.area_m2` (numeric(7,1)) cannot store. Kept equal to
 # `scraper.db._NUMERIC_ABS_MAX["area_m2"]` — which is what NULLs an out-of-range
 # value at the write boundary — by `tests/scraper/test_area.py`, so the two can
@@ -171,6 +191,17 @@ MAX_AREA_M2 = 1_000_000.0
 MAX_SIDE_AREA_M2 = 100_000_000.0
 
 
+def dwelling_area_band(category_main: str | None,
+                       disposition: str | None = None) -> tuple[float, float]:
+    """The [low, high) band a dwelling headline must sit in to be the unit's own area."""
+    low = MIN_AREA_M2 if category_main in BOUNDED_CATEGORIES else 0.0
+    rooms = _ROOMS_RE.match(disposition or "") if category_main in ROOMED_CATEGORIES else None
+    if rooms:
+        low = max(low, MIN_AREA_PER_ROOM_M2 * int(rooms.group(1)))
+    high = MAX_FLAT_AREA_M2 if category_main == "byt" else MAX_AREA_M2
+    return low, high
+
+
 def derive_headline_area(
     *,
     category_main: str | None,
@@ -179,6 +210,7 @@ def derive_headline_area(
     total: float | None = None,
     plot: float | None = None,
     fallback: float | None = None,
+    disposition: str | None = None,
 ) -> tuple[float | None, str | None]:
     """Return (area_m2, area_basis) for one listing. See module docstring."""
     if category_main in LAND_CATEGORIES:
@@ -190,13 +222,13 @@ def derive_headline_area(
             if value and value < MAX_AREA_M2:
                 return value, "plot"
         return None, None
-    min_m2 = MIN_AREA_M2 if category_main in BOUNDED_CATEGORIES else 0.0
+    min_m2, max_m2 = dwelling_area_band(category_main, disposition)
     for value, basis in (
         (usable, "usable"),
         (floor, "floor"),
         (total, "total"),
         (fallback, "unknown"),
     ):
-        if value and min_m2 <= value < MAX_AREA_M2:
+        if value and min_m2 <= value < max_m2:
             return value, basis
     return None, None

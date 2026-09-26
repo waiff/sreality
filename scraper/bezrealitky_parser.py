@@ -145,9 +145,10 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     # resolver — before W17 only `surface` did, and 2,654 of 2,667 land rows had a
     # parcel in `estate_area` and nothing in `area_m2`.
     surface_land = _num(advert.get("surfaceLand"))
+    disposition = vocabulary.disposition_code(read("disposition"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, usable=_num(advert.get("surface")),
-        plot=surface_land,
+        plot=surface_land, disposition=disposition,
     )
 
     return ScrapedListing(
@@ -161,7 +162,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         price_unit="za mesic" if category_type == "pronajem" else "za nemovitost",
         area_m2=area_m2,
         area_basis=area_basis,
-        disposition=vocabulary.disposition_code(read("disposition")),
+        disposition=disposition,
         locality=_locality(advert),
         district=None,
         # bezrealitky's GraphQL advert carries structured street/houseNumber/zip

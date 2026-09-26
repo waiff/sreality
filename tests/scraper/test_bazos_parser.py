@@ -561,3 +561,25 @@ def test_spaced_thousands_in_the_ad_text_is_one_number():
     assert parse_area_text("Prodám pozemek 1 500 m2 v obci") == 1500.0
     # The disposition in an ad's own prose is still never swallowed.
     assert parse_area_text("Byt 3+1 o velikosti 73 m²") == 73.0
+
+
+def test_parse_detail_the_cellar_figure_is_not_the_flat():
+    """Mechová 3+1 (bazos 14012930, a trial property stored at 2 m²): the only m² in the
+    advert is the cellar's. parse_detail hands the resolver the disposition it read, so
+    the per-room band declines the figure and the area is absence, not a veto-sized lie;
+    a real figure in the same prose still reads."""
+    html = (
+        "<html><body>"
+        '<h1 class="nadpisdetail">Prodej bytu 3+1 s balkonem</h1>'
+        '<div class="popisdetail">Byt 3+1 v Mechové ulici. K bytu náleží sklepní kóje '
+        "s okýnkem o velikosti 2 m² a podíl na sklepní místnosti.</div>"
+        "</body></html>"
+    )
+    url = "https://reality.bazos.cz/inzerat/1/x.php"
+    listing = parse_detail(html, source_url=url, category_main="byt", category_type="prodej")
+    assert listing.disposition == "3+1"
+    assert (listing.area_m2, listing.area_basis) == (None, None)
+
+    stated = parse_detail(html.replace("Byt 3+1 v", "Byt 3+1 o výměře 70 m² v"),
+                          source_url=url, category_main="byt", category_type="prodej")
+    assert (stated.area_m2, stated.area_basis) == (70.0, "unknown")

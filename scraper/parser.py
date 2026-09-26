@@ -97,8 +97,12 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     # `parking_lots` is the BOOLEAN and `parking` the count — the payload's names are the
     # opposite way round from the columns'. All three arms are the property's own (R11).
     lots_flag, garage_flag, parking_count = source_values(SOURCE, "has_parking", raw)
+    disposition = vocabulary.disposition(
+        SOURCE, *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
+    )
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=_numeric_or_none(raw.get("usable_area")),
         plot=estate_area,
     )
@@ -111,9 +115,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "price_unit": _price_unit(raw),
         "area_m2": area_m2,
         "area_basis": area_basis,
-        "disposition": vocabulary.disposition(
-            SOURCE, *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
-        ),
+        "disposition": disposition,
         "floor": floor_from_portal(floor_convention(SOURCE), read("floor")),
         "total_floors": total_floors_from_portal(_int_or_none(read("total_floors"))),
         "has_balcony": vocabulary.any_true(

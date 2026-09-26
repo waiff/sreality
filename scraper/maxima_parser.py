@@ -308,6 +308,7 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
+    disposition: str | None,
 ) -> PortalAreas:
     """maxima's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -322,6 +323,7 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=parse_area_text(usable_text),
         floor=parse_area_text(floor_text),
         plot=estate_area,
@@ -360,7 +362,9 @@ def parse_detail(
 
     locality = _text(tree.css_first("div.locality"))
 
-    areas = areas_from_params(params, title=title, category_main=category_main)
+    disposition = vocabulary.disposition(SOURCE, title)
+    areas = areas_from_params(params, title=title, category_main=category_main,
+                              disposition=disposition)
     floor_text, total_floors = _split_floors(read("floor"))
     floor = floor_from_portal(floor_convention(SOURCE), floor_text)
 
@@ -402,7 +406,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(SOURCE, title),
+        disposition=disposition,
         locality=locality,
         district=None,
         # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the

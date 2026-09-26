@@ -269,3 +269,52 @@ def test_dotted_thousands_are_one_number_and_a_decimal_point_still_is_one():
     assert parse_area_text("byt 1.5 m2 sklep") == 1.5
     assert parse_area_text("2.5m2") == 2.5
 
+
+
+def test_a_headline_under_eight_square_metres_a_room_is_a_part_of_the_unit():
+    """Mechová 3+1 (bazos 14012930): the only m² in the advert is the cellar's 2 m², and a
+    3+1 of 8 m² (bazos 18453993) is a room. Both are absence; the band is the advert's own
+    room count, so a 12 m² chata that states no disposition keeps its area."""
+    from scraper.area import derive_headline_area, dwelling_area_band
+
+    assert derive_headline_area(category_main="byt", fallback=2.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", fallback=8.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", fallback=76.0, disposition="3+1") == (76.0, "unknown")
+    assert derive_headline_area(category_main="byt", usable=18.0, disposition="2+kk") == (18.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=12.0) == (12.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=8.0, disposition="1+1") == (8.0, "usable")
+    assert derive_headline_area(category_main="dum", usable=7.9, disposition="1+1") == (None, None)
+    assert derive_headline_area(category_main="komercni", usable=6.0, disposition="3+1") == (6.0, "usable")
+    # A declined measure falls through to the next one, exactly like the 5 m² rail.
+    assert derive_headline_area(
+        category_main="byt", usable=13.0, total=76.0, disposition="3+1") == (76.0, "total")
+    # Only a stated N+kk / N+1 scales the band; anything else keeps the flat 5 m² floor.
+    assert dwelling_area_band("byt", "atypicky") == (MIN_AREA_M2, 1_000.0)
+    assert dwelling_area_band("byt", None) == (MIN_AREA_M2, 1_000.0)
+    assert dwelling_area_band("pozemek", "3+1") == (0.0, MAX_AREA_M2)
+
+
+def test_a_flat_at_a_thousand_square_metres_is_a_site_area_and_the_next_measure_speaks():
+    """23,000 / 5,989 / 4,095 / 1,800 m² flats were a project's site area or a keyed typo;
+    the band's top is a FLAT's only — a house or a hall of 1,800 m² is real."""
+    from scraper.area import derive_headline_area
+
+    assert derive_headline_area(category_main="byt", usable=1800.0) == (None, None)
+    assert derive_headline_area(category_main="byt", usable=1800.0, floor=55.0) == (55.0, "floor")
+    assert derive_headline_area(category_main="byt", usable=999.9) == (999.9, "usable")
+    assert derive_headline_area(category_main="dum", usable=1800.0) == (1800.0, "usable")
+    assert derive_headline_area(category_main="komercni", total=1800.0) == (1800.0, "total")
+
+
+def test_bazos_mechova_cellar_is_not_the_flat():
+    from scraper import vocabulary
+    from scraper.bazos_parser import ad_haystack, areas_from_text
+
+    haystack = ad_haystack(
+        "Prodej bytu 3+1 s balkonem",
+        "Byt 3+1 v Mechové ulici. K bytu náleží sklepní kóje s okýnkem o velikosti 2 m² "
+        "a podíl na třináctimetrové sklepní místnosti.")
+    disposition = vocabulary.disposition("bazos", haystack)
+    assert disposition == "3+1"
+    areas = areas_from_text(haystack, category_main="byt", disposition=disposition)
+    assert (areas.area_m2, areas.area_basis) == (None, None)
