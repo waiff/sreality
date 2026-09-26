@@ -904,6 +904,21 @@ const ENGINE_VIEW: Record<RulingPairRow['engine_view'], string> = {
   unseen: 'inzeráty neviděl',
 };
 
+/* The engine's view in one line: its grouping, then the stored pair — the
+ * certificate when one decided it, the decision's own name on a merge, and on
+ * anything else why it was not merged. No stored row is said, not left blank:
+ * the live stream keeps no machine reject (decision 7). */
+export function engineLine(row: RulingPairRow): string {
+  const parts = [ENGINE_VIEW[row.engine_view]];
+  if (!row.zone) return `${parts[0]} · pár bez uloženého řádku`;
+  let pair = `pár: ${row.zone}${row.score != null ? ` ${row.score.toFixed(2)}` : ''}`;
+  if (row.certificate) pair += ` · certifikát ${row.certificate}`;
+  else if (row.zone === 'merge' && row.decision) pair += ` · ${row.decision}`;
+  if (row.zone !== 'merge' && row.why_not_merged) pair += ` — ${row.why_not_merged}`;
+  parts.push(pair);
+  return parts.join(' · ');
+}
+
 function address(street: string | null, cp: string | null): string | null {
   if (!street && !cp) return null;
   return [street, cp && `čp. ${cp}`].filter(Boolean).join(' ');
@@ -983,17 +998,8 @@ function PairRulingCard({
             : 'dvě různé nemovitosti'}
           {row.must_not_link ? ' · zákaz spojení platí' : ''}
         </dd>
-        <dt className="text-[var(--color-ink-3)]">Engine ({row.generation ?? generation ?? '—'})</dt>
-        <dd className="text-[var(--color-ink-2)]">
-          {ENGINE_VIEW[row.engine_view]}
-          {row.zone
-            ? ` · pár: ${row.zone}${row.score != null ? ` ${row.score.toFixed(2)}` : ''}${
-                row.certificate ? ` · certifikát ${row.certificate}` : ''
-              }${row.decision && !row.certificate ? ` · ${row.decision}` : ''}${
-                row.why_not_merged && row.zone !== 'merge' ? ` — ${row.why_not_merged}` : ''
-              }`
-            : ' · pár bez uloženého řádku'}
-        </dd>
+        <dt className="text-[var(--color-ink-3)]">Engine ({row.generation || generation || '—'})</dt>
+        <dd className="text-[var(--color-ink-2)]">{engineLine(row)}</dd>
       </dl>
       {row.source === 'implied' && (
         <p className="mt-2 text-[0.72rem] text-[var(--color-ink-3)]">
