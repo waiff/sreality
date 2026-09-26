@@ -32,14 +32,14 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, load
 from autodedup.decide import decide_pair
 from autodedup.features import FeatureContext, pair_features
 from autodedup.fingerprint import build_all
 from autodedup.harness import load_model, load_must_not_link, load_settings
-from autodedup.hazard_context import ContextIndex
+from autodedup.hazard_context import ContextIndex, ContextStamp
 from autodedup.incremental import (
     EVIDENCE_HOLD_REASON,
     Calibration,
@@ -240,6 +240,17 @@ def batch_state(
     return out, {key: list(members) for key, members in clustered.clusters.items()}, timings
 
 
+# What the real-time lane adds to a row's evidence for its own rails — E64's context stamp on a
+# promotion, E93's hold — and a batch decision never carries: it says nothing about the decision.
+LANE_EVIDENCE_KEYS: frozenset[str] = frozenset(
+    {*ContextStamp(0, 0).to_evidence(), "held_zone", "held_reason", "held_certificate"})
+
+
+def decision_evidence(evidence: Mapping[str, Any] | None) -> bool:
+    """Whether a row carries evidence of the decision's own (E61's veto names its two units)."""
+    return any(key not in LANE_EVIDENCE_KEYS for key in (evidence or {}))
+
+
 def _pair_view(decision: Any, probes: Sequence[str]) -> dict[str, Any]:
     return {
         "zone": decision.zone,
@@ -249,9 +260,9 @@ def _pair_view(decision: Any, probes: Sequence[str]) -> dict[str, Any]:
         "veto": decision.veto,
         "families": sorted(decision.families),
         "probes": list(probes),
-        # Whether the row carries evidence: `storable` keeps an evidence-bearing row (E61's
+        # Whether the DECISION carries evidence: `storable` keeps an evidence-bearing row (E61's
         # designator vetoes) whatever it scored, so the stored grain is compared on it too.
-        "evidence": bool(decision.evidence),
+        "evidence": decision_evidence(decision.evidence),
     }
 
 
@@ -294,7 +305,7 @@ def incremental_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
-            "evidence": bool(row.evidence),
+            "evidence": decision_evidence(row.evidence),
         }
         for key, row in store.pairs.items()
     }
@@ -390,7 +401,7 @@ def withheld_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
-            "evidence": bool(row.evidence),
+            "evidence": decision_evidence(row.evidence),
         }
         for key, row in store.pairs.items()
     }

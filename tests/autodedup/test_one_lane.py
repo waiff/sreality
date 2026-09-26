@@ -807,3 +807,16 @@ def test_a_seed_resets_the_rate_and_a_pass_times_its_reconcile(tmp_path, monkeyp
     ran = run_incremental(lambda: conn)
     assert seen and ran["reconcile"]["counts"]["groups"] == 7
     assert ran["reconcile"]["seconds"] >= 0
+
+
+def test_the_replay_compares_the_decisions_own_evidence_only() -> None:
+    """Review B10: the stored grain keeps E61's evidence-bearing veto rows, so the replay's
+    pair view carries whether a row has evidence — of the DECISION's own: the lane's context
+    stamp (E64) and hold markers (E93) are its rails, never the batch decision's."""
+    from autodedup.replay import decision_evidence
+
+    assert decision_evidence({"designator_lo": "A", "designator_hi": "B"})
+    assert not decision_evidence({"context_cell_n": "3", "context_image_pop_min": "1"})
+    assert not decision_evidence({"held_zone": "merge", "held_reason": "x",
+                                  "held_certificate": ""})
+    assert not decision_evidence(None) and not decision_evidence({})
