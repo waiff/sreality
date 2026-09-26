@@ -1042,9 +1042,10 @@ def publish(conn: psycopg.Connection, version_id: int) -> None:
 
 
 def refresh_rent_map_cells(conn: psycopg.Connection) -> None:
-    """MF's rent cells (migration 563) read the obec→KÚ membership of the current registry
-    version, so they are rebuilt the moment a version goes live — CONCURRENTLY, so readers
-    never block. Not guarded: this module merges only after 563 is applied."""
+    """MF's rent cells (`mf_reference`'s only input) read the obec→KÚ membership of the
+    current registry version, so they are rebuilt the moment a version goes live —
+    CONCURRENTLY, so readers never block. Not guarded: this lands after the migration that
+    creates the matview is applied."""
     with conn.cursor() as cur:
         cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY rent_map_cells")
 
