@@ -172,6 +172,21 @@ SPENT_SEALS: dict[str, str] = {
         "those groups in new developments (Harfa Living twice, Pod Harfou). The next choice "
         "needs a fresh seed again."
     ),
+    "eecc33b95ad50fd3291ba19172223d7c645abf8f7bbf350ed0bf1a88c49ab139": (
+        "Refit W7's seal (4,488 listings, 1,831 groups; the map alone hashes to f3b63906..., "
+        "which is how the W7 fit reports name it), seed 20261002 — the first seed of the "
+        "pre-registered scan that met its share rule. Cut over the W7 COMPOSITE substrate "
+        "(autodedup/refit_substrate.py: fourteen w29 runs, each labelled pair read at the export "
+        "its label was made against) from every labelled POSITIVE of every tier + the merge "
+        "edges and cluster memberships of the fourteen w6_gold substrate runs; labelled "
+        "NEGATIVES are not edges (amendment A1: unioning them put 20.4% of the rows in one "
+        "group, the W14 structural-negative failure again). SPENT by ONE read of the "
+        "pre-registered model bars on the common sealed population (947 rows, full label "
+        "store): w6_gold AUC 0.9766 / ECE 3.14% / F1 0.9493 against w7a 0.9613 / 3.19% / "
+        "0.9430 and w7b 0.9583 / 4.56% / 0.9463 — both candidates fail the AUC and F1 bars and "
+        "nothing shipped (docs/design/autodedup/refit_w7_preregistration.json + "
+        "refit_w7_results.json). The next refit needs a fresh seal."
+    ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
         "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "
