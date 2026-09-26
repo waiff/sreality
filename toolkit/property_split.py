@@ -210,6 +210,8 @@ def _landings(
     for lid in movers:
         if lid in origins:
             home.setdefault(int(origins[lid][0]), set()).add(letter[lid])
+    if not home:
+        return
     if shared := sorted(lid for lid in movers
                         if lid in origins and len(home[int(origins[lid][0])]) > 1):
         raise SplitRefused(409, "cannot_move", "adverts of different units came from one "
