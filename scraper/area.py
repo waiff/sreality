@@ -68,12 +68,34 @@ AREA_THOUSANDS_SEPS = "\u0020\u00a0\u202f\u2009\u200b\u200c\u200d\u2060"
 # in front of it — a disposition ("3+1 174 m²" stays 174, never 1174), another
 # number, or a decimal tail — while still allowing a match to START at a real
 # number's first digit.
+# The NUMBER half, kept apart so any later reader of a figure builds on this shape
+# instead of a second grammar (rule 21). Three forms, in order:
+# spaced thousands ("5 870 m²", with an optional decimal tail), DOTTED thousands — a
+# dot followed by exactly three digits, the way brokers key "1.910 m2" / "12.100 m2" /
+# "1.994,71 m²" (Czech decimals take a comma, so a 3-digit group after a dot is never a
+# fraction; "1.5 m2" keeps its dot as the decimal it is) — and a plain number.
+AREA_NUMBER_SRC = (
+    rf"\d{{1,3}}(?:[{AREA_THOUSANDS_SEPS}]\d{{3}})+(?:[.,]\d+)?"
+    rf"|\d{{1,3}}(?:\.\d{{3}})+(?:,\d+)?"
+    rf"|\d+(?:[.,]\d+)?"
+)
+_DOTTED_THOUSANDS_RE = re.compile(r"^\d{1,3}(?:\.\d{3})+(?:,\d+)?$")
 AREA_TEXT_RE = re.compile(
     rf"(?<![\d+.,])"
-    rf"(\d{{1,3}}(?:[{AREA_THOUSANDS_SEPS}]\d{{3}})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    rf"({AREA_NUMBER_SRC})"
     rf"\s*m(?:2|²|\s*2)\b",
     re.IGNORECASE,
 )
+
+
+def area_token_to_float(token: str) -> float:
+    """One matched number token -> its value: separators stripped, a dotted-thousands
+    token's dots with them, the decimal comma read as a point."""
+    for sep in AREA_THOUSANDS_SEPS:
+        token = token.replace(sep, "")
+    if _DOTTED_THOUSANDS_RE.match(token):
+        token = token.replace(".", "")
+    return float(token.replace(",", "."))
 
 
 def parse_area_text(text: str | None) -> float | None:
@@ -87,10 +109,7 @@ def parse_area_text(text: str | None) -> float | None:
     match = AREA_TEXT_RE.search(text)
     if not match:
         return None
-    token = match.group(1)
-    for sep in AREA_THOUSANDS_SEPS:
-        token = token.replace(sep, "")
-    return float(token.replace(",", "."))
+    return area_token_to_float(match.group(1))
 
 
 @dataclass(frozen=True, slots=True)

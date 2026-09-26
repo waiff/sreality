@@ -254,3 +254,18 @@ def test_every_emitted_basis_is_in_the_declared_vocabulary():
     # all — a legal answer, and not a token. Every token emitted must be declared.
     assert emitted - {None} <= AREA_BASES
     assert {"usable", "floor", "total", "plot", "unknown"} <= emitted
+
+
+def test_dotted_thousands_are_one_number_and_a_decimal_point_still_is_one():
+    """Brokers key "1.910 m2" / "12.100 m2" / "1.994,71 m²"; a dot followed by exactly
+    three digits is a thousands group (Czech decimals take a comma), so it read as 1,91
+    until 2026-09-23 — 121 active area-less rows carried the form and bazos held 313
+    active parcels under 5 m². A dot with any other tail keeps its decimal meaning."""
+    from scraper.area import parse_area_text
+
+    assert parse_area_text("Celková plocha pozemku činí 1.910 m2") == 1910.0
+    assert parse_area_text("výměra 12.100 m2") == 12100.0
+    assert parse_area_text("1.994,71 m²") == 1994.71
+    assert parse_area_text("byt 1.5 m2 sklep") == 1.5
+    assert parse_area_text("2.5m2") == 2.5
+
