@@ -17,7 +17,6 @@ export interface YieldScenario {
   updated_at: string;
 }
 
-
 export interface EstimationRun {
   id: number;
   status: 'pending' | 'running' | 'success' | 'failed';
