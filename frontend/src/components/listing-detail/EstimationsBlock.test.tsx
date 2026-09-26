@@ -105,7 +105,7 @@ describe('EstimationsBlock MF card', () => {
   });
 
   it('shows the property reason as its note, in place of any placeholder', async () => {
-    const note = 'Poloha bytu zatím není určena.';
+    const note = '(a reason note, from SQL)';
     fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0, next_cursor: null });
     const { container } = renderBlock(
       property({
