@@ -1290,10 +1290,11 @@ select p.listing_lo, p.listing_hi, p.features
 # generation to its pass (migration 538's own convention), and a score run records its whole
 # settings blob — so the instrument can say whether the two sides ran the same clock rather
 # than assuming it (E120). The newest successful pass wins: a generation re-scored under new
-# settings IS the newer pass.
+# settings IS the newer pass. `export_run` names the export the pass was scored on, which is
+# how the instrument finds the cohort's cut (E918).
 RT_EQUIV_BATCH_SETTINGS_SQL = """
 select r.params -> 'settings' as settings, r.params ->> 'model_version' as model_version,
-       r.finished_at
+       r.finished_at, r.params ->> 'export_run' as export_run
   from autodedup.runs r
  where r.mode = 'score'
    and r.status = 'success'
@@ -1320,8 +1321,11 @@ select m.cluster_key, m.listing_id
  order by m.cluster_key, m.listing_id
 """
 
+# `resolved_at` is the moment the location that PUT the listing in the scope was written — the
+# snapshot's own arrival event (`RT_SCOPE_ENTRANTS_SQL`), and the clock `arrival_after_export`
+# reads beside `first_seen_at`, because the export's block query reads `listing_location` too.
 RT_EQUIV_SCOPE_IDS_SQL = """
-select s.listing_id
+select s.listing_id, s.resolved_at
   from autodedup.rt_scope_ids s
  where s.generation = %(generation)s::text
  order by s.listing_id
@@ -1337,4 +1341,40 @@ RT_EQUIV_CLOCK_FACTS_SQL = """
 select l.id, l.first_seen_at, l.last_seen_at, l.inactive_at, l.is_active
   from public.listings l
  where l.id = any(%(ids)s::bigint[])
+"""
+
+# The live side's HOLDS (E908), asked for by the one reason the lane writes and served by
+# `autodedup_pairs_evidence_pending_idx` (migration 540): what each held pair WOULD have decided
+# (`evidence.held_*`, which the lane keeps beside the band row so a release is a re-decision),
+# and, per endpoint, the two facts the lane's own release arm (`RT_EVIDENCE_RELEASE_SQL`) reads —
+# whether the gallery was complete when the listing was last decided, and how long ago this
+# generation FIRST decided it. The age is taken by the SERVER's clock, the one the horizon runs on.
+RT_EQUIV_HOLDS_SQL = """
+select p.listing_lo, p.listing_hi,
+       p.evidence ->> 'held_zone'        as held_zone,
+       p.evidence ->> 'held_certificate' as held_certificate,
+       flo.ev_complete                   as lo_complete,
+       extract(epoch from now() - flo.first_decided_at)::double precision as lo_age_s,
+       fhi.ev_complete                   as hi_complete,
+       extract(epoch from now() - fhi.first_decided_at)::double precision as hi_age_s
+  from autodedup.pairs p
+  left join autodedup.rt_fp flo
+         on flo.generation = p.generation and flo.listing_id = p.listing_lo
+  left join autodedup.rt_fp fhi
+         on fhi.generation = p.generation and fhi.listing_id = p.listing_hi
+ where p.generation = %(generation)s::text
+   and p.decision = %(reason)s::text
+ order by p.listing_lo, p.listing_hi
+"""
+
+# The export the batch generation was scored on, as the export's own lane run recorded it: the
+# `export` mode writes one `autodedup.iterations` row keyed by its GitHub run id and stamped by
+# the server when the mode started and when it finished, and the batch's score run names that
+# run id in `params.export_run`. So the cohort's cut is READ rather than typed on a command line.
+RT_EQUIV_EXPORT_WINDOW_SQL = """
+select i.started_at, i.finished_at
+  from autodedup.iterations i
+ where i.run_id = %(run_id)s::bigint
+ order by i.id desc
+ limit 1
 """
