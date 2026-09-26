@@ -1245,7 +1245,12 @@ def accessory_area_conflict(
     return (str(value_a), str(value_b))
 
 
-def cellar_area_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+# E305r: the photographic identity a stated cellar yields to - K-B/K-C's own frame bar.
+CELLAR_YIELD_TIGHT_FRAMES: float = 4.0
+
+
+def cellar_area_conflict(a: Listing, b: Listing, cfg: Settings,
+                         feats: Feats | None = None) -> tuple[str, str] | None:
     """E305: the one cellar two FLAT bodies state, apart beyond the accessory tolerance.
 
     Byty Podlesí, Jablonec (g13 trial): one 1+kk template let on idnes `sklepní kóje 6,6 m²`
@@ -1263,6 +1268,14 @@ def cellar_area_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, st
     if rounding_equal_values(value_a, dec_a, value_b, dec_b):
         return None
     if rel_diff(value_a, value_b) <= cfg.d43_outdoor_accessory_rel_tol:
+        return None
+    # E305r: one agency may correct its own text (Na Radouči 1045: `sklep o výměře 2m2` in June,
+    # `5 m2` in August, one three-step price path, 13-17 shared frames). The cellar yields where
+    # the pair is one listing on the engine's own positive evidence: >= 4 tight non-catalogue
+    # frames AND price paths that meet. A pair never scored carries no frames and keeps the fact.
+    if (cfg.d43_cellar_area_photo_yield
+            and (_present(feats, "phash_tight_matches") or 0.0) >= CELLAR_YIELD_TIGHT_FRAMES
+            and price_paths_agree(a, b, cfg.d43_price_path_tol)):
         return None
     return (f"cellar={value_a:g}", f"cellar={value_b:g}")
 
@@ -2929,7 +2942,7 @@ def distinguishing_facts(
         if acc_area is not None:
             add("accessory_area", acc_area[0], acc_area[1])
 
-    cellar = cellar_area_conflict(a, b, cfg)
+    cellar = cellar_area_conflict(a, b, cfg, feats)
     if cellar is not None:
         add("cellar_area", cellar[0], cellar[1])
 

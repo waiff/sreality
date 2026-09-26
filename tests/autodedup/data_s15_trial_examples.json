@@ -1,5 +1,5 @@
 {
- "_provenance": "listing rows of the g13 TRIAL export (autodedup-score-36155865816/artifact/cohort.jsonl.gz, export run 36155223243, 2026-09-25), copied verbatim; the W30 (S15) trial examples. Not read from the database.",
+ "_provenance": "listing rows of the g13 TRIAL export (autodedup-score-36155865816/artifact/cohort.jsonl.gz, export run 36155223243, 2026-09-25), copied verbatim; the W30 (S15) trial examples. Not read from the database. 161444, 179801 and 208326 (Na Radouci 1045, E305r) are listing rows of the cohort-17 export (export run 36221961445), copied verbatim.",
  "listings": {
   "13057838": {
    "area_m2": 35.0,
@@ -117,6 +117,65 @@
    "t": "listing",
    "total_floors": 8
   },
+  "161444": {
+   "area_m2": 65.0,
+   "attrs": {
+    "area_basis": "unknown",
+    "price_unit": "za nemovitost"
+   },
+   "block": "town535419",
+   "broker_firm_id": null,
+   "broker_identity_id": null,
+   "broker_key": null,
+   "category_main": "byt",
+   "category_type": "prodej",
+   "description": "Ve výhradním zastoupení Vám nabízíme ke koupi světlý a velmi dobře řešený byt 3+1 v osobním vlastnictví o užitné ploše 71m2, s lodžií a sklepem. Byt se nachází ve 3.patře třípatrového bytového domu v žádané lokalitě Radouč, která je vyhledávána pro klidné bydlení a skvělou občanskou dostupnost. Zaujme Vás příjemnou atmosférou, výhledem na Michalovickou putnu a svým potenciálem pro komfortní bydlení. Interiér prošel rozsáhlou rekonstrukcí. Zděné bytové jádro, nová elektroinstalace, nová kuchyňská linka ve vysokém standardu včetně spotřebičů (Siemens a Elektrolux), vestavěné skříně v ložnici a chodbě. Součástí bytu je i zastíněná lodžie, která nabízí příjemné místo k odpočinku a také sklep o výměře 2m2. Byt představuje skvělou příležitost jak pro vlastní bydlení, tak i jako stabilní investici.",
+   "disposition": "3+kk",
+   "first_seen_at": "2026-06-01T15:36:10.822495+00:00",
+   "floor": null,
+   "id": 161444,
+   "inactive_at": "2026-08-01T08:38:54.451168+00:00",
+   "is_active": false,
+   "last_seen_at": "2026-07-31T19:52:40.287221+00:00",
+   "location": {
+    "cast_obce_kod": null,
+    "cast_obce_name": null,
+    "country_status": "cz",
+    "granularity": "street",
+    "granularity_rank": 60,
+    "house_number": null,
+    "is_address_grain": false,
+    "lat": 50.4300622165042,
+    "lon": 14.9053803161161,
+    "obec_kod": 535419,
+    "obec_name": "Mladá Boleslav",
+    "psc": "29301",
+    "ruian_adm_kod": null,
+    "street_key": "na radouci",
+    "uncertainty_radius_m": 670.68677381
+   },
+   "price": 6390000,
+   "price_history": [
+    [
+     "2026-06-01T15:36:10.822495+00:00",
+     6690000
+    ],
+    [
+     "2026-06-09T13:42:21.370859+00:00",
+     6490000
+    ],
+    [
+     "2026-06-22T14:46:02.401968+00:00",
+     6390000
+    ]
+   ],
+   "source": "bazos",
+   "source_id_native": "219604467",
+   "source_url": "https://reality.bazos.cz/inzerat/219604467/3kk-65-m2-na-radouci-mlada-boleslav.php",
+   "subtype": null,
+   "t": "listing",
+   "total_floors": null
+  },
   "17902432": {
    "area_m2": 52.0,
    "attrs": {
@@ -177,6 +236,80 @@
    "subtype": null,
    "t": "listing",
    "total_floors": 3
+  },
+  "179801": {
+   "area_m2": 65.0,
+   "attrs": {
+    "area_basis": "usable",
+    "building_type": "panel",
+    "category_sub_cb": 6,
+    "cellar": true,
+    "condition": "velmi_dobry",
+    "garage": false,
+    "has_balcony": true,
+    "has_parking": false,
+    "ownership": "osobni",
+    "price_unit": "za nemovitost",
+    "published_at": "2026-08-24T00:00:00+00:00",
+    "terrace": false,
+    "usable_area": 65.0
+   },
+   "block": "town535419",
+   "broker_firm_id": null,
+   "broker_identity_id": null,
+   "broker_key": null,
+   "category_main": "byt",
+   "category_type": "prodej",
+   "description": "Ve výhradním zastoupení Vám nabízíme ke koupi světlý a velmi dobře řešený byt 3+1 v osobním vlastnictví o užitné ploše 71m2, s lodžií a sklepem.\n\nByt se nachází ve 3.patře třípatrového bytového domu v žádané lokalitě Radouč, která je vyhledávána pro klidné bydlení a skvělou občanskou dostupnost.\n\nZaujme Vás příjemnou atmosférou, výhledem na Michalovickou putnu a svým potenciálem pro komfortní bydlení.\n\nInteriér prošel rozsáhlou rekonstrukcí. Zděné bytové jádro, nová elektroinstalace, nová kuchyňská linka ve vysokém standardu včetně spotřebičů (Siemens a Elektrolux),\n\nvestavěné skříně v ložnici a chodbě. Součástí bytu je i zastíněná lodžie, která nabízí příjemné místo k odpočinku a také sklep o výměře 5 m2. K bytové jednotce náleží podíl na pozemcích okolo domu, kde je oplocený pozemek s dětským hřištěm pouze pro spoluvlastníky domu.\n\nByt představuje skvělou příležitost jak pro vlastní bydlení, tak i jako stabilní investici.",
+   "disposition": "3+kk",
+   "first_seen_at": "2026-06-03T22:36:28.095147+00:00",
+   "floor": 3,
+   "id": 179801,
+   "inactive_at": "2026-09-01T13:49:15.831402+00:00",
+   "is_active": false,
+   "last_seen_at": "2026-08-31T20:22:55.650740+00:00",
+   "location": {
+    "cast_obce_kod": 402591,
+    "cast_obce_name": "Mladá Boleslav II",
+    "country_status": "cz",
+    "granularity": "address_point",
+    "granularity_rank": 100,
+    "house_number": "1045",
+    "is_address_grain": true,
+    "lat": 50.4272422534415,
+    "lon": 14.9028733409223,
+    "obec_kod": 535419,
+    "obec_name": "Mladá Boleslav",
+    "psc": "29301",
+    "ruian_adm_kod": 21251169,
+    "street_key": "na radouci",
+    "uncertainty_radius_m": 10.0
+   },
+   "price": 6240000,
+   "price_history": [
+    [
+     "2026-06-03T22:36:28.095147+00:00",
+     6690000
+    ],
+    [
+     "2026-06-09T08:30:56.241041+00:00",
+     6490000
+    ],
+    [
+     "2026-06-22T11:31:49.218735+00:00",
+     6390000
+    ],
+    [
+     "2026-08-24T18:09:31.631896+00:00",
+     6240000
+    ]
+   ],
+   "source": "sreality",
+   "source_id_native": "3493625932",
+   "source_url": "https://www.sreality.cz/detail/prodej/byt/3+kk/mlada-boleslav-mlada-boleslav-ii-na-radouci/3493625932",
+   "subtype": null,
+   "t": "listing",
+   "total_floors": null
   },
   "18223015": {
    "area_m2": 52.0,
@@ -587,6 +720,83 @@
    "subtype": null,
    "t": "listing",
    "total_floors": 5
+  },
+  "208326": {
+   "area_m2": 65.0,
+   "attrs": {
+    "area_basis": "usable",
+    "building_type": "panel",
+    "cellar": true,
+    "condition": "velmi_dobry",
+    "energy_rating": "D",
+    "furnished": "castecne",
+    "garage": false,
+    "has_balcony": true,
+    "has_parking": false,
+    "ownership": "osobni",
+    "price_unit": "za nemovitost",
+    "usable_area": 65.0
+   },
+   "block": "town535419",
+   "broker_firm_id": 22202,
+   "broker_identity_id": 150637,
+   "broker_key": "f0bc879a014d688446c007d661d2f5dcb61f949d97a68e3f6312b3bfe6153566",
+   "category_main": "byt",
+   "category_type": "prodej",
+   "description": "3+1 s balkonem Na Radouči v Mladé Boleslavi Ve výhradním zastoupení Vám nabízíme ke koupi světlý a velmi dobře řešený byt 3+1 v osobním vlastnictví o užitné ploše 71m², s velkou lodžií opatřenou výsuvnou markýzou a prostorným sklepem 5 m².. Byt se nachází ve 3.patře třípatrového bytového domu v žádané lokalitě Radouč, která je vyhledávána pro klidné bydlení a skvělou občanskou dostupnost. Zaujme Vás příjemnou atmosférou, výhledem na Michalovickou putnu a svým potenciálem pro komfortní bydlení. Interiér prošel rozsáhlou rekonstrukcí. Zděné bytové jádro, nová elektroinstalace, nová kuchyňská linka ve vysokém standardu včetně spotřebičů (Siemens a Elektrolux), vestavěné skříně v ložnici a chodbě. K bytové jednotce náleží podíl na pozemcích okolo domu, kde je oplocený pozemek s dětským hřištěm pouze pro spoluvlastníky domu. Byt představuje skvělou příležitost jak pro vlastní bydlení, tak i jako stabilní investici.",
+   "disposition": "3+kk",
+   "first_seen_at": "2026-06-05T12:29:52.174979+00:00",
+   "floor": 3,
+   "id": 208326,
+   "inactive_at": null,
+   "is_active": true,
+   "last_seen_at": "2026-09-26T05:47:34.711505+00:00",
+   "location": {
+    "cast_obce_kod": null,
+    "cast_obce_name": null,
+    "country_status": "cz",
+    "granularity": "street",
+    "granularity_rank": 60,
+    "house_number": null,
+    "is_address_grain": false,
+    "lat": 50.427242253441,
+    "lon": 14.902873340922,
+    "obec_kod": 535419,
+    "obec_name": "Mladá Boleslav",
+    "psc": null,
+    "ruian_adm_kod": null,
+    "street_key": "na radouci",
+    "uncertainty_radius_m": 300.0
+   },
+   "price": 6090000,
+   "price_history": [
+    [
+     "2026-06-05T12:29:52.174979+00:00",
+     6690000
+    ],
+    [
+     "2026-06-09T08:49:04.746756+00:00",
+     6490000
+    ],
+    [
+     "2026-06-22T14:49:53.593802+00:00",
+     6390000
+    ],
+    [
+     "2026-08-25T15:42:40.285538+00:00",
+     6240000
+    ],
+    [
+     "2026-09-08T05:56:39.123270+00:00",
+     6090000
+    ]
+   ],
+   "source": "idnes",
+   "source_id_native": "6a1c60a6cc8cbe9d36081ec6",
+   "source_url": "https://reality.idnes.cz/detail/prodej/byt/mlada-boleslav-na-radouci/6a1c60a6cc8cbe9d36081ec6/",
+   "subtype": null,
+   "t": "listing",
+   "total_floors": 4
   },
   "411764": {
    "area_m2": 73.0,

@@ -372,6 +372,53 @@ def test_E305_sizes_that_meet_are_one_cellar() -> None:
     assert "cellar_area" not in names(a, land, S15)
 
 
+# --- E305r (W31): the cellar yields to the engine's own identity evidence -------------------
+S15B = Settings.from_json(SETTINGS / "w31.json")
+W31_ON = {"attr_probe_town_grain", "d43_cellar_area", "d43_cellar_area_photo_yield"}
+
+
+def _frames(n: float) -> dict:
+    return {"phash_tight_matches": (n, True)}
+
+
+def test_E305r_one_agency_correcting_its_cellar_is_one_flat() -> None:
+    # Na Radouci 1045 (cohort 17): bazos 161444 `sklep o vymere 2m2` (June text) against sreality
+    # 179801 and idnes 208326 `5 m2` (August text); one three-step price path, 18 / 20 tight frames.
+    a = trial(161444)
+    for other, tight in ((179801, 18.0), (208326, 20.0)):
+        b = trial(other)
+        feats = _frames(tight)
+        assert "cellar_area" in [f.name for f in distinguishing_facts(a, b, feats, S15, GATE)]
+        assert "cellar_area" not in [f.name for f in distinguishing_facts(a, b, feats, S15B, GATE)]
+        # a pair never scored carries no frames, and the stated cellar stays a fact
+        assert "cellar_area" in [f.name for f in distinguishing_facts(a, b, None, S15B, GATE)]
+
+
+def test_E305r_needs_both_the_frames_and_one_price_path() -> None:
+    a, b = trial(161444), trial(179801)
+    assert "cellar_area" in [f.name for f in distinguishing_facts(a, b, _frames(3.0), S15B, GATE)]
+    moved = trial(179801, price=5_100_000.0,
+                  price_history=[["2026-06-03T00:00:00+00:00", 5_100_000.0]])
+    facts = distinguishing_facts(a, moved, _frames(18.0), S15B, GATE)
+    assert "cellar_area" in [f.name for f in facts]
+
+
+def test_E305r_keeps_byty_podlesi_apart() -> None:
+    a, b = trial(13057838), trial(19042993)   # 2 tight frames on the engine's own row
+    assert "cellar_area" in [f.name for f in distinguishing_facts(a, b, _frames(2.0), S15B, GATE)]
+
+
+def test_w31_is_w29_plus_its_three_dials_and_E305r_needs_E305() -> None:
+    w29, w31 = S14.to_dict(), S15B.to_dict()
+    assert {key for key in w31 if w29.get(key) != w31[key]} == W31_ON
+    for dial in ("d43_floor_total_camp_shift", "d43_floor_total_camp_shift_mixed",
+                 "d43_total_floors_agreeing_unit", "d43_cluster_price_kc_house_number"):
+        assert not getattr(S15B, dial)
+    assert not Settings().d43_cellar_area_photo_yield and not S15.d43_cellar_area_photo_yield
+    with pytest.raises(ValueError, match="E305r"):
+        variant(d43_cellar_area=False, d43_cellar_area_photo_yield=True)
+
+
 # --- the table itself ------------------------------------------------------------------------
 def test_every_W30_dial_is_off_by_default() -> None:
     default = Settings()
@@ -400,6 +447,10 @@ EARLIER_DIGESTS = {
     "w29.json": "76bceb5d233359c796aae194524a4271ab31234c22737224488ddcbd61ab0c79",
     "w29_land_hold.json": "38d81db5ebdcbd36d419aa3989a2e833773f7b3d0f812956a8365141fb298e24",
     "w29_rentals_hold.json": "8257cd443224cf31f75eb2c896e45685f0acb382fb1a66864be43ecbcd83a4c9",
+    # w30 as cohort 17 judged it (E305 on), frozen: refused there, kept for replay parity.
+    "w30.json": "f718506d7ab75e2a43a88d835b9daf5a05a522001c7f1e43d0987b566c76638f",
+    "w30_land_hold.json": "3e20a55b726ad51a3b5d53ca3730d3381ffd7dcdf1c2bb7a26b12bcc642f06b3",
+    "w30_rentals_hold.json": "b96e0cb8dd986120edbbb36660ca13bdb285d18dd7297ff2380ff748ee870018",
 }
 
 
