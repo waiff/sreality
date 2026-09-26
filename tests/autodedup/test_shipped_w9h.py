@@ -40,18 +40,15 @@ from autodedup.incremental import (
     run_pass,
 )
 from autodedup.incremental_lane import (
-    ENV_FLAG,
     EVIDENCE_HORIZON_HOURS,
     SqlStore,
     SqlWork,
-    parity_baseline_key,
+    cut_calibration,
     run_incremental,
-    run_rt_seed,
 )
 from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.parity_digest import Floors, baseline, compare, verdict
 from autodedup.replay import (
     DatasetFacts,
     ScheduleWork,
@@ -63,38 +60,15 @@ from autodedup.export import encode_clip
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_incremental import _dataset, _settings
-from tests.autodedup.test_parity import (
-    EXPORTED_AT,
-    GENERATION,
-    seed,
-    seed_calibration,
-    true_population,
-    write_artifact,
-)
+from tests.autodedup.lane_world import GENERATION, seed_lane, true_population
+from tests.autodedup.lane_world import world as lane_world
 
-SCOPE = "obec:563510"
-SEED_ARGS = {"settings": "default", "model": "prior", "rt_scope": SCOPE}
 TOWN = Scope((ScopeBlock("obec", 563510),))
 
 
 @pytest.fixture()
-def world(tmp_path: Path):
-    conn = FakePg(now=EXPORTED_AT + timedelta(days=1))
-    seed(conn)
-    seed_calibration(conn, Settings())
-    artifact = write_artifact(conn, tmp_path / "cohort.jsonl.gz", true_population(conn))
-    conn.calibration.pop(GENERATION, None)
-    return conn, artifact
-
-
-def _seed(conn: FakePg, artifact: Path, tmp_path: Path, **args: Any) -> dict[str, Any]:
-    return run_rt_seed(lambda: conn, {"artifact": str(artifact), **SEED_ARGS, **args},
-                       tmp_path)
-
-
-def _pass(conn: FakePg, tmp_path: Path, monkeypatch, **args: Any) -> dict[str, Any]:
-    monkeypatch.setenv(ENV_FLAG, "true")
-    return run_incremental(lambda: conn, {"rt_scope": SCOPE, **args}, tmp_path)
+def world() -> FakePg:
+    return lane_world()
 
 
 # ============================================================ V1a: the evidence arrives late
@@ -466,164 +440,40 @@ def test_withholding_the_photographs_and_delivering_them_reaches_the_batch_state
         tuple(sorted(v)) for v in batch_clusters.values()}
 
 
-# ================================================================== V2: the gate's own floors
+# ======================================= V3: the calibration follows the corpus (A10, E912)
 
 
-def _report(**kw: Any) -> dict[str, Any]:
-    base = {"listings": 25, "checked": 25, "breaches": 0, "drifted_skipped": 0, "absent": 0,
-            "population_images_checked": 300, "population_images_excused": 0,
-            "legacy_baseline_rows": 0, "age_days": 1.0, "unknown_pop_share": 0.01}
-    base.update(kw)
-    return base
+def test_a_pass_reports_the_calibration_age_and_the_population_coverage(world, tmp_path) -> None:
+    """The export's 14-day age rail is gone with the export: the calibration is cut from the
+    database and re-cut when the coverage falls, so the pass REPORTS both."""
+    seed_lane(world, tmp_path)
 
+    out = run_incremental(lambda: world)
 
-def test_a_gate_that_checked_nothing_refuses_instead_of_passing() -> None:
-    """THE DEFECT: every baseline listing drifted (or absent) gave `checked` 0, `breaches` 0
-    and `ok` true — and drift is monotone in export age, so the gate self-weakened as the
-    export aged."""
-    drifted = _report(checked=0, drifted_skipped=25)
-    absent = _report(checked=0, absent=25)
-
-    assert verdict(drifted, generation="rt", floors=Floors(min_checked=0,
-                                                           min_checked_share=0.0),
-                   what="x") is None, "with the rail off, this is W9g's behaviour"
-    for report in (drifted, absent):
-        message = verdict(report, generation="rt", floors=Floors(), what="the pass")
-        assert message and "checked 0 of 25" in message
-
-
-def test_the_floor_is_a_count_and_a_share_so_neither_end_defeats_it() -> None:
-    floors = Floors()
-    assert floors.required(25) == 15          # the shipped slice
-    assert floors.required(120) == 72         # a seed sample: 60% of it, not 15 of it
-    assert floors.required(9) == 6            # a cohort smaller than the absolute floor
-    assert floors.required(0) == 1            # an EMPTY baseline is the vacuity itself
-    assert Floors(min_checked=0, min_checked_share=0.0).required(0) == 0
-
-
-def test_a_baseline_older_than_the_age_rail_refuses() -> None:
-    assert verdict(_report(age_days=13.0), generation="rt", floors=Floors(),
-                   what="the pass") is None
-    message = verdict(_report(age_days=21.0), generation="rt", floors=Floors(),
-                      what="the pass")
-    assert message and "21.0 days old" in message and "UNDERCOUNT" in message
-
-
-def test_an_unknown_population_share_over_the_ceiling_refuses() -> None:
-    assert verdict(_report(unknown_pop_share=0.04), generation="rt", floors=Floors(),
-                   what="the pass") is None
-    message = verdict(_report(unknown_pop_share=0.31), generation="rt", floors=Floors(),
-                      what="the pass")
-    assert message and "31.0%" in message
-
-
-def test_a_producer_move_on_one_image_no_longer_excuses_the_rest(world) -> None:
-    """THE DEFECT: `compare` skipped the whole listing's population check as soon as any image
-    of it had been re-hashed, so a population decaying image by image ran green."""
-    conn, _artifact = world
-    listing_id = 4_000
-    from autodedup.incremental_lane import SqlFacts
-
-    conn.phash_pop.update(true_population(conn))
-
-    listing, gallery = SqlFacts(conn).facts([listing_id])[listing_id]
-    rows = baseline({listing_id: listing}, {listing_id: gallery})
-
-    # One image re-hashed (honest producer movement), and EVERY OTHER image's population
-    # quietly wiped — the shape W9f shipped, one frame at a time.
-    moved = [replace(gallery[0], phash=(gallery[0].phash or 0) + 1)] + [
-        replace(image, pop=None) for image in gallery[1:]]
-    assert len(moved) > 1, "the fixture needs a gallery to decay"
-
-    report = compare(rows, {listing_id: listing}, {listing_id: moved})
-
-    assert report["producer_moved"] == 1
-    assert report["population_images_excused"] == 1, "the re-hashed frame, and only it"
-    assert report["breaches"] == 1 and report["breaches_by_kind"] == {"population": 1}
-
-
-def test_an_image_less_listing_is_not_a_legacy_baseline_row(world) -> None:
-    """A gallery with nothing in it has no population to compare, which is not the same as a
-    baseline that CANNOT be compared — and E94's vacuity rail reads the difference."""
-    from autodedup.incremental_lane import SqlFacts
-
-    conn, _artifact = world
-    conn.phash_pop.update(true_population(conn))
-    listing_id = 4_000
-    listing, _gallery = SqlFacts(conn).facts([listing_id])[listing_id]
-    rows = baseline({listing_id: listing}, {listing_id: []})
-
-    report = compare(rows, {listing_id: listing}, {listing_id: []})
-
-    assert report["checked"] == 1 and report["breaches"] == 0
-    assert report["legacy_baseline_rows"] == 0
-    assert report["population_images_checked"] == 0
-    assert verdict(report, generation="rt",
-                   floors=Floors(min_checked=1, min_checked_share=0.0),
-                   what="the pass") is None
-
-
-# ==================================================== V3: the calibration has an expiry date
-
-
-def test_a_pass_reports_the_calibration_age_and_the_population_coverage(
-        world, tmp_path, monkeypatch) -> None:
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-
-    out = _pass(conn, tmp_path, monkeypatch)
-
-    assert 0.0 < out["calibration"]["export_age_days"] < 14.0
-    assert out["calibration"]["max_age_days"] == 14.0
     assert out["calibration"]["built_age_days"] is not None
     assert out["population"]["coverage"] == 1.0
+    assert out["population"]["floor"] == 0.85
     assert out["evidence"]["horizon_hours"] == EVIDENCE_HORIZON_HOURS
 
 
-def test_a_pass_refuses_a_calibration_past_its_age_rail(world, tmp_path, monkeypatch) -> None:
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    conn.settings["rt_calibration_max_age_days"] = 0.5
-    before = dict(conn.cursors)
-
-    with pytest.raises(SystemExit) as raised:
-        _pass(conn, tmp_path, monkeypatch)
-
-    assert "rt_calibration_max_age_days" in str(raised.value)
-    assert conn.cursors == before, "nothing was written and no cursor moved"
+# ======================================= V4: a hash the population never saw is UNKNOWN
 
 
-def test_a_baseline_that_cannot_say_when_it_was_exported_is_refused(
-        world, tmp_path, monkeypatch) -> None:
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    payload = dict(conn.settings[parity_baseline_key(GENERATION)])
-    payload.pop("exported_at")
-    conn.settings[parity_baseline_key(GENERATION)] = payload
-
-    with pytest.raises(SystemExit) as raised:
-        _pass(conn, tmp_path, monkeypatch)
-    assert "exported_at" in str(raised.value)
-
-
-# ================================================= V4: a hash the export never saw is UNKNOWN
-
-
-def test_a_hash_the_frozen_population_never_measured_reads_unknown_not_zero(world) -> None:
+def test_a_hash_the_population_never_measured_reads_unknown_not_zero(world) -> None:
     """E96. There is no index from a hash to its carriers (`images_phash_idx` is on
-    `sreality_id`) and D8 forbids adding one, so a hash that arrived after the export cannot
-    be counted without the export's own sequential scan. It therefore reads UNKNOWN — and an
-    unknown population makes `catalog_ratio` absent, which is what K-C requires to be
-    PRESENT, so the pair bands rather than merging on photo evidence nobody measured."""
+    `sreality_id`) and D8 forbids adding one, so a hash that arrived after the last cut cannot
+    be counted without a sequential scan. It therefore reads UNKNOWN — and an unknown
+    population makes `catalog_ratio` absent, which is what K-C requires to be PRESENT, so the
+    pair bands rather than merging on photo evidence nobody measured."""
     from autodedup.decide import certificate_c
     from autodedup.features import Feats
     from autodedup.incremental_lane import SqlFacts
 
-    conn, _artifact = world
+    conn = world
     conn.phash_pop.clear()
     conn.phash_pop.update(true_population(conn))
     listing_id = next(iter(conn.listings))
-    # One frame re-hashed after the export: its new hash is in no frozen population.
+    # One frame re-hashed after the cut: its new hash is in no measured population.
     for row in conn.image_rows:
         if row["listing_id"] == listing_id:
             row["phash"] = (row["phash"] or 0) + 7_777_777
@@ -642,26 +492,23 @@ def test_a_hash_the_frozen_population_never_measured_reads_unknown_not_zero(worl
     assert certificate_c(feats) is False
 
 
-def test_a_fresh_export_is_what_closes_the_gap(world, tmp_path) -> None:
-    """The only writer of the frozen population is the seed, and the only source of a
-    population for a NEW hash is a new export: re-seeding from a fresh artifact writes the
-    new hash's count and the gap closes to whatever has moved since THAT export."""
-    conn, _artifact = world
-    listing_id = next(iter(conn.listings))
-    for row in conn.image_rows:
+def test_a_re_cut_is_what_closes_the_gap(world, tmp_path) -> None:
+    """The writer of the population is the cut, and a re-cut measures the new hash over
+    `public.images` — no export, no artifact, no 14-day clock (A10)."""
+    seed_lane(world, tmp_path)
+    listing_id = next(iter(world.listings))
+    for row in world.image_rows:
         if row["listing_id"] == listing_id:
             row["phash"] = (row["phash"] or 0) + 7_777_777
             break
-    fresh = write_artifact(conn, tmp_path / "fresh.jsonl.gz", true_population(conn))
 
-    conn.phash_pop.clear()
-    out = _seed(conn, fresh, tmp_path, reseed="true")
+    out = cut_calibration(world, Settings(), "hand_v1")
 
-    assert out["population"]["hashes_written"] == len(conn.phash_pop)
-    assert conn.phash_pop == true_population(conn)
+    assert out["hashes_measured"] == len(true_population(world))
+    assert all(world.phash_pop[h] == n for h, n in true_population(world).items())
     from autodedup.incremental_lane import SqlFacts
 
-    reader = SqlFacts(conn)
+    reader = SqlFacts(world)
     reader.facts([listing_id])
     assert reader.images_unmeasured == 0
 

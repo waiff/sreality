@@ -11,7 +11,6 @@ rather than left half-indexed.
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,20 +21,17 @@ import pytest
 from autodedup import cohort
 from autodedup.incremental import Limits, WorkItem, run_pass
 from autodedup.incremental_lane import (
-    BUDGET_SETTING,
     CURSOR_CHANGED,
     CURSOR_ENTER,
     CURSOR_EVIDENCE,
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_SCOPE,
-    ENV_FLAG,
     SCOPE_SETTING,
     STORAGE_WATERMARK,
     RetireRefusal,
     SqlStore,
     SqlWork,
-    parity_baseline_key,
     resolve_scope_parents,
     run_incremental,
     scope_setting_key,
@@ -71,26 +67,12 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
     db.locations[int(listing_id)] = {"obec_kod": obec, "cast_obce_kod": cast_obce}
 
 
-def _baseline(db: FakePg, generation: str = GEN) -> None:
-    """The parity gate (E91) refuses a generation with no fact baseline. A fixture that
-    hand-writes the calibration row hand-writes the baseline too — an empty one, because its
-    `public` holds no cohort listing to compare against, and with W9h's vacuity floors (E94)
-    an empty baseline now REFUSES unless the rail is switched off by name. These fixtures
-    switch it off and say so: they test the scope, the feeds and the seed's mechanics, and
-    what the gate is FOR is proved end to end in `test_rt_gate.py`, `test_shipped_w9h.py`
-    and `test_parity.py`."""
-    db.settings[parity_baseline_key(generation)] = {
-        "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
-    db.settings["rt_parity_min_checked"] = 0
-    db.settings["rt_parity_min_checked_share"] = 0
-
 def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
     """A SEEDED generation. A pass over an unseeded one is a green skip (W9e/R1), so every
     test about what a pass REFUSES has to seed it first."""
     db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
                                   "artifact_url": None, "settings": {},
                                   "model_version": "hand_v1"}
-    _baseline(db, generation)
     return db
 
 
@@ -153,14 +135,13 @@ def test_an_empty_or_missing_scope_is_a_hard_error_never_the_whole_corpus() -> N
     assert resolve_scope("all", [{"grain": "obec", "code": 1}]).whole_corpus is True
 
 
-def test_the_lane_refuses_an_empty_scope_setting(tmp_path, monkeypatch) -> None:
+def test_the_lane_refuses_an_empty_scope_setting() -> None:
     # SEEDED (W9e/R1): an UNseeded generation is a green skip, and only a seeded one can have a
     # scope row that is wrong.
     conn = _calibrated(FakePg())
-    conn.settings[SCOPE_SETTING] = []
-    monkeypatch.setenv(ENV_FLAG, "true")
+    conn.settings[scope_setting_key(GEN)] = []
     with pytest.raises(SystemExit) as raised:
-        run_incremental(lambda: conn, {}, tmp_path)
+        run_incremental(lambda: conn)
     assert SCOPE_SETTING in str(raised.value)
     assert not conn.cursors and not conn.rt_fp
 
@@ -168,14 +149,12 @@ def test_the_lane_refuses_an_empty_scope_setting(tmp_path, monkeypatch) -> None:
 # ------------------------------------------------------------------ the storage budget
 
 
-def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget(tmp_path, monkeypatch):
+def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget() -> None:
     conn = _calibrated(FakePg())
     conn.schema_bytes = 500 * 1_048_576
-    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
-    conn.settings[BUDGET_SETTING] = 400
-    monkeypatch.setenv(ENV_FLAG, "true")
+    conn.settings[scope_setting_key(GEN)] = [{"grain": "obec", "code": 563510}]
     with pytest.raises(SystemExit) as raised:
-        run_incremental(lambda: conn, {}, tmp_path)
+        run_incremental(lambda: conn)
     assert "over the 400 MB" in str(raised.value)
     # Loud, non-zero, and nothing moved: no lease taken, no cursor written, no row stored.
     assert not conn.lease and not conn.cursors and not conn.rt_fp and not conn.fp_key
@@ -440,16 +419,14 @@ def test_a_pair_that_falls_below_the_floor_on_a_re_score_is_deleted() -> None:
 # ------------------------------------------------------------ the summary the operator reads
 
 
-def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, monkeypatch):
+def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth() -> None:
     conn = FakePg()
     conn.schema_bytes = 64 * 1_048_576
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
                              "artifact_url": None, "settings": {},
                              "model_version": "hand_v1"}
-    _baseline(conn, GEN)
-    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
-    monkeypatch.setenv(ENV_FLAG, "true")
-    out = run_incremental(lambda: conn, {SCOPE_SETTING: "obec:563510"}, tmp_path)
+    conn.settings[scope_setting_key(GEN)] = [{"grain": "obec", "code": 563510}]
+    out = run_incremental(lambda: conn)
     assert out["scope"] == [{"grain": "obec", "code": 563510}]
     assert out["storage"]["schema_mb"] == 64.0
     assert out["storage"]["max_schema_mb"] == 400.0
@@ -457,7 +434,6 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
     assert out["retention"]["store_floor"] > 0
     # The growth watermark is written, so the NEXT pass can report growth against this one.
     assert conn.settings[STORAGE_WATERMARK]["bytes"] == conn.schema_bytes
-    assert json.loads(Path(tmp_path, "incremental.json").read_text())["scope"]
 
 
 # ------------------------------------------------- W9d: the four defects the verification found
@@ -523,19 +499,17 @@ def test_a_handful_of_departures_is_still_retired() -> None:
     assert [item.listing_id for item in items if item.retire] == [7]
 
 
-def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatch) -> None:
+def test_the_lane_stops_loudly_when_the_drift_sweep_refuses() -> None:
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
                              "artifact_url": None, "settings": {},
                              "model_version": "hand_v1"}
-    _baseline(conn, GEN)
-    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
+    conn.settings[scope_setting_key(GEN)] = [{"grain": "obec", "code": 563510}]
     for listing_id in range(1, 101):
         conn.rt_fp[(GEN, listing_id)] = _fp_row()
         _place(conn, listing_id, obec=999999)
-    monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
-        run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+        run_incremental(lambda: conn)
     assert "retire" in str(raised.value).lower()
     assert not conn.cursors and len(conn.rt_fp) == 100
 
@@ -548,54 +522,18 @@ def _seeded(scope_json: Any) -> FakePg:
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
                              "artifact_url": None, "settings": {},
                              "model_version": "hand_v1"}
-    _baseline(conn, GEN)
-    conn.settings[SCOPE_SETTING] = scope_json
+    conn.settings[scope_setting_key(GEN)] = scope_json
     return conn
 
 
-def test_a_dispatch_scope_that_differs_from_the_seeded_one_is_refused(tmp_path, monkeypatch):
-    conn = _seeded([{"grain": "obec", "code": 563510}, {"grain": "obec", "code": 577626}])
-    monkeypatch.setenv(ENV_FLAG, "true")
-    with pytest.raises(SystemExit) as raised:
-        run_incremental(lambda: conn, {"generation": GEN, SCOPE_SETTING: "obec:563510"},
-                        tmp_path)
-    assert "rt_rescope" in str(raised.value)
-    assert conn.settings[SCOPE_SETTING] == [{"grain": "obec", "code": 563510},
-                                            {"grain": "obec", "code": 577626}]
-    assert not conn.lease and not conn.cursors
-
-
-def test_the_same_scope_spelled_differently_is_not_a_rescope(tmp_path, monkeypatch) -> None:
-    conn = _seeded([{"grain": "obec", "code": 577626}, {"grain": "obec", "code": 563510}])
-    monkeypatch.setenv(ENV_FLAG, "true")
-    out = run_incremental(lambda: conn, {"generation": GEN,
-                                         SCOPE_SETTING: "obec:563510 obec:577626"}, tmp_path)
-    assert out.get("rescoped") is False
-
-
-def test_rt_rescope_persists_the_new_scope_and_requeues_the_entrants(tmp_path, monkeypatch):
-    conn = _seeded([{"grain": "obec", "code": 563510}, {"grain": "obec", "code": 577626}])
-    conn.cursors[CURSOR_ENTER] = {"last_listing_id": 4242, "last_snapshot_id": 1}
-    monkeypatch.setenv(ENV_FLAG, "true")
-    out = run_incremental(lambda: conn, {"generation": GEN, SCOPE_SETTING: "obec:563510",
-                                         "rt_rescope": "true"}, tmp_path)
-    assert out["rescoped"] is True
-    # The row the rescope persists is the GENERATION's (W9e/R4), never the legacy global one.
-    assert conn.settings[scope_setting_key(GEN)] == [{"grain": "obec", "code": 563510}]
-    # The entrant sweep restarts, so everything the new scope holds is re-claimed.
-    assert conn.cursors[CURSOR_ENTER]["last_listing_id"] == 0
-
-
-def test_a_seeded_generation_with_no_scope_row_is_a_hard_error(tmp_path, monkeypatch) -> None:
+def test_a_seeded_generation_with_no_scope_row_is_a_hard_error() -> None:
     """Never a silent fall back to the default: the row IS the generation's scope."""
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
                              "artifact_url": None, "settings": {},
                              "model_version": "hand_v1"}
-    _baseline(conn, GEN)
-    monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
-        run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+        run_incremental(lambda: conn)
     assert SCOPE_SETTING in str(raised.value)
     assert not conn.cursors and not conn.rt_fp
 
@@ -672,12 +610,11 @@ def test_a_quarter_block_needs_its_parent_obec_resolved() -> None:
 # --------------------------- W9d-4: the session guards belong INSIDE the transaction
 
 
-def test_the_session_guards_are_set_local_inside_the_pass_transaction(tmp_path, monkeypatch):
+def test_the_session_guards_are_set_local_inside_the_pass_transaction() -> None:
     """`db.connect` speaks to the transaction-mode pooler, which rebinds a connection between
     queries: a guard set on the session is a guard the pass's own transaction may never see."""
     conn = _seeded([{"grain": "obec", "code": 563510}])
-    monkeypatch.setenv(ENV_FLAG, "true")
-    run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+    run_incremental(lambda: conn)
     for guard in (RT_STATEMENT_GUARD_SQL, RT_LOCK_GUARD_SQL, RT_IDLE_GUARD_SQL):
         assert guard in conn.statements_in_tx, guard
         assert ", true)" in guard, "set_config must be LOCAL to the transaction"

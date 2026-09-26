@@ -367,14 +367,12 @@ def test_update_iteration_refuses_an_unknown_status() -> None:
 
 def test_every_mode_is_registered() -> None:
     assert set(lane.MODES) == {"census", "probes", "export", "judge", "score", "labels",
-                               "record", "incremental", "rt_seed", "rt_parity",
-                               "rt_equivalence", "town", "apply", "unapply"}
+                               "record", "rt_seed", "rt_equivalence", "town", "apply",
+                               "unapply"}
     # `record` writes its own terminal row, so wrapping it would file the same iteration twice;
-    # `incremental` is a `*/10` schedule and a ledger row per pass would file 144 narrative
-    # iterations a day over work `autodedup.runs` and the workflow summary already carry, and
-    # `rt_seed` is the operator's one-off cut of a generation's calibration. `rt_parity` is
-    # the READ-ONLY instrument — an `iterations` row would be the one write it promises never
-    # to make, and `rt_equivalence` and `town` make the same promise.
+    # the real-time pass is not a mode at all (the worker's lane, E914), and `rt_seed` is the
+    # operator's one-off (re)build of it. `rt_equivalence` is READ-ONLY — an `iterations` row
+    # would be the one write it promises never to make, and `town` makes the same promise.
     # `apply` / `unapply` (A1) are a unit of work a person reads: each run is a row.
     assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge", "score",
                                         "labels", "apply", "unapply"}
