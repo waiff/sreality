@@ -182,7 +182,13 @@ name: "AUTODEDUP: engine lane"
 #             negatives, which are an INPUT to the next generation's clustering. The operator
 #             is the TOP label tier - above gold - so `harness fit` and `harness evaluate`
 #             read these files with --operator-labels instead of an ad-hoc query nobody can
-#             re-run the same way twice. Every statement is a SELECT.
+#             re-run the same way twice. Since migration 564 (E299) a pair ruling a Browse
+#             merge wrote leaves as source `browse_merge` with its merge_group_id, and
+#             out/operator_merges.jsonl carries the operator's Browse merges at GROUP grain
+#             from autodedup.operator_merges (never property_merge_events): every member with
+#             its origin side, where it sits today and the export block it lives in, and every
+#             pair with its standing - the file `harness yardstick` measures a generation
+#             against. Empty until 564 is applied. Every statement is a SELECT.
 #
 #   rt_parity - READS ONLY, and writes NOTHING - not a `public` row, not an `autodedup` row,
 #             not even a ledger row. The instrument that asks whether the real-time lane's

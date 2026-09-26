@@ -7,7 +7,7 @@ it lived only in the database, where a fit could read it only through an ad-hoc 
 could re-run the same way twice. This lane writes it to a file instead, so `harness fit` and
 `harness evaluate` consume LABELS FROM AN ARTIFACT exactly as they already consume judgements.
 
-Two files, both JSONL, both sorted by `(listing_lo, listing_hi)` so two runs over an unchanged
+Three files, all JSONL, the pair files sorted by `(listing_lo, listing_hi)` so two runs over an unchanged
 store produce byte-identical output:
 
   * `operator_labels.jsonl` — one row per operator pair label. `source` says how the operator
