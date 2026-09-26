@@ -64,15 +64,6 @@ RT_IDLE_GUARD_SQL = """
 select set_config('idle_in_transaction_session_timeout', %(idle_timeout_ms)s::text, true)
 """
 
-# The SECOND kill switch, in the database rather than in the repository: an operator can stop
-# the lane without a workflow edit. Absent means "not blocked" — the repository variable is
-# what makes the lane dark by default, and this row is what stops one that is already on.
-RT_SETTING_SQL = """
-select s.value
-  from autodedup.settings s
- where s.key = %(key)s::text
-"""
-
 # ------------------------------------------------------------------ mutual exclusion
 #
 # Lease-row CAS, never pg_advisory_lock: a session lock strands over the transaction pooler.
@@ -586,19 +577,6 @@ RT_PHASH_POP_COUNT_SQL = """
 select count(*) as n from autodedup.phash_pop
 """
 
-# The change stamp of a listing's CONTENT, for the parity gate and for the instrument that
-# shares its definition: rule #2 appends a `listing_snapshots` row only when the content hash
-# moves, so the newest snapshot is when this row last really changed. There is no
-# `last_change_at` column on `listings` to read instead.
-RT_PARITY_CHANGE_SQL = """
-select s.listing_id           as listing_id,
-       max(s.scraped_at)      as last_change_at,
-       count(*)               as n_snapshots
-from listing_snapshots s
-where s.listing_id = any(%(ids)s::bigint[])
-group by s.listing_id
-"""
-
 # ------------------------------------------------------------------ probe postings
 #
 # One statement per PASS rather than per probe key (E74): a listing carries 17.3 index keys and
@@ -982,6 +960,23 @@ select c.generation, c.digest, c.n_listings, c.payload, c.artifact_url, c.settin
        c.model_version, c.built_at
   from autodedup.rt_calibration c
  where c.generation = %(generation)s::text
+"""
+
+# A10 (E912): the calibration is cut over what the scope snapshot holds, and the pHash
+# population over those listings' hashes — the export's own statement (`COHORT_PHASH_POP_SQL`),
+# now run by the lane rather than by a GitHub job whose artifact aged out in 14 days.
+RT_CUT_SCOPE_IDS_SQL = """
+select distinct s.listing_id
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+ order by s.listing_id
+"""
+
+RT_CUT_HASHES_SQL = """
+select distinct i.phash
+  from public.images i
+ where i.listing_id = any(%(ids)s::bigint[])
+   and i.phash is not null
 """
 
 RT_CALIBRATION_WRITE_SQL = """

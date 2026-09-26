@@ -621,6 +621,17 @@ def neighbourhood(
 # -------------------------------------------------------------------------------- the pass
 
 
+class PassDeadline(Exception):
+    """The pass ran past its own deadline (E913). Raised between steps, never inside a write:
+    the caller's one transaction rolls back, nothing is written and no cursor moves (E75), and
+    the next pass claims half as much."""
+
+
+def _in_time(deadline: float | None) -> None:
+    if deadline is not None and time.perf_counter() >= deadline:
+        raise PassDeadline("the pass ran past its deadline")
+
+
 @dataclass(slots=True)
 class Limits:
     """Everything one pass is allowed to spend, and what it does when it cannot fit.
@@ -673,6 +684,8 @@ class PassResult:
     aborted: str = ""
     wanted_pairs: int = 0
     attempts: int = 1
+    # The groups this pass (re)wrote — what the lane's reconcile (A9) looks at first.
+    cluster_keys: list[int] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -916,8 +929,13 @@ def run_pass(
     generation: str = GENERATION,
     now: float | None = None,
     hold: EvidenceHold | None = None,
+    deadline: float | None = None,
 ) -> PassResult:
     """One bounded, idempotent incremental pass. Re-running it on an unchanged corpus is a no-op.
+
+    `deadline` (a `time.perf_counter()` instant) bounds the pass's own time (E913): it is read
+    between steps and every few hundred pair decisions, and past it the pass raises
+    `PassDeadline` for its caller's transaction to roll back.
 
     The order is the cohort pass's order, restricted: refresh the fingerprints that moved,
     widen to the probe-key neighbourhood (E71), retrieve, score what is new or stale, write the
@@ -1067,6 +1085,7 @@ def run_pass(
         touched_blocks.add(cell[0])
         changed.add(listing_id)
     result.timings["refresh_s"] = time.perf_counter() - clock
+    _in_time(deadline)
 
     # --- 2. E71: the dirty set is the probe-key neighbourhood ------------------------------
     clock = time.perf_counter()
@@ -1099,6 +1118,7 @@ def run_pass(
             continue
         cand[listing_id] = retrieve(fp, keyer, view, lookup, settings, vetoed)
     result.timings["retrieve_s"] = time.perf_counter() - clock
+    _in_time(deadline)
 
     # --- 4. the pair set: either side retrieving the other keeps it ------------------------
     clock = time.perf_counter()
@@ -1162,7 +1182,9 @@ def run_pass(
                   if hold is not None else {})
     rows: list[PairRow] = []
     result.redecided = len(redecide)
-    for (lo, hi) in sorted(wanted):
+    for index, (lo, hi) in enumerate(sorted(wanted)):
+        if index % 256 == 255:
+            _in_time(deadline)
         entry = wanted[(lo, hi)]
         if lo not in working.fps or hi not in working.fps:
             continue
@@ -1239,6 +1261,7 @@ def run_pass(
         previous = stored.get(key)
         if previous is not None and previous.zone == "merge":
             seeds |= set(key)
+    _in_time(deadline)
     rulings = read_rulings(store)
     seeds |= _ruling_seeds(store, rulings)
     # A retired listing is not a seed: it has no postings, no pairs and no cell any more. Its
@@ -1249,6 +1272,7 @@ def run_pass(
     result.timings["cluster_s"] = time.perf_counter() - clock
 
     # --- 7. E64: a census that has overtaken a stamped promotion re-opens it to the band ---
+    _in_time(deadline)
     clock = time.perf_counter()
     result.rail = _run_rail(store, facts, settings, working, result, sorted(touched_blocks),
                             rulings)
@@ -1279,6 +1303,7 @@ def run_pass_bounded(
     shrink: int = 4,
     attempts: int = 5,
     hold: EvidenceHold | None = None,
+    deadline: float | None = None,
 ) -> PassResult:
     """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
@@ -1288,12 +1313,12 @@ def run_pass_bounded(
     budget is a block worth an operator's eye, not a number to quietly truncate."""
     caps = limits or Limits()
     result = run_pass(store, facts, work, settings, model, calibration, caps, generation, now,
-                      hold)
+                      hold, deadline)
     tries = 1
     while result.aborted and tries < attempts and caps.max_listings > 1:
         caps = replace(caps, max_listings=max(1, caps.max_listings // shrink))
         result = run_pass(store, facts, work, settings, model, calibration, caps, generation,
-                          now, hold)
+                          now, hold, deadline)
         tries += 1
     result.attempts = tries
     return result
@@ -1578,6 +1603,7 @@ def _recluster(
     # the cluster survived.
     drop = sorted(key for key in touched if key not in keep)
     store.write_clusters(drop, rows, conflicts)
+    result.cluster_keys.extend(int(row["cluster_key"]) for row in rows)
     result.clusters_written += len(rows)
     result.clusters_dropped += len(drop)
 

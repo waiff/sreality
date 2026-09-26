@@ -1,14 +1,15 @@
-"""`--mode incremental`: the real-time shadow pass, and the Postgres store behind it.
+"""THE autodedup lane: one bounded pass that decides, groups and reconciles, and its store.
 
-Dark by default at two levels, and stoppable at a third. The workflow exits before python runs
-unless the repository variable `AUTODEDUP_REALTIME_ENABLED` is `true`; `env_enabled` re-reads
-the same variable here, so a manual dispatch cannot bypass it; and `autodedup.settings`'s
-`realtime_enabled` row stops a lane that is already on WITHOUT a repository change. Shadow
-mode's own posture (E39/D4) is untouched: nothing here reaches `public.listings`, a
-`property_id` or a merge. The always-on worker runs this same pass as its `autodedup` lane
-(stopped while `app_settings.realtime_autodedup_interval_seconds` is 0; it hands in
-`enabled=True`): one lease and one set of cursors, so the worker and the workflow can never pass
-at once — and `rt_seed` takes that same lease, so no pass runs inside a seed.
+W5 made this the ONE production path (E914): the always-on worker's `autodedup` lane
+(`scraper/realtime_worker.py`) is its only caller and its interval (0 = stop) its only switch.
+One pass, under the lane's lease (`autodedup.rt_lease`), claims what moved, decides it with the
+batch engine's own functions (`incremental.run_pass_bounded`), re-clusters under the relation
+and the operator's rulings the batch pass clusters under (F2, E909; E910), commits, and then
+RECONCILES production (`autodedup/reconcile.py`, A9): the groups it re-clustered become merges
+through `toolkit.property_identity.merge_property_set` inside the area
+`app_settings.autodedup_apply_scope` names. It never splits. Its calibration is cut from the
+database (A10, E912) — at `rt_seed` and again whenever the pHash population it reads has fallen
+below `COVERAGE_FLOOR` — and its controls are constants of this module, not settings rows.
 
 The pass itself is `incremental.run_pass_bounded`; this module is the three adapters it needs —
 the store, the read-only fact source and the watermark — plus the lease that keeps two runs out
@@ -32,7 +33,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import socket
 import time
 from contextlib import nullcontext
@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
 
+from autodedup import reconcile
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -55,13 +56,14 @@ from autodedup.export_sql import (
     COHORT_IMAGES_SQL,
     COHORT_LISTINGS_SQL,
     COHORT_LOCATION_SQL,
+    COHORT_PHASH_POP_SQL,
     COHORT_PRICE_HISTORY_SQL,
 )
 from autodedup.features import FEATURE_VERSION
+from autodedup.fingerprint import build_fingerprint
 from autodedup.harness import (
     DEFAULT_SETTINGS_NAME,
     PRIOR_MODEL_NAME,
-    model_name_of,
     model_of_version,
     named_model,
     named_settings,
@@ -74,15 +76,13 @@ from autodedup.incremental import (
     CellRow,
     Evidence,
     EvidenceHold,
-    evidence_of,
     FpRow,
     GuardRow,
-    Keyer,
     Limits,
     PairRow,
+    PassDeadline,
     SET_CAP,
     WorkItem,
-    fp_digest,
     key_token,
     run_pass_bounded,
 )
@@ -91,7 +91,7 @@ from autodedup.incremental_scope import (
     Scope,
     ScopeError,
     guard_agrees,
-    resolve_pass_scope,
+    parse_scope,
     resolve_scope,
 )
 from autodedup.incremental_sql import (
@@ -108,11 +108,9 @@ from autodedup.incremental_sql import (
     RT_CURSOR_READ_SQL,
     RT_CURSOR_SET_SQL,
     RT_CURSOR_WRITE_SQL,
+    RT_CUT_HASHES_SQL,
+    RT_CUT_SCOPE_IDS_SQL,
     RT_FLIPPED_LISTINGS_SQL,
-    RT_EQUIV_BATCH_SETTINGS_SQL,
-    RT_EQUIV_CLOCK_FACTS_SQL,
-    RT_EQUIV_PAIR_FEATURES_SQL,
-    RT_EQUIV_SCORE_TYPE_SQL,
     RT_EVIDENCE_CANDIDATES_SQL,
     RT_EVIDENCE_HELD_COUNT_SQL,
     RT_EVIDENCE_PROBE_SQL,
@@ -135,7 +133,6 @@ from autodedup.incremental_sql import (
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
     RT_LOCK_GUARD_SQL,
-    RT_PARITY_CHANGE_SQL,
     RT_PHASH_POP_COUNT_SQL,
     RT_PHASH_POP_SQL,
     RT_PHASH_POP_WRITE_SQL,
@@ -176,7 +173,6 @@ from autodedup.incremental_sql import (
     RT_RETIRE_EVENT_WRITE_SQL,
     RT_RETIRE_WINDOW_SQL,
     RT_SEED_CURSORS_SQL,
-    RT_SETTING_SQL,
     RT_SETTING_WRITE_SQL,
     RT_SETTINGS_MANY_SQL,
     RT_STAMPED_MERGES_SQL,
@@ -192,22 +188,23 @@ from autodedup.score_lane import (
 )
 from autodedup.store_score import storable
 from autodedup.model import LogisticModel
-from autodedup.parity_digest import Floors as ParityFloors
-from autodedup.parity_digest import baseline as parity_baseline
-from autodedup.parity_digest import compare as parity_compare
-from autodedup.parity_digest import stratified_sample
-from autodedup.parity_digest import verdict as parity_verdict
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
 
 LANE_NAME: str = "autodedup_realtime"
-# Longer than the workflow's own 25-minute timeout: a lease that expires while its holder is
-# still running invites a second pass to write over the first.
-LEASE_TTL_S: int = 2100
-# `rt_seed` takes the SAME lease (E97b's reset, the calibration and the cursors it rewrites are
-# exactly what a pass reads and writes): a pass inside a seed would land old-scorer rows in a
-# generation the seed just emptied. Its TTL is the seeding job's own timeout (`autodedup.yml`,
-# `timeout-minutes: 300`), so a seed that is still running can never lose the lease to a pass.
+# THE PASS'S OWN DEADLINE (E913), in seconds of wall clock from the moment it starts. The
+# worker used to wrap the connection in a statement-refusing deadline and back off in process;
+# the engine now bounds itself: `run_pass` checks it between steps, a pass past it rolls back
+# (E75: nothing written, no cursor moved) and records its rate HALVED, so the next claim is
+# half the size. Sized so the deadline plus one statement at `statement_timeout` stays under
+# the worker's 1,200 s stall warning.
+PASS_DEADLINE_S: float = 1050.0
+# The lease outlives the longest pass by construction: the deadline, one statement past it,
+# the reconcile's last group and a calibration re-cut (A10) that may follow the pass.
+LEASE_TTL_S: int = 2400
+# `rt_seed` takes the SAME lease (E97's reset, the calibration and the cursors it rewrites are
+# exactly what a pass reads and writes). Its TTL is the seeding job's own timeout
+# (`autodedup.yml`, `timeout-minutes: 300`), so a running seed can never lose it to a pass.
 SEED_LEASE_TTL_S: int = 300 * 60
 CURSOR_NEW: str = "rt_new"
 CURSOR_CHANGED: str = "rt_changed"
@@ -216,28 +213,28 @@ CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
 CURSOR_EVIDENCE: str = "rt_evidence"
-ENV_FLAG: str = "AUTODEDUP_REALTIME_ENABLED"
-DB_FLAG: str = "realtime_enabled"
+# The rows the lane still keeps in `autodedup.settings` are WRITTEN BY IT, never set by hand:
+# the scope the seed cut the generation for, the build phase the seed opens and the pass
+# closes, the rate each pass measures, and the storage watermark (E914).
 SCOPE_SETTING: str = "rt_scope"
-BUDGET_SETTING: str = "rt_max_schema_mb"
-RETIRE_SETTING: str = "rt_max_retire_fraction"
-SCAN_CAP_SETTING: str = "rt_enter_max_scans_per_day"
-INTERVAL_SETTING: str = "rt_enter_interval_hours"
-EVIDENCE_HORIZON_SETTING: str = "rt_evidence_horizon_hours"
-EVIDENCE_SLICE_SETTING: str = "rt_evidence_slice"
-# --- the bootstrap phase and the time budget (E98) ---
-# Both are per-generation `autodedup.settings` rows, written by the seed and read by the pass.
 BOOTSTRAP_SETTING: str = "rt_bootstrap"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
-PASS_BUDGET_SETTING: str = "rt_pass_budget_s"
-CALIBRATION_AGE_SETTING: str = "rt_calibration_max_age_days"
-RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
-# The generation whose scope row may still be the LEGACY global one (W9e/R4). `rt_scope` was
-# one row for every generation, so a second generation's seed silently rescoped the first; the
-# row is `rt_scope:<generation>` now, and the old spelling is read exactly here and nowhere
-# else, because only this generation can have written one.
-LEGACY_SCOPE_GENERATION: str = GENERATION
+# THE ONE CLAIM BOUND (E75): how many listings a pass may claim before the time budget cuts it.
+PASS_LIMITS: Limits = Limits(max_listings=500, max_component=400)
+# The calibration re-cut (A10): when the share of a pass's hashed photographs whose population
+# the table can measure falls below the floor — photographs that arrived after the last cut —
+# the pass re-cuts, at most once per `RECUT_MIN_AGE_H`, on a pass that measured at least
+# `RECUT_MIN_IMAGES` of them and still has `RECUT_RESERVE_S` of its time left.
+COVERAGE_FLOOR: float = 0.85
+RECUT_MIN_IMAGES: int = 200
+RECUT_MIN_AGE_H: float = 6.0
+RECUT_RESERVE_S: float = 300.0
+# The cut reads the scope's facts in chunks of this many listings, and its one corpus-wide
+# statement (the pHash population, a sequential scan of `public.images` the export always ran)
+# gets a longer statement timeout than a pass.
+CUT_CHUNK: int = 200
+CUT_STATEMENT_TIMEOUT_MS: int = 600_000
 
 # How long a row must have existed before the lane will claim it (E73). Portal writes commit in
 # seconds; a transaction still open after five minutes would have to be a stuck one, and the
@@ -274,23 +271,22 @@ ENTER_SLICE: int = 20000
 # were that large; it is not — the trial scope carries 76 rows of incomplete evidence in
 # steady state plus ~74 inside the 48 h horizon, so a pass probes ~150 listings (~1,800
 # buffers, 14 MB) and the day costs ~259,000 buffers, 2.0 GB — the same order as the entrant
-# feed's 1.6 GB after W9e cut it 7.8x. `rt_evidence_slice = 0` turns the feed off.
+# feed's 1.6 GB after W9e cut it 7.8x.
 EVIDENCE_SLICE: int = 400
 # How long after its FIRST decision a listing's photographs are still expected. The producers
 # are hourly (dHash at :20, CLIP at :40) and measured p90 4.51 h to a first tag, so 48 h is
 # ~10x the observed tail rather than a guess at it — and it is the bound on how long a merge
-# may wait (E93) as much as on how long the sweep chases one. Data: `rt_evidence_horizon_hours`.
+# may wait (E93) as much as on how long the sweep chases one.
 EVIDENCE_HORIZON_HOURS: float = 48.0
 # How often a scope block's membership is re-walked on `public`, by grain and in HOURS. A town
 # block is an index-served bitmap scan of its own obec (Jablonec: 2,745 buffers = 21 MB, 61 ms);
 # a QUARTER has no index of its own at all and costs 29,568 buffers = 231 MB, 6.4 s, cold every
-# time. So they do not deserve the same cadence, and neither is per-pass work. Data, overridable
-# per grain: `rt_enter_interval_hours`.
+# time. So they do not deserve the same cadence, and neither is per-pass work.
 ENTER_INTERVAL_HOURS: dict[str, float] = {"obec": 1.0, "cast_obce": 6.0}
 # The hard ceiling on those walks, per generation and per rolling day (W9e/R3). The cadence
 # above is what the lane INTENDS to spend; this is what it is allowed to spend when an interval
 # is mis-set to zero or the block list grows. Under the trial scope the cadence asks for 52 a
-# day (24 + 24 + 4) against this 60. Data: `rt_enter_max_scans_per_day`.
+# day (24 + 24 + 4) against this 60.
 MAX_ENTER_SCANS_PER_DAY: int = 60
 # --- the bootstrap phase (E98) ---------------------------------------------------------------
 #
@@ -311,19 +307,13 @@ MAX_ENTER_SCANS_PER_DAY: int = 60
 BOOTSTRAP_MIN_CLAIM: int = 1
 # --- the time budget (E98) -------------------------------------------------------------------
 #
-# The claim is bounded by SECONDS as well as by counts, because the count bound is not a bound on
-# time and the job's is 25 minutes. Measured: the one live pass that ever did work claimed 77
-# listings and took 876.7 s (2026-09-20, run 35520830343) — 0.088 claimed listings a second, 14.6
-# minutes of a 25-minute timeout on a claim a sixth of the shipped one. A claim of 500 at that
-# rate is an hour and a half, and a pass that dies on the runner's timeout has written nothing,
-# advanced no cursor and left the lease held until it expires.
-#
-# So every pass measures its OWN rate (claimed listings per second of pass wall time) into
-# `rt_pass_rate_per_s:<generation>` and the next pass claims at most `budget x rate`. The default
-# below is the one live measurement, which is the pathological case this branch removes — the
-# first pass of a build therefore claims ~90 listings, measures the real rate, and the second
-# claims the full slice. One extra pass is the price of never guessing the rate upward.
-PASS_BUDGET_S: float = 900.0
+# The claim is bounded by SECONDS as well as by counts: every pass measures its OWN rate (claimed
+# listings per second of pass wall time, reconcile included) into
+# `rt_pass_rate_per_s:<generation>`, and the next pass claims at most `budget x rate`. The
+# budget is half the deadline, so a pass may run twice as slow as its measured rate before the
+# deadline stops it. The default rate is the one measurement taken before any was recorded — a
+# conservative start the second pass corrects.
+PASS_BUDGET_S: float = PASS_DEADLINE_S / 2
 PASS_RATE_PER_S: float = 0.1
 # A rate is only recorded when the pass actually claimed enough for the quotient to mean
 # something: an idle pass is 0 listings in 7 seconds and would otherwise wedge the claim at 1.
@@ -338,36 +328,12 @@ RETIRE_WINDOW_HOURS: int = 24
 # The share of the store one pass's drift sweep may retire before the lane STOPS instead (W9d-1).
 # A geocode correction moves a listing or two; a scope that has gone wrong moves everything, and
 # the difference between those two is the only thing standing between a hand-edited settings row
-# and a store that has to be re-seeded. Data, not a constant: `rt_max_retire_fraction`.
+# and a store that has to be re-seeded.
 MAX_RETIRE_FRACTION: float = 0.05
 # The storage budget, in megabytes of schema `autodedup` (pg_total_relation_size, indexes and
 # TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
 # not been watched for a week must not be able to double it.
 MAX_SCHEMA_MB: float = 400.0
-# --- the parity gate (E91) ---------------------------------------------------------------
-#
-# The seed writes a baseline of per-listing fact digests into `autodedup.settings` (one row, a
-# few kilobytes — no migration, and it is cut at exactly the moment the calibration is) and
-# every pass re-checks a slice of it before it opens its transaction. The tolerance is ZERO
-# breaches: a stored fact or a frozen statistic that differs on a listing nothing has changed
-# is the W9f defect, and the one thing W9f proved is that it can run for a whole pass unnoticed.
-PARITY_BASELINE_SETTING: str = "rt_parity_baseline"
-PARITY_SAMPLE_SETTING: str = "rt_parity_sample"
-# How many listings the SEED puts in the baseline, and how many of them a PASS re-checks. The
-# pass's slice is drawn fresh each time, so a day of passes covers the baseline many times over
-# at one fact read (6 statements, ~0.7 s) a pass.
-PARITY_BASELINE_N: int = 120
-PARITY_PASS_SAMPLE: int = 25
-PARITY_TOLERANCE: int = 0
-# The four FLOORS a pass must clear before a green gate means anything (E94). All data:
-# `rt_parity_min_checked`, `rt_calibration_max_age_days`, `rt_parity_max_unknown_pop_share`.
-PARITY_MIN_CHECKED_SETTING: str = "rt_parity_min_checked"
-PARITY_MIN_SHARE_SETTING: str = "rt_parity_min_checked_share"
-PARITY_UNKNOWN_POP_SETTING: str = "rt_parity_max_unknown_pop_share"
-PARITY_MIN_CHECKED: int = 15
-PARITY_MIN_CHECKED_SHARE: float = 0.6
-CALIBRATION_MAX_AGE_DAYS: float = 14.0
-PARITY_MAX_UNKNOWN_POP_SHARE: float = 0.15
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
@@ -894,15 +860,18 @@ class SqlFacts:
     it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
-                 population: Mapping[int, int] | None = None) -> None:
+                 population: Mapping[int, int] | None = None, clip: bool = True) -> None:
         self.conn = conn
         self.clip_model = clip_model
-        # A population handed in INSTEAD of the frozen table, for the one read-only caller that
-        # needs to see what the table WOULD hold: `--mode rt_parity population=artifact` reads
-        # the cohort's own counts so the operator can measure a seed's effect before seeding.
-        # The pass never passes this — its population is the frozen one or nothing (E91).
+        # A population handed in INSTEAD of the table, for the one caller that is about to
+        # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
+        # builds the fingerprints it is cut from on exactly those counts. The pass never
+        # passes this — its population is the table's or unknown (E91).
         self.population = None if population is None else {
             int(key): int(value) for key, value in population.items()}
+        # The cut builds fingerprints, which read no CLIP vector: it skips the one read that
+        # would move ~2 kB per photograph for nothing.
+        self.clip = clip
         self.reads = 0
         self.statements = 0
         # The population readout, for the pass summary: how many phash-bearing images this pass
@@ -951,7 +920,8 @@ class SqlFacts:
         hashes = sorted({int(row["phash"]) for row in rows if row.get("phash") is not None})
         clips = {int(row["image_id"]): encode_clip(row["embedding"])
                  for row in self._dicts(COHORT_CLIP_SQL,
-                                        {"ids": image_ids, "model": self.clip_model})}
+                                        {"ids": image_ids, "model": self.clip_model})
+                 } if self.clip else {}
         tags: dict[int, list[dict[str, Any]]] = {}
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
@@ -1172,7 +1142,7 @@ class SqlWork:
         # schema, ZERO blocks of `public` — and the wide scan that fills that snapshot runs on
         # a cadence, one block at a time, under a rolling-day cap.
         if self.enter_slice and self.enter_blocks:
-            pointer = self._refresh_scope_ids(cursors[CURSOR_ENTER][1])
+            pointer = self.refresh_scope_ids(cursors[CURSOR_ENTER][1])
             after_enter = cursors[CURSOR_ENTER][0]
             rows = self._query(RT_SCOPE_ENTRANTS_SQL, {
                 "generation": self.generation, "after_id": after_enter,
@@ -1276,7 +1246,7 @@ class SqlWork:
         return [WorkItem(listing_id, "evidence", None, None, redecide=True)
                 for listing_id in wanted]
 
-    def _refresh_scope_ids(self, pointer: int) -> int:
+    def refresh_scope_ids(self, pointer: int) -> int:
         """Re-walk ONE scope block on `public`, but only when its cadence says so (W9e/R3).
 
         This is the whole cost of the entrant feed, and it used to be paid every cycle: the
@@ -1408,9 +1378,9 @@ class SqlWork:
                 f"the drift sweep would retire {wanted} listings on top of the "
                 f"{retired_before} this generation has retired in the last "
                 f"{RETIRE_WINDOW_HOURS} h, over the {self.max_retire_fraction:.0%} "
-                f"{RETIRE_SETTING} rail ({allowed} of the {baseline} rows the store held when "
-                "that window opened) — refusing. That is a scope that has gone wrong, not a "
-                "geocode correction. Nothing was written and no cursor moved; check "
+                f"MAX_RETIRE_FRACTION rail ({allowed} of the {baseline} rows the store held "
+                "when that window opened) — refusing. That is a scope that has gone wrong, not "
+                "a geocode correction. Nothing was written and no cursor moved; check "
                 f"autodedup.settings {SCOPE_SETTING}:{self.generation}.")
         self._retire = (wanted, baseline)
 
@@ -1566,39 +1536,26 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
 
 
 def lane_settings(conn: Any, keys: Sequence[str]) -> dict[str, Any]:
-    """The lane's own control rows out of `autodedup.settings` — one statement, not one each."""
+    """The lane's own rows out of `autodedup.settings` — one statement, not one each."""
     out: dict[str, Any] = {}
     for row in _rows(conn, RT_SETTINGS_MANY_SQL, {"keys": list(keys)}):
         out[str(row[0])] = row[1]
     return out
 
 
-def _setting_number(value: Any, fallback: float) -> float:
-    """A control number, or a HARD ERROR (W9e/R6).
-
-    W9d fell back to the default whenever `float()` refused the value, so
-    `rt_max_retire_fraction = "0,05"` — or a settings row holding an object the lane did not
-    expect — disabled nothing and said nothing: the rail simply ran at a number nobody had
-    chosen. A control row that cannot be read is a lane that must not run."""
-    if value is None:
+def _number(value: Any, fallback: float) -> float:
+    """A number the lane measured and wrote itself (the rate), or `fallback` without one."""
+    raw = value.get("value") if isinstance(value, Mapping) else value
+    if raw is None or isinstance(raw, bool):
         return float(fallback)
-    raw = value
-    if isinstance(raw, Mapping):
-        raw = raw.get("value", raw.get("mb"))
-        if raw is None:
-            return float(fallback)
-    if isinstance(raw, bool):
-        raise ScopeError(f"expected a number, got {value!r}")
     try:
-        return float(raw)  # type: ignore[arg-type]
+        return float(raw)
     except (TypeError, ValueError):
-        raise ScopeError(f"expected a number, got {value!r}") from None
+        return float(fallback)
 
 
 def scope_setting_key(generation: str) -> str:
-    """`rt_scope:<generation>` (W9e/R4). One global row meant a second generation's seed
-    silently rescoped the first — and a scope that differs a LITTLE is retirement under a rail
-    that was built for the case where it differs a lot."""
+    """`rt_scope:<generation>` (W9e/R4) — the scope the seed cut the generation for."""
     return f"{SCOPE_SETTING}:{generation}"
 
 
@@ -1613,9 +1570,8 @@ def pass_rate_key(generation: str) -> str:
 
 
 def setting_flag(value: Any) -> bool:
-    """A settings row read as a boolean. `true`, `True` and `"true"` all mean the same thing,
-    and anything else — a missing row included — means off, because the phases and switches
-    these rows carry are all opt-in."""
+    """A settings row read as a boolean: `true`, `True` and `"true"` all mean on; anything
+    else — a missing row included — means off."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -1624,52 +1580,19 @@ def setting_flag(value: Any) -> bool:
 
 
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
-    """The generation's scope row, and the legacy global row for `rt` alone (W9e/R4)."""
-    value = control.get(scope_setting_key(generation))
-    if value is None and generation == LEGACY_SCOPE_GENERATION:
-        return control.get(SCOPE_SETTING)
-    return value
+    """The generation's scope row, as the seed wrote it."""
+    return control.get(scope_setting_key(generation))
 
 
-def control_number(key: str, args: Mapping[str, Any], control: Mapping[str, Any],
-                   fallback: float, rescope: bool) -> float:
-    """A control number's resolution order — and what a DISPATCH may do to it (W9e/R6).
-
-    `rt_max_retire_fraction` was a plain dispatch argument, so one `args=rt_max_retire_fraction=1`
-    disabled the store's last rail for that pass with nothing persisted and nothing said. These
-    numbers are `autodedup.settings` rows: the argument is accepted only beside `rt_rescope=true`
-    — the same word the operator already has to say to move a generation's scope — and a value
-    that is not a number stops the lane rather than reverting to a default."""
-    if key in args and str(args.get(key) or "").strip() != "":
-        if not rescope:
-            raise ScopeError(
-                f"{key} is an autodedup.settings row, not a dispatch argument — it governs a "
-                f"rail, and a pass that could move it could disable it. Write the row, or "
-                f"pass {RESCOPE_ARG}=true to mean it for this pass.")
-        return _setting_number(args[key], fallback)
-    return _setting_number(control.get(key), fallback)
-
-
-def enter_intervals(args: Mapping[str, Any], control: Mapping[str, Any],
-                    rescope: bool) -> dict[str, float]:
-    """The per-grain entrant cadence (W9e/R3), as data: a number for every grain, or an object
-    keyed by grain (`{"obec": 1, "cast_obce": 6}`). Unreadable is a hard error, never a
-    default — the cadence IS the cost control."""
-    out = dict(ENTER_INTERVAL_HOURS)
-    value = control.get(INTERVAL_SETTING)
-    if isinstance(value, Mapping) and not {"value", "mb"} & set(value):
-        for grain, hours in value.items():
-            out[str(grain)] = _setting_number(hours, ENTER_INTERVAL_HOURS.get(str(grain), 6.0))
-    elif value is not None:
-        out = {grain: _setting_number(value, hours) for grain, hours in out.items()}
-    if INTERVAL_SETTING in args and str(args.get(INTERVAL_SETTING) or "").strip() != "":
-        if not rescope:
-            raise ScopeError(
-                f"{INTERVAL_SETTING} is an autodedup.settings row, not a dispatch argument — "
-                f"pass {RESCOPE_ARG}=true to mean it for this pass.")
-        hours = _setting_number(args[INTERVAL_SETTING], 0.0)
-        out = {grain: hours for grain in out}
-    return out
+def pass_scope(setting: Any) -> Scope:
+    """A PASS's scope is the one `rt_seed` persisted, and nothing else: the pass takes no
+    argument, and a missing row under a seeded generation is a hard error — falling back to a
+    default would retire everything the store holds outside it (W9d-2)."""
+    if setting is None:
+        raise ScopeError(
+            "this generation has a calibration but no rt_scope row — the row IS the scope its "
+            "store was built under. Re-seed it (`--mode rt_seed fresh=true`)")
+    return parse_scope(setting)
 
 
 def schema_bytes(conn: Any) -> int:
@@ -1685,15 +1608,11 @@ def rt_rows(conn: Any, generation: str, scope: Scope) -> dict[str, int]:
 
 
 def storage_guard(conn: Any, generation: str, scope: Scope,
-                  max_schema_mb: float) -> dict[str, Any]:
+                  max_schema_mb: float = MAX_SCHEMA_MB) -> dict[str, Any]:
     """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
-    budget (E79).
-
-    The operator pays for this store by the megabyte, and the failure this guards is not a
-    crash but a silent one: a lane nobody watches for a week, adding rows at 10-minute
-    cadence. So the check is a REFUSAL — non-zero, cursor unmoved, nothing written — and never
-    a warning in a log line. It also holds the second half of the whole-corpus gate: `all` is a
-    scope only when the budget could hold what `all` costs."""
+    budget (E79) — non-zero, cursor unmoved, nothing written, never a warning in a log line.
+    It also holds the second half of the whole-corpus gate: `all` is a scope only when the
+    budget could hold what `all` costs."""
     bytes_now = schema_bytes(conn)
     mb = bytes_now / 1_048_576.0
     previous = lane_settings(conn, [STORAGE_WATERMARK]).get(STORAGE_WATERMARK) or {}
@@ -1709,11 +1628,11 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
     if mb > float(max_schema_mb):
         raise StorageRefusal(
             f"schema autodedup is {mb:.1f} MB, over the {float(max_schema_mb):.0f} MB "
-            f"{BUDGET_SETTING} budget — refusing to write. Prune a generation or raise the "
-            "setting; nothing was written and no cursor moved.")
+            "MAX_SCHEMA_MB budget — refusing to write. Prune a generation or raise the "
+            "constant; nothing was written and no cursor moved.")
     if not guard_agrees(scope, max_schema_mb):
         raise StorageRefusal(
-            f"rt_scope=all needs {BUDGET_SETTING} >= {CORPUS_PROJECTION_MB} MB (the measured "
+            f"rt_scope=all needs MAX_SCHEMA_MB >= {CORPUS_PROJECTION_MB} MB (the measured "
             f"whole-corpus projection) and it is {float(max_schema_mb):.0f} — refusing. A "
             "whole-corpus generation is a budget decision, not a scope one.")
     return report
@@ -1731,7 +1650,8 @@ def record_storage(conn: Any, generation: str, bytes_now: int) -> None:
 # the generation's rows are named here rather than filtered by a column the table does not have
 # — which is also why two real-time generations cannot run at once, and why the reset says so.
 RESET_CURSORS: tuple[str, ...] = (CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE,
-                                  CURSOR_SCOPE, CURSOR_ENTER, CURSOR_EVIDENCE)
+                                  CURSOR_SCOPE, CURSOR_ENTER, CURSOR_EVIDENCE,
+                                  reconcile.CURSOR)
 
 # The reset's statements, in the order they run: members and conflicts before the clusters they
 # name, pairs before the fingerprints they were scored from. Nothing here is an FK requirement —
@@ -1754,19 +1674,11 @@ RESET_TABLES: tuple[tuple[str, str], ...] = (
 def reset_generation(conn: Any, generation: str, *, holder: str) -> dict[str, int]:
     """Empty ONE generation and nothing else (E97), counting what went.
 
-    `reseed=true` re-cuts the calibration, the frozen population and the parity baseline, and
-    leaves every pair and cluster the generation already holds exactly where they are — which is
-    right when the re-seed is a REFRESH of a generation scored under the same scorer (E95's
-    refresh recipe) and wrong when it is a rebuild. On 2026-09-20 it was a rebuild: the 15,923
-    pairs and 703 clusters written by the defective first pass (wrong scorer, `model_version`
-    NULL on every row, no photo evidence) survived the re-seed, and nothing in the lane will ever
-    re-decide a pair whose fingerprint digests still agree. So `fresh=true` is the other half of
-    `reseed=true`, and it is a DELETE of this generation's rows, never a TRUNCATE.
-
-    The caller runs it inside the seed's transaction: a seed that refuses after this point — an
-    empty scope, a refused parity baseline, a storage guard — leaves the store exactly as it
-    found it. `holder` is the seed's own lease, which the reset keeps: the seed holds it so no
-    pass can write into the generation while it is being emptied."""
+    A DELETE of this generation's rows, never a TRUNCATE, run inside the seed's transaction: a
+    seed that refuses after this point leaves the store exactly as it found it. The ledger of
+    production merges (`autodedup.applied_merges`) is NOT here: a rebuild changes what the lane
+    will decide, never what it has already merged. `holder` is the seed's own lease, which the
+    reset keeps: the seed holds it so no pass can write into the generation while it empties."""
     deleted: dict[str, int] = {}
     for name, sql in RESET_TABLES:
         rows = _rows(conn, sql, {"generation": generation})
@@ -1776,26 +1688,6 @@ def reset_generation(conn: Any, generation: str, *, holder: str) -> dict[str, in
     rows = _rows(conn, RT_FRESH_LEASE_SQL, {"name": LANE_NAME, "holder": holder})
     deleted["rt_lease"] = int(rows[0][0] or 0) if rows else 0
     return deleted
-
-
-def env_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """The workflow's own gate, re-read here so a dispatched run cannot bypass the variable."""
-    source = os.environ if env is None else env
-    return str(source.get(ENV_FLAG, "")).strip().lower() == "true"
-
-
-def db_enabled(conn: Any) -> bool:
-    """The operator's stop button, in the database: `realtime_enabled = false` halts the lane.
-
-    Absent means NOT BLOCKED — the repository variable is what makes the lane dark by default,
-    and this row is what stops one already running, with no workflow edit and no deploy."""
-    rows = _rows(conn, RT_SETTING_SQL, {"key": DB_FLAG})
-    if not rows:
-        return True
-    value = rows[0][0]
-    if isinstance(value, dict):
-        value = value.get("enabled", value.get("value"))
-    return str(value).strip().lower() not in ("false", "0", "off", "no")
 
 
 def take_lease(conn: Any, holder: str, ttl: int = LEASE_TTL_S) -> bool:
@@ -1820,280 +1712,48 @@ class _Refused(Exception):
     """The pair budget refused this claim — roll the pass back and report it (E75)."""
 
 
-def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: str,
-                n: int, floors: ParityFloors) -> dict[str, Any]:
-    """The seed's own gate, and the baseline every later pass re-checks against.
-
-    Here the whole artifact is in hand, so the comparison is the real one: a stratified sample
-    of the generation's own listings, built from the artifact with the export's builders and
-    read back through `SqlFacts` from the database, digest against digest. A seed that cannot
-    show the two agree is refused — it would be freezing a calibration for a lane that cannot
-    reproduce the facts it was cut from."""
-    sample = stratified_sample(dataset.listings, set(int(i) for i in in_scope), n, seed=1)
-    reader = SqlFacts(conn)
-    live: dict[int, tuple[Listing, list[Image]]] = {}
-    for start in range(0, len(sample), 100):
-        live.update(reader.facts(sample[start:start + 100]))
-    rows = parity_baseline({i: dataset.listings[i] for i in sample},
-                           {i: dataset.images(i) for i in sample})
-    drifted = drifted_since(conn, sample, dataset.meta.exported_at)
-    report = parity_compare(rows, {i: value[0] for i, value in live.items()},
-                            {i: value[1] for i, value in live.items()}, drifted)
-    report.update({
-        "sampled": len(sample), "tolerance": floors.tolerance,
-        "phash_pop_rows": phash_pop_rows(conn),
-        "images_with_phash": reader.images_with_phash,
-        "images_unmeasured": reader.images_unmeasured,
-        "unknown_pop_share": _unknown_share(reader),
-        "age_days": age_days(dataset.meta.exported_at),
-        "floors": floors_json(floors),
-        "statements": reader.statements + 1,
-    })
-    refused = parity_verdict(report, generation=generation, floors=floors, what="rt_seed")
-    if refused:
-        raise SystemExit(refused)
-    report["ok"] = True
-    return {
-        "report": report,
-        "baseline": {
-            "generation": generation,
-            "rows": rows,
-            "exported_at": dataset.meta.exported_at,
-            "cut_at": datetime.now(timezone.utc).isoformat(),
-            "phash_pop_rows": report["phash_pop_rows"],
-            "tolerance": floors.tolerance,
-            "n": len(rows),
-        },
-    }
-
-
-def _unknown_share(reader: "SqlFacts") -> float | None:
-    """The share of phash-bearing images whose hash the frozen population cannot measure."""
-    if not reader.images_with_phash:
-        return None
-    return round(reader.images_unmeasured / float(reader.images_with_phash), 6)
-
-
-def age_days(stamp: Any) -> float | None:
-    parsed = _stamp(stamp)
-    if parsed is None:
-        return None
-    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0, 3)
-
-
-def floors_json(floors: ParityFloors) -> dict[str, Any]:
-    return {"tolerance": floors.tolerance, "min_checked": floors.min_checked,
-            "min_checked_share": floors.min_checked_share,
-            "max_age_days": floors.max_age_days,
-            "max_unknown_pop_share": floors.max_unknown_pop_share}
-
-
-def resolve_floors(args: Mapping[str, str], control: Mapping[str, Any],
-                   rescope: bool = False) -> ParityFloors:
-    """The four floors as SETTINGS rows (E94/E95). Like every other rail on this lane, a
-    dispatch argument may only move one beside `rt_rescope=true` — a rail one `-f args=` can
-    turn into a formality is not a rail (W9e/R6)."""
-    return ParityFloors(
-        tolerance=PARITY_TOLERANCE,
-        min_checked=int(control_number(PARITY_MIN_CHECKED_SETTING, args, control,
-                                       float(PARITY_MIN_CHECKED), rescope)),
-        min_checked_share=control_number(PARITY_MIN_SHARE_SETTING, args, control,
-                                         PARITY_MIN_CHECKED_SHARE, rescope),
-        max_age_days=control_number(CALIBRATION_AGE_SETTING, args, control,
-                                    CALIBRATION_MAX_AGE_DAYS, rescope),
-        max_unknown_pop_share=control_number(PARITY_UNKNOWN_POP_SETTING, args, control,
-                                             PARITY_MAX_UNKNOWN_POP_SHARE, rescope),
-    )
-
-
-def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
-                args: Mapping[str, str], floors: ParityFloors,
-                built_at: Any = None) -> dict[str, Any]:
-    """The permanent rail: no pass runs on facts that are not the export's (E91).
-
-    A generation with no baseline is refused rather than waved through — the baseline is cut by
-    the seed at the same moment as the calibration, so its absence means this generation was
-    seeded before the gate existed and nothing has ever checked its facts."""
-    payload = control.get(parity_baseline_key(generation))
-    if isinstance(payload, str):
-        payload = json.loads(payload or "{}")
-    if not isinstance(payload, Mapping) or "rows" not in payload:
-        raise SystemExit(
-            f"PARITY GATE: generation {generation!r} carries no fact baseline "
-            f"(autodedup.settings {parity_baseline_key(generation)}) — it was seeded before "
-            "the gate existed, so nothing has ever checked that the live lane reads the "
-            "export's facts (E91). Re-seed it "
-            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
-            "backfill=true,reseed=true`). Nothing was written and no cursor moved.")
-    # The knob may only RAISE the sample (E82's lesson at a rail one dispatch argument could
-    # otherwise have turned into a formality): `rt_parity_sample=1` cannot weaken the gate.
-    try:
-        asked = _setting_number(args.get(PARITY_SAMPLE_SETTING,
-                                         control.get(PARITY_SAMPLE_SETTING)),
-                                float(PARITY_PASS_SAMPLE))
-    except ScopeError as exc:
-        raise SystemExit(f"{PARITY_SAMPLE_SETTING}: {exc}") from exc
-    report = check_parity(conn, generation, payload,
-                          max(PARITY_PASS_SAMPLE, int(asked)))
-    report["floors"] = floors_json(floors)
-    report["calibration_built_age_days"] = age_days(built_at)
-    # The W9f defect itself FIRST, because it is the specific diagnosis of what the sample is
-    # about to report generically: a frozen population that HAD rows when the generation was
-    # seeded and has none now is the table emptied under a running lane.
-    at_seed = int(report.get("phash_pop_rows_at_seed") or 0)
-    if at_seed and not int(report.get("phash_pop_rows") or 0):
-        raise SystemExit(
-            f"PARITY GATE: autodedup.phash_pop is EMPTY and generation {generation!r} was "
-            f"seeded with {at_seed} hashes in it (E91). Every image would read an unknown "
-            "population, every catalog_ratio would go absent and no K-C certificate could "
-            "fire. Nothing was written and no cursor moved — re-seed the generation.")
-    # The EXPORT's age has to be knowable for the age rail to mean anything (E95). A baseline
-    # that cannot say when its cohort was cut is a baseline the rail cannot read, so it is
-    # refused rather than waved through on a missing field.
-    if report.get("age_days") is None:
-        raise SystemExit(
-            f"PARITY GATE: generation {generation!r}'s baseline carries no `exported_at`, so "
-            "the calibration-age rail cannot be evaluated and a frozen population of unknown "
-            "age would be read as fresh (E95). Re-seed the generation. Nothing was written "
-            "and no cursor moved.")
-    refused = parity_verdict(report, generation=generation, floors=floors,
-                             what="the scheduled pass")
-    if refused:
-        raise SystemExit(refused)
-    report["ok"] = True
-    return report
-
-
 # --- WHICH SCORER (E90a) -----------------------------------------------------------------
 
 
 def named_config(args: Mapping[str, str], *, what: str
                  ) -> tuple[Settings, LogisticModel, str, str]:
-    """The settings row and the model a dispatch NAMES — and silence is not a name.
+    """The settings row and the model a dispatch NAMES — and silence is not a name (E90a).
 
-    W9f's seed and its first live pass both ran on empty arguments, so `Settings()` and the
-    uncalibrated `hand_initialised()` prior scored a generation the operator believed was the
-    batch pass's `w8` + `w6_gold` (t_lo 0.30 against 0.1823, t_hi 0.97 against 1.0, no
-    per-stratum ceiling, no bridge, no context rule). That is 5,888 of 7,878 shared pairs
-    scored differently and 1,039 pairs merged that the batch generation bands — and no
-    argument was mis-typed, because `settings=w8` would have been read as a PATH and found no
-    file. Both halves are fixed: the name resolves inside the repo (`harness.named_settings`),
-    and choosing the defaults is spelled `settings=default,model=prior`."""
+    The generation's scorer is chosen once, by the seed, and every stored decision is stamped
+    with it; the defaults are spelled `settings=default,model=prior`, never implied."""
     settings_name = str(args.get("settings") or "").strip()
     model_name = str(args.get("model") or "").strip()
     if not settings_name or not model_name:
         raise SystemExit(
             f"{what} needs settings=<row in autodedup/settings> and model=<file in "
             f"autodedup/models> — a generation is scored by ONE scorer and every stored "
-            f"decision is stamped with it. The batch generation g6 is "
-            f"`settings=w8,model=w6_gold`; the uncalibrated defaults are "
+            f"decision is stamped with it. The production engine is "
+            f"`settings=w29,model=w6_gold`; the uncalibrated defaults are "
             f"`settings={DEFAULT_SETTINGS_NAME},model={PRIOR_MODEL_NAME}`, which is a choice "
-            "this lane will not make on your behalf again (E90a).")
+            "this lane will not make on your behalf (E90a).")
     return (named_settings(settings_name), named_model(model_name),
             settings_name, model_name)
 
 
-def pass_config(args: Mapping[str, str], recorded: Any, model_version: Any,
-                generation: str) -> tuple[Settings, LogisticModel]:
-    """The GENERATION's scorer, read back from its frozen calibration row.
-
-    The seed writes both columns and W9's pass read neither, so the schedule scored with
-    whatever the dispatch happened to carry. Now the row decides and a dispatch argument may
-    only AGREE with it: changing a generation's scorer is a re-seed, because every decision
-    already in the store was taken under the old one."""
+def pass_config(recorded: Any, model_version: Any, generation: str
+                ) -> tuple[Settings, LogisticModel]:
+    """The GENERATION's scorer, read back from its calibration row: changing it is a re-seed,
+    because every decision already in the store was taken under the old one."""
     if recorded is None:
         raise SystemExit(
-            f"generation {generation!r} carries no settings on its frozen calibration — it "
-            "was seeded before the scorer was recorded (E90a). Re-seed it "
-            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
-            "reseed=true`) before the schedule runs.")
+            f"generation {generation!r} carries no settings on its calibration — re-seed it "
+            "(`-f mode=rt_seed -f args=settings=w29,model=w6_gold,fresh=true`)")
     try:
         settings = Settings.from_dict(dict(recorded))
     except (TypeError, ValueError) as exc:
         raise SystemExit(
             f"generation {generation!r} carries settings this build cannot read ({exc}) — "
             "re-seed it.") from exc
-    model = model_of_version(str(model_version) if model_version else None)
-    asked_settings = str(args.get("settings") or "").strip()
-    asked_model = str(args.get("model") or "").strip()
-    if asked_settings:
-        chosen = named_settings(asked_settings)
-        if chosen != settings:
-            moved = {key: {"generation": settings.to_dict().get(key), "dispatch": value}
-                     for key, value in chosen.to_dict().items()
-                     if settings.to_dict().get(key) != value}
-            raise SystemExit(
-                f"settings={asked_settings} is not what generation {generation!r} was seeded "
-                f"with: {json.dumps(moved, sort_keys=True, default=str)}. A pass may name the "
-                "generation's scorer, never a different one — re-seed to change it.")
-    if asked_model and named_model(asked_model).version != model.version:
-        raise SystemExit(
-            f"model={asked_model} is not generation {generation!r}'s model "
-            f"({model.version}) — re-seed to change it.")
-    return settings, model
-
-
-# --- the frozen pHash population (E91) ----------------------------------------------------
+    return settings, model_of_version(str(model_version) if model_version else None)
 
 
 def phash_pop_rows(conn: Any) -> int:
     return int(_rows(conn, RT_PHASH_POP_COUNT_SQL)[0][0] or 0)
-
-
-def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
-    """Materialise the calibration's own pHash population into `autodedup.phash_pop`.
-
-    The number is the artifact's: `COHORT_PHASH_POP_SQL` counted `count(DISTINCT listing_id)`
-    over `public.images` when the cohort was exported, and every image record carries it. So
-    the seed copies it rather than recounting it — zero blocks of `public`, and the live lane
-    then joins against EXACTLY the statistic the batch engine scored with. What that buys and
-    what it costs: the population is frozen at export time (E70), it can only have grown since,
-    and a hash the export never saw stays unknown until the next export and re-seed."""
-    population: dict[int, int] = {}
-    images = with_phash = 0
-    for image in dataset.all_images():
-        images += 1
-        if image.phash is None:
-            continue
-        with_phash += 1
-        if image.pop is None:
-            continue
-        population[int(image.phash)] = max(population.get(int(image.phash), 0), int(image.pop))
-    if with_phash and not population:
-        raise SystemExit(
-            "the cohort artifact carries no MEASURED pHash population (`phash_pop_ok` false: "
-            "the export's population probe timed out) — seeding from it would freeze a "
-            "generation in which every catalog_ratio is absent and no K-C certificate can "
-            "ever fire (E91). Re-run the export first.")
-    rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
-    # Chunked like the score lane's writes: the trial cohort carries 41,791 distinct hashes and
-    # one `executemany` of that many bound parameters is megabytes in a single call.
-    for start in range(0, len(rows), POP_CHUNK):
-        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, rows[start:start + POP_CHUNK])
-    return {"images": images, "images_with_phash": with_phash,
-            "hashes_written": len(population),
-            "hashes_at_or_above_2": sum(1 for n in population.values() if n >= 2)}
-
-
-# --- the parity gate (E91) ----------------------------------------------------------------
-
-
-def parity_baseline_key(generation: str) -> str:
-    return f"{PARITY_BASELINE_SETTING}:{generation}"
-
-
-def drifted_since(conn: Any, ids: Sequence[int], exported_at: Any) -> set[int]:
-    """The sampled listings whose CONTENT changed after the export — genuine drift, never a
-    parity breach (rule #2: a snapshot row is appended only when the content hash moves)."""
-    cut = _stamp(exported_at)
-    if cut is None or not ids:
-        return set()
-    out: set[int] = set()
-    for row in _rows(conn, RT_PARITY_CHANGE_SQL, {"ids": list(ids)}):
-        stamp = _stamp(row[1])
-        if stamp is not None and stamp > cut:
-            out.add(int(row[0]))
-    return out
 
 
 def _stamp(value: Any) -> datetime | None:
@@ -2108,88 +1768,106 @@ def _stamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def parity_sample(rows: Mapping[str, Any], k: int) -> list[int]:
-    """A fresh slice of the baseline each pass, so a day of passes covers all of it."""
-    ids = sorted(int(key) for key in rows)
-    if len(ids) <= k:
-        return ids
-    return sorted(random.sample(ids, k))
+def age_days(stamp: Any) -> float | None:
+    parsed = _stamp(stamp)
+    if parsed is None:
+        return None
+    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0, 3)
 
 
-def check_parity(conn: Any, generation: str, payload: Mapping[str, Any], k: int,
-                 facts: "SqlFacts | None" = None) -> dict[str, Any]:
-    """Re-read a slice of the seeded baseline through `SqlFacts` and compare the digests."""
-    rows = payload.get("rows") or {}
-    sample = parity_sample(rows, k)
-    reader = facts or SqlFacts(conn)
-    live: dict[int, tuple[Listing, list[Image]]] = {}
-    for start in range(0, len(sample), 100):
-        live.update(reader.facts(sample[start:start + 100]))
-    drifted = drifted_since(conn, sample, payload.get("exported_at"))
-    report = parity_compare(
-        {str(i): rows[str(i)] for i in sample},
-        {i: value[0] for i, value in live.items()},
-        {i: value[1] for i, value in live.items()},
-        drifted)
-    report["sampled"] = len(sample)
-    report["baseline_listings"] = len(rows)
-    report["baseline_cut_at"] = payload.get("cut_at")
-    report["exported_at"] = payload.get("exported_at")
-    report["tolerance"] = PARITY_TOLERANCE
-    report["phash_pop_rows"] = phash_pop_rows(conn)
-    report["phash_pop_rows_at_seed"] = payload.get("phash_pop_rows")
-    # The two staleness readouts every pass owes (E95): how old the EXPORT the calibration was
-    # cut from is, and how much of what this gate just read the frozen population could not
-    # measure. Reported whether or not they refuse, so the drift is watchable before it bites.
-    report["age_days"] = age_days(payload.get("exported_at"))
-    report["images_with_phash"] = reader.images_with_phash
-    report["images_unmeasured"] = reader.images_unmeasured
-    report["unknown_pop_share"] = _unknown_share(reader)
-    report["statements"] = reader.statements + 2
-    return report
+# --- A10: THE CALIBRATION, CUT FROM THE DATABASE (E912) -----------------------------------
 
 
-def _measure_rate(result: Any, control: Mapping[str, Any], generation: str,
-                  elapsed_s: float) -> float | None:
+class CalibrationRefusal(Exception):
+    """The scope holds nothing the cut could be taken over."""
+
+
+def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
+                    generation: str = GENERATION, *, chunk: int = CUT_CHUNK
+                    ) -> dict[str, Any]:
+    """Cut the generation's calibration from the database, over what its scope snapshot holds.
+
+    Only the cohort statistics are cut (E70's price deciles, exploded keys, token and attribute
+    document frequencies, pin population and certifying codes) plus E91's pHash population; the
+    band, the thresholds, `store_floor`, `catalog_df` and the model are engine settings and never
+    live. The listings are read through `SqlFacts` — the pass's own facts — so the calibration
+    and the pass cannot read two different corpora (the parity gate's whole question, answered
+    by construction), and the population is ONE aggregate over `public.images` for the scope's
+    hashes, the statement the export always ran. Written together with the calibration row, so
+    the switch is atomic inside the caller's transaction. A cut is not a generation (E907):
+    stored decisions keep the digest they were taken under and are re-decided only when a feed
+    re-claims their listing."""
+    clock = time.perf_counter()
+    ids = [int(row[0]) for row in _rows(conn, RT_CUT_SCOPE_IDS_SQL, {"generation": generation})]
+    if not ids:
+        raise CalibrationRefusal(
+            f"the scope snapshot of generation {generation!r} holds no listing — nothing to "
+            "cut a calibration over. Refusing rather than freezing an empty one.")
+    hashes: set[int] = set()
+    for start in range(0, len(ids), chunk):
+        hashes |= {int(row[0]) for row in _rows(conn, RT_CUT_HASHES_SQL,
+                                                {"ids": ids[start:start + chunk]})}
+    _exec(conn, RT_STATEMENT_GUARD_SQL, {"statement_timeout_ms": CUT_STATEMENT_TIMEOUT_MS})
+    population = ({int(row[0]): int(row[1]) for row in _rows(
+        conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
+    facts = SqlFacts(conn, population=population, clip=False)
+    listings: dict[int, Listing] = {}
+    fps: dict[int, Any] = {}
+    for start in range(0, len(ids), chunk):
+        for listing_id, (listing, images) in facts.facts(ids[start:start + chunk]).items():
+            listings[listing_id] = listing
+            fps[listing_id] = build_fingerprint(listing, images, settings)
+    calibration = Calibration.build(fps, listings, settings, generation)
+    rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
+    for start in range(0, len(rows), POP_CHUNK):
+        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, rows[start:start + POP_CHUNK])
+    payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
+    _exec(conn, RT_CALIBRATION_WRITE_SQL, {
+        "generation": generation, "digest": calibration.digest(),
+        "n_listings": calibration.n_listings, "payload": payload, "artifact_url": None,
+        "settings": json.dumps(settings.to_dict(), sort_keys=True),
+        "model_version": model_version})
+    return {"digest": calibration.digest(), "n_listings": calibration.n_listings,
+            "scope_listings": len(ids), "hashes": len(hashes),
+            "hashes_measured": len(population), "statements": facts.statements + 4,
+            "seconds": round(time.perf_counter() - clock, 3)}
+
+
+def _measure_rate(claimed: int, elapsed_s: float, previous: float,
+                  bound: Mapping[str, Any]) -> float | None:
     """This pass's claimed-listings-per-second, blended with what the generation had (E98).
 
-    None when the pass claimed too little for the quotient to mean anything — an idle pass is
-    0 listings in 7 seconds, and a lane that learned 0 from it would claim one listing a pass
-    for ever."""
-    claimed = len(getattr(result, "claimed", ()) or ())
-    if claimed < PASS_RATE_MIN_CLAIM or elapsed_s <= 0:
+    Recorded only when the quotient means something: the pass claimed `PASS_RATE_MIN_CLAIM`
+    listings, or it claimed everything the time budget allowed it (a claim the budget cut is a
+    measurement at any size — without that, a rate halved to a one-listing claim would never be
+    measured again)."""
+    limit = int(bound.get("limit") or 0)
+    saturated = bound.get("bound_by") == "time" and limit > 0 and claimed >= limit
+    if elapsed_s <= 0 or (claimed < PASS_RATE_MIN_CLAIM and not saturated):
         return None
-    previous = max(1e-6, _setting_number(control.get(pass_rate_key(generation)),
-                                         PASS_RATE_PER_S))
-    blended = PASS_RATE_ALPHA * (claimed / float(elapsed_s)) + (1.0 - PASS_RATE_ALPHA) * previous
+    blended = (PASS_RATE_ALPHA * (claimed / float(elapsed_s))
+               + (1.0 - PASS_RATE_ALPHA) * max(1e-6, previous))
     return round(blended, 6)
 
 
-def run_incremental(
-    conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path,
-    *, enabled: bool = False, max_pass_budget_s: float | None = None,
-) -> dict[str, Any]:
-    """One bounded real-time pass. Dark unless BOTH switches are on; writes nothing else.
+def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
+    _exec(conn, RT_SETTING_WRITE_SQL, {
+        "key": pass_rate_key(generation), "value": json.dumps(round(max(1e-6, rate), 6)),
+        "updated_by": f"{LANE_NAME}:{why}"})
 
-    `enabled=True` is a caller whose OWN switch already opened the pass, standing in for the
-    repository variable: the always-on worker (`scraper/realtime_worker.py`, lane `autodedup`)
-    has none to read and runs only while its interval is above 0. False — the workflow's path —
-    reads the variable exactly as before. The database stop button
-    (`autodedup.settings.realtime_enabled`), the lease and every rail bind both callers alike.
 
-    `max_pass_budget_s` is a caller's ceiling on the time budget the claim is sized by (E98): the
-    pass uses the smaller of it and `rt_pass_budget_s`. The worker's hard deadline is far closer
-    to the default budget than the workflow's 25-minute timeout is, so it sizes its claims to
-    fit inside that deadline. None — the workflow's path — leaves the setting alone."""
-    generation = (args.get("generation") or "").strip() or GENERATION
-    limits = Limits(
-        max_listings=int(args.get("max_listings") or 500),
-        max_pairs=int(args.get("max_pairs") or Limits().max_pairs),
-        max_component=int(args.get("max_component") or 400),
-    )
-    if not (enabled or env_enabled()):
-        return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
+def run_incremental(conn_factory: Callable[[], Any], *,
+                    deadline_s: float = PASS_DEADLINE_S) -> dict[str, Any]:
+    """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
+    The worker's `autodedup` lane is the only caller and runs it only while its interval is
+    above 0. The pass decides, groups and commits; then, outside the bootstrap phase and inside
+    what is left of its time, the reconcile turns the groups it re-clustered into production
+    merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
+    is re-cut. A pass past its deadline rolls back and halves its rate (E913)."""
+    started = time.perf_counter()
+    deadline = started + float(deadline_s)
+    generation = GENERATION
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
@@ -2197,105 +1875,45 @@ def run_incremental(
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
             raise SystemExit("autodedup realtime store absent — migration 539 not applied")
-        if not db_enabled(conn):
-            return {"skipped": "dark", "reason": f"autodedup.settings {DB_FLAG} is false",
-                    "spent_usd": 0.0}
-        # Is the generation SEEDED (W9e/R1)? Seeding is the step BEFORE the switch, so the
-        # variable being on says nothing about whether `rt_seed` has run. An unseeded
-        # generation is a loud green skip — the schedule says so every ten minutes without
-        # failing every ten minutes — and never the hard error the missing `rt_scope` row
-        # would otherwise raise two statements below.
         if not _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation}):
-            return {
-                "skipped": "unseeded",
-                "reason": (f"generation {generation!r} has no frozen calibration (E70) — seed "
-                           "it with `gh workflow run autodedup.yml -f mode=rt_seed` before the "
-                           "schedule can do anything"),
-                "generation": generation, "spent_usd": 0.0}
-        rescope = str(args.get(RESCOPE_ARG) or "").strip().lower() == "true"
-        scope_key = scope_setting_key(generation)
-        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
-                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING,
-                                       PARITY_SAMPLE_SETTING, PARITY_MIN_CHECKED_SETTING,
-                                       PARITY_MIN_SHARE_SETTING,
-                                       PARITY_UNKNOWN_POP_SETTING, CALIBRATION_AGE_SETTING,
-                                       EVIDENCE_HORIZON_SETTING, EVIDENCE_SLICE_SETTING,
-                                       PASS_BUDGET_SETTING,
+            return {"skipped": "unseeded",
+                    "reason": (f"generation {generation!r} has no calibration — seed it with "
+                               "`gh workflow run autodedup.yml -f mode=rt_seed` first"),
+                    "generation": generation, "spent_usd": 0.0}
+        control = lane_settings(conn, [scope_setting_key(generation),
                                        bootstrap_setting_key(generation),
-                                       pass_rate_key(generation),
-                                       parity_baseline_key(generation)])
+                                       pass_rate_key(generation)])
         try:
-            # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
-            # the operator has to ask for by name (W9d-2). The row is PER GENERATION (W9e/R4).
-            scope, rescoped = resolve_pass_scope(
-                args.get(SCOPE_SETTING), read_scope_setting(control, generation),
-                rescope=rescope)
+            scope = pass_scope(read_scope_setting(control, generation))
             parents = resolve_scope_parents(conn, scope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
+        bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
+        rate_per_s = max(1e-6, _number(control.get(pass_rate_key(generation)),
+                                       PASS_RATE_PER_S))
         try:
-            max_schema_mb = control_number(BUDGET_SETTING, args, control, MAX_SCHEMA_MB,
-                                           rescope)
-            max_retire_fraction = control_number(RETIRE_SETTING, args, control,
-                                                 MAX_RETIRE_FRACTION, rescope)
-            max_enter_scans = control_number(SCAN_CAP_SETTING, args, control,
-                                             float(MAX_ENTER_SCANS_PER_DAY), rescope)
-            intervals = enter_intervals(args, control, rescope)
-            evidence_horizon = control_number(EVIDENCE_HORIZON_SETTING, args, control,
-                                              EVIDENCE_HORIZON_HOURS, rescope)
-            evidence_slice = control_number(EVIDENCE_SLICE_SETTING, args, control,
-                                            float(EVIDENCE_SLICE), rescope)
-            floors = resolve_floors(args, control, rescope)
-            # The build phase and the clock the claim is bounded by (E98), both data.
-            bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
-            pass_budget_s = _setting_number(control.get(PASS_BUDGET_SETTING), PASS_BUDGET_S)
-            if max_pass_budget_s is not None:
-                pass_budget_s = min(pass_budget_s, float(max_pass_budget_s))
-            rate_per_s = max(1e-6, _setting_number(control.get(pass_rate_key(generation)),
-                                                   PASS_RATE_PER_S))
-        except ScopeError as exc:
-            raise SystemExit(str(exc)) from exc
-        try:
-            storage = storage_guard(conn, generation, scope, max_schema_mb)
+            storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
         if not take_lease(conn, holder):
-            return {"skipped": "leased", "reason": "another pass holds the lease",
+            return {"skipped": "leased", "reason": "another writer holds the lane's lease",
                     "spent_usd": 0.0}
         leased = True
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
-            raise SystemExit(
-                f"no frozen calibration for generation {generation!r} (E70) — seed it with "
-                "`--mode rt_seed` before the lane runs")
+            raise SystemExit(f"no calibration for generation {generation!r} — seed it")
         payload = rows[0][3]
         calibration = Calibration.from_json(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
-        # The scorer is the GENERATION's, read off the row the seed wrote (E90a).
-        settings, model = pass_config(args, rows[0][5], rows[0][6], generation)
-        # THE GATE (E91). Before the lease's transaction, before a single write: a slice of the
-        # seeded baseline re-read through the same `SqlFacts` the pass is about to score with.
-        # A breach stops the pass — non-zero, nothing written, no cursor moved.
-        parity = parity_gate(conn, generation, control, args, floors, rows[0][7])
+        settings, model = pass_config(rows[0][5], rows[0][6], generation)
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
         facts = SqlFacts(conn)
-        work = SqlWork(conn, scope, generation,
-                       lag=int(args.get("settle_lag") or SETTLE_LAG_S),
-                       straggler_window=int(args.get("straggler_window") or STRAGGLER_WINDOW),
-                       revive_slice=int(args.get("revive_slice") or REVIVE_SLICE),
-                       window=int(args.get("feed_window") or FEED_WINDOW),
-                       drift_slice=int(args.get("drift_slice") or DRIFT_SLICE),
-                       enter_slice=int(args.get("enter_slice") or ENTER_SLICE),
-                       parents=parents, max_retire_fraction=max_retire_fraction,
-                       enter_interval_hours=intervals,
-                       max_enter_scans_per_day=int(max_enter_scans),
-                       evidence_slice=int(evidence_slice),
-                       evidence_horizon_hours=evidence_horizon,
-                       bootstrap=bootstrap, pass_budget_s=pass_budget_s,
-                       rate_per_s=rate_per_s)
+        work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
+                       pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
         result = None
+        stopped = ""
         try:
             with _transaction(conn):
                 # The three bounds are the transaction's first statements and LOCAL to it
@@ -2305,127 +1923,106 @@ def run_incremental(
                       {"statement_timeout_ms": STATEMENT_TIMEOUT_MS})
                 _exec(conn, RT_LOCK_GUARD_SQL, {"lock_timeout_ms": LOCK_TIMEOUT_MS})
                 _exec(conn, RT_IDLE_GUARD_SQL, {"idle_timeout_ms": IDLE_TIMEOUT_MS})
-                if rescoped:
-                    # A rescope is PERSISTED, not applied for one pass, and the entrant sweep
-                    # restarts so everything the new scope holds is (re)claimed (W9d-2).
-                    _exec(conn, RT_SETTING_WRITE_SQL, {
-                        "key": scope_key, "value": json.dumps(scope.as_json()),
-                        "updated_by": f"{LANE_NAME}:rescope"})
-                    _exec(conn, RT_CURSOR_WRITE_SQL, {
-                        "name": CURSOR_ENTER, "last_listing_id": 0,
-                        "last_snapshot_id": 0, "watermark": None})
-                # E93's clock. The hold exists only where there IS one: the batch engine
-                # has none, so the replay's default is no hold and the equivalence proof is
-                # untouched by it.
                 pass_now = time.time()
-                pass_clock = time.perf_counter()
-                result = run_pass_bounded(store, facts, work, settings, model, calibration,
-                                          limits=limits, generation=generation,
-                                          now=pass_now,
-                                          hold=EvidenceHold(pass_now,
-                                                            evidence_horizon * 3600.0))
+                result = run_pass_bounded(
+                    store, facts, work, settings, model, calibration, limits=PASS_LIMITS,
+                    generation=generation, now=pass_now,
+                    hold=EvidenceHold(pass_now, EVIDENCE_HORIZON_HOURS * 3600.0),
+                    deadline=deadline)
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
-                # What this pass measured ITSELF at, for the next pass's time budget (E98).
-                # Written inside the transaction, so a refused pass records nothing and a
-                # slow one cannot teach the lane to claim more than it can finish.
-                measured = _measure_rate(result, control, generation, time.perf_counter()
-                                         - pass_clock)
-                if measured is not None:
-                    _exec(conn, RT_SETTING_WRITE_SQL, {
-                        "key": pass_rate_key(generation), "value": json.dumps(measured),
-                        "updated_by": f"{LANE_NAME}:rate"})
-                # The phase ends by ITSELF, in the transaction that empties the backlog: the
-                # entrant claim goes back to a seventh and the cadence takes the blocks back.
+                # The phase ends by ITSELF, in the transaction that empties the backlog.
                 if bootstrap and work.bootstrap_done:
                     _exec(conn, RT_SETTING_WRITE_SQL, {
                         "key": bootstrap_setting_key(generation), "value": json.dumps(False),
                         "updated_by": f"{LANE_NAME}:bootstrap_done"})
         except _Refused:
-            pass
+            stopped = result.aborted if result is not None else "refused"
+        except PassDeadline:
+            stopped = "deadline"
         except RetireRefusal as exc:
             # The transaction rolled back on the way out: nothing written, no cursor moved.
             raise SystemExit(str(exc)) from exc
-        summary = result.to_json() if result is not None else {"aborted": "unknown"}
-        summary["fact_reads"] = facts.reads
-        summary["statements"] = (store.statements + facts.statements + work.statements
-                                 + int(parity.get("statements") or 0))
-        summary["parity"] = parity
-        summary["settings"] = settings.to_dict()
-        summary["model_version"] = model.version
-        # What this pass could not measure: images whose hash the frozen population does not
-        # carry (E91). Zero on a generation whose seed and export are the same cut; it grows
-        # with every photograph that arrived after the export, and it is the number that says
-        # when the generation is due a re-export and re-seed.
+        if stopped:
+            # E913: the next pass claims half as much.
+            _write_rate(conn, generation, rate_per_s / 2.0, "halved")
+        summary: dict[str, Any] = (result.to_json() if result is not None
+                                   else {"counts": {}, "aborted": stopped})
+        summary["aborted"] = stopped
+        # A9: the reconcile, after the pass committed and under the same lease. Off during
+        # the build (a half-built store is missing groups), off after a pass that rolled back.
+        if stopped:
+            summary["reconcile"] = {"skipped": f"pass_{stopped}"}
+        elif bootstrap:
+            summary["reconcile"] = {"skipped": "bootstrap"}
+        else:
+            summary["reconcile"] = reconcile.run(
+                conn, generation, result.cluster_keys if result is not None else [],
+                run_id=f"{reconcile.RUN_PREFIX}{holder}", deadline=deadline,
+                blocks=[block.key for block in work.enter_blocks])
+        elapsed = time.perf_counter() - started
+        if not stopped and result is not None:
+            measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
+                                     work.claim_bound)
+            if measured is not None:
+                _write_rate(conn, generation, measured, "rate")
+        coverage = (None if not facts.images_with_phash else round(
+            1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6))
         summary["population"] = {
-            "phash_pop_rows": parity.get("phash_pop_rows"),
+            "phash_pop_rows": phash_pop_rows(conn),
             "images_with_phash": facts.images_with_phash,
             "images_unmeasured": facts.images_unmeasured,
             "hashes_unmeasured": len(facts.hashes_unmeasured),
-            # COVERAGE, the number the age rail is a proxy for: the share of the photographs
-            # this pass actually scored that the frozen population could measure (E95).
-            "coverage": (None if not facts.images_with_phash else round(
-                1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6)),
-            "gate_unknown_share": parity.get("unknown_pop_share"),
-            "max_unknown_share": floors.max_unknown_pop_share,
+            "coverage": coverage,
+            "floor": COVERAGE_FLOOR,
         }
-        summary["calibration_n_listings"] = int(rows[0][2] or 0)
+        built_at = _stamp(rows[0][7])
+        age_h = (None if built_at is None
+                 else (datetime.now(timezone.utc) - built_at).total_seconds() / 3600.0)
+        # A10: the population has drifted — re-cut the calibration, atomically.
+        if (not stopped and coverage is not None and coverage < COVERAGE_FLOOR
+                and facts.images_with_phash >= RECUT_MIN_IMAGES
+                and (age_h is None or age_h >= RECUT_MIN_AGE_H)
+                and deadline - time.perf_counter() >= RECUT_RESERVE_S):
+            with _transaction(conn):
+                summary["recut"] = cut_calibration(conn, settings, model.version, generation)
+        summary["fact_reads"] = facts.reads
+        summary["statements"] = store.statements + facts.statements + work.statements
+        summary["settings"] = settings.to_dict()
+        summary["model_version"] = model.version
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
         summary["scope"] = scope.as_json()
-        summary["scope_key"] = scope_key
-        summary["rescoped"] = bool(rescoped)
         summary["windows"] = dict(work.windows)
-        # What the entrant feed cost the production instance THIS pass: a block refresh, a
-        # refusal against the rolling-day cap, or nothing at all (W9e/R3).
         summary["enter_scan"] = dict(work.enter_scan)
-        # The build phase and the clock (E98): what bounded this claim, what the phase still
-        # owes, and whether this pass was the one that ended it.
         summary["claim_bound"] = dict(work.claim_bound)
         summary["bootstrap"] = {
             "active": bool(bootstrap),
             "backlog": work.bootstrap_backlog,
-            "ended_this_pass": bool(bootstrap and work.bootstrap_done
-                                    and result is not None and not result.aborted),
-            "setting_key": bootstrap_setting_key(generation),
-            "rate_key": pass_rate_key(generation),
+            "ended_this_pass": bool(bootstrap and work.bootstrap_done and not stopped),
         }
-        summary["enter_interval_hours"] = dict(intervals)
-        summary["max_enter_scans_per_day"] = int(max_enter_scans)
-        # The seventh feed and the hold it serves (E92/E93): what the sweep probed on
-        # `public.images`, what it found moved, and how many merges are waiting.
         summary["evidence"] = {
             **dict(work.evidence),
             "held_this_pass": result.held if result is not None else 0,
             "released_this_pass": result.released if result is not None else 0,
             "redecided": result.redecided if result is not None else 0,
         }
-        # The staleness readout E95 owes every pass, refused above and REPORTED here.
-        summary["calibration"] = {
-            "digest": calibration.digest(),
-            "built_at": _iso(rows[0][7]),
-            "built_age_days": age_days(rows[0][7]),
-            "export_age_days": parity.get("age_days"),
-            "max_age_days": floors.max_age_days,
-        }
+        summary["calibration"] = {"digest": calibration.digest(), "built_at": _iso(rows[0][7]),
+                                  "built_age_days": age_days(rows[0][7])}
         summary["retention"] = {"store_floor": settings.store_floor,
                                 "pairs_retained": store.pairs_retained,
                                 "pairs_evicted": store.pairs_evicted}
-        # The storage readout is taken AFTER the pass, against the reading taken before it, so
-        # "growth" is this pass's own growth and not the last one's.
+        summary["deadline_s"] = float(deadline_s)
+        summary["elapsed_s"] = round(elapsed, 3)
         after_bytes = schema_bytes(conn)
         summary["storage"] = {
             **storage,
             "schema_mb_after": round(after_bytes / 1_048_576.0, 2),
             "pass_growth_mb": round(
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
-            "rows_after": rt_rows(conn, generation, scope),
         }
         record_storage(conn, generation, after_bytes)
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        (Path(out_dir) / "incremental.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
         return summary
     finally:
         try:
@@ -2437,64 +2034,29 @@ def run_incremental(
                 close()
 
 
+RT_SEED_ARGS: frozenset[str] = frozenset({"settings", "model", SCOPE_SETTING, "fresh"})
+
+
 def run_rt_seed(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
 ) -> dict[str, Any]:
-    """`--mode rt_seed`: cut a generation's FROZEN calibration and start its cursors AT TODAY.
+    """`--mode rt_seed`: (re)build THE generation from the database (A10, E912).
 
-    Without this the lane has no calibration at all (it refuses to run on a guess) and its
-    cursors would start at id 0 — 83 days of walking history at the shipped slice before the
-    first live arrival is reached (E76). The seed writes the calibration from the same cohort
-    artifact the batch pass scored, stamps the forward cursors at the corpus's current maxima,
-    and — with `backfill=true` — writes the cohort's own fingerprints and postings so the
-    generation starts from a populated store rather than an empty one.
-
-    Read-only against `public` like the pass itself — and deliberately NOT behind the dark
-    switch (W9e/R1). Seeding is the step BEFORE the switch: the documented enable sequence is
-    apply 539, merge, SEED, verify, then flip `AUTODEDUP_REALTIME_ENABLED`. W9 gated this mode
-    on that variable, so the recipe printed in the workflow header and in PROGRAM.md exited 0
-    having done nothing, and flipping the variable afterwards left the `*/10` schedule
-    hard-erroring on a generation nothing had seeded. It is idempotent instead: a generation
-    that already carries a frozen calibration is REFUSED unless `reseed=true`, because a
-    re-seed re-cuts the calibration every stored decision of that generation was taken under."""
-    from autodedup.dataset import load
-    from autodedup.fingerprint import build_all
-    from autodedup.judge_lane import download_cohort
-
-    artifact = (args.get("artifact") or "").strip()
-    export_run = (args.get("export_run") or "").strip()
-    if export_run:
-        # The same input the batch pass took, fetched the same way the score and judge lanes
-        # fetch it: a runner has no cohort file until `gh run download` puts one there, so a
-        # documented recipe that only took a PATH could not be run on a runner at all.
-        if not export_run.isdigit():
-            raise SystemExit(f"export_run must be a GitHub run id, got {export_run!r}")
-        artifact = str(download_cohort(export_run, Path(out_dir) / "artifact"))
-    if not artifact:
-        raise SystemExit(
-            "rt_seed needs export_run=<the export lane's run id> or artifact=<cohort.jsonl.gz>")
-    generation = (args.get("generation") or "").strip() or GENERATION
+    It names the scorer (`settings`, `model`) and the scope (`rt_scope`, else the row the
+    previous seed wrote, else the trial blocks), walks every scope block once, cuts the
+    calibration and the pHash population from the database, starts the cursors at TODAY and
+    opens the build phase — every in-scope listing then arrives through the passes, the one
+    path the replay proof covers (E98). A generation already seeded is rebuilt only with
+    `fresh=true`, which first empties it (E97) inside the same transaction; production merges
+    are never touched. It takes the lane's lease and refuses while a pass holds it — stop the
+    worker's lane first (interval 0)."""
+    unknown = sorted(set(args) - RT_SEED_ARGS)
+    if unknown:
+        raise SystemExit(f"unknown arg(s) {', '.join(unknown)}; allowed: "
+                         f"{', '.join(sorted(RT_SEED_ARGS))}")
     settings, model, settings_name, model_name = named_config(args, what="rt_seed")
-    backfill = str(args.get("backfill") or "").strip().lower() == "true"
-    reseed = str(args.get("reseed") or "").strip().lower() == "true"
-    # A CLEAN RESET (E97), and only ever beside the word that already means "I mean it": a
-    # `fresh` that could run without `reseed` would be one fat-fingered dispatch away from
-    # emptying a generation somebody is reading.
     fresh = str(args.get("fresh") or "").strip().lower() == "true"
-    if fresh and not reseed:
-        raise SystemExit(
-            "fresh=true empties THIS generation's pairs, clusters, fingerprints, postings, "
-            "census cells, scope snapshot and cursors — it is only valid with reseed=true, "
-            "which is how this lane spells 'I mean it'. Nothing was written.")
-    bootstrap = str(args.get("rt_bootstrap") or "").strip().lower() == "true"
-    if bootstrap and backfill:
-        raise SystemExit(
-            "rt_bootstrap=true builds the generation through the ARRIVAL path (E98) and "
-            "backfill=true writes the fingerprints without a single pair (E97) — a generation "
-            "seeded with both would spend the phase walking a scope whose every listing is "
-            "already in the store, and would still hold no pairs. Pass backfill=false.")
-    parity_n = int(_setting_number(args.get("parity_n"), float(PARITY_BASELINE_N)))
-
+    generation = GENERATION
     holder = f"rt_seed:{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
@@ -2503,91 +2065,44 @@ def run_rt_seed(
         if not present or not present[0][0]:
             raise SystemExit("autodedup realtime store absent — migration 539 not applied")
         existing = _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation})
-        if existing and not reseed:
+        if existing and not fresh:
             raise SystemExit(
                 f"generation {generation!r} is already seeded (calibration "
-                f"{str(existing[0][1])!r}, cut {existing[0][2]}) — a re-seed re-cuts the frozen "
-                "calibration every stored decision of this generation was taken under. Pass "
-                "reseed=true to mean it, or seed a new generation.")
-        if fresh and not existing:
-            # The reset deletes pairs, clusters, members and conflicts BY GENERATION NAME. A
-            # batch generation (g4..g7) has no rt_calibration row, so without this refusal
-            # `generation=g7 reseed=true fresh=true` would empty the operator's reviewed pass.
-            raise SystemExit(
-                f"fresh=true refused: generation {generation!r} carries no real-time "
-                "calibration, so it was never seeded by this lane and is not this lane's to "
-                "empty. Seed it first (without fresh), or name the real-time generation.")
-        scope_key = scope_setting_key(generation)
-        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
-                                       PARITY_MIN_CHECKED_SETTING, PARITY_MIN_SHARE_SETTING,
-                                       CALIBRATION_AGE_SETTING, PARITY_UNKNOWN_POP_SETTING])
-        # The same four floors the scheduled pass is held to (E94/E95). A seed cut from an
-        # export already past the age rail would be refused by the first pass anyway; it is
-        # refused HERE, where the recipe that fixes it is one re-export away.
-        floors = resolve_floors({}, control)
+                f"{str(existing[0][1])!r}, cut {existing[0][2]}) — the calibration re-cuts "
+                "itself when the pHash population drifts; a new scorer or scope is a REBUILD: "
+                "pass fresh=true. Nothing was written.")
+        control = lane_settings(conn, [scope_setting_key(generation)])
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING),
                                   read_scope_setting(control, generation))
-            # Proved at SEED time rather than at the first pass: a quarter the register cannot
-            # place is a scope whose entrant sweep could never walk it (W9d-3).
-            resolve_scope_parents(conn, scope)
-            max_schema_mb = _setting_number(
-                args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB)
+            # Proved at SEED time: a quarter the register cannot place is a scope whose
+            # entrant sweep could never walk it (W9d-3).
+            parents = resolve_scope_parents(conn, scope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         try:
-            storage = storage_guard(conn, generation, scope, max_schema_mb)
+            storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
-
-        ds = load(artifact)
-        # The artifact is the BATCH cohort and carries the assembled negative control, which
-        # has no arrival feed and is therefore outside every real-time scope (E79). The seed
-        # drops it here rather than backfilling rows the lane could never maintain — and the
-        # frozen calibration is cut over what the generation will actually HOLD, because every
-        # statistic in it is cohort-relative.
-        in_scope = sorted(i for i, listing in ds.listings.items() if scope.holds(listing))
-        if not in_scope:
-            raise SystemExit(
-                f"{SCOPE_SETTING} {scope.label()!r} holds none of the {len(ds.listings)} "
-                f"listings in {artifact} — seeding it would freeze an empty calibration")
-        fps = {i: fp for i, fp in build_all(ds, settings).items() if i in set(in_scope)}
-        calibration = Calibration.build(
-            fps, {i: ds.listings[i] for i in in_scope}, settings, generation)
-        payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
-        written = 0
-        reset: dict[str, int] = {}
-        # THE LANE'S LEASE, taken by the passes' own CAS and held through the transaction. A seed
-        # rewrites the calibration and the cursors every pass reads, and `fresh=true` empties the
-        # generation a pass writes into; with two callers (the workflow and the worker's
-        # `autodedup` lane) the repository variable no longer stops every pass, so the seed does
-        # not rely on a switch being off. While a pass holds the lease the seed refuses, having
-        # written nothing; while the seed holds it every pass is a green `skipped: leased`.
         if not take_lease(conn, holder, ttl=SEED_LEASE_TTL_S):
             raise SystemExit(
-                "rt_seed refused: a real-time pass holds autodedup.rt_lease. Stop both callers "
-                "(`update autodedup.settings set value = 'false' where key = "
-                "'realtime_enabled'` stops the workflow and the worker's autodedup lane alike), "
-                "wait for the lease to clear, and seed again. Nothing was written.")
+                "rt_seed refused: the lane holds autodedup.rt_lease. Set "
+                "app_settings.realtime_autodedup_interval_seconds to 0, wait for the lease to "
+                "clear, and seed again. Nothing was written.")
         leased = True
+        reset: dict[str, int] = {}
         with _transaction(conn):
-            # FIRST, inside the seed's own transaction (E97): a refusal anywhere below — an
-            # empty scope, a parity baseline that cannot clear the floors — puts every deleted
-            # row back, so there is no state in which the generation is emptied and unseeded.
             if fresh:
                 reset = reset_generation(conn, generation, holder=holder)
-            # THE FROZEN POPULATION FIRST (E91). Everything below — the parity gate included —
-            # reads galleries through `SqlFacts`, which joins this table, so it has to be
-            # written before anything looks at an image.
-            population = write_population(conn, ds)
-            parity = seed_parity(conn, ds, in_scope, generation, parity_n, floors)
-            _exec(conn, RT_CALIBRATION_WRITE_SQL, {
-                "generation": generation, "digest": calibration.digest(),
-                "n_listings": calibration.n_listings,
-                "payload": payload if len(payload) < 40_000_000 else None,
-                "artifact_url": str(artifact),
-                "settings": json.dumps(settings.to_dict(), sort_keys=True),
-                "model_version": model.version})
+            # The scope's blocks, walked once now: the cut is taken over what they hold, and
+            # the build phase starts with every block already listed.
+            work = SqlWork(conn, scope, generation, parents=parents, bootstrap=True)
+            if work.enter_blocks:
+                work.refresh_scope_ids(0)
+            try:
+                cut = cut_calibration(conn, settings, model.version, generation)
+            except CalibrationRefusal as exc:
+                raise SystemExit(f"{scope.label()!r}: {exc}") from exc
             seeded = _rows(conn, RT_SEED_CURSORS_SQL)[0]
             _exec(conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_NEW, "last_listing_id": int(seeded[0]),
@@ -2598,86 +2113,35 @@ def run_rt_seed(
             _exec(conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_FLIPPED, "last_listing_id": int(seeded[3]),
                 "last_snapshot_id": None, "watermark": seeded[2]})
-            _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_REVIVE, "last_listing_id": 0})
-            _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_SCOPE, "last_listing_id": 0})
+            for name in (CURSOR_REVIVE, CURSOR_SCOPE, reconcile.CURSOR):
+                _exec(conn, RT_CURSOR_SET_SQL, {"name": name, "last_listing_id": 0})
             _exec(conn, RT_CURSOR_WRITE_SQL, {"name": CURSOR_ENTER, "last_listing_id": 0,
                                               "last_snapshot_id": 0, "watermark": None})
-            # The generation's scope, written where the lane reads it: a pass dispatched
-            # without an argument then runs the scope this generation was seeded for, and can
-            # never quietly widen to one it has no fingerprints for.
             _exec(conn, RT_SETTING_WRITE_SQL, {
-                "key": scope_key, "value": json.dumps(scope.as_json()),
+                "key": scope_setting_key(generation), "value": json.dumps(scope.as_json()),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
-            # The gate's baseline, cut at the same moment as the calibration and stored where
-            # the lane already reads its control rows — a settings row needs no migration (E91).
             _exec(conn, RT_SETTING_WRITE_SQL, {
-                "key": parity_baseline_key(generation),
-                "value": json.dumps(parity["baseline"], sort_keys=True, default=str),
+                "key": bootstrap_setting_key(generation), "value": json.dumps(True),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
-            # The build phase, as DATA rather than as a flag on one dispatch (E98): the passes
-            # that do the building are the `*/10` schedule's, and none of them carries an
-            # argument. The row is written on every seed — true when the operator asked for the
-            # phase, false when they did not — so a re-seed can never leave a stale one on.
-            _exec(conn, RT_SETTING_WRITE_SQL, {
-                "key": bootstrap_setting_key(generation),
-                "value": json.dumps(bool(bootstrap)),
-                "updated_by": f"{LANE_NAME}:rt_seed"})
-            if backfill:
-                store = SqlStore(conn, generation, store_floor=settings.store_floor,
-                                 model_version=model.version,
-                                 calibration_digest=calibration.digest())
-                keyer = Keyer(settings, calibration)
-                for listing_id in sorted(fps):
-                    fp = fps[listing_id]
-                    listing = ds.listings[listing_id]
-                    store.put_listing(
-                        listing_id,
-                        FpRow(GuardRow(listing_id, fp.category_main, fp.category_type,
-                                       fp.area_m2, fp.disposition, fp.floor),
-                              fp_digest(fp, ds.images(listing_id)),
-                              address_block_key(listing), category_group(listing),
-                              bool(listing.is_active),
-                              # What the COHORT's own decision rested on (E92). A backfilled
-                              # listing whose artifact gallery was already hashed is complete
-                              # and never enters the evidence sweep.
-                              evidence_of(ds.images(listing_id))),
-                        keyer.index_keys(fp))
-                    store.bump_cell(listing)
-                    written += 1
-                store.flush()
         summary = {
             "generation": generation,
-            "calibration_digest": calibration.digest(),
-            "calibration_n_listings": calibration.n_listings,
+            "calibration": cut,
             "settings_name": settings_name,
             "model_name": model_name,
             "model_version": model.version,
-            "population": population,
-            "parity": parity["report"],
-            "floors": floors_json(floors),
-            "evidence_horizon_hours": EVIDENCE_HORIZON_HOURS,
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
-                        CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
-            "backfilled": written,
-            # What the reset removed, per table (E97). `{}` when `fresh` was not asked for —
-            # which is itself the receipt that the generation's old rows are still there.
+                        CURSOR_FLIPPED: str(seeded[2])},
             "fresh": bool(fresh),
             "reset": reset,
-            "bootstrap": bool(bootstrap),
-            "bootstrap_key": bootstrap_setting_key(generation),
+            "bootstrap": True,
             "scope": scope.as_json(),
-            "scope_key": scope_key,
-            "reseed": bool(reseed),
-            "artifact": str(artifact),
-            "export_run": export_run or None,
-            "artifact_listings": len(ds.listings),
-            "in_scope_listings": len(in_scope),
+            "enter_scan": dict(work.enter_scan),
             "storage": storage,
             "spent_usd": 0.0,
         }
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         (Path(out_dir) / "rt_seed.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+            json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
         return summary
     finally:
         try:
