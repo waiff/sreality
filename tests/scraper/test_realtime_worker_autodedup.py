@@ -202,7 +202,7 @@ def test_the_settings_row_says_the_lane_merges() -> None:
     body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
     assert "set description =" in body and "MERGES" in body
     assert f"where key = '{rw.AUTODEDUP_INTERVAL_SETTING}'" in body
-    assert "value" not in body.split("set description", 1)[1].split("where", 1)[0]
+    assert not re.search(r"\bset\s+value\b|,\s*value\s*=", body, re.I), "the value is untouched"
     assert not re.search(r"\b(create|alter|drop|delete|insert|truncate)\b", body, re.I)
 
 
