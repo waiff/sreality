@@ -602,5 +602,5 @@ render its SHAPE.
 | Registry modes / inputs / bypass flags | **4 → 1** / **6 → 2** / **−2** (plus the `vfr_delta` module) |
 | MF write paths / implementations / stored grains | **3 → 0** / **3 → 1** / **2 → 0** |
 | Reason-text sources | **1** (six codes, notes only in 565; −2 client literals) |
-| LOC outside migrations: prod / tests / docs | **+1712 −1721** / **+2340 −575** / **+213 −156** |
+| LOC outside migrations: prod / tests / docs | **+1712 −1721** / **+2340 −575** / **+239 −166** |
 | Migration SQL (append-only) | **+1364** (565, 566, 567, 575) |
