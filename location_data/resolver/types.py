@@ -157,6 +157,10 @@ class AdminUnit:
     qualifier: str | None = None
     homonym_count: int = 1
     psc_set: tuple[str, ...] = ()
+    # An OBEC's one KÚ child, else None — answered by `admin_chain` only, like the point. A
+    # one-KÚ obec is 3,942 of 6,258 (gate 0, 2026-09-25), and every entity inside one lies in
+    # that KÚ by the hierarchy alone.
+    sole_katastr_kod: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +181,8 @@ class AddressPoint:
     znak_orientacniho: str | None = None
     cast_obce_unit_id: int | None = None
     cast_obce_kod: int | None = None
+    # The KÚ whose `pip` piece covers this point at the view's registry version (PR-B).
+    katastr_kod: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +215,9 @@ class StreetPoint:
     lon: float
     extent_m: float
     point_count: int
+    # The one KÚ holding EVERY door of the street, else None — the door rule (Q7, PR-B), off
+    # the same point set as the centroid.
+    katastr_kod: int | None = None
 
 
 class RegistryView(Protocol):
@@ -230,6 +239,10 @@ class RegistryView(Protocol):
     def street_point(self, street: Street) -> StreetPoint | None:
         """Where a bound street sits, off its own address points. None when it has none —
         `ruian_streets` holds the name, never the geometry."""
+
+    def part_katastr_kod(self, unit_id: int) -> int | None:
+        """The one KÚ holding every RÚIAN door of a část obce, else None (the Q7 door rule).
+        Asked only for a row BOUND to a část in a multi-KÚ obec."""
 
     def admin_units_by_name(
         self, name_norm: str, *, levels: Sequence[str] = ()
@@ -302,6 +315,8 @@ class Binding:
     # and never for a loser. `lat`/`lon` above carry the point; this carries its size, which
     # is what `place()` compares a pin against and what floors the published radius.
     street_extent_m: float | None = None
+    # The same read's door rule: the one KÚ holding every door of the bound street (PR-B).
+    street_katastr_kod: int | None = None
     # A house number that belongs to THIS bind and to no other claim on the listing (W18).
     # A street bound out of one line's segment carries that segment's number; nothing else on
     # the row may lend it one, which is the defect this field exists to make impossible —
@@ -386,6 +401,7 @@ class Fill:
     psc: str | None = None
     lat: float | None = None
     lon: float | None = None
+    katastr_kod: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +448,7 @@ class Resolution:
     cast_obce_kod: int | None
     ulice_kod: int | None
     ruian_adm_kod: int | None
+    katastr_kod: int | None
     match_confidence: str
     granularity: str
     uncertainty_radius_m: float
