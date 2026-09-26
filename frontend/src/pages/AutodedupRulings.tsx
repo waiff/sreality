@@ -19,8 +19,9 @@
  * A withdrawal is a newer `unsure`. The lane reads the newest word on its next
  * pass. It never splits a property (decision 9) and merges only inside its
  * scope, so where a ruling and a property disagree the row offers the existing
- * split (`POST /properties/{id}/detach`) or merge (`POST /properties/merge`),
- * each behind a second click. */
+ * split (the operator's split statement, `POST /properties/{id}/split`, as the
+ * property page's row split sends it) or merge (`POST /properties/merge`), each
+ * behind a second click. */
 
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -39,10 +40,12 @@ import {
 import {
   ApiError,
   DETACH_REASON_MAX,
-  detachListing,
+  fetchPropertyOrigins,
   getAutodedupRulings,
   mergePropertySet,
   postAutodedupVerdict,
+  splitProperty,
+  splitRefusal,
   type AutodedupMember,
   type AutodedupVerdictInput,
   type AutodedupVerdictRow,
@@ -58,7 +61,7 @@ import {
 import { fmtAbsolute, fmtCount } from '@/lib/format';
 import { useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { propertyPath } from '@/lib/listingUrl';
-import { detachOutcomeNote, inzeratu, mergedAdvertsKeys, refreshAfterDetach } from '@/lib/mergedAdverts';
+import { inzeratu, mergedAdvertsKeys, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
 import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
 import type { ListingPublic } from '@/lib/types';
@@ -780,6 +783,21 @@ function CorrectionBar({
 
 /* ------------------------------------------------------------ the consequence */
 
+const STALE_PROPERTY =
+  'Nemovitost se mezitím změnila. Seznam se načetl znovu — rozhodněte podle aktuálního stavu.';
+
+/* Why the split wrote nothing, in the page's words: an advert that cannot move
+ * says why (`unmovedReason`), a changed property says so; anything else raw. */
+function splitErrorText(err: Error): string {
+  const refusal = splitRefusal(err);
+  if (err.message === STALE_PROPERTY || refusal?.code === 'stale') return STALE_PROPERTY;
+  const stuck = refusal?.code === 'cannot_move' ? refusal.ids[0] : null;
+  if (stuck && typeof stuck === 'object' && 'outcome' in stuck) {
+    return `Nelze oddělit: ${unmovedReason(String((stuck as { outcome: unknown }).outcome))}.`;
+  }
+  return `Chyba: ${err.message}`;
+}
+
 /* A ruling production does not reflect, with the existing tool that would: a
  * negative on one property is split (the engine never splits, decision 9); a
  * `same` on two properties is merged. Neither is a ruling of its own making —
@@ -798,17 +816,38 @@ function Consequence({ row }: { row: RulingPairRow }) {
         const res = await mergePropertySet([row.property_lo!, row.property_hi!]);
         return `Sloučeno do nemovitosti #${res.survivor_id}.`;
       }
-      const res = await detachListing(row.property_lo!, armed.listing, reason.trim() || undefined);
-      return res.detached
-        ? `Inzerát #${armed.listing} oddělen → nemovitost #${res.restored_property_id}.`
-        : detachOutcomeNote(res.outcome);
+      /* The one split statement (E919), as the property page's row split sends it:
+       * every advert the property holds, read at the click, the named one leaving and
+       * the rest not ruled among themselves. The count the confirm named is the
+       * operator's view; a property that has changed since is re-read, never ruled. */
+      const origins = await fetchPropertyOrigins(row.property_lo!);
+      const adverts = origins.adverts.map((a) => a.listing_id);
+      if (row.adverts_on_property != null && adverts.length !== row.adverts_on_property) {
+        throw new Error(STALE_PROPERTY);
+      }
+      const res = await splitProperty(origins.property_id, {
+        adverts,
+        separate: [[armed.listing]],
+        keep_together: false,
+        ...(reason.trim() ? { reason: reason.trim() } : {}),
+      });
+      const left = res.units.find((u) => u.role === 'separated');
+      return left && left.moved.length > 0
+        ? `Inzerát #${armed.listing} oddělen → nemovitost #${left.property_id}.`
+        : 'Nic se nepřesunulo — inzerát už je oddělen.';
     },
     onSuccess: (text) => {
       setDone(text);
       setArmed(null);
       setReason('');
-      refreshAfterDetach(qc);
+      refreshAfterSplit(qc);
       qc.invalidateQueries({ queryKey: ['autodedup'] });
+    },
+    onError: (e) => {
+      if (e.message === STALE_PROPERTY || splitRefusal(e)?.code === 'stale') {
+        refreshAfterSplit(qc);
+        qc.invalidateQueries({ queryKey: ['autodedup'] });
+      }
     },
   });
 
@@ -896,7 +935,7 @@ function Consequence({ row }: { row: RulingPairRow }) {
       )}
       {act.error && (
         <p role="alert" className="mt-2 text-[0.75rem] text-[var(--color-brick)]">
-          Chyba: {(act.error as Error).message}
+          {splitErrorText(act.error)}
         </p>
       )}
       {done && <p className="mt-2 text-[0.75rem] text-[var(--color-ink-2)]">{done}</p>}

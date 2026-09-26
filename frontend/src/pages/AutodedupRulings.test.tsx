@@ -2,7 +2,7 @@
  * URL, and corrections that are NEW rulings — Flip / Withdraw post
  * `POST /autodedup/verdict` with `supersedes` (a 409 says someone ruled since),
  * never a delete; the split / merge a disagreeing property needs is the existing
- * route, behind a second click. */
+ * route (the split: the operator's split statement, E919), behind a second click. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -20,7 +20,8 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   getAutodedupRulings: vi.fn(),
   postAutodedupVerdict: vi.fn(),
-  detachListing: vi.fn(),
+  fetchPropertyOrigins: vi.fn(),
+  splitProperty: vi.fn(),
   mergePropertySet: vi.fn(),
 }));
 vi.mock('@/lib/queries', async (importOriginal) => ({
@@ -40,6 +41,39 @@ const history = (id: number, verdict: api.AutodedupVerdictValue): api.AutodedupV
   note: null,
   decided_by: 'operator@example.com',
   decided_at: AT,
+});
+
+const origins = (ids: number[]) => ({
+  property_id: 100,
+  adverts: ids.map((listing_id) => ({
+    listing_id,
+    origin_property_id: null,
+    merge_source: null,
+    merged_at: null,
+    detach_outcome: 'split_native',
+    splittable: true,
+  })),
+});
+
+const splitDone = (listing: number, to: number): api.SplitResult => ({
+  call_id: 'c',
+  property_id: 100,
+  record_kept_by: 'A',
+  units: [
+    { unit: 'A', role: 'kept', listing_ids: [11, 13], property_id: 100, moved: [], merge_group_id: null },
+    {
+      unit: 'B',
+      role: 'separated',
+      listing_ids: [listing],
+      property_id: to,
+      moved: [{ listing_id: listing, outcome: 'detached', from: 100, to }],
+      merge_group_id: null,
+    },
+  ],
+  moved: 1,
+  rulings: { written: 2, same: 0, different: 2, must_not_link_written: 2, must_not_link_retracted: 0 },
+  reversed_pairs: [],
+  undo: null,
 });
 
 function pairRow(over: Partial<api.RulingPairRow> = {}): api.RulingPairRow {
@@ -294,14 +328,8 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
         }),
       ]) as never,
     );
-    vi.mocked(api.detachListing).mockResolvedValue({
-      listing_id: 12,
-      detached: true,
-      outcome: 'detached',
-      survivor_property_id: 100,
-      restored_property_id: 300,
-      rulings_written: 2,
-    });
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12, 13]));
+    vi.mocked(api.splitProperty).mockResolvedValue(splitDone(12, 300));
     setup();
     const card = await screen.findByTestId('ruling-11-12');
     fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #12' }));
@@ -310,9 +338,58 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
       target: { value: 'jiné patro' },
     });
     fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
-    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(100, 12, 'jiné patro'));
+    // the property page's row split: every advert shown, the one leaving, the rest not ruled
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(100, {
+        adverts: [11, 12, 13],
+        separate: [[12]],
+        keep_together: false,
+        reason: 'jiné patro',
+      }),
+    );
+    expect(api.fetchPropertyOrigins).toHaveBeenCalledWith(100);
     expect(await within(card).findByText(/oddělen → nemovitost #300/)).toBeInTheDocument();
     expect(api.postAutodedupVerdict).not.toHaveBeenCalled();
+  });
+
+  it('never splits a property that changed since the count it named', async () => {
+    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
+      page([
+        pairRow({ verdict: 'different', together_now: true, property_hi: 100, adverts_on_property: 3 }),
+      ]) as never,
+    );
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12, 13, 14]));
+    setup();
+    const card = await screen.findByTestId('ruling-11-12');
+    fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #11' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent(
+      'Nemovitost se mezitím změnila',
+    );
+    expect(api.splitProperty).not.toHaveBeenCalled();
+  });
+
+  it('says why an advert cannot leave when the split refuses it', async () => {
+    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
+      page([pairRow({ verdict: 'different', together_now: true, property_hi: 100 })]) as never,
+    );
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12]));
+    vi.mocked(api.splitProperty).mockRejectedValue(
+      new api.ApiError('an advert cannot leave the property', 409, {
+        detail: {
+          code: 'cannot_move',
+          message: 'an advert cannot leave the property',
+          ids: [{ listing_id: 12, outcome: 'on_origin' }],
+        },
+      }),
+    );
+    setup();
+    const card = await screen.findByTestId('ruling-11-12');
+    fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #12' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent(
+      'Nelze oddělit: inzerát už je v nemovitosti, ze které přišel.',
+    );
   });
 
   it('offers the merge a same on two properties needs', async () => {
