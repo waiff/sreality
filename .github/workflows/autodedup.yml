@@ -120,11 +120,16 @@ name: "AUTODEDUP: engine lane"
 #             a NEW presentation (j2) is measured against the labels an OLD one produced,
 #             because the label belongs to the pair and not to the prompt.
 #             `pairs_file=<name>` narrows the draw to an EXPLICIT list committed under
-#             autodedup/pairs/<name>.json (a JSON list of `[lo, hi]`) - how a targeted pass
-#             buys labels for one starved cell, which a stratified draw spends everywhere but.
+#             autodedup/pairs/<name>.json (a JSON list of `[lo, hi]`, or of
+#             `{"lo", "hi", "stratum"}` objects) - how a targeted pass buys labels for one
+#             starved cell, which a stratified draw spends everywhere but. A listed `stratum`
+#             replaces the zone grid for that pair: the draw, the `strata` filter, sample.json
+#             and judgements.jsonl all carry it, so a contested list reports per set.
 #             It narrows the POPULATION, not the sample: `n` is still the cost dial. Pairs the
 #             engine did not store are reported by id in `pairs_file_missing` rather than
-#             quietly shrinking the pass.
+#             quietly shrinking the pass - unless `score_unstored=1`, which scores each one
+#             through the engine's own features (below the floor, or never paired by blocking)
+#             and reports it in `pairs_file_scored_unstored` instead.
 #             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
 #             judge_version, tier) and not on the model, so a second `oss_model` at the same
 #             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
@@ -411,7 +416,8 @@ name: "AUTODEDUP: engine lane"
 # arm, default 0), strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
 # download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row),
-# pairs_file (an explicit `[lo, hi]` list under autodedup/pairs/) and,
+# pairs_file (an explicit `[lo, hi]` or `{lo, hi, stratum}` list under autodedup/pairs/),
+# score_unstored (with pairs_file: score the listed pairs the pass did not store) and,
 # for `tier=oss`, oss_model (the served model id, default Qwen/Qwen2.5-VL-7B-Instruct),
 # oss_gpu (SPACE-separated RunPod GPU types in preference order, e.g. `H100_80GB A100_80GB
 # L40S A6000 A40`, treated as a PIN - a pass fails rather than silently renting a 6x dearer
