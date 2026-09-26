@@ -560,3 +560,17 @@ dum/prodej no longer reads ~5 701 Kč/m² on a ~905 m² median area.
   until the labels are on screen).
 - Renaming the anon-exposed `price_stat_*` rate columns that are named like absolute
   prices (breaks the SPA's direct read — commented in W4, renamed never or much later).
+
+## MF reference rent — one read-time measure (2026-09, in progress)
+
+Order C → D → A → B → F (operator-approved 2026-09-25). North star: MF is one read-time SQL
+measure returning a value, the town's published range, or a reason; readers render its SHAPE.
+- **Done — PR-C (readers):** lookup, extension panel + index badge, SPA card and Watchdog feed
+  read the PROPERTY's result from `properties_public` and render it by shape through ONE rule
+  (`frontend/src/lib/mfReference.ts`, imported by the extension); the listing-grain coalesces,
+  the per-m² CASE (`mf_reference_rent_per_m2_czk`, W5 above), the run fallback and both
+  client reason literals are gone. `range.per_m2_*` are TOTAL rates (the town's published
+  span + the flat's adjustments, the twin of `total_per_m2`); `rent_*_czk` = per-m² × area.
+- **Next:** PR-D `mf_reference()` + `rent_map_cells` + view swap; PR-A registry publish-complete;
+  PR-B `listing_location.katastr_kod`; PR-F drops right after the program is verified in
+  production (operator 2026-09-25; explicit OK + `pg_dump` first).

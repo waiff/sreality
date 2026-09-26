@@ -1,3 +1,7 @@
+/* The MF result type and its shape rule are the SPA's own zero-dependency
+ * module (like brand.ts), imported rather than copied. */
+import type { ReferenceRent } from '../../frontend/src/lib/mfReference';
+
 /* Subset of the SPA's EstimationRun shape — we only consume the
  * fields needed by the yield panel. Mirroring frontend/src/lib/types.ts
  * but kept local so the extension build doesn't reach across into the
@@ -11,18 +15,6 @@ export interface YieldScenario {
    * the total acquisition cost (the yield denominator). Null/absent = none. */
   renovation_czk: number | null;
   updated_at: string;
-}
-
-/* MF Cenová mapa secondary rent reference (migration 131). Null on sale
- * runs, territory misses, and runs predating a rent-map revision. */
-export interface ReferenceRent {
-  territory: { name: string; kraj: string | null };
-  vk: number;
-  is_novostavba: boolean;
-  base_per_m2: number;
-  total_per_m2: number;
-  monthly_rent_czk: number;
-  source_date: string | null;
 }
 
 export interface EstimationRun {
@@ -141,8 +133,8 @@ export interface ExtNote {
 }
 
 /* One entry from POST /listings/lookup — our scraped facts for a portal
- * listing keyed by (source, native id), including the precomputed MF
- * reference rent + "Výnos MF" gross yield (the same figures Browse cards
+ * listing keyed by (source, native id), including its property's MF
+ * reference-rent result + "Výnos MF" gross yield (the same figures Browse cards
  * show), a handle on any existing successful estimation, the property's
  * deal-pipeline membership, and its collection memberships. */
 export interface PortalListing {
@@ -193,14 +185,14 @@ export interface PortalListing {
   display_label: string | null;
   is_active: boolean | null;
   last_seen_at: string | null;
+  /* MF is PROPERTY-grain — every advert of one flat shows its property's
+   * figures; null for a non-flat, and for an advert not yet attached to a
+   * property. `mf_reference_rent` is the whole result, rendered by its SHAPE
+   * (mfShape): a value's breakdown, a range + note, or a note alone. Absent
+   * only from an API that predates it — then there is nothing to render. */
   mf_reference_rent_czk: number | null;
-  /* The SAME reference rent per m², computed by the server AT THE GRAIN OF ITS
-   * OWN NUMERATOR. `mf_reference_rent_czk` is PROPERTY-grain (the golden
-   * record) while `area_m2` is LISTING-grain, so dividing one by the other
-   * here mixed two grains and was wrong for every merged multi-portal group.
-   * A MONTHLY figure: render it in the monthly unit, never the capital one. */
-  mf_reference_rent_per_m2_czk: number | null;
   mf_gross_yield_pct: number | null;
+  mf_reference_rent?: ReferenceRent | null;
   /* The default service charge (fond oprav + SVJ) to seed the yield panel
    * with, in Kč per m² of floor area per MONTH — resolved server-side from
    * THIS subject's denominator. THREE distinct states, and collapsing any two

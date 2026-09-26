@@ -27,6 +27,7 @@ import {
   fmtTime24,
 } from '@/lib/format';
 import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
+import { mfShape } from '@/lib/mfReference';
 import {
   ConfidencePill,
   RunBody,
@@ -36,11 +37,8 @@ import {
   useNewEstimationModal,
   type NewEstimationPrefill,
 } from '@/components/NewEstimationModal';
-import type {
-  EstimationListResponse,
-  EstimationRun,
-  ListingPublic,
-} from '@/lib/types';
+import type { PropertyPublic } from '@/lib/queries';
+import type { EstimationListResponse, EstimationRun } from '@/lib/types';
 import { Hairline, SectionLabel } from '@/components/section';
 
 export default function EstimationsBlock({
@@ -48,9 +46,9 @@ export default function EstimationsBlock({
   listingIds,
   prefill,
 }: {
-  /* The property as its header shows it: its MF is the property's (migration
-   * 257), built on the canonical advert's price the header states. */
-  listing: ListingPublic;
+  /* The property as its header shows it, MF included: one result per
+   * property, the same row Browse, the kanban and the extension read. */
+  listing: PropertyPublic;
   /* Every advert of the property as SURROGATE listings.id values (falls back to
    * the canonical advert until the advert list loads) — runs are fetched
    * property-grain. Never sreality_id: that is NULL for every non-sreality
@@ -127,15 +125,13 @@ export default function EstimationsBlock({
     return () => cancelAnimationFrame(raf);
   }, [wantsScroll, runsQ.isLoading]);
 
-  // The property's MF, else the selected run's reference_rent for orphan runs.
-  // The yield % pairs only with the property's own reference rent.
-  const colMfRef = listing.mf_reference_rent ?? null;
-  const mfRef = colMfRef ?? selected?.reference_rent ?? null;
+  // The property's MF result, rendered by shape — the one source; a run's
+  // frozen reference rent belongs to that run's own page, not to this card.
+  const hasMf = mfShape(listing.mf_reference_rent).kind !== 'none';
 
-  // Nothing to say: no MF reference, no runs. The section disappears
-  // entirely (e.g. land parcels) rather than rendering an empty shell.
-  if (!mfRef && runs.length === 0 && !runsQ.isLoading) return null;
-  if (runs.length === 0 && runsQ.isLoading && !colMfRef) return null;
+  // Nothing to say: no MF result, no runs. The section disappears entirely
+  // (e.g. land parcels) rather than rendering an empty shell.
+  if (!hasMf && runs.length === 0) return null;
 
   const openedViaFeedbackHash =
     location.hash === '#feedback'
@@ -159,16 +155,10 @@ export default function EstimationsBlock({
         {/* Two authorities, side by side: the ministry's reference figure
             and our comparables-based estimate. */}
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          {mfRef ? (
-            <MfReferenceCard
-              refRent={mfRef}
-              yieldPct={colMfRef != null ? listing.mf_gross_yield_pct : null}
-            />
-          ) : (
-            <EmptyCard label="Odhad nájmu · cenová mapa MF">
-              No MF reference for this listing.
-            </EmptyCard>
-          )}
+          <MfReferenceCard
+            refRent={listing.mf_reference_rent}
+            yieldPct={listing.mf_gross_yield_pct}
+          />
           {selected ? (
             <RunSummaryCard run={selected} />
           ) : (
@@ -297,23 +287,6 @@ function NoRunsCard({
           </button>
         </>
       )}
-    </div>
-  );
-}
-
-function EmptyCard({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="border border-dashed border-[var(--color-rule)] rounded-[var(--radius-sm)] p-3">
-      <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
-        {label}
-      </p>
-      <p className="mt-2 text-sm text-[var(--color-ink-3)]">{children}</p>
     </div>
   );
 }
