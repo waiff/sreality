@@ -24,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -489,3 +490,29 @@ def test_the_measure_is_inlined_into_every_view_that_calls_it(conn, adverts, rel
     assert not [n for n in nodes if n.get("Function Name") == function
                 or n["Node Type"] == "Function Scan"]
     assert reads in {n.get("Relation Name") for n in nodes}
+
+
+@needs_db
+def test_an_ingested_revision_is_live_at_its_refresh_with_nothing_to_recompute(conn):
+    """The ingest REFRESHes rent_map_cells CONCURRENTLY inside its own transaction, and
+    from that commit every reader sees the new revision -- the old one's cells gone, not
+    mixed in. Rolled back to a savepoint, so the rest of the matrix keeps its seed."""
+    import psycopg
+
+    from api.rent_map import insert_revision
+    from toolkit.rent_map import ParsedRentMap, RentAdjustment, RentValue
+
+    parsed = ParsedRentMap(
+        values=[RentValue(O_OBEC, "obec", "Kraj Test", None, "Obecov", 2, 400, 440, None)],
+        adjustments=[RentAdjustment(2, False, "balcony", 1)],
+        source_date=date(2026, 11, 15),
+    )
+    with conn.transaction() as tx:
+        rev = insert_revision(conn, parsed, source_filename="mf-next.xlsx",
+                              file_sha256="mf-test-next", source_date=date(2026, 11, 15),
+                              uploaded_by=None)
+        rent, _, d = mf(conn, has_lift=False)
+        assert (d["source_revision"], d["base_per_m2"], rent) == (rev, 400, (400 + 1) * 50)
+        assert mf(conn, obec_kod=O_KU, has_lift=False)[2]["status"] == "no_rent_cell"
+        raise psycopg.Rollback(tx)
+    assert mf(conn)[2]["source_revision"] == _SEEDED["latest"]
