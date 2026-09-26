@@ -1,6 +1,6 @@
 -- 575_mf_legacy_columns.sql -- the stored MF grains leave (MF program PR-F, the destructive
--- close-out). DESTRUCTIVE: applied only after the operator's explicit OK, and only after the
--- backup lane has dumped every value this file drops (CLAUDE.md rule 1, the `database` skill).
+-- close-out). DESTRUCTIVE: applied only after the operator's explicit OK, and only after
+-- backup_before_drop.yml has dumped every value it drops to R2 (CLAUDE.md rule 1; #1635).
 --
 -- WHY NOW. Since 567 every serving surface computes MF at read time: browse_projection and
 -- properties_public call mf_reference() (565) over rent_map_cells, listing_feed_public reads the

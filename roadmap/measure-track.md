@@ -588,8 +588,8 @@ render its SHAPE.
 - **Done — PR-F (#1634, destructive):** migration 575 drops `listings.mf_*` / `properties.mf_*`
   (+ their 3 indexes), `listings_public`'s three MF columns (517's blue-green, 44 → 41), the 507
   functions, `rent_map_values_public` / `rent_map_adjustments_public` and
-  `ruian_admin_units.has_polygon` — applied from its branch after `backup_before_drop.yml` (the
-  new-dedup one-off, generalized) dumped every dropped value to R2 and the operator's OK.
+  `ruian_admin_units.has_polygon` — applied from its branch after `backup_before_drop.yml` (#1635,
+  the new-dedup one-off generalized) dumped every dropped value to R2, on the operator's OK.
 
 **Final ledger** (`main @ 99f23ae9` → after PR-F; the PRs' own diffs, LOC ±5 %):
 
@@ -602,5 +602,5 @@ render its SHAPE.
 | Registry modes / inputs / bypass flags | **4 → 1** / **6 → 2** / **−2** (plus the `vfr_delta` module) |
 | MF write paths / implementations / stored grains | **3 → 0** / **3 → 1** / **2 → 0** |
 | Reason-text sources | **1** (six codes, notes only in 565; −2 client literals) |
-| LOC outside migrations: prod / tests / docs | **+1712 −1721** / **+2340 −575** / **+239 −166** |
+| LOC outside migrations: prod / tests / docs | **+1470 −1533** / **+2292 −575** / **+237 −164** |
 | Migration SQL (append-only) | **+1364** (565, 566, 567, 575) |
