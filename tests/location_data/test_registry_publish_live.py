@@ -2,9 +2,10 @@
 
 The offline suite pins the SQL's shape and drives `ruian_load.run` over faked phases. It
 cannot answer what Postgres DOES with that SQL: whether an unchanged boundary really
-compares equal to the row it was stored as (and so is carried, every pip piece of it and
-nothing of its neighbours), whether a moved one is derived afresh, and which member units
-the completeness read reports. Those are PostGIS and anti-join questions, so they run here.
+compares equal to the row it was stored as (and so is carried, with render + pip re-cut row
+for row equal to the previous version's), whether a moved one is derived afresh, and which
+member units the completeness read reports. Those are PostGIS and anti-join questions, so
+they run here.
 
 Gated on TEST_DATABASE_URL, like the PREPARE sweep: runs in the schema-replay job
 (.github/workflows/migrations.yml), skips in the normal offline suite. Everything rolls back.
@@ -103,8 +104,7 @@ def test_an_unchanged_unit_is_carried_row_for_row_and_a_moved_one_is_derived(con
     moved = _unit(conn, "obec", 9_900_002, v1, v2)
     obce = _layer("obec")
 
-    # Neighbours whose bounding boxes overlap, so the carry's bbox join sees the other
-    # unit's pip pieces and must leave them behind.
+    # Neighbours whose bounding boxes overlap: the carried unit's rows must be its own.
     assert rb.load_feature(conn, _feature("obec", 9_900_001, 14.400, 50.08), obce, v1)[0] \
         == "derived"
     assert rb.load_feature(conn, _feature("obec", 9_900_002, 14.415, 50.08), obce, v1)[0] \

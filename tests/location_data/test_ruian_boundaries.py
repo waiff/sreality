@@ -41,6 +41,8 @@ def test_every_layer_is_a_distinct_mirror_level():
     levels = [layer.level for layer in rb.LAYERS]
     assert len(levels) == len(set(levels))
     assert set(rb.COMPLETE_LEVELS) <= set(levels)
+    # the state polygon is the resolver's in-CZ test at the pinned version
+    assert set(rb.COMPLETE_LEVELS) == {"stat", "obec", "katastralni_uzemi"}
 
 
 def test_the_office_layers_are_not_spravni_obvod():
@@ -183,20 +185,22 @@ def test_a_changed_unit_is_derived_three_geometries_and_nothing_else():
     assert not any("has_polygon" in s for s in statements)
 
 
-def test_an_unchanged_unit_is_carried_in_one_insert_select():
-    """The pack's geometry equals the unit's newest earlier authoritative row: that
-    version's rows are copied — one statement, no ST_MaximumInscribedCircle, no
-    ST_Subdivide — and restamped to the version being loaded."""
+def test_an_unchanged_unit_carries_its_authoritative_row_and_recuts_the_rest():
+    """The pack's geometry equals the unit's newest earlier authoritative row: that row —
+    the inscribed circle and radii, the expensive part — is copied and restamped, and
+    render + pip are cut from it by the derive path's own two statements."""
     conn = _Conn(7, carry_from=2)
     layer = next(x for x in rb.LAYERS if x.token == "KATUZE_P")
     how, _ = rb.load_feature(conn, _feature("katastralni_uzemi", 659673), layer, 3)
     assert how == "carried"
     inserts = [(sql, params) for sql, params in conn.executed
                if "INSERT INTO ruian_admin_unit_geometries" in sql]
-    assert len(inserts) == 1
-    sql, params = inserts[0]
+    assert len(inserts) == 3
+    (carry, params), render, pip = inserts
     assert params == {"unit_id": 7, "version_id": 3, "from_version_id": 2}
-    assert "ST_MaximumInscribedCircle" not in sql and "ST_Subdivide" not in sql
+    assert "ST_MaximumInscribedCircle" not in carry and "ST_Subdivide" not in carry
+    assert render[0] == " ".join(rb._INSERT_RENDER.split())
+    assert pip[0] == " ".join(rb._INSERT_PIP.split())
 
 
 def test_the_carry_compares_the_exact_expression_the_authoritative_row_was_stored_with():
@@ -211,14 +215,13 @@ def test_the_carry_compares_the_exact_expression_the_authoritative_row_was_store
     assert "ORDER BY a.registry_version_id DESC LIMIT 1" in probe
 
 
-def test_the_carry_copies_every_purpose_of_the_source_version_by_index():
-    """All three purposes, every pip piece, row for row — located through the two indexes
-    that cover them (`pip` rows sit outside both btrees, hence the bbox join) and never by
-    a per-unit scan of the whole table."""
-    sql = " ".join(rb._CARRY_FORWARD_SQL.split())
+def test_the_carry_copies_one_authoritative_row_by_index():
+    """One row through `ruian_aug_unique_nonpip`, every column but the version as stored —
+    never a probe over the pip pieces, whose GiST index spans every stored version."""
+    sql = " ".join(rb._CARRY_AUTHORITATIVE_SQL.split())
     assert "SELECT g.unit_id, %(version_id)s, g.purpose," in sql
-    assert "n.purpose <> 'pip'" in sql
-    assert "p.purpose = 'pip' AND p.geom && a.geom" in sql
+    assert "g.registry_version_id = %(from_version_id)s AND g.purpose = 'authoritative'" in sql
+    assert "pip" not in sql and "&&" not in sql
     for column in ("generalization_tolerance_m", "simplify_algorithm", "area_m2",
                    "representative_point", "inscribed_radius_m", "centroid_point",
                    "containment_radius_m", "max_radius_m"):
@@ -370,14 +373,14 @@ def test_all_three_purposes_and_the_name_upgrade_commit_in_one_transaction():
     """The resume fast-path's premise: an `authoritative` row for a registry version
     proves the unit's render + pip rows and its name upgrade committed too, so a unit found
     there can be skipped WHOLE — for a derived unit and a carried one alike."""
-    for carry_from, inserts in ((None, 3), (2, 1)):
+    for carry_from in (None, 2):
         conn = _Conn(7, carry_from=carry_from)  # unit_id_for -> 7
         layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
         rb.load_feature(conn, _feature("obec", 554782), layer, 3)
         statements = conn.statements()
         begin, commit = statements.index("BEGIN"), statements.index("COMMIT")
         inside = statements[begin + 1:commit]
-        assert sum("INSERT INTO ruian_admin_unit_geometries" in s for s in inside) == inserts
+        assert sum("INSERT INTO ruian_admin_unit_geometries" in s for s in inside) == 3
         assert any(s.startswith("UPDATE ruian_admin_units u SET name") for s in inside)
         assert statements.count("BEGIN") == 1  # ONE transaction, so it is all-or-nothing
 
@@ -434,7 +437,7 @@ def test_missing_geometry_binds_the_complete_levels_and_shapes_its_answer():
     conn = _Conn(rows=[("katastralni_uzemi", 2, [600016, 600024])])
     assert rb.missing_geometry(conn, 3) == [("katastralni_uzemi", 2, [600016, 600024])]
     _, params = conn.executed[-1]
-    assert params == {"levels": ["obec", "katastralni_uzemi"], "version_id": 3}
+    assert params == {"levels": ["stat", "obec", "katastralni_uzemi"], "version_id": 3}
 
 
 def test_pick_field_is_case_insensitive_and_ordered():

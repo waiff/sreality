@@ -192,9 +192,9 @@ def evaluate(
 
 
 def boundary_completeness(missing: list[tuple[str, int, list[int]]]) -> Assertion:
-    """The publish gate: every member obec and KÚ of the staged version carries its `pip` and
-    `authoritative` geometry. `missing` is `ruian_boundaries.missing_geometry`'s answer —
-    (level, units, first codes) for each level that falls short, degenerate units excused."""
+    """The publish gate: every member unit of `ruian_boundaries.COMPLETE_LEVELS` in the staged
+    version carries its `pip` and `authoritative` geometry. `missing` is `missing_geometry`'s
+    answer — (level, units, first codes) per level that falls short, degenerate units excused."""
     return Assertion(
         name="boundary_completeness",
         ok=not missing,

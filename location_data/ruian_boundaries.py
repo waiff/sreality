@@ -27,11 +27,14 @@ the placeholder names the CSV loader wrote; the loader rebuilds the gazetteer on
 — the gazetteer skips placeholder-named units.
 
 CARRY-FORWARD. A monthly pack moves few boundaries, while deriving one unit costs ~1.35 s per
-KÚ (`ST_MaximumInscribedCircle` over the raw vertex set, `ST_Subdivide`). A unit whose
-validated source geometry is `ST_OrderingEquals` to its newest earlier `authoritative` row
-gets that version's rows — authoritative, render and every pip piece — copied in ONE
-INSERT…SELECT; only changed and new units are derived. Vertex-exact, so a PROJ or GEOS
-change that moves a coordinate recomputes the unit instead of carrying a stale one.
+KÚ, nearly all of it the `authoritative` row's `ST_MaximumInscribedCircle` / `ST_MaxDistance`
+over the raw vertex set. A unit whose validated source geometry is `ST_OrderingEquals` to its
+newest earlier `authoritative` row gets that row copied instead, and its render + pip rows are
+cut from it by the same two statements a derived unit runs (deterministic, so equal to the
+previous version's): ~5 ms per KÚ, ~4.5 s for the state, flat in the number of stored
+versions — where copying the pip pieces needed a bounding-box probe over every version's
+pieces — and always at the current tolerance and piece size. Vertex-exact, so a PROJ or
+GEOS change that moves a coordinate recomputes the unit instead of carrying a stale one.
 
 The per-unit loop is RESUMABLE and RECONNECTING, both bounded, because an hour of per-piece
 PostGIS work on one session-mode connection is long enough for the session to be dropped
@@ -124,8 +127,9 @@ LAYERS: tuple[Layer, ...] = (
 )
 
 # The levels a version may not publish without: every member unit carries both a `pip` and
-# an `authoritative` row (`missing_geometry`). `spravni_obvod` is not one — see LAYERS.
-COMPLETE_LEVELS = ("obec", "katastralni_uzemi")
+# an `authoritative` row (`missing_geometry`). `stat` because the resolver's in-CZ test reads
+# its polygon at the pinned version; `spravni_obvod` is not one — see LAYERS.
+COMPLETE_LEVELS = ("stat", "obec", "katastralni_uzemi")
 
 # A degenerate feature is skipped and counted, never fatal; the discrepancy rows are capped
 # so one broken layer cannot write a million rows.
@@ -322,11 +326,9 @@ SELECT prev.registry_version_id
  WHERE ST_OrderingEquals(prev.geom, {_SOURCE_GEOM})
 """
 
-# Carry-forward, step 2: that version's rows, all three purposes, restamped to this version
-# in one INSERT…SELECT. Located by index, never by a scan: the non-pip rows through
-# `ruian_aug_unique_nonpip`, the pip pieces through `ruian_aug_pip_gist` inside the unit's
-# own bounding box (a piece is a subset of the authoritative polygon it was cut from).
-_CARRY_FORWARD_SQL = """
+# Carry-forward, step 2: that version's `authoritative` row, restamped to this version — one
+# row through `ruian_aug_unique_nonpip`. `load_feature` then cuts render + pip from it.
+_CARRY_AUTHORITATIVE_SQL = """
 INSERT INTO ruian_admin_unit_geometries
        (unit_id, registry_version_id, purpose, generalization_tolerance_m,
         simplify_algorithm, geom, area_m2, representative_point, inscribed_radius_m,
@@ -335,18 +337,8 @@ SELECT g.unit_id, %(version_id)s, g.purpose, g.generalization_tolerance_m,
        g.simplify_algorithm, g.geom, g.area_m2, g.representative_point,
        g.inscribed_radius_m, g.centroid_point, g.containment_radius_m, g.max_radius_m
   FROM ruian_admin_unit_geometries g
- WHERE g.id IN (
-         SELECT n.id FROM ruian_admin_unit_geometries n
-          WHERE n.unit_id = %(unit_id)s AND n.registry_version_id = %(from_version_id)s
-            AND n.purpose <> 'pip'
-         UNION ALL
-         SELECT p.id
-           FROM ruian_admin_unit_geometries a
-           JOIN ruian_admin_unit_geometries p
-             ON p.purpose = 'pip' AND p.geom && a.geom
-            AND p.unit_id = a.unit_id AND p.registry_version_id = a.registry_version_id
-          WHERE a.unit_id = %(unit_id)s AND a.registry_version_id = %(from_version_id)s
-            AND a.purpose = 'authoritative')
+ WHERE g.unit_id = %(unit_id)s AND g.registry_version_id = %(from_version_id)s
+   AND g.purpose = 'authoritative'
 """
 
 
@@ -416,13 +408,13 @@ def load_feature(
         upgraded = upgrade_name(cur, unit_id, feature.name)
         cur.execute(_CARRY_SOURCE_SQL, {**unit, "wkb": feature.wkb})
         carried_from = cur.fetchone()
-        if carried_from is not None:
-            cur.execute(_CARRY_FORWARD_SQL, {**unit, "from_version_id": carried_from[0]})
-            return "carried", upgraded
-        cur.execute(_INSERT_AUTHORITATIVE, {**unit, "wkb": feature.wkb})
+        if carried_from is None:
+            cur.execute(_INSERT_AUTHORITATIVE, {**unit, "wkb": feature.wkb})
+        else:
+            cur.execute(_CARRY_AUTHORITATIVE_SQL, {**unit, "from_version_id": carried_from[0]})
         cur.execute(_INSERT_RENDER, {**unit, "tolerance_m": layer.render_tolerance_m})
         cur.execute(_INSERT_PIP, {**unit, "max_vertices": SUBDIVIDE_MAX_VERTICES})
-    return "derived", upgraded
+    return ("derived" if carried_from is None else "carried"), upgraded
 
 
 def _extract(pack: Path) -> Path:
