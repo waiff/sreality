@@ -80,7 +80,7 @@ describe('EstimationsBlock MF card', () => {
   beforeEach(() => fetchRuns.mockReset());
 
   it('never borrows a run frozen reference rent for a property without MF', async () => {
-    fetchRuns.mockResolvedValue({ data: [run], total: 1, limit: 50, offset: 0 });
+    fetchRuns.mockResolvedValue({ data: [run], total: 1, limit: 50, offset: 0, next_cursor: null });
     const { container } = renderBlock(property({}));
     await waitFor(() => expect(screen.getByTestId('run-body')).toBeInTheDocument());
     expect(container).not.toHaveTextContent(MF_LABEL);
@@ -89,14 +89,14 @@ describe('EstimationsBlock MF card', () => {
   });
 
   it('renders nothing at all with no MF result and no runs', async () => {
-    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0 });
+    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0, next_cursor: null });
     const { container } = renderBlock(property({}));
     await waitFor(() => expect(fetchRuns).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
   });
 
   it('shows the property value with the property yield', async () => {
-    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0 });
+    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0, next_cursor: null });
     const { container } = renderBlock(
       property({ mf_reference_rent: FROZEN_REF, mf_gross_yield_pct: 4.6 }),
     );
@@ -106,7 +106,7 @@ describe('EstimationsBlock MF card', () => {
 
   it('shows the property reason as its note, in place of any placeholder', async () => {
     const note = 'Poloha bytu zatím není určena.';
-    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0 });
+    fetchRuns.mockResolvedValue({ data: [], total: 0, limit: 50, offset: 0, next_cursor: null });
     const { container } = renderBlock(
       property({
         mf_reference_rent: { status: 'location_unknown', note } as unknown as ReferenceRent,
