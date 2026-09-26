@@ -1,8 +1,9 @@
 """The `listing_location` row, and the column list that IS its contract.
 
-26 columns, down from 81. What went and why is in migration 501's header; the short version
+27 columns, down from 81. What went and why is in migration 501's header; the short version
 is that 55 of them were provably NULL, reachable through a join, derivable at read, or the
-output of an engine this wave deletes. There is no property-grain twin any more:
+output of an engine this wave deletes. The 27th, `katastr_kod` (migration 566), came back by
+operator ruling (MF program D5): it replaces a per-read KÚ point-in-polygon. There is no property-grain twin any more:
 `property_location_current` was a verbatim copy of its winner's row (migration 493 measured
 `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows because the rollup IS the copy),
 nothing outside one pg_cron statement read it, and it was the drain's only cross-listing
@@ -19,7 +20,7 @@ from typing import Any
 
 from location_data.resolver.types import Resolution
 
-# The table, in DDL order. The gate that keeps the builder and migration 501 in step.
+# The table, in DDL order. The gate that keeps the builder and migrations 501 + 566 in step.
 LISTING_LOCATION_COLUMNS: tuple[str, ...] = (
     "listing_id",
     "geom",
@@ -29,6 +30,7 @@ LISTING_LOCATION_COLUMNS: tuple[str, ...] = (
     "match_confidence", "granularity", "uncertainty_radius_m",
     "country_status", "disputed",
     "resolver_version", "resolved_at", "claim_set_hash", "registry_version",
+    "katastr_kod",
 )
 
 # `geom` is built in SQL from the pair; `resolved_at` is the statement's own `now()`.

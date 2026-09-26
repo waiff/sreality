@@ -29,6 +29,15 @@ where it has an answer (on a registry-bound row the official street form `nám. 
 beats the portal's `Budovatelů`). The ONE thing the registry does not get to respell is an
 OPERATOR correction, which is also the only survivorship rule that outlived the policy
 table: `bind.operator_fields` is the whole of it.
+
+`katastr_kod` (PR-B, v5.4) is ONE rule under the same contract: **the single KÚ of the BOUND
+registry entity, else NULL** — a KÚ (or a ZSJ inside one) on the bound unit's chain; the one
+KÚ of a one-KÚ obec, which every entity inside it lies in; an address point's own KÚ; a street
+or část obce whose every RÚIAN door lies in one KÚ (the Q7 door rule). A portal pin never
+decides it, whatever the portal labels it: 66,165 idnes `no_exact_address` and 13,176 sreality
+`not_address` pins read as "precise" (`core.pin_is_precise`), so a pin-based KÚ would be a
+guess. Nothing else is NULL-masked specially: a foreign row loses it with every other code in
+`core`, and a disputed row keeps its bound entity's.
 """
 
 from __future__ import annotations
@@ -67,7 +76,7 @@ def fill(
     *,
     operator: dict[str, str] | None = None,
 ) -> Fill:
-    """-> the fourteen hierarchy/address values of the answer row, and its registry point."""
+    """-> the fifteen hierarchy/address values of the answer row, and its registry point."""
     operator = operator or {}
     values: dict[str, object] = {}
     chain = _chain(binding, registry)
@@ -110,6 +119,7 @@ def fill(
         or (point.psc if point is not None and point.psc else constraints.psc),
         lat=lat,
         lon=lon,
+        katastr_kod=_katastr_kod(binding, chain, point, registry),
     )
 
 
@@ -133,8 +143,9 @@ def position(filled: Fill, binding: Binding) -> Position:
 
 
 def _chain(binding: Binding, registry: RegistryView) -> tuple[AdminUnit, ...]:
-    """The ONE registry read FILL makes. The finest bound unit first, so its own level lands
-    on the row alongside every ancestor."""
+    """The registry read FILL makes for every row (the only other is `part_katastr_kod`, for
+    a část bound in a multi-KÚ obec). The finest bound unit first, so its own level lands on
+    the row alongside every ancestor, and a one-KÚ obec carries its sole KÚ."""
     if binding.cast_obce_unit_id is not None:
         chain = tuple(registry.admin_chain(binding.cast_obce_unit_id))
         if chain:
@@ -144,6 +155,30 @@ def _chain(binding: Binding, registry: RegistryView) -> tuple[AdminUnit, ...]:
     if binding.obec_kod is not None:
         return tuple(registry.admin_chain_by_code("obec", binding.obec_kod))
     return ()
+
+
+def _katastr_kod(
+    binding: Binding,
+    chain: tuple[AdminUnit, ...],
+    point: AddressPoint | None,
+    registry: RegistryView,
+) -> int | None:
+    """The single KÚ of the bound entity, else None. Each answer is the registry's own read
+    of that entity — the chain, the address point, the street's doors, the část's doors —
+    so no coordinate a portal supplied is ever asked where it lies."""
+    for unit in chain:
+        if unit.level == "katastralni_uzemi":
+            return unit.code
+    obec = next((unit for unit in chain if unit.level == "obec"), None)
+    if obec is not None and obec.sole_katastr_kod is not None:
+        return obec.sole_katastr_kod
+    if point is not None:
+        return point.katastr_kod
+    if binding.target_kind == "street":
+        return binding.street_katastr_kod
+    if binding.target_kind == "admin_unit" and chain and chain[0].level == "cast_obce":
+        return registry.part_katastr_kod(chain[0].unit_id)
+    return None
 
 
 def _registry_point(

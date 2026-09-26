@@ -1,5 +1,6 @@
 """`mf_reference()` -- THE MF reference rent (migration 565) -- proven against the replayed
-schema, plus the one rail that keeps its six codes and five notes in one place.
+schema with the three serving views that call it (migration 567), plus the one rail that
+keeps its six codes and five notes in one place.
 
 The matrix EXECUTES the function over a seeded rent map (a stale revision, an obec-priced
 town, a KÚ-priced town with a partial, a uniform and a non-uniform VK, a retired KÚ, an
@@ -8,9 +9,11 @@ the contract every reader renders by (value | range + note | note | none). Nothi
 CI can see any of it: PREPARE type-checks the function without computing a value, and the
 fake connections cannot evaluate SQL.
 
-The plan test proves the planner INLINES the function into the property lateral the
-serving views run (no `Function Scan`): a `SET` clause, `STRICT` or plpgsql body would turn
-it into a per-row call over every Browse row.
+The plan tests prove the planner INLINES the function into the property lateral and into
+each serving view (no `Function Scan`): a `SET` clause, `STRICT` or plpgsql body would turn
+it into a per-row call over every Browse row. The views are read back for the three shapes
+an advert can take (a value via its KÚ, a value via its obec, a town's range), and the
+portal lane's yield is proven to be the Browse read model's number (operator ruling Q8 b).
 
 DB tests run in CI's migrations lane (`TEST_DATABASE_URL`, `DB_RAILS_REQUIRED=1`) inside a
 transaction that is always rolled back; locally they skip. The rail tests are offline and
@@ -367,9 +370,8 @@ def test_a_non_flat_has_no_row(conn, category_main):
 
 # --- the estimation hand-off and the inlining -------------------------------------------
 
-# The lateral a serving view runs: the property's golden facts + its representative's
-# stored codes. The views themselves switch to it with PR-B's view swap, which also binds
-# the KÚ; until then they read the stored mf_* columns.
+# The lateral browse_projection and properties_public run (567): the property's golden
+# facts + its representative's stored codes, the KÚ included.
 _PROPERTY_MF_SQL = """
 SELECT mf.mf_reference_rent_czk, mf.mf_gross_yield_pct, mf.mf_reference_rent
   FROM properties p
@@ -377,12 +379,13 @@ SELECT mf.mf_reference_rent_czk, mf.mf_gross_yield_pct, mf.mf_reference_rent
   LEFT JOIN LATERAL mf_reference(
       p.category_main, p.category_type, p.disposition, p.area_m2, p.current_price_czk,
       p.condition, p.has_balcony, p.terrace, p.furnished, p.garage, p.has_lift,
-      p.building_type, ll.obec_kod, NULL::bigint, ll.country_status) mf ON true
+      p.building_type, ll.obec_kod, ll.katastr_kod, ll.country_status) mf ON true
  WHERE p.id = {pid:d}
 """
 
 
-def _property(cur: Any, *, obec: int, disposition: str, area: float, price: int) -> tuple[int, int]:
+def _property(cur: Any, *, obec: int, katastr: int | None = None, disposition: str,
+              area: float, price: int) -> tuple[int, int]:
     cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
     pid = int(cur.fetchone()[0])
     cur.execute(
@@ -404,10 +407,10 @@ def _property(cur: Any, *, obec: int, disposition: str, area: float, price: int)
     cur.execute(
         "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
         "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
-        "  registry_version, obec_kod) "
+        "  registry_version, obec_kod, katastr_kod) "
         "VALUES (%s, ST_SetSRID(ST_MakePoint(15.59, 49.40), 4326), 'exact', 'building', 5, "
-        "  'cz', 'test', '\\x00'::bytea, 'test', %s)",
-        (lid, obec),
+        "  'cz', 'test', '\\x00'::bytea, 'test', %s, %s)",
+        (lid, obec, katastr),
     )
     return pid, lid
 
@@ -418,7 +421,21 @@ def adverts(conn):
         return {
             "coarse": _property(cur, obec=O_KU, disposition="3+1", area=75, price=5_100_000),
             "value": _property(cur, obec=O_OBEC, disposition="3+1", area=75, price=5_100_000),
+            "ku": _property(cur, obec=O_KU, katastr=K1, disposition="3+1", area=75,
+                            price=5_100_000),
         }
+
+
+# What each advert reads (3+1 / 75 m2 / 5.1M, balcony + garage, no lift: VK3 adjustments
+# 5 + 37): the KÚ's own cell, the obec's cell, or -- a KÚ-priced town with no KÚ bound --
+# no value and the town's range.
+_EXPECTED = {
+    "ku": ((195 + 42) * 75, 4.18),
+    "value": ((220 + 42) * 75, 4.62),
+    "coarse": (None, None),
+}
+_RANGE = {"per_m2_min": 237, "per_m2_max": 280, "rent_min_czk": 17_775,
+          "rent_max_czk": 21_000, "yield_min_pct": 4.18, "yield_max_pct": 4.94}
 
 
 def _one(conn: Any, sql: str) -> tuple[Any, ...]:
@@ -437,12 +454,12 @@ def test_the_property_lateral_reads_the_golden_facts_and_the_stored_codes(conn, 
     assert detail["note"] == NOTES["territory_coarse"] and "range" in detail
 
 
-@pytest.mark.parametrize("advert", ["value", "coarse"])
+@pytest.mark.parametrize("advert", ["value", "coarse", "ku"])
 @needs_db
 def test_an_estimation_of_our_advert_hands_the_propertys_facts_to_the_measure(conn, adverts,
                                                                              advert):
     """The run's reference equals the property's: the same golden facts and the same
-    stored codes reach the same function."""
+    stored codes -- the KÚ included -- reach the same function."""
     from api.estimation_runs import _MF_FACT_KEYS, _SUBJECT_MF_FACTS_SQL
     from toolkit.rent_map import MF_ENGINE, compute_reference_rent
 
@@ -453,6 +470,11 @@ def test_an_estimation_of_our_advert_hands_the_propertys_facts_to_the_measure(co
     ref = compute_reference_rent(conn, disposition="3+1", area_m2=75, **facts)
     (_, _, detail) = _one(conn, _PROPERTY_MF_SQL.format(pid=pid))
     assert ref == {**detail, "engine": MF_ENGINE}
+    if advert == "ku":
+        assert facts["katastr_kod"] == K1
+        assert (ref["status"], ref["territory"]["level"], ref["territory"]["ruian_code"],
+                ref["monthly_rent_czk"]) == ("ok", "ku", K1, _EXPECTED["ku"][0])
+        assert "range" not in ref
 
 
 def _plan_nodes(node: dict[str, Any]):
@@ -497,3 +519,88 @@ def test_an_ingested_revision_is_live_at_its_refresh_with_nothing_to_recompute(c
         assert mf(conn, obec_kod=O_KU, has_lift=False)[2]["status"] == "no_rent_cell"
         raise psycopg.Rollback(tx)
     assert mf(conn)[2]["source_revision"] == _SEEDED["latest"]
+
+
+# --- the serving views (567) -------------------------------------------------------------
+
+def _numbers(rent: Any, yld: Any) -> tuple[Any, Any]:
+    return (rent, None if yld is None else float(yld))
+
+
+@pytest.mark.parametrize("advert", ["ku", "value", "coarse"])
+@needs_db
+def test_properties_public_reads_the_measure_with_the_stored_ku(conn, adverts, advert):
+    rent, yld, detail = _one(conn, "SELECT mf_reference_rent_czk, mf_gross_yield_pct, "
+                                   "mf_reference_rent FROM properties_public "
+                                   f"WHERE property_id = {adverts[advert][0]:d}")
+    assert _numbers(rent, yld) == _EXPECTED[advert]
+    if advert == "coarse":
+        assert (detail["status"], detail["note"]) == ("territory_coarse",
+                                                      NOTES["territory_coarse"])
+        assert detail["range"] == _RANGE and "monthly_rent_czk" not in detail
+    else:
+        assert _is_value(detail) and detail["status"] == "ok"
+        assert detail["territory"]["level"] == ("ku" if advert == "ku" else "obec")
+
+
+@pytest.mark.parametrize("advert", ["ku", "value", "coarse"])
+@needs_db
+def test_browse_projection_reads_the_measure_with_the_stored_ku(conn, adverts, advert):
+    rent, yld = _one(conn, "SELECT mf_reference_rent_czk, mf_gross_yield_pct "
+                           "FROM browse_projection "
+                           f"WHERE property_id = {adverts[advert][0]:d}")
+    assert _numbers(rent, yld) == _EXPECTED[advert]
+
+
+_VIEW_READS = {
+    "properties_public": ("SELECT * FROM properties_public WHERE property_id = {pid:d}",
+                          "rent_map_cells"),
+    "browse_projection": ("SELECT * FROM browse_projection WHERE property_id = {pid:d}",
+                          "rent_map_cells"),
+    "listing_feed_public": ("SELECT * FROM listing_feed_public WHERE property_id = {pid:d}",
+                            "browse_list"),
+    "listing_feed_visible": ("SELECT * FROM listing_feed_visible() WHERE property_id = {pid:d}",
+                             "browse_list"),
+}
+
+
+@pytest.mark.parametrize("view", sorted(_VIEW_READS))
+@needs_db
+def test_each_serving_view_inlines_the_function_it_reads_mf_through(conn, adverts, view):
+    """RED by: anything that makes mf_reference() or browse_list_mf() (or the dismissal-
+    aware listing_feed_visible() over the feed) a Function Scan -- one call per row, and
+    a scan whose body the planner cannot see, so the relation it reads vanishes from the
+    plan too."""
+    sql, relation = _VIEW_READS[view]
+    (plan,) = _one(conn, "EXPLAIN (FORMAT JSON) " + sql.format(pid=adverts["ku"][0]))
+    nodes = list(_plan_nodes((plan if isinstance(plan, list) else json.loads(plan))[0]["Plan"]))
+    assert not [n for n in nodes if n.get("Function Name") in
+                ("mf_reference", "browse_list_mf", "listing_feed_visible")]
+    assert relation in {n.get("Relation Name") for n in nodes}
+
+
+@needs_db
+def test_the_portal_lane_serves_the_browse_read_models_yield(conn, adverts):
+    """Q8 (b): an advert on the portal lane shows its PROPERTY's yield, read from browse_list
+    by property_id -- nothing until the read model holds the property, then exactly its
+    number (the rebuild's own `select * from browse_projection`, via sync_browse_list)."""
+    from toolkit.browse_read_model import sync_browse_list
+
+    pids = [pid for pid, _ in adverts.values()]
+    feed_sql = ("SELECT f.property_id, f.mf_gross_yield_pct FROM {src} f "
+                "WHERE f.property_id = ANY(%s) ORDER BY 1")
+    with conn.cursor() as cur:
+        cur.execute(feed_sql.format(src="listing_feed_public"), (pids,))
+        assert [y for _, y in cur.fetchall()] == [None] * len(pids)
+
+        sync_browse_list(conn, pids)
+        cur.execute("SELECT property_id, mf_gross_yield_pct FROM browse_list "
+                    "WHERE property_id = ANY(%s) ORDER BY 1", (pids,))
+        read_model = cur.fetchall()
+        assert len(read_model) == len(pids)
+        for src in ("listing_feed_public", "listing_feed_visible()"):
+            cur.execute(feed_sql.format(src=src), (pids,))
+            assert cur.fetchall() == read_model
+    by_pid = {pid: (None if y is None else float(y)) for pid, y in read_model}
+    assert {a: by_pid[pid] for a, (pid, _) in adverts.items()} == {
+        a: yld for a, (_, yld) in _EXPECTED.items()}

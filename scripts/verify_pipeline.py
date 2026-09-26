@@ -67,6 +67,7 @@ from urllib.parse import urlencode
 import requests
 
 from location_data import location_steps
+from location_data.resolver.version import RESOLVER_VERSION
 from scraper import attribute_contract, field_census, media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
@@ -3011,6 +3012,19 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
 # contract gap the S2 rewrites drive to zero, and it is not a chain step.
 _LOCATION_STEP_FLAGS = location_steps.step_flags_sql()
 
+# The KÚ arm's one excuse (MF PR-B): an obec holding a KÚ the boundary loader recorded as
+# `degenerate_boundary_geometry` at the current version has a hole no address point can be
+# placed in, so its address-grain rows may lack a KÚ. `boundary_load_failed` is never one.
+_DEGENERATE_KU_OBCE_SQL = """
+    SELECT o.code
+      FROM registry_load_discrepancies d
+      JOIN ruian_admin_units k ON k.level = 'katastralni_uzemi' AND k.code = d.entity_code
+                              AND k.valid_to IS NULL
+      JOIN ruian_admin_units o ON o.id = k.parent_id
+     WHERE d.entity_kind = 'katastralni_uzemi'
+       AND d.discrepancy = 'degenerate_boundary_geometry'
+       AND d.registry_version_id = (SELECT id FROM registry_versions WHERE is_current)"""
+
 _LOCATION_TOWN_COVERAGE_SQL = f"""
     SELECT l.source,
            count(*)                                                   AS listings_n,
@@ -3020,7 +3034,13 @@ _LOCATION_TOWN_COVERAGE_SQL = f"""
                               AND ll.obec_kod IS NULL)                AS cz_no_town_n,
            count(*) FILTER (WHERE {_LOCATION_STEP_FLAGS["has_town"]}) AS town_n,
            count(*) FILTER (WHERE NOT {_LOCATION_STEP_FLAGS["located"]})
-                                                                      AS hidden_n
+                                                                      AS hidden_n,
+           count(*) FILTER (WHERE ll.country_status = 'cz'
+                              AND gr.is_address_grain
+                              AND ll.resolver_version = %s
+                              AND ll.katastr_kod IS NULL
+                              AND ll.obec_kod NOT IN ({_DEGENERATE_KU_OBCE_SQL}))
+                                                                      AS address_no_ku_n
       FROM listings l
       LEFT JOIN listing_location ll ON ll.listing_id = l.id
       LEFT JOIN location_granularity_rank gr ON gr.granularity = ll.granularity
@@ -3078,19 +3098,27 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
     counts, no threshold: the invariant is zero, and a number that is not zero names the
     portal whose contract has to change.
 
+    The KÚ arm (MF PR-B) is the same kind of invariant: a Czech ADDRESS-GRAIN row
+    (`location_granularity_rank.is_address_grain`, never the enum's order) resolved by the
+    current `RESOLVER_VERSION` has a `katastr_kod`, because an address point lies in exactly
+    one KÚ — so a non-zero count is the 2026-09-13 failure class (KÚ geometry missing at the
+    registry version) caught directly. Rows still at an older version are the re-resolve's
+    backlog, not a defect; an obec holding a degenerate KÚ is excused.
+
     `hidden` (W5) is the one number here that is not a defect: the listings the consumer rule
     refuses to serve. It rides the same read so the number the audit page shows is visible
     from the pipeline verifier too, and it never changes the status. The registry-liveness
     arm (`_registry_liveness`) turns it red on its own."""
     stalled, registry = _registry_liveness(conn)
     stall_note = f" Registry stalled: {'; '.join(stalled)}." if stalled else ""
-    rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL)
+    rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL, (RESOLVER_VERSION,))
     cells = [{"source": s, "listings": int(n), "no_row": int(nr), "cz_no_town": int(nt),
-              "town": int(t), "hidden": int(h),
+              "town": int(t), "hidden": int(h), "address_no_ku": int(nk),
               "town_share": (int(t) / int(n)) if int(n) else None}
-             for s, n, nr, nt, t, h in rows]
+             for s, n, nr, nt, t, h, nk in rows]
     no_row = sum(c["no_row"] for c in cells)
     cz_no_town = sum(c["cz_no_town"] for c in cells)
+    address_no_ku = sum(c["address_no_ku"] for c in cells)
     hidden = sum(c["hidden"] for c in cells)
     listings = sum(c["listings"] for c in cells)
     if not cells:
@@ -3107,7 +3135,7 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         for c in sorted(cells, key=lambda c: -c["hidden"]) if c["hidden"]
     )
     missing = no_row + cz_no_town
-    status = "fail" if missing or stalled else "ok"
+    status = "fail" if missing or stalled or address_no_ku else "ok"
     message = (
         f"{missing:,} listings have no town "
         f"({no_row:,} without an answer row, {cz_no_town:,} Czech without obec_kod): "
@@ -3115,6 +3143,13 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         if missing
         else f"Every one of {listings:,} listings has an answer row and every Czech one a town."
     )
+    if address_no_ku:
+        message += (
+            f" {address_no_ku:,} Czech address-grain rows at {RESOLVER_VERSION} have no KÚ: "
+            + "; ".join(f"{c['source']} {c['address_no_ku']:,}"
+                        for c in cells if c["address_no_ku"])
+            + "."
+        )
     if hidden:
         message += (
             f" Consumers currently hide {hidden:,} unresolved listings ({hidden_by_source})."
@@ -3124,8 +3159,8 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         "status": status,
         "value": missing,
         "details": {"listings": listings, "no_row": no_row, "cz_no_town": cz_no_town,
-                    "hidden": hidden, "cells": cells, "offenders": offenders,
-                    "registry": registry},
+                    "address_no_ku": address_no_ku, "hidden": hidden, "cells": cells,
+                    "offenders": offenders, "registry": registry},
         "message": message + stall_note,
     }
 

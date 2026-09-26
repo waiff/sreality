@@ -140,18 +140,18 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
   test). It reads ONLY the matview `rent_map_cells` (latest revision as `ku`/`obec`/`town` cells
   with the adjustments as columns), never geometry. Nothing WRITES MF any more (the hourly job
   and the merge/detach recompute are gone); estimations and `/estimate_yield` call the measure.
-- **Serving, until PR-B:** `browse_projection` / `properties_public` / `listing_feed_public`
-  still read the stored `properties.mf_*` / `listings.mf_*` — writer-less, frozen at their last
-  write. PR-B's ONE view swap calls the measure with `ll.katastr_kod` (the portal lane takes the
-  PROPERTY's yield from `browse_list`, Q8 b); swapping with a NULL KÚ would put every flat in a
-  KÚ-priced town (79 %) on a range and out of the yield filter. PR-F drops the stored columns.
+- **Serving, after 567 applies:** `browse_projection` / `properties_public` call the measure in
+  their property lateral with the representative's `ll.obec_kod` + `ll.katastr_kod` (566, FILL
+  v5.4: the single KÚ of the bound entity, never a pin); `listing_feed_public` takes the
+  PROPERTY's yield from `browse_list` via `browse_list_mf(property_id)` (Q8 b). Until 567 applies
+  they read the stored, writer-less `properties.mf_*` / `listings.mf_*`; PR-F drops those.
 - **Rules:** flats only (else no row). VK = leading integer of the disposition clamped 1..4;
   novostavba = `condition = 'novostavba'` (NULL → older column, adjustments kept); rent =
   round((base + adjustments) × area); yield only for `prodej` with price ≥ 100 000, else the
   rent stands without one. Cell: a bound KÚ's cell → the obec's cell → (KÚ bound) `no_rent_cell`
   → the town row: one price across every current KÚ → value (`territory.basis='town_uniform'`),
-  else the town's published range + note (`territory_coarse`). Until `listing_location.katastr_kod`
-  lands every caller passes NULL, i.e. "location known to town level".
+  else the town's published range + note (`territory_coarse`). A NULL `katastr_kod` (no KÚ-grain
+  bind; any subject not in our DB) reads as "location known to town level".
 - **The result's SHAPE is the render contract:** value (`monthly_rent_czk`) | range
   (`range{per_m2_min/max, rent_min/max_czk, yield_min/max_pct?}` + `note`) | note (`status` +
   `note`) | none (NULL). Six codes (`ok`, `territory_coarse`, `no_rent_cell`, `not_in_cz`,

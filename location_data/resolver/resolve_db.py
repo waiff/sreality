@@ -38,9 +38,9 @@ The ~62 % cache plateau was those point-keyed questions; with the rest gone, the
 misses are two per distinct pin.
 
 The registry view here answers exactly the questions `types.RegistryView` declares, so the
-pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is deliberate:
-containment wants the `ST_Subdivide`d `pip` geometries, and preferring `pip` when rows exist
-degrades to the authoritative polygon when the boundary loader has not populated them.
+pure core cannot reach past it into SQL. Containment reads the `ST_Subdivide`d `pip` pieces
+only: they tile the authoritative polygon and every unit of every loaded version carries both
+(checked 2026-09-26), so there is no "partially loaded pack" left to fall back from.
 """
 
 from __future__ import annotations
@@ -183,16 +183,60 @@ _SOURCES_BULK_SQL = "SELECT id, source FROM listings WHERE id = ANY(%s::bigint[]
 
 # ------------------------------------------------------------------ the registry reads
 
+# THE KÚ OF A POINT (PR-B): the katastrální území whose `pip` piece covers it at the view's
+# registry version — one GiST probe on `ruian_aug_pip_gist`, the same shape as
+# `containing_obec` (0.4 ms/point warm, measured over 639 sampled address points). It is asked
+# of REGISTRY points only (an address point, a door), never of a portal pin. `ORDER BY code`
+# only makes a door that sits exactly ON a shared border replay to the same KÚ every time, and
+# the `OFFSET 0` fence is what keeps the probe the DRIVING side: with a bare `ORDER BY u.code
+# LIMIT 1` the planner walked all 13,074 KÚ in code order against the probe — 16 ms a point.
+def _katastr_covering(point: str) -> str:
+    return f"""
+    SELECT kc.id, kc.code
+      FROM (SELECT u.id, u.code
+              FROM ruian_admin_unit_geometries g
+              JOIN ruian_admin_units u ON u.id = g.unit_id
+             WHERE g.registry_version_id = %s
+               AND g.purpose = 'pip'
+               AND u.level = 'katastralni_uzemi'
+               AND ST_Covers(g.geom, {point})
+            OFFSET 0) kc
+     ORDER BY kc.code
+     LIMIT 1"""
+
+
+# THE DOOR RULE (operator Q7, 2026-09-25): a street or část obce is in a KÚ when EVERY one of
+# its valid RÚIAN doors is. Asked door by door it is a GiST probe each — 1.7 s for the
+# 9,193-door část measured 2026-09-26 — so it is asked ONCE: the KÚ covering the lowest-kód
+# door, kept only when that KÚ's authoritative polygon, read by `(unit_id, version)` on
+# `ruian_aug_unique_nonpip`, covers the whole door set (22 ms for the same část). The pip
+# pieces tile that polygon (pip = authoritative for every unit at every loaded version,
+# checked 2026-09-26), so the two answers are the same answer. No door -> no row -> NULL.
+def _doors_katastr(doors: str) -> str:
+    return f"""
+SELECT k.code
+  FROM (SELECT d.geom FROM {doors} d ORDER BY d.kod_adm LIMIT 1) f
+  CROSS JOIN LATERAL ({_katastr_covering("f.geom")}) k
+  JOIN ruian_admin_unit_geometries a
+    ON a.unit_id = k.id AND a.registry_version_id = %s AND a.purpose = 'authoritative'
+ WHERE ST_Covers(a.geom, (SELECT ST_Collect(d.geom) FROM {doors} d))"""
+
+
 _ADDRESS_POINT_COLUMNS = """
        ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
        ST_Y(ap.geom), ST_X(ap.geom), ap.ulice_kod, s.name_norm, s.name,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
-       ap.cast_obce_unit_id, ap.cast_obce_kod"""
+       ap.cast_obce_unit_id, ap.cast_obce_kod, ku.code"""
 
-_ADDRESS_POINT_SQL = f"""
-SELECT {_ADDRESS_POINT_COLUMNS}
+# Every address-point read answers its KÚ in the SAME round trip — the drain's cost is round
+# trips, and FILL reads the bound point anyway. Binds the registry version FIRST.
+_ADDRESS_POINT_FROM = f"""
   FROM ruian_address_points ap
   LEFT JOIN ruian_streets s ON s.id = ap.street_id
+  LEFT JOIN LATERAL ({_katastr_covering("ap.geom")}) ku ON true"""
+
+_ADDRESS_POINT_SQL = f"""
+SELECT {_ADDRESS_POINT_COLUMNS}{_ADDRESS_POINT_FROM}
  WHERE ap.kod_adm = %s AND ap.valid_to IS NULL
 """
 
@@ -213,9 +257,7 @@ _OBEC_UNIT_ID_SUBQUERY = """
 """
 
 _ADDRESS_POINTS_BY_NUMBER_SQL = f"""
-SELECT {_ADDRESS_POINT_COLUMNS}
-  FROM ruian_address_points ap
-  LEFT JOIN ruian_streets s ON s.id = ap.street_id
+SELECT {_ADDRESS_POINT_COLUMNS}{_ADDRESS_POINT_FROM}
  WHERE ap.obec_unit_id IN {_OBEC_UNIT_ID_SUBQUERY.strip()}
    AND ap.valid_to IS NULL
    AND (%s::text IS NULL OR s.name_norm = %s::text)
@@ -251,9 +293,11 @@ SELECT s.code, s.name, s.name_norm, u.code, s.id
 # so the kód form would plan a scan of three million rows for a question asked once per
 # listing that binds a street. `::geography` on the distance because the answer is METRES;
 # the centroid stays geometry (4326 degrees), which is what `ST_Y`/`ST_X` want.
-_STREET_POINT_SQL = """
+#
+# The same door set answers the street's KÚ (PR-B, the door rule) in the same round trip.
+_STREET_POINT_SQL = f"""
 WITH p AS (
-    SELECT ap.geom
+    SELECT ap.kod_adm, ap.geom
       FROM ruian_address_points ap
      WHERE ap.street_id = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 ), c AS (
@@ -261,9 +305,21 @@ WITH p AS (
 )
 SELECT ST_Y(c.g), ST_X(c.g),
        MAX(ST_Distance(c.g::geography, p.geom::geography)),
-       count(*)
+       count(*),
+       ({_doors_katastr("p")})
   FROM p, c
  GROUP BY 1, 2
+"""
+
+# A část obce's KÚ by the same door rule. `ruian_ap_cast_obce (cast_obce_unit_id)` is its
+# index. Asked lazily, for a row bound to a část in a multi-KÚ obec only.
+_PART_KATASTR_SQL = f"""
+WITH p AS (
+    SELECT ap.kod_adm, ap.geom
+      FROM ruian_address_points ap
+     WHERE ap.cast_obce_unit_id = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
+)
+{_doors_katastr("p")}
 """
 
 # The unit column list `_admin_unit` unpacks positionally, over ONE point expression: the
@@ -318,8 +374,12 @@ SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
 # loader's layer list (`ruian_boundaries.LAYERS`) is stát → kraj → okres → ORP → POU → obec
 # → KÚ — so FILL walks up to the first ancestor that HAS a point, and it can only walk what
 # this answer carries.
+#
+# An OBEC row also answers its one KÚ child (PR-B): every entity inside a one-KÚ obec lies in
+# that KÚ by the hierarchy alone, so FILL needs no geometry for 3,942 of the 6,258 obce. An
+# index read on `ruian_admin_units_parent`, in the round trip FILL already makes.
 _ADMIN_CHAIN_TAIL = f"""
-SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
+SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[], ks.code
   FROM chain c
   JOIN ruian_admin_units u ON u.id = c.id
   LEFT JOIN LATERAL (
@@ -329,6 +389,13 @@ SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
        AND g.registry_version_id = %s
        AND g.purpose = 'authoritative'
      LIMIT 1) gp ON true
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(*) = 1 THEN min(k.code) END AS code
+      FROM ruian_admin_units k
+     WHERE u.level = 'obec'
+       AND k.parent_id = u.id
+       AND k.level = 'katastralni_uzemi'
+       AND k.valid_to IS NULL) ks ON true
  ORDER BY c.depth
 """
 
@@ -372,32 +439,28 @@ SELECT DISTINCT obec_kod FROM ruian_address_points
 _PT = "ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)"
 _POINTS = "unnest(%s::int[], %s::double precision[], %s::double precision[]) AS p(idx, lat, lon)"
 
-# `purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist (geom) WHERE purpose =
-# 'pip'` — an IN-list does not imply the partial index's predicate — so the planner fell back
-# to the unpartitioned index and ran ST_Covers against RAW obec polygons: 194 ms and 1,225
-# buffers, nearly all of it detoasting geometry the pip pieces exist to avoid. Split into two
-# branches under one LIMIT instead: `Limit -> Append` stops at the first row, so the
-# authoritative branch is `never executed` whenever a pip piece covers the point. Measured:
-# 0.24 ms/point. The authoritative branch stays because boundaries load per unit.
-_CONTAINING_OBEC_BRANCH = f"""
+# THE ONE CONTAINING-OBEC STATEMENT. `api/maps.py` runs this same text for a Mapy pick and
+# for an estimation subject that has no stored location, so a chip, a listing and an
+# estimation can never disagree about which town a point is in.
+#
+# `purpose = 'pip'` is what lets `ruian_aug_pip_gist (geom) WHERE purpose = 'pip'` serve it:
+# the subdivided pieces are small, so ST_Covers never detoasts a raw obec polygon (194 ms and
+# 1,225 buffers when an IN-list forced exactly that). Measured: 0.24 ms/point. The
+# authoritative fallback branch it used to carry (and the copy in `api/maps.py`) is gone: it
+# was reachable only for a version loaded with `--allow-missing-pip`, and pip = authoritative
+# for every unit of every loaded version (checked 2026-09-26).
+CONTAINING_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
     SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
-       AND g.purpose = '{{purpose}}'
+       AND g.purpose = 'pip'
        AND u.level = 'obec'
        AND ST_Covers(g.geom, {_PT})
      LIMIT 1
-"""
-
-_CONTAINING_OBEC_SQL = f"""
-SELECT p.idx, c.*
-  FROM {_POINTS}
-  CROSS JOIN LATERAL (
-    ({_CONTAINING_OBEC_BRANCH.format(purpose="pip")})
-    UNION ALL
-    ({_CONTAINING_OBEC_BRANCH.format(purpose="authoritative")})
-    LIMIT 1
   ) c
 """
 
@@ -410,37 +473,29 @@ SELECT p.idx, c.*
 #   deliberate under-estimate of metres per degree of longitude (69,900 at CZ's northernmost
 #   51.1°), so the box strictly CONTAINS the geodesic circle and cannot hide a row the exact
 #   `ST_DWithin` would have kept.
-# * the subdivided `pip` pieces preferred over the raw polygon, same two-branch form and same
-#   reason as `containing_obec`: the pieces TILE the polygon, so the minimum distance over
-#   them is the distance to the polygon — and with the small pieces the geography cast is
-#   cheap. All 6,258 obce carry pip rows today, so the authoritative branch is the
-#   partially-loaded-pack fallback only. Measured: 2.95 ms/point.
+# * the subdivided `pip` pieces, never the raw polygon, for the same reason as
+#   `containing_obec`: the pieces TILE the polygon, so the minimum distance over them is the
+#   distance to the polygon — and with the small pieces the geography cast is cheap.
+#   Measured: 2.95 ms/point.
 #
 # It is reached only when `containing_obec` misses (~1 % of listings), which is also why it is
 # NOT in `warm_points`: warming it would run this lateral for all 250 of a slice's points to
 # answer the two or three that ask.
-_NEAREST_OBEC_BRANCH = f"""
+_NEAREST_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
     SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[],
            ST_Distance(g.geom::geography, {_PT}::geography) AS d
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
-       AND g.purpose = '{{purpose}}'
+       AND g.purpose = 'pip'
        AND u.level = 'obec'
        AND g.geom && ST_Expand({_PT}, %s / 60000.0)
        AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
      ORDER BY 13
      LIMIT 1
-"""
-
-_NEAREST_OBEC_SQL = f"""
-SELECT p.idx, c.*
-  FROM {_POINTS}
-  CROSS JOIN LATERAL (
-    ({_NEAREST_OBEC_BRANCH.format(purpose="pip")})
-    UNION ALL
-    ({_NEAREST_OBEC_BRANCH.format(purpose="authoritative")})
-    LIMIT 1
   ) c
 """
 
@@ -464,7 +519,7 @@ INSERT INTO listing_location AS ll (
     kraj_kod, okres_kod, obec_kod, cast_obce_kod, ulice_kod, ruian_adm_kod,
     match_confidence, granularity, uncertainty_radius_m,
     country_status, disputed,
-    resolver_version, resolved_at, claim_set_hash, registry_version)
+    resolver_version, resolved_at, claim_set_hash, registry_version, katastr_kod)
 VALUES (
     %(listing_id)s,
     CASE WHEN %(lat)s::double precision IS NULL THEN NULL
@@ -476,7 +531,8 @@ VALUES (
     %(match_confidence)s::match_confidence, %(granularity)s::location_granularity,
     %(uncertainty_radius_m)s,
     %(country_status)s::country_status, %(disputed)s,
-    %(resolver_version)s, now(), decode(%(claim_set_hash)s, 'hex'), %(registry_version)s)
+    %(resolver_version)s, now(), decode(%(claim_set_hash)s, 'hex'), %(registry_version)s,
+    %(katastr_kod)s)
 ON CONFLICT (listing_id) DO UPDATE SET
     geom = EXCLUDED.geom, country_code = EXCLUDED.country_code,
     kraj_name = EXCLUDED.kraj_name, okres_name = EXCLUDED.okres_name,
@@ -490,7 +546,8 @@ ON CONFLICT (listing_id) DO UPDATE SET
     uncertainty_radius_m = EXCLUDED.uncertainty_radius_m,
     country_status = EXCLUDED.country_status, disputed = EXCLUDED.disputed,
     resolver_version = EXCLUDED.resolver_version, resolved_at = now(),
-    claim_set_hash = EXCLUDED.claim_set_hash, registry_version = EXCLUDED.registry_version
+    claim_set_hash = EXCLUDED.claim_set_hash, registry_version = EXCLUDED.registry_version,
+    katastr_kod = EXCLUDED.katastr_kod
 WHERE ll.listing_id = EXCLUDED.listing_id
 """
 
@@ -549,7 +606,7 @@ def sources_bulk(conn: psycopg.Connection, listing_ids: Sequence[int]) -> dict[i
         return {int(r[0]): str(r[1]) for r in cur.fetchall()}
 
 
-def _admin_unit(row: Sequence[Any]) -> AdminUnit:
+def _admin_unit(row: Sequence[Any], *, sole_katastr_kod: int | None = None) -> AdminUnit:
     path = str(row[5] or "")
     return AdminUnit(
         unit_id=int(row[0]), level=str(row[1]), code=int(row[2]), name=str(row[3]),
@@ -559,8 +616,13 @@ def _admin_unit(row: Sequence[Any]) -> AdminUnit:
         qualifier=row[9], homonym_count=int(row[10] or 1),
         psc_set=tuple(str(p).strip() for p in (row[11] or ())),
         obec_kod=_path_code(path, "b"), okres_kod=_path_code(path, "o"),
-        kraj_kod=_path_code(path, "k"),
+        kraj_kod=_path_code(path, "k"), sole_katastr_kod=sole_katastr_kod,
     )
+
+
+def _chain_unit(row: Sequence[Any]) -> AdminUnit:
+    """A chain row: the unit columns, then the obec's one KÚ child (NULL off an obec row)."""
+    return _admin_unit(row[:12], sole_katastr_kod=row[12])
 
 
 def _path_code(path: str, prefix: str) -> int | None:
@@ -579,7 +641,7 @@ def _address_point(row: Sequence[Any]) -> AddressPoint:
         lon=None if row[5] is None else float(row[5]),
         ulice_kod=row[6], street_name_norm=row[7], street_name=row[8],
         cislo_domovni=row[9], cislo_orientacni=row[10], znak_orientacniho=row[11],
-        cast_obce_unit_id=row[12], cast_obce_kod=row[13],
+        cast_obce_unit_id=row[12], cast_obce_kod=row[13], katastr_kod=row[14],
     )
 
 
@@ -633,7 +695,7 @@ class SqlRegistryView:
         return rows
 
     def address_point(self, kod_adm: int) -> AddressPoint | None:
-        rows = self._rows("address_point", _ADDRESS_POINT_SQL, (kod_adm,))
+        rows = self._rows("address_point", _ADDRESS_POINT_SQL, (self._version, kod_adm))
         return _address_point(rows[0]) if rows else None
 
     def address_points_by_number(
@@ -643,8 +705,8 @@ class SqlRegistryView:
         rows = self._rows(
             "address_points_by_number",
             _ADDRESS_POINTS_BY_NUMBER_SQL,
-            (obec_kod, street_name_norm, street_name_norm, cislo_domovni, cislo_domovni,
-             cislo_orientacni, cislo_orientacni),
+            (self._version, obec_kod, street_name_norm, street_name_norm, cislo_domovni,
+             cislo_domovni, cislo_orientacni, cislo_orientacni),
         )
         return [_address_point(r) for r in rows]
 
@@ -662,13 +724,22 @@ class SqlRegistryView:
         aggregate comes back with a NULL centroid and a zero count."""
         if street.id is None:
             return None
-        rows = self._rows("street_point", _STREET_POINT_SQL, (street.id,))
+        rows = self._rows(
+            "street_point", _STREET_POINT_SQL, (street.id, self._version, self._version)
+        )
         if not rows or rows[0][0] is None or rows[0][1] is None:
             return None
         return StreetPoint(
             lat=float(rows[0][0]), lon=float(rows[0][1]),
             extent_m=float(rows[0][2] or 0.0), point_count=int(rows[0][3] or 0),
+            katastr_kod=rows[0][4],
         )
+
+    def part_katastr_kod(self, unit_id: int) -> int | None:
+        rows = self._rows(
+            "part_katastr_kod", _PART_KATASTR_SQL, (unit_id, self._version, self._version)
+        )
+        return int(rows[0][0]) if rows else None
 
     def admin_units_by_name(self, name_norm: str, *, levels: Sequence[str] = ()) -> list[AdminUnit]:
         wanted = list(levels)
@@ -682,13 +753,13 @@ class SqlRegistryView:
 
     def admin_chain(self, unit_id: int) -> list[AdminUnit]:
         return [
-            _admin_unit(r)
+            _chain_unit(r)
             for r in self._rows("admin_chain", _ADMIN_CHAIN_SQL, (unit_id, self._version))
         ]
 
     def admin_chain_by_code(self, level: str, code: int) -> list[AdminUnit]:
         return [
-            _admin_unit(r)
+            _chain_unit(r)
             for r in self._rows(
                 "admin_chain_by_code", _ADMIN_CHAIN_BY_CODE_SQL, (level, code, self._version)
             )
@@ -707,8 +778,7 @@ class SqlRegistryView:
             return {}
         idx, lats, lons = _point_arrays(points)
         rows = self._rows(
-            "containing_obec", _CONTAINING_OBEC_SQL,
-            (idx, lats, lons, self._version, self._version),
+            "containing_obec", CONTAINING_OBEC_SQL, (idx, lats, lons, self._version)
         )
         return {int(r[0]): _admin_unit(r[1:]) for r in rows}
 
@@ -723,7 +793,7 @@ class SqlRegistryView:
         idx, lats, lons = _point_arrays([(lat, lon)])
         rows = self._rows(
             "nearest_obec_within", _NEAREST_OBEC_SQL,
-            (idx, lats, lons, self._version, max_m, max_m, self._version, max_m, max_m),
+            (idx, lats, lons, self._version, max_m, max_m),
         )
         if not rows:
             return None
@@ -896,6 +966,11 @@ class CachedRegistryView:
         return self._cache.get(
             ("street_index", obec_kod),
             lambda: composite.build_street_index(self.streets_in_obec(obec_kod)),
+        )
+
+    def part_katastr_kod(self, unit_id: int) -> int | None:
+        return self._cache.get(
+            ("part_katastr_kod", unit_id), lambda: self._inner.part_katastr_kod(unit_id)
         )
 
     def admin_units_by_name(

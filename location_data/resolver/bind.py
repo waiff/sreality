@@ -789,6 +789,7 @@ def bind(
             lon=top.lon if street_point is None else street_point.lon,
             cast_obce_unit_id=top.cast_obce_unit_id,
             street_extent_m=None if street_point is None else street_point.extent_m,
+            street_katastr_kod=None if street_point is None else street_point.katastr_kod,
             house_number_cp=top.house_number_cp,
             house_number_co=top.house_number_co,
             agreed=top.agreed,

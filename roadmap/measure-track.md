@@ -579,12 +579,12 @@ render its SHAPE.
   2 call sites (`merge_property_set`, `detach_listing`), the Python PIP implementation
   (`_REFERENCE_RENT_SQL`, `disposition_to_vk`, the amenity derivations in estimations +
   `/estimate_yield`), the dead comparables MF bounds. Matrix + inlining plan test + notes rail:
-  `tests/test_mf_reference.py`. Until PR-B the serving views read the stored, writer-less `mf_*`.
-- **Next — PR-B:** `listing_location.katastr_kod` (resolver v5.4; does not wait for the October
-  vintage) plus the ONE view swap, applied together (drafted as PR-D's 566, #1622 @ `fa7ce8e1`):
-  `browse_projection` + `properties_public` call the measure with `ll.katastr_kod`,
-  `listing_feed_public` reads the property's yield from `browse_list` (Q8 b). It also adds
-  `ll.katastr_kod` to `_SUBJECT_MF_FACTS_SQL` / `_MF_FACT_KEYS` (else runs of our adverts stay
-  town-level) and moves the yield-filter doc to read time. Then PR-A registry publish-complete;
-  PR-F drops the stored `mf_*`, the 507 functions and `rent_map_*_public` right after the
-  program is verified in production (operator 2026-09-25; explicit OK + `pg_dump` first).
+  `tests/test_mf_reference.py`. The serving views call it after PR-B's 567 applies.
+- **Done — PR-B (#1624, rollout pending):** `listing_location.katastr_kod` (566; FILL v5.4: the
+  single KÚ of the bound entity, never a pin; the nightly sweep re-resolves the corpus) plus the
+  ONE view swap (567, applied once the re-resolve drained). After 567 applies, `browse_projection`
+  and `properties_public` call the measure with `ll.katastr_kod` and `listing_feed_public` reads
+  the property's yield from `browse_list` (`browse_list_mf`, Q8 b); estimations pass the KÚ too.
+  PR-A (registry publish-complete) is merged.
+- **Next — PR-F:** drops the stored `mf_*`, the 507 functions and `rent_map_*_public` right
+  after the program is verified in production (operator 2026-09-25; explicit OK + `pg_dump` first).

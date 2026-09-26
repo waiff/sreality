@@ -117,6 +117,7 @@ def resolve(
         cast_obce_kod=filled.cast_obce_kod if czech else None,
         ulice_kod=filled.ulice_kod if czech else None,
         ruian_adm_kod=filled.ruian_adm_kod if czech else None,
+        katastr_kod=filled.katastr_kod if czech else None,
         match_confidence=("low" if not czech else graded.match_confidence),
         granularity=granularity,
         uncertainty_radius_m=step_grade.radius_m(granularity, floor_m=position.extent_m),

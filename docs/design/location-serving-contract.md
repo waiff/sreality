@@ -1,7 +1,7 @@
 # Location serving contract — how a consumer reads the location engine
 
 **Status 2026-09-12 (W2-b).** The location-data program's engine is **claims → four-step resolver →
-one answer table**. `listing_location` (migration 501, 26 columns) is the whole serving surface;
+one answer table**. `listing_location` (migrations 501 + 566, 27 columns) is the whole serving surface;
 W2-b dropped `listing_location_current`, `property_location_current` and every resolver-side
 relation the deleted engines wrote. This page is the contract a consumer codes against, written
 first for the NEW DEDUP program (rule 15), which is the first consumer after the admin dashboard.
@@ -30,7 +30,7 @@ vanishing case: a listing with no live claim gets an `undetermined` row (granula
 position) rather than no row, so `count(listing_location) = count(active listings)` holds by
 construction. Treat "no row" as *unknown*, never as "no location".
 
-## 2. The 26 columns
+## 2. The 27 columns
 
 **Where.** `geom` (`geometry(Point,4326)`, NULL when nothing resolvable) and
 `uncertainty_radius_m`. One point, one radius: the radius is what says how much to trust the point,
@@ -47,7 +47,11 @@ containment test evaluate NULL and the row drops out of `certain` AND `possible`
 
 **Registry identity (RÚIAN codes — the official Czech address registry, ČÚZK).** `ruian_adm_kod`
 (address point), `ulice_kod` (street), `obec_kod`, `cast_obce_kod`, `okres_kod`, `kraj_kod`. NULL
-means "not bound to that level". The building (`stavebni_objekt_kod`) and parcel (`parcela_id`)
+means "not bound to that level". `katastr_kod` (migration 566, MF program) is the single
+katastrální území of the BOUND entity — an address point's own KÚ, a KÚ/ZSJ unit, the one KÚ of a
+one-KÚ obec, a street or část obce whose every RÚIAN door lies in one KÚ — else NULL; never a
+portal pin's. NULL there means "not known at KÚ grain", which is what `mf_reference()` reads as a
+town-level location. The building (`stavebni_objekt_kod`) and parcel (`parcela_id`)
 keys are **gone**: the building code was never loaded and the parcel rung was unreachable, so W2-a
 deleted the rung and W2-b the columns.
 
