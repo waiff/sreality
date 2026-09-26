@@ -290,3 +290,12 @@ def test_the_door_rule_reads_the_polygon_by_unit_and_version():
                 "and a.purpose = 'authoritative'") in flat
         assert "st_covers(a.geom, (select st_collect(d.geom)" in flat
         assert "order by d.kod_adm limit 1" in flat
+
+
+def test_the_ku_probe_is_fenced_so_the_gist_drives_it():
+    """A bare `ORDER BY u.code LIMIT 1` let the planner walk all 13,074 KÚ in code order
+    against the probe's pieces: 16 ms a point on prod, against 0.4 ms with the fence."""
+    from location_data.resolver import resolve_db
+
+    flat = _flat(resolve_db._ADDRESS_POINT_SQL)
+    assert "st_covers(g.geom, ap.geom) offset 0) kc order by kc.code limit 1" in flat

@@ -184,20 +184,24 @@ _SOURCES_BULK_SQL = "SELECT id, source FROM listings WHERE id = ANY(%s::bigint[]
 # ------------------------------------------------------------------ the registry reads
 
 # THE KÚ OF A POINT (PR-B): the katastrální území whose `pip` piece covers it at the view's
-# registry version — one GiST probe on `ruian_aug_pip_gist`, ~0.2 ms, the same shape as
-# `containing_obec`. `ORDER BY u.code` only makes a door that sits exactly ON a shared border
-# replay to the same KÚ every time. It is asked of REGISTRY points only (an address point, a
-# door), never of a portal pin.
+# registry version — one GiST probe on `ruian_aug_pip_gist`, the same shape as
+# `containing_obec` (0.4 ms/point warm, measured over 639 sampled address points). It is asked
+# of REGISTRY points only (an address point, a door), never of a portal pin. `ORDER BY code`
+# only makes a door that sits exactly ON a shared border replay to the same KÚ every time, and
+# the `OFFSET 0` fence is what keeps the probe the DRIVING side: with a bare `ORDER BY u.code
+# LIMIT 1` the planner walked all 13,074 KÚ in code order against the probe — 16 ms a point.
 def _katastr_covering(point: str) -> str:
     return f"""
-    SELECT u.id, u.code
-      FROM ruian_admin_unit_geometries g
-      JOIN ruian_admin_units u ON u.id = g.unit_id
-     WHERE g.registry_version_id = %s
-       AND g.purpose = 'pip'
-       AND u.level = 'katastralni_uzemi'
-       AND ST_Covers(g.geom, {point})
-     ORDER BY u.code
+    SELECT kc.id, kc.code
+      FROM (SELECT u.id, u.code
+              FROM ruian_admin_unit_geometries g
+              JOIN ruian_admin_units u ON u.id = g.unit_id
+             WHERE g.registry_version_id = %s
+               AND g.purpose = 'pip'
+               AND u.level = 'katastralni_uzemi'
+               AND ST_Covers(g.geom, {point})
+            OFFSET 0) kc
+     ORDER BY kc.code
      LIMIT 1"""
 
 
