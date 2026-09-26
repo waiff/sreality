@@ -149,8 +149,8 @@ explicitly on every new function; grant back only the roles that need it.
   without a timeout it queues behind, or blocks, the `*/10` health refresh or the map rebuild.
 - **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
   without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
-  take a `pg_dump` backup of the affected tables *first*. There's no staging DB, so these
-  are largely irreversible.
+  back up the affected data *first* (`backup_before_drop.yml`, to R2). There's no staging
+  DB, so these are largely irreversible.
 - Read-only inspection (counts, sample rows, schema, verifying backfills) needs no confirmation.
 
 Correct flow for any schema change: (1) write the new numbered migration file in
