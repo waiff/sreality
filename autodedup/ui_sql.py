@@ -1225,12 +1225,30 @@ LIMIT 1
 
 VERDICT_COUNT_COLUMNS: tuple[str, ...] = ("kind", "verdict", "n")
 
-VERDICT_COUNTS_SQL = """
+# RULINGS, NOT ROWS (migration 573): the store keeps every correction, so a count over rows would
+# count a pair ruled `same` and later withdrawn once as each. The newest row per pair and per
+# (group key, pass) is the ruling, exactly as every engine reader takes it.
+_NEWEST_RULINGS = """
+FROM (
+    SELECT DISTINCT ON (x.kind, x.listing_lo, x.listing_hi, x.cluster_key,
+                        coalesce(x.generation, ''::text))
+           x.kind, x.verdict, x.reasons
+      FROM autodedup.verdicts x
+     ORDER BY x.kind, x.listing_lo, x.listing_hi, x.cluster_key,
+              coalesce(x.generation, ''::text), x.decided_at DESC, x.id DESC
+) v
+"""
+
+VERDICT_COUNTS_SQL = (
+    """
 SELECT v.kind, v.verdict, count(*) AS n
-FROM autodedup.verdicts v
+"""
+    + _NEWEST_RULINGS
+    + """
 GROUP BY 1, 2
 ORDER BY 1, 2
 """
+)
 
 # The reason histogram (migration 533): WHAT the operator saw, counted per grain. Pair and
 # cluster stay separate columns on the page because they answer different questions — a chip
@@ -1239,13 +1257,17 @@ ORDER BY 1, 2
 # array, so a verdict with no reason contributes no row at all rather than a null bucket.
 REASON_COUNT_COLUMNS: tuple[str, ...] = ("kind", "reason", "n")
 
-REASON_COUNTS_SQL = """
+REASON_COUNTS_SQL = (
+    """
 SELECT v.kind, r.reason, count(*) AS n
-FROM autodedup.verdicts v
+"""
+    + _NEWEST_RULINGS
+    + """
 CROSS JOIN LATERAL unnest(v.reasons) AS r(reason)
 GROUP BY 1, 2
 ORDER BY 1, 2
 """
+)
 
 JUDGEMENT_COUNT_COLUMNS: tuple[str, ...] = ("tier", "verdict", "n")
 
@@ -1277,48 +1299,175 @@ LIMIT 1
 
 # -------------------------------------------------------------------------- operator writes
 
-# Re-deciding UPSERTs rather than stacking (migration 528's two partial unique indexes). The
-# `WHERE kind = …` on the conflict target is how a PARTIAL unique index is inferred — without
-# it Postgres cannot match the index and raises 42P10.
-VERDICT_PAIR_UPSERT_SQL = """
-INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, reasons,
-                                decided_by)
-VALUES ('pair', %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(verdict)s::text,
-        %(note)s::text, %(reasons)s::text[], %(decided_by)s::text)
-ON CONFLICT (kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'
-DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
-              reasons = excluded.reasons, decided_at = now()
-RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
-          decided_by, decided_at, generation, member_ids
+# THE STORE IS A LEDGER (Decision 8, migration 573, E919). A ruling is never overwritten: a flip,
+# a withdrawal (`unsure`) or a re-ruling with another note is a NEW row, and per pair the newest
+# row (`decided_at desc, id desc`) is the ruling every reader obeys -- the lane's must-links
+# (`incremental_sql.RT_MUST_LINK_SQL`), apply's negatives (`apply_sql.PAIR_VERDICTS_SQL`), the
+# labels and every review queue already read it that way.
+#
+# APPEND ON CHANGE. A write that says exactly what the newest row already says (same verdict,
+# note and reasons) appends nothing and answers that newest row, so a double click or a re-merge
+# of the same set does not stack identical rows.
+#
+# BOTH SIDES OF MIGRATION 573. Before it, a partial unique index allowed one row per (pair,
+# decider): `ON CONFLICT DO NOTHING` (no target, so it is valid with or without that index) lets
+# the conflicting insert fall through, and `restated` then updates that decider's own row in place
+# -- the pre-573 behaviour, reached only while the index still exists. After 573 the insert never
+# conflicts and `restated` never fires. The code therefore ships BEFORE the migration is applied
+# (the migration's header says why the reverse order is an outage).
+_VERDICT_RETURNING = """id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
+              decided_by, decided_at, generation, member_ids"""
+
+VERDICT_PAIR_APPEND_SQL = (
+    """
+WITH newest AS (
+    SELECT x.id, x.kind, x.cluster_key, x.listing_lo, x.listing_hi, x.verdict, x.weight, x.note,
+           x.reasons, x.decided_by, x.decided_at, x.generation, x.member_ids
+      FROM autodedup.verdicts x
+     WHERE x.kind = 'pair'
+       AND x.listing_lo = %(listing_lo)s::bigint
+       AND x.listing_hi = %(listing_hi)s::bigint
+     ORDER BY x.decided_at DESC, x.id DESC
+     LIMIT 1
+), said AS (
+    SELECT NOT EXISTS (
+        SELECT 1 FROM newest n
+         WHERE n.verdict = %(verdict)s::text
+           AND n.note IS NOT DISTINCT FROM %(note)s::text
+           AND n.reasons = %(reasons)s::text[]
+    ) AS changed
+), appended AS (
+    INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, reasons,
+                                    decided_by)
+    SELECT 'pair', %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(verdict)s::text,
+           %(note)s::text, %(reasons)s::text[], %(decided_by)s::text
+      FROM said
+     WHERE said.changed
+    ON CONFLICT DO NOTHING
+    RETURNING """
+    + _VERDICT_RETURNING
+    + """
+), restated AS (
+    UPDATE autodedup.verdicts u
+       SET verdict = %(verdict)s::text, note = %(note)s::text, reasons = %(reasons)s::text[],
+           decided_at = now()
+      FROM said
+     WHERE said.changed
+       AND NOT EXISTS (SELECT 1 FROM appended)
+       AND u.kind = 'pair'
+       AND u.listing_lo = %(listing_lo)s::bigint
+       AND u.listing_hi = %(listing_hi)s::bigint
+       AND u.decided_by = %(decided_by)s::text
+    RETURNING u.id, u.kind, u.cluster_key, u.listing_lo, u.listing_hi, u.verdict, u.weight,
+              u.note, u.reasons, u.decided_by, u.decided_at, u.generation, u.member_ids
+)
+SELECT * FROM appended
+UNION ALL
+SELECT * FROM restated
+UNION ALL
+SELECT n.* FROM newest n CROSS JOIN said WHERE NOT said.changed
 """
+)
 
 # STAMPED WITH THE SET IT IS ABOUT (E58, migration 538). `generation` and `member_ids` are not
-# optional extras on this write: the ruling is a statement about those adverts. The route
-# resolves `member_ids` from the store for that (generation, cluster_key) at write time and
-# never from the request body.
+# optional extras on this write: the ruling is a statement about those adverts. A fresh ruling
+# has its `member_ids` resolved by the route from the store for that (generation, cluster_key),
+# never from the request body; a correction on the rulings page (`supersedes`) copies both from
+# the ruling it replaces, because it is a new word about THAT set.
 #
-# THE CONFLICT TARGET CARRIES THE GENERATION, which is the write half of E58. The pre-538 index
-# was unique on (kind, cluster_key, decided_by), so ruling the g5 group 38324 UPDATEd the row
-# that held the operator's g4 ruling — the same "one key, one row, last pass wins" defect this
-# migration removes from `clusters`, and on the one table that has no history to fall back on.
-# A re-ruling now replaces only a ruling of the SAME pass, so `generation` is never reassigned;
-# `member_ids` still is, because a re-run of that pass can legitimately have moved the group
-# under the key. `coalesce(generation, '')` matches the partial index expression exactly —
-# inference is by expression, and a mismatch is a 42P10 at runtime, not at import.
-VERDICT_CLUSTER_UPSERT_SQL = """
-INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by,
-                                generation, member_ids)
-VALUES ('cluster', %(cluster_key)s::bigint, %(verdict)s::text, %(note)s::text,
-        %(reasons)s::text[], %(decided_by)s::text, %(generation)s::text,
-        %(member_ids)s::bigint[])
-ON CONFLICT (kind, cluster_key, (coalesce(generation, ''::text)), decided_by)
-  WHERE kind = 'cluster'
-DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
-              reasons = excluded.reasons, member_ids = excluded.member_ids,
-              decided_at = now()
-RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
-          decided_by, decided_at, generation, member_ids
+# THE KEY CARRIES THE PASS: the newest row per (cluster_key, coalesce(generation, '')) is the
+# group's ruling, so ruling the g5 group 38324 never touches what the operator said about g4's.
+# A changed member set under the same key is a change, and so appends.
+VERDICT_CLUSTER_APPEND_SQL = (
+    """
+WITH newest AS (
+    SELECT x.id, x.kind, x.cluster_key, x.listing_lo, x.listing_hi, x.verdict, x.weight, x.note,
+           x.reasons, x.decided_by, x.decided_at, x.generation, x.member_ids
+      FROM autodedup.verdicts x
+     WHERE x.kind = 'cluster'
+       AND x.cluster_key = %(cluster_key)s::bigint
+       AND coalesce(x.generation, ''::text) = coalesce(%(generation)s::text, ''::text)
+     ORDER BY x.decided_at DESC, x.id DESC
+     LIMIT 1
+), said AS (
+    SELECT NOT EXISTS (
+        SELECT 1 FROM newest n
+         WHERE n.verdict = %(verdict)s::text
+           AND n.note IS NOT DISTINCT FROM %(note)s::text
+           AND n.reasons = %(reasons)s::text[]
+           AND n.member_ids IS NOT DISTINCT FROM %(member_ids)s::bigint[]
+    ) AS changed
+), appended AS (
+    INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by,
+                                    generation, member_ids)
+    SELECT 'cluster', %(cluster_key)s::bigint, %(verdict)s::text, %(note)s::text,
+           %(reasons)s::text[], %(decided_by)s::text, %(generation)s::text,
+           %(member_ids)s::bigint[]
+      FROM said
+     WHERE said.changed
+    ON CONFLICT DO NOTHING
+    RETURNING """
+    + _VERDICT_RETURNING
+    + """
+), restated AS (
+    UPDATE autodedup.verdicts u
+       SET verdict = %(verdict)s::text, note = %(note)s::text, reasons = %(reasons)s::text[],
+           member_ids = %(member_ids)s::bigint[], decided_at = now()
+      FROM said
+     WHERE said.changed
+       AND NOT EXISTS (SELECT 1 FROM appended)
+       AND u.kind = 'cluster'
+       AND u.cluster_key = %(cluster_key)s::bigint
+       AND coalesce(u.generation, ''::text) = coalesce(%(generation)s::text, ''::text)
+       AND u.decided_by = %(decided_by)s::text
+    RETURNING u.id, u.kind, u.cluster_key, u.listing_lo, u.listing_hi, u.verdict, u.weight,
+              u.note, u.reasons, u.decided_by, u.decided_at, u.generation, u.member_ids
+)
+SELECT * FROM appended
+UNION ALL
+SELECT * FROM restated
+UNION ALL
+SELECT n.* FROM newest n CROSS JOIN said WHERE NOT said.changed
 """
+)
+
+# The ruling a correction names (`POST /autodedup/verdict` `supersedes`), and the newest ruling
+# of its key: a correction is accepted only while what the page showed is still the newest word,
+# so a stale tab answers 409 instead of silently ruling over a ruling it never saw.
+VERDICT_ONE_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.id = %(id)s::bigint
+"""
+)
+
+PAIR_NEWEST_RULING_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'pair'
+  AND v.listing_lo = %(listing_lo)s::bigint
+  AND v.listing_hi = %(listing_hi)s::bigint
+ORDER BY v.decided_at DESC, v.id DESC
+LIMIT 1
+"""
+)
+
+CLUSTER_NEWEST_RULING_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'cluster'
+  AND v.cluster_key = %(cluster_key)s::bigint
+  AND coalesce(v.generation, ''::text) = coalesce(%(generation)s::text, ''::text)
+ORDER BY v.decided_at DESC, v.id DESC
+LIMIT 1
+"""
+)
 
 # PERMANENT (§13's own word): an operator "not the same" outranks every machine source, so it
 # overwrites a `guard`/`model`/`llm` row rather than losing the conflict.
@@ -1367,11 +1516,22 @@ SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 """
 
 # ANY generation: a pair verdict is about two adverts, not about the pass that proposed them
-# (E58), so a pair this engine scored under g4 is still a pair the operator may rule today.
+# (E58), so a pair this engine scored under g4 is still a pair the operator may rule today. And
+# ANY earlier word about the pair: a Browse merge's or a detach's ruling, or a must-not-link, is
+# about a pair the engine may never have stored (Decision 7 keeps no machine reject), and the
+# operator must be able to correct it (the rulings page, E919).
 PAIR_EXISTS_SQL = """
-SELECT 1 FROM autodedup.pairs
-WHERE listing_lo = %(listing_lo)s::bigint AND listing_hi = %(listing_hi)s::bigint
-LIMIT 1
+SELECT 1
+WHERE EXISTS (SELECT 1 FROM autodedup.verdicts x
+               WHERE x.kind = 'pair'
+                 AND x.listing_lo = %(listing_lo)s::bigint
+                 AND x.listing_hi = %(listing_hi)s::bigint)
+   OR EXISTS (SELECT 1 FROM autodedup.must_not_link n
+               WHERE n.listing_lo = %(listing_lo)s::bigint
+                 AND n.listing_hi = %(listing_hi)s::bigint)
+   OR EXISTS (SELECT 1 FROM autodedup.pairs p
+               WHERE p.listing_lo = %(listing_lo)s::bigint
+                 AND p.listing_hi = %(listing_hi)s::bigint)
 """
 
 # ------------------------------------------------- the validation session (D6): how far in?
@@ -1656,4 +1816,495 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
   JOIN public.listings l ON l.property_id = pr.id
   LEFT JOIN grouped g ON g.listing_id = l.id
  ORDER BY l.property_id, l.id
+"""
+
+# ------------------------------------------------------------------- the rulings page (E919)
+#
+# EVERY operator ruling, in one list, beside the engine's current view of it
+# (`GET /autodedup/rulings`, the page `/autodedup/rulings`). No other surface lists the rulings:
+# a queue shows a ruling only while its pair or group sits in the chosen generation's queue.
+#
+# THE NEWEST ROW IS THE RULING (migration 573): per pair, and per (group key, pass). `status` is
+# derived from the history, never parsed from a note: `standing` (the newest row states
+# something), `withdrawn` (the newest is `unsure` and an earlier row stated something) or `unsure`
+# (nothing else was ever said).
+#
+# FOUR SOURCES AT PAIR GRAIN, each named as what it is:
+#   * `pair`          a ruling typed against the pair (a queue, a split, the pair page, a detach);
+#   * `browse_merge`  a Browse merge's `same`, linked to its `operator_merges` group (564);
+#   * `implied`       a member pair of a group whose newest ruling is `same` and which carries no
+#                     pair-grain row of its own (explicit beats implied, as in the labels lane);
+#                     the lane never binds it (E910 reads pair grain only), the page says so;
+#   * `must_not_link` an operator veto with no ruling row behind it.
+# Each pair appears ONCE across the four, so `(decided_at, listing_lo, listing_hi)` is the
+# keyset.
+#
+# THE ENGINE'S VIEW is read in ONE generation (the route resolves it as every view does: `rt`
+# once live). `engine_view`: `together` (both in one group), `apart` (both seen, not in one
+# group) or `unseen` (the pass never read one of them -- outside the trial scope, say).
+# `agreement` puts the ruling against production and the engine: a standing `same` disagrees when
+# the two are apart now or the engine holds them apart; a standing negative when they are
+# together now or in one engine group; anything else (a withdrawal, `unsure`) is `none`.
+
+
+def _engine_seen(listing: str) -> str:
+    """Did the generation READ this advert: a group member, a fingerprint (the live stream) or
+    a stored pair's side -- `PROPOSED_SPLIT_ADVERTS_SQL`'s definition, per advert."""
+    return f"""(EXISTS (SELECT 1 FROM autodedup.cluster_members m
+                  WHERE m.generation = %(generation)s::text AND m.listing_id = {listing})
+         OR EXISTS (SELECT 1 FROM autodedup.rt_fp f
+                     WHERE f.generation = %(generation)s::text AND f.listing_id = {listing})
+         OR EXISTS (SELECT 1 FROM autodedup.pairs q
+                     WHERE q.generation = %(generation)s::text AND q.listing_lo = {listing})
+         OR EXISTS (SELECT 1 FROM autodedup.pairs q
+                     WHERE q.generation = %(generation)s::text AND q.listing_hi = {listing}))"""
+
+
+_NEGATIVE_LIST = ", ".join(f"'{value}'" for value in NEGATIVE_VERDICTS)
+
+# The ruling against the state of production and the engine, ONE spelling for both grains.
+_AGREEMENT = f"""
+           CASE WHEN w.status <> 'standing' OR w.verdict = 'unsure' THEN 'none'
+                WHEN w.verdict = 'same'
+                     THEN CASE WHEN NOT w.together_now OR w.engine_view = 'apart'
+                               THEN 'disagrees' ELSE 'agrees' END
+                WHEN w.verdict IN ({_NEGATIVE_LIST})
+                     THEN CASE WHEN w.together_now OR w.engine_view = 'together'
+                               THEN 'disagrees' ELSE 'agrees' END
+                ELSE 'none' END AS agreement,
+           CASE WHEN w.verdict IN ({_NEGATIVE_LIST}) THEN 'different'
+                ELSE w.verdict END AS verdict_word
+"""
+
+RULING_PAIR_COLUMNS: tuple[str, ...] = (
+    "ruling_id",
+    "ruling_kind",
+    "listing_lo",
+    "listing_hi",
+    "verdict",
+    "status",
+    "source",
+    "merge_group_id",
+    "group_cluster_key",
+    "group_generation",
+    "note",
+    "reasons",
+    "decided_by",
+    "decided_at",
+    "n_rows",
+    "must_not_link",
+    "property_lo",
+    "property_hi",
+    "together_now",
+    "adverts_on_property",
+    "obec_kod",
+    "obec_name",
+    "cast_obce_kod",
+    "cast_obce_name",
+    "street_lo",
+    "cp_lo",
+    "street_hi",
+    "cp_hi",
+    "zone",
+    "score",
+    "decision",
+    "guard_veto",
+    "engine_decided_at",
+    "engine_group_lo",
+    "engine_group_hi",
+    "seen_lo",
+    "seen_hi",
+    "engine_view",
+    "agreement",
+)
+
+_RULINGS_PAIR_FROM = (
+    """
+WITH pair_rows AS (
+    SELECT x.id, x.listing_lo, x.listing_hi, x.verdict, x.note, x.reasons, x.decided_by,
+           x.decided_at, x.operator_merge_group_id
+      FROM autodedup.verdicts x
+     WHERE x.kind = 'pair' AND x.listing_lo IS NOT NULL AND x.listing_hi IS NOT NULL
+), newest AS (
+    SELECT DISTINCT ON (p.listing_lo, p.listing_hi)
+           p.id, p.listing_lo, p.listing_hi, p.verdict, p.note, p.reasons, p.decided_by,
+           p.decided_at, p.operator_merge_group_id
+      FROM pair_rows p
+     ORDER BY p.listing_lo, p.listing_hi, p.decided_at DESC, p.id DESC
+), history AS (
+    SELECT p.listing_lo, p.listing_hi, count(*) AS n_rows,
+           bool_or(p.verdict <> 'unsure') AS ever_stated
+      FROM pair_rows p
+     GROUP BY p.listing_lo, p.listing_hi
+), group_rulings AS (
+    SELECT DISTINCT ON (x.cluster_key, coalesce(x.generation, ''::text))
+           x.id, x.cluster_key, x.generation, x.member_ids, x.verdict, x.note, x.reasons,
+           x.decided_by, x.decided_at
+      FROM autodedup.verdicts x
+     WHERE x.kind = 'cluster'
+     ORDER BY x.cluster_key, coalesce(x.generation, ''::text), x.decided_at DESC, x.id DESC
+), implied AS (
+    SELECT DISTINCT ON (a.lo, b.hi)
+           g.id, a.lo AS listing_lo, b.hi AS listing_hi, g.note, g.reasons, g.decided_by,
+           g.decided_at, g.cluster_key, g.generation
+      FROM group_rulings g
+     CROSS JOIN LATERAL unnest(g.member_ids) AS a(lo)
+     CROSS JOIN LATERAL unnest(g.member_ids) AS b(hi)
+     WHERE g.verdict = 'same'
+       AND a.lo < b.hi
+       AND NOT EXISTS (SELECT 1 FROM history h
+                        WHERE h.listing_lo = a.lo AND h.listing_hi = b.hi)
+     ORDER BY a.lo, b.hi, g.decided_at DESC, g.id DESC
+), rulings AS (
+    SELECT n.id AS ruling_id, 'pair'::text AS ruling_kind, n.listing_lo, n.listing_hi,
+           n.verdict,
+           CASE WHEN n.verdict <> 'unsure' THEN 'standing'
+                WHEN h.ever_stated THEN 'withdrawn'
+                ELSE 'unsure' END AS status,
+           CASE WHEN n.operator_merge_group_id IS NOT NULL THEN 'browse_merge'
+                ELSE 'pair' END AS source,
+           n.operator_merge_group_id AS merge_group_id,
+           NULL::bigint AS group_cluster_key, NULL::text AS group_generation,
+           n.note, n.reasons, n.decided_by, n.decided_at, h.n_rows
+      FROM newest n
+      JOIN history h ON h.listing_lo = n.listing_lo AND h.listing_hi = n.listing_hi
+    UNION ALL
+    SELECT i.id, 'cluster'::text, i.listing_lo, i.listing_hi, 'same'::text, 'standing'::text,
+           'implied'::text, NULL::uuid, i.cluster_key, i.generation, i.note, i.reasons,
+           i.decided_by, i.decided_at, 0::bigint
+      FROM implied i
+    UNION ALL
+    SELECT NULL::bigint, 'must_not_link'::text, m.listing_lo, m.listing_hi, 'different'::text,
+           'standing'::text, 'must_not_link'::text, NULL::uuid, NULL::bigint, NULL::text,
+           m.reason, '{}'::text[], m.source, m.created_at, 0::bigint
+      FROM autodedup.must_not_link m
+     WHERE NOT EXISTS (SELECT 1 FROM history h
+                        WHERE h.listing_lo = m.listing_lo AND h.listing_hi = m.listing_hi)
+       AND NOT EXISTS (SELECT 1 FROM implied i
+                        WHERE i.listing_lo = m.listing_lo AND i.listing_hi = m.listing_hi)
+), joined AS (
+    SELECT r.ruling_id, r.ruling_kind, r.listing_lo, r.listing_hi, r.verdict, r.status,
+           r.source, r.merge_group_id, r.group_cluster_key, r.group_generation, r.note,
+           r.reasons, r.decided_by, r.decided_at, r.n_rows,
+           mnl.source AS must_not_link,
+           la.property_id AS property_lo, lb.property_id AS property_hi,
+           coalesce(la.property_id = lb.property_id, false) AS together_now,
+           ll.obec_kod, ll.obec_name, ll.cast_obce_kod, ll.cast_obce_name,
+           ll.street_name AS street_lo, ll.house_number_cp AS cp_lo,
+           lh.street_name AS street_hi, lh.house_number_cp AS cp_hi,
+           p.zone, p.score, p.decision, p.guard_veto, p.decided_at AS engine_decided_at,
+           ca.cluster_key AS engine_group_lo, cb.cluster_key AS engine_group_hi,
+           """
+    + _engine_seen("r.listing_lo")
+    + """ AS seen_lo,
+           """
+    + _engine_seen("r.listing_hi")
+    + """ AS seen_hi
+      FROM rulings r
+      LEFT JOIN public.listings la ON la.id = r.listing_lo
+      LEFT JOIN public.listings lb ON lb.id = r.listing_hi
+      LEFT JOIN public.listing_location ll ON ll.listing_id = r.listing_lo
+      LEFT JOIN public.listing_location lh ON lh.listing_id = r.listing_hi
+      LEFT JOIN autodedup.must_not_link mnl
+             ON mnl.listing_lo = r.listing_lo AND mnl.listing_hi = r.listing_hi
+      LEFT JOIN autodedup.pairs p
+             ON p.generation = %(generation)s::text
+            AND p.listing_lo = r.listing_lo AND p.listing_hi = r.listing_hi
+      LEFT JOIN LATERAL (
+          SELECT m.cluster_key FROM autodedup.cluster_members m
+           WHERE m.generation = %(generation)s::text AND m.listing_id = r.listing_lo
+           LIMIT 1
+      ) ca ON true
+      LEFT JOIN LATERAL (
+          SELECT m.cluster_key FROM autodedup.cluster_members m
+           WHERE m.generation = %(generation)s::text AND m.listing_id = r.listing_hi
+           LIMIT 1
+      ) cb ON true
+), w AS (
+    SELECT j.*,
+           CASE WHEN j.engine_group_lo IS NOT NULL AND j.engine_group_lo = j.engine_group_hi
+                     THEN 'together'
+                WHEN j.seen_lo AND j.seen_hi THEN 'apart'
+                ELSE 'unseen' END AS engine_view
+      FROM joined j
+), v AS (
+    SELECT w.*,
+"""
+    + _AGREEMENT
+    + """
+      FROM w
+)
+"""
+)
+
+# The filter arms, shared by the page and its counts so "20 of N" counts what the page lists.
+# A nullable parameter per filter, never interpolated text (the module's rule).
+_RULINGS_FILTERS = (
+    """
+WHERE (%(verdict)s::text IS NULL OR """
+    + _VERDICT_MATCHES
+    + """)
+  AND (%(source)s::text IS NULL OR v.source = %(source)s::text)
+  AND (%(status)s::text IS NULL OR v.status = %(status)s::text)
+  AND (%(engine)s::text IS NULL OR v.agreement = %(engine)s::text)
+  AND (%(together)s::boolean IS NULL OR v.together_now = %(together)s::boolean)
+  AND (%(decided_from)s::timestamptz IS NULL OR v.decided_at >= %(decided_from)s::timestamptz)
+  AND (%(decided_to)s::timestamptz IS NULL OR v.decided_at < %(decided_to)s::timestamptz)
+  AND (%(obec)s::bigint IS NULL OR v.obec_kod = %(obec)s::bigint)
+  AND (%(cast_obce)s::bigint IS NULL OR v.cast_obce_kod = %(cast_obce)s::bigint)
+  AND (%(merge_group)s::uuid IS NULL OR v.merge_group_id = %(merge_group)s::uuid)
+"""
+)
+
+_RULINGS_PAIR_WHERE = (
+    _RULINGS_FILTERS
+    + """  AND (%(listing)s::bigint IS NULL
+       OR v.listing_lo = %(listing)s::bigint OR v.listing_hi = %(listing)s::bigint)
+  AND (%(property)s::bigint IS NULL
+       OR v.property_lo = %(property)s::bigint OR v.property_hi = %(property)s::bigint)
+"""
+)
+
+RULINGS_PAIR_SQL = (
+    _RULINGS_PAIR_FROM
+    + """
+SELECT v.ruling_id, v.ruling_kind, v.listing_lo, v.listing_hi, v.verdict, v.status, v.source,
+       v.merge_group_id, v.group_cluster_key, v.group_generation, v.note, v.reasons,
+       v.decided_by, v.decided_at, v.n_rows, v.must_not_link, v.property_lo, v.property_hi,
+       v.together_now,
+       CASE WHEN v.together_now
+            THEN (SELECT count(*) FROM public.listings l WHERE l.property_id = v.property_lo)
+       END AS adverts_on_property,
+       v.obec_kod, v.obec_name, v.cast_obce_kod, v.cast_obce_name, v.street_lo, v.cp_lo,
+       v.street_hi, v.cp_hi, v.zone, v.score, v.decision, v.guard_veto, v.engine_decided_at,
+       v.engine_group_lo, v.engine_group_hi, v.seen_lo, v.seen_hi, v.engine_view, v.agreement
+  FROM v
+"""
+    + _RULINGS_PAIR_WHERE
+    + """  AND (%(after_at)s::timestamptz IS NULL
+       OR (v.decided_at, v.listing_lo, v.listing_hi)
+          < (%(after_at)s::timestamptz, %(after_lo)s::bigint, %(after_hi)s::bigint))
+ORDER BY v.decided_at DESC, v.listing_lo DESC, v.listing_hi DESC
+LIMIT %(limit)s::int
+"""
+)
+
+# The counters beside each filter: the total and one count per value of four facets, under the
+# CURRENT filters, in one pass over the same rows (GROUPING SETS).
+RULING_FACET_COLUMNS: tuple[str, ...] = ("facet", "value", "n")
+
+_RULINGS_FACET_SELECT = """
+SELECT CASE WHEN grouping(v.source) = 0 THEN 'source'
+            WHEN grouping(v.status) = 0 THEN 'status'
+            WHEN grouping(v.verdict_word) = 0 THEN 'verdict'
+            WHEN grouping(v.agreement) = 0 THEN 'engine'
+            ELSE 'total' END AS facet,
+       CASE WHEN grouping(v.source) = 0 THEN v.source
+            WHEN grouping(v.status) = 0 THEN v.status
+            WHEN grouping(v.verdict_word) = 0 THEN v.verdict_word
+            WHEN grouping(v.agreement) = 0 THEN v.agreement END AS value,
+       count(*) AS n
+  FROM v
+"""
+
+_RULINGS_FACET_GROUPING = """
+GROUP BY GROUPING SETS ((), (v.source), (v.status), (v.verdict_word), (v.agreement))
+"""
+
+RULINGS_PAIR_FACETS_SQL = (
+    _RULINGS_PAIR_FROM + _RULINGS_FACET_SELECT + _RULINGS_PAIR_WHERE + _RULINGS_FACET_GROUPING
+)
+
+# GROUP GRAIN: the newest ruling of each (group key, pass) with the SET it was taken on (E58),
+# and the operator's Browse merges (`operator_merges`, 564) as the groups they are. For each, how
+# many properties its adverts sit on now and how the generation groups them. A ruling taken
+# before 538 recorded no set (`set_recorded` false): the page offers only its withdrawal.
+RULING_GROUP_COLUMNS: tuple[str, ...] = (
+    "ruling_key",
+    "ruling_id",
+    "source",
+    "cluster_key",
+    "generation",
+    "merge_group_id",
+    "member_ids",
+    "set_recorded",
+    "verdict",
+    "status",
+    "note",
+    "reasons",
+    "decided_by",
+    "decided_at",
+    "n_rows",
+    "n_members",
+    "property_ids",
+    "n_properties",
+    "together_now",
+    "n_engine_groups",
+    "n_grouped",
+    "n_seen",
+    "obec_kod",
+    "obec_name",
+    "cast_obce_kod",
+    "cast_obce_name",
+    "engine_view",
+    "agreement",
+)
+
+_RULINGS_GROUP_FROM = (
+    """
+WITH cluster_rows AS (
+    SELECT x.id, x.cluster_key, x.generation, x.member_ids, x.verdict, x.note, x.reasons,
+           x.decided_by, x.decided_at
+      FROM autodedup.verdicts x
+     WHERE x.kind = 'cluster'
+), newest AS (
+    SELECT DISTINCT ON (c.cluster_key, coalesce(c.generation, ''::text))
+           c.id, c.cluster_key, c.generation, c.member_ids, c.verdict, c.note, c.reasons,
+           c.decided_by, c.decided_at
+      FROM cluster_rows c
+     ORDER BY c.cluster_key, coalesce(c.generation, ''::text), c.decided_at DESC, c.id DESC
+), history AS (
+    SELECT c.cluster_key, coalesce(c.generation, ''::text) AS pass, count(*) AS n_rows,
+           bool_or(c.verdict <> 'unsure') AS ever_stated
+      FROM cluster_rows c
+     GROUP BY c.cluster_key, coalesce(c.generation, ''::text)
+), rulings AS (
+    SELECT n.id::text AS ruling_key, n.id AS ruling_id, 'group'::text AS source,
+           n.cluster_key, n.generation, NULL::uuid AS merge_group_id,
+           coalesce(n.member_ids, '{}'::bigint[]) AS member_ids,
+           n.member_ids IS NOT NULL AS set_recorded, n.verdict,
+           CASE WHEN n.verdict <> 'unsure' THEN 'standing'
+                WHEN h.ever_stated THEN 'withdrawn'
+                ELSE 'unsure' END AS status,
+           n.note, n.reasons, n.decided_by, n.decided_at, h.n_rows
+      FROM newest n
+      JOIN history h
+        ON h.cluster_key = n.cluster_key AND h.pass = coalesce(n.generation, ''::text)
+    UNION ALL
+    SELECT m.merge_group_id::text, NULL::bigint, 'browse_merge'::text, NULL::bigint, NULL::text,
+           m.merge_group_id, m.member_ids, true, 'same'::text,
+           CASE WHEN m.status = 'live' THEN 'standing' ELSE 'withdrawn' END,
+           m.status_note, '{}'::text[], m.decided_by, m.merged_at, 1::bigint
+      FROM autodedup.operator_merges m
+), joined AS (
+    SELECT r.*, cardinality(r.member_ids) AS n_members,
+           now_on.property_ids, coalesce(now_on.n_properties, 0) AS n_properties,
+           (cardinality(r.member_ids) >= 2 AND now_on.n_properties = 1
+            AND now_on.n_placed = cardinality(r.member_ids)) AS together_now,
+           coalesce(eng.n_engine_groups, 0) AS n_engine_groups,
+           coalesce(eng.n_grouped, 0) AS n_grouped,
+           coalesce(seen.n_seen, 0) AS n_seen,
+           ll.obec_kod, ll.obec_name, ll.cast_obce_kod, ll.cast_obce_name
+      FROM rulings r
+      LEFT JOIN LATERAL (
+          SELECT array_agg(DISTINCT l.property_id)
+                     FILTER (WHERE l.property_id IS NOT NULL) AS property_ids,
+                 count(DISTINCT l.property_id) AS n_properties,
+                 count(l.property_id) AS n_placed
+            FROM public.listings l
+           WHERE l.id = ANY(r.member_ids)
+      ) now_on ON true
+      LEFT JOIN LATERAL (
+          SELECT count(DISTINCT m.cluster_key) AS n_engine_groups, count(*) AS n_grouped
+            FROM autodedup.cluster_members m
+           WHERE m.generation = %(generation)s::text AND m.listing_id = ANY(r.member_ids)
+      ) eng ON true
+      LEFT JOIN LATERAL (
+          SELECT count(*) AS n_seen
+            FROM unnest(r.member_ids) AS u(listing_id)
+           WHERE """
+    + _engine_seen("u.listing_id")
+    + """
+      ) seen ON true
+      LEFT JOIN public.listing_location ll ON ll.listing_id = r.member_ids[1]
+), w AS (
+    SELECT j.*,
+           CASE WHEN j.n_members >= 2 AND j.n_grouped = j.n_members AND j.n_engine_groups = 1
+                     THEN 'together'
+                WHEN j.n_members >= 2 AND j.n_seen = j.n_members THEN 'apart'
+                ELSE 'unseen' END AS engine_view
+      FROM joined j
+), v AS (
+    SELECT w.*,
+"""
+    + _AGREEMENT
+    + """
+      FROM w
+)
+"""
+)
+
+_RULINGS_GROUP_WHERE = (
+    _RULINGS_FILTERS
+    + """  AND (%(listing)s::bigint IS NULL OR %(listing)s::bigint = ANY(v.member_ids))
+  AND (%(property)s::bigint IS NULL OR %(property)s::bigint = ANY(v.property_ids))
+"""
+)
+
+RULINGS_GROUP_SQL = (
+    _RULINGS_GROUP_FROM
+    + """
+SELECT v.ruling_key, v.ruling_id, v.source, v.cluster_key, v.generation, v.merge_group_id,
+       v.member_ids, v.set_recorded, v.verdict, v.status, v.note, v.reasons, v.decided_by,
+       v.decided_at, v.n_rows, v.n_members, v.property_ids, v.n_properties,
+       coalesce(v.together_now, false), v.n_engine_groups, v.n_grouped, v.n_seen, v.obec_kod,
+       v.obec_name, v.cast_obce_kod, v.cast_obce_name, v.engine_view, v.agreement
+  FROM v
+"""
+    + _RULINGS_GROUP_WHERE
+    + """  AND (%(after_at)s::timestamptz IS NULL
+       OR (v.decided_at, v.ruling_key) < (%(after_at)s::timestamptz, %(after_key)s::text))
+ORDER BY v.decided_at DESC, v.ruling_key DESC
+LIMIT %(limit)s::int
+"""
+)
+
+RULINGS_GROUP_FACETS_SQL = (
+    _RULINGS_GROUP_FROM + _RULINGS_FACET_SELECT + _RULINGS_GROUP_WHERE + _RULINGS_FACET_GROUPING
+)
+
+# Every ruling of the listed groups' keys, newest first -- the page's expandable history, one
+# statement per page (the route keeps the rows of each row's own pass).
+GROUP_RULING_HISTORY_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'cluster' AND v.cluster_key = any(%(keys)s::bigint[])
+ORDER BY v.decided_at DESC, v.id DESC
+"""
+)
+
+# The town filter's vocabulary: the obce and the quarters (část obce) the rulings touch, named off
+# `listing_location`, busiest first and capped -- a code, never typed, as on the queues' block
+# picker. Read over the side each filter reads: a pair's low advert, a group's first member.
+RULING_TOWN_COLUMNS: tuple[str, ...] = ("grain", "code", "name", "n")
+
+RULING_TOWNS_SQL = """
+WITH named AS (
+    SELECT x.listing_lo AS listing_id FROM autodedup.verdicts x
+     WHERE x.kind = 'pair' AND x.listing_lo IS NOT NULL
+    UNION
+    SELECT m.listing_lo FROM autodedup.must_not_link m
+    UNION
+    SELECT x.member_ids[1] FROM autodedup.verdicts x
+     WHERE x.kind = 'cluster' AND cardinality(x.member_ids) > 0
+    UNION
+    SELECT o.member_ids[1] FROM autodedup.operator_merges o
+     WHERE cardinality(o.member_ids) > 0
+), towns AS (
+    SELECT 'o'::text AS grain, ll.obec_kod AS code, max(ll.obec_name) AS name, count(*) AS n
+      FROM named d JOIN public.listing_location ll ON ll.listing_id = d.listing_id
+     WHERE ll.obec_kod IS NOT NULL
+     GROUP BY ll.obec_kod
+    UNION ALL
+    SELECT 'c'::text, ll.cast_obce_kod, max(ll.cast_obce_name), count(*)
+      FROM named d JOIN public.listing_location ll ON ll.listing_id = d.listing_id
+     WHERE ll.cast_obce_kod IS NOT NULL
+     GROUP BY ll.cast_obce_kod
+)
+SELECT t.grain, t.code, t.name, t.n
+  FROM towns t
+ ORDER BY t.n DESC, t.grain DESC, t.code
+ LIMIT %(limit)s::int
 """

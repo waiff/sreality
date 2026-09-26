@@ -395,6 +395,17 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_operator_merges_live.py -q
 
+      # Migration 573 (E919), EXECUTED: a flip and a withdrawal are new rows, and the lane's
+      # must-links, apply's pair and group negatives and the rulings page all read the newest
+      # word; the writes also hold with the pre-573 unique indexes re-created (the code ships
+      # before the migration is applied). PREPARE proves the statements compile, not which row
+      # a DISTINCT ON keeps.
+      - name: The operator's rulings are a ledger (migration 573)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_verdicts_ledger_live.py -q
+
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left

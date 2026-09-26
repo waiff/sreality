@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +49,7 @@ from autodedup.dataset import Listing, hamming64
 from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
 from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
+from toolkit.property_identity import record_ruling
 
 try:  # the two SQLSTATEs a missing store raises, if the catalog probe ever misses it
     from psycopg import errors as _pg_errors
@@ -2143,12 +2145,12 @@ def pair(
             {"listing_lo": listing_lo, "listing_hi": listing_hi,
              "generation": generation},
         )
-        if not rows:
-            raise HTTPException(
-                status_code=404, detail="no such pair in this generation"
-            )
-        row = _row(usql.PAIR_COLUMNS, rows[0])
-        feats = _feats(row["features"])
+        # NO STORED ROW IS NOT "NO PAIR" (E919). The live stream keeps no machine reject
+        # (Decision 7) and a Browse merge or a detach rules pairs the engine never compared, so
+        # most rulings name a pair with no row here; the page still opens on both adverts, their
+        # photos and the ruling history, and says the engine kept nothing.
+        row = _row(usql.PAIR_COLUMNS, rows[0]) if rows else None
+        feats = _feats(row["features"]) if row is not None else {}
 
         digests = {
             int(detail["id"]): _digest(detail)
@@ -2180,12 +2182,13 @@ def pair(
 
     return {
         "data": {
-            "pair": _pair_view(row),
+            "pair": _pair_view(row) if row is not None else None,
             "features": [
                 {"name": name, "value": value, "present": present}
                 for name, (value, present) in sorted(feats.items())
             ],
-            "top_features": _top_features(feats, row["model_version"]),
+            "top_features": (_top_features(feats, row["model_version"])
+                             if row is not None else []),
             "digests": {
                 "a": digests.get(listing_lo),
                 "b": digests.get(listing_hi),
@@ -2227,6 +2230,10 @@ class VerdictIn(BaseModel):
     # WHY the operator ruled this way (migration 533), validated against the registry.
     reasons: list[str] = Field(default_factory=list,
                                max_length=reasons_registry.MAX_REASONS)
+    # THE RULING THIS ONE CORRECTS (the rulings page, E919): the `verdicts.id` the page was
+    # showing. The key comes from that row; a flip or a withdrawal is a new row, and it is taken
+    # only while that row is still the newest word on its key (409 otherwise).
+    supersedes: int | None = None
 
 
 @router.get("/verdict-reasons")
@@ -2262,6 +2269,12 @@ def verdict(
 
     Unlike the reads, an un-migrated store is a 503 here and not a `store_ready: false` 200: a
     write that silently did nothing would be recorded by the optimistic client as a decision.
+
+    A CORRECTION (`supersedes`, the rulings page, E919) names the ruling it replaces. Its key is
+    that row's: a pair's two listings, or a group's key, pass AND member set (E58, copied, never
+    re-resolved -- the new word is about the set the old one was about). It is accepted only while
+    that row is still the newest on its key (409: ruled again since the page loaded). Every write
+    APPENDS (migration 573): a withdrawal is a new `unsure` row, never a delete.
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2272,109 +2285,102 @@ def verdict(
     if not store_ready(conn):
         raise HTTPException(status_code=503, detail="the autodedup store is not created yet")
 
+    superseded = _superseded(conn, body) if body.supersedes is not None else None
+
     if body.kind == "pair":
-        if body.listing_lo is None or body.listing_hi is None:
-            raise _bad("a pair verdict needs listing_lo and listing_hi")
-        if body.cluster_key is not None:
-            raise _bad("a pair verdict carries no cluster_key")
-        if body.listing_lo >= body.listing_hi:
-            raise _bad("listing_lo must be smaller than listing_hi")
-        if not _fetch(
-            conn,
-            usql.PAIR_EXISTS_SQL,
-            {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
-        ):
-            raise HTTPException(status_code=404, detail="no such pair")
-        try:
-            stored = _fetch(
+        if superseded is None:
+            if body.listing_lo is None or body.listing_hi is None:
+                raise _bad("a pair verdict needs listing_lo and listing_hi")
+            if body.cluster_key is not None:
+                raise _bad("a pair verdict carries no cluster_key")
+            if body.listing_lo >= body.listing_hi:
+                raise _bad("listing_lo must be smaller than listing_hi")
+            if not _fetch(
                 conn,
-                usql.VERDICT_PAIR_UPSERT_SQL,
-                {
-                    "listing_lo": body.listing_lo,
-                    "listing_hi": body.listing_hi,
-                    "verdict": body.verdict,
-                    "note": body.note,
-                    "reasons": reasons,
-                    "decided_by": str(decided_by),
-                },
-            )
-        except _CHECK_VIOLATION as exc:
-            raise _needs_migration_532() from exc
-        except _UNDEFINED_COLUMN as exc:
-            raise _needs_migration_533() from exc
-        must_not_link = body.verdict in NEGATIVE_VERDICTS
-        retracted = 0
-        if must_not_link:
-            _execute(
-                conn,
-                usql.MUST_NOT_LINK_UPSERT_SQL,
-                {
-                    "listing_lo": body.listing_lo,
-                    "listing_hi": body.listing_hi,
-                    "reason": body.note or f"operator: {body.verdict}",
-                },
-            )
-        else:
-            # The correction path. Without it a mis-clicked "not the same" keeps `guards.py`
-            # vetoing the pair on every future run while this page shows the corrected
-            # verdict — a contradiction visible on no surface at all.
-            _execute(
-                conn,
-                usql.MUST_NOT_LINK_RETRACT_SQL,
+                usql.PAIR_EXISTS_SQL,
                 {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
-            )
-            retracted = 1
-    else:
-        if body.cluster_key is None:
-            raise _bad("a cluster verdict needs cluster_key")
-        if body.listing_lo is not None or body.listing_hi is not None:
-            raise _bad("a cluster verdict carries no listing ids")
-        if not body.generation:
-            raise _bad("a cluster verdict needs the generation it was taken on")
-        if not _fetch(
-            conn,
-            usql.CLUSTER_EXISTS_SQL,
-            {"cluster_key": body.cluster_key, "generation": body.generation},
-        ):
-            raise HTTPException(
-                status_code=404, detail="no such cluster in this generation"
-            )
-        # Resolved HERE, from the store, at write time: the ruling is a statement about these
-        # adverts (E58), and the only honest record of which ones is the one the server reads.
-        ids = _cluster_member_ids(conn, body.cluster_key, body.generation)
+            ):
+                raise HTTPException(status_code=404, detail="no such pair")
+            lo, hi = body.listing_lo, body.listing_hi
+        else:
+            lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
         try:
-            stored = _fetch(
-                conn,
-                usql.VERDICT_CLUSTER_UPSERT_SQL,
-                {
-                    "cluster_key": body.cluster_key,
-                    "verdict": body.verdict,
-                    "note": body.note,
-                    "reasons": reasons,
-                    "decided_by": str(decided_by),
-                    "generation": body.generation,
-                    "member_ids": ids,
-                },
-            )
+            with conn.transaction():
+                stored_row = record_ruling(
+                    conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
+                    note=body.note, reasons=reasons,
+                )
         except _CHECK_VIOLATION as exc:
             raise _needs_migration_532() from exc
         except _UNDEFINED_COLUMN as exc:
             raise _needs_migration_533() from exc
-        must_not_link = False
-        retracted = 0
-        if body.verdict == "same":
-            for index, lo in enumerate(ids):
-                for hi in ids[index + 1:]:
-                    _execute(
-                        conn,
-                        usql.MUST_NOT_LINK_RETRACT_SQL,
-                        {"listing_lo": lo, "listing_hi": hi},
-                    )
-                    retracted += 1
+        stored = [stored_row] if stored_row else []
+        must_not_link = body.verdict in NEGATIVE_VERDICTS
+        # The correction path: a non-negative ruling drops the operator's own veto, or `guards.py`
+        # keeps vetoing a pair this page shows as confirmed. Counted as "no longer vetoed".
+        retracted = 0 if must_not_link else 1
+    else:
+        if superseded is None:
+            if body.cluster_key is None:
+                raise _bad("a cluster verdict needs cluster_key")
+            if body.listing_lo is not None or body.listing_hi is not None:
+                raise _bad("a cluster verdict carries no listing ids")
+            if not body.generation:
+                raise _bad("a cluster verdict needs the generation it was taken on")
+            if not _fetch(
+                conn,
+                usql.CLUSTER_EXISTS_SQL,
+                {"cluster_key": body.cluster_key, "generation": body.generation},
+            ):
+                raise HTTPException(
+                    status_code=404, detail="no such cluster in this generation"
+                )
+            # Resolved HERE, from the store, at write time: the ruling is a statement about
+            # these adverts (E58), and the only honest record of which ones is the one the
+            # server reads.
+            cluster_key, generation = body.cluster_key, body.generation
+            ids: list[int] | None = _cluster_member_ids(conn, body.cluster_key, body.generation)
+        else:
+            cluster_key = int(superseded["cluster_key"])
+            generation = superseded["generation"]
+            recorded = superseded["member_ids"]
+            ids = [int(value) for value in recorded] if recorded is not None else None
+        try:
+            with conn.transaction():
+                stored = _fetch(
+                    conn,
+                    usql.VERDICT_CLUSTER_APPEND_SQL,
+                    {
+                        "cluster_key": cluster_key,
+                        "verdict": body.verdict,
+                        "note": body.note,
+                        "reasons": reasons,
+                        "decided_by": str(decided_by),
+                        "generation": generation,
+                        "member_ids": ids,
+                    },
+                )
+                must_not_link = False
+                retracted = 0
+                if body.verdict == "same":
+                    members = ids or []
+                    for index, lo in enumerate(members):
+                        for hi in members[index + 1:]:
+                            _execute(
+                                conn,
+                                usql.MUST_NOT_LINK_RETRACT_SQL,
+                                {"listing_lo": lo, "listing_hi": hi},
+                            )
+                            retracted += 1
+        except _CHECK_VIOLATION as exc:
+            raise _needs_migration_532() from exc
+        except _UNDEFINED_COLUMN as exc:
+            raise _needs_migration_533() from exc
 
     return {
         "data": {
             "verdict": _row(usql.VERDICT_COLUMNS, stored[0]) if stored else None,
+            "superseded": superseded,
             "must_not_link": must_not_link,
             # Pairs whose operator veto this verdict dropped. The DELETE is a no-op where no
             # veto stood, so this is "pairs no longer vetoed by the operator", not "rows gone".
@@ -2382,6 +2388,43 @@ def verdict(
         },
         "store_ready": True,
     }
+
+
+def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
+    """The ruling a correction replaces, checked: it exists (404), it is of the body's grain and
+    names the same key when the body names one (400), and it is still the newest word on that
+    key (409) -- a stale tab must not rule over a ruling it never saw."""
+    rows = _fetch(conn, usql.VERDICT_ONE_SQL, {"id": body.supersedes})
+    if not rows:
+        raise HTTPException(status_code=404, detail="no such ruling")
+    old = _row(usql.VERDICT_COLUMNS, rows[0])
+    if old["kind"] != body.kind:
+        raise _bad(f"ruling {body.supersedes} is a {old['kind']} ruling")
+    if old["kind"] == "pair":
+        named = (body.listing_lo, body.listing_hi)
+        if named != (None, None) and named != (old["listing_lo"], old["listing_hi"]):
+            raise _bad("the listing ids contradict the ruling being corrected")
+        if body.cluster_key is not None:
+            raise _bad("a pair verdict carries no cluster_key")
+        newest = _fetch(conn, usql.PAIR_NEWEST_RULING_SQL, {
+            "listing_lo": old["listing_lo"], "listing_hi": old["listing_hi"]})
+    else:
+        if body.cluster_key is not None and body.cluster_key != old["cluster_key"]:
+            raise _bad("the cluster key contradicts the ruling being corrected")
+        if body.generation and body.generation != old["generation"]:
+            raise _bad("the generation contradicts the ruling being corrected")
+        if body.listing_lo is not None or body.listing_hi is not None:
+            raise _bad("a cluster verdict carries no listing ids")
+        newest = _fetch(conn, usql.CLUSTER_NEWEST_RULING_SQL, {
+            "cluster_key": old["cluster_key"], "generation": old["generation"]})
+    current = _row(usql.VERDICT_COLUMNS, newest[0]) if newest else None
+    if current is None or current["id"] != old["id"]:
+        raise HTTPException(
+            status_code=409,
+            detail="this ruling was ruled again since the page loaded it: reload and decide "
+                   "on the newest one",
+        )
+    return old
 
 
 class SplitUnitIn(BaseModel):
@@ -2542,15 +2585,13 @@ def verdict_split(
     def relation_of(lo: int, hi: int) -> str:
         return named.get(_unit_pair(assignment[lo], assignment[hi]), body.relation)
 
-    # What the operator has already said about these pairs, under their OWN name — the upsert
-    # conflicts on `decided_by`, so nobody else's ruling is at stake here.
+    # What is already ruled on these pairs: the NEWEST ruling per pair, whoever took it — it is
+    # the one every reader obeys (migration 573), so it is the one this split would take back.
     stored_verdicts: dict[tuple[int, int], str] = {}
     for row in _rows(
         usql.VERDICT_COLUMNS,
         _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": member_ids}),
     ):
-        if row["decided_by"] != str(decided_by):
-            continue
         key = (int(row["listing_lo"]), int(row["listing_hi"]))
         # Newest first (the statement's own ORDER BY), so the first row per pair is the live one.
         stored_verdicts.setdefault(key, row["verdict"])
@@ -2600,47 +2641,24 @@ def verdict_split(
     try:
         with conn.transaction():
             for lo, hi, relation, same_unit in pairs:
-                _execute(
-                    conn,
-                    usql.VERDICT_PAIR_UPSERT_SQL,
-                    {
-                        "listing_lo": lo,
-                        "listing_hi": hi,
-                        "verdict": relation,
-                        "note": f"operator split: {summary}",
-                        # The reasons ride on the CLUSTER row alone. A split is ONE ruling;
-                        # stamping it on the fan-out would post C(n,2) rows from a single
-                        # click, so the pair histogram would measure cluster size instead of
-                        # operator evidence and stop being comparable with the judge's
-                        # per-pair `unit_discriminator` — the readout's whole purpose (§9).
-                        "reasons": [],
-                        "decided_by": str(decided_by),
-                    },
+                # The one pair writer (E919): the ruling and its must-not-link mirror — a
+                # same-unit pair drops the veto an earlier ruling wrote (§9), a negative writes
+                # one. The reasons ride on the CLUSTER row alone. A split is ONE ruling;
+                # stamping it on the fan-out would post C(n,2) rows from a single click, so the
+                # pair histogram would measure cluster size instead of operator evidence and
+                # stop being comparable with the judge's per-pair `unit_discriminator` (§9).
+                record_ruling(
+                    conn, lo, hi, verdict=relation, decided_by=str(decided_by),
+                    note=f"operator split: {summary}",
+                    veto_reason=f"operator split: {relation}",
                 )
                 if same_unit:
                     n_pairs_same += 1
-                    # The correction half of the loop (§9): re-ruling a pair as one unit
-                    # has to drop the veto an earlier ruling wrote, or `guards.py` keeps
-                    # refusing a pair this page now shows as confirmed.
-                    _execute(
-                        conn,
-                        usql.MUST_NOT_LINK_RETRACT_SQL,
-                        {"listing_lo": lo, "listing_hi": hi},
-                    )
                 else:
                     n_pairs_negative += 1
-                    _execute(
-                        conn,
-                        usql.MUST_NOT_LINK_UPSERT_SQL,
-                        {
-                            "listing_lo": lo,
-                            "listing_hi": hi,
-                            "reason": f"operator split: {relation}",
-                        },
-                    )
             stored = _fetch(
                 conn,
-                usql.VERDICT_CLUSTER_UPSERT_SQL,
+                usql.VERDICT_CLUSTER_APPEND_SQL,
                 {
                     "cluster_key": body.cluster_key,
                     "verdict": cluster_verdict,
@@ -2806,8 +2824,6 @@ def verdict_candidate_split(
         usql.VERDICT_COLUMNS,
         _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": member_ids}),
     ):
-        if row["decided_by"] != str(decided_by):
-            continue
         key = (int(row["listing_lo"]), int(row["listing_hi"]))
         stored_verdicts.setdefault(key, row["verdict"])
 
@@ -2851,37 +2867,16 @@ def verdict_candidate_split(
     try:
         with conn.transaction():
             for lo, hi, relation, same_unit in pairs:
-                _execute(
-                    conn,
-                    usql.VERDICT_PAIR_UPSERT_SQL,
-                    {
-                        "listing_lo": lo,
-                        "listing_hi": hi,
-                        "verdict": relation,
-                        "note": note,
-                        # The fan-out carries no reason chips — see the body's own comment.
-                        "reasons": [],
-                        "decided_by": str(decided_by),
-                    },
+                # The one pair writer (E919); the fan-out carries no reason chips — see the
+                # body's own comment.
+                record_ruling(
+                    conn, lo, hi, verdict=relation, decided_by=str(decided_by), note=note,
+                    veto_reason=f"operator split: {relation}",
                 )
                 if same_unit:
                     n_pairs_same += 1
-                    _execute(
-                        conn,
-                        usql.MUST_NOT_LINK_RETRACT_SQL,
-                        {"listing_lo": lo, "listing_hi": hi},
-                    )
                 else:
                     n_pairs_negative += 1
-                    _execute(
-                        conn,
-                        usql.MUST_NOT_LINK_UPSERT_SQL,
-                        {
-                            "listing_lo": lo,
-                            "listing_hi": hi,
-                            "reason": f"operator split: {relation}",
-                        },
-                    )
     except _CHECK_VIOLATION as exc:
         raise _needs_migration_532() from exc
     except _UNDEFINED_COLUMN as exc:
@@ -2967,3 +2962,241 @@ def proposed_split(
     if not found[1]:
         raise HTTPException(status_code=404, detail="no live property of two or more adverts")
     return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}
+
+
+# ------------------------------------------------------------------ the rulings page (E919)
+#
+# Every operator ruling in one list, beside the engine's current view and the state of
+# production (`autodedup/ui_sql.py`, the rulings section). Read-only: a flip or a withdrawal is
+# `POST /autodedup/verdict` with `supersedes`, and the consequence buttons are the existing
+# `POST /properties/merge` and `POST /properties/{id}/detach`.
+
+RULING_GRAINS: tuple[str, ...] = ("pair", "group")
+# What a ruling IS, per grain: typed against the pair, a Browse merge's, a confirmed group's
+# member pair (implied), a bare operator veto; at group grain a group ruling or a Browse merge.
+RULING_SOURCES: dict[str, tuple[str, ...]] = {
+    "pair": ("pair", "browse_merge", "implied", "must_not_link"),
+    "group": ("group", "browse_merge"),
+}
+RULING_STATUSES: tuple[str, ...] = ("standing", "withdrawn", "unsure")
+# The page's three words (D39); `different` is widened over the stored negatives.
+RULING_VERDICTS: tuple[str, ...] = ("same", "different", "unsure")
+RULING_AGREEMENT: tuple[str, ...] = ("agrees", "disagrees", "none")
+RULING_NOW: dict[str, bool] = {"together": True, "apart": False}
+RULINGS_FILTER_KEYS: frozenset[str] = frozenset(
+    {
+        "grain", "verdict", "source", "status", "engine", "now", "decided_from", "decided_to",
+        "town", "listing", "property", "merge_group", "generation", "after", "limit",
+    }
+)
+# `o:<obec_kod>` or `c:<cast_obce_kod>` — the two RÚIAN grains a block is named at (529).
+TOWN_RE = re.compile(r"^([oc]):([0-9]{1,12})$")
+RULINGS_PAGE_SIZE = 25
+RULING_TOWNS_LIMIT = 40
+
+
+def _day(name: str, value: str | None) -> str | None:
+    """An ISO date off the wire, validated here: an unparsable one is a 400, not a 500."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise _bad(f"{name} must be an ISO date") from exc
+
+
+def _uuid(name: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise _bad(f"{name} must be a merge group id") from exc
+
+
+def _ruling_filters(
+    grain: str, verdict: str | None, source: str | None, status: str | None,
+    engine: str | None, now: str | None, decided_from: str | None, decided_to: str | None,
+    town: str | None, listing: int | None, property_id: int | None, merge_group: str | None,
+) -> dict[str, Any]:
+    """The filter registry, as the statements' nullable parameters. A blank value is no filter;
+    a value outside a vocabulary is a 400."""
+    obec = cast_obce = None
+    if town:
+        match = TOWN_RE.match(town)
+        if not match:
+            raise _bad("town must be o:<obec_kod> or c:<cast_obce_kod>")
+        if match.group(1) == "o":
+            obec = int(match.group(2))
+        else:
+            cast_obce = int(match.group(2))
+    if now and now not in RULING_NOW:
+        raise _bad(f"now must be one of: {', '.join(RULING_NOW)}")
+    return {
+        "verdict": _one_of("verdict", verdict or None, RULING_VERDICTS),
+        "source": _one_of("source", source or None, RULING_SOURCES[grain]),
+        "status": _one_of("status", status or None, RULING_STATUSES),
+        "engine": _one_of("engine", engine or None, RULING_AGREEMENT),
+        "together": RULING_NOW[now] if now else None,
+        "decided_from": _day("decided_from", decided_from),
+        "decided_to": _day("decided_to", decided_to),
+        "obec": obec,
+        "cast_obce": cast_obce,
+        "listing": listing,
+        "property": property_id,
+        "merge_group": _uuid("merge_group", merge_group),
+    }
+
+
+def _facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]]:
+    total = 0
+    facets: dict[str, dict[str, int]] = {"source": {}, "status": {}, "verdict": {}, "engine": {}}
+    for row in _rows(usql.RULING_FACET_COLUMNS, rows):
+        if row["facet"] == "total":
+            total = int(row["n"] or 0)
+        elif row["facet"] in facets and row["value"] is not None:
+            facets[row["facet"]][str(row["value"])] = int(row["n"] or 0)
+    return total, facets
+
+
+def _pair_ruling(row: dict[str, Any], generation: str | None,
+                 history: list[dict[str, Any]]) -> dict[str, Any]:
+    out = dict(row)
+    out["reasons"] = list(row.get("reasons") or [])
+    out["certificate"] = _certificate(row["decision"])
+    out["why_not_merged"] = (
+        _why_not_merged(row["zone"], row["decision"], row["guard_veto"])
+        if row["zone"] is not None else None
+    )
+    out["generation"] = generation
+    out["history"] = history
+    return out
+
+
+@router.get("/rulings")
+def rulings(
+    request: Request,
+    grain: str = Query("pair"),
+    verdict: str | None = Query(None),
+    source: str | None = Query(None),
+    status: str | None = Query(None),
+    engine: str | None = Query(None),
+    now: str | None = Query(None),
+    decided_from: str | None = Query(None),
+    decided_to: str | None = Query(None),
+    town: str | None = Query(None),
+    listing: int | None = Query(None),
+    property_id: int | None = Query(None, alias="property"),
+    merge_group: str | None = Query(None),
+    generation: str | None = Query(None),
+    after: str | None = Query(None),
+    limit: int = Query(RULINGS_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every operator ruling at one grain, newest first (keyset on `decided_at`), each with its
+    status, its source, where its adverts sit now and how the generation (the live stream once
+    live, else the newest pass) groups them; `agreement` puts the two side by side. `facets`
+    count the current filter's rows per source, status, verdict and agreement; `towns` is the
+    town filter's vocabulary; `history` is every row of each ruling's key, newest first."""
+    _reject_unknown_filters(request, RULINGS_FILTER_KEYS)
+    _one_of("grain", grain, RULING_GRAINS)
+    params = _ruling_filters(grain, verdict, source, status, engine, now, decided_from,
+                             decided_to, town, listing, property_id, merge_group)
+    cursor = _split_cursor(after, 3 if grain == "pair" else 2)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
+        if grain == "pair":
+            page_params = {
+                **params,
+                "after_at": _as_stamp(cursor[0]) if cursor else None,
+                "after_lo": _as_int(cursor[1]) if cursor else None,
+                "after_hi": _as_int(cursor[2]) if cursor else None,
+                "limit": limit + 1,
+            }
+            rows = _rows(usql.RULING_PAIR_COLUMNS,
+                         _fetch(conn, usql.RULINGS_PAIR_SQL, page_params))
+            facet_rows = _fetch(conn, usql.RULINGS_PAIR_FACETS_SQL, params)
+        else:
+            page_params = {
+                **params,
+                "after_at": _as_stamp(cursor[0]) if cursor else None,
+                "after_key": cursor[1] if cursor else None,
+                "limit": limit + 1,
+            }
+            rows = _rows(usql.RULING_GROUP_COLUMNS,
+                         _fetch(conn, usql.RULINGS_GROUP_SQL, page_params))
+            facet_rows = _fetch(conn, usql.RULINGS_GROUP_FACETS_SQL, params)
+        towns = _rows(usql.RULING_TOWN_COLUMNS,
+                      _fetch(conn, usql.RULING_TOWNS_SQL, {"limit": RULING_TOWNS_LIMIT}))
+        page = rows[:limit]
+        items = _ruling_items(conn, grain, page, generation)
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    total, facets = _facets(facet_rows)
+    last = page[-1] if page else None
+    next_after = None
+    if len(rows) > limit and last is not None:
+        next_after = (_cursor(last["decided_at"], last["listing_lo"], last["listing_hi"])
+                      if grain == "pair" else _cursor(last["decided_at"], last["ruling_key"]))
+    return {
+        "data": {
+            "grain": grain,
+            "generation": generation,
+            "items": items,
+            "next_after": next_after,
+            "total": total,
+            "facets": facets,
+            "towns": towns,
+        },
+        "store_ready": True,
+    }
+
+
+def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
+                  generation: str | None) -> list[dict[str, Any]]:
+    """The page's rows with each key's whole history (one statement per page, never per row):
+    a pair's own rows, an implied pair's group rows, a group's rows of its own pass."""
+    if not page:
+        return []
+    if grain == "pair":
+        los = [int(r["listing_lo"]) for r in page]
+        his = [int(r["listing_hi"]) for r in page]
+        pair_rows = _rows(usql.VERDICT_COLUMNS,
+                          _fetch(conn, usql.PAIR_VERDICTS_SQL, {"los": los, "his": his}))
+        keys = sorted({int(r["group_cluster_key"]) for r in page
+                       if r["group_cluster_key"] is not None})
+        group_rows = (_rows(usql.VERDICT_COLUMNS,
+                            _fetch(conn, usql.GROUP_RULING_HISTORY_SQL, {"keys": keys}))
+                      if keys else [])
+        items = []
+        for r in page:
+            if r["source"] == "implied":
+                history = [v for v in group_rows
+                           if v["cluster_key"] == r["group_cluster_key"]
+                           and v["generation"] == r["group_generation"]]
+            else:
+                history = [v for v in pair_rows
+                           if (v["listing_lo"], v["listing_hi"])
+                           == (r["listing_lo"], r["listing_hi"])]
+            items.append(_pair_ruling(r, generation, history))
+        return items
+    keys = sorted({int(r["cluster_key"]) for r in page if r["cluster_key"] is not None})
+    group_rows = (_rows(usql.VERDICT_COLUMNS,
+                        _fetch(conn, usql.GROUP_RULING_HISTORY_SQL, {"keys": keys}))
+                  if keys else [])
+    items = []
+    for r in page:
+        item = dict(r)
+        item["reasons"] = list(r.get("reasons") or [])
+        item["member_ids"] = [int(x) for x in (r.get("member_ids") or [])]
+        item["property_ids"] = sorted(int(x) for x in (r.get("property_ids") or []))
+        item["history"] = [v for v in group_rows
+                           if r["source"] == "group"
+                           and v["cluster_key"] == r["cluster_key"]
+                           and v["generation"] == r["generation"]]
+        items.append(item)
+    return items

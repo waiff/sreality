@@ -15,20 +15,20 @@ def _flat(sql: str) -> str:
     return " ".join(sql.split())
 
 
-def test_a_cluster_ruling_can_only_replace_a_ruling_of_the_same_pass() -> None:
-    """The conflict target carries the generation, matching the partial unique index migration
-    538 creates. Without it the upsert re-stamped the one row a key was allowed — so ruling the
-    g5 group 38324 destroyed the operator's g4 ruling, the last record of what they saw there.
-    """
-    flat = _flat(usql.VERDICT_CLUSTER_UPSERT_SQL)
+def test_a_cluster_ruling_is_newest_per_key_and_pass() -> None:
+    """The newest row per (cluster_key, coalesce(generation, '')) is the group's ruling
+    (migration 573): ruling the g5 group 38324 appends beside the operator's g4 ruling and never
+    touches it. The pre-573 in-place arm is keyed on the same pass, so it cannot reach another
+    pass's row either; `generation` is never reassigned, `member_ids` is part of what changed."""
+    flat = _flat(usql.VERDICT_CLUSTER_APPEND_SQL)
     assert (
-        "ON CONFLICT (kind, cluster_key, (coalesce(generation, ''::text)), decided_by) "
-        "WHERE kind = 'cluster'" in flat
+        "AND coalesce(x.generation, ''::text) = coalesce(%(generation)s::text, ''::text) "
+        "ORDER BY x.decided_at DESC, x.id DESC LIMIT 1" in flat
     )
-    # `generation` is part of the key now, so a re-ruling never reassigns it; `member_ids`
-    # still is, because re-running the SAME pass can move the group under the key.
-    assert "generation = excluded.generation" not in flat
-    assert "member_ids = excluded.member_ids" in flat
+    assert "AND coalesce(u.generation, ''::text) = coalesce(%(generation)s::text, ''::text)" in flat
+    assert "generation = %(generation)s" not in flat.split("restated AS (")[1].split("WHERE")[0]
+    assert "member_ids = %(member_ids)s::bigint[]" in flat
+    assert "AND n.member_ids IS NOT DISTINCT FROM %(member_ids)s::bigint[]" in flat
 
 
 def test_the_queue_and_the_progress_strip_pick_the_same_ruling() -> None:

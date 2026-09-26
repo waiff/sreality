@@ -77,8 +77,8 @@ _LABELS: dict[str, str] = {
     usql.REASON_COUNTS_SQL: "reason_counts",
     usql.JUDGEMENT_COUNTS_SQL: "judgement_counts",
     usql.LAST_SCORE_RUN_SQL: "last_run",
-    usql.VERDICT_PAIR_UPSERT_SQL: "verdict_write",
-    usql.VERDICT_CLUSTER_UPSERT_SQL: "verdict_write",
+    usql.VERDICT_PAIR_APPEND_SQL: "verdict_write",
+    usql.VERDICT_CLUSTER_APPEND_SQL: "verdict_write",
     usql.MUST_NOT_LINK_UPSERT_SQL: "must_not_link",
     usql.MUST_NOT_LINK_RETRACT_SQL: "must_not_link_retract",
     usql.CLUSTER_EXISTS_SQL: "cluster_exists",
@@ -1026,11 +1026,18 @@ def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client
     assert _last_call(conn, usql.PAIR_ONE_SQL)["generation"] == "g3"
 
 
-def test_a_pair_the_asked_for_pass_never_scored_is_a_404(client, conn):
-    conn.canned = {"pair_one": []}
+def test_a_pair_the_asked_for_pass_never_scored_still_opens(client, conn):
+    """E919: no stored row is "the engine kept nothing", not "no pair" — the live stream keeps
+    no machine reject (Decision 7) and most rulings name pairs it never stored. The page still
+    gets both digests, the photos and the ruling history, with `pair: null`."""
+    conn.canned = {"pair_one": [], "pair_verdicts": [_verdict_row()]}
     resp = client.get("/autodedup/pair/11/12", params={"generation": "g4"})
-    assert resp.status_code == 404
-    assert "generation" in resp.json()["detail"]
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["pair"] is None
+    assert data["features"] == [] and data["top_features"] == []
+    assert data["generation"] == "g4"
+    assert [v["verdict"] for v in data["verdicts"]] == ["different"]
 
 
 def test_a_store_with_no_clustering_yet_resolves_to_no_generation(client, conn):
@@ -1794,8 +1801,10 @@ def test_the_pair_view_keeps_the_price_unit_the_judge_digest_dropped(client, con
     assert digests["a"]["price_unit"] == "celkem"
 
 
-def test_an_unknown_pair_is_a_404(client, conn):
-    assert client.get("/autodedup/pair/11/12").status_code == 404
+def test_an_unknown_pair_opens_with_no_engine_row(client, conn):
+    body = client.get("/autodedup/pair/11/12").json()
+    assert body["store_ready"] is True
+    assert body["data"]["pair"] is None
 
 
 def test_a_pair_must_be_asked_for_in_canonical_order(client, conn):
@@ -1852,7 +1861,7 @@ def test_a_negative_pair_verdict_also_writes_the_permanent_must_not_link(admin_c
     assert body["data"]["must_not_link"] is True
     assert body["data"]["verdict"]["decided_by"] == "operator@example.com"
     assert body["data"]["verdict"]["decided_at"] == "2026-09-16T10:00:00+00:00"
-    written = _last_call(conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    written = _last_call(conn, usql.VERDICT_PAIR_APPEND_SQL)
     assert written["decided_by"] == "operator@example.com"
     assert written["verdict"] == "different"
     mnl = _last_call(conn, usql.MUST_NOT_LINK_UPSERT_SQL)
@@ -1943,7 +1952,7 @@ def test_a_cluster_verdict_records_only_the_verdict(admin_client, conn):
     assert body["data"]["must_not_link"] is False
     assert body["data"]["verdict"]["cluster_key"] == 101
     assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in conn.calls)
-    assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["cluster_key"] == 101
+    assert _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)["cluster_key"] == 101
 
 
 @pytest.mark.parametrize(
@@ -2259,7 +2268,7 @@ def test_a_split_rules_on_every_member_pair(admin_client, split_conn):
     assert data["must_not_link_retracted"] == 1
     pairs = {
         (p["listing_lo"], p["listing_hi"]): p["verdict"]
-        for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        for p in _calls(split_conn, usql.VERDICT_PAIR_APPEND_SQL)
     }
     assert pairs == {
         (11, 12): "same",
@@ -2282,7 +2291,7 @@ def test_a_split_stores_the_cluster_verdict_with_the_assignment_as_its_note(
 ):
     body = admin_client.post("/autodedup/verdict/split", json=_split()).json()
     assert body["data"]["cluster_verdict"]["kind"] == "cluster"
-    written = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    written = _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     assert written["verdict"] == "different"
     assert written["note"] == "A: 11,12 | B: 13"
     assert written["decided_by"] == "operator@example.com"
@@ -2290,7 +2299,7 @@ def test_a_split_stores_the_cluster_verdict_with_the_assignment_as_its_note(
 
 def test_an_operator_note_is_kept_beside_the_assignment(admin_client, split_conn):
     admin_client.post("/autodedup/verdict/split", json=_split(note="one developer, two houses"))
-    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["note"] == (
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)["note"] == (
         "one developer, two houses · A: 11,12 | B: 13"
     )
 
@@ -2301,7 +2310,7 @@ def test_one_unit_means_the_whole_cluster_is_the_same_property(admin_client, spl
         json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]),
     ).json()
     assert (body["data"]["n_pairs_same"], body["data"]["n_pairs_negative"]) == (3, 0)
-    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "same"
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)["verdict"] == "same"
     assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in split_conn.calls)
 
 
@@ -2311,8 +2320,8 @@ def test_a_split_lands_in_one_transaction(admin_client, split_conn):
     admin_client.post("/autodedup/verdict/split", json=_split())
     assert split_conn.transactions == 1
     written = [sql for sql, _ in split_conn.tx_calls]
-    assert written.count(usql.VERDICT_PAIR_UPSERT_SQL) == 3
-    assert usql.VERDICT_CLUSTER_UPSERT_SQL in written
+    assert written.count(usql.VERDICT_PAIR_APPEND_SQL) == 3
+    assert usql.VERDICT_CLUSTER_APPEND_SQL in written
 
 
 def test_a_split_never_asks_whether_the_pair_was_scored(admin_client, split_conn):
@@ -2344,7 +2353,7 @@ def test_a_split_never_asks_whether_the_pair_was_scored(admin_client, split_conn
 def test_a_malformed_split_is_refused(admin_client, split_conn, over):
     resp = admin_client.post("/autodedup/verdict/split", json=_split(**over))
     assert resp.status_code == 400
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in split_conn.calls)
 
 
 def test_more_units_than_letters_is_refused(admin_client, conn):
@@ -2391,7 +2400,7 @@ def test_a_vocabulary_the_store_predates_names_the_migration_instead_of_500ing(
     """Migration 532 widened `autodedup.verdicts.verdict`. Against a store without it the
     write raises a CHECK violation, and a bare 500 would send the operator to the logs."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    split_conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.CheckViolation(
+    split_conn.raises[usql.VERDICT_PAIR_APPEND_SQL] = psycopg_errors.CheckViolation(
         'new row violates check constraint "verdicts_verdict_check"'
     )
     resp = admin_client.post("/autodedup/verdict/split", json=_split())
@@ -2456,9 +2465,9 @@ def test_a_cluster_verdict_that_is_not_same_retracts_nothing(admin_client, conn,
     ("payload", "statement"),
     [
         ({"kind": "pair", "listing_lo": 11, "listing_hi": 12,
-          "verdict": "same_project_different_unit"}, usql.VERDICT_PAIR_UPSERT_SQL),
+          "verdict": "same_project_different_unit"}, usql.VERDICT_PAIR_APPEND_SQL),
         ({"kind": "cluster", "cluster_key": 101, "generation": "g1",
-          "verdict": "same_project_different_unit"}, usql.VERDICT_CLUSTER_UPSERT_SQL),
+          "verdict": "same_project_different_unit"}, usql.VERDICT_CLUSTER_APPEND_SQL),
     ],
 )
 def test_the_plain_verdict_route_names_the_migration_instead_of_500ing(
@@ -2489,11 +2498,11 @@ def test_a_split_names_no_relation_and_the_server_reads_it_as_different(
     admin_client.post("/autodedup/verdict/split", json=body)
     crossing = {
         (p["listing_lo"], p["listing_hi"]): p["verdict"]
-        for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        for p in _calls(split_conn, usql.VERDICT_PAIR_APPEND_SQL)
         if p["verdict"] != "same"
     }
     assert crossing == {(11, 13): "different", (12, 13): "different"}
-    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "different"
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)["verdict"] == "different"
 
 
 def test_an_older_client_that_names_one_relation_is_still_obeyed(admin_client, split_conn):
@@ -2504,7 +2513,7 @@ def test_an_older_client_that_names_one_relation_is_still_obeyed(admin_client, s
         json=_split(relation="same_building_different_unit"),
     )
     crossing = {
-        p["verdict"] for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        p["verdict"] for p in _calls(split_conn, usql.VERDICT_PAIR_APPEND_SQL)
         if p["verdict"] != "same"
     }
     assert crossing == {"same_building_different_unit"}
@@ -2514,7 +2523,7 @@ def test_a_candidate_split_names_no_relation_either(admin_client, candidate_conn
     body = _candidate_split_body(candidate_conn)
     assert "relation" not in body and "relations" not in body
     admin_client.post("/autodedup/verdict/candidate-split", json=body)
-    assert {p["verdict"] for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)} == {
+    assert {p["verdict"] for p in _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)} == {
         "different"
     }
 
@@ -2526,7 +2535,7 @@ def test_a_split_saves_with_neither_chips_nor_note(admin_client, split_conn):
     assert "reasons" not in body and "note" not in body
     resp = admin_client.post("/autodedup/verdict/split", json=body)
     assert resp.status_code == 200
-    written = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    written = _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     assert written["reasons"] == []
     # Only the assignment — the operator's own words are simply absent.
     assert written["note"] == "A: 11,12 | B: 13"
@@ -2556,7 +2565,7 @@ def test_a_split_can_name_a_relation_PER_UNIT_PAIR(admin_client, conn):
         ),
     ).json()
     pairs = {(p["listing_lo"], p["listing_hi"]): p["verdict"]
-             for p in _calls(conn, usql.VERDICT_PAIR_UPSERT_SQL)}
+             for p in _calls(conn, usql.VERDICT_PAIR_APPEND_SQL)}
     assert pairs == {
         (11, 12): "same_building_different_unit",
         (12, 13): "same_project_different_unit",
@@ -2564,7 +2573,7 @@ def test_a_split_can_name_a_relation_PER_UNIT_PAIR(admin_client, conn):
         (11, 13): "same_project_different_unit",
     }
     assert body["data"]["n_pairs_negative"] == 3
-    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    written = _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     # The cluster carries the WEAKEST claim — the only one true of the whole group — and the
     # note says which pair got which, because the single value cannot.
     assert written["verdict"] == "same_project_different_unit"
@@ -2589,7 +2598,7 @@ def test_the_cluster_takes_the_weakest_relation_the_split_used(admin_client, con
             relations=[{"unit_a": "A", "unit_b": "B", "relation": "different"}],
         ),
     )
-    assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "different"
+    assert _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)["verdict"] == "different"
 
 
 @pytest.mark.parametrize(
@@ -2605,7 +2614,7 @@ def test_the_cluster_takes_the_weakest_relation_the_split_used(admin_client, con
 def test_a_malformed_relation_is_refused(admin_client, split_conn, relations):
     resp = admin_client.post("/autodedup/verdict/split", json=_split(relations=relations))
     assert resp.status_code == 400
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in split_conn.calls)
 
 
 def test_a_split_that_takes_back_an_earlier_veto_asks_first(admin_client, split_conn):
@@ -2621,7 +2630,7 @@ def test_a_split_that_takes_back_an_earlier_veto_asks_first(admin_client, split_
     )
     assert resp.status_code == 409
     assert "11-12" in resp.json()["detail"]
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in split_conn.calls)
     assert all(sql != usql.MUST_NOT_LINK_RETRACT_SQL for sql, _ in split_conn.calls)
 
 
@@ -2651,9 +2660,9 @@ def test_a_split_that_agrees_with_what_is_stored_asks_nothing(admin_client, spli
     assert resp.json()["data"]["reversed_pairs"] == []
 
 
-def test_another_operators_veto_is_not_mine_to_take_back(admin_client, split_conn):
-    """The upsert conflicts on `decided_by`: a split rewrites MY rulings, never theirs, so
-    theirs cannot be the thing this confirmation is about."""
+def test_the_newest_veto_is_taken_back_whoever_wrote_it(admin_client, split_conn):
+    """Migration 573 / E919: the newest ruling on a pair is the one every reader obeys, whoever
+    took it — so a split that would supersede anyone's standing negative asks first."""
     split_conn.canned["member_verdicts"] = [
         _verdict_row(listing_lo=11, listing_hi=12, verdict="different",
                      decided_by="someone.else@example.com")
@@ -2662,7 +2671,8 @@ def test_another_operators_veto_is_not_mine_to_take_back(admin_client, split_con
         "/autodedup/verdict/split",
         json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]),
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 409
+    assert "11-12" in resp.json()["detail"]
 
 
 def test_a_group_card_carries_the_operators_rulings_on_its_members(client, conn):
@@ -2747,7 +2757,7 @@ def test_a_pair_verdict_stores_its_reasons_and_its_note(admin_client, conn):
               "reasons": ["floor_plan_differs", "unit_number"], "note": "different layout"},
     )
     assert resp.status_code == 200
-    written = _last_call(conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    written = _last_call(conn, usql.VERDICT_PAIR_APPEND_SQL)
     assert written["reasons"] == ["floor_plan_differs", "unit_number"]
     assert written["note"] == "different layout"
 
@@ -2762,7 +2772,7 @@ def test_a_cluster_verdict_stores_its_reasons(admin_client, conn):
               "generation": "g1",
               "reasons": ["identical_photos"]},
     )
-    assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["reasons"] == ["identical_photos"]
+    assert _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)["reasons"] == ["identical_photos"]
 
 
 def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
@@ -2772,7 +2782,7 @@ def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
               "reasons": ["broker", "identical_photos", "broker"]},
     )
-    assert _last_call(conn, usql.VERDICT_PAIR_UPSERT_SQL)["reasons"] == [
+    assert _last_call(conn, usql.VERDICT_PAIR_APPEND_SQL)["reasons"] == [
         "broker", "identical_photos"
     ]
 
@@ -2788,7 +2798,7 @@ def test_an_unknown_reason_is_refused_and_nothing_is_written(admin_client, conn)
     )
     assert resp.status_code == 400
     assert "the_curtains" in resp.json()["detail"]
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in conn.calls)
 
 
 def test_an_unknown_reason_on_a_split_is_refused_too(admin_client, split_conn):
@@ -2796,7 +2806,7 @@ def test_an_unknown_reason_on_a_split_is_refused_too(admin_client, split_conn):
         "/autodedup/verdict/split", json=_split(reasons=["nope"])
     )
     assert resp.status_code == 400
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in split_conn.calls)
 
 
 def test_a_split_stamps_its_reasons_on_the_cluster_row_ONLY(admin_client, split_conn):
@@ -2808,22 +2818,26 @@ def test_a_split_stamps_its_reasons_on_the_cluster_row_ONLY(admin_client, split_
         "/autodedup/verdict/split",
         json=_split(reasons=["floor_plan_differs", "same_project"], note="two buildings"),
     )
-    pair_writes = _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    pair_writes = _calls(split_conn, usql.VERDICT_PAIR_APPEND_SQL)
     assert len(pair_writes) == 3
     assert all(p["reasons"] == [] for p in pair_writes)
     # The fan-out rows still say where they came from, in their machine note.
     assert all(p["note"].startswith("operator split:") for p in pair_writes)
-    cluster = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    cluster = _last_call(split_conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     assert cluster["reasons"] == ["floor_plan_differs", "same_project"]
     # The operator's note still leads the assignment string, as it did before 533.
     assert cluster["note"].startswith("two buildings · A: 11,12 | B: 13")
 
 
-def test_re_deciding_a_verdict_overwrites_the_reasons_it_carried(admin_client, conn):
-    """The upsert is the re-decision path: a DO UPDATE that left `reasons` behind would keep
-    yesterday's evidence under today's verdict."""
-    assert "reasons = excluded.reasons" in usql.VERDICT_PAIR_UPSERT_SQL
-    assert "reasons = excluded.reasons" in usql.VERDICT_CLUSTER_UPSERT_SQL
+def test_re_deciding_a_verdict_appends_with_its_own_reasons(admin_client, conn):
+    """Migration 573: a re-decision is a NEW row carrying its own reasons, and the newest row is
+    the ruling. A change of reasons alone is a change (it appends); the pre-573 in-place arm
+    rewrites the reasons with the verdict, so yesterday's evidence never sits under today's."""
+    for sql in (usql.VERDICT_PAIR_APPEND_SQL, usql.VERDICT_CLUSTER_APPEND_SQL):
+        flat = " ".join(sql.split())
+        assert "AND n.reasons = %(reasons)s::text[]" in flat
+        assert "reasons = %(reasons)s::text[], " in flat
+        assert "ON CONFLICT DO NOTHING" in flat
 
 
 def test_the_reason_histogram_is_counted_per_grain(client, conn):
@@ -2852,7 +2866,7 @@ def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client
     VALUE, so the two are told apart and each names its own migration."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
     conn.canned = {"pair_exists": [(1,)]}
-    conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.UndefinedColumn(
+    conn.raises[usql.VERDICT_PAIR_APPEND_SQL] = psycopg_errors.UndefinedColumn(
         'column "reasons" of relation "verdicts" does not exist'
     )
     resp = admin_client.post(
@@ -2866,7 +2880,7 @@ def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client
 
 def test_a_split_against_a_store_without_533_names_that_migration(admin_client, split_conn):
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    split_conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.UndefinedColumn(
+    split_conn.raises[usql.VERDICT_PAIR_APPEND_SQL] = psycopg_errors.UndefinedColumn(
         'column "reasons" of relation "verdicts" does not exist'
     )
     resp = admin_client.post("/autodedup/verdict/split", json=_split())
@@ -3476,7 +3490,7 @@ def test_a_candidate_split_rules_every_pair_that_crosses_the_units(
     assert data["must_not_link_written"] == 3
     written = {
         (p["listing_lo"], p["listing_hi"]): p["verdict"]
-        for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        for p in _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)
     }
     assert written == {
         (50, 201): "different",
@@ -3498,7 +3512,7 @@ def test_a_candidate_split_never_writes_inside_a_lock(admin_client, candidate_co
     )
     touched = {
         (p["listing_lo"], p["listing_hi"])
-        for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        for p in _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)
         + _calls(candidate_conn, usql.MUST_NOT_LINK_UPSERT_SQL)
         + _calls(candidate_conn, usql.MUST_NOT_LINK_RETRACT_SQL)
     }
@@ -3531,7 +3545,7 @@ def test_a_candidate_split_writes_NO_cluster_verdict(admin_client, candidate_con
     ).json()
     assert body["data"]["cluster_verdict"] is None
     assert all(
-        sql != usql.VERDICT_CLUSTER_UPSERT_SQL for sql, _ in candidate_conn.calls
+        sql != usql.VERDICT_CLUSTER_APPEND_SQL for sql, _ in candidate_conn.calls
     )
 
 
@@ -3541,7 +3555,7 @@ def test_a_candidate_split_lands_in_one_transaction(admin_client, candidate_conn
     )
     assert candidate_conn.transactions == 1
     assert [sql for sql, _ in candidate_conn.tx_calls].count(
-        usql.VERDICT_PAIR_UPSERT_SQL
+        usql.VERDICT_PAIR_APPEND_SQL
     ) == 3
 
 
@@ -3564,7 +3578,7 @@ def test_splitting_a_locked_group_is_refused_and_says_where_to_do_it(
     assert "Groups page" in resp.json()["detail"]
     assert "900" in resp.json()["detail"]
     assert all(
-        sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls
+        sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in candidate_conn.calls
     )
 
 
@@ -3587,7 +3601,7 @@ def test_a_malformed_candidate_split_is_refused(admin_client, candidate_conn, ov
         "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn, **over)
     )
     assert resp.status_code == 400
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in candidate_conn.calls)
 
 
 def test_reason_chips_are_refused_rather_than_silently_dropped(admin_client, candidate_conn):
@@ -3604,7 +3618,7 @@ def test_the_note_rides_on_every_pair_row_with_the_assignment(admin_client, cand
         "/autodedup/verdict/candidate-split",
         json=_candidate_split_body(candidate_conn, note="jiny dum stejneho projektu"),
     )
-    note = _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)[0]["note"]
+    note = _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)[0]["note"]
     assert note.startswith("jiny dum stejneho projektu · operator candidate split: ")
     assert "A: 50 | B: 201,202,203" in note
 
@@ -3620,7 +3634,7 @@ def test_a_candidate_split_that_takes_back_a_veto_asks_first(admin_client, candi
     resp = admin_client.post("/autodedup/verdict/candidate-split", json=one_unit)
     assert resp.status_code == 409
     assert "50-201" in resp.json()["detail"]
-    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls)
+    assert all(sql != usql.VERDICT_PAIR_APPEND_SQL for sql, _ in candidate_conn.calls)
 
     confirmed = admin_client.post(
         "/autodedup/verdict/candidate-split", json={**one_unit, "confirm_retract": True}
@@ -3716,7 +3730,7 @@ def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement
 ):
     """D6's agreement read takes EVERY pair verdict as an explicit operator label (§9/E55).
 
-    The candidate split writes through the same `VERDICT_PAIR_UPSERT_SQL` with `kind = 'pair'`
+    The candidate split writes through the same `VERDICT_PAIR_APPEND_SQL` with `kind = 'pair'`
     as the pair queue does, and `AGREEMENT_PAIRS_SQL`'s `explicit` CTE selects those rows with
     no predicate beyond the kind — so a card ruled here counts towards the gate exactly as a
     pair ruled one at a time does. Both halves are asserted, because either one alone would
@@ -3724,11 +3738,11 @@ def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement
     admin_client.post(
         "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
     )
-    writes = _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    writes = _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)
     assert writes, "the split wrote no pair verdict"
     # `kind` is written as the literal 'pair' — the same row shape the pair queue writes.
-    assert "INSERT INTO autodedup.verdicts (kind," in usql.VERDICT_PAIR_UPSERT_SQL
-    assert "VALUES ('pair'," in usql.VERDICT_PAIR_UPSERT_SQL
+    assert "INSERT INTO autodedup.verdicts (kind," in usql.VERDICT_PAIR_APPEND_SQL
+    assert "SELECT 'pair', %(listing_lo)s::bigint" in usql.VERDICT_PAIR_APPEND_SQL
     explicit = usql.AGREEMENT_PAIRS_SQL[
         usql.AGREEMENT_PAIRS_SQL.index("WITH explicit AS"):
         usql.AGREEMENT_PAIRS_SQL.index("confirmed AS")
@@ -3859,7 +3873,7 @@ def test_a_cluster_verdict_without_a_generation_is_a_400(admin_client, conn):
     )
     assert resp.status_code == 400
     assert "generation" in resp.json()["detail"]
-    assert all(sql != usql.VERDICT_CLUSTER_UPSERT_SQL for sql, _ in conn.calls)
+    assert all(sql != usql.VERDICT_CLUSTER_APPEND_SQL for sql, _ in conn.calls)
 
 
 def test_a_cluster_verdict_is_stamped_with_the_set_the_server_resolved(admin_client, conn):
@@ -3876,7 +3890,7 @@ def test_a_cluster_verdict_is_stamped_with_the_set_the_server_resolved(admin_cli
         "/autodedup/verdict",
         json={"kind": "cluster", "cluster_key": 101, "verdict": "same", "generation": "g5"},
     ).json()
-    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    written = _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     assert written["generation"] == "g5"
     # Sorted, which is the shape every read compares against.
     assert written["member_ids"] == [11, 12, 13]
@@ -3904,7 +3918,7 @@ def test_a_split_stamps_the_set_it_ruled(admin_client, conn):
         },
     )
     assert resp.status_code == 200
-    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    written = _last_call(conn, usql.VERDICT_CLUSTER_APPEND_SQL)
     assert (written["generation"], written["member_ids"]) == ("g4", [11, 12])
 
 

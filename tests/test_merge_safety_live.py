@@ -254,10 +254,14 @@ def test_a_propertys_last_own_advert_stays_while_merged_ones_share_it(cur):
 
 
 def _rulings(cur: Any, ids: list[int], by: str = OP) -> list[tuple[int, int, str]]:
+    """Each pair's NEWEST ruling by `by` — the ruling every reader obeys since migration 573
+    made the store a ledger (a detach after a merge is a second row, not an overwrite)."""
     cur.execute(
-        "SELECT listing_lo, listing_hi, verdict FROM autodedup.verdicts "
+        "SELECT DISTINCT ON (listing_lo, listing_hi) listing_lo, listing_hi, verdict "
+        "FROM autodedup.verdicts "
         "WHERE kind = 'pair' AND decided_by = %s AND listing_lo = ANY(%s) "
-        "AND listing_hi = ANY(%s) ORDER BY listing_lo, listing_hi", (by, ids, ids))
+        "AND listing_hi = ANY(%s) ORDER BY listing_lo, listing_hi, decided_at DESC, id DESC",
+        (by, ids, ids))
     return [(int(lo), int(hi), v) for lo, hi, v in cur.fetchall()]
 
 

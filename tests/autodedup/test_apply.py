@@ -215,7 +215,7 @@ class FakeDb:
         if sql == S.CLUSTER_VERDICTS_SQL:
             ids = set(p["listing_ids"])
             return [(v["cluster_key"], v["verdict"], v.get("generation"), v.get("member_ids"),
-                     v.get("decided_by", "op"), v.get("decided_at"), n + 1)
+                     v.get("decided_at"), n + 1)
                     for n, v in enumerate(self.verdicts)
                     if v["kind"] == "cluster"
                     and ((v.get("member_ids") is not None and ids & set(v["member_ids"]))
@@ -513,24 +513,25 @@ def test_a_group_verdict_with_no_member_set_refuses_its_key_in_every_generation(
     assert reasons == {10: [A.SKIP_CLUSTER_VERDICT], 20: [A.SKIP_CLUSTER_VERDICT], 30: []}
 
 
-def test_the_newest_group_verdict_of_each_operator_on_a_set_is_the_one_that_stands() -> None:
-    # g10 {10, 11} ruled different, then g12's {10, 11} ruled same by the same operator: the
-    # newer ruling retracts the older one. Another operator's standing negative still refuses,
-    # and so does a negative newer than the positive.
+def test_the_newest_group_verdict_on_a_set_is_the_one_that_stands_whoever_ruled() -> None:
+    # g10 {10, 11} ruled different, then g12's {10, 11} ruled same: the newer ruling retracts
+    # the older one, whoever took either (E919: the newest word wins at every reader, as the
+    # lane's must-links and apply's pair negatives already read it). A negative newer than the
+    # positive refuses again, and a withdrawal (`unsure`) after it lifts it.
     db = FakeDb()
     _pair_group(db, 10, [10, 11], [100, 200])
     db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
                         "generation": "g10", "member_ids": [10, 11], "decided_by": "op",
                         "decided_at": T0})
     db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "same",
-                        "generation": GEN, "member_ids": [10, 11], "decided_by": "op",
+                        "generation": GEN, "member_ids": [10, 11], "decided_by": "op2",
                         "decided_at": T0 + timedelta(days=2)})
     assert _only(_plan(db)).reasons == []
+    # An OLDER negative by another operator no longer outlives the newer positive (G11).
     db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
-                        "generation": "g11", "member_ids": [10, 11], "decided_by": "op2",
+                        "generation": "g11", "member_ids": [10, 11], "decided_by": "op3",
                         "decided_at": T0 + timedelta(days=1)})
-    assert _only(_plan(db)).reasons == [A.SKIP_CLUSTER_VERDICT]
-    db.verdicts.pop()
+    assert _only(_plan(db)).reasons == []
     db.verdicts.append({"kind": "cluster", "cluster_key": 10,
                         "verdict": "same_building_different_unit", "generation": GEN,
                         "member_ids": [10, 11], "decided_by": "op",
@@ -538,10 +539,14 @@ def test_the_newest_group_verdict_of_each_operator_on_a_set_is_the_one_that_stan
     group = _only(_plan(db))
     assert group.reasons == [A.SKIP_CLUSTER_VERDICT]
     assert group.detail["group_verdicts"] == [[10, 11]]
-    # Who ruled is a grouping key only: it never reaches the ledger or the artifact.
+    # Who ruled is never read: it cannot reach the ledger or the artifact.
     db.verdicts[-1]["decided_by"] = "someone@example.cz"
     A.apply_plan(db, _plan(db), dry_run=True)
     assert "example.cz" not in json.dumps([r["plan_json"] for r in db.ledger])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "unsure",
+                        "generation": GEN, "member_ids": [10, 11], "decided_by": "op",
+                        "decided_at": T0 + timedelta(days=4)})
+    assert _only(_plan(db)).reasons == []
 
 
 def _engine_merged(db: FakeDb, key: int, lids: list[int], pids: list[int],
