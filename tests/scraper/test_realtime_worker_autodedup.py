@@ -196,11 +196,13 @@ def test_the_seeded_setting_ships_the_lane_dark() -> None:
 
 def test_the_settings_row_says_the_lane_merges() -> None:
     """W5 (E911): /settings is where the lane is turned on, and 557's description still said it
-    "never merges anything". 566 rewrites the DESCRIPTION only — never an operator's value."""
-    sql = (MIGRATION.parent / "566_autodedup_one_lane_interval_description.sql").read_text(
+    "never merges anything". 568 rewrites the DESCRIPTION only — never an operator's value, and
+    it says the interval stays 0 until the W5 seed and the gates (review A2)."""
+    sql = (MIGRATION.parent / "568_autodedup_one_lane_interval_description.sql").read_text(
         encoding="utf-8")
     body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
     assert "set description =" in body and "MERGES" in body
+    assert "sensible running value" not in body and "G1-G3" in body and "rt_seed" in body
     assert f"where key = '{rw.AUTODEDUP_INTERVAL_SETTING}'" in body
     assert not re.search(r"\bset\s+value\b|,\s*value\s*=", body, re.I), "the value is untouched"
     assert not re.search(r"\b(create|alter|drop|delete|insert|truncate)\b", body, re.I)
