@@ -46,12 +46,14 @@ floor (`auto_reject:numeral_conflict` 603 stored of 6,748; `auto_reject:attr_con
    `/stats` engine block (5 SQL constants + `_engine_stats`), the reason-string parsers `_certificate` /
    `_why_not_merged` / `CERTIFICATE_COUNTS_SQL`, the 7-bit family bitmask in 3 mirrors, the stale
    "shadow mode, merges nothing" copy. Section 1.6.
-5. **Item 2, the 11 heads (model v1, `dinov3-b16@768/bf16`, `pos_neg`):** 3 exteriér - fasáda, 17 garáž,
-   22 interiér - koupelna, 25 interiér - kuchyně, 28 interiér - obývací pokoj, 39 podklad - 3d plán, 42 podklad -
-   katastrální mapa, 43 podklad - letecký snímek s ohraničením subjektu, 45 podklad - property list, 46 podklad -
-   půdorys, 48 technické zařízení / místnost. Id 39 = 3d plán verified (`docs/design/new-dedup/PROGRAM.md:1586`);
-   the other ten pairings are inferred from the two lists printed in the same order (`:764` ids, `:1031-1033`
-   names); a DB read of `tag_taxonomy` confirms or corrects them.
+5. **Item 2, the 11 heads (model v1, `dinov3-b16@768/bf16`, `pos_neg`):** 3 `exterier - fasáda`, 17 `garáž`,
+   22 `interier - koupelna`, 25 `interier - kuchyně`, 28 obývací pokoj, 39 `podklad - 3d plán`, 42 `podklad -
+   katastrální mapa`, 43 `podklad - letecký snímek s ohraničením subjektu`, 45 property list, 46 `podklad -
+   půdorys`, 48 `technické zařízení / místnost`. Labels in backticks are exact (`migrations/457:43-55`,
+   `docs/design/new-dedup/PROGRAM.md:1580`); the exact label text of obývací pokoj and property list lives only in
+   the DB. Id 39 = 3d plán is verified (`PROGRAM.md:1586`); the other ten id-to-label pairings are inferred from
+   the two lists printed in the same order (`:764` ids, `:1031-1033` names), both also alphabetical by label; a DB
+   read of `tag_taxonomy` confirms or corrects them.
 6. **Item 2, where to score: measured.** ViT-B/16 at 768 px (2,309 tokens) = 589 GFLOP per image; one CPU core of
    this machine (i7-1260P, numpy/OpenBLAS fp32) runs the layer GEMMs at 60-68 GFLOP/s = **9.8 s per image per
    core** (512 px 3.1 s, 224 px 0.56 s). At 55-60k new images/day that is **6.8 cores busy all day**, about
@@ -221,7 +223,7 @@ K-R 837; share of joined adverts IMG 69.4 %, TXT 28.8 %, PRICE 1.0 %, ATTR 0.9 %
 | K-C (IMG) | 2,100 | 6,492 | 6,915 |
 | K-B (TXT) | 1,564 | 2,614 | 1,445 |
 | K-R (TXT) | 173 | 1,708 | 1,059 |
-| model | 1,942: IMG 1,166, TXT 652, ATTR 84, PRICE 38, MISSING-only 2 | 7,794: IMG 4,904, TXT 2,391, ATTR 357, PRICE 142 | 7,995 |
+| model | 1,942: IMG 1,166, TXT 654, ATTR 84, PRICE 38 | 7,794: IMG 4,904, TXT 2,391, ATTR 357, PRICE 142 | 7,995: IMG 5,060, TXT 2,470, ATTR 295, PRICE 170 |
 | promotion `agree:2` | 2,114: photo IMG 1,393, body TXT 721 | 21,156: body TXT 14,725, photo IMG 6,419, twin TXT 12 | 7,663: photo 6,009, body 1,646, twin 8 |
 | promotion `photo` / `unit` | 48 IMG / 30 TXT | 73 IMG / 8 TXT | 134 IMG / 26 TXT |
 
@@ -393,15 +395,15 @@ does not know):
 
 | head | engine room | family | private room |
 |---|---|---|---|
-| interiér - kuchyně | kitchen | interior | yes |
-| interiér - koupelna | bathroom | interior | yes |
-| interiér - obývací pokoj | living_room | interior | yes |
+| interier - kuchyně | kitchen | interior | yes |
+| interier - koupelna | bathroom | interior | yes |
+| obývací pokoj (exact label in DB) | living_room | interior | yes |
 | technické zařízení / místnost | technical | interior | no |
-| exteriér - fasáda | exterior_facade | exterior | no |
+| exterier - fasáda | exterior_facade | exterior | no |
 | podklad - půdorys | floor_plan (`FLOOR_PLAN_TAG`) | plan | no |
 | podklad - 3d plán | plan_3d (NOT floor_plan: a 3D view against a 2D drawing of one unit cannot match by dHash and would fire `floorplan_conflict` falsely) | plan | no |
 | podklad - katastrální mapa, letecký snímek s ohraničením | site_plan | plan | no |
-| podklad - property list | property_document | plan | no |
+| property list (exact label in DB) | property_document | plan | no |
 | garáž | garage | other | no |
 | winner under 0.5 | other | other | no |
 
@@ -524,4 +526,7 @@ tests, and every image threshold re-cut on DINOv3's cosine scale (`indistinguish
 - outputs: `c6/g15/`, `c6/c17/`, `c6/c18/` (`attribution.json`, `attribution.md`, `operator_table.md`,
   `tagshare.json`, `warrant_probe.txt` for g15 and c17); the c17 w31 run `c6/runs/c17_w31/`
   (`run.json`, `pairs.jsonl.gz`, `clusters.json`)
-- CPU timing script: the session scratchpad `gemm.py` (numbers in section 0 line 6)
+- CPU timing script: `c6/cpu_vit_gemm.py` (numbers in section 0 line 6; run with OPENBLAS_NUM_THREADS=1 while
+  other census agents shared the machine, so the per-core rate is a floor, not a ceiling)
+- the same scripts and this report are committed on branch `census/w15-c6-dinov3-attribution` @ `d1e2d74d`
+  (pushed; no PR), path `autodedup_w15_census/c6/`
