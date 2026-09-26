@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,10 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from autodedup import harness, judge, judge_lane
+from autodedup import harness, judge, judge_lane, labels
+from autodedup.dataset import load
+from autodedup.model import hand_initialised
+from autodedup.settings import Settings
 from autodedup.judge_sql import (
     GOLD_PAIRS_SQL,
     JUDGEMENT_CACHED_SQL,
@@ -1407,6 +1411,156 @@ def test_every_committed_pair_list_is_a_well_formed_lo_first_list() -> None:
         pairs = judge_lane.load_pair_list(path.stem)
         assert pairs, path
         assert all(lo < hi for lo, hi in pairs), path
+
+
+def test_every_committed_stratum_is_a_named_contested_set() -> None:
+    for path in sorted(judge_lane.PAIRS_DIR.glob("*.json")):
+        _, strata = judge_lane.load_pair_set(path.stem)
+        assert all(name.strip() == name and name for name in strata.values()), path
+
+
+# --- a stratum per listed pair, and the pairs the engine never stored ------------------------
+
+
+def _write_pair_objects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                        entries: list[Any]) -> str:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "stamped.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    return "stamped"
+
+
+def test_load_pair_set_reads_a_stratum_per_pair_and_orders_lo_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"hi": 4, "lo": 9, "stratum": "a:refused_union|price"},
+        [1, 2],
+        {"lo": 4, "hi": 9, "stratum": "a:refused_union|price"},
+        {"lo": 7, "hi": 3},
+    ])
+    pairs, strata = judge_lane.load_pair_set(name)
+    assert pairs == ((4, 9), (1, 2), (3, 7))
+    assert strata == {(4, 9): "a:refused_union|price"}
+    assert judge_lane.load_pair_list(name) == pairs
+
+
+@pytest.mark.parametrize("entries", [
+    [{"lo": 1, "hi": 2, "stratom": "a"}],
+    [{"lo": 1, "stratum": "a"}],
+    [{"lo": 1, "hi": 2, "stratum": "  "}],
+    [{"lo": 1, "hi": 2, "stratum": 3}],
+    [{"lo": 1, "hi": 2, "stratum": "a"}, {"lo": 2, "hi": 1, "stratum": "b"}],
+    [{"lo": 1, "hi": "x"}],
+])
+def test_load_pair_set_refuses_a_malformed_object_entry(
+    entries: list[Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_objects(tmp_path, monkeypatch, entries)
+    with pytest.raises(SystemExit):
+        judge_lane.load_pair_set(name)
+
+
+def test_a_stamped_pairs_file_files_every_pair_under_its_own_stratum(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    first, second = _pairs_of(whole)[:2]
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": first[0], "hi": first[1], "stratum": "a:refused_union|price"},
+        {"lo": second[0], "hi": second[1], "stratum": "e:merged_disagree|floor"},
+    ])
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=8, max_usd=5, workers=1,
+                   pairs_file=name)
+    assert summary["pairs_file_stamped_strata"] == 2
+    assert set(summary["sample_strata"]) == {"a:refused_union|price", "e:merged_disagree|floor"}
+    assert {(row["lo"], row["hi"]): row["stratum"] for row in _judgements(out)} == {
+        first: "a:refused_union|price", second: "e:merged_disagree|floor",
+    }
+    # The stamp travels in sample.json, so the label side reads it without recomputing a key.
+    sample = labels.load_sample(out / judge_lane.SAMPLE_FILE)
+    assert sample.stratum_fn == "stamped"
+    assert sample.stratum_of(first) == "a:refused_union|price"
+
+
+def test_a_strata_filter_reads_the_stamped_stratum(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    first, second = _pairs_of(whole)[:2]
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": first[0], "hi": first[1], "stratum": "a:refused_union|price"},
+        {"lo": second[0], "hi": second[1], "stratum": "c:unscored_block_gap"},
+    ])
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=8, max_usd=5,
+                   dry_run=1, pairs_file=name, strata="c:")
+    assert list(summary["sample_strata"]) == ["c:unscored_block_gap"]
+    assert _pairs_of(tmp_path / "out") == [second]
+
+
+def test_score_unstored_judges_a_listed_pair_the_engine_never_stored(
+    lane, cohort: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    stored = {(int(row["lo"]), int(row["hi"])) for row in harness.read_pairs(whole)}
+    unstored = next(pair for pair in combinations(sorted(load(cohort).listings), 2)
+                    if pair not in stored)
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": unstored[0], "hi": unstored[1], "stratum": "c:unscored_block_gap"},
+        [999_000_001, 999_000_002],
+    ])
+
+    # Without the flag the pair is missing, and a list with nothing stored refuses to start.
+    with pytest.raises(SystemExit):
+        lane(tmp_path / "refused", export_run="1", tier="text", n=4, max_usd=5, dry_run=1,
+             pairs_file=name)
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=4, max_usd=5, workers=1,
+                   pairs_file=name, score_unstored=1)
+    assert summary["score_unstored"] is True
+    assert summary["pairs_file_scored_unstored"] == [list(unstored)]
+    assert summary["pairs_file_missing"] == [[999_000_001, 999_000_002]]
+    assert [(row["lo"], row["hi"], row["stratum"]) for row in _judgements(out)] == [
+        (unstored[0], unstored[1], "c:unscored_block_gap")
+    ]
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert [row["stored"] for row in drawn] == [False]
+
+
+def test_score_unstored_without_a_pairs_file_is_refused(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5, dry_run=1,
+             score_unstored=1)
+    assert "pairs_file" in str(exc.value)
+
+
+def test_drawn_stratum_prefers_the_stamp_over_the_zone_grid() -> None:
+    row = {"zone": "merge", "certificate": "K-C", "block": "b1", "cross_source": True,
+           "feats": {}}
+    assert harness.drawn_stratum(row) == harness.judge_stratum(row)
+    assert harness.drawn_stratum({**row, "stratum": "a:refused_union"}) == "a:refused_union"
+
+
+def test_score_pairs_reproduces_the_run_row_of_a_stored_pair(cohort: Path, tmp_path: Path) -> None:
+    dataset = load(cohort)
+    settings, model = Settings(), hand_initialised()
+    harness.run_engine(dataset, settings, model, tmp_path)
+    row = next(row for row in harness.read_pairs(tmp_path) if row.get("certificate") != "K-B")
+    [again] = harness.score_pairs(dataset, settings, model, [(row["hi"], row["lo"])])
+    assert again["stored"] is False
+    for key in ("lo", "hi", "zone", "score", "certificate", "reason", "families", "block",
+                "block_key", "source_pair", "cross_source", "probes", "feats", "context"):
+        assert again[key] == row[key], key
+    assert harness.score_pairs(
+        dataset, settings, model, [(row["lo"], 999_000_001), (row["lo"], row["lo"])]
+    ) == []
 
 
 # --- the adapter onto autodedup.oss_pod -----------------------------------------------------
