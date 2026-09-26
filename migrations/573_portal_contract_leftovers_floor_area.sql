@@ -59,8 +59,8 @@
 --   A1 bazos 32 (0 of 19,345 dispositioned byt/dum rows on the eight structured portals)
 --   A2 bazos 3, idnes 1 (4,095), realitymix 1 (1,800), sreality 1 (5,989).
 -- Corpus-wide the only measured figures are F1 2,995 rows (1,736 active) on 2026-09-23 and
--- F2 86 (33 active) before the W8 heal. RUN THE COUNT BELOW FIRST (read-only), by rail, portal and liveness, and record it
--- with the apply:
+-- F2 86 (33 active) before the W8 heal. RUN THE COUNT BELOW FIRST (read-only), by rail,
+-- portal and liveness, and record it with the apply:
 --
 --   select rail, source, is_active, count(*) as n from (
 --     select case when source = 'idnes' and floor = 20
