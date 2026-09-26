@@ -311,6 +311,14 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
     assert [(int(lo), int(hi)) for lo, hi in cur.fetchall()] == sorted([card, veto])
 
 
+def _as_at_560(cur: Any) -> None:
+    """Migration 560's one-time copy, as it ran: its conflict target is the per-decider pair
+    index of 528, which 574 dropped (the store is a ledger since), so the replay recreates that
+    index inside the test's transaction (rolled back with it) before running the statement."""
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS autodedup_verdicts_pair_uidx ON autodedup.verdicts "
+                "(kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'")
+
+
 def _copy_statement() -> str:
     sql = (Path(__file__).resolve().parent.parent / "migrations"
            / "560_one_merge_one_undo.sql").read_text()
@@ -335,6 +343,7 @@ def test_the_copy_rules_the_operators_live_merge_same_and_nothing_it_did_not_jud
     cur.execute("UPDATE property_merge_events SET source = 'operator' "
                 "WHERE merge_group_id = ANY(%s::uuid[])", ([old, gone],))
 
+    _as_at_560(cur)
     cur.execute(_copy_statement())
     ids = [s1, b1, a1, u1]
     assert _rulings(cur, ids, by="operator") == [(*_pair(s1, a1), "same")]
