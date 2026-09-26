@@ -1,5 +1,6 @@
 /* The MF card renders the ONE result by its shape — value, range + (i) note,
- * note, none — and holds no reason text of its own. */
+ * note, none — and holds no reason text of its own. The notes here are
+ * stand-ins: the real sentences exist once, in the SQL that returns them. */
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
@@ -23,16 +24,18 @@ const STORED: ReferenceRent = {
   monthly_rent_czk: 17_700,
 };
 
-const NOTE_COARSE = 'Konkrétní katastr není znám.';
+const NOTE_COARSE = '(the range note, from SQL)';
 
-/* A town-level location in a town priced per katastr: no value, the range. */
+/* A town-level location in a town priced per katastr: no value, the range —
+ * the published per-m² span of the reference flat, this flat's adjustments,
+ * and the rents they make at its area ((203 + 5) × 75, (232 + 5) × 75). */
 const RANGE = {
   territory: { ruian_code: 586846, level: 'obec', name: 'Jihlava', kraj: 'Kraj Vysočina' },
   vk: 3,
   is_novostavba: false,
   source_revision: 3,
   base_per_m2: null,
-  adjustments: [],
+  adjustments: [{ attribute: 'balcony', czk_per_m2: 5 }],
   total_per_m2: null,
   area_m2: 75,
   monthly_rent_czk: null,
@@ -41,8 +44,8 @@ const RANGE = {
   range: {
     per_m2_min: 203,
     per_m2_max: 232,
-    rent_min_czk: 15_225,
-    rent_max_czk: 17_400,
+    rent_min_czk: 15_600,
+    rent_max_czk: 17_775,
     yield_min_pct: 3.6,
     yield_max_pct: 4.1,
   },
@@ -50,7 +53,7 @@ const RANGE = {
 
 const NOTE_ONLY = {
   status: 'no_rent_cell',
-  note: 'Cenová mapa MF pro toto území a velikost bytu nájem neuvádí.',
+  note: '(a reason note, from SQL)',
   monthly_rent_czk: null,
 } as unknown as ReferenceRent;
 
@@ -81,16 +84,17 @@ describe('MfReferenceCard', () => {
 
   it('renders a range with its note behind the (i), and the range yield', () => {
     const { container } = render(<MfReferenceCard refRent={RANGE} yieldPct={9.99} />);
-    expect(container).toHaveTextContent('15 225–17 400 Kč/měs');
-    expect(container).toHaveTextContent('Celkem za m²203–232 Kč/m²/měs');
-    expect(container).toHaveTextContent('× plocha 75 m²15 225–17 400 Kč');
+    expect(container).toHaveTextContent('15 600–17 775 Kč/měs');
+    expect(container).toHaveTextContent('Nájemné referenčního bytu203–232 Kč/m²/měs');
+    expect(container).toHaveTextContent('+ balkón+5 Kč/m²/měs');
+    expect(container).toHaveTextContent('× plocha 75 m²15 600–17 775 Kč');
     expect(container).toHaveTextContent('hrubý výnos 3,60–4,10 %');
     // The range carries its own yields; the value yield is not borrowed.
     expect(container).not.toHaveTextContent('9,99');
     const hint = screen.getByRole('img', { name: NOTE_COARSE });
     expect(hint).toHaveAttribute('title', NOTE_COARSE);
-    // A range is not a value: no base row, no single rent.
-    expect(container).not.toHaveTextContent('Nájemné referenčního bytu');
+    // A range is not a value: no single total, no single rent.
+    expect(container).not.toHaveTextContent('Celkem za m²');
   });
 
   it('renders a range without yields for a rental flat', () => {
@@ -99,7 +103,7 @@ describe('MfReferenceCard', () => {
       range: { ...RANGE.range!, yield_min_pct: null, yield_max_pct: null },
     } as ReferenceRent;
     const { container } = render(<MfReferenceCard refRent={rental} />);
-    expect(container).toHaveTextContent('15 225–17 400 Kč/měs');
+    expect(container).toHaveTextContent('15 600–17 775 Kč/měs');
     expect(container).not.toHaveTextContent('hrubý výnos');
   });
 

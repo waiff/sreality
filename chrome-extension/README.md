@@ -90,7 +90,7 @@ oprav / listing price) with the SPA's `/estimation/:id` page via the
 it never derives them:
 
 - The MF ledger line renders the per-m² rate carried in the property's own MF
-  result (`total_per_m2`, or a range's two totals). It used to divide the rent
+  result (`total_per_m2`, or a range's published span). It used to divide the rent
   by the listing's `area_m2` in the browser, which mixed grains — the rent is
   **property**-grain and the area **listing**-grain.
 - Both monthly per-m² figures (the MF reference rent and the *Fond oprav + SVJ*

@@ -21,10 +21,10 @@ export interface ReferenceRentAdjustment {
 }
 
 /* The ministry's published range, for a flat whose location is known only to
- * town level in a town priced per katastr. `per_m2_*` are TOTAL rates (base
- * plus this flat's adjustments), the range twin of `total_per_m2`, so
- * `rent_*_czk` = per-m² × area. The yields exist only for a sale flat with a
- * usable price. */
+ * town level in a town priced per katastr. `per_m2_*` is the published range
+ * of the reference flat's rate across the town's katastry (the range twin of
+ * `base_per_m2`); `rent_*_czk` add this flat's `adjustments` before × area.
+ * The yields exist only for a sale flat with a usable price. */
 export interface ReferenceRentRange {
   per_m2_min: number;
   per_m2_max: number;

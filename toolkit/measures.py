@@ -675,11 +675,11 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
     RegisteredSite(
         path="frontend/src/components/estimation/MfReferenceCard.test.tsx",
         arm="unit",
-        hits=4,
+        hits=5,
         measure="ppm2",
         kind=KIND_GUARDS,
-        why="Pins that every per-m² figure on the MF card — the base rate, an "
-        "adjustment, the value's total and a range's two totals — renders the "
+        why="Pins that every per-m² figure on the MF card — a value's base rate, "
+        "adjustment and total; a range's published span and adjustment — renders the "
         "MONTHLY rent-basis unit through the shared formatter; the capital unit "
         "would misname a rent-map rate by a factor of twelve.",
     ),
