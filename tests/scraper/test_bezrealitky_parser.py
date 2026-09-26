@@ -161,6 +161,17 @@ def test_a_dwelling_never_takes_surface_land_as_its_headline():
     assert listing.estate_area == 905
 
 
+
+def test_the_room_band_reaches_bezrealitky():
+    """A1 wiring: bezrealitky calls derive_headline_area inline, where `disposition` is an
+    optional keyword — dropping it would silently switch the per-room band off here. A
+    3+kk is at least 24 m² (8 m² a room): 20 m² is a part of the unit, 24 m² is the unit."""
+    under = parse_advert(_advert(disposition="DISP_3_KK", surface=20))
+    assert under.disposition == "3+kk"
+    assert (under.area_m2, under.area_basis) == (None, None)
+    on_band = parse_advert(_advert(disposition="DISP_3_KK", surface=24))
+    assert (on_band.area_m2, on_band.area_basis) == (24.0, "usable")
+
 def test_zero_surface_is_none_sentinel():
     # bezrealitky uses 0 as the "not specified" sentinel for numeric fields.
     listing = parse_advert(_advert(surface=0, etage=0, totalFloors=0))

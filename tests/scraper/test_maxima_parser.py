@@ -310,10 +310,11 @@ def test_spaced_thousands_in_a_spec_cell_is_one_number():
     listing = parse_detail(html, source_url=_DETAIL_URL,
                            category_main="dum", category_type="prodej")
     assert listing.area_m2 == 1114.0
-    # The same figure on a FLAT is a site area, never the unit (MAX_FLAT_AREA_M2).
+    # The same figure on a FLAT is a site area, never the unit (MAX_FLAT_AREA_M2): the
+    # declined floor cell falls through to the next measure, the title's own 114 m².
     flat = parse_detail(html, source_url=_DETAIL_URL,
                         category_main="byt", category_type="prodej")
-    assert flat.area_m2 != 1114.0
+    assert (flat.area_m2, flat.area_basis) == (114.0, "unknown")
 
 
 def test_a_loggia_alone_is_a_balcony_and_a_stated_no_survives_the_union():
