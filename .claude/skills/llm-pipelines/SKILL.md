@@ -134,13 +134,13 @@ The Ministry of Finance's quarterly *Cenová mapa nájemného*: a hedonic refere
 territory (KÚ or obec) × VK1–4, standard + novostavba columns, plus per-amenity Kč/m²
 adjustments. A secondary figure shown ALONGSIDE the comparables estimate — never overrides it.
 
-- **ONE read-time SQL measure (migration 563):** `mf_reference(facts, obec_kod, katastr_kod,
+- **ONE read-time SQL measure (migration 565):** `mf_reference(facts, obec_kod, katastr_kod,
   country_status)` → `mf_reference_rent_czk`, `mf_gross_yield_pct`, `mf_reference_rent` (detail
   jsonb). LANGUAGE sql, inlined into the caller's LEFT JOIN LATERAL (no `SET`/STRICT — CI plan
   test). It reads ONLY the matview `rent_map_cells` (latest revision as `ku`/`obec`/`town` cells
   with the adjustments as columns), never geometry. Nothing stores MF: `browse_projection` and
   `properties_public` call it on the golden facts + the representative's `listing_location`
-  codes (migration 564), the read models copy it like any column, and `listing_feed_public` takes
+  codes (migration 566), the read models copy it like any column, and `listing_feed_public` takes
   the PROPERTY's yield from `browse_list` (operator ruling Q8 b). The stored `listings.mf_*` /
   `properties.mf_*` have had no writer since then and are dropped in the destructive cleanup.
 - **Rules:** flats only (else no row). VK = leading integer of the disposition clamped 1..4;
@@ -153,7 +153,7 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
 - **The result's SHAPE is the render contract:** value (`monthly_rent_czk`) | range
   (`range{per_m2_min/max, rent_min/max_czk, yield_min/max_pct?}` + `note`) | note (`status` +
   `note`) | none (NULL). Six codes (`ok`, `territory_coarse`, `no_rent_cell`, `not_in_cz`,
-  `location_unknown`, `inputs_missing`); their Czech notes exist ONLY in migration 563 — clients
+  `location_unknown`, `inputs_missing`); their Czech notes exist ONLY in migration 565 — clients
   render `detail.note`, never their own text (rail: `tests/test_mf_reference.py`), and decide the
   shape through ONE rule, `frontend/src/lib/mfReference.ts` (`mfShape`, shared with the
   extension). Ranges show on detail surfaces only; Browse/map/kanban and the yield filter see

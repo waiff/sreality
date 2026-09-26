@@ -2152,10 +2152,10 @@ renumber.** Navigate by area:
     unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
     publishing relations return byte-identical figures.
 
-    **Its sibling, the MF reference rent** (migration 563), follows the same doctrine at property
+    **Its sibling, the MF reference rent** (migration 565), follows the same doctrine at property
     grain: `public.mf_reference(...)` is one inlinable SQL function over the ingest-refreshed
     `rent_map_cells` matview. `browse_projection` and `properties_public` call it through a LEFT
-    JOIN LATERAL (migration 564), the read models copy it, nothing stores it. It answers a value,
+    JOIN LATERAL (migration 566), the read models copy it, nothing stores it. It answers a value,
     the town's published range (location known only to town level) or a reason — six codes whose
     Czech notes live only in that migration — and every surface renders the result by its shape.
     Contract and rules: the `llm-pipelines` skill.
@@ -3228,7 +3228,7 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
 * `admin_boundaries` — price stats, the rent-map choropleth and city proximity still read its
-  geometry and population (MF itself reads only stored codes since migration 563). Its LOCATION
+  geometry and population (MF itself reads only stored codes since migration 565). Its LOCATION
   role died with trigger 289; re-keying those three onto
   `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id` is an FK to it,
   and already the RÚIAN obec code.

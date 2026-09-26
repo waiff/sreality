@@ -1,4 +1,4 @@
-"""`mf_reference()` -- THE MF reference rent (migration 563) -- proven against the replayed
+"""`mf_reference()` -- THE MF reference rent (migration 565) -- proven against the replayed
 schema, plus the one rail that keeps its six codes and five notes in one place.
 
 The matrix EXECUTES the function over a seeded rent map (a stale revision, an obec-priced

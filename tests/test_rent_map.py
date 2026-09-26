@@ -1,7 +1,7 @@
 """Tests for the MF rent-map parser + the reference-rent wrapper (toolkit.rent_map).
 
 Parser tests run against a committed fixture XLSX (hermetic, no network). The
-measure itself is SQL (`mf_reference()`, migration 563) and is tested live in
+measure itself is SQL (`mf_reference()`, migration 565) and is tested live in
 tests/test_mf_reference.py; here only the wrapper's hand-off, on a fake connection.
 """
 
@@ -102,7 +102,7 @@ _FACTS = {
     "katastr_kod": None, "country_status": "cz",
 }
 
-# mf_reference()'s declared parameter order (migration 563). The wrapper binds by name,
+# mf_reference()'s declared parameter order (migration 565). The wrapper binds by name,
 # so this pins that every name lands in its own positional slot of the call.
 _SIGNATURE_ORDER = (
     "category_main", "category_type", "disposition", "area_m2", "price_czk", "condition",

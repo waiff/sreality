@@ -1,4 +1,4 @@
--- 564_mf_read_time_views.sql -- the three serving views read MF at read time (PR-D, D-2).
+-- 566_mf_read_time_views.sql -- the three serving views read MF at read time (PR-D, D-2).
 --
 -- ADDITIVE SWAP. `create or replace` of three views with IDENTICAL column names, types and
 -- positions (Postgres enforces all three, and `sync_browse_list` inserts POSITIONALLY);
@@ -37,7 +37,7 @@
 -- ROLLBACK is a forward migration restating 561 §2 / 508 §1e / 535 §2 verbatim; the stored
 -- properties.mf_* columns survive until PR-F.
 --
--- APPLY after 563 AND after PR-C (the readers that render by the jsonb's shape) has
+-- APPLY after 565 AND after PR-C (the readers that render by the jsonb's shape) has
 -- deployed, via apply_migration.yml. Statement autocommit around ONE explicit transaction
 -- for the swap, every statement idempotent (561's recipe), so a retried file resumes.
 
@@ -51,13 +51,13 @@ begin
      or to_regprocedure('public.mf_reference(text, text, text, numeric, bigint, text, boolean, '
                         'boolean, text, boolean, boolean, text, bigint, bigint, '
                         'public.country_status)') is null then
-    raise exception '564 refused: apply 563 (rent_map_cells + mf_reference) first';
+    raise exception '566 refused: apply 565 (rent_map_cells + mf_reference) first';
   end if;
   if exists (select 1 from public.rent_map_revisions)
      and not exists (select 1 from public.rent_map_cells c
                       where c.source_revision = (select max(source_revision)
                                                    from public.rent_map_revisions)) then
-    raise exception '564 refused: rent_map_cells is not populated for the latest rent-map '
+    raise exception '566 refused: rent_map_cells is not populated for the latest rent-map '
                     'revision -- refresh it first';
   end if;
 end $$;
@@ -390,7 +390,7 @@ begin
     missing := missing || 'listing_feed_public does not read MF from the read model';
   end if;
   if array_length(missing, 1) is not null then
-    raise exception '564 did not land: %', array_to_string(missing, '; ');
+    raise exception '566 did not land: %', array_to_string(missing, '; ');
   end if;
 end $$;
 

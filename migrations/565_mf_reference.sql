@@ -1,4 +1,4 @@
--- 563_mf_reference.sql -- MF reference rent becomes ONE read-time SQL measure (PR-D, D-1).
+-- 565_mf_reference.sql -- MF reference rent becomes ONE read-time SQL measure (PR-D, D-1).
 --
 -- ADDITIVE. Two new objects, nothing existing changes:
 --
@@ -65,7 +65,7 @@
 --   note   -> status + note only.
 -- NULL-valued keys are stripped, so presence alone decides the shape.
 --
--- APPLY with apply_migration.yml (or the MCP) BEFORE 564. Idempotent: every statement
+-- APPLY with apply_migration.yml (or the MCP) BEFORE 566. Idempotent: every statement
 -- is `if not exists`, `create or replace`, `on conflict do nothing` or a grant, so a
 -- retried file resumes.
 
@@ -299,7 +299,7 @@ comment on function public.mf_reference(text, text, text, numeric, bigint, text,
   boolean, text, boolean, boolean, text, bigint, bigint, public.country_status) is
   'THE MF reference rent (Cenová mapa nájemného): facts + stored obec/KÚ codes -> rent, '
   'yield and the detail jsonb (value | range + note | note). Reads only rent_map_cells. '
-  'Inlined by the planner; call it through LEFT JOIN LATERAL. Migration 563.';
+  'Inlined by the planner; call it through LEFT JOIN LATERAL. Migration 565.';
 
 revoke execute on function public.mf_reference(text, text, text, numeric, bigint, text,
   boolean, boolean, text, boolean, boolean, text, bigint, bigint, public.country_status)
@@ -346,6 +346,6 @@ begin
     missing := missing || 'anon can read rent_map_cells';
   end if;
   if array_length(missing, 1) is not null then
-    raise exception '563 did not land: %', array_to_string(missing, '; ');
+    raise exception '565 did not land: %', array_to_string(missing, '; ');
   end if;
 end $$;

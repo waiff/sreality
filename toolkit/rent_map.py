@@ -13,7 +13,7 @@ the layout is flat tabular, so `openpyxl` would be a needless dependency.
 
 The territory key `Kód obce` is the RÚIAN code of a katastrální území (`ku`, when
 the *Katastrální území* cell is non-empty) or of an obec (`obec`, when it is empty).
-The reference rent itself is ONE SQL measure, `mf_reference()` (migration 563): it
+The reference rent itself is ONE SQL measure, `mf_reference()` (migration 565): it
 reads only the ingested cells and the stored obec/KÚ codes, never geometry.
 """
 

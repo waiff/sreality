@@ -3,7 +3,7 @@
 Parsing lives in `toolkit.rent_map`; the write lives here (out of the read-only
 toolkit). Shared by `scripts.fetch_rent_map` and the `/admin/rent-map` upload
 endpoint so both ingest identically. The reference rent itself is the SQL
-measure `mf_reference()` (migration 563), which reads the refreshed cells.
+measure `mf_reference()` (migration 565), which reads the refreshed cells.
 """
 
 from __future__ import annotations
@@ -136,7 +136,7 @@ def insert_revision(
         # artifact's freshness depends on someone loading a page, and the registry says so
         # (host = 'api-request'); the non-concurrent REFRESH above leaves no other trace.
         scraper_db.stamp_derived_artifact(conn, "rent_map_choropleth")
-        # mf_reference()'s only input (migration 563), read by every Browse and listing
+        # mf_reference()'s only input (migration 565), read by every Browse and listing
         # read: CONCURRENTLY, so no reader ever blocks on an ingest.
         cur.execute("refresh materialized view concurrently rent_map_cells")
         scraper_db.stamp_derived_artifact(conn, "rent_map_cells")

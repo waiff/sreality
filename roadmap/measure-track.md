@@ -572,8 +572,8 @@ measure returning a value, the town's published range, or a reason; readers rend
   client reason literals are gone. `range.per_m2_*` are TOTAL rates (the town's published
   span + the flat's adjustments, the twin of `total_per_m2`); `rent_*_czk` = per-m² × area.
 - **Done — PR-D (the measure):** `mf_reference()` over the ingest-refreshed `rent_map_cells`
-  matview (migration 563: six codes, their notes only there, VK clamp 1..4, NULL condition keeps
-  adjustments) and the view swap (564: `browse_projection` + `properties_public` call it,
+  matview (migration 565: six codes, their notes only there, VK clamp 1..4, NULL condition keeps
+  adjustments) and the view swap (566: `browse_projection` + `properties_public` call it,
   `listing_feed_public` reads the property's yield from `browse_list`, Q8 b). Deleted: the hourly
   `recompute_mf_yields` job + script + test, the ingest's monolith call, `recompute_mf_one` and its
   five merge/detach/split calls, the Python PIP implementation (`_REFERENCE_RENT_SQL`,
