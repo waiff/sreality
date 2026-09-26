@@ -692,11 +692,13 @@ def decide_pair(
     # still reads every stated fact except the three columns the rung outranks.
     if (decision.zone in ("band", "reject") and not decision.reason.startswith("auto_reject")
             and photo_override(la, lb, present_value(feats, "room_proof_frames"), settings)):
-        decision = apply_d43_rule(
+        lifted = apply_d43_rule(
             Decision(decision.lo, decision.hi, "merge", decision.score, decision.families,
                      "K-P", None, "certificate:K-P",
                      {**decision.evidence, "k_p_lifted_from": decision.reason}),
             la, lb, feats, settings)
+        if lifted.zone == "merge":
+            decision = lifted
     # D65 last: a cell the operator holds propose-only must survive every promotion above it.
     return apply_merge_policy(decision, la, lb, settings)
 

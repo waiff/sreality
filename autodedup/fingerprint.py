@@ -230,7 +230,9 @@ def build_fingerprint(
         own = settings.photo_override_own_pop_max
         for image in non_catalog:
             room = image.room_tag()
-            if room not in settings.photo_override_rooms or image.phash is None:
+            if room is None or image.phash is None:
+                continue
+            if "*" not in settings.photo_override_rooms and room not in settings.photo_override_rooms:
                 continue
             if own > 0 and (image.pop is None or image.pop > own):
                 continue
