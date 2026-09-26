@@ -249,6 +249,9 @@ def _pair_view(decision: Any, probes: Sequence[str]) -> dict[str, Any]:
         "veto": decision.veto,
         "families": sorted(decision.families),
         "probes": list(probes),
+        # Whether the row carries evidence: `storable` keeps an evidence-bearing row (E61's
+        # designator vetoes) whatever it scored, so the stored grain is compared on it too.
+        "evidence": bool(decision.evidence),
     }
 
 
@@ -291,6 +294,7 @@ def incremental_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
+            "evidence": bool(row.evidence),
         }
         for key, row in store.pairs.items()
     }
@@ -326,6 +330,8 @@ def withheld_state(
     batch_size: int,
     limits: Limits,
     score_column: str = PAIR_SCORE_SQL_TYPE,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
+    must_not_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
     """The incremental path run against production's actual evidence timeline (E92/E93).
 
@@ -336,6 +342,8 @@ def withheld_state(
     the lane has. The final state must be the batch engine's, exactly — the hold changes WHEN
     a decision is reached, never which one."""
     store = MemoryStore(now=WITHHELD_T0, score_sql_type=score_column)
+    store.ml = set(must_link)
+    store.mnl = set(must_not_link)
     facts = WithheldFacts(ds)
     hold = EvidenceHold(now=WITHHELD_T0, horizon_s=WITHHELD_HORIZON_S)
     passes: list[PassResult] = []
@@ -382,6 +390,7 @@ def withheld_state(
             "veto": row.veto,
             "families": sorted(row.families),
             "probes": sorted(row.probes),
+            "evidence": bool(row.evidence),
         }
         for key, row in store.pairs.items()
     }
@@ -565,10 +574,16 @@ def run(argv: Sequence[str] | None = None) -> int:
         },
     }
 
+    # The groups themselves, beside the comparison: G1 against a batch pass that ran
+    # elsewhere (g12's own clusters.json) is read off these, not re-derived.
+    dumped: dict[str, dict[int, list[int]]] = {
+        "batch": batch_clusters, "arrival": clusters, "live": live_clusters}
     if ns.withhold_photos:
         w_pairs, w_clusters, w_stats = withheld_state(
-            ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
+            ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column,
+            must_link, must_not_link,
         )
+        dumped["withheld"] = w_clusters
         report["withheld_photos"] = {
             "stats": w_stats,
             "pairs_vs_batch": compare_pairs(reference, w_pairs),
@@ -580,8 +595,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     if ns.shuffle_seed is not None:
         shuffled = arrival_order(ds, ns.shuffle_seed)
         s_pairs, s_clusters, s_stats = incremental_state(
-            ds, settings, model, calibration, shuffled, ns.batch_size, limits, ns.score_column
+            ds, settings, model, calibration, shuffled, ns.batch_size, limits, ns.score_column,
+            must_link, must_not_link,
         )
+        dumped["shuffled"] = s_clusters
         report["shuffled"] = {
             "seed": ns.shuffle_seed,
             "stats": s_stats,
@@ -592,6 +609,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     (out_dir / "replay.json").write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
     )
+    (out_dir / "clusters.json").write_text(json.dumps(
+        {arm: {str(k): sorted(v) for k, v in sorted(groups.items())}
+         for arm, groups in dumped.items()}, sort_keys=True), encoding="utf-8")
     print(json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=2,
                      sort_keys=True)[:4000])
     return 0

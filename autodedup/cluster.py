@@ -221,97 +221,13 @@ def _repartition_clusters(
 ) -> tuple[dict[int, list[int]], list[dict[str, Any]], int]:
     """E137: components of the merge graph, each cut into maximal consistent sub-groups.
 
-    E910: a must-link closure is CONTRACTED to one node (its smallest id) before the graph is
-    cut, so `partition` starts from the closures instead of singletons and every move it makes
-    shifts a whole closure; the invariants and the blockers read the expanded member sets."""
-    if closures:
-        return _repartition_contracted(edges, fps, settings, must_not_link, relation, closures)
-
-    def invariants(members: Sequence[int]) -> str | None:
-        fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
-        return cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
-
-    strict_relation = (relation.strict()
-                       if settings.repartition_rejoin_cells and relation is not None else None)
-
-    def blockers(members: Sequence[int]) -> list[tuple[int, int]]:
-        """E253: the pairwise refusals inside a member set — what a cell could shed its way
-        out of. The set-level invariants are deliberately absent: `partition` re-tests the
-        whole of `invariants` on what is left, so an area spread no eviction can fix simply
-        makes the move fail."""
-        ids = sorted(members)
-        out: list[tuple[int, int]] = []
-        for index, left in enumerate(ids):
-            for right in ids[index + 1:]:
-                if (left, right) in must_not_link:
-                    out.append((left, right))
-                elif relation is not None and not relation.ok(left, right):
-                    out.append((left, right))
-        return out
-
-    def strict_invariants(members: Sequence[int]) -> str | None:
-        broken = invariants(members)
-        if broken is not None:
-            return broken
-        if strict_relation is not None and strict_relation.violating_pair(members) is not None:
-            return "d43_strict"
-        return None
-
-    graph = [Edge(d.lo, d.hi, d.score, d.certificate is not None) for d in edges]
-    nodes = {listing_id for edge in edges for listing_id in (edge.lo, edge.hi)}
-    grouped: dict[int, list[int]] = {}
-    cut = 0
-    for component in components(nodes, graph):
-        inside = {listing_id: index for index, listing_id in enumerate(component)}
-        if invariants(component) is None:
-            cells = [component]
-        else:
-            cut += 1
-            local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
-            cells = partition(component, local, invariants, settings.repartition_max_rounds,
-                              settings.repartition_keep_factless,
-                              settings.repartition_rejoin_cells, strict_invariants,
-                              blockers if settings.repartition_shed_blockers else None,
-                              settings.repartition_shed_max,
-                              settings.repartition_shed_max_union,
-                              settings.repartition_outer_rounds,
-                              settings.repartition_shed_factless_guard,
-                              settings.repartition_reconcile_factless_first)
-        for cell in cells:
-            grouped[min(cell)] = sorted(cell)
-
-    membership = {listing_id: key for key, members in grouped.items() for listing_id in members}
-    conflicts: list[dict[str, Any]] = []
-    for decision in edges:
-        if membership.get(decision.lo) == membership.get(decision.hi):
-            continue
-        members = sorted(set(grouped.get(membership.get(decision.lo, -1), [decision.lo]))
-                         | set(grouped.get(membership.get(decision.hi, -1), [decision.hi])))
-        conflicts.append({
-            "lo": decision.lo,
-            "hi": decision.hi,
-            "score": decision.score,
-            "certificate": decision.certificate,
-            "invariant": invariants(members) or "repartition",
-            "members": members,
-            "families": sorted(decision.families),
-        })
-    return grouped, conflicts, cut
-
-
-def _repartition_contracted(
-    edges: Sequence[Decision],
-    fps: Mapping[int, Fingerprint],
-    settings: Settings,
-    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
-    relation: ClusterRelation | None,
-    closures: Mapping[int, Sequence[int]],
-) -> tuple[dict[int, list[int]], list[dict[str, Any]], int]:
-    """`_repartition_clusters` over the graph with every must-link closure contracted (E910).
-
-    A node is a closure's smallest id; an edge inside a closure disappears (the closure is one
-    node) and an edge out of one is re-attached to it. The repartition itself is untouched: it
-    sees nodes, and every node it moves is a whole closure."""
+    E910: the graph is always CONTRACTED to its must-link closures — a closure is one node (its
+    smallest id), an edge inside one disappears and an edge out of one is re-attached to it, and
+    an advert no ruling names is a node of its own — so `partition` starts from the closures
+    and every move it makes shifts a whole closure; the invariants and the blockers read the
+    expanded member sets. With no ruling the contraction is the identity: every node is one
+    advert and every edge is the pass's own."""
+    closures = closures or {}
     node_of = {member: key for key, members in closures.items() for member in members}
 
     def node(listing_id: int) -> int:
@@ -325,9 +241,11 @@ def _repartition_contracted(
         left, right = node(decision.lo), node(decision.hi)
         if left == right:
             continue
-        contracted.append(replace(decision, lo=min(left, right), hi=max(left, right)))
-    nodes_only = [key for key in closures
-                  if not any(key in (d.lo, d.hi) for d in contracted)]
+        if (left, right) != (decision.lo, decision.hi):
+            decision = replace(decision, lo=min(left, right), hi=max(left, right))
+        contracted.append(decision)
+    touched = {n for d in contracted for n in (d.lo, d.hi)}
+    nodes_only = [key for key in closures if key not in touched]
 
     def invariants(nodes: Sequence[int]) -> str | None:
         fingerprints = [fps[m] for m in expand(nodes) if m in fps]
@@ -337,6 +255,10 @@ def _repartition_contracted(
                        if settings.repartition_rejoin_cells and relation is not None else None)
 
     def blockers(nodes: Sequence[int]) -> list[tuple[int, int]]:
+        """E253: the pairwise refusals inside a member set — what a cell could shed its way
+        out of, as NODE pairs. The set-level invariants are deliberately absent: `partition`
+        re-tests the whole of `invariants` on what is left, so an area spread no eviction can
+        fix simply makes the move fail."""
         members = expand(nodes)
         out: set[tuple[int, int]] = set()
         for index, left in enumerate(members):
@@ -359,7 +281,7 @@ def _repartition_contracted(
         return None
 
     graph = [Edge(d.lo, d.hi, d.score, d.certificate is not None) for d in contracted]
-    nodes = {n for edge in contracted for n in (edge.lo, edge.hi)} | set(nodes_only)
+    nodes = touched | set(nodes_only)
     grouped: dict[int, list[int]] = {}
     cut = 0
     for component in components(nodes, graph):
