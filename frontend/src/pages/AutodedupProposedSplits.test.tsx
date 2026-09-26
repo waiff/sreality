@@ -210,6 +210,11 @@ describe('<AutodedupProposedSplits> the cards', () => {
     expect(within(shot).getAllByText(/dvojice: reject: plocha 55 vs 72/)).toHaveLength(3);
     for (const id of ['#101', '#202', '#303']) expect(within(shot).getByText(id)).toBeInTheDocument();
     expect(within(shot).getByRole('link', { name: 'detail' })).toHaveAttribute('href', '/property/13393');
+    // the operator's rulings on this property's adverts (E920), as the property page links them
+    expect(within(shot).getByRole('link', { name: 'Rozhodnutí o těchto inzerátech' })).toHaveAttribute(
+      'href',
+      '/autodedup/rulings?property=13393',
+    );
     // the proposal: both apart groups ticked, the kept group not
     expect([tick(13393, 101).checked, tick(13393, 202).checked, tick(13393, 303).checked]).toEqual([
       false,

@@ -4,11 +4,13 @@ made true in ONE transaction and ruled.
 `split_property` takes every advert the operator was shown and the units to separate; the rest is
 the kept unit. It moves adverts ONLY through rule 15's chokepoint (`detach_listing`, then
 `merge_property_set` to join a unit that landed on two records) and rules ONLY through
-`record_rulings`: `different` + an operator must-not-link across units, `same` inside each
-separated unit, and `same` inside the kept unit when `keep_together`; a machine veto on a pair
-it rules `same` stays the machine's (`restore_must_not_link`). A refusal is a `SplitRefused` and
-nothing is written. The response carries the body of its own undo: `undo_split` re-joins the
-adverts and restores each pair's previous word and must-not-link row.
+`record_rulings` (each pair through `record_ruling`, the one pair writer, which APPENDS to the
+rulings ledger, migration 574 / E920): `different` + an operator must-not-link across units,
+`same` inside each separated unit, and `same` inside the kept unit when `keep_together`; a
+machine veto on a pair it rules `same` stays the machine's (`restore_must_not_link`). A refusal
+is a `SplitRefused` and nothing is written. The response carries the body of its own undo:
+`undo_split` re-joins the adverts and appends each pair's previous word again and puts back its
+must-not-link row.
 """
 
 from __future__ import annotations
@@ -81,11 +83,11 @@ def split_summary(assignment: Mapping[int, str]) -> str:
     )
 
 
-def operator_pair_verdicts(
-    conn: psycopg.Connection, listing_ids: Iterable[int], decided_by: str,
+def newest_pair_rulings(
+    conn: psycopg.Connection, listing_ids: Iterable[int],
 ) -> dict[Pair, dict[str, Any]]:
-    """This decider's live ruling on every pair drawn from `listing_ids` (the upsert keys on
-    `decided_by`, so nobody else's word is at stake)."""
+    """The ruling on every pair drawn from `listing_ids`: its NEWEST row, whoever took it -- the
+    one every reader obeys (migration 574, E920), so the one a new word would replace."""
     ids = sorted({int(i) for i in listing_ids})
     out: dict[Pair, dict[str, Any]] = {}
     if len(ids) < 2:
@@ -95,13 +97,12 @@ def operator_pair_verdicts(
         rows = cur.fetchall()
     for row in rows:  # newest first
         v = dict(zip(usql.VERDICT_COLUMNS, row))
-        if v["decided_by"] == decided_by:
-            out.setdefault((int(v["listing_lo"]), int(v["listing_hi"])), v)
+        out.setdefault((int(v["listing_lo"]), int(v["listing_hi"])), v)
     return out
 
 
 def reversed_pairs(stored: Mapping[Pair, str | None], same_pairs: Iterable[Pair]) -> list[Pair]:
-    """E52: the pairs a `same` would take back from this decider's own stored negative."""
+    """E52: the pairs a `same` would take back from a standing negative ruling."""
     return sorted(p for p in same_pairs if stored.get(p) in usql.NEGATIVE_VERDICTS)
 
 
@@ -302,7 +303,7 @@ def split_property(
                 raise SplitRefused(409, "cannot_move", "an advert cannot leave the property",
                                    stuck)
 
-            stored = operator_pair_verdicts(conn, named, decided_by)
+            stored = newest_pair_rulings(conn, named)
             taken_back = reversed_pairs({p: v["verdict"] for p, v in stored.items()},
                                         [p for p, t in targets.items() if t == "same"])
             if taken_back and not confirm_retract:
@@ -346,9 +347,7 @@ def split_property(
             "call_id": call_id,
             "placements": {lid: final[lid] for lid in on_record} if moves else {},
             "rulings": [{"listing_lo": lo, "listing_hi": hi,
-                         "verdict": (stored.get((lo, hi)) or {}).get("verdict"),
-                         "note": (stored.get((lo, hi)) or {}).get("note"),
-                         "reasons": list((stored.get((lo, hi)) or {}).get("reasons") or []),
+                         **_previous_word(stored.get((lo, hi)), vetoes.get((lo, hi))),
                          "must_not_link": _veto_body(vetoes.get((lo, hi)))}
                         for lo, hi in sorted(write)],
         }
@@ -370,6 +369,18 @@ def split_property(
         "reversed_pairs": [list(p) for p in taken_back],
         "undo": undo,
     }
+
+
+def _previous_word(ruling: Mapping[str, Any] | None, veto: Veto | None) -> dict[str, Any]:
+    """What the pair said before the split, as its undo appends it again: its newest ruling, else
+    a bare operator veto as the `different` it is (`record_ruling` writes it down so, E920), else
+    nothing (the undo's `unsure`)."""
+    if ruling is not None:
+        return {"verdict": ruling["verdict"], "note": ruling["note"],
+                "reasons": list(ruling["reasons"] or [])}
+    if veto is not None and veto[0] == "operator":
+        return {"verdict": "different", "note": veto[1], "reasons": []}
+    return {"verdict": None, "note": None, "reasons": []}
 
 
 def _veto_body(veto: Veto | None) -> dict[str, Any] | None:
@@ -401,9 +412,9 @@ def undo_split(
 ) -> dict[str, Any]:
     """Take back one split from the body its response issued: while nothing moved or was ruled
     again since, its adverts become one property again (the oldest record, decision 17) and
-    each pair it ruled carries the word it had before (`unsure` where there was none) and the
-    must-not-link row it had before, a machine's included. Exact for ONE decider: the restored
-    `unsure` is the newest word on its pair, so it masks another decider's older `same` (E919)."""
+    each pair it ruled gets the word it had before appended again as its newest (`unsure` where
+    there was none; the ledger keeps the split's own rows) and the must-not-link row it had
+    before, a machine's included."""
     try:
         call = str(uuid.UUID(str(call_id)))
     except ValueError as exc:
@@ -436,7 +447,7 @@ def undo_split(
             if moved := sorted(lid for lid, pid in place.items()
                                if now.get(lid) is None or now.get(lid) != want.get(pid)):
                 raise SplitRefused(409, "stale", "moved again since the split", moved)
-            stored = operator_pair_verdicts(conn, ruled, decided_by)
+            stored = newest_pair_rulings(conn, ruled)
             if again := [list(p) for p in pairs
                          if not str((stored.get(p) or {}).get("note") or "").startswith(prefix)]:
                 raise SplitRefused(409, "stale", "ruled again since the split", again)

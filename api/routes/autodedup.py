@@ -51,7 +51,7 @@ from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
 from toolkit.property_identity import record_ruling
 from toolkit.property_split import (
-    operator_pair_verdicts,
+    newest_pair_rulings,
     reversal_message,
     reversed_pairs,
     split_summary,
@@ -2599,9 +2599,10 @@ def verdict_split(
                 used.add(relation)
             pairs.append((lo, hi, relation, same_unit))
 
-    # E52 through the one helper `POST /properties/{id}/split` shares: what the operator has
-    # already said about these pairs under their OWN name (the upsert conflicts on `decided_by`).
-    stored = operator_pair_verdicts(conn, member_ids, str(decided_by))
+    # E52 through the one helper `POST /properties/{id}/split` shares: what is already ruled on
+    # these pairs, the NEWEST ruling per pair whoever took it -- the one every reader obeys
+    # (migration 574), so the one this split would take back.
+    stored = newest_pair_rulings(conn, member_ids)
     taken_back = reversed_pairs(
         {pair: row["verdict"] for pair, row in stored.items()},
         [(lo, hi) for lo, hi, _relation, same_unit in pairs if same_unit],
@@ -2824,7 +2825,7 @@ def verdict_candidate_split(
             )
             pairs.append((lo, hi, relation, same_unit))
 
-    stored = operator_pair_verdicts(conn, member_ids, str(decided_by))
+    stored = newest_pair_rulings(conn, member_ids)
     taken_back = reversed_pairs(
         {pair: row["verdict"] for pair, row in stored.items()},
         [(lo, hi) for lo, hi, _relation, same_unit in pairs if same_unit],

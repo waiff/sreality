@@ -40,7 +40,7 @@ def _split(db: _Ledger, separate: list[list[int]], *, adverts: list[int] | None 
 
 def _state(db: _Ledger) -> tuple:
     return (dict(db.listings), dict(db.props), [dict(e) for e in db.events],
-            {k: dict(v) for k, v in db.verdicts.items()}, dict(db.mnl))
+            [dict(r) for r in db.verdicts], dict(db.mnl))
 
 
 def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:
@@ -51,13 +51,11 @@ def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:
 
 def test_the_screenshot_case_one_advert_leaves_and_the_rest_are_confirmed_one():
     db = _screenshot()
-    db.rule(1, 3, "different", by=OTHER, note="their veto")   # someone else's word: no E52
     out = _split(db, [[2]], reason="jiná dispozice")
     assert db.listings == {1: 10, 2: 20, 3: 10} and db.props[20] == "active"
     note = f"operator split {out['call_id']} · A: 1,3 | B: 2 · jiná dispozice"
     assert (db.word(1, 2), db.word(2, 3), db.word(1, 3)) == (
         ("different", note), ("different", note), ("same", note))
-    assert db.word(1, 3, OTHER) == ("different", "their veto"), "nobody else's word is touched"
     assert set(db.mnl) == {(1, 2), (2, 3)} and {v[0] for v in db.mnl.values()} == {"operator"}
     assert out["record_kept_by"] == "A" and out["property_id"] == 10 and out["moved"] == 1
     kept, separated = out["units"]
@@ -70,11 +68,51 @@ def test_the_screenshot_case_one_advert_leaves_and_the_rest_are_confirmed_one():
                               "must_not_link_written": 2, "must_not_link_retracted": 1}
     assert out["undo"] == {"call_id": out["call_id"], "placements": {1: 10, 2: 20, 3: 10},
                            "rulings": [{"listing_lo": lo, "listing_hi": hi, "verdict": None,
-                                        "note": None, "reasons": [], "must_not_link": veto}
-                                       for lo, hi, veto in (
-                                           (1, 2, None),
-                                           (1, 3, {"source": "operator", "reason": "their veto"}),
-                                           (2, 3, None))]}
+                                        "note": None, "reasons": [], "must_not_link": None}
+                                       for lo, hi in ((1, 2), (1, 3), (2, 3))]}
+
+
+def test_the_rulings_are_appended_to_the_ledger_through_the_one_pair_writer():
+    """E920: every word is a new row by `record_ruling`'s own statement; another decider's newest
+    negative is the pair's ruling, so confirming over it asks first (E52) and it stays in the
+    history, and the undo appends it again as the newest word."""
+    db = _screenshot()
+    db.rule(1, 3, "different", by=OTHER, note="their veto")
+    asked = _refused(_split, db, [[2]])
+    assert (asked.code, asked.ids) == ("reverses_rulings", [[1, 3]])
+    out = _split(db, [[2]], confirm_retract=True)
+    note = f"operator split {out['call_id']} · A: 1,3 | B: 2"
+    assert db.history(1, 3) == [("different", "their veto", OTHER), ("same", note, OP)]
+    appended = " ".join(pi.usql.VERDICT_PAIR_APPEND_SQL.split())
+    assert {(p["listing_lo"], p["listing_hi"], p["note"]) for s, p in db.log
+            if s == appended and p["note"] == note} == {(1, 2, note), (1, 3, note), (2, 3, note)}
+    assert not any("UPSERT" in s or "ON CONFLICT (kind" in s for s, _p in db.log)
+    assert out["undo"]["rulings"][1] == {
+        "listing_lo": 1, "listing_hi": 3, "verdict": "different", "note": "their veto",
+        "reasons": [], "must_not_link": {"source": "operator", "reason": "their veto"}}
+    undo = out["undo"]
+    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
+               rulings=undo["rulings"], decided_by=OP)
+    assert db.word(1, 3) == ("different", "their veto") and db.history(1, 3)[0][2] == OTHER
+    assert db.mnl[(1, 3)] == ("operator", "their veto")
+
+
+def test_a_bare_veto_the_split_confirms_comes_back_as_the_different_it_was():
+    """E920: an operator must-not-link with no ruling behind it is the operator's `different`;
+    `record_ruling` writes it down before the split's `same`, and the undo appends it again."""
+    db = _screenshot()
+    db.mnl[(1, 3)] = ("operator", "jiné patro")
+    out = _split(db, [[2]])
+    assert db.history(1, 3)[0] == ("different", "jiné patro", "operator")
+    assert db.word(1, 3)[0] == "same" and (1, 3) not in db.mnl
+    undo = out["undo"]
+    assert undo["rulings"][1]["verdict"] == "different"
+    assert undo["rulings"][1]["note"] == "jiné patro"
+    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
+               rulings=undo["rulings"], decided_by=OP)
+    assert db.word(1, 3) == ("different", "jiné patro")
+    assert db.mnl[(1, 3)] == ("operator", "jiné patro")
+    assert db.word(1, 2)[0] == db.word(2, 3)[0] == "unsure"
 
 
 def test_a_whole_group_leaves_together_as_one_record_the_oldest():
@@ -106,7 +144,8 @@ def test_confirm_as_one_moves_nothing_and_rules_every_pair_same():
     db = _screenshot()
     db.rule(1, 2, "different", by=OTHER)
     events, listings = [dict(e) for e in db.events], dict(db.listings)
-    out = _split(db, [])
+    out = _split(db, [], confirm_retract=True)
+    assert out["reversed_pairs"] == [[1, 2]], "the newest word, whoever took it (E920)"
     assert db.events == events and db.listings == listings and out["moved"] == 0
     assert {db.word(*p)[0] for p in ((1, 2), (1, 3), (2, 3))} == {"same"}
     assert db.mnl == {}, "the operator's must-not-link is retracted"
@@ -166,10 +205,10 @@ def test_the_e52_helper_is_the_one_both_verdict_split_routes_call():
     import api.routes.autodedup as routes
 
     assert routes.reversed_pairs is ps.reversed_pairs
-    assert routes.operator_pair_verdicts is ps.operator_pair_verdicts
-    assert not hasattr(routes, "_split_summary")
+    assert routes.newest_pair_rulings is ps.newest_pair_rulings
+    assert not hasattr(routes, "_split_summary") and not hasattr(ps, "operator_pair_verdicts")
     src = inspect.getsource(routes)
-    assert src.count("operator_pair_verdicts(conn, member_ids") == 2
+    assert src.count("newest_pair_rulings(conn, member_ids)") == 2
     assert ps.reversed_pairs({(1, 2): "different", (1, 3): "same", (2, 3): None},
                              [(1, 2), (1, 3), (2, 3)]) == [(1, 2)]
 
@@ -261,7 +300,8 @@ def test_an_origin_holding_another_units_or_an_unnamed_advert_is_refused():
     merge_property_set(db, [10, 20], source="autodedup", reason="r")
     ps.detach_listing(db, 3, decided_by=OTHER)          # 20 is back, holding 3
     before = _state(db)
-    refused = _refused(_split, db, [[2]], adverts=[1, 2, 3])    # 3 stays in the kept unit
+    # 3 stays in the kept unit; OTHER's detach ruled (1, 3) `different`, the newest word (E52)
+    refused = _refused(_split, db, [[2]], adverts=[1, 2, 3], confirm_retract=True)
     assert (refused.code, refused.ids) == ("cannot_move", [{"listing_id": 2,
                                                              "outcome": "shared_origin"}])
     assert _state(db) == before
@@ -269,8 +309,9 @@ def test_an_origin_holding_another_units_or_an_unnamed_advert_is_refused():
     dragged = _refused(_split, db, [[2]], adverts=[1, 2])
     assert (dragged.code, dragged.ids) == ("join_would_drag", [3]) and _state(db) == before
     # named and in the same unit, it is that unit's record
-    out = _split(db, [[2, 3]], adverts=[1, 2, 3])
+    out = _split(db, [[2, 3]], adverts=[1, 2, 3], confirm_retract=True)
     assert db.listings == {1: 10, 2: 20, 3: 20} and out["units"][1]["property_id"] == 20
+    assert out["reversed_pairs"] == [[2, 3]]
 
 
 def test_a_machine_veto_survives_the_split_and_its_undo():
@@ -331,8 +372,8 @@ def test_the_undo_rejoins_the_adverts_and_restores_every_pairs_previous_word():
                       rulings=undo["rulings"], decided_by=OP)
     assert set(db.listings.values()) == {10} and db.props[20] == "merged_away"
     assert done["property_id"] == 10 and done["undone"] and done["merge_group_id"]
-    assert db.verdicts[(1, 2, OP)]["reasons"] == ["plocha"] and db.word(1, 2) == ("different",
-                                                                                  "old")
+    assert db.newest(1, 2)["reasons"] == ["plocha"] and db.word(1, 2) == ("different", "old")
+    assert [v for v, _n, _by in db.history(1, 2)][0] == "different", "the ledger keeps every row"
     undone = f"operator split-undo {undo['call_id']}"
     assert db.word(1, 3) == db.word(2, 3) == ("unsure", undone)
     assert set(db.mnl) == {(1, 2)}, "unsure retracts; the restored negative vetoes again"

@@ -72,11 +72,20 @@ def _where(cur: Any, ids: list[int]) -> dict[int, int]:
 
 
 def _words(cur: Any, ids: list[int]) -> dict[tuple[int, int], str]:
+    """Each pair's ruling: its newest row, whoever wrote it (the ledger, migration 574)."""
     cur.execute(
-        "SELECT listing_lo, listing_hi, verdict FROM autodedup.verdicts "
-        "WHERE kind = 'pair' AND decided_by = %s AND listing_lo = ANY(%s) AND listing_hi = ANY(%s)",
-        (OP, ids, ids))
+        "SELECT DISTINCT ON (listing_lo, listing_hi) listing_lo, listing_hi, verdict "
+        "FROM autodedup.verdicts WHERE kind = 'pair' AND listing_lo = ANY(%s) "
+        "AND listing_hi = ANY(%s) ORDER BY listing_lo, listing_hi, decided_at DESC, id DESC",
+        (ids, ids))
     return {(int(lo), int(hi)): v for lo, hi, v in cur.fetchall()}
+
+
+def _history(cur: Any, x: int, y: int) -> list[tuple[str, str | None, str]]:
+    cur.execute(
+        "SELECT verdict, note, decided_by FROM autodedup.verdicts WHERE kind = 'pair' "
+        "AND listing_lo = %s AND listing_hi = %s ORDER BY decided_at, id", _pair(x, y))
+    return [(v, n, by) for v, n, by in cur.fetchall()]
 
 
 def _vetoes(cur: Any, ids: list[int]) -> dict[tuple[int, int], str]:
@@ -209,3 +218,36 @@ def test_the_keeper_swap_keeps_the_record_and_the_machine_veto(cur):
                       placements=undo["placements"], rulings=undo["rulings"], decided_by=OP)
     assert set(_where(cur, ids).values()) == {done["property_id"]}
     assert _vetoes(cur, ids) == {_pair(b, i): "guard"} and _veto_row(cur, b, i) == ("guard", "g")
+
+
+def test_a_bare_veto_and_another_deciders_word_stay_in_the_ledger_and_come_back(cur):
+    """E920 on Postgres: the split's words are appended; a bare operator veto it confirms is
+    written down as its `different` first, another decider's newest negative is the pair's
+    ruling (E52), and the undo appends each previous word again as the newest."""
+    home, from_b, from_i = _property(cur), _property(cur), _property(cur)
+    s = _advert(cur, home, source="sreality")
+    b = _advert(cur, from_b, source="bazos")
+    i = _advert(cur, from_i, source="idnes")
+    merge_property_set(cur.connection, [home, from_b, from_i], source="autodedup", reason="r")
+    ids = [s, b, i]
+    cur.execute("INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason) "
+                "VALUES (%s, %s, 'operator', 'jiné patro')", _pair(s, i))
+    cur.execute("INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, "
+                "reasons, decided_by, decided_at) VALUES ('pair', %s, %s, 'same', 'their word', "
+                "'{}', 'someone.else@replay.local', now() - interval '1 day')", _pair(b, i))
+
+    out = split_property(cur.connection, home, adverts=ids, separate=[[b]], keep_together=True,
+                         decided_by=OP)
+    assert _words(cur, ids) == {_pair(s, b): "different", _pair(b, i): "different",
+                                _pair(s, i): "same"}
+    assert _history(cur, s, i)[0] == ("different", "jiné patro", "operator")
+    assert _history(cur, b, i)[0] == ("same", "their word", "someone.else@replay.local")
+    assert _vetoes(cur, ids) == {_pair(s, b): "operator", _pair(b, i): "operator"}
+
+    undo = out["undo"]
+    undo_split(cur.connection, home, call_id=undo["call_id"], placements=undo["placements"],
+               rulings=undo["rulings"], decided_by=OP)
+    assert _words(cur, ids) == {_pair(s, b): "unsure", _pair(b, i): "same",
+                                _pair(s, i): "different"}
+    assert _veto_row(cur, s, i) == ("operator", "jiné patro")
+    assert _vetoes(cur, ids) == {_pair(s, i): "operator"}

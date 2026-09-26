@@ -22,7 +22,7 @@ class _Tx:
     def __enter__(self) -> "_Tx":
         self.saved = (dict(self.db.listings), dict(self.db.props), [dict(e) for e in self.db.events],
                       dict(self.db.into), dict(self.db.assets),
-                      {k: dict(v) for k, v in self.db.verdicts.items()}, dict(self.db.mnl))
+                      [dict(r) for r in self.db.verdicts], dict(self.db.mnl))
         return self
 
     def __exit__(self, exc_type: Any, *exc: Any) -> bool:
@@ -64,8 +64,9 @@ class _Cur:
 class _Ledger:
     """listings: id -> property_id; props: id -> status; into: id -> merged_into; first_seen /
     assets / cats / canonical: per property; events: the merge ledger; asset_events: the asset
-    membership log; verdicts: (lo, hi, decided_by) -> the pair ruling, upserted like
-    `VERDICT_PAIR_UPSERT_SQL`; mnl: (lo, hi) -> (source, reason)."""
+    membership log; verdicts: the pair rulings LEDGER (migration 574), appended on change like
+    `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; mnl: (lo, hi) -> (source,
+    reason)."""
 
     def __init__(self, listings: dict[int, int], *, first_seen: dict[int, datetime] | None = None,
                  assets: dict[int, int] | None = None, canonical: dict[int, int] | None = None,
@@ -81,33 +82,63 @@ class _Ledger:
         self.asset_events: list[tuple[int, int, str, str]] = []
         self.log: list[tuple[str, Any]] = []
         self.count: int | None = None
-        self.verdicts: dict[tuple[int, int, str], dict[str, Any]] = {}
+        self.verdicts: list[dict[str, Any]] = []
         self.mnl: dict[tuple[int, int], tuple[str, str]] = {}
         self.clock = 0
 
     def rule(self, lo: int, hi: int, verdict: str, *, by: str = OP, note: str | None = None,
              reasons: list[str] | None = None) -> None:
         """Seed a stored pair ruling, as the verdict routes would have written it."""
-        self._upsert({"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
+        self._append({"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
                       "reasons": reasons or [], "decided_by": by})
         if verdict in usql.NEGATIVE_VERDICTS:
             self.mnl[(lo, hi)] = ("operator", note or "")
 
-    def word(self, lo: int, hi: int, by: str = OP) -> tuple[str, str | None] | None:
-        row = self.verdicts.get((lo, hi, by))
+    def newest(self, lo: int, hi: int, by: str | None = None) -> dict[str, Any] | None:
+        """The pair's newest row (`decided_at desc, id desc`), or `by`'s newest."""
+        rows = [r for r in self.verdicts if (r["listing_lo"], r["listing_hi"]) == (lo, hi)
+                and (by is None or r["decided_by"] == by)]
+        return max(rows, key=lambda r: (r["decided_at"], r["id"])) if rows else None
+
+    def word(self, lo: int, hi: int, by: str | None = None) -> tuple[str, str | None] | None:
+        """The pair's ruling (its newest row), or the newest row `by` wrote."""
+        row = self.newest(lo, hi, by)
         return (row["verdict"], row["note"]) if row else None
 
-    def _upsert(self, p: dict[str, Any]) -> list[tuple]:
-        self.clock += 1
-        key = (p["listing_lo"], p["listing_hi"], p["decided_by"])
-        row = self.verdicts.get(key) or {"id": len(self.verdicts) + 1, "kind": "pair",
-                                         "cluster_key": None, "weight": None,
-                                         "generation": None, "member_ids": None}
-        row.update(listing_lo=p["listing_lo"], listing_hi=p["listing_hi"], verdict=p["verdict"],
-                   note=p["note"], reasons=list(p["reasons"]), decided_by=p["decided_by"],
-                   decided_at=self.clock)
-        self.verdicts[key] = row
+    def history(self, lo: int, hi: int) -> list[tuple[str, str | None, str]]:
+        """Every row of the pair, oldest first: (verdict, note, decided_by)."""
+        return [(r["verdict"], r["note"], r["decided_by"])
+                for r in sorted(self.verdicts, key=lambda r: (r["decided_at"], r["id"]))
+                if (r["listing_lo"], r["listing_hi"]) == (lo, hi)]
+
+    def _row(self, p: dict[str, Any], *, decided_at: int | None = None) -> dict[str, Any]:
+        if decided_at is None:
+            self.clock += 1
+        row = {"id": len(self.verdicts) + 1, "kind": "pair", "cluster_key": None,
+               "weight": None, "generation": None, "member_ids": None,
+               "listing_lo": p["listing_lo"], "listing_hi": p["listing_hi"],
+               "verdict": p["verdict"], "note": p["note"], "reasons": list(p["reasons"]),
+               "decided_by": p["decided_by"],
+               "decided_at": self.clock if decided_at is None else decided_at}
+        self.verdicts.append(row)
+        return row
+
+    def _append(self, p: dict[str, Any]) -> list[tuple]:
+        """`VERDICT_PAIR_APPEND_SQL`: a new row unless the newest already says exactly this."""
+        row = self.newest(p["listing_lo"], p["listing_hi"])
+        if row is None or (row["verdict"], row["note"], row["reasons"]) != (
+                p["verdict"], p["note"], list(p["reasons"])):
+            row = self._row(p)
         return [tuple(row.get(c) for c in usql.VERDICT_COLUMNS)]
+
+    def _veto_as_ruling(self, p: dict[str, Any]) -> None:
+        """`VERDICT_PAIR_FROM_VETO_SQL`: a bare operator veto written down as its `different`,
+        dated before anything the call writes."""
+        key = (p["listing_lo"], p["listing_hi"])
+        veto = self.mnl.get(key)
+        if veto and veto[0] == "operator" and self.newest(*key) is None:
+            self._row({"listing_lo": key[0], "listing_hi": key[1], "verdict": "different",
+                       "note": veto[1], "reasons": [], "decided_by": "operator"}, decided_at=0)
 
     def cursor(self) -> _Cur:
         return _Cur(self)
@@ -133,12 +164,15 @@ class _Ledger:
             return out
         if s == " ".join(usql.MEMBER_PAIR_VERDICTS_SQL.split()):
             ids = set(p["ids"])
-            rows = [r for r in self.verdicts.values()
+            rows = [r for r in self.verdicts
                     if r["listing_lo"] in ids and r["listing_hi"] in ids]
             rows.sort(key=lambda r: (r["decided_at"], r["id"]), reverse=True)
             return [tuple(r.get(c) for c in usql.VERDICT_COLUMNS) for r in rows]
-        if s == " ".join(usql.VERDICT_PAIR_UPSERT_SQL.split()):
-            return self._upsert(p)
+        if s == " ".join(usql.VERDICT_PAIR_FROM_VETO_SQL.split()):
+            self._veto_as_ruling(p)
+            return []
+        if s == " ".join(usql.VERDICT_PAIR_APPEND_SQL.split()):
+            return self._append(p)
         if s == " ".join(usql.MUST_NOT_LINK_UPSERT_SQL.split()):
             self.mnl[(p["listing_lo"], p["listing_hi"])] = ("operator", p["reason"])
             return []

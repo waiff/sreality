@@ -53,6 +53,7 @@ import {
   unmovedReason,
 } from '@/lib/mergedAdverts';
 import { fetchListingsForListingIds } from '@/lib/queries';
+import { ROUTES, withQuery } from '@/lib/routes';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 
 const PAGE_SIZE = 20;
@@ -542,6 +543,12 @@ function ProposalCard({
           className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
         >
           detail
+        </Link>
+        <Link
+          to={withQuery(ROUTES.autodedupRulings.build(), { property: item.property_id })}
+          className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+        >
+          Rozhodnutí o těchto inzerátech
         </Link>
         <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
           {fmtCount(adverts)} {inzeratu(adverts)} · {fmtCount(groups.length)} skupiny

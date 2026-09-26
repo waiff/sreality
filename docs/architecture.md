@@ -1288,9 +1288,9 @@ renumber.** Navigate by area:
     `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing; its response names
     where each unit sits (`units[].property_id`), which unit keeps the record (`record_kept_by`:
     the one holding the property's own advert, rules 18/22) and carries the body of its own undo
-    (`{undo}` posted back: the adverts re-joined, each pair's previous word restored, `unsure`
-    where there was none, and each pair's previous must-not-link row, a machine's included —
-    exact for one decider). A re-send changes nothing. `GET
+    (`{undo}` posted back: the adverts re-joined, each pair's previous newest word appended
+    again, a bare operator veto as its `different`, `unsure` where there was none, and each
+    pair's previous must-not-link row, a machine's included). A re-send changes nothing. `GET
     /properties/{id}/origins` names each advert's origin; the ledger is `GET /properties/merges`
     (`api/property_merge.py`). **Every operator merge and split is a ruling (decision 8)**
     (`toolkit.property_identity.record_rulings`, same transaction, only for `source='operator'`:
@@ -1299,9 +1299,10 @@ renumber.** Navigate by area:
     ingest grouped there) `same`; the split rules every pair across units `different` (+ an
     operator must-not-link), every pair inside a separated unit `same`, and (keep_together)
     every pair of the kept unit `same` — the rest of a proposal confirmed, which stops it — with
-    the optional `reason` (max 500) and the call id in the note; taking back this operator's own
-    negative asks first (E52, `reversed_pairs`, the one helper the Groups page's split and the
-    candidate split share) — all into the review pages' store (`autodedup.verdicts` + operator
+    the optional `reason` (max 500) and the call id in the note; taking back a standing negative
+    (the pair's newest ruling, whoever took it) asks first (E52, `reversed_pairs` over
+    `newest_pair_rulings`, the helpers the Groups page's split and the candidate split share) —
+    every word appended through `record_ruling` into the review pages' store (`autodedup.verdicts` + operator
     `must_not_link`, `decided_by` = the admin's email).
     **Migration 560** copied the operator's live pre-ruling merges (362 groups) into `same`
     rulings — pairs that sat on different properties of a group (a side is an advert's origin)
@@ -1313,8 +1314,9 @@ renumber.** Navigate by area:
     seeds the autodedup lane's next pass (the `rt_rulings` cursor), so a withdrawn `same`
     releases its group within a minute. `/autodedup/rulings` lists every ruling (typed, Browse merge, implied by a confirmed
     group, bare veto; group grain too) beside the engine's view and where the adverts sit now,
-    and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale); the property
-    page links to it for an admin. Labeling / annotation CRUD that the old
+    and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale), its split
+    button through `POST /properties/{id}/split`; the property page and the proposed-splits page
+    link to it for an admin. Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
     first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
     2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)
