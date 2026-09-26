@@ -27,6 +27,7 @@ from api.routes import autodedup as routes
 from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
+from autodedup.incremental import GENERATION as LIVE
 
 
 # Every W5 statement the routes may execute, mapped to the canned-row bucket it reads.
@@ -136,11 +137,6 @@ class _Cursor:
             raise self._conn.raises[sql]
         if "to_regclass" in sql:
             self._rows = [(self._conn.ready,)]
-        elif sql == usql.LATEST_GENERATION_SQL:
-            # WHICH pass a view opens on is now a read, not a constant — so the fake answers
-            # it like the store does, and a store with no clustering yet answers nothing.
-            latest = self._conn.latest_generation
-            self._rows = [] if latest is None else [(latest,)]
         elif "per_wave" in sql:
             self._rows = list(self._conn.wave_rows)
         elif sql == psql.AUTODEDUP_ITERATIONS_SQL:
@@ -386,10 +382,10 @@ EMPTY_ENGINE: dict[str, Any] = {
     "pairs_by_zone": {},
     "n_pairs": 0,
     # WHICH pass the two pair histograms describe (E58) — null when the store holds none.
-    "pairs_generation": None,
+    "pairs_generation": LIVE,
     "certificates": {},
     "generations": [],
-    "latest_generation": None,
+    "latest_generation": LIVE,
     "verdicts": [],
     "n_verdicts": 0,
     "verdict_reasons": [],
@@ -715,8 +711,8 @@ def test_groups_renders_a_cluster_with_members_and_edge_evidence(client, conn):
     assert set(body) == {"data", "store_ready"}
     assert body["store_ready"] is True
     data = body["data"]
-    # The generation is the store's newest pass, echoed back — never the one the URL omitted.
-    assert (data["has_more"], data["next_after"], data["generation"]) == (False, None, "g3")
+    # The generation is the live stream, echoed back — never the one the URL omitted.
+    assert (data["has_more"], data["next_after"], data["generation"]) == (False, None, LIVE)
     item = data["items"][0]
     assert item["cluster"]["cluster_key"] == 101
     assert item["cluster"]["sources"] == ["sreality", "bazos"]
@@ -978,11 +974,12 @@ def test_a_queue_with_no_generation_named_reads_the_newest_pass(client, conn):
     """THE DEFECT. Every validation view defaulted to `g1` — the first hand-prior pass, which
     over-merged developer units and was superseded twice — so the operator reviewed
     certificate edges the current engine never proposed, against a queue that looked current.
-    A generation the caller did not name is now resolved against the store."""
+    A generation the caller did not name is THE live stream (E914): the one the worker's
+    pass keeps current and reconciles production from, so it cannot be moved past."""
     conn.canned = {"groups": [_cluster(generation="g3")]}
     body = client.get("/autodedup/groups").json()
-    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g3"
-    assert body["data"]["generation"] == "g3"
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == LIVE
+    assert body["data"]["generation"] == LIVE
 
 
 def test_a_named_generation_is_read_as_asked_and_costs_no_extra_statement(client, conn):
@@ -990,22 +987,21 @@ def test_a_named_generation_is_read_as_asked_and_costs_no_extra_statement(client
     skips the resolving read entirely."""
     client.get("/autodedup/groups", params={"generation": "g1"})
     assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g1"
-    assert all(sql != usql.LATEST_GENERATION_SQL for sql, _ in conn.calls)
 
 
 def test_the_residual_scroll_opens_on_the_newest_pass(client, conn):
     """The residual view asks "which scored pair did this clustering NOT join?" — against the
     wrong generation it answers about a clustering nobody is validating."""
     client.get("/autodedup/residual")
-    assert _last_call(conn, usql.RESIDUAL_SQL)["generation"] == "g3"
+    assert _last_call(conn, usql.RESIDUAL_SQL)["generation"] == LIVE
 
 
 def test_the_block_vocabulary_is_the_newest_passs_blocks(client, conn):
     """The picker lists the blocks a generation clustered: read against `g1` it offers a
     vocabulary that filters the queue down to nothing."""
     body = client.get("/autodedup/blocks").json()
-    assert _last_call(conn, usql.BLOCKS_SQL) == {"generation": "g3", "limit": 200}
-    assert body["data"]["generation"] == "g3"
+    assert _last_call(conn, usql.BLOCKS_SQL) == {"generation": LIVE, "limit": 200}
+    assert body["data"]["generation"] == LIVE
 
 
 def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client, conn):
@@ -1014,8 +1010,8 @@ def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client
     the pair — a g2 zone answering a g4 question, the mix M42 found in the panel."""
     conn.canned = {"pair_one": [_pair_row()]}
     body = client.get("/autodedup/pair/11/12").json()
-    assert body["data"]["generation"] == "g3"
-    assert _last_call(conn, usql.PAIR_ONE_SQL)["generation"] == "g3"
+    assert body["data"]["generation"] == LIVE
+    assert _last_call(conn, usql.PAIR_ONE_SQL)["generation"] == LIVE
 
 
 def test_a_pair_the_asked_for_pass_never_scored_is_a_404(client, conn):
@@ -1025,14 +1021,13 @@ def test_a_pair_the_asked_for_pass_never_scored_is_a_404(client, conn):
     assert "generation" in resp.json()["detail"]
 
 
-def test_a_store_with_no_clustering_yet_resolves_to_no_generation(client, conn):
-    """Nothing persisted is not `g1`: the queue is empty and says so, rather than filtering on
-    a generation name the store never wrote."""
-    conn.latest_generation = None
+def test_an_unnamed_view_is_the_live_stream_even_over_an_empty_store(client, conn):
+    """Nothing persisted is still not `g1`: the queue reads the live stream and is honestly
+    empty until the lane has written it."""
     body = client.get("/autodedup/groups").json()
     assert body["store_ready"] is True
-    assert body["data"]["generation"] is None
-    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] is None
+    assert body["data"]["generation"] == LIVE
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == LIVE
 
 
 def test_the_generations_route_lists_every_pass_newest_first(client, conn):
@@ -1041,7 +1036,7 @@ def test_the_generations_route_lists_every_pass_newest_first(client, conn):
     conn.canned = {"generations": [_generation("g3"), _generation("g1", n_clusters=4)]}
     body = client.get("/autodedup/generations").json()
     assert body["store_ready"] is True
-    assert body["data"]["latest"] == "g3"
+    assert body["data"]["latest"] == LIVE, "the empty filter resolves to the live stream"
     assert [row["generation"] for row in body["data"]["items"]] == ["g3", "g1"]
     assert body["data"]["items"][0] == {
         "generation": "g3",
@@ -1246,7 +1241,7 @@ def test_the_session_counter_reports_the_sample_and_the_whole_generation(client,
     body = client.get("/autodedup/validation-progress", params={"surface": "groups"}).json()
     assert body["store_ready"] is True
     data = body["data"]
-    assert data["generation"] == "g3"
+    assert data["generation"] == LIVE
     assert data["seed"] == "v1"
     assert data["sample_size"] == 100
     assert data["grain"] == "cluster"
@@ -1255,7 +1250,7 @@ def test_the_session_counter_reports_the_sample_and_the_whole_generation(client,
     params = _last_call(conn, usql.VALIDATION_GROUPS_SAMPLE_SQL)
     assert params["seed"] == "v1"
     assert params["sample_size"] == 100
-    assert params["generation"] == "g3"
+    assert params["generation"] == LIVE
 
 
 def test_the_residual_counter_counts_pairs_above_the_floor_it_was_given(client, conn):
@@ -1332,7 +1327,7 @@ def test_the_agreement_read_reports_the_gate_the_directions_and_the_bound(client
         "agreement_oversize": [(2,)],
     }
     data = client.get("/autodedup/agreement").json()["data"]
-    assert data["generation"] == "g3"
+    assert data["generation"] == LIVE
     assert data["overall"]["n"] == 4
     assert data["overall"]["n_agree"] == 3
     assert data["overall"]["agreement"] == pytest.approx(0.75)
@@ -2009,7 +2004,7 @@ def test_stats_reports_what_the_engine_produced(client, conn):
     assert engine["pairs_by_zone"] == {"band": 40, "merge": 12}
     assert engine["n_pairs"] == 52
     assert engine["certificates"] == {"K-A": 7}
-    assert engine["latest_generation"] == "g1"
+    assert engine["latest_generation"] == LIVE
     assert engine["generations"][0]["n_clusters"] == 9
     assert engine["n_verdicts"] == 3
     assert engine["n_judgements"] == 5
@@ -3074,18 +3069,16 @@ def test_candidates_render_when_the_store_does_not_exist(client, conn):
 
 
 def test_a_store_with_no_clustering_is_an_empty_candidate_queue(client, conn):
-    """E54: no pass resolves to no generation at all — never to a fabricated name, and never
-    to a cohort of every scored pair (every pair is 'unclustered' in a pass that never ran)."""
-    conn.latest_generation = None
+    """E54: an unnamed queue is the live stream, never a fabricated name, and a stream the lane
+    has not written yet is an honestly empty queue."""
     data = client.get("/autodedup/candidates").json()["data"]
-    assert data["items"] == [] and data["total"] == 0 and data["generation"] is None
-    assert all(sql != usql.CANDIDATE_PAIRS_SQL for sql, _ in conn.calls)
+    assert data["items"] == [] and data["total"] == 0 and data["generation"] == LIVE
 
 
 def test_the_fan_out_of_one_advert_against_a_group_is_ONE_card(client, conn):
     _fan_out_store(conn)
     data = client.get("/autodedup/candidates").json()["data"]
-    assert data["generation"] == "g3"
+    assert data["generation"] == LIVE
     assert len(data["items"]) == 1
     item = data["items"][0]
     assert item["size"] == 4
@@ -3133,8 +3126,8 @@ def test_the_cohort_is_the_pair_queues_own_floor_and_generation(client, conn):
     client.get("/autodedup/candidates")
     params = _last_call(conn, usql.CANDIDATE_PAIRS_SQL)
     assert params["min_score"] == routes.RESIDUAL_MIN_SCORE
-    assert params["generation"] == "g3"
-    assert _last_call(conn, usql.CANDIDATE_CLUSTER_MEMBERS_SQL)["generation"] == "g3"
+    assert params["generation"] == LIVE
+    assert _last_call(conn, usql.CANDIDATE_CLUSTER_MEMBERS_SQL)["generation"] == LIVE
 
 
 @pytest.mark.parametrize(
@@ -3687,7 +3680,7 @@ def test_the_session_counter_counts_candidate_CARDS(client, conn):
     # the sample is the first 100 of the seeded order over the whole generation — three here
     assert data["sample"]["n"] == 3
     assert data["seed"] == "v1"
-    assert data["generation"] == "g3"
+    assert data["generation"] == LIVE
     # and it is counted WITHOUT the queue's own statements
     assert all(sql != usql.VALIDATION_RESIDUAL_SAMPLE_SQL for sql, _ in conn.calls)
 
@@ -3909,12 +3902,11 @@ def test_the_progress_strip_counts_only_a_ruling_that_applies(client, conn):
         assert "m.generation = %(generation)s::text" in flat
 
 
-def test_a_real_time_generation_is_never_the_default_pass() -> None:
-    """`rt` is rewritten every ten minutes, so recency alone would make it the default and the
-    operator's links into a batch generation would 404 (2026-09-20)."""
+def test_the_live_stream_is_the_default_pass_and_the_picker_orders_by_recency() -> None:
+    """One stream (Decision 5, E914): the review pages open on `rt`, and the batch passes stay
+    in the picker as the evaluation lab, newest first — no `rt` special case in the SQL."""
     from autodedup import ui_sql
 
-    for statement in (ui_sql.LATEST_GENERATION_SQL, ui_sql.GENERATION_COUNTS_SQL):
-        order_by = statement.split("ORDER BY", 1)[1]
-        assert "left(c.generation, 2) = 'rt'" in order_by
-        assert order_by.index("'rt'") < order_by.index("last_changed_at")
+    assert not hasattr(ui_sql, "LATEST_GENERATION_SQL")
+    order_by = ui_sql.GENERATION_COUNTS_SQL.split("ORDER BY", 1)[1]
+    assert "'rt'" not in order_by and "last_changed_at" in order_by

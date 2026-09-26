@@ -1184,8 +1184,9 @@ GENERATION_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
 )
 
-# One row per pass. It is the picker's vocabulary AND, since migration 538, what scopes the
-# engine stat strip: the newest row here names the pass whose pairs the zone histogram counts.
+# One row per pass: the picker's vocabulary. Production reads ONE stream, the real-time lane's
+# `rt` (Decision 5, E914) — an unnamed generation IS that one — and the batch passes (g4..g12)
+# stay listed as the evaluation lab, newest first.
 GENERATION_COUNTS_SQL = """
 SELECT
     c.generation,
@@ -1195,24 +1196,7 @@ SELECT
     max(c.last_changed_at)                            AS last_changed_at
 FROM autodedup.clusters c
 GROUP BY c.generation
-ORDER BY (left(c.generation, 2) = 'rt'), max(c.last_changed_at) DESC
-"""
-
-# WHICH pass a validation view reads when the caller names none. The first row of
-# GENERATION_COUNTS_SQL by construction — the generation whose clusters changed most recently —
-# because the list the picker offers and the default the queue opens on must never disagree
-# about which pass is current. A hard-coded default is what put a superseded generation's
-# proposals in front of the operator; the store names the newest pass, so the store is asked.
-# A REAL-TIME shadow generation (`rt…`) is rewritten every pass, so by recency it would always
-# be "newest" and every validation view would open on it — which is how the operator's pair
-# links 404'd on 2026-09-20 (the pairs lived in g6; the default had silently become `rt`).
-# The default is the newest BATCH pass; a real-time generation is offered by the picker, last,
-# and is only ever read when it is named.
-LATEST_GENERATION_SQL = """
-SELECT c.generation
-FROM autodedup.clusters c
-ORDER BY (left(c.generation, 2) = 'rt'), c.last_changed_at DESC
-LIMIT 1
+ORDER BY max(c.last_changed_at) DESC
 """
 
 VERDICT_COUNT_COLUMNS: tuple[str, ...] = ("kind", "verdict", "n")
@@ -1620,7 +1604,8 @@ WHERE v.kind = 'cluster'
 
 # Every advert of every LIVE property the generation touches (`autodedup/proposed_splits.py`
 # decides which are proposals), with the group it holds (NULL = none) and whether the generation
-# SAW it (a group member or a scored pair's side); with `property_id`, that property only.
+# SAW it (a group member, a scored pair's side, or — for the live stream — a fingerprint the lane
+# holds); with `property_id`, that property only.
 PROPOSED_SPLIT_ADVERTS_SQL = """
 WITH grouped AS (
     SELECT s.listing_id, max(s.cluster_key) AS cluster_key
@@ -1631,6 +1616,9 @@ WITH grouped AS (
         SELECT e.listing_id, NULL::bigint FROM autodedup.pairs p
          CROSS JOIN LATERAL (VALUES (p.listing_lo), (p.listing_hi)) AS e(listing_id)
          WHERE p.generation = %(generation)s::text
+        UNION ALL
+        SELECT f.listing_id, NULL::bigint FROM autodedup.rt_fp f
+         WHERE f.generation = %(generation)s::text
     ) s
     GROUP BY s.listing_id
 ), touched AS (

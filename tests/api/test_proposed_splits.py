@@ -59,7 +59,6 @@ CANNED = {
              decision="certificate:K-A"),
         _row(usql.PAIR_COLUMNS, listing_lo=501, listing_hi=503, zone="reject",
              decision="auto_reject:area")],
-    usql.LATEST_GENERATION_SQL: [("g12",)],
 }
 
 
@@ -126,8 +125,8 @@ def _advert(lid: int, source: str, origin: int | None = None, *,
             "detach_outcome": outcome, "splittable": outcome in pi.MOVED}
 
 
-def test_the_list_is_every_split_the_latest_generation_proposes(client, conn):
-    data = client.get("/autodedup/proposed-splits").json()["data"]
+def test_the_list_is_every_split_a_generation_proposes(client, conn):
+    data = client.get("/autodedup/proposed-splits?generation=g12").json()["data"]
     assert (data["generation"], data["total"], data["next_after"]) == ("g12", 2, None)
     first, second = data["items"]
     assert first["property_id"] == 10 and first["canonical_listing_id"] == 101
@@ -151,9 +150,9 @@ def test_the_list_is_every_split_the_latest_generation_proposes(client, conn):
 
 
 def test_the_list_pages_by_property_id(client):
-    page = client.get("/autodedup/proposed-splits?limit=1").json()["data"]
+    page = client.get("/autodedup/proposed-splits?generation=g12&limit=1").json()["data"]
     assert [i["property_id"] for i in page["items"]] == [10] and page["next_after"] == 10
-    rest = client.get("/autodedup/proposed-splits?limit=1&after=10").json()["data"]
+    rest = client.get("/autodedup/proposed-splits?generation=g12&limit=1&after=10").json()["data"]
     assert [i["property_id"] for i in rest["items"]] == [30] and rest["next_after"] is None
 
 
@@ -161,17 +160,32 @@ def test_one_property_is_the_generations_view_of_it_proposal_or_not(client):
     one = client.get("/autodedup/proposed-splits/20?generation=g12").json()["data"]
     assert (one["generation"], one["property_id"], one["proposed"]) == ("g12", 20, False)
     assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[201, 202]]
-    unseen = client.get("/autodedup/proposed-splits/40").json()["data"]
+    unseen = client.get("/autodedup/proposed-splits/40?generation=g12").json()["data"]
     assert unseen["proposed"] is False and unseen["unseen"] == [_advert(402, "idnes")]
     assert client.get("/autodedup/proposed-splits/99").status_code == 404
 
 
-def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal(client):
-    """Grouped apart is not stated apart: 501/502 were never scored against each other, and the
-    operator's newest ruling on 501/503 is `same`, which the engine obeys (decision 8)."""
-    one = client.get("/autodedup/proposed-splits/50").json()["data"]
+def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal_of_a_batch_pass(client):
+    """Grouped apart is not stated apart in a batch pass: 501/502 were never scored against each
+    other, and the operator's newest ruling on 501/503 is `same`, which the engine obeys
+    (decision 8)."""
+    one = client.get("/autodedup/proposed-splits/50?generation=g12").json()["data"]
     assert (one["proposed"], one["splits"]) == (False, [])
     assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[501], [502], [503]]
+
+
+def test_the_live_stream_is_the_default_and_reads_an_unstored_pair_as_below_band(client):
+    """Production reads ONE stream (E914): an unnamed view is `rt`, the lane that also merges.
+    It keeps only the pairs worth keeping, so two adverts it read and holds apart with no
+    stored row are a proposal `below band` (Decision 9: never a split) — and a `same` ruling
+    still wins."""
+    one = client.get("/autodedup/proposed-splits/50").json()["data"]
+    assert one["generation"] == "rt" and one["proposed"] is True
+    assert one["splits"] == [
+        {"listing_lo": 501, "listing_hi": 502, "reason_source": "pair", "reason": "below band",
+         "ruling": None},
+        {"listing_lo": 502, "listing_hi": 503, "reason_source": "pair", "reason": "below band",
+         "ruling": None}]
 
 
 def test_each_advert_says_what_its_split_would_do(client, conn):
@@ -180,15 +194,16 @@ def test_each_advert_says_what_its_split_would_do(client, conn):
     is: 302 already sits on its origin (merged off 30 and back) — which leaves 301 the last own
     advert of 30 — and 103 once its origin was merged elsewhere."""
     conn.moves += [(302, 6, "out", 31, 30, "operator", AT), (302, 7, "back", 30, 31, "operator", AT)]
-    one = client.get("/autodedup/proposed-splits/30").json()["data"]
+    one = client.get("/autodedup/proposed-splits/30?generation=g12").json()["data"]
     assert [a for g in one["groups"] for a in g["adverts"]] == [
         _advert(301, "sreality", outcome="last_native")]
     assert one["unseen"] == [{**_advert(302, "idnes", origin=30, outcome="on_origin"),
                               "is_active": False}]
-    assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
-        _advert(103, "bazos", origin=13)]
+    assert client.get("/autodedup/proposed-splits/10?generation=g12").json()["data"]["groups"][1][
+        "adverts"] == [_advert(103, "bazos", origin=13)]
     conn.status[13] = ("merged_away", 77)
-    assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
+    assert client.get("/autodedup/proposed-splits/10?generation=g12").json()["data"]["groups"][1][
+        "adverts"] == [
         _advert(103, "bazos", origin=13, outcome="origin_moved_on")]
 
 

@@ -45,6 +45,7 @@ from autodedup import proposed_splits as splits
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
+from autodedup.incremental import GENERATION
 from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
 
@@ -224,11 +225,11 @@ def stats(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
 
 # ============================================================ the validation UI (W5, §12)
 
-# There is NO default generation. `g1` was one — the first hand-prior pass, which over-merged
-# developer units and was superseded twice — and every validation view opened on it long after
-# the engine had moved on: the operator reviewed certificate edges that the current pass never
-# proposed. An unnamed generation is resolved against the store instead (`_resolve_generation`),
-# and the answer is echoed back so the page can say which pass it is showing.
+# An unnamed generation is THE live stream, `rt` (`_resolve_generation`, E914): the one the
+# worker's pass keeps current and reconciles production from. `g1` once was the default and
+# every view opened on a pass the engine had moved past; the live stream cannot be moved past.
+# The answer is echoed back so the page can say which pass it is showing, and the batch passes
+# stay nameable as the evaluation lab.
 GROUP_PAGE_SIZE = 25
 GROUP_MAX_PAGE_SIZE = 100
 RESIDUAL_MIN_SCORE = 0.20
@@ -426,15 +427,13 @@ def _rows(columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> list[dict[st
 
 
 def _resolve_generation(conn: Any, generation: str | None) -> str | None:
-    """The pass a view reads: the one the caller named, else the newest one persisted.
+    """The pass a view reads: the one the caller named, else THE live stream.
 
-    None comes back only from a store that holds no cluster at all — an empty queue is then
-    the honest answer, where a fabricated generation name would be an empty queue that looks
-    like a filter result."""
-    if generation:
-        return generation
-    rows = _fetch(conn, usql.LATEST_GENERATION_SQL)
-    return str(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else None
+    Production reads one generation, the real-time lane's (Decision 5, E914): it is the one
+    kept current by the pass that also merges, so it is what an unnamed view means. The batch
+    passes stay nameable as the evaluation lab. `conn` is kept so every caller reads alike."""
+    del conn
+    return generation or GENERATION
 
 
 def _families(mask: Any) -> list[str]:
@@ -996,10 +995,10 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
 
     THE PAIR HISTOGRAMS ARE ONE PASS'S (E58): `autodedup.pairs` holds every generation ever
     scored, and an unscoped zone count adds four engines together — the mix that made the
-    validation panel read a band g4 never assigned (M42). The pass is the newest one, the
+    validation panel read a band g4 never assigned (M42). The pass is the live stream, the
     same default every queue opens on, and it is named in the answer."""
     generations = _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
-    generation = generations[0]["generation"] if generations else None
+    generation = _resolve_generation(conn, None)
     scope = {"generation": generation}
     zones = {
         row["zone"]: int(row["n"])
@@ -1032,7 +1031,7 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
         "pairs_generation": generation,
         "certificates": certificates,
         "generations": generations,
-        "latest_generation": generations[0]["generation"] if generations else None,
+        "latest_generation": generation,
         "verdicts": verdicts,
         "n_verdicts": sum(int(row["n"]) for row in verdicts),
         # Per (kind, reason), never summed across the two grains — see REASON_COUNTS_SQL.
@@ -1066,7 +1065,7 @@ def generations(
     except _STORE_BEHIND:
         return _not_ready()
     return {
-        "data": {"items": items, "latest": items[0]["generation"] if items else None},
+        "data": {"items": items, "latest": _resolve_generation(conn, None)},
         "store_ready": True,
     }
 

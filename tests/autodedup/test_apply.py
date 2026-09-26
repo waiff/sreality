@@ -1101,14 +1101,14 @@ def test_an_engine_merge_ruled_different_afterwards_is_reported_not_counted_away
     assert f"generation={GEN},cluster_key=10" in text
 
 
-def test_real_time_generations_are_refused(tmp_path: Path) -> None:
+def test_the_live_stream_is_refused_here_the_lane_reconciles_it(tmp_path: Path) -> None:
+    """One stream, one writer (A9): the lane reconciles `rt` itself, under its lease."""
     db = FakeDb()
     _pair_group(db, 10, [10, 11], [100, 200], gen="rt")
     with pytest.raises(ValueError, match="real-time"):
         A.plan_apply(db, "rt", A.Scope())
-    for gen in ("rt", "RT", "rt_seed_g12"):
-        with pytest.raises(SystemExit, match="real-time"):
-            A.run_apply(_factory(db), {"generation": gen}, tmp_path)
+    with pytest.raises(SystemExit, match="real-time"):
+        A.run_apply(_factory(db), {"generation": "rt"}, tmp_path)
     assert db.ledger == [] and not db.statements
 
 

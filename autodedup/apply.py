@@ -50,6 +50,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from autodedup import apply_sql as S
 from autodedup import legacy_retire
 from autodedup.census import write_json
+from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
     AssetLinkConflict,
@@ -117,10 +118,6 @@ SKIP_CHANGED_SINCE_PLAN = "changed_since_plan"
 # Reported, never acted on — `unapply` is the operator's call (E905).
 RULED_AFTER_MERGE = "ruled_different_after_merge"
 
-# The real-time lane's generations (`rt…`, `left(generation, 2) = 'rt'` on the review pages)
-# are rewritten every few minutes by a workflow in another concurrency group and spell their
-# blocks differently, so no plan read across several statements can hold still. Refused.
-REALTIME_PREFIX: str = "rt"
 
 
 class ApplyRefused(RuntimeError):
@@ -422,10 +419,6 @@ def scope_closed(conn: Any) -> str | None:
     return "; ".join(problems) or None
 
 
-def is_realtime_generation(generation: str) -> bool:
-    return generation.strip().lower().startswith(REALTIME_PREFIX)
-
-
 @dataclass
 class Negatives:
     """The operator's negatives over a set of listings, indexed by each ruling's lowest
@@ -630,7 +623,7 @@ def _members(conn: Any, generation: str) -> dict[int, list[Member]]:
 
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     """Read-only: which groups of `generation` would merge, into what, and which are refused."""
-    if is_realtime_generation(generation):
+    if generation.strip() == GENERATION:
         raise ValueError(
             f"generation {generation!r} belongs to the real-time lane, which reconciles it "
             "itself under its own lease (A9) — it cannot be applied from this lane"
@@ -1614,7 +1607,7 @@ def run_apply(
 ) -> dict[str, Any]:
     _check_args(args, APPLY_ARGS)
     generation = _generation_arg(args)
-    if is_realtime_generation(generation):
+    if generation.strip() == GENERATION:
         raise SystemExit(
             f"generation={generation}: the real-time lane's generation is reconciled by the "
             "lane itself, under its own lease (A9) — it cannot be applied from here"
