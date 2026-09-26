@@ -2,7 +2,8 @@
  * row per advert, photos and the portal link collapsed, words on expand, the
  * asked-for advert's row open, and for an admin session each advert's origin
  * and the exact two-step per-advert split, any property size, any merge origin,
- * the property's own advert included (to a new record). */
+ * the property's own advert included (to a new record) — the split route's
+ * statement `separate: [[id]], keep_together: false` over every advert shown. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -21,7 +22,7 @@ import type { ImagePublic, ListingPublic, PropertySource } from '@/lib/types';
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   fetchPropertyOrigins: vi.fn(),
-  detachListing: vi.fn(),
+  splitProperty: vi.fn(),
 }));
 vi.mock('@/lib/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth')>()),
@@ -173,14 +174,38 @@ beforeEach(() => {
     broker_firm_label: 'RE/MAX Alfa',
   } as unknown as Awaited<ReturnType<typeof brokers.fetchListingBroker>>);
   vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins());
-  vi.mocked(api.detachListing).mockResolvedValue({
-    listing_id: 202,
-    detached: true,
-    outcome: 'detached',
-    survivor_property_id: 42,
-    restored_property_id: 43,
-    rulings_written: 1,
-  });
+  vi.mocked(api.splitProperty).mockResolvedValue(splitResult(202, 'detached', 43));
+});
+
+/* The split route's answer when `listingId` left for `to` (nothing moved: `outcome` null). */
+function splitResult(listingId: number, outcome: string | null, to: number): api.SplitResult {
+  return {
+    call_id: '5b0c0000-0000-4000-8000-000000000000',
+    property_id: 42,
+    record_kept_by: 'A',
+    units: [
+      { unit: 'A', role: 'kept', listing_ids: [101, 202].filter((i) => i !== listingId), property_id: 42, moved: [], merge_group_id: null },
+      {
+        unit: 'B',
+        role: 'separated',
+        listing_ids: [listingId],
+        property_id: to,
+        moved: outcome ? [{ listing_id: listingId, outcome, from: 42, to }] : [],
+        merge_group_id: null,
+      },
+    ],
+    moved: outcome ? 1 : 0,
+    rulings: { written: outcome ? 1 : 0, same: 0, different: outcome ? 1 : 0, must_not_link_written: 0, must_not_link_retracted: 0 },
+    reversed_pairs: [],
+    undo: null,
+  };
+}
+
+const statement = (listingId: number, adverts = [101, 202], reason?: string) => ({
+  adverts,
+  separate: [[listingId]],
+  keep_together: false,
+  ...(reason ? { reason } : {}),
 });
 
 describe('<MergedAdvertsSection> rows', () => {
@@ -314,25 +339,20 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
   });
 
   it('splits the header’s own advert off to a new record, saying the property’s state stays', async () => {
-    vi.mocked(api.detachListing).mockResolvedValue({
-      listing_id: 101,
-      detached: true,
-      outcome: 'split_native',
-      survivor_property_id: 42,
-      restored_property_id: 9001,
-      rulings_written: 1,
-    });
+    vi.mocked(api.splitProperty).mockResolvedValue(splitResult(101, 'split_native', 9001));
     setup();
     fireEvent.click(await within(rowOf('Sreality')).findByRole('button', { name: /Rozdělit/ }));
     const confirm = screen.getByRole('group', { name: 'Oddělit inzerát' });
     expect(confirm.textContent).toMatch(/Nepřivedlo ho sloučení: dostane novou vlastní nemovitost/);
     expect(confirm.textContent).toContain(STATE_STAYS);
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 101, undefined));
+    await waitFor(() => expect(api.splitProperty).toHaveBeenCalledWith(42, statement(101)));
     await waitFor(() =>
       expect(toast.pushToast).toHaveBeenCalledWith(
         'ok',
         `Odděleno — inzerát má novou vlastní nemovitost #9001. ${STATE_STAYS}`,
+        0,
+        expect.objectContaining({ label: 'Otevřít #9001' }),
       ),
     );
   });
@@ -348,18 +368,22 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     expect(
       screen.getByText(/Vrátí se do nemovitosti #43, odkud ho přivedlo ruční sloučení ze dne 21\/09\/2026/),
     ).toBeInTheDocument();
-    expect(api.detachListing).not.toHaveBeenCalled();
+    expect(api.splitProperty).not.toHaveBeenCalled();
 
     // Step two is the write, with the optional reason trimmed.
     fireEvent.change(screen.getByRole('textbox', { name: /Důvod/ }), {
       target: { value: '  jiné patro ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 202, 'jiné patro'));
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(42, statement(202, [101, 202], 'jiné patro')),
+    );
     await waitFor(() =>
       expect(toast.pushToast).toHaveBeenCalledWith(
         'ok',
         'Odděleno — inzerát je zpět v nemovitosti #43.',
+        0,
+        expect.objectContaining({ label: 'Otevřít #43' }),
       ),
     );
     // Read-your-writes: the property and its advert list, and every Browse surface.
@@ -379,7 +403,7 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     expect(
       within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }),
     ).toBeInTheDocument();
-    expect(api.detachListing).not.toHaveBeenCalled();
+    expect(api.splitProperty).not.toHaveBeenCalled();
   });
 
   it('splits any row of a bigger property, an AUTODEDUP merge like any other; no reason sends none', async () => {
@@ -406,18 +430,31 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
       screen.getByText(/nemovitosti #44, odkud ho přivedlo automatické \(AUTODEDUP\) sloučení/),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 303, undefined));
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(42, statement(303, [101, 202, 303])),
+    );
   });
 
-  it('a detach that moved nothing says why, and still refreshes', async () => {
-    vi.mocked(api.detachListing).mockResolvedValue({
-      listing_id: 202,
-      detached: false,
-      outcome: 'not_on_property',
-      survivor_property_id: 42,
-      restored_property_id: 43,
-      rulings_written: 0,
-    });
+  it('a split that moved nothing (a re-send) says so, and still refreshes', async () => {
+    vi.mocked(api.splitProperty).mockResolvedValue(splitResult(202, null, 43));
+    const { qc } = setup();
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
+    fireEvent.click(
+      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
+    await waitFor(() =>
+      expect(toast.pushToast).toHaveBeenCalledWith('info', 'Nic se nepřesunulo — inzerát už je oddělen.'),
+    );
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
+  });
+
+  it('a property that changed since the page read it refuses, says why and re-reads', async () => {
+    vi.mocked(api.splitProperty).mockRejectedValue(
+      new api.ApiError('property 42 holds adverts the statement did not name: 404', 409, {
+        detail: { code: 'stale', message: 'property 42 holds adverts the statement did not name: 404', ids: [404] },
+      }),
+    );
     const { qc } = setup();
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
     fireEvent.click(
@@ -426,10 +463,12 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
     await waitFor(() =>
       expect(toast.pushToast).toHaveBeenCalledWith(
-        'info',
-        'Nic se nepřesunulo — inzerát už v této nemovitosti není.',
+        'err',
+        'property 42 holds adverts the statement did not name: 404',
       ),
     );
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
+    // the panel stays open: nothing looks done
+    expect(screen.getByRole('group', { name: 'Oddělit inzerát' })).toBeInTheDocument();
   });
 });
