@@ -117,7 +117,7 @@ def test_two_stores_that_agree_pass(tmp_path) -> None:
 
     out = _run(db, tmp_path)
 
-    assert out["verdict"] == {"ok": True, "reasons": []}
+    assert out["verdict"] == {"ok": True, "reasons": [], "notes": []}
     assert out["pairs"]["both"] == 2 and out["pairs"]["differing"] == 0
     assert out["clusters"]["member_sets_identical"] is True
     assert out["clusters"]["keys_identical"] is True

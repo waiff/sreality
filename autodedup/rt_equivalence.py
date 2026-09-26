@@ -30,26 +30,41 @@ failing on (E119).
     matches the facts as they stand now), `calibration_cohort` (the corpus-frequency features
     moved, which two differently-cut calibrations always do), `clock_anchor` (the two
     generations do not agree what the window's end is) — and `unexplained`.
+  * **`evidence_hold`** (E918) is a shared pair the live lane HOLDS in the band for complete
+    photo evidence (E908) — a hold, not a decision. It is named only while the lane's own
+    release rule still keeps it (inside the 48 h cap) and only when the decision it holds is
+    the batch's; the verdict does not fail on it and its notes say how many wait and how long.
   * **One-sided pairs** keep their own causes, now reported PER SIDE: `scope`,
     `not_in_live_store`, `arrival_after_export`, `retention`, `store_floor`, `unexplained`.
-  * **Clusters** are compared component by component: a component whose two sides hold
-    DIFFERENT merge edges is `upstream_pair` (the pair grain already accounted for it), one
-    holding a listing the batch cohort never had is `arrival`, and one where both sides hold
-    the SAME edges and partition them differently is `unexplained` — which is the shape E114
-    wore, and the reason this attribution exists at all.
+    `arrival_after_export` (E918) is read against the batch cohort ITSELF — the export
+    artifact the batch pass names in `params.export_run` — and the cut is the export's START
+    from its own `autodedup.iterations` row, not the minute typed on the command line
+    (`arrival_of`, `_cohort_cut`).
+  * **Clusters** are compared component by component: a component whose moved merge edges all
+    touch an arrival is `arrival`, one whose moved edges are arrivals or held batch merges is
+    `evidence_hold`, one with any other moved edge is `upstream_pair` (the pair grain already
+    accounted for it), and one where both sides hold the SAME edges and partition them
+    differently is `unexplained` — which is the shape E114 wore, and the reason this
+    attribution exists at all.
 
 The verdict fails on `unexplained` and on defects. It does not fail on a difference that has
 been named and evidenced, because a check that cannot tell drift from a bug is a description.
 
 It writes NOTHING — not a `public` row, not an `autodedup` row, not an `iterations` row. Its
-deliverable is `out/rt_equivalence.json`.
+deliverable is `out/rt_equivalence.json`; the export artifact it reads the cohort from is
+downloaded into a temporary directory and gone before that file is written.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from autodedup.features import (
     CALIBRATION_FEATURES,
@@ -59,8 +74,10 @@ from autodedup.features import (
     clock_features,
 )
 from autodedup.harness import model_of_version
-from autodedup.incremental import GENERATION
+from autodedup.incremental import EVIDENCE_HOLD_REASON, GENERATION
+from autodedup.judge_lane import download_cohort
 from autodedup.incremental_lane import (
+    EVIDENCE_HORIZON_HOURS,
     SCOPE_SETTING,
     lane_settings,
     read_scope_setting,
@@ -72,6 +89,8 @@ from autodedup.incremental_sql import (
     RT_CALIBRATION_READ_SQL,
     RT_EQUIV_BATCH_SETTINGS_SQL,
     RT_EQUIV_CLOCK_FACTS_SQL,
+    RT_EQUIV_EXPORT_WINDOW_SQL,
+    RT_EQUIV_HOLDS_SQL,
     RT_EQUIV_MEMBERS_SQL,
     RT_EQUIV_PAIR_FEATURES_SQL,
     RT_EQUIV_PAIRS_SQL,
@@ -132,6 +151,18 @@ SCORE_DEFECT: str = "score_not_from_vector"
 #   `model_unavailable` the row names a model this build does not carry
 SCORE_EXEMPT: tuple[str, ...] = (
     "guard_veto", "no_feature_vector", "no_model_version", "model_unavailable")
+# E918. The cause a shared pair carries when the live side is HELD for complete photo evidence
+# (E908) and the decision it holds IS the batch's: a hold, not a decision, and the safe way
+# round — the lane has decided exactly what the batch decided and is waiting to act on it.
+EVIDENCE_HOLD: str = "evidence_hold"
+# The two decision fields a hold rewrites. `incremental` writes the band and no certificate
+# while it waits and keeps what it decided in `pairs.evidence.held_*`, so a release is a
+# re-decision and not a reconstruction — and so the instrument can read what is being held.
+HOLD_FIELDS: frozenset[str] = frozenset({"zone", "certificate"})
+# The cap a hold may run to: the lane's own horizon, measured from the youngest endpoint whose
+# gallery was still incomplete — the one the release arm (`RT_EVIDENCE_RELEASE_SQL`) keeps it
+# for. A hold past it is one the lane should have released, and it is `unexplained` again.
+HOLD_CAP_S: float = EVIDENCE_HORIZON_HOURS * 3600.0
 _UNREAD: object = object()
 
 
@@ -235,18 +266,23 @@ def read_clusters(conn: Any, generation: str) -> dict[int, frozenset[int]]:
     return {key: frozenset(members) for key, members in out.items()}
 
 
-def scope_listings(conn: Any, generation: str, scope: Any) -> tuple[set[int], str]:
-    """The live generation's own membership, and where it was read from.
+def scope_listings(conn: Any, generation: str,
+                   scope: Any) -> tuple[set[int], dict[int, Any], str]:
+    """The live generation's own membership, when each listing's location put it there, and
+    where it was read from.
 
     `autodedup.rt_scope_ids` is the snapshot the entrant feed claims out of, so it is the
     generation's OWN answer to "what does my scope hold" and it costs `public` nothing. A
     generation whose snapshot is empty — one seeded and never passed — has to fall back to the
     block walk, and the report says which it used, because a comparison scoped by one and a
     build scoped by the other would be two different questions."""
-    ids = {int(row[0]) for row in _rows(conn, RT_EQUIV_SCOPE_IDS_SQL,
-                                        {"generation": generation})}
+    ids: set[int] = set()
+    resolved: dict[int, Any] = {}
+    for row in _rows(conn, RT_EQUIV_SCOPE_IDS_SQL, {"generation": generation}):
+        ids.add(int(row[0]))
+        _keep_latest(resolved, int(row[0]), row[1])
     if ids:
-        return ids, "rt_scope_ids"
+        return ids, resolved, "rt_scope_ids"
     if scope.whole_corpus:
         raise SystemExit(
             "this generation's scope is the whole corpus and its membership snapshot is "
@@ -260,9 +296,19 @@ def scope_listings(conn: Any, generation: str, scope: Any) -> tuple[set[int], st
         cast_obce = block.code if block.grain == "cast_obce" else None
         if obec is None:
             continue
-        ids.update(int(row[0]) for row in _rows(conn, RT_SCOPE_BLOCK_SQL, {
-            "obec": obec, "cast_obce": cast_obce, "limit": 1_000_000}))
-    return ids, "listing_location"
+        for row in _rows(conn, RT_SCOPE_BLOCK_SQL, {
+                "obec": obec, "cast_obce": cast_obce, "limit": 1_000_000}):
+            ids.add(int(row[0]))
+            _keep_latest(resolved, int(row[0]), row[1])
+    return ids, resolved, "listing_location"
+
+
+def _keep_latest(into: dict[int, Any], listing_id: int, stamp: Any) -> None:
+    """A listing two blocks hold is read twice; its location has one `resolved_at`, but the
+    later of two readings is never the wrong one to keep."""
+    parsed = _to_stamp(stamp)
+    if parsed is not None and (into.get(listing_id) is None or parsed > into[listing_id]):
+        into[listing_id] = parsed
 
 
 def known_listings(conn: Any, generation: str, ids: Sequence[int]) -> set[int]:
@@ -310,15 +356,79 @@ def store_score_type(conn: Any) -> str:
     return str(rows[0][0]).strip().lower()
 
 
-def batch_settings(conn: Any, generation: str) -> tuple[dict[str, Any] | None, Any]:
-    """The settings the batch generation's newest successful score pass recorded, and when
-    that pass finished."""
+def batch_settings(conn: Any,
+                   generation: str) -> tuple[dict[str, Any] | None, Any, str | None]:
+    """The settings the batch generation's newest successful score pass recorded, when that
+    pass finished, and the export run it was scored on."""
     rows = _rows(conn, RT_EQUIV_BATCH_SETTINGS_SQL, {"generation": generation})
-    if not rows or rows[0][0] is None:
-        return None, (rows[0][2] if rows else None)
-    blob = rows[0][0]
+    if not rows:
+        return None, None, None
+    row = rows[0]
+    export_run = None if len(row) < 4 or row[3] is None else str(row[3]).strip() or None
+    if row[0] is None:
+        return None, row[2], export_run
+    blob = row[0]
     return (dict(blob) if isinstance(blob, Mapping) else json.loads(blob or "{}"),
-            rows[0][2])
+            row[2], export_run)
+
+
+def export_window(conn: Any, export_run: str | None) -> tuple[Any, Any] | None:
+    """`(started_at, finished_at)` of the export run's own ledger row, or None when the batch
+    pass names no export run or the export left no row (a ledger failure never fails a lane)."""
+    if not export_run or not export_run.isdigit():
+        return None
+    rows = _rows(conn, RT_EQUIV_EXPORT_WINDOW_SQL, {"run_id": int(export_run)})
+    if not rows or rows[0][0] is None:
+        return None
+    return rows[0][0], rows[0][1]
+
+
+@dataclass(frozen=True, slots=True)
+class Hold:
+    """One live pair HELD for complete photo evidence (E908), as the store keeps it.
+
+    `held_zone` / `held_certificate` are what the pass DECIDED and did not act on. `age_s` is
+    how long ago this generation first decided the youngest endpoint whose gallery was still
+    incomplete — the endpoint the lane's release arm keeps the hold for — or None when no
+    endpoint is incomplete or one cannot be aged, and then the lane owes a release."""
+
+    held_zone: str | None
+    held_certificate: str | None
+    age_s: float | None
+
+    @property
+    def alive(self) -> bool:
+        return self.age_s is not None and self.age_s < HOLD_CAP_S
+
+
+def read_holds(conn: Any, generation: str) -> dict[tuple[int, int], Hold]:
+    """Every pair the live generation holds for evidence, keyed like the pair reads.
+
+    A hold is alive exactly when the lane's release arm would NOT release it: some endpoint was
+    decided with an incomplete gallery and first decided inside the horizon. An endpoint whose
+    first decision carries no stamp cannot be aged, and a hold the instrument cannot age is not
+    one it will excuse — the SQL arm keeps such a hold for ever, which is the defect."""
+    out: dict[tuple[int, int], Hold] = {}
+    for row in _rows(conn, RT_EQUIV_HOLDS_SQL,
+                     {"generation": generation, "reason": EVIDENCE_HOLD_REASON}):
+        ages = [float(age) for complete, age in ((row[4], row[5]), (row[6], row[7]))
+                if complete is False and age is not None]
+        out[(int(row[0]), int(row[1]))] = Hold(
+            held_zone=None if row[2] is None else str(row[2]),
+            held_certificate=str(row[3]) if row[3] else None,
+            age_s=min(ages) if ages else None,
+        )
+    return out
+
+
+def as_held(pair: Pair, hold: Hold) -> Pair:
+    """The row the pass decided and did not write: the stored row with the held decision put
+    back. The score, the vector and the veto are the stored ones — a hold moves neither."""
+    held = Pair([pair.lo, pair.hi, pair.score, hold.held_zone or "merge",
+                 hold.held_certificate, pair.decision, pair.guard_veto, pair.families,
+                 pair.model_version])
+    held.features = pair.features
+    return held
 
 
 def differences(left: Pair, right: Pair, tol: float) -> list[str]:
@@ -472,24 +582,101 @@ def asymmetric_fields(live: Mapping[Any, Pair],
     return out
 
 
+def arrival_of(listing_id: int, *, cut: datetime | None, seen: Mapping[int, Any],
+               resolved: Mapping[int, Any], batch_held: Collection[int],
+               cohort: Collection[int] | None) -> str | None:
+    """Which clock says `listing_id` reached the scope after the batch cohort was cut, or None.
+
+    The export's cohort is `listings` joined to `listing_location` by block, read as the export
+    STARTS (`cut`). A listing is missing from it for one of two reasons: it did not exist yet
+    (`first_seen_at` after the cut), or its location — what puts it in a block — had not been
+    written yet (the scope snapshot's `resolved_at` after the cut, the lane's own arrival event
+    for the snapshot feed).
+
+    Membership decides; the clocks only say WHY. A listing the batch generation holds any row
+    for (a pair at any zone, a cluster membership) was in its cohort by construction, and one
+    the export artifact carries (`cohort`) was in it by record — neither is ever an arrival,
+    whatever its clocks say. `resolved_at` is rewritten by every re-resolve, so it is read
+    ONLY against the artifact: a listing the cohort provably lacks whose location was written
+    after the cut moved in; one it lacks whose clocks both predate the cut was never missing
+    for that reason, and the scope and the export simply disagree. Without the artifact only
+    `first_seen_at` can prove an absence — a listing that did not exist at the cut."""
+    if cut is None or listing_id in batch_held:
+        return None
+    if cohort is not None and listing_id in cohort:
+        return None
+    clocks = (("first_seen_at", seen), ("resolved_at", resolved)) if cohort is not None \
+        else (("first_seen_at", seen),)
+    for clock, stamps in clocks:
+        stamp = _to_stamp(stamps.get(listing_id))
+        if stamp is not None and stamp > cut:
+            return clock
+    return None
+
+
+def cohort_listing_ids(path: Path) -> set[int]:
+    """The listing ids an export artifact carries.
+
+    The artifact's order is a contract (`export.py`, pinned by `test_export.py`): `meta`, then
+    every `listing`, then every `image` — so the read stops at the first image and never
+    decompresses the part of the file that is 90 % of its bytes."""
+    ids: set[int] = set()
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            kind = record.get("t")
+            if kind == "image":
+                break
+            if kind == "listing":
+                ids.add(int(record["id"]))
+    return ids
+
+
+def batch_cohort(
+    cohort_path: str | None, export_run: str | None,
+    fetch: Callable[[str, Path], Path] = download_cohort,
+) -> tuple[set[int] | None, str | None, str | None]:
+    """The batch cohort's listing set: `(ids, where it came from, why it could not be read)`.
+
+    The batch pass stores its pairs and its clusters and NOT the listings it was handed, so the
+    set is read from the export artifact it was scored on — a local `cohort=<path>`, else the
+    `export_run` its own run row names, downloaded into a temporary directory that is gone
+    before the report is written (the lane uploads `out/`, and a 280 MB cohort is not a report).
+    A failure is reported and never raised: without the set the arrival cause falls back to
+    `first_seen_at`, which is the conservative side."""
+    try:
+        if cohort_path:
+            return cohort_listing_ids(Path(cohort_path)), "cohort", None
+        if not export_run or not export_run.isdigit():
+            return None, None, "the batch pass names no export run"
+        with tempfile.TemporaryDirectory(prefix="rt_equivalence_") as tmp:
+            return (cohort_listing_ids(fetch(export_run, Path(tmp))),
+                    f"export_run:{export_run}", None)
+    except (SystemExit, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"[:400]
+
+
 def cause_of(pair: Pair, *, side: str, in_scope: set[int], known: set[int],
-             seen: Mapping[int, Any], exported_at: Any, store_floor: float) -> str:
+             arrived: Collection[int], store_floor: float) -> str:
     """Why exactly one side holds this pair — or `unexplained`, which fails the verdict.
 
     The order is the order of AUTHORITY. A pair whose endpoint the scope does not hold was
     never this generation's to decide; one whose endpoint the live store has no fingerprint for
     has not been built yet; one whose endpoint arrived after the export could not have been in
-    the batch cohort at all; and only then do the two storage rules — the floor and what is
-    still sitting in the store under an older floor — get to explain anything."""
+    the batch cohort at all (`arrival_of`); and only then do the two storage rules — the floor
+    and what is still sitting in the store under an older floor — get to explain anything.
+
+    A HOLD (E908) is not a one-sided cause: a pair the live side holds for evidence and the
+    batch side holds nothing for is a pair the lane DECIDED to merge and the batch did not keep,
+    and waiting to act on that decision does not explain it."""
     if not ({pair.lo, pair.hi} <= in_scope):
         return "scope"
     if not ({pair.lo, pair.hi} <= known):
         return "not_in_live_store"
-    if exported_at is not None and side == "live":
-        for listing_id in (pair.lo, pair.hi):
-            stamp = seen.get(listing_id)
-            if stamp is not None and stamp > exported_at:
-                return "arrival_after_export"
+    if side == "live" and ({pair.lo, pair.hi} & set(arrived)):
+        return "arrival_after_export"
     score = pair.score
     if score is not None and score < store_floor:
         # In the store under a floor it no longer clears: `storable` keeps the merge and band
@@ -535,6 +722,28 @@ def shared_cause(
     return "calibration_cohort"
 
 
+def hold_cause(live: Pair, batch: Pair, features: Sequence[str], hold: Hold | None, *,
+               asymmetric: Sequence[str], one_clock: bool | None,
+               facts: Mapping[int, ClockFacts], settings: WindowRule, tol: float) -> str:
+    """Why a shared pair differs when the LIVE side is held for evidence (E908, E918).
+
+    The hold explains a difference only when three things are true: the store still holds it
+    for a reason the lane recognises (an endpoint inside the 48 h horizon with an incomplete
+    gallery — past that the lane owes a release, and the pair is `unexplained` again); the
+    decision it holds IS the batch's — zone and certificate, read from `evidence.held_*`; and
+    whatever ELSE differs has a cause of its own, attributed exactly as an unheld pair's is. A
+    held merge the batch does not make is a disagreement the hold is merely postponing."""
+    if hold is None or not hold.alive:
+        return "unexplained"
+    held = as_held(live, hold)
+    moved = differences(held, batch, tol)
+    if not moved:
+        return EVIDENCE_HOLD
+    rest = shared_cause(held, batch, moved, features, asymmetric=asymmetric,
+                        one_clock=one_clock, facts=facts, settings=settings, tol=tol)
+    return rest if rest in UNNAMED else EVIDENCE_HOLD
+
+
 def _drift_evidenced(live: Pair, batch: Pair, clock: Sequence[str],
                      facts: Mapping[int, ClockFacts], settings: WindowRule,
                      tol: float) -> bool:
@@ -563,7 +772,8 @@ def _drift_evidenced(live: Pair, batch: Pair, clock: Sequence[str],
 
 
 def run_equivalence(
-    conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
+    conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path, *,
+    fetch_cohort: Callable[[str, Path], Path] = download_cohort,
 ) -> dict[str, Any]:
     """`--mode rt_equivalence`: the live store against a batch generation. Writes nothing."""
     generation = str(args.get("generation") or "").strip() or GENERATION
@@ -595,17 +805,16 @@ def run_equivalence(
             scope = resolve_scope(None, read_scope_setting(control, generation))
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
-        in_scope, scope_source = scope_listings(conn, generation, scope)
+        in_scope, resolved, scope_source = scope_listings(conn, generation, scope)
         score_type = store_score_type(conn)
-        batch_blob, batch_finished = batch_settings(conn, batch)
-        # The batch cohort's cut: the export time when the dispatch names it, else the batch
-        # pass's own finish — LATER than the export, so an arrival between the two reads as
-        # unexplained rather than excused (the instrument fails closed without the stamp).
-        exported_raw = str(args.get("exported_at") or "").strip() or batch_finished
+        batch_blob, batch_finished, export_run = batch_settings(conn, batch)
+        window = export_window(conn, export_run)
+        exported_raw = str(args.get("exported_at") or "").strip() or None
         live_pairs = read_pairs(conn, generation)
         batch_pairs = read_pairs(conn, batch)
         live_clusters = read_clusters(conn, generation)
         batch_clusters = read_clusters(conn, batch)
+        holds = read_holds(conn, generation)
 
         # The effective tolerance is never finer than the store's own resolution (M178).
         tol = max(asked_tol, TOL_STORE_ULPS * store_eps(score_type)
@@ -616,12 +825,16 @@ def run_equivalence(
         only_live = sorted(set(live_pairs) - set(batch_pairs))
         only_batch = sorted(set(batch_pairs) - set(live_pairs))
         both = sorted(set(live_pairs) & set(batch_pairs))
+        # A held pair differs when its STORED row does, and also when the decision it holds
+        # does: a band row both sides agree on can be hiding a merge the batch never made.
         differing_keys = [key for key in both
-                          if differences(live_pairs[key], batch_pairs[key], tol)]
-        # The nine this mode always runs: the calibration, the control settings, the scope
-        # snapshot, the score column's type, the batch pass's settings, two pair reads and two
-        # membership reads. Everything after it is bounded by what actually differs.
-        statements = 9
+                          if differences(live_pairs[key], batch_pairs[key], tol)
+                          or _held_moved(live_pairs[key], batch_pairs[key], holds, tol)]
+        # The ten this mode always runs: the calibration, the control settings, the scope
+        # snapshot, the score column's type, the batch pass's settings, two pair reads, two
+        # membership reads and the live side's holds — plus the export's ledger row when the
+        # batch pass names its export. Everything after it is bounded by what actually differs.
+        statements = 10 + (1 if export_run and export_run.isdigit() else 0)
         statements += read_features(conn, generation, differing_keys, live_pairs)
         statements += read_features(conn, batch, differing_keys, batch_pairs)
 
@@ -639,12 +852,22 @@ def run_equivalence(
         if callable(close):
             close()
 
-    exported_at = None
-    if exported_raw is not None and seen:
-        # The baseline's stamp is TEXT in a settings row and the live column is a timestamp, so
-        # one of the two has to be converted — and it is the stamp, once, rather than every row.
-        sample = next(iter(seen.values()), None)
-        exported_at = _as_stamp(exported_raw, sample)
+    cut, cut_source = _cohort_cut(window, exported_raw, batch_finished)
+    batch_held = {i for key in batch_pairs for i in key}
+    batch_held |= {i for members in batch_clusters.values() for i in members}
+    # The artifact is read only when some listing could be an arrival at all: a comparison
+    # that asks about nothing outside the batch store does not pull a 280 MB cohort to say so.
+    cohort_skipped = ("no cut to read arrivals against" if cut is None
+                      else None if set(endpoints) - batch_held
+                      else "every listing the comparison asks about is in the batch store")
+    cohort, cohort_source, cohort_error = (None, None, None) if cohort_skipped else batch_cohort(
+        str(args.get("cohort") or "").strip() or None, export_run, fetch_cohort)
+    arrived: dict[int, str] = {}
+    for listing_id in endpoints:
+        clock = arrival_of(listing_id, cut=cut, seen=seen, resolved=resolved,
+                           batch_held=batch_held, cohort=cohort)
+        if clock is not None:
+            arrived[listing_id] = clock
 
     live_clock = live_settings.get("live_window_from_sighting")
     batch_clock = (batch_blob or {}).get("live_window_from_sighting")
@@ -660,13 +883,24 @@ def run_equivalence(
     score_only = 0
     score_only_max = 0.0
     unexplained_score_max = 0.0
+    held_shared: list[dict[str, Any]] = []
     for key in differing_keys:
         live, batch_pair = live_pairs[key], batch_pairs[key]
         moved = differences(live, batch_pair, tol)
         features = moved_features(live, batch_pair, tol)
-        cause = shared_cause(live, batch_pair, moved, features, asymmetric=asymmetric,
-                             one_clock=one_clock, facts=facts, settings=clock_settings,
-                             tol=tol)
+        attribution = {"asymmetric": asymmetric, "one_clock": one_clock, "facts": facts,
+                       "settings": clock_settings, "tol": tol}
+        if live.decision == EVIDENCE_HOLD_REASON:
+            hold = holds.get(key)
+            cause = hold_cause(live, batch_pair, features, hold, **attribution)
+            if not moved and hold is not None:
+                # The stored rows agree and the HELD decision does not: name what moved as the
+                # hold's, so the counters never read a band row as a decision that moved.
+                moved = [f"held_{field}"
+                         for field in differences(as_held(live, hold), batch_pair, tol)]
+            held_shared.append({"key": key, "cause": cause, "hold": hold})
+        else:
+            cause = shared_cause(live, batch_pair, moved, features, **attribution)
         shared_causes[cause] = shared_causes.get(cause, 0) + 1
         if moved == ["score"]:
             score_only += 1
@@ -695,15 +929,17 @@ def run_equivalence(
     for side, keys, store in (("live", only_live, live_pairs),
                               ("batch", only_batch, batch_pairs)):
         for key in keys:
-            cause = cause_of(store[key], side=side, in_scope=in_scope, known=known, seen=seen,
-                             exported_at=exported_at, store_floor=store_floor)
+            cause = cause_of(store[key], side=side, in_scope=in_scope, known=known,
+                             arrived=arrived, store_floor=store_floor)
             causes[side][cause] = causes[side].get(cause, 0) + 1
             if cause == "unexplained" and len(unexplained) < MAX_EXAMPLES:
                 unexplained.append({"side": side, **store[key].to_json()})
     one_sided = {cause: causes["live"].get(cause, 0) + causes["batch"].get(cause, 0)
                  for cause in set(causes["live"]) | set(causes["batch"])}
 
-    clusters = _attribute_clusters(cluster_diff, seen, exported_at, known)
+    held_edges = {entry["key"] for entry in held_shared if entry["cause"] == EVIDENCE_HOLD}
+    clusters = _attribute_clusters(cluster_diff, arrived, known, held_edges)
+    evidence_hold = _hold_report(held_shared, holds, only_live, live_pairs)
     consistency = score_self_consistency(differing_keys, live_pairs, batch_pairs,
                                          score_type=score_type, tol=tol)
     defects = _defects(asymmetry, one_clock, score_type, live_clock, batch_clock)
@@ -724,6 +960,12 @@ def run_equivalence(
     if unexplained_score_max > SCORE_ONLY_MAX:
         reasons.append(f"an unattributed score-only difference of {unexplained_score_max:.4f} "
                        f"exceeds {SCORE_ONLY_MAX} with the decision unchanged")
+    if evidence_hold["unexplained"]:
+        reasons.append(
+            f"{evidence_hold['unexplained']} of the {evidence_hold['shared']} held shared pairs "
+            "are not excused by their hold — past the "
+            f"{EVIDENCE_HORIZON_HOURS:.0f} h evidence cap, not ageable, or holding a decision "
+            "the batch did not take")
     if one_sided.get("unexplained"):
         reasons.append(f"{one_sided['unexplained']} one-sided pairs have no cause")
     if clusters["component_causes"].get("unexplained"):
@@ -734,6 +976,17 @@ def run_equivalence(
                        "live store has never fingerprinted — the build is not finished")
     if live_versions and batch_versions and live_versions != batch_versions:
         reasons.append(f"model_version {live_versions} against {batch_versions}")
+    notes: list[str] = []
+    if evidence_hold["explained"]:
+        oldest = evidence_hold["oldest_h"]
+        notes.append(
+            f"{evidence_hold['explained']} shared pairs are HELD for complete photo evidence "
+            f"(E908) — a hold, not a decision; the oldest has waited "
+            f"{'an unknown time' if oldest is None else f'{oldest:.1f} h'} of the "
+            f"{EVIDENCE_HORIZON_HOURS:.0f} h cap")
+    if arrived:
+        notes.append(f"{len(arrived)} listings reached the scope after the batch cohort's cut "
+                     f"({_stamp(cut)}, from {cut_source})")
 
     report: dict[str, Any] = {
         "generation": generation,
@@ -748,6 +1001,25 @@ def run_equivalence(
                             if score_type in ("real", "double precision") else None},
         "clock": {"live": live_clock, "batch": batch_clock, "one_definition": one_clock},
         "exported_at": _stamp(exported_raw),
+        "export_window": {
+            "export_run": export_run,
+            "started_at": _stamp(window[0]) if window else None,
+            "finished_at": _stamp(window[1]) if window else None,
+            "cut": _stamp(cut),
+            "cut_source": cut_source,
+        },
+        "arrivals": {
+            **_arrival_report(arrived, seen, resolved),
+            "cohort": {
+                "source": cohort_source,
+                "listings": None if cohort is None else len(cohort),
+                # In the scope and NOT in the cohort the batch was scored on. Arrivals are a
+                # handful; hundreds here is a scope the export never covered.
+                "scope_absent": None if cohort is None else len(in_scope - cohort),
+                "error": cohort_error,
+                "skipped": cohort_skipped,
+            },
+        },
         "model_version": {"calibration": live_model, "live_pairs": live_versions,
                           "batch_pairs": batch_versions},
         "defects": defects,
@@ -764,6 +1036,7 @@ def run_equivalence(
             "by_field": by_field,
             "score_self_consistency": consistency,
             "shared_causes": shared_causes,
+            "evidence_hold": evidence_hold,
             "shared_unexplained_examples": shared_unexplained,
             "differing_examples": differing_examples,
             "only_live": len(only_live),
@@ -773,7 +1046,7 @@ def run_equivalence(
             "unexplained_examples": unexplained,
         },
         "clusters": clusters,
-        "verdict": {"ok": not reasons, "reasons": reasons},
+        "verdict": {"ok": not reasons, "reasons": reasons, "notes": notes},
         "statements": statements,
         "spent_usd": 0.0,
     }
@@ -847,17 +1120,104 @@ def _score_defects(consistency: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _as_stamp(raw: Any, like: Any) -> Any:
-    """The baseline's `exported_at` in whatever type the live column hands back."""
-    if hasattr(raw, "isoformat") or like is None:
-        return raw
-    parse = getattr(type(like), "fromisoformat", None)
-    if parse is None or not isinstance(raw, str):
+def _to_stamp(raw: Any) -> datetime | None:
+    """A timestamp from a column or from a command line, always timezone-aware.
+
+    `exported_at=2026-09-26T12:38Z` is text and `first_seen_at` is a `timestamptz`, and an aware
+    and a naive datetime do not compare — so a stamp without a zone is read as UTC, the zone
+    every stamp in this lane is written in."""
+    if raw is None:
         return None
-    try:
-        return parse(raw)
-    except ValueError:
-        return None
+    if isinstance(raw, datetime):
+        stamp = raw
+    else:
+        try:
+            stamp = datetime.fromisoformat(str(raw).strip())
+        except ValueError:
+            return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+
+
+def _cohort_cut(window: tuple[Any, Any] | None, exported_raw: str | None,
+                batch_finished: Any) -> tuple[datetime | None, str | None]:
+    """The moment the batch cohort was cut, and where the instrument read it (E918).
+
+    The export's ledger row first: the export lane reads its block ids as the mode STARTS, so
+    the window's start is the cut — a listing first seen or first located after it cannot be in
+    the cohort. The dispatch's `exported_at` only when the batch pass names no export run or the
+    export left no row, and last the batch pass's own finish, which is LATER than the export and
+    so fails closed: an arrival between the two reads as unexplained rather than excused."""
+    if window is not None and _to_stamp(window[0]) is not None:
+        return _to_stamp(window[0]), "export_ledger"
+    if exported_raw and _to_stamp(exported_raw) is not None:
+        return _to_stamp(exported_raw), "exported_at"
+    if _to_stamp(batch_finished) is not None:
+        return _to_stamp(batch_finished), "batch_finished"
+    return None, None
+
+
+def _held_moved(live: Pair, batch: Pair, holds: Mapping[tuple[int, int], Hold],
+                tol: float) -> bool:
+    """Does the decision a live HOLD keeps differ from the batch's, whatever the rows say?"""
+    if live.decision != EVIDENCE_HOLD_REASON:
+        return False
+    hold = holds.get(live.key)
+    return hold is not None and bool(differences(as_held(live, hold), batch, tol))
+
+
+def _hold_report(held_shared: Sequence[Mapping[str, Any]],
+                 holds: Mapping[tuple[int, int], Hold], only_live: Sequence[tuple[int, int]],
+                 live_pairs: Mapping[tuple[int, int], Pair]) -> dict[str, Any]:
+    """What the live side is HOLDING (E908), counted apart from what it decided.
+
+    `explained` is the shared pairs whose only difference is the hold; `unexplained` the held
+    shared pairs no hold excuses (past the cap, not ageable, or holding a decision the batch
+    did not take). The oldest EXPLAINED hold's age is the number that says whether the photo
+    producers are keeping up — a hold that ages past the cap is already `unexplained`."""
+    explained = [entry for entry in held_shared if entry["cause"] == EVIDENCE_HOLD]
+    refused = [entry for entry in held_shared if entry["cause"] in UNNAMED]
+    ages = [entry["hold"].age_s for entry in explained
+            if entry["hold"] is not None and entry["hold"].age_s is not None]
+    examples: list[dict[str, Any]] = []
+    for entry in refused[:MAX_EXAMPLES]:
+        hold = entry["hold"]
+        examples.append({
+            "listing_lo": entry["key"][0], "listing_hi": entry["key"][1],
+            "cause": entry["cause"],
+            "held_zone": None if hold is None else hold.held_zone,
+            "held_certificate": None if hold is None else hold.held_certificate,
+            "age_h": None if hold is None or hold.age_s is None
+            else round(hold.age_s / 3600.0, 2),
+        })
+    return {
+        "reason": EVIDENCE_HOLD_REASON,
+        "cap_h": EVIDENCE_HORIZON_HOURS,
+        "live_rows": len(holds),
+        "shared": len(held_shared),
+        "explained": len(explained),
+        "unexplained": len(refused),
+        "only_live": sum(1 for key in only_live
+                         if live_pairs[key].decision == EVIDENCE_HOLD_REASON),
+        "oldest_h": round(max(ages) / 3600.0, 2) if ages else None,
+        "unexplained_examples": examples,
+    }
+
+
+def _arrival_report(arrived: Mapping[int, str], seen: Mapping[int, Any],
+                    resolved: Mapping[int, Any]) -> dict[str, Any]:
+    """Which listings the instrument called arrivals, and by which clock — a count nobody can
+    chase is a rumour, and this cause excuses pairs and components alike."""
+    by_clock: dict[str, int] = {}
+    for clock in arrived.values():
+        by_clock[clock] = by_clock.get(clock, 0) + 1
+    return {
+        "listings": len(arrived),
+        "by_clock": by_clock,
+        "examples": [{"listing_id": listing_id, "clock": clock,
+                      "first_seen_at": _stamp(seen.get(listing_id)),
+                      "resolved_at": _stamp(resolved.get(listing_id))}
+                     for listing_id, clock in sorted(arrived.items())[:MAX_EXAMPLES]],
+    }
 
 
 def _trim(source: Mapping[int, frozenset[int]],
@@ -929,6 +1289,12 @@ def _cluster_components(
     }
 
 
+def _partition(sets: Sequence[Sequence[int]], drop: Collection[int]) -> list[list[int]]:
+    """A component's partition with `drop` taken out of every set — empty sets gone."""
+    return sorted(kept for kept in (sorted(set(members) - set(drop)) for members in sets)
+                  if kept)
+
+
 def _membership(trimmed: Mapping[frozenset[int], list[int]]) -> dict[int, frozenset[int]]:
     return {listing_id: members for members in trimmed for listing_id in members}
 
@@ -956,40 +1322,49 @@ def _merge_edges(index: Mapping[int, set[int]], members: set[int]) -> list[list[
                   if listing_id < other and other in members)
 
 
-def _attribute_clusters(diff: Mapping[str, Any], seen: Mapping[int, Any], exported_at: Any,
-                        known: set[int]) -> dict[str, Any]:
-    """Name every cluster component's cause, in the order of AUTHORITY (E119).
+def _attribute_clusters(diff: Mapping[str, Any], arrived: Collection[int], known: set[int],
+                        held_edges: Collection[tuple[int, int]]) -> dict[str, Any]:
+    """Name every cluster component's cause (E119, E918).
 
-    `arrival` first: a listing the batch cohort never held cannot be clustered the same way on
-    both sides, and it would otherwise show up as a difference in the edge set and be filed
-    under the pair grain that legitimately explains it. Then `upstream_pair`: the two sides
-    hold different merge edges, so the pair grain has already accounted for this component and
-    counting it twice would double-report one cause. What is LEFT — the same edges, a
-    different partition — is the finding, and it is the exact shape E114 wore."""
+    A component is explained by what moved its MERGE EDGES. When every edge one side holds and
+    the other does not touches a listing that arrived after the batch cohort was cut (or one the
+    live store has not fingerprinted), it is `arrival`; when every such edge is either that or
+    a batch merge the live side is HOLDING for evidence (E908), it is `evidence_hold` — the
+    group the lane will form once the photographs land. Any other moved edge makes it
+    `upstream_pair`: the pair grain has already accounted for it, and counting it twice would
+    double-report one cause. What is LEFT — the same edges, a different partition — is the
+    finding, the exact shape E114 wore, unless taking the arrivals out of both partitions makes
+    them equal (a listing the batch never had, joined by no edge of its own)."""
     left, right = diff["left"], diff["right"]
     only_live = sorted(left.keys() - right.keys(), key=sorted)
     only_batch = sorted(right.keys() - left.keys(), key=sorted)
     shared = left.keys() & right.keys()
     keys_identical = all(sorted(left[members]) == sorted(right[members]) for members in shared)
+    held = {tuple(edge) for edge in held_edges}
 
     causes: dict[str, int] = {}
     examples: list[dict[str, Any]] = []
     for component in diff["components"]:
         members = set(component["listings"])
-        arrived = [i for i in sorted(members)
-                   if i not in known
-                   or (exported_at is not None and seen.get(i) is not None
-                       and seen[i] > exported_at)]
-        if arrived:
-            cause = "arrival"
-        elif component["live_edges"] != component["batch_edges"]:
+        new = {i for i in members if i in arrived or i not in known}
+        moved = ({tuple(edge) for edge in component["live_edges"]}
+                 ^ {tuple(edge) for edge in component["batch_edges"]})
+        held_here = sorted(edge for edge in moved if edge in held)
+        rest = [edge for edge in moved if edge not in held and not (set(edge) & new)]
+        if moved and not rest:
+            cause = EVIDENCE_HOLD if held_here else "arrival"
+        elif moved:
             cause = "upstream_pair"
+        elif new and _partition(component["live"], new) == _partition(component["batch"], new):
+            cause = "arrival"
         else:
             cause = "unexplained"
         causes[cause] = causes.get(cause, 0) + 1
         if len(examples) < MAX_EXAMPLES:
             examples.append({"cause": cause, **component,
-                             **({"arrived": arrived} if arrived else {})})
+                             **({"arrived": sorted(new)} if new else {}),
+                             **({"held_edges": [list(edge) for edge in held_here]}
+                                if held_here else {})})
     return {
         "live": len(left),
         "batch": len(right),

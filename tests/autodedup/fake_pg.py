@@ -99,6 +99,9 @@ class FakePg:
         # ran the same clock.
         self.score_column_type = "double precision"
         self.score_runs: dict[str, dict[str, Any]] = {}
+        # `autodedup.iterations` rows by GitHub run id: the export run's own ledger row, which is
+        # where `rt_equivalence` reads the batch cohort's cut from (E918).
+        self.ledger_runs: dict[int, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ psycopg surface
     def cursor(self) -> "_Cursor":
@@ -644,7 +647,31 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return sorted((key, listing_id) for g, key, listing_id in db.cluster_members
                       if g == gen)
     if sql == S.RT_EQUIV_SCOPE_IDS_SQL:
-        return sorted((listing_id,) for (g, _block, listing_id) in db.scope_ids if g == gen)
+        return sorted(((listing_id, row.get("resolved_at"))
+                       for (g, _block, listing_id), row in db.scope_ids.items() if g == gen),
+                      key=lambda row: row[0])
+    if sql == S.RT_EQUIV_HOLDS_SQL:
+        def _endpoint(listing_id: int) -> tuple[Any, Any]:
+            row = db.rt_fp.get((gen, int(listing_id)))
+            if row is None:
+                return None, None
+            stamp = row.get("first_decided_at")
+            return (row.get("ev_complete"),
+                    None if stamp is None else (db.now - stamp).total_seconds())
+
+        out = []
+        for (g, lo, hi), row in sorted(db.pairs.items()):
+            if g != gen or row.get("decision") != p["reason"]:
+                continue
+            evidence = _jsonb(row.get("evidence")) or {}
+            held_certificate = evidence.get("held_certificate")
+            out.append((lo, hi, evidence.get("held_zone"),
+                        None if held_certificate is None else str(held_certificate),
+                        *_endpoint(lo), *_endpoint(hi)))
+        return out
+    if sql == S.RT_EQUIV_EXPORT_WINDOW_SQL:
+        row = db.ledger_runs.get(int(p["run_id"]))
+        return [] if row is None else [(row.get("started_at"), row.get("finished_at"))]
     if sql == S.RT_EQUIV_CLOCK_FACTS_SQL:
         return [(int(i), row.get("first_seen_at"), row.get("last_seen_at"),
                  row.get("inactive_at"), bool(row.get("is_active", True)))
@@ -660,7 +687,9 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_EQUIV_BATCH_SETTINGS_SQL:
         row = db.score_runs.get(gen)
         return [] if row is None else [(_jsonb(row.get("settings")),
-                                        row.get("model_version"), db.now)]
+                                        row.get("model_version"),
+                                        row.get("finished_at", db.now),
+                                        row.get("export_run"))]
 
     # ---------------------------------------------------------------- calibration
     if sql == S.RT_CALIBRATION_PRESENT_SQL:

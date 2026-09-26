@@ -222,15 +222,22 @@ name: "AUTODEDUP: engine lane"
 #               that matches `public.listings` as it stands now, recomputed through the
 #               engine's own `features.clock_features`), `calibration_cohort` (the
 #               corpus-frequency features moved, which two differently-cut calibrations always
-#               do), `clock_anchor`, `store_write_asymmetry` - and `unexplained`.
+#               do), `clock_anchor`, `store_write_asymmetry`, `evidence_hold` (E918: the live
+#               lane HOLDS the batch's own merge in the band for complete photo evidence,
+#               inside the 48 h cap - a hold, not a decision, so it does not fail; the
+#               verdict's notes say how many wait and for how long) - and `unexplained`.
 #             * One-sided pairs keep their causes - `scope` (the batch cohort is wider),
 #               `not_in_live_store` (a listing the build has not reached, which FAILS the
 #               verdict because a mid-build comparison reads as a disagreement),
 #               `arrival_after_export`, `store_floor`, `retention`, `unexplained` - now
-#               reported PER SIDE as well as summed.
-#             * Clusters are compared by connected COMPONENT: `arrival` (a listing the batch
-#               cohort never had), `upstream_pair` (the two sides hold different merge edges,
-#               so the pair grain already accounted for it) or `unexplained`, which is a
+#               reported PER SIDE as well as summed. An arrival is read against the batch
+#               cohort ITSELF: the export artifact the batch pass names (params.export_run),
+#               fetched with `gh run download` into a temporary directory, and cut at the
+#               export's START from its own ledger row.
+#             * Clusters are compared by connected COMPONENT: `arrival` (every moved merge
+#               edge touches a listing the batch cohort never had), `evidence_hold` (the moved
+#               edges are arrivals or held batch merges), `upstream_pair` (any other moved
+#               edge, so the pair grain already accounted for it) or `unexplained`, which is a
 #               component both sides hold the same edges in and partition differently.
 #             The score tolerance is never finer than the store's own resolution (`tol`,
 #             default 1e-6, raised to 32 units in the score column's last place while that is
@@ -431,8 +438,10 @@ name: "AUTODEDUP: engine lane"
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
 # settings (required), model (required), rt_scope, fresh and release_lease; rt_equivalence accepts
 # generation (default rt), batch (REQUIRED - the batch generation to compare against),
-# exported_at (the batch cohort's export time; default the batch pass's finish, which fails
-# closed) and tol (the score tolerance, default 1e-6); apply accepts generation (REQUIRED),
+# exported_at (the batch cohort's export time, used only when the export named by the batch
+# pass left no ledger row; last resort the batch pass's finish, which fails closed), cohort
+# (a local export artifact, in place of downloading the one the batch pass names) and tol
+# (the score tolerance, default 1e-6); apply accepts generation (REQUIRED),
 # dry_run (1, the default, or
 # 0), retire_legacy (0, the default, or 1) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=town:563510
 # quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -

@@ -1,0 +1,507 @@
+{
+ "_what": "G1-live, 2026-09-26: `mode=rt_equivalence args=generation=rt,batch=g15,exported_at=2026-09-26T12:38Z`, GitHub run 36253408857. Verbatim from its rt_equivalence.json: the verdict, the counters, every unexplained example it stored (MAX_EXAMPLES = 8 per list, so 8 of the 28 shared and 8 of the 16 one-sided cases) and the one component example holding an arrived advert.",
+ "component_causes": {
+  "upstream_pair": 38
+ },
+ "component_example": {
+  "batch": [
+   [
+    22951,
+    108344,
+    11715096,
+    11725458,
+    11773648
+   ],
+   [
+    19054616
+   ]
+  ],
+  "batch_edges": [
+   [
+    22951,
+    108344
+   ],
+   [
+    22951,
+    11715096
+   ],
+   [
+    22951,
+    11725458
+   ],
+   [
+    22951,
+    11773648
+   ],
+   [
+    108344,
+    11715096
+   ],
+   [
+    108344,
+    11725458
+   ],
+   [
+    108344,
+    11773648
+   ],
+   [
+    11715096,
+    11725458
+   ],
+   [
+    11715096,
+    11773648
+   ],
+   [
+    11725458,
+    11773648
+   ]
+  ],
+  "cause": "upstream_pair",
+  "listings": [
+   22951,
+   108344,
+   11715096,
+   11725458,
+   11773648,
+   19054616
+  ],
+  "live": [
+   [
+    22951,
+    108344,
+    11715096,
+    11725458,
+    11773648,
+    19054616
+   ]
+  ],
+  "live_edges": [
+   [
+    22951,
+    108344
+   ],
+   [
+    22951,
+    11715096
+   ],
+   [
+    22951,
+    11725458
+   ],
+   [
+    22951,
+    11773648
+   ],
+   [
+    22951,
+    19054616
+   ],
+   [
+    108344,
+    11715096
+   ],
+   [
+    108344,
+    11725458
+   ],
+   [
+    108344,
+    11773648
+   ],
+   [
+    108344,
+    19054616
+   ],
+   [
+    11715096,
+    11725458
+   ],
+   [
+    11715096,
+    11773648
+   ],
+   [
+    11715096,
+    19054616
+   ],
+   [
+    11725458,
+    11773648
+   ],
+   [
+    11725458,
+    19054616
+   ],
+   [
+    11773648,
+    19054616
+   ]
+  ]
+ },
+ "counts": {
+  "batch": 17057,
+  "both": 17056,
+  "causes_by_side": {
+   "batch": {
+    "store_floor": 1
+   },
+   "live": {
+    "store_floor": 21,
+    "unexplained": 16
+   }
+  },
+  "differing": 563,
+  "live": 17093,
+  "only_batch": 1,
+  "only_live": 37,
+  "shared_causes": {
+   "calibration_cohort": 520,
+   "drifted_since_export": 15,
+   "unexplained": 28
+  }
+ },
+ "exported_at_arg": "2026-09-26T12:38Z",
+ "run_id": 36253408857,
+ "shared_unexplained_examples": [
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "model",
+    "families": 53,
+    "guard_veto": null,
+    "listing_hi": 420274,
+    "listing_lo": 23140,
+    "model_version": "w6_gold",
+    "score": 0.999999995420496,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 53,
+    "guard_veto": null,
+    "listing_hi": 420274,
+    "listing_lo": 23140,
+    "model_version": "w6_gold",
+    "score": 0.999999995420496,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 5,
+    "guard_veto": null,
+    "listing_hi": 522198,
+    "listing_lo": 46880,
+    "model_version": "w6_gold",
+    "score": 0.954513434253566,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 5,
+    "guard_veto": null,
+    "listing_hi": 522198,
+    "listing_lo": 46880,
+    "model_version": "w6_gold",
+    "score": 0.954513434253566,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": "K-C",
+    "decision": "certificate:K-C",
+    "families": 53,
+    "guard_veto": null,
+    "listing_hi": 420274,
+    "listing_lo": 105457,
+    "model_version": "w6_gold",
+    "score": 0.99999999085941,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 53,
+    "guard_veto": null,
+    "listing_hi": 420274,
+    "listing_lo": 105457,
+    "model_version": "w6_gold",
+    "score": 0.999999990859418,
+    "zone": "band"
+   },
+   "moved": [
+    "zone",
+    "certificate"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 1,
+    "guard_veto": null,
+    "listing_hi": 19039392,
+    "listing_lo": 288718,
+    "model_version": "w6_gold",
+    "score": 0.954513420128761,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 1,
+    "guard_veto": null,
+    "listing_hi": 19039392,
+    "listing_lo": 288718,
+    "model_version": "w6_gold",
+    "score": 0.954513420128761,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 5,
+    "guard_veto": null,
+    "listing_hi": 13173714,
+    "listing_lo": 427015,
+    "model_version": "w6_gold",
+    "score": 0.562081647519535,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 5,
+    "guard_veto": null,
+    "listing_hi": 13173714,
+    "listing_lo": 427015,
+    "model_version": "w6_gold",
+    "score": 0.562081647519535,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 1,
+    "guard_veto": null,
+    "listing_hi": 19039392,
+    "listing_lo": 470280,
+    "model_version": "w6_gold",
+    "score": 0.562081718630907,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 1,
+    "guard_veto": null,
+    "listing_hi": 19039392,
+    "listing_lo": 470280,
+    "model_version": "w6_gold",
+    "score": 0.562081718630907,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 21,
+    "guard_veto": null,
+    "listing_hi": 10104373,
+    "listing_lo": 10060320,
+    "model_version": "w6_gold",
+    "score": 0.562081740155896,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 21,
+    "guard_veto": null,
+    "listing_hi": 10104373,
+    "listing_lo": 10060320,
+    "model_version": "w6_gold",
+    "score": 0.562081740155896,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  },
+  {
+   "batch": {
+    "certificate": null,
+    "decision": "d43_promote:agree:2",
+    "families": 21,
+    "guard_veto": null,
+    "listing_hi": 10193543,
+    "listing_lo": 10129549,
+    "model_version": "w6_gold",
+    "score": 0.954513515444415,
+    "zone": "merge"
+   },
+   "cause": "unexplained",
+   "live": {
+    "certificate": null,
+    "decision": "evidence_pending",
+    "families": 21,
+    "guard_veto": null,
+    "listing_hi": 10193543,
+    "listing_lo": 10129549,
+    "model_version": "w6_gold",
+    "score": 0.954513515444415,
+    "zone": "band"
+   },
+   "moved": [
+    "zone"
+   ],
+   "moved_features": []
+  }
+ ],
+ "unexplained_examples": [
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 37,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 22951,
+   "model_version": "w6_gold",
+   "score": 0.999999998095203,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 53,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 108344,
+   "model_version": "w6_gold",
+   "score": 0.999999998561078,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 37,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 11715096,
+   "model_version": "w6_gold",
+   "score": 0.999999998112277,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 37,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 11725458,
+   "model_version": "w6_gold",
+   "score": 0.999999998684492,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 53,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 11773648,
+   "model_version": "w6_gold",
+   "score": 0.999999999397158,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": null,
+   "decision": "model",
+   "families": 16,
+   "guard_veto": null,
+   "listing_hi": 19054616,
+   "listing_lo": 18403171,
+   "model_version": "w6_gold",
+   "score": 0.574494471187764,
+   "side": "live",
+   "zone": "band"
+  },
+  {
+   "certificate": "K-C",
+   "decision": "certificate:K-C",
+   "families": 53,
+   "guard_veto": null,
+   "listing_hi": 19054614,
+   "listing_lo": 18889054,
+   "model_version": "w6_gold",
+   "score": 0.954513756914011,
+   "side": "live",
+   "zone": "merge"
+  },
+  {
+   "certificate": null,
+   "decision": "evidence_pending",
+   "families": 53,
+   "guard_veto": null,
+   "listing_hi": 19055674,
+   "listing_lo": 18889054,
+   "model_version": "w6_gold",
+   "score": 0.954513757148875,
+   "side": "live",
+   "zone": "band"
+  }
+ ],
+ "verdict": {
+  "ok": false,
+  "reasons": [
+   "28 of 17056 shared pairs differ with no cause",
+   "16 one-sided pairs have no cause"
+  ]
+ }
+}
