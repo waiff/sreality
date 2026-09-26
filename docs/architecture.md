@@ -2152,6 +2152,12 @@ renumber.** Navigate by area:
     unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
     publishing relations return byte-identical figures.
 
+    **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
+    `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
+    published range or a reason (six codes, notes only in that migration), rendered by its shape.
+    Estimations call it; the serving views read the stored, writer-less `mf_*` columns until
+    PR-B's view swap passes `katastr_kod`. Rules: the `llm-pipelines` skill.
+
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
     fallback)` picks `area_m2` and stamps `area_basis`; the land arm is
@@ -3221,10 +3227,10 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
 
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
-* `admin_boundaries` — price stats, the rent map and city proximity still read its geometry and
-  population. Its LOCATION role died with trigger 289; re-keying those three onto
-  `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id` is an FK to it,
-  and already the RÚIAN obec code.
+* `admin_boundaries` — price stats, the rent-map choropleth (not the MF calc, since 565) and city
+  proximity read its geometry and population. Its LOCATION role died with trigger 289; re-keying
+  those three onto `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id`
+  is an FK to it, and already the RÚIAN obec code.
 * `portal_raw_pages` / `portal_raw_payloads` — the preservation substrate, and the intake's second
   source; not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,
@@ -3253,14 +3259,14 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   filters read them); and `scraper/street.py`, whose extraction is a CLAIM now, not a column.
 
 **THE RÚIAN MIRROR IS VERSIONED, NOT MUTATED.** `ruian_*` (migration 381) holds ČÚZK's address
-points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load
-stamps one `registry_versions` row (`ruian:YYYY-MM-DD`) and publishes by **pointer swap** behind
-blocking assertions, so it never half-changes the world underneath a resolution that pinned a
-version. Křovák S-JTSK → WGS84 goes through ONE audited conversion on an explicitly chosen 1 m PROJ
-pipeline (`location_data/krovak.py`; the 6 m one is never used), guarded by a golden-point test;
-boundary packs carry three geometries per unit (authoritative, subdivided pip, render). Freshness is
-the monthly baseline — the VFR daily-delta lane ships as chain-verification only and fails loudly
-until the `ST_ZZSZ` element schema is pinned down.
+points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. ONE monthly
+`full` load stamps one `registry_versions` row (`ruian:YYYY-MM-DD`): stage → blocking assertions →
+merge → boundaries (the state SHP pack is the vintage's third archived artifact, a resume restores
+all three from R2; three geometries per unit — authoritative, subdivided pip, render — an unchanged
+unit's authoritative row carried) → gazetteer → a **completeness assertion** (the state and every
+member obec and KÚ have pip + authoritative) → **pointer swap**: only a complete version goes live.
+Křovák S-JTSK → WGS84 is ONE audited 1 m PROJ conversion (`location_data/krovak.py`, golden-point
+test); `location_town_coverage` goes red when the registry stops moving (40 d current / 24 h staged).
 
 **OPS RULES THE INCIDENTS WROTE.** The heavy lanes — registry load and claim intake — share the OUTER
 `location-batch` concurrency group so **at most one runs at a time** (each keeps its own inner group

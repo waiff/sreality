@@ -202,7 +202,7 @@ def test_the_per_unit_transaction_arms_a_bounded_statement_timeout(monkeypatch):
     per-unit PostGIS statement, which nothing could interrupt."""
     conn = _BoundaryConn(unit_id=7)
     layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
-    rb.load_feature(conn, _feature("obec", 554782), layer, 3, with_pip=True)
+    rb.load_feature(conn, _feature("obec", 554782), layer, 3)
 
     guarded = conn.executed[conn.first_in_transaction]
     assert "set_config('statement_timeout'" in guarded[0]
@@ -219,7 +219,7 @@ def test_the_per_unit_budget_is_env_overridable(monkeypatch):
     monkeypatch.setenv(rb.UNIT_TIMEOUT_ENV, "45")
     conn = _BoundaryConn(unit_id=7)
     layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
-    rb.load_feature(conn, _feature("obec", 1), layer, 3, with_pip=False)
+    rb.load_feature(conn, _feature("obec", 1), layer, 3)
     assert conn.executed[conn.first_in_transaction][1]["statement_timeout"] == "45s"
 
 
@@ -249,22 +249,22 @@ def test_a_timed_out_unit_is_a_data_fault_and_never_spends_the_reconnect_budget(
 
     calls: list[int] = []
 
-    def _timeout(conn, feature, layer, version_id, *, with_pip, unit_timeout_s=None):
+    def _timeout(conn, feature, layer, version_id, *, unit_timeout_s=None):
         calls.append(1)
         raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
 
     original = rb.load_feature
     rb.load_feature = _timeout
     try:
-        loaded, upgraded, conn, error = rb.load_feature_resilient(
+        how, upgraded, conn, error = rb.load_feature_resilient(
             "conn", _feature("obec", 1),
             next(x for x in rb.LAYERS if x.token == "OBCE_P"), 3,
-            with_pip=True, reconnector=rb.Reconnector(_never_called),
+            reconnector=rb.Reconnector(_never_called),
         )
     finally:
         rb.load_feature = original
 
-    assert (loaded, upgraded) == (False, False)
+    assert (how, upgraded) == (None, False)
     assert isinstance(error, psycopg.errors.QueryCanceled)
     assert calls == [1], "the unit is attempted once, not retried on a fresh session"
     assert reconnects == []

@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 
 from autodedup import ui_sql as usql
 from scraper.db import create_singleton_properties
-from scripts.recompute_property_stats import recompute_mf_one, recompute_one
+from scripts.recompute_property_stats import recompute_one
 from toolkit.browse_read_model import sync_browse_list
 from toolkit.dismissal_identity import reconcile_dismissals_on_merge
 from toolkit.operator_state import carry_operator_state_on_merge
@@ -411,7 +411,6 @@ def merge_property_set(
                 confidence=confidence, markers=markers, merge_group_id=group,
             )
         recompute_one(conn, survivor)
-        recompute_mf_one(conn, survivor)
         sync_browse_list(conn, [survivor, *retired])
         ruled = record_rulings(
             conn, pairs, verdict="same", decided_by=str(decided_by),
@@ -632,7 +631,6 @@ def detach_listing(
                 )
             for pid in (current, target):
                 recompute_one(conn, pid)
-                recompute_mf_one(conn, pid)
             sync_browse_list(conn, [current, target])
 
     return {

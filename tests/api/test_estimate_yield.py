@@ -374,6 +374,79 @@ def test_route_wired_via_app(monkeypatch):
     assert captured["filters"].category_type == "pronajem"
 
 
+def test_rent_route_hands_the_subject_to_mf_reference_with_a_containing_obec(monkeypatch):
+    """A typed point has no stored location: the MF reference gets its obec from the
+    one containing-obec statement, never a KÚ, and the amenity filters as its facts."""
+    TestClient = pytest.importorskip("fastapi.testclient").TestClient
+
+    from api import dependencies as deps
+    from api import main as api_main
+
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    monkeypatch.setattr(
+        api_main, "estimate_yield",
+        lambda *a, **k: {"data": {"sample_size": 0}, "metadata": {}},
+    )
+    monkeypatch.setattr(
+        api_main.maps, "containing_obec_kod",
+        lambda conn, *, lat, lng: 586846 if (lat, lng) == (49.4, 15.59) else None,
+    )
+    handed: dict[str, Any] = {}
+
+    def fake_mf(conn, **facts):
+        handed.update(facts)
+        return {"status": "territory_coarse", "note": "n", "range": {}}
+    monkeypatch.setattr(api_main, "compute_reference_rent", fake_mf)
+
+    res = TestClient(api_main.app).post(
+        "/estimate_yield",
+        json={
+            "target": {"lat": 49.4, "lng": 15.59, "area_m2": 75.0, "disposition": "3+1"},
+            "category_main": "byt", "has_balcony": True, "furnished": ["ano"],
+        },
+    )
+    api_main.app.dependency_overrides.clear()
+    assert res.status_code == 200
+    assert res.json()["data"]["reference_rent"]["status"] == "territory_coarse"
+    assert handed["obec_kod"] == 586846 and "katastr_kod" not in handed
+    assert (handed["category_main"], handed["category_type"]) == ("byt", "pronajem")
+    assert (handed["disposition"], handed["area_m2"]) == ("3+1", 75.0)
+    assert handed["has_balcony"] is True and handed["furnished"] == "ano"
+
+
+def test_a_failed_obec_lookup_omits_the_reference_and_never_claims_an_unknown_location(
+    monkeypatch,
+):
+    """A registry/PIP error is not "no obec": read as one it would answer the measure's
+    location_unknown note as a fact. The route omits the reference instead."""
+    TestClient = pytest.importorskip("fastapi.testclient").TestClient
+
+    from api import dependencies as deps
+    from api import main as api_main
+
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    monkeypatch.setattr(
+        api_main, "estimate_yield",
+        lambda *a, **k: {"data": {"sample_size": 0}, "metadata": {}},
+    )
+
+    def broken(conn, *, lat, lng):
+        raise RuntimeError("statement timeout")
+    monkeypatch.setattr(api_main.maps, "containing_obec_kod", broken)
+    called: list[bool] = []
+    monkeypatch.setattr(api_main, "compute_reference_rent",
+                        lambda conn, **facts: called.append(True) or {"status": "ok"})
+
+    res = TestClient(api_main.app).post(
+        "/estimate_yield",
+        json={"target": {"lat": 49.4, "lng": 15.59, "area_m2": 75.0, "disposition": "3+1"},
+              "category_main": "byt"},
+    )
+    api_main.app.dependency_overrides.clear()
+    assert res.status_code == 200
+    assert "reference_rent" not in res.json()["data"] and not called
+
+
 def test_sale_kind_emits_sale_keys_and_reverse_yield(monkeypatch):
     listings = [
         _listing(i, price_per_m2=120_000.0,

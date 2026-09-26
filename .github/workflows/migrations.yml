@@ -156,13 +156,16 @@ jobs:
       # discover — they would be the one executed-SQL family nothing type-checks.
       # test_location_w10_gone_bodies_live joins it because PREPARE only proves the
       # anti-join COMPILES; W10's claim is about which row it RETURNS once a stored
-      # gone page is stamped 410, and only a real schema can answer that.
+      # gone page is stamped 410, and only a real schema can answer that. The registry
+      # publish check joins for the same reason: carry-forward equality and the
+      # completeness read are PostGIS and anti-join answers, not SQL shapes.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           pytest tests/test_sql_schema_prepare.py tests/test_broker_sources.py \
                  tests/location_data/test_location_w10_gone_bodies_live.py \
+                 tests/location_data/test_registry_publish_live.py \
                  tests/toolkit/test_dedup_candidates_sql.py -q
 
       - name: Tenant-isolation sweep (RLS cross-tenant denial, Phase 1)
@@ -409,6 +412,18 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_price_per_m2.py -q
+
+      # MF reference rent is ONE read-time measure (migration 565). Executed over a seeded
+      # rent map: every status code, the range for a town-level location, the VK clamp,
+      # the adjustments -- plus the plan assertion that the function INLINES into the
+      # property lateral that calls it (a SET clause or STRICT would make it one call per
+      # Browse row), and that an estimation hands the property's facts to it.
+      - name: MF reference rent is one inlined measure (migration 565)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_mf_reference.py -q
 
       # W5's five per-m2 call sites are the one executed-SQL family the sweep
       # above CANNOT see: all five are assembled by in-function concatenation

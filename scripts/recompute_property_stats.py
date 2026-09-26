@@ -298,20 +298,6 @@ def recompute_one(conn: Any, property_id: int) -> None:
         cur.execute(_RECOMPUTE_ONE_SQL, {"pid": property_id})
 
 
-def recompute_mf_one(conn: Any, property_id: int) -> None:
-    """Refresh ONE property's MF reference rent/yield from its golden record.
-
-    Pairs with recompute_one: rebuild the golden columns, then recompute MF on
-    them so a merge/unmerge survivor is never one mf-recompute cycle stale.
-    Calls the same recompute_property_mf() DB function the hourly job uses.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT public.recompute_property_mf(ARRAY[%s]::bigint[])",
-            (property_id,),
-        )
-
-
 def _run_recompute_statement(conn: Any, sql: str, params: dict[str, Any]) -> None:
     """One recompute statement under the raised per-statement ceiling.
 

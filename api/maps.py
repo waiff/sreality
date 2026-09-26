@@ -15,8 +15,8 @@ is what `listing_location` answers with, so chip and listing now come from one
 registry version.
 
 WHICH LEVELS A POINT CAN RESOLVE TO. The mirror loads polygons for stat,
-region_soudrznosti, kraj, okres, orp, pou, obec, spravni_obvod,
-katastralni_uzemi and zsj (`location_data/ruian_boundaries.LAYERS`). It draws
+region_soudrznosti, kraj, okres, orp, pou, obec and katastralni_uzemi
+(`location_data/ruian_boundaries.LAYERS`). It draws
 NONE for `cast_obce` or `momc` — RÚIAN publishes no part-of-municipality
 boundary — so a point can never be PIP'd to a quarter. Therefore:
 
@@ -229,6 +229,23 @@ def _containing_chain(
         str(level): (int(unit_id), int(code), name)
         for unit_id, level, code, name in rows
     }
+
+
+def containing_obec_kod(conn: Any, *, lat: float | None, lng: float | None) -> int | None:
+    """The RÚIAN code of the obec covering a point, or None (outside every obec / no current
+    registry) -- the one containing-obec statement, for subjects with no stored location
+    (an estimation of a URL-parsed advert or a typed point). Any query error raises, unlike
+    `_registry_version`: read as "no obec" it would become a confident `location_unknown`
+    frozen into a run."""
+    if lat is None or lng is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(_CURRENT_VERSION_SQL)
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    obec = _containing_chain(conn, version=int(row[0]), lat=lat, lng=lng).get("obec")
+    return obec[1] if obec else None
 
 
 def _lookup_name(

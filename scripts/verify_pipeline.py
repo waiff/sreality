@@ -3049,6 +3049,50 @@ _LOCATION_TOWN_COVERAGE_SQL = f"""
 """
 
 
+# Registry liveness, the second arm of the same check: every town above is a code of the
+# CURRENT registry version, so a registry that stopped moving ages every answer silently. Its
+# two failure shapes are both non-failures to Actions: a monthly run superseded by another
+# pending `location-batch` run is cancelled, not failed, and a load killed or refused mid-way
+# leaves an inert staged version. Red when the current vintage is over 40 days old (the
+# monthly cadence plus a re-dispatch margin) or a NEWER version has sat staged over 24 h (the
+# 6 h job plus a re-dispatch). An older staged version — one a later vintage overtook — is
+# history, not a stall. No row at all is red too: nothing is current.
+REGISTRY_MAX_AGE_DAYS = 40
+REGISTRY_MAX_STAGED_HOURS = 24
+
+_REGISTRY_LIVENESS_SQL = """
+    SELECT c.label AS current_label, current_date - c.source_date AS age_days,
+           s.label AS staged_label,
+           extract(epoch FROM now() - s.loaded_at) / 3600 AS staged_hours
+      FROM registry_versions c
+      LEFT JOIN LATERAL (
+            SELECT n.label, n.loaded_at
+              FROM registry_versions n
+             WHERE NOT n.is_current AND n.source_date > c.source_date
+             ORDER BY n.loaded_at
+             LIMIT 1) s ON true
+     WHERE c.is_current
+"""
+
+
+def _registry_liveness(conn: Any) -> tuple[list[str], dict[str, Any]]:
+    """(problems, details) of the registry-liveness arm; no problems when it is green."""
+    row = _fetchone(conn, _REGISTRY_LIVENESS_SQL)
+    if row is None:
+        return ["no current registry version"], {"current": None}
+    label, age_days, staged, staged_hours = row
+    details = {"current": label, "age_days": int(age_days), "staged": staged,
+               "staged_hours": None if staged_hours is None else round(float(staged_hours), 1)}
+    problems = []
+    if age_days > REGISTRY_MAX_AGE_DAYS:
+        problems.append(f"current {label} is {int(age_days)} days old "
+                        f"(> {REGISTRY_MAX_AGE_DAYS})")
+    if staged_hours is not None and staged_hours > REGISTRY_MAX_STAGED_HOURS:
+        problems.append(f"{staged} has sat staged {float(staged_hours):.0f} h "
+                        f"(> {REGISTRY_MAX_STAGED_HOURS} h) — re-dispatch location_registry_load")
+    return problems, details
+
+
 def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     """Red when ANY listing has no answer row, or any non-foreign one has no town. Absolute
     counts, no threshold: the invariant is zero, and a number that is not zero names the
@@ -3063,7 +3107,10 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
 
     `hidden` (W5) is the one number here that is not a defect: the listings the consumer rule
     refuses to serve. It rides the same read so the number the audit page shows is visible
-    from the pipeline verifier too, and it never changes the status."""
+    from the pipeline verifier too, and it never changes the status. The registry-liveness
+    arm (`_registry_liveness`) turns it red on its own."""
+    stalled, registry = _registry_liveness(conn)
+    stall_note = f" Registry stalled: {'; '.join(stalled)}." if stalled else ""
     rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL, (RESOLVER_VERSION,))
     cells = [{"source": s, "listings": int(n), "no_row": int(nr), "cz_no_town": int(nt),
               "town": int(t), "hidden": int(h), "address_no_ku": int(nk),
@@ -3075,9 +3122,11 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
     hidden = sum(c["hidden"] for c in cells)
     listings = sum(c["listings"] for c in cells)
     if not cells:
-        return {"check_key": "location_town_coverage", "status": "warn", "value": None,
-                "details": {"skipped": "no listings read", "cells": []},
-                "message": "Location town coverage verified NOTHING — no listings read."}
+        return {"check_key": "location_town_coverage",
+                "status": "fail" if stalled else "warn", "value": None,
+                "details": {"skipped": "no listings read", "cells": [], "registry": registry},
+                "message": "Location town coverage verified NOTHING — no listings read."
+                           + stall_note}
     offenders = [f"{c['source']}: {c['no_row']:,} without a row, {c['cz_no_town']:,} Czech "
                  f"without a town (of {c['listings']:,})"
                  for c in cells if c["no_row"] or c["cz_no_town"]]
@@ -3086,7 +3135,7 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         for c in sorted(cells, key=lambda c: -c["hidden"]) if c["hidden"]
     )
     missing = no_row + cz_no_town
-    status = "fail" if missing or address_no_ku else "ok"
+    status = "fail" if missing or stalled or address_no_ku else "ok"
     message = (
         f"{missing:,} listings have no town "
         f"({no_row:,} without an answer row, {cz_no_town:,} Czech without obec_kod): "
@@ -3108,11 +3157,11 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
     return {
         "check_key": "location_town_coverage",
         "status": status,
-        "value": missing + address_no_ku,
+        "value": missing,
         "details": {"listings": listings, "no_row": no_row, "cz_no_town": cz_no_town,
                     "address_no_ku": address_no_ku, "hidden": hidden, "cells": cells,
-                    "offenders": offenders},
-        "message": message,
+                    "offenders": offenders, "registry": registry},
+        "message": message + stall_note,
     }
 
 

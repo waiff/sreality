@@ -2003,7 +2003,7 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     because a non-zero number is a contract that has to change, not a trend to watch."""
     from scripts.verify_pipeline import check_location_town_coverage
 
-    conn = _ShapeDriftConn([
+    conn = _TownCoverageConn([
         ("bazos", 40_000, 0, 120, 39_500, 120, 0),
         ("idnes", 30_000, 900, 11_000, 18_000, 11_900, 0),
         ("sreality", 200_000, 0, 0, 199_000, 0, 0),
@@ -2028,7 +2028,7 @@ def test_location_town_coverage_measures_every_listing_not_only_the_live_ones() 
     corpus — which is why the per-portal series is not comparable across that date."""
     from scripts.verify_pipeline import check_location_town_coverage
 
-    out = check_location_town_coverage(_ShapeDriftConn([
+    out = check_location_town_coverage(_TownCoverageConn([
         ("bazos", 40_000, 0, 0, 40_000, 0, 0),
         ("remax", 30_000, 4_200, 0, 25_800, 4_200, 0),
     ]), T)
@@ -2045,7 +2045,7 @@ def test_location_town_coverage_measures_every_listing_not_only_the_live_ones() 
 def test_location_town_coverage_is_ok_only_at_zero() -> None:
     from scripts.verify_pipeline import check_location_town_coverage
 
-    out = check_location_town_coverage(_ShapeDriftConn([
+    out = check_location_town_coverage(_TownCoverageConn([
         ("bazos", 40_000, 0, 0, 39_000, 0, 0), ("idnes", 30_000, 0, 0, 10_000, 0, 0)]), T)
     assert out["status"] == "ok" and out["value"] == 0
     assert out["details"]["hidden"] == 0
@@ -2061,14 +2061,15 @@ def test_location_town_coverage_ku_arm_is_red_while_an_address_row_lacks_a_ku() 
     from location_data.resolver.version import RESOLVER_VERSION
     from scripts.verify_pipeline import check_location_town_coverage
 
-    conn = _ShapeDriftConn([
+    conn = _TownCoverageConn([
         ("bezrealitky", 20_000, 0, 0, 20_000, 0, 37),
         ("sreality", 200_000, 0, 0, 200_000, 0, 0),
     ])
     out = check_location_town_coverage(conn, T)
     assert out["status"] == "fail"
-    assert out["value"] == 37
+    assert out["value"] == 0, "the Health series stays the town count; the arm is a detail"
     assert out["details"]["address_no_ku"] == 37
+    assert out["details"]["registry"]["current"] == "ruian:2026-08-31"
     assert out["details"]["cz_no_town"] == 0
     assert f"37 Czech address-grain rows at {RESOLVER_VERSION} have no KÚ: bezrealitky 37." \
         in out["message"]
@@ -2127,6 +2128,59 @@ def test_location_town_coverage_covers_every_listing() -> None:
     assert "filter (where l.is_active" not in flat
 
 
+def test_registry_liveness_is_red_for_a_stale_current_version() -> None:
+    """The towns are codes of the CURRENT registry version; a registry that stopped moving
+    ages every one of them without a single listing going red."""
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    out = check_location_town_coverage(_TownCoverageConn(
+        [("bazos", 40_000, 0, 0, 40_000, 0, 0)], registry=("ruian:2026-08-31", 41, None, None),
+    ), T)
+    assert out["status"] == "fail" and out["value"] == 0
+    assert out["details"]["registry"]["age_days"] == 41
+    assert "Registry stalled: current ruian:2026-08-31 is 41 days old (> 40)" in out["message"]
+
+
+def test_registry_liveness_is_red_for_a_newer_version_staged_over_a_day() -> None:
+    """A monthly run a pending `location-batch` run superseded is CANCELLED, not failed, and
+    a load killed mid-pack leaves an inert staged version — Actions reports neither."""
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    out = check_location_town_coverage(_TownCoverageConn(
+        [("bazos", 40_000, 0, 0, 40_000, 0, 0)],
+        registry=("ruian:2026-08-31", 12, "ruian:2026-09-30", 30.4),
+    ), T)
+    assert out["status"] == "fail"
+    assert "ruian:2026-09-30 has sat staged 30 h (> 24 h)" in out["message"]
+
+    fresh = check_location_town_coverage(_TownCoverageConn(
+        [("bazos", 40_000, 0, 0, 40_000, 0, 0)],
+        registry=("ruian:2026-08-31", 12, "ruian:2026-09-30", 5.0),
+    ), T)
+    assert fresh["status"] == "ok" and "Registry stalled" not in fresh["message"]
+
+
+def test_registry_liveness_is_red_when_nothing_is_current() -> None:
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    out = check_location_town_coverage(_TownCoverageConn(
+        [("bazos", 40_000, 0, 0, 40_000, 0, 0)], registry=None,
+    ), T)
+    assert out["status"] == "fail"
+    assert "no current registry version" in out["message"]
+
+
+def test_registry_liveness_reads_only_newer_staged_versions() -> None:
+    """A staged version a later vintage overtook is history, not a stall; the age is the
+    vintage's, not the load's."""
+    from scripts.verify_pipeline import _REGISTRY_LIVENESS_SQL
+
+    flat = " ".join(_REGISTRY_LIVENESS_SQL.split()).lower()
+    assert "current_date - c.source_date as age_days" in flat
+    assert "where not n.is_current and n.source_date > c.source_date" in flat
+    assert "where c.is_current" in flat
+
+
 # --- location_payload_shape_drift (W4's standing P6 check) ---------------------
 
 class _ShapeDriftConn:
@@ -2151,6 +2205,18 @@ class _ShapeDriftConn:
 
     def fetchall(self) -> Any:
         return self._rows
+
+
+class _TownCoverageConn(_ShapeDriftConn):
+    """The coverage rows plus the registry-liveness row, green unless a test says not."""
+
+    def __init__(self, rows: list[tuple], *,
+                 registry: tuple | None = ("ruian:2026-08-31", 10, None, None)) -> None:
+        super().__init__(rows)
+        self._registry = registry
+
+    def fetchone(self) -> Any:
+        return self._registry
 
 
 def test_location_payload_shape_drift_is_registered() -> None:

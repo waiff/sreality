@@ -317,7 +317,7 @@ def test_resolve_okres_matches_the_okres_code(client):
 
 def test_resolve_cast_obce_is_placed_by_name_inside_the_pipped_obec(client):
     """RUIAN publishes no part-of-municipality polygon (ruian_boundaries.LAYERS
-    loads ten levels and neither cast_obce nor momc is one), so a quarter can
+    loads eight levels and neither cast_obce nor momc is one), so a quarter can
     never be point-in-polygon'd: the POINT places the obec and the NAME places
     the part inside it. That is the whole reason the pick's `name` is sent."""
     _override_conn(scripted=[
@@ -512,3 +512,29 @@ def test_resolve_names_empty_request_is_a_no_op(client):
     res = client.post("/maps/resolve-names", json={"chips": []})
     assert res.status_code == 200
     assert res.json() == {"chips": []}
+
+
+# ---------------- containing_obec_kod (the MF hand-off for a typed point) ----------------
+
+
+def test_containing_obec_kod_answers_the_pipped_obec_or_none():
+    jihlava = _FakeConn([(7,), _CHAIN_JIHLAVA])
+    assert maps.containing_obec_kod(jihlava, lat=49.4, lng=15.59) == 586846
+    assert maps.containing_obec_kod(_FakeConn([(7,), []]), lat=41.4, lng=2.17) is None
+    assert maps.containing_obec_kod(_FakeConn([None]), lat=49.4, lng=15.59) is None
+    assert maps.containing_obec_kod(_FakeConn([]), lat=None, lng=15.59) is None
+
+
+def test_containing_obec_kod_raises_a_query_error_instead_of_reading_it_as_no_obec():
+    """A "no obec" answer becomes mf_reference()'s location_unknown -- a confident note a
+    run would freeze. A failed query must reach the caller's own guard instead."""
+    class _Broken(_FakeCursor):
+        def execute(self, sql: str, params: Any = None) -> None:
+            raise RuntimeError("statement timeout")
+
+    class _BrokenConn(_FakeConn):
+        def cursor(self) -> _FakeCursor:
+            return _Broken([])
+
+    with pytest.raises(RuntimeError):
+        maps.containing_obec_kod(_BrokenConn([]), lat=49.4, lng=15.59)

@@ -1,4 +1,4 @@
-"""Parse the MF "Cenová mapa nájemného" XLSX and compute reference rents.
+"""Parse the MF "Cenová mapa nájemného" XLSX; ask the SQL measure for a reference rent.
 
 The Ministry of Finance publishes a quarterly hedonic-model rent map. Sheet 2
 ("Cenové mapy nájemného") carries one row per territory with four horizontal
@@ -11,16 +11,17 @@ max / median column is deliberately ignored (pre-hedonic-model raw data).
 Parsing is stdlib-only (`zipfile` + `xml.etree`) — an XLSX is a zip of XML and
 the layout is flat tabular, so `openpyxl` would be a needless dependency.
 
-The territory key `Kód obce` is the ČÚZK/RÚIAN code; it equals
-`admin_boundaries.id`. A non-empty *Katastrální území* cell means the code is a
-cadastral-area (`ku`) code; an empty one means it is an `obec` code — verified
-exact against the live `admin_boundaries` table (zero ku/obec id collision).
+The territory key `Kód obce` is the RÚIAN code of a katastrální území (`ku`, when
+the *Katastrální území* cell is non-empty) or of an obec (`obec`, when it is empty).
+The reference rent itself is ONE SQL measure, `mf_reference()` (migration 565): it
+reads only the ingested cells and the stored obec/KÚ codes, never geometry.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import re
 import unicodedata
 import zipfile
@@ -32,12 +33,9 @@ from xml.etree import ElementTree as ET
 if TYPE_CHECKING:
     import psycopg
 
-_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+LOG = logging.getLogger("rent_map")
 
-# Amenity adjustment keys applied to the reference rent, in display order.
-ADJUSTMENT_ATTRIBUTES: tuple[str, ...] = (
-    "balcony", "terrace", "furnished", "garage", "elevator", "other_material",
-)
+_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _RNS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 # Normalised header fragment -> stable internal attribute name. The sheet ships
@@ -92,21 +90,6 @@ def source_date_from_filename(name: str) -> date | None:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
-
-
-def disposition_to_vk(disposition: str | None) -> int | None:
-    """Map a sreality disposition to a VK size category (1..4)."""
-    if not disposition:
-        return None
-    m = re.match(r"\s*(\d+)", disposition)
-    if not m:
-        return None
-    n = int(m.group(1))
-    if n <= 1:
-        return 1
-    if n >= 4:
-        return 4
-    return n
 
 
 def _norm(s: str) -> str:
@@ -353,93 +336,61 @@ def parse_rent_map_xlsx(
     )
 
 
-_REFERENCE_RENT_SQL = """
-    select v.ruian_code, v.level, v.kraj,
-           v.ref_rent_per_m2, v.ref_rent_novostavba_per_m2,
-           v.source_revision, r.source_date,
-           coalesce(b.name, v.ku_name, v.obec_name) as name
-      from rent_map_values_public v
-      join admin_boundaries_public b
-        on b.id = v.ruian_code and b.level = v.level
-      join rent_map_revisions r on r.source_revision = v.source_revision
-     where v.vk = %(vk)s
-       and st_covers(
-             b.geom,
-             st_setsrid(st_makepoint(%(lng)s, %(lat)s), 4326)::geography)
-     order by case b.level when 'ku' then 0 else 1 end
-     limit 1
+_MF_REFERENCE_SQL = """
+    SELECT mf_reference_rent
+      FROM mf_reference(%(category_main)s, %(category_type)s, %(disposition)s,
+                        %(area_m2)s::numeric, %(price_czk)s::bigint, %(condition)s,
+                        %(has_balcony)s::boolean, %(terrace)s::boolean, %(furnished)s,
+                        %(garage)s::boolean, %(has_lift)s::boolean, %(building_type)s,
+                        %(obec_kod)s::bigint, %(katastr_kod)s::bigint,
+                        %(country_status)s::country_status)
 """
+
+# Stamped on every reference rent computed from here on, so a stored estimation run
+# names the engine that produced it; runs written before carry no stamp (rule 12).
+MF_ENGINE = "mf_sql_v1"
 
 
 def compute_reference_rent(
     conn: "psycopg.Connection",
     *,
-    lat: float | None,
-    lng: float | None,
-    area_m2: float | None,
+    category_main: str | None,
+    category_type: str | None,
     disposition: str | None,
-    amenities: dict[str, Any] | None,
-    is_novostavba: bool = False,
+    area_m2: float | None,
+    price_czk: int | None,
+    condition: str | None,
+    has_balcony: bool | None,
+    terrace: bool | None,
+    furnished: str | None,
+    garage: bool | None,
+    has_lift: bool | None,
+    building_type: str | None,
+    obec_kod: int | None,
+    katastr_kod: int | None = None,
+    country_status: str | None = None,
 ) -> dict[str, Any] | None:
-    """MF Cenová mapa secondary rent reference for one subject.
+    """`mf_reference()` for one subject, on the caller's (service-role) connection.
 
-    Resolves the subject's territory by point-in-polygon against
-    `admin_boundaries`, picks the VK from the disposition, reads the base
-    reference rent + the published per-amenity adjustments from the latest
-    ingested revision, and scales by area. Read-only. Best-effort: returns
-    None on any miss (no revision, territory not covered, missing area /
-    disposition / base rent) and never raises.
+    Returns the measure's detail jsonb (value | range + note | note) stamped with
+    `engine`, or None for a non-flat. A secondary reference never fails its caller,
+    so a database error is logged and read as None.
     """
-    try:
-        if lat is None or lng is None or not area_m2 or area_m2 <= 0:
-            return None
-        vk = disposition_to_vk(disposition)
-        if vk is None:
-            return None
-        amenities = amenities or {}
-        with conn.cursor() as cur:
-            cur.execute(
-                _REFERENCE_RENT_SQL,
-                {"vk": vk, "lat": float(lat), "lng": float(lng)},
-            )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            (ruian_code, level, kraj, ref_std, ref_nov, source_revision,
-             source_date, name) = row
-            base = ref_nov if is_novostavba else ref_std
-            if base is None:
-                return None
-            cur.execute(
-                "select attribute, czk_per_m2 from rent_map_adjustments_public "
-                "where vk = %(vk)s and is_novostavba = %(nov)s",
-                {"vk": vk, "nov": is_novostavba},
-            )
-            adj_table = {a: c for a, c in cur.fetchall()}
-    except Exception:
-        return None
-
-    applied = [
-        {"attribute": attr, "czk_per_m2": int(adj_table[attr])}
-        for attr in ADJUSTMENT_ATTRIBUTES
-        if amenities.get(attr) and attr in adj_table
-    ]
-    total_per_m2 = int(base) + sum(a["czk_per_m2"] for a in applied)
-    return {
-        "territory": {
-            "ruian_code": int(ruian_code),
-            "level": level,
-            "name": name,
-            "kraj": kraj,
-        },
-        "vk": vk,
-        "is_novostavba": bool(is_novostavba),
-        "source_revision": int(source_revision),
-        "source_date": source_date.isoformat() if source_date else None,
-        "base_per_m2": int(base),
-        "adjustments": applied,
-        "total_per_m2": total_per_m2,
-        "area_m2": round(float(area_m2), 2),
-        "monthly_rent_czk": int(round(total_per_m2 * float(area_m2))),
+    params = {
+        "category_main": category_main, "category_type": category_type,
+        "disposition": disposition, "area_m2": area_m2, "price_czk": price_czk,
+        "condition": condition, "has_balcony": has_balcony, "terrace": terrace,
+        "furnished": furnished, "garage": garage, "has_lift": has_lift,
+        "building_type": building_type, "obec_kod": obec_kod,
+        "katastr_kod": katastr_kod, "country_status": country_status,
     }
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_MF_REFERENCE_SQL, params)
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - secondary reference, never fatal
+        LOG.warning("mf_reference failed: %s", exc)
+        return None
+    if row is None or row[0] is None:
+        return None
+    return {**row[0], "engine": MF_ENGINE}

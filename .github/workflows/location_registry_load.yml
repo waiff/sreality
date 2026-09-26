@@ -1,30 +1,22 @@
 name: "Location: RÚIAN registry load"
 
-# The registry-group jobs of the location subsystem (design 04 §4.4.2):
-#
-#   mode=full        `ruian_baseline`    — monthly, 1st 10:00 UTC. HEAD-probes the vintage,
-#                                          archives both zips to R2, loads via staging ->
-#                                          blocking assertions -> gazetteer rebuild ->
-#                                          pointer swap into ONE new registry_version.
-#   mode=boundaries  `boundary_baseline` — monthly, 2nd 02:00 UTC. The 253 MB state SHP
-#                                          pack; three geometries per boundary
-#                                          (authoritative / pip / render), the real names
-#                                          for the levels the CSVs never name, and a
-#                                          gazetteer rebuild for those names.
-#   mode=gazetteer   `name_index`        — rebuild ruian_name_index for the current version.
-#                                          Recovery lane: a full load killed between the
-#                                          pointer swap and the rebuild leaves the current
-#                                          version with zero gazetteer rows.
-#   mode=deltas      `ruian_delta`       — daily VFR change file. Chain verification only:
-#                                          application is deliberately unimplemented and the
-#                                          job exits non-zero so it can never be mistaken for
-#                                          a working freshness lane (see location_data/vfr_delta.py).
+# The monthly RÚIAN registry load (design 04 §4.4.2): ONE `full` load per vintage, 1st 10:00
+# UTC. It HEAD-probes the vintage, archives both CSV zips AND the 253 MB state SHP boundary
+# pack to R2, then stage -> blocking assertions -> merge -> boundaries (three geometries per
+# unit, an unchanged unit's authoritative row carried from the previous version) -> gazetteer
+# -> completeness assertion -> pointer swap into ONE new registry_version. A version publishes
+# only when the state, every obec and every katastrální území has its geometry, so a killed or
+# incomplete run leaves an inert staged version that any later dispatch resumes.
 #
 # 10:00 UTC on the 1st is comfortably after the measured generation times (OB_ADR 08:04,
-# strukt_ADR 23:43 the prior day); the boundary pack runs the NEXT day so it can never
-# overlap the baseline's 180-minute budget — both crons sit in the one `location-registry`
-# concurrency group, which is exclusive and does not cancel in progress. Everything here is
-# CC BY 4.0 ČÚZK open data — free, no key, no registration.
+# strukt_ADR 23:43 the prior day). The boundary pack has no vintage in its URL and ČÚZK
+# refreshes it in place daily, so a resume never downloads: it restores the vintage's archived
+# bytes from R2 and refuses (exit 1) only if they differ from the recorded sha256. A member
+# unit ČÚZK dissolves between the month-end CSV and the pack's load day would hold the
+# version back with no excuse path (none seen so far). `registry liveness` in
+# `location_town_coverage` goes red when the current version is over 40 days old or a newer
+# one has sat staged over 24 h. Everything here is CC BY 4.0 ČÚZK open data — free, no key,
+# no registration.
 #
 # Required secrets: LOCATION_DB_DIRECT_URL (a direct 5432 URL) or SUPABASE_DB_SESSION_URL —
 # a registry load wants a session it owns, never the transaction pooler — plus the R2_*
@@ -34,18 +26,8 @@ name: "Location: RÚIAN registry load"
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "what to load"
-        required: true
-        default: full
-        type: choice
-        options:
-          - full
-          - boundaries
-          - gazetteer
-          - deltas
       vintage:
-        description: "YYYYMMDD (full mode; blank = HEAD-probe the newest published)"
+        description: "YYYYMMDD (blank = HEAD-probe the newest published)"
         required: false
         default: ""
         type: string
@@ -54,28 +36,8 @@ on:
         required: false
         default: false
         type: boolean
-      allow_missing_pip:
-        description: "boundaries: load authoritative+render only (PIP degrades)"
-        required: false
-        default: false
-        type: boolean
-      allow_unarchived:
-        description: "full: load even if the R2 vintage archive fails (unreproducible)"
-        required: false
-        default: false
-        type: boolean
-      no_resume:
-        description: "boundaries: re-load units already loaded for this registry version"
-        required: false
-        default: false
-        type: boolean
   schedule:
-    # Monthly full baseline, 1st at 10:00 UTC.
     - cron: "0 10 1 * *"
-    # Monthly boundary pack, 2nd at 02:00 UTC — staggered a day behind the baseline so the
-    # two can never contend for the registry group, and so the pack's name upgrades always
-    # land on a freshly published version.
-    - cron: "0 2 2 * *"
 
 concurrency:
   # OUTER, cross-lane: every heavy location batch lane (registry load, claim intake, the
@@ -100,12 +62,11 @@ jobs:
   load:
     runs-on: ubuntu-latest
     concurrency:
-      # INNER, per-lane: the design's `registry group`, exclusive — the baseline, the
-      # boundary pack and the delta lane all touch the same registry_version and must never
-      # overlap each other or themselves. Kept under the outer group, not replaced by it.
+      # INNER, per-lane: the design's `registry group`, exclusive — two loads of the same
+      # registry_version must never overlap. Kept under the outer group, not replaced by it.
       group: location-registry
       cancel-in-progress: false
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
@@ -116,13 +77,8 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-      # Scheduled runs carry no inputs: the boundary cron IS the mode selector.
-      MODE: ${{ inputs.mode || (github.event.schedule == '0 2 2 * *' && 'boundaries') || 'full' }}
       VINTAGE: ${{ inputs.vintage }}
       DRY_RUN: ${{ inputs.dry_run }}
-      ALLOW_MISSING_PIP: ${{ inputs.allow_missing_pip }}
-      ALLOW_UNARCHIVED: ${{ inputs.allow_unarchived }}
-      NO_RESUME: ${{ inputs.no_resume }}
     steps:
       - uses: actions/checkout@v6
 
@@ -140,31 +96,6 @@ jobs:
           set -euo pipefail
           ARGS=""
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          case "$MODE" in
-            full)
-              if [ -n "$VINTAGE" ]; then ARGS="$ARGS --vintage $VINTAGE"; fi
-              if [ "$ALLOW_UNARCHIVED" = "true" ]; then ARGS="$ARGS --allow-unarchived"; fi
-              echo "python -m location_data.ruian_load $ARGS"
-              python -m location_data.ruian_load $ARGS
-              ;;
-            boundaries)
-              if [ "$ALLOW_MISSING_PIP" = "true" ]; then ARGS="$ARGS --allow-missing-pip"; fi
-              # Default is resume: a re-dispatch after a dropped session skips the units
-              # already committed for this registry_version and finishes the pack.
-              if [ "$NO_RESUME" = "true" ]; then ARGS="$ARGS --no-resume"; fi
-              echo "python -m location_data.ruian_boundaries $ARGS"
-              python -m location_data.ruian_boundaries $ARGS
-              ;;
-            gazetteer)
-              echo "python -m location_data.name_index"
-              python -m location_data.name_index
-              ;;
-            deltas)
-              echo "python -m location_data.vfr_delta"
-              python -m location_data.vfr_delta
-              ;;
-            *)
-              echo "unknown mode: $MODE" >&2
-              exit 2
-              ;;
-          esac
+          if [ -n "$VINTAGE" ]; then ARGS="$ARGS --vintage $VINTAGE"; fi
+          echo "python -m location_data.ruian_load $ARGS"
+          python -m location_data.ruian_load $ARGS
