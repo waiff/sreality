@@ -375,6 +375,28 @@ describe('<AutodedupRulings> group grain', () => {
   });
 });
 
+describe('<AutodedupRulings> a superseded group ruling', () => {
+  it('says a newer ruling on the same adverts stands, and offers no correction of it', async () => {
+    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
+      page([groupRow({ status: 'superseded', agreement: 'none' })], 'group') as never,
+    );
+    setup('/autodedup/rulings?grain=group&status=superseded');
+    const group = await screen.findByTestId('ruling-group-31');
+    expect(lastQuery()).toMatchObject({ grain: 'group', status: 'superseded' });
+    expect(within(group).getByText('nahrazeno novějším')).toBeInTheDocument();
+    expect(within(group).queryByRole('button', { name: 'Odvolat' })).toBeNull();
+    expect(within(group).queryByRole('button', { name: /Různé/ })).toBeNull();
+    expect(within(group).getByText(/platí novější rozhodnutí/)).toBeInTheDocument();
+  });
+
+  it('is no status of the pair grain', () => {
+    expect(sanitizeRulingFilters({ ...RULING_DEFAULTS, status: 'superseded' }).status).toBe('');
+    expect(
+      sanitizeRulingFilters({ ...RULING_DEFAULTS, grain: 'group', status: 'superseded' }).status,
+    ).toBe('superseded');
+  });
+});
+
 describe('corrections', () => {
   it('a standing word flips or is withdrawn; a withdrawn one is said again', () => {
     expect(corrections('same', 'standing', 'pair').map((c) => c.verdict)).toEqual([

@@ -263,3 +263,33 @@ def test_the_rulings_page_lists_every_source_with_its_status(cur):
     assert ("total", None, 1) in [tuple(r) for r in cur.fetchall()]
     cur.execute(usql.RULING_TOWNS_SQL, {"limit": 40})
     cur.fetchall()
+
+
+def test_a_set_ruled_again_under_another_key_implies_nothing_and_supersedes(cur):
+    """E920 iii at the page: apply reads the newest ruling per SET, whichever key or pass took
+    it. {c, d} confirmed `same` under g4's key and later ruled `different` under g13's: the page
+    must list no implied `same` for (c, d), and the g4 row is `superseded`, not standing."""
+    c, d = _pair(cur)
+
+    def group(key: int, generation: str, verdict: str, members: list[int]) -> None:
+        cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+            "cluster_key": key, "verdict": verdict, "note": None, "reasons": [],
+            "decided_by": OP, "generation": generation, "member_ids": members})
+
+    group(c, "g-set-4", "same", [c, d])
+    (implied,) = _page(cur, usql.RULINGS_PAIR_SQL, usql.RULING_PAIR_COLUMNS, listing=c)
+    assert (implied["source"], implied["status"]) == ("implied", "standing")
+    group(d, "g-set-13", "different", [d, c])
+    assert _page(cur, usql.RULINGS_PAIR_SQL, usql.RULING_PAIR_COLUMNS, listing=c) == [], (
+        "a set ruled different later, under another key, still implies a standing same")
+    rows = {(r["cluster_key"], r["generation"]): r
+            for r in _page(cur, usql.RULINGS_GROUP_SQL, usql.RULING_GROUP_COLUMNS, listing=c)}
+    assert rows[(c, "g-set-4")]["status"] == "superseded"
+    assert rows[(c, "g-set-4")]["agreement"] == "none"
+    assert rows[(d, "g-set-13")]["status"] == "standing"
+    cur.execute(usql.CLUSTER_SET_NEWEST_RULING_SQL, {"member_ids": [c, d]})
+    newest = cur.fetchone()
+    assert (newest[usql.VERDICT_COLUMNS.index("cluster_key")],
+            newest[usql.VERDICT_COLUMNS.index("verdict")]) == (d, "different")
+    assert Negatives.read(cur.connection, [c, d], [c]).sets.get(min(c, d)), (
+        "and apply refuses the set, which is what the page now says")

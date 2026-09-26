@@ -3158,12 +3158,14 @@ export const getProposedSplits = (
  * beside the engine's current view and where the adverts sit now. The newest
  * row per pair / per (group key, pass) IS the ruling (migration 574): `status`
  * says whether it states something (`standing`), was taken back (`withdrawn`:
- * a newer `unsure`) or never said more than `unsure`. `agreement` puts it
+ * a newer `unsure`) or never said more than `unsure`; a group ruling a newer
+ * ruling on the same adverts outranks, under another key or pass, is
+ * `superseded` (apply reads the newest word per set). `agreement` puts it
  * against production and the engine: a standing `same` disagrees when the two
  * adverts are apart now or the engine holds them apart; a standing negative
  * when they are together now or in one engine group. */
 
-export type RulingStatus = 'standing' | 'withdrawn' | 'unsure';
+export type RulingStatus = 'standing' | 'withdrawn' | 'unsure' | 'superseded';
 export type RulingAgreement = 'agrees' | 'disagrees' | 'none';
 export type RulingEngineView = 'together' | 'apart' | 'unseen';
 /* `implied`: a member pair of a group confirmed `same` with no pair ruling of

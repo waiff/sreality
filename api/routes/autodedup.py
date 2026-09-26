@@ -2285,10 +2285,13 @@ def verdict(
     if not store_ready(conn):
         raise HTTPException(status_code=503, detail="the autodedup store is not created yet")
 
-    superseded = _superseded(conn, body) if body.supersedes is not None else None
+    # A correction's "is it still the newest word" is read INSIDE the write's transaction, over
+    # the locked ruling it names (`VERDICT_ONE_SQL ... FOR UPDATE`): two tabs correcting one
+    # ruling queue there, and the second answers 409 instead of appending over the first.
+    superseded: dict[str, Any] | None = None
 
     if body.kind == "pair":
-        if superseded is None:
+        if body.supersedes is None:
             if body.listing_lo is None or body.listing_hi is None:
                 raise _bad("a pair verdict needs listing_lo and listing_hi")
             if body.cluster_key is not None:
@@ -2301,11 +2304,13 @@ def verdict(
                 {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
             ):
                 raise HTTPException(status_code=404, detail="no such pair")
-            lo, hi = body.listing_lo, body.listing_hi
-        else:
-            lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
         try:
             with conn.transaction():
+                if body.supersedes is not None:
+                    superseded = _superseded(conn, body)
+                    lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
+                else:
+                    lo, hi = int(body.listing_lo), int(body.listing_hi)
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2320,7 +2325,7 @@ def verdict(
         # keeps vetoing a pair this page shows as confirmed. Counted as "no longer vetoed".
         retracted = 0 if must_not_link else 1
     else:
-        if superseded is None:
+        if body.supersedes is None:
             if body.cluster_key is None:
                 raise _bad("a cluster verdict needs cluster_key")
             if body.listing_lo is not None or body.listing_hi is not None:
@@ -2340,13 +2345,14 @@ def verdict(
             # server reads.
             cluster_key, generation = body.cluster_key, body.generation
             ids: list[int] | None = _cluster_member_ids(conn, body.cluster_key, body.generation)
-        else:
-            cluster_key = int(superseded["cluster_key"])
-            generation = superseded["generation"]
-            recorded = superseded["member_ids"]
-            ids = [int(value) for value in recorded] if recorded is not None else None
         try:
             with conn.transaction():
+                if body.supersedes is not None:
+                    superseded = _superseded(conn, body)
+                    cluster_key = int(superseded["cluster_key"])
+                    generation = superseded["generation"]
+                    recorded = superseded["member_ids"]
+                    ids = [int(value) for value in recorded] if recorded is not None else None
                 stored = _fetch(
                     conn,
                     usql.VERDICT_CLUSTER_APPEND_SQL,
@@ -2391,9 +2397,11 @@ def verdict(
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
-    """The ruling a correction replaces, checked: it exists (404), it is of the body's grain and
-    names the same key when the body names one (400), and it is still the newest word on that
-    key (409) -- a stale tab must not rule over a ruling it never saw."""
+    """The ruling a correction replaces, locked and checked inside the write's transaction: it
+    exists (404), it is of the body's grain and names the same key when the body names one
+    (400), and it is still the newest word on that key -- and, for a group ruling with a set, on
+    that SET under any key or pass (409) -- a stale tab must not rule over a ruling it never
+    saw."""
     rows = _fetch(conn, usql.VERDICT_ONE_SQL, {"id": body.supersedes})
     if not rows:
         raise HTTPException(status_code=404, detail="no such ruling")
@@ -2424,6 +2432,15 @@ def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
             detail="this ruling was ruled again since the page loaded it: reload and decide "
                    "on the newest one",
         )
+    if old["kind"] == "cluster" and old["member_ids"]:
+        on_set = _fetch(conn, usql.CLUSTER_SET_NEWEST_RULING_SQL,
+                        {"member_ids": [int(value) for value in old["member_ids"]]})
+        if on_set and _row(usql.VERDICT_COLUMNS, on_set[0])["id"] != old["id"]:
+            raise HTTPException(
+                status_code=409,
+                detail="a newer ruling on the same adverts, under another group key or pass, "
+                       "stands: correct that one",
+            )
     return old
 
 
@@ -2978,7 +2995,7 @@ RULING_SOURCES: dict[str, tuple[str, ...]] = {
     "pair": ("pair", "browse_merge", "implied", "must_not_link"),
     "group": ("group", "browse_merge"),
 }
-RULING_STATUSES: tuple[str, ...] = ("standing", "withdrawn", "unsure")
+RULING_STATUSES: tuple[str, ...] = ("standing", "withdrawn", "unsure", "superseded")
 # The page's three words (D39); `different` is widened over the stored negatives.
 RULING_VERDICTS: tuple[str, ...] = ("same", "different", "unsure")
 RULING_AGREEMENT: tuple[str, ...] = ("agrees", "disagrees", "none")

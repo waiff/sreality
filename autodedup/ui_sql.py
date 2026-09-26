@@ -603,6 +603,12 @@ VERDICT_COLUMNS: tuple[str, ...] = (
     "member_ids",
 )
 
+# A group ruling's SET, spelled once: its `member_ids` sorted and distinct, so two rulings on the
+# same adverts compare equal whatever key or pass they were taken under -- apply's own reading
+# (`apply.Negatives.read`: per set, the newest ruling stands, E903 / E920 iii).
+_MEMBER_SET = "ARRAY(SELECT DISTINCT u.id FROM unnest({ids}) AS u(id) ORDER BY u.id)"
+
+
 _VERDICT_SELECT_LIST = """
     v.id, v.kind, v.cluster_key, v.listing_lo, v.listing_hi, v.verdict, v.weight, v.note,
     v.reasons, v.decided_by, v.decided_at, v.generation, v.member_ids
@@ -1433,13 +1439,16 @@ SELECT n.* FROM newest n CROSS JOIN said WHERE NOT said.changed
 
 # The ruling a correction names (`POST /autodedup/verdict` `supersedes`), and the newest ruling
 # of its key: a correction is accepted only while what the page showed is still the newest word,
-# so a stale tab answers 409 instead of silently ruling over a ruling it never saw.
+# so a stale tab answers 409 instead of silently ruling over a ruling it never saw. The row is
+# LOCKED, inside the write's own transaction: two tabs correcting the same ruling queue here, and
+# the second then reads the first one's row as the newest and answers 409.
 VERDICT_ONE_SQL = (
     "SELECT"
     + _VERDICT_SELECT_LIST
     + """
 FROM autodedup.verdicts v
 WHERE v.id = %(id)s::bigint
+FOR UPDATE
 """
 )
 
@@ -1464,6 +1473,26 @@ FROM autodedup.verdicts v
 WHERE v.kind = 'cluster'
   AND v.cluster_key = %(cluster_key)s::bigint
   AND coalesce(v.generation, ''::text) = coalesce(%(generation)s::text, ''::text)
+ORDER BY v.decided_at DESC, v.id DESC
+LIMIT 1
+"""
+)
+
+# The newest group ruling on a SET, under whichever key or pass (apply's reading, E920 iii): a
+# group ruling another key's newer word on the same adverts outranks is no longer the word to
+# correct (409, the page shows it `superseded`).
+CLUSTER_SET_NEWEST_RULING_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'cluster'
+  AND v.member_ids && %(member_ids)s::bigint[]
+  AND """
+    + _MEMBER_SET.format(ids="v.member_ids")
+    + """ = """
+    + _MEMBER_SET.format(ids="%(member_ids)s::bigint[]")
+    + """
 ORDER BY v.decided_at DESC, v.id DESC
 LIMIT 1
 """
@@ -1830,15 +1859,18 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
 #
 # THE NEWEST ROW IS THE RULING (migration 574): per pair, and per (group key, pass). `status` is
 # derived from the history, never parsed from a note: `standing` (the newest row states
-# something), `withdrawn` (the newest is `unsure` and an earlier row stated something) or `unsure`
-# (nothing else was ever said).
+# something), `withdrawn` (the newest is `unsure` and an earlier row stated something), `unsure`
+# (nothing else was ever said) or, at group grain only, `superseded` (a newer ruling on the same
+# SET under another key or pass outranks it: apply reads the newest word per set).
 #
 # FOUR SOURCES AT PAIR GRAIN, each named as what it is:
 #   * `pair`          a ruling typed against the pair (a queue, a split, the pair page, a detach);
 #   * `browse_merge`  a Browse merge's `same`, linked to its `operator_merges` group (564);
-#   * `implied`       a member pair of a group whose newest ruling is `same` and which carries no
-#                     pair-grain row of its own (explicit beats implied, as in the labels lane);
-#                     the lane never binds it (E910 reads pair grain only), the page says so;
+#   * `implied`       a member pair of a SET whose newest ruling is `same` -- newest per set across
+#                     every key and pass, apply's reading (E920 iii), so a set later ruled
+#                     different or withdrawn under another key implies nothing -- and which
+#                     carries no pair-grain row of its own (explicit beats implied, as in the
+#                     labels lane); the lane never binds it (E910 reads pair grain only);
 #   * `must_not_link` an operator veto with no ruling row behind it.
 # Each pair appears ONCE across the four, so `(decided_at, listing_lo, listing_hi)` is the
 # keyset.
@@ -1940,20 +1972,25 @@ WITH pair_rows AS (
            bool_or(p.verdict <> 'unsure') AS ever_stated
       FROM pair_rows p
      GROUP BY p.listing_lo, p.listing_hi
-), group_rulings AS (
-    SELECT DISTINCT ON (x.cluster_key, coalesce(x.generation, ''::text))
-           x.id, x.cluster_key, x.generation, x.member_ids, x.verdict, x.note, x.reasons,
-           x.decided_by, x.decided_at
-      FROM autodedup.verdicts x
-     WHERE x.kind = 'cluster'
-     ORDER BY x.cluster_key, coalesce(x.generation, ''::text), x.decided_at DESC, x.id DESC
+), set_rulings AS (
+    SELECT DISTINCT ON (s.member_set)
+           s.id, s.cluster_key, s.generation, s.member_set, s.verdict, s.note, s.reasons,
+           s.decided_by, s.decided_at
+      FROM (SELECT x.id, x.cluster_key, x.generation, x.verdict, x.note, x.reasons,
+                   x.decided_by, x.decided_at,
+                   """
+    + _MEMBER_SET.format(ids="x.member_ids")
+    + """ AS member_set
+              FROM autodedup.verdicts x
+             WHERE x.kind = 'cluster' AND x.member_ids IS NOT NULL) s
+     ORDER BY s.member_set, s.decided_at DESC, s.id DESC
 ), implied AS (
     SELECT DISTINCT ON (a.lo, b.hi)
            g.id, a.lo AS listing_lo, b.hi AS listing_hi, g.note, g.reasons, g.decided_by,
            g.decided_at, g.cluster_key, g.generation
-      FROM group_rulings g
-     CROSS JOIN LATERAL unnest(g.member_ids) AS a(lo)
-     CROSS JOIN LATERAL unnest(g.member_ids) AS b(hi)
+      FROM set_rulings g
+     CROSS JOIN LATERAL unnest(g.member_set) AS a(lo)
+     CROSS JOIN LATERAL unnest(g.member_set) AS b(hi)
      WHERE g.verdict = 'same'
        AND a.lo < b.hi
        AND NOT EXISTS (SELECT 1 FROM history h
@@ -2122,7 +2159,10 @@ RULINGS_PAIR_FACETS_SQL = (
 # GROUP GRAIN: the newest ruling of each (group key, pass) with the SET it was taken on (E58),
 # and the operator's Browse merges (`operator_merges`, 564) as the groups they are. For each, how
 # many properties its adverts sit on now and how the generation groups them. A ruling taken
-# before 538 recorded no set (`set_recorded` false): the page offers only its withdrawal.
+# before 538 recorded no set (`set_recorded` false): the page offers only its withdrawal. A
+# ruling a NEWER ruling on the same set outranks -- under another key or pass -- is `superseded`:
+# apply reads the newest word per set (E920 iii), so it states nothing any more and the page
+# offers neither a correction nor a consequence for it.
 RULING_GROUP_COLUMNS: tuple[str, ...] = (
     "ruling_key",
     "ruling_id",
@@ -2158,15 +2198,23 @@ _RULINGS_GROUP_FROM = (
     """
 WITH cluster_rows AS (
     SELECT x.id, x.cluster_key, x.generation, x.member_ids, x.verdict, x.note, x.reasons,
-           x.decided_by, x.decided_at
+           x.decided_by, x.decided_at,
+           CASE WHEN x.member_ids IS NOT NULL THEN """
+    + _MEMBER_SET.format(ids="x.member_ids")
+    + """ END AS member_set
       FROM autodedup.verdicts x
      WHERE x.kind = 'cluster'
 ), newest AS (
     SELECT DISTINCT ON (c.cluster_key, coalesce(c.generation, ''::text))
-           c.id, c.cluster_key, c.generation, c.member_ids, c.verdict, c.note, c.reasons,
-           c.decided_by, c.decided_at
+           c.id, c.cluster_key, c.generation, c.member_ids, c.member_set, c.verdict, c.note,
+           c.reasons, c.decided_by, c.decided_at
       FROM cluster_rows c
      ORDER BY c.cluster_key, coalesce(c.generation, ''::text), c.decided_at DESC, c.id DESC
+), set_newest AS (
+    SELECT DISTINCT ON (c.member_set) c.id, c.member_set
+      FROM cluster_rows c
+     WHERE c.member_set IS NOT NULL
+     ORDER BY c.member_set, c.decided_at DESC, c.id DESC
 ), history AS (
     SELECT c.cluster_key, coalesce(c.generation, ''::text) AS pass, count(*) AS n_rows,
            bool_or(c.verdict <> 'unsure') AS ever_stated
@@ -2177,13 +2225,15 @@ WITH cluster_rows AS (
            n.cluster_key, n.generation, NULL::uuid AS merge_group_id,
            coalesce(n.member_ids, '{}'::bigint[]) AS member_ids,
            n.member_ids IS NOT NULL AS set_recorded, n.verdict,
-           CASE WHEN n.verdict <> 'unsure' THEN 'standing'
+           CASE WHEN sn.id IS NOT NULL AND sn.id <> n.id THEN 'superseded'
+                WHEN n.verdict <> 'unsure' THEN 'standing'
                 WHEN h.ever_stated THEN 'withdrawn'
                 ELSE 'unsure' END AS status,
            n.note, n.reasons, n.decided_by, n.decided_at, h.n_rows
       FROM newest n
       JOIN history h
         ON h.cluster_key = n.cluster_key AND h.pass = coalesce(n.generation, ''::text)
+      LEFT JOIN set_newest sn ON sn.member_set = n.member_set
     UNION ALL
     SELECT m.merge_group_id::text, NULL::bigint, 'browse_merge'::text, NULL::bigint, NULL::text,
            m.merge_group_id, m.member_ids, true, 'same'::text,

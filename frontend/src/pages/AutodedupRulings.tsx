@@ -120,6 +120,14 @@ export const STATUS_LABEL: Record<RulingStatus, string> = {
   standing: 'platí',
   withdrawn: 'odvoláno',
   unsure: 'nevím',
+  superseded: 'nahrazeno novějším',
+};
+
+/* `superseded` exists at group grain only: a newer ruling on the same adverts,
+ * under another key or pass, outranks the row (apply reads the newest per set). */
+const STATUSES: Record<'pair' | 'group', ReadonlyArray<RulingStatus>> = {
+  pair: ['standing', 'withdrawn', 'unsure'],
+  group: ['standing', 'withdrawn', 'unsure', 'superseded'],
 };
 
 const AGREEMENT_LABEL: Record<RulingAgreement, string> = {
@@ -146,7 +154,7 @@ export function sanitizeRulingFilters(raw: RulingFilterState): RulingFilterState
     engine: pick(raw.engine, ['agrees', 'disagrees', 'none']),
     verdict: pick(raw.verdict, VERDICT_FILTERS),
     source: pick(raw.source, SOURCES[grain]),
-    status: pick(raw.status, ['standing', 'withdrawn', 'unsure']),
+    status: pick(raw.status, STATUSES[grain]),
     now: pick(raw.now, ['together', 'apart']),
     town: TOWN.test(raw.town) ? raw.town : '',
     decided_from: DAY.test(raw.decided_from) ? raw.decided_from : '',
@@ -447,7 +455,7 @@ function FilterStrip({
             onChange={(e) => onChange({ status: e.target.value })}
           >
             <option value="">vše</option>
-            {(['standing', 'withdrawn', 'unsure'] as const).map((s) => (
+            {STATUSES[grain].map((s) => (
               <option key={s} value={s}>
                 {counted(STATUS_LABEL[s], facets?.status?.[s])}
               </option>
@@ -1061,9 +1069,18 @@ function GroupRulingCard({
   onPairs: (mergeGroup: string) => void;
 }) {
   const place = [row.obec_name, row.cast_obce_name].filter(Boolean).join(' · ');
-  const options = row.set_recorded
-    ? corrections(row.verdict, row.status, 'group')
-    : corrections(row.verdict, row.status, 'group').filter((c) => c.verdict === 'unsure');
+  const options =
+    row.status === 'superseded'
+      ? []
+      : row.set_recorded
+        ? corrections(row.verdict, row.status, 'group')
+        : corrections(row.verdict, row.status, 'group').filter((c) => c.verdict === 'unsure');
+  const disabledReason =
+    row.status === 'superseded'
+      ? 'O stejných inzerátech platí novější rozhodnutí (jiná skupina nebo generace) — opravte to.'
+      : options.length === 0
+        ? 'Bez zaznamenané sestavy lze rozhodnutí jen odvolat.'
+        : null;
   return (
     <li
       className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-4"
@@ -1131,7 +1148,7 @@ function GroupRulingCard({
       ) : (
         <CorrectionBar
           options={options}
-          disabledReason={options.length === 0 ? 'Bez zaznamenané sestavy lze rozhodnutí jen odvolat.' : null}
+          disabledReason={disabledReason}
           build={(verdict, note) => ({
             kind: 'cluster',
             verdict,

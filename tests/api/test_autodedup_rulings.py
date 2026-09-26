@@ -359,7 +359,10 @@ def test_a_withdrawal_appends_unsure_and_retracts_the_veto_in_one_transaction(cl
     assert not conn.ran(usql.PAIR_EXISTS_SQL)
     assert conn.ran(usql.MUST_NOT_LINK_RETRACT_SQL)
     assert not conn.ran(usql.MUST_NOT_LINK_UPSERT_SQL)
-    assert conn.tx_calls == [usql.VERDICT_PAIR_APPEND_SQL, usql.MUST_NOT_LINK_RETRACT_SQL]
+    # The "still the newest" check runs over the LOCKED ruling, in the write's own transaction.
+    assert conn.tx_calls == [usql.VERDICT_ONE_SQL, usql.PAIR_NEWEST_RULING_SQL,
+                             usql.VERDICT_PAIR_APPEND_SQL, usql.MUST_NOT_LINK_RETRACT_SQL]
+    assert _flat(usql.VERDICT_ONE_SQL).endswith("FOR UPDATE")
     assert body["data"]["verdict"]["id"] == 12
     assert body["data"]["superseded"]["id"] == 7
     assert body["data"]["must_not_link"] is False
@@ -382,6 +385,7 @@ def test_a_group_correction_copies_its_pass_and_its_set(client, conn):
                    generation="g4", member_ids=[501, 502, 503], verdict="different")
     conn.canned[usql.VERDICT_ONE_SQL] = [old]
     conn.canned[usql.CLUSTER_NEWEST_RULING_SQL] = [old]
+    conn.canned[usql.CLUSTER_SET_NEWEST_RULING_SQL] = [old]
     conn.canned[usql.VERDICT_CLUSTER_APPEND_SQL] = [
         _verdict(id=40, kind="cluster", listing_lo=None, listing_hi=None, cluster_key=501,
                  generation="g4", member_ids=[501, 502, 503], verdict="same")]
@@ -389,12 +393,43 @@ def test_a_group_correction_copies_its_pass_and_its_set(client, conn):
     written = conn.params(usql.VERDICT_CLUSTER_APPEND_SQL)
     assert (written["cluster_key"], written["generation"], written["member_ids"]) == (
         501, "g4", [501, 502, 503])
+    assert conn.params(usql.CLUSTER_SET_NEWEST_RULING_SQL) == {"member_ids": [501, 502, 503]}
+    assert conn.tx_calls[:3] == [usql.VERDICT_ONE_SQL, usql.CLUSTER_NEWEST_RULING_SQL,
+                                 usql.CLUSTER_SET_NEWEST_RULING_SQL]
     assert not conn.ran(usql.CLUSTER_EXISTS_SQL) and not conn.ran(usql.CLUSTER_MEMBER_IDS_SQL)
     # A group `same` retracts the operator's veto on every member pair (E52).
     retracted = [(p["listing_lo"], p["listing_hi"]) for s, p in conn.calls
                  if s == usql.MUST_NOT_LINK_RETRACT_SQL]
     assert retracted == [(501, 502), (501, 503), (502, 503)]
     assert body["data"]["must_not_link_retracted"] == 3
+
+
+def test_a_group_ruling_a_newer_ruling_on_its_set_outranks_is_a_409(client, conn):
+    """E920 iii: apply reads the newest word per SET, under whichever key or pass. A g4 `same`
+    on {501, 502} that a g13 `different` on the same adverts outranks is no longer the word to
+    correct, though it is still the newest under its own key."""
+    old = _verdict(id=31, kind="cluster", listing_lo=None, listing_hi=None, cluster_key=501,
+                   generation="g4", member_ids=[501, 502], verdict="same")
+    newer = _verdict(id=44, kind="cluster", listing_lo=None, listing_hi=None, cluster_key=502,
+                     generation="g13", member_ids=[502, 501], verdict="different",
+                     decided_at=LATER)
+    conn.canned[usql.VERDICT_ONE_SQL] = [old]
+    conn.canned[usql.CLUSTER_NEWEST_RULING_SQL] = [old]
+    conn.canned[usql.CLUSTER_SET_NEWEST_RULING_SQL] = [newer]
+    resp = _post(client, kind="cluster", verdict="different", supersedes=31)
+    assert resp.status_code == 409
+    assert not conn.ran(usql.VERDICT_CLUSTER_APPEND_SQL)
+
+
+def test_superseded_is_a_status_the_filter_names(client, conn):
+    assert client.get("/autodedup/rulings",
+                      params={"grain": "group", "status": "superseded"}).status_code == 200
+    assert conn.params(usql.RULINGS_GROUP_SQL)["status"] == "superseded"
+    flat = _flat(usql.RULINGS_GROUP_SQL)
+    assert "THEN 'superseded'" in flat and "LEFT JOIN set_newest sn ON sn.member_set" in flat
+    # The implied pairs come out of the newest ruling per SET, across keys and passes.
+    pair = _flat(usql.RULINGS_PAIR_SQL)
+    assert "SELECT DISTINCT ON (s.member_set)" in pair and "FROM set_rulings g" in pair
 
 
 def test_a_legacy_group_ruling_with_no_set_can_still_be_withdrawn(client, conn):
