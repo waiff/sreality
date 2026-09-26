@@ -1262,16 +1262,20 @@ renumber.** Navigate by area:
     (E919, `toolkit.property_split.split_property`) is the operator's ONE split statement:
     `{adverts, separate: [[...], ...], keep_together, reason?, confirm_retract?}` — `adverts` is
     every advert the operator was shown (a newcomer the lane merged in since is a 409 `stale`,
-    never ruled), each `separate` unit leaves as ONE record (its adverts detached, then joined by
-    the one merge when they landed apart), the rest stays, ruled one property when
-    `keep_together`; ONE transaction (5 s lock / 25 s statement, the lane's bounds), composing
-    `detach_listing` + `merge_property_set` + `record_rulings` and writing no statement of its
-    own. Its refusals (`{code, message, ids}`: 400 `invalid`, 404, 409 `stale` /
-    `reverses_rulings` / `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing;
-    its response names where each unit sits (`units[].property_id`), which unit keeps the record
-    (`record_kept_by`: the one holding the property's own advert, rules 18/22) and carries the
-    body of its own undo (`{undo}` posted back: the adverts re-joined, each pair's previous word
-    restored, `unsure` where there was none). A re-send changes nothing. `GET
+    never ruled), each `separate` unit leaves as a record of its OWN (its adverts detached, then
+    joined by the one merge when they landed apart; two units that would go home to one origin,
+    or an origin already holding another unit's or an unnamed advert, is a 409 before any write),
+    the rest stays, ruled one property when `keep_together`; ONE transaction (5 s lock / 25 s
+    statement, the lane's bounds), composing `detach_listing` + `merge_property_set` +
+    `record_rulings` (+ `restore_must_not_link`, so a guard/model/llm veto on a pair it rules
+    `same` stays the machine's) and writing no statement of its own. Its refusals
+    (`{code, message, ids}`: 400 `invalid`, 404, 409 `stale` / `reverses_rulings` /
+    `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing; its response names
+    where each unit sits (`units[].property_id`), which unit keeps the record (`record_kept_by`:
+    the one holding the property's own advert, rules 18/22) and carries the body of its own undo
+    (`{undo}` posted back: the adverts re-joined, each pair's previous word restored, `unsure`
+    where there was none, and each pair's previous must-not-link row, a machine's included —
+    exact for one decider). A re-send changes nothing. `GET
     /properties/{id}/origins` names each advert's origin; the ledger is `GET /properties/merges`
     (`api/property_merge.py`). **Every operator merge and split is a ruling (decision 8)**
     (`toolkit.property_identity.record_rulings`, same transaction, only for `source='operator'`:
