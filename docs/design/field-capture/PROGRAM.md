@@ -620,18 +620,18 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   headline is the FIRST m² figure in its prose, and in 32 of the 40,514 A4 rows that was a PART of the unit — the
   cellar (Mechová 3+1, 2 m²), a room, a balcony; a flat `dum < 20 m²` bound would have taken 133 real chaty. A
   declined measure falls through to the next one, like the 5 m² rail; re-parsing to "the first plausible figure"
-  instead was measured and refused (14 of 20 checkable picks were another room). **Narrowed 2026-09-27 (PR
-  fix/area-per-room-rail-bazos-only).** #1630 first applied the per-room floor to every parser that read a
-  disposition, on the A4 sample's "0 of 19,345 dispositioned structured rows". Migration 573's count query on
-  production (2026-09-27) found **280** structured rows under it (ceskereality 93, idnes 120, bezrealitky 39,
-  sreality 16, realitymix 12; active 40), and the hand-read of 30 active ones found ROOM RENTALS listed under the
-  whole flat's disposition — ceskereality "pronájem bytu 5+1 a více" at 11-38 m² (the same Praha rooms on idnes as
-  5+kk 11-12 m²), bezrealitky 3+1 / 2+kk / 4+1 rooms at 15-23 m², realitymix "pronájem pokoje 20 m² ve sdíleném
-  bytě 3+1": the room's real size, which the rail would have NULLed at each row's next fetch. A structured cell
-  and a structured title figure (`fallback`) are therefore never held to it, and the structured parsers no longer
-  hand the resolver a disposition. **Residual, named:** the few genuine structured typos in the same sample (one
-  broker's "prodej bytu 3+kk 8 m²" in Benátky nad Jizerou on ceskereality 18628455 / idnes 18628153 / realitymix
-  18629569, idnes 12539595 2+kk 9 m²) keep their stored figure; a 1 m² placeholder is still the 5 m² rail's.
+  instead was measured and refused (14 of 20 checkable picks were another room). **Narrowed 2026-09-27 (PR #1637).**
+  #1630 first applied the per-room floor to every parser that read a disposition, on the A4 sample's "0 of 19,345
+  dispositioned structured rows". Migration 573's count query on production (2026-09-27) found **280** structured
+  rows under it (ceskereality 93, idnes 120, bezrealitky 39, sreality 16, realitymix 12; active 40), and the
+  hand-read of 30 active ones found ROOM RENTALS listed under the whole flat's disposition — ceskereality "pronájem
+  bytu 5+1 a více" at 11-38 m² (the same Praha rooms on idnes as 5+kk 11-12 m²), bezrealitky 3+1 / 2+kk / 4+1 rooms
+  at 15-23 m², realitymix "pronájem pokoje 20 m² ve sdíleném bytě 3+1": the room's real size, which the rail would
+  have NULLed at each row's next fetch. A structured cell and a structured title figure (`fallback`) are therefore
+  never held to it, and the structured parsers no longer hand the resolver a disposition. **Residual, named:** the
+  few genuine structured typos in the same sample (one broker's "prodej bytu 3+kk 8 m²" in Benátky nad Jizerou on
+  ceskereality 18628455 / idnes 18628153 / realitymix 18629569, idnes 12539595 2+kk 9 m²) keep their stored figure;
+  a 1 m² placeholder is still the 5 m² rail's.
 - **Dotted thousands** ("1.910 m2" read 1,91) are one number in the one area grammar (`AREA_NUMBER_SRC`,
   `area_token_to_float`; the grammar half of PR #1595) — and on a HOUSE the unlabelled figure stays under the
   flat ceiling (1,000 m², `derive_headline_area`), because bazos's first prose m² on a dum is its parcel: the
