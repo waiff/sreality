@@ -148,7 +148,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     disposition = vocabulary.disposition_code(read("disposition"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, usable=_num(advert.get("surface")),
-        plot=surface_land, disposition=disposition,
+        plot=surface_land,
     )
 
     return ScrapedListing(

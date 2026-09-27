@@ -397,7 +397,6 @@ def areas_from_params(
     obj: Mapping[str, Any],
     *,
     category_main: str | None,
-    disposition: str | None,
 ) -> PortalAreas:
     """mmreality's area keys, in ITS precedence — spelled here once and nowhere else.
 
@@ -437,7 +436,6 @@ def areas_from_params(
     plot = _to_float(obj.get("parcelArea"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        disposition=disposition,
         usable=_to_float(obj.get("usableArea")),
         plot=plot,
     )
@@ -496,7 +494,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     disposition = vocabulary.disposition(
         SOURCE, *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
     )
-    areas = areas_from_params(obj, category_main=category_main, disposition=disposition)
+    areas = areas_from_params(obj, category_main=category_main)
 
     image_urls = _image_urls(obj)
     raw = dict(obj)

@@ -623,3 +623,22 @@ def test_parse_detail_a_dotted_parcel_is_not_the_house():
         _bazos_page("Prodej pozemku", "Celková plocha pozemku činí 1.910 m2."),
         source_url=url, category_main="pozemek", category_type="prodej")
     assert (parcel.area_m2, parcel.area_basis) == (1910.0, "plot")
+
+
+def test_parse_detail_a_room_sized_first_figure_is_not_the_flat():
+    """bazos 18453993 (A4, 2026-09-26): a 3+1 whose first m² in the prose is 8 m² — a room
+    or a balcony, not the unit. The per-room band (8 m² a room, 24 m² on a 3+1) reads the
+    prose arm, which is bazos's whole area, so the figure is absence; a 2 m² cellar the
+    same, and the first figure on the band is the flat."""
+    url = "https://reality.bazos.cz/inzerat/1/x.php"
+    for figure in ("8 m²", "2 m²", "23 m²"):
+        listing = parse_detail(
+            _bazos_page("Prodej bytu 3+1", f"Byt 3+1 po rekonstrukci, balkon {figure}, sklep."),
+            source_url=url, category_main="byt", category_type="prodej")
+        assert listing.disposition == "3+1", figure
+        assert (listing.area_m2, listing.area_basis) == (None, None), figure
+
+    flat = parse_detail(
+        _bazos_page("Prodej bytu 3+1", "Byt 3+1 o výměře 24 m², sklep 2 m²."),
+        source_url=url, category_main="byt", category_type="prodej")
+    assert (flat.area_m2, flat.area_basis) == (24.0, "unknown")

@@ -543,7 +543,6 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
-    disposition: str | None,
 ) -> PortalAreas:
     """remax's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -563,7 +562,6 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        disposition=disposition,
         usable=parse_area_text(usable_text),
         total=parse_area_text(total_text),
         plot=estate_area,
@@ -672,8 +670,7 @@ def parse_detail(
     )
 
     disposition = vocabulary.disposition(SOURCE, read("disposition"), title)
-    areas = areas_from_params(params, title=title, category_main=category_main,
-                              disposition=disposition)
+    areas = areas_from_params(params, title=title, category_main=category_main)
 
     image_urls = _detail_images(html, source_id)
 
