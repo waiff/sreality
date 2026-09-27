@@ -328,9 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc = sub.add_parser("score", help="Score images under one version.")
     sc.add_argument("--version", required=True)
     sc.add_argument("--source", default=tm.SOURCE_BAKEOFF_PREFIX,
-                    help="'bakeoff' (the model's own run), 'bakeoff:<run_id>', or "
+                    help="'bakeoff' (the model's own run), 'bakeoff:<run_id>', "
                          "'production' (image_dinov3_embeddings under the model's "
-                         "seven identity facts).")
+                         "seven identity facts), or 'r2:<prefix>' (float16 shard files the "
+                         "embed pass wrote with --vectors-to r2; needs R2_*).")
     sc.add_argument("--batch", type=int, default=tm.DEFAULT_BATCH)
     sc.add_argument("--limit", type=int, default=None,
                     help="Stop after this many images considered.")

@@ -4735,7 +4735,7 @@
     {
       "filename": "tag_model.yml",
       "name": "NEW DEDUP: tag model (promote / score / activate)",
-      "description": "Runs the tag model lane: turn one cell of a finished tagging bake-off into a versioned, permanent model, score images with it, and then — as a separate, explicit step — make that version the one the product reads. Manual dispatch only; one stage per run; CPU only, no GPU, no R2, no money.",
+      "description": "Runs the tag model lane: turn one cell of a finished tagging bake-off into a versioned, permanent model, score images with it, and then — as a separate, explicit step — make that version the one the product reads. Manual dispatch only; one stage per run; CPU only, no GPU, no money (R2 is read only by `score --source r2:<prefix>`).",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -4819,7 +4819,7 @@
         },
         {
           "name": "source",
-          "description": "score only: bakeoff (the model's own run), bakeoff:<run_id>, or production (image_dinov3_embeddings).",
+          "description": "score only: bakeoff (the model's own run), bakeoff:<run_id>, production (image_dinov3_embeddings), or r2:<prefix> (the embed pass's R2 float16 shards, e.g. r2:dinov3-vectors/dinov3-vitb16-pretrain-lvd1689m/5931719e67bb-768-letterbox_pad-cls-bf16-transformers).",
           "required": false,
           "type": "string",
           "default": "bakeoff",
@@ -4873,6 +4873,10 @@
         }
       ],
       "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
         "SUPABASE_DB_URL"
       ],
       "concurrencyGroup": "tag-model",

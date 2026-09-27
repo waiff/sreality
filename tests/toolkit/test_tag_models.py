@@ -484,6 +484,71 @@ def test_production_source_is_wired_and_simply_empty_today() -> None:
     assert report.considered == 0 and report.written == 0
 
 
+class _ObjectStore:
+    """In-memory stand-in for the R2 client (upload / download / list)."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def upload_bytes(self, key: str, data: bytes, content_type: str = "") -> None:
+        self.objects[key] = bytes(data)
+
+    def download_bytes(self, key: str) -> bytes:
+        return self.objects[key]
+
+    def list_keys(self, prefix: str) -> list[str]:
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+
+def _r2_store(conn: _FakeConn, identity: dict[str, Any]) -> _ObjectStore:
+    from toolkit import vector_shards as vs
+
+    store = _ObjectStore()
+    vs.ensure_identity(store, "p", identity)
+    writer = vs.ShardWriter(store=store, prefix="p", shard=0, shards=1, dim=8)
+    ids = sorted(conn.vectors)
+    for i in range(0, len(ids), 16):
+        part = ids[i:i + 16]
+        writer.commit(part, writer.put_part(part, vs.pack_f16(conn.vectors[j] for j in part)))
+    return store
+
+
+def test_r2_source_rescores_from_the_float16_shards_the_embed_pass_kept() -> None:
+    # G4 (2026-09-27): the measurement pass keeps vectors in R2, not Postgres; a later head
+    # version must re-score them without re-embedding, to the same winners.
+    pytest.importorskip("sklearn")
+    conn = _fixture()
+    model = _promote(conn)
+    source = tm.resolve_source(conn, model=model, spec="r2:p/",
+                               store=_r2_store(conn, ENCODER.as_dict()))
+    assert source.name == "r2:p"
+    report = tm.score(conn, model=model, source=source, batch=25, scored_at=TRAINED_AT)
+    assert report.written == 60 and report.missing_vector == 0
+
+    reference = _fixture()
+    ref_model = _promote(reference)
+    tm.score(reference, model=ref_model, source=tm.bakeoff_source(reference, run_id=1,
+                                                                  arm=ARM.arm),
+             scored_at=TRAINED_AT)
+    for image_id in range(1, 61):
+        got, want = conn.scores[(image_id, model.id)], reference.scores[(image_id, ref_model.id)]
+        assert got["winner_tag_id"] == want["winner_tag_id"]
+        assert got["winner_score"] == pytest.approx(want["winner_score"], abs=2e-3)
+
+
+def test_r2_source_refuses_another_population_or_a_bare_prefix() -> None:
+    pytest.importorskip("sklearn")
+    conn = _fixture()
+    model = _promote(conn)
+    other = _r2_store(conn, {**ENCODER.as_dict(), "resolution": 768})
+    with pytest.raises(tm.TagModelError, match="different population"):
+        tm.resolve_source(conn, model=model, spec="r2:p", store=other)
+    with pytest.raises(tm.TagModelError, match="not a vector store"):
+        tm.resolve_source(conn, model=model, spec="r2:elsewhere", store=other)
+    with pytest.raises(tm.TagModelError, match="needs a prefix"):
+        tm.resolve_source(conn, model=model, spec="r2:", store=other)
+
+
 def test_resolve_source_spellings() -> None:
     pytest.importorskip("sklearn")
     conn = _fixture()

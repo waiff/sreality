@@ -67,9 +67,10 @@ STATUS_ACTIVE = "active"
 STATUS_RETIRED = "retired"
 STATUSES = (STATUS_CANDIDATE, STATUS_ACTIVE, STATUS_RETIRED)
 
-# Two vector sources, named the way the CLI spells them.
+# The vector sources, named the way the CLI spells them.
 SOURCE_PRODUCTION = "production"
 SOURCE_BAKEOFF_PREFIX = "bakeoff"
+SOURCE_R2_PREFIX = "r2"
 
 DEFAULT_BATCH = 500
 
@@ -683,12 +684,41 @@ def production_source(
                          vectors=th.encoder_vector_source(conn, encoder))
 
 
+def r2_source(*, store: Any, prefix: str, encoder: th.EncoderIdentity) -> ScoringSource:
+    """Vectors kept as float16 shard files in R2 by the embed pass's `--vectors-to r2`
+    (toolkit/vector_shards.py): a later head version re-scores them without re-embedding.
+    Refused unless the store's identity.json is the model's own seven encoder facts."""
+    from toolkit import vector_shards as vs
+
+    stored = vs.read_identity(store, prefix)
+    if stored is None:
+        raise TagModelError(f"r2:{prefix} holds no {vs.IDENTITY_FILE} — not a vector store")
+    if vs.canonical_identity(stored) != vs.canonical_identity(encoder.as_dict()):
+        raise TagModelError(f"r2:{prefix} holds vectors of {stored}, but the model was "
+                            f"trained on {encoder.as_dict()} — a different population")
+    reader = vs.ShardVectorReader(store, prefix)
+    return ScoringSource(name=f"{SOURCE_R2_PREFIX}:{prefix}", candidates=reader.ids_after,
+                         vectors=reader)
+
+
 def resolve_source(
-    conn: psycopg.Connection, *, model: TagModel, spec: str,
+    conn: psycopg.Connection, *, model: TagModel, spec: str, store: Any = None,
 ) -> ScoringSource:
-    """`production`, `bakeoff` (the model's own source run) or `bakeoff:<run_id>`."""
+    """`production`, `bakeoff` (the model's own source run), `bakeoff:<run_id>` or
+    `r2:<prefix>` (`store` defaults to the R2 client from the environment)."""
     if spec == SOURCE_PRODUCTION:
         return production_source(conn, encoder=model.encoder)
+    if spec.startswith(SOURCE_R2_PREFIX + ":"):
+        prefix = spec.split(":", 1)[1].strip("/")
+        if not prefix:
+            raise TagModelError("r2:<prefix> needs a prefix, e.g. r2:dinov3-vectors/...")
+        if store is None:
+            from scraper import image_storage
+
+            if not image_storage.is_configured():
+                raise TagModelError("r2:<prefix> needs the R2_* environment variables")
+            store = image_storage.R2Client.from_env()
+        return r2_source(store=store, prefix=prefix, encoder=model.encoder)
     if spec == SOURCE_BAKEOFF_PREFIX or spec.startswith(SOURCE_BAKEOFF_PREFIX + ":"):
         _, _, tail = spec.partition(":")
         run_id = int(tail) if tail else model.source_run_id
