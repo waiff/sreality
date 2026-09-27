@@ -1297,13 +1297,42 @@ def upload_results(out_dir: str, run_id: int, local_only: bool) -> str:
     return key
 
 
-def finalize(out_dir: str, run_id: int, rep: Reporter, reason: str,
-             local_only: bool) -> int:
-    """The bootstrap's last call when it gives the payload up (an OOM kill, or a third
-    failure): ship what the passes left on disk — finished arms and the shards of the
-    unfinished ones, which a `resume` continues — and close every open arm, so the
-    dispatcher's watchdog ends the pod now instead of at the end of its window."""
+# Waits between final-upload attempts. The LAST upload has no later checkpoint to fall
+# back on: every arm is terminal by then, so the watchdog's all-terminal teardown (within a
+# minute) beats the bootstrap restart that would have retried it.
+UPLOAD_BACKOFF_S = (5.0, 20.0, 60.0)
+
+
+def upload_with_retry(out_dir: str, run_id: int, local_only: bool,
+                      backoff: Sequence[float] = UPLOAD_BACKOFF_S,
+                      sleep: Callable[[float], None] = time.sleep) -> str:
+    """upload_results, retried in-process; the last failure raises."""
+    for attempt in range(len(backoff) + 1):
+        try:
+            return upload_results(out_dir, run_id, local_only=local_only)
+        except Exception as exc:  # noqa: BLE001 - R2 has transient failures
+            if attempt == len(backoff):
+                raise
+            LOG.warning("upload attempt %d failed (%s: %s); retrying in %.0fs",
+                        attempt + 1, type(exc).__name__, exc, backoff[attempt])
+            sleep(backoff[attempt])
+    raise AssertionError("unreachable")
+
+
+def finalize(out_dir: str, run_id: int, reason: str, *, local_only: bool,
+             connect: Callable[[], Any] | None = None,
+             units_fn: Callable[[], int] | None = None,
+             backoff: Sequence[float] = UPLOAD_BACKOFF_S) -> int:
+    """The bootstrap's last call when it gives the payload up (an OOM kill, or its restart
+    bound): ship what the passes left on disk — finished arms and the shards of the
+    unfinished ones, which a `resume` continues — and then close every open arm.
+
+    UPLOAD FIRST, DATABASE SECOND. The upload needs only R2; a database that cannot be
+    reached must not cost it (the connect used to come first and raise). And the arms close
+    only after the upload, because closing them is the watchdog's all-terminal cue.
+    Returns 1 when the upload failed, so the bootstrap's give-up says `finalize=failed`."""
     uploaded = "nothing on disk"
+    ok = True
     if os.path.isdir(out_dir):
         path = os.path.join(out_dir, "report.json")
         try:
@@ -1315,15 +1344,24 @@ def finalize(out_dir: str, run_id: int, rep: Reporter, reason: str,
         try:
             with open(path, "w") as fh:
                 json.dump(report, fh, indent=1, default=str)
-            uploaded = upload_results(out_dir, run_id, local_only=local_only)
-        except Exception as exc:  # noqa: BLE001 - closing the arms matters more
+            uploaded = upload_with_retry(out_dir, run_id, local_only, backoff=backoff)
+        except Exception as exc:  # noqa: BLE001 - closing the arms still matters
             LOG.exception("final upload failed")
             uploaded = f"upload failed: {type(exc).__name__}: {exc}"
+            ok = False
+    conn = None
+    if connect is not None:
+        try:
+            conn = connect()
+        except Exception as exc:  # noqa: BLE001 - the upload above is what mattered
+            LOG.warning("finalize: no database (%s: %s); the arms stay open",
+                        type(exc).__name__, exc)
+    rep = Reporter(conn, run_id, units_fn=units_fn)
     rep.run_note(alive=f"gave up ({reason}); uploaded {uploaded}")
     rep.fail_open_arms(f"payload gave up ({reason}); partial results: {uploaded}")
     rep.finish_run("failed")
     LOG.info("FINALIZE %s -> %s", reason, uploaded)
-    return 0
+    return 0 if ok else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1354,20 +1392,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.makedirs(out_dir, exist_ok=True)
     deadline = time.monotonic() + args.max_seconds if args.max_seconds else None
 
-    conn = None
-    if not args.no_db:
+    def connect() -> Any:
         import psycopg
 
-        conn = psycopg.connect(os.environ["SUPABASE_DB_URL"], autocommit=True,
+        return psycopg.connect(os.environ["SUPABASE_DB_URL"], autocommit=True,
                                prepare_threshold=None, connect_timeout=15)
+
     cached = [0]
     synth_dir = os.path.join(args.root, "synth")
-    rep = Reporter(conn, args.run_id,
-                   units_fn=lambda: durable_units(out_dir, synth_dir) + cached[0] // 1000)
+
+    def units() -> int:
+        return durable_units(out_dir, synth_dir) + cached[0] // 1000
+
     if args.finalize:
-        return finalize(out_dir, args.run_id, rep,
+        return finalize(out_dir, args.run_id,
                         os.environ.get("PODBOOT_GAVE_UP") or "the bootstrap gave up",
-                        local_only=conn is None)
+                        local_only=args.no_db, connect=None if args.no_db else connect,
+                        units_fn=units)
+    conn = None if args.no_db else connect()
+    rep = Reporter(conn, args.run_id, units_fn=units)
     rep.run_note(boot=f"g1 {sys.version.split()[0]}", alive="starting")
 
     if not args.skip_deps:
@@ -1667,7 +1710,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report["finished"] = iso_now()
         json.dump(report, open(os.path.join(out_dir, "report.json"), "w"), indent=1, default=str)
         try:
-            where = upload_results(out_dir, args.run_id, local_only=conn is None)
+            where = upload_with_retry(out_dir, args.run_id, local_only=conn is None)
             rep.phase("upload", "ok", where)
         except Exception as exc:  # noqa: BLE001
             LOG.exception("upload failed")

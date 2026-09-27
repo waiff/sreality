@@ -861,8 +861,8 @@ def test_finalize_ships_what_is_on_disk_and_closes_every_open_arm(tmp_path):
     np.savez(out / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
     (out / "emb_dinov3.shards" / "000000.npz").write_bytes(b"x")
     log: list = []
-    rep = pod.Reporter(_Conn(log), 2, units_fn=lambda: 2)
-    assert pod.finalize(str(out), 2, rep, "code=137 failures=1 pass=1", local_only=True) == 0
+    assert pod.finalize(str(out), 2, "code=137 failures=1 pass=1", local_only=True,
+                        connect=lambda: _Conn(log), units_fn=lambda: 2) == 0
     import json as _json
     import tarfile as _tar
 
@@ -874,6 +874,100 @@ def test_finalize_ships_what_is_on_disk_and_closes_every_open_arm(tmp_path):
     closed = [p for s, p in log if s.startswith("UPDATE dedup_sim.tag_head_bakeoff_arms")]
     assert closed and "payload gave up (code=137" in closed[0]["note"]
     assert {"run_id": 2, "status": "failed"} in [p for _s, p in log]
+
+
+class _R2Log:
+    """A fake R2 whose uploads land in a shared event log, failing the first `fails`."""
+
+    def __init__(self, events: list, fails: int = 0) -> None:
+        self.events = events
+        self.fails = fails
+
+    def upload_file(self, key, path, content_type=None):
+        if self.fails:
+            self.fails -= 1
+            self.events.append(("upload-error", key))
+            raise ConnectionError("R2 503")
+        self.events.append(("upload", key))
+
+
+class _EventConn(_Conn):
+    def cursor(self):
+        return _Cur(self.log)
+
+
+def _gave_up_dir(tmp_path):
+    out = tmp_path / "run-2"
+    (out / "emb_dinov3.shards").mkdir(parents=True)
+    np.savez(out / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
+    return out
+
+
+def test_finalize_uploads_before_it_touches_the_database(tmp_path, monkeypatch):
+    # Review of 17bea70d: --finalize connected FIRST, so an unreachable database raised
+    # before the upload that needs only R2. And closing the arms is the watchdog's
+    # all-terminal cue, so it must come after the upload, never before.
+    from scraper import image_storage
+
+    events: list = []
+    r2 = _R2Log(events)
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **kw: r2))
+
+    def connect():
+        events.append(("connect", None))
+        return _EventConn(events)
+
+    assert pod.finalize(str(_gave_up_dir(tmp_path)), 2, "code=137", local_only=False,
+                        connect=connect) == 0
+    kinds = [e[0] for e in events]
+    assert kinds.index("upload") < kinds.index("connect")
+    closed = [i for i, e in enumerate(events)
+              if str(e[0]).startswith("UPDATE dedup_sim.tag_head_bakeoff_arms")]
+    assert closed and closed[0] > kinds.index("upload")
+
+
+def test_finalize_still_uploads_when_the_database_is_unreachable(tmp_path, monkeypatch):
+    from scraper import image_storage
+
+    events: list = []
+    monkeypatch.setattr(image_storage.R2Client, "from_env",
+                        classmethod(lambda cls, **kw: _R2Log(events)))
+
+    def connect():
+        raise OSError("connection refused")
+
+    assert pod.finalize(str(_gave_up_dir(tmp_path)), 2, "code=137", local_only=False,
+                        connect=connect) == 0
+    assert events == [("upload", "bakeoff/g1-image-stack/2/results.tar")]
+
+
+def test_the_final_upload_is_retried_in_process(tmp_path, monkeypatch):
+    # A transient R2 failure of the one final upload used to exit 1 with every arm already
+    # terminal: the watchdog's teardown beat the restart that would have retried.
+    from scraper import image_storage
+
+    events: list = []
+    r2 = _R2Log(events, fails=2)
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **kw: r2))
+    slept: list = []
+    key = pod.upload_with_retry(str(_gave_up_dir(tmp_path)), 2, False, sleep=slept.append)
+    assert key == "bakeoff/g1-image-stack/2/results.tar"
+    assert [e[0] for e in events] == ["upload-error", "upload-error", "upload"]
+    assert slept == list(pod.UPLOAD_BACKOFF_S[:2])
+    # Past the backoff the failure is real: it raises, and a finalize says so.
+    r2.fails = 99
+    with pytest.raises(ConnectionError):
+        pod.upload_with_retry(str(_gave_up_dir(tmp_path / "b")), 2, False, sleep=slept.append)
+    assert pod.finalize(str(_gave_up_dir(tmp_path / "c")), 2, "code=137", local_only=False,
+                        backoff=(0.0,)) == 1
+
+
+def test_the_payloads_final_upload_goes_through_the_retry():
+    import inspect
+
+    src = inspect.getsource(pod.main)
+    tail = src[src.index("finally:"):]
+    assert "upload_with_retry(" in tail and "upload_results(" not in tail
 
 
 # --- the evaluator reads finished arms only, and says PARTIAL -------------------------
