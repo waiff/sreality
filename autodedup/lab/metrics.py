@@ -115,6 +115,7 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[s
         "rulings": _read(g, labels.rulings, ids),
         "judges": {name: _read(g, pairs, ids) for name, pairs in labels.judges.items()},
         "timings": {k: round(v, 2) for k, v in arm.timings.items()},
+        "walls_forced": arm.walls_forced,
     }
     if base is not None:
         base_co = base.groups.co_pairs()

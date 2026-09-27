@@ -98,6 +98,15 @@ def test_a_rung_switched_off_is_skipped(tmp_path: Path) -> None:
     assert _zones(board.run(c, {"ladder": ladder, "group": {"step": "components"}}))[2] == "merge"
 
 
+def test_the_walls_are_not_a_rung_an_arm_may_remove(tmp_path: Path) -> None:
+    c = _cohort(tmp_path)
+    ladder = [{"rung": r, **({"on": False} if r == "veto" else {})} for r in board.REFERENCE_LADDER]
+    out = board.run(c, {"ladder": ladder, "group": {"step": "components"}})
+    assert out.walls_forced and _zones(out)[0] == "veto"
+    assert not board.run(c, {"ladder": [{"rung": r} for r in board.REFERENCE_LADDER],
+                             "group": {"step": "components"}}).walls_forced
+
+
 def test_sweep_expands_one_arm_per_combination() -> None:
     config = {"name": "t", "ladder": [{"rung": "score", "t_lo": 0.2}],
               "sweep": {"ladder.0.t_lo": [0.1, 0.3], "model": ["ref", "x.json"]}}

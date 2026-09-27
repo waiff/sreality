@@ -467,6 +467,7 @@ class Outcome:
     decisions: Decisions
     groups: Groups
     timings: dict[str, float]
+    walls_forced: bool = False
 
 
 def config_id(config: dict[str, Any]) -> str:
@@ -481,9 +482,15 @@ def run(c: Cohort, config: dict[str, Any]) -> Outcome:
         c.load_extra(os.path.expandvars(str(path).format(cohort=c.name)))
     score, model = scores(config.get("model", "ref"), c)
     d = Decisions.blank(c.n, score)
-    for step in config.get("ladder", [{"rung": name} for name in REFERENCE_LADDER]):
-        if step.get("on", True):
-            d = RUNGS[step["rung"]](c, d, step)
+    ladder = [step for step in config.get("ladder", [{"rung": name} for name in REFERENCE_LADDER])
+              if step.get("on", True)]
+    walls_forced = not any(step["rung"] == "veto" for step in ladder)
+    if walls_forced:
+        # The standing rulings (never a rental with a sale, never a flat with a commercial unit)
+        # are not a rung an arm may remove: without them no group step is safe to read.
+        ladder = [{"rung": "veto"}] + ladder
+    for step in ladder:
+        d = RUNGS[step["rung"]](c, d, step)
     rest = d.zone == U
     d.settle(rest, REJECT, "score", "unscored", "NONE", "unscored")
     if model is not None:
@@ -498,8 +505,8 @@ def run(c: Cohort, config: dict[str, Any]) -> Outcome:
     group = config.get("group", {"step": "relation"})
     groups = GROUPS[group["step"]](c, d, group)
     c.save()
-    return Outcome(config, d, groups, {"decide_s": decide_s,
-                                       "group_s": time.perf_counter() - clock - decide_s})
+    timings = {"decide_s": decide_s, "group_s": time.perf_counter() - clock - decide_s}
+    return Outcome(config, d, groups, timings, walls_forced)
 
 
 def expand(config: dict[str, Any]) -> list[dict[str, Any]]:
