@@ -80,7 +80,8 @@ def test_assemble_routes_same_room_frames_and_counts_strata():
 def test_truth_drops_conflicts_and_names_the_hardest_negative():
     assert ev.truth(["pos_rule", "pos_merge"]) == "pos"
     assert ev.truth(["neg_mnl", "neg_rule"]) == "neg_rule"
-    assert ev.truth(["neg_fused", "pos_rule"]) == "conflict"
+    assert ev.truth(["neg_fused", "pos_rule"]) == "pos"          # the operator overrides C7
+    assert ev.truth(["neg_mnl", "pos_merge"]) == "conflict"
     assert ev.truth([]) is None
 
 

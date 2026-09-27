@@ -6,9 +6,10 @@ SSCD / DINOv2 / DINOv3 vectors, head scores and LightGlue counts) and writes one
 metrics plus a short markdown table. The same code reads the baseline today and the pod's
 results tomorrow, so the bars are measured on one instrument.
 
-Truth: pos = pos_rule or pos_merge (and no negative class); the negative classes are read
-separately (neg_rule, neg_unit, neg_mnl, neg_fused, neg_sib_hard, neg_sib_rnd). A pair
-carrying both a positive and a negative class is a conflict and is dropped (counted).
+Truth: pos = pos_rule or pos_merge; the negative classes are read separately (neg_rule,
+neg_unit, neg_mnl, neg_fused, neg_sib_hard, neg_sib_rnd). An operator positive beats a C7
+or sibling negative; an operator positive against an operator negative is a conflict and
+is dropped (counted).
 
 Usage:
     python -m scripts.g1_image_stack_eval --manifest manifest.json.gz \\
@@ -49,12 +50,17 @@ HEAD_ROOM = {25: "kitchen", 22: "bathroom", 28: "living_room", 46: "floor_plan",
              42: "site_plan", 43: "site_plan", 45: "property_document"}
 
 
+OPERATOR_NEG = ("neg_rule", "neg_unit", "neg_mnl")
+
+
 def truth(classes: Iterable[str]) -> str | None:
+    """An operator positive overrides C7's reading and the sibling rule (operator rulings
+    override); only operator against operator is a conflict, and it is dropped."""
     cs = set(classes)
     pos = bool(cs & set(POS))
     neg = bool(cs & set(NEG))
     if pos and neg:
-        return "conflict"
+        return "conflict" if cs & set(OPERATOR_NEG) else "pos"
     if pos:
         return "pos"
     if neg:
@@ -734,7 +740,7 @@ def layered_proof(manifest: dict[str, Any], scores: dict[str, dict[str, Any]],
                 cells[name][grp] += 1
                 if t == "pos":
                     cells[name][f"pos_{p.get('stratum')}"] += 1
-                if "neg_fused" in p["classes"]:
+                if "neg_fused" in p["classes"] and t != "pos":
                     fused_pass[name].append(f"{key[0]}x{key[1]}")
     n_pos = sum(1 for t, _ in tr.values() if t == "pos")
     out = {"k_arm": k_arm, "p_arm": p_arm, "router": router_name, "n_pos": n_pos,
