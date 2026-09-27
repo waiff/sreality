@@ -62,8 +62,15 @@ def main() -> None:
         if path.is_file():
             continue
         clock = time.perf_counter()
-        ds = load(str(ART / cohort / "export" / "cohort.jsonl.gz"))
-        rows = json.load(gzip.open(ART / "s15" / "runs" / cohort / "S15b" / "decisions.json.gz", "rt"))
+        if cohort in c2lib.COHORTS:
+            # The three unseen cohorts, read on the SAME populations from this census's FULL runs,
+            # so dev-cohort and unseen-cohort firing rates are comparable.
+            ds = load(str(c2lib.COHORTS[cohort]))
+            rows = [r[:4] for r in (json.loads(x) for x in gzip.open(
+                OUT.parent / f"readers_{cohort}" / "full_decisions.jsonl.gz", "rt"))]
+        else:
+            ds = load(str(ART / cohort / "export" / "cohort.jsonl.gz"))
+            rows = json.load(gzip.open(ART / "s15" / "runs" / cohort / "S15b" / "decisions.json.gz", "rt"))
         gate, promote, merges = [], [], []
         for lo, hi, zone, reason in rows:
             if zone == "merge":

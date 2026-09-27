@@ -91,7 +91,7 @@ def main() -> None:
     hist = {}
     for hp in sorted((OUT / "history").glob("*.json")):
         h = load(hp)
-        if h:
+        if h and h["cohort"] not in ("trial", "c17", "c18"):
             hist[h["cohort"]] = h
     lines.append("| # | reader | code | predicate / tolerance | repeats | trial g/p/c fires (sole) | c17 | c18 | cohorts 3-16 g/p/c fires (n cohorts) | KO trial dMerge/flips/groups/opSame/opDiff | KO c17 | KO c18 |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
