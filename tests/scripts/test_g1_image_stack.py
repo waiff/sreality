@@ -753,6 +753,43 @@ def test_embed_arm_writes_shards_and_a_restart_resumes_after_the_last_one(tmp_pa
         "arm": "x", "skipped": "exists"}
 
 
+def test_a_dropped_corrupt_shard_never_lets_a_resume_overwrite_a_later_one(tmp_path):
+    # Review of 17bea70d, reproduced: 000000 (keys 1-2), 000001 unreadable, 000002 (keys
+    # 5-6). The resume drops 000001, and a count-based number (2) made the next flush
+    # overwrite 000002: the arm was written "finished" with n=6 of 8, keys 5 and 6 gone.
+    out = str(tmp_path / "emb_c.npz")
+    sdir = pod.shard_dir(out)
+    import os as _os
+
+    _os.makedirs(sdir)
+    for seq, keys in ((0, [1, 2]), (2, [5, 6])):
+        np.savez(_os.path.join(sdir, f"{seq:06d}.npz"), key=np.array(keys),
+                 vec=np.array([[float(k), 1.0] for k in keys], np.float16), bad=np.array([]))
+    with open(_os.path.join(sdir, "000001.npz"), "wb") as fh:
+        fh.write(b"half a shard")
+    assert pod.next_shard_seq(sdir) == 3
+    items = [(i, i) for i in range(1, 9)]
+    enc = _Encoder()
+    done = pod.embed_arm("c", enc, items, batch=2, workers=1, loader=_Decoded, out_path=out,
+                         beat=lambda m: None, deadline=None, prefetch=1, shard_size=2)
+    assert enc.seen == [3, 4, 7, 8]                   # the dropped shard's keys, and the rest
+    keys, _ = pod.load_vecs(out)
+    assert sorted(keys.tolist()) == list(range(1, 9)) and done["n"] == 8
+
+
+def test_shard_numbers_ignore_a_legacy_file_and_continue_past_gaps(tmp_path):
+    sdir = tmp_path / "lg_disk.shards"
+    assert pod.next_shard_seq(str(sdir)) == 0          # no directory yet
+    sdir.mkdir()
+    for name in ("legacy.npz", "000000.npz", "000004.npz", "000005.npz.tmp.npz"):
+        (sdir / name).write_bytes(b"x")
+    assert pod.next_shard_seq(str(sdir)) == 5
+    import inspect
+
+    assert "next_shard_seq(sdir)" in inspect.getsource(pod.match_phase)
+    assert "len(shard_files(sdir))\n" not in inspect.getsource(pod.match_phase).split("seq =")[1][:40]
+
+
 def test_an_undecodable_image_is_recorded_and_never_retried(tmp_path):
     out = str(tmp_path / "emb_y.npz")
     items = [(i, i) for i in range(1, 5)]

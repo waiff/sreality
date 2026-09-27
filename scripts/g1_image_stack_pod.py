@@ -639,6 +639,18 @@ def shard_files(sdir: str) -> list[str]:
                   if f.endswith(".npz") and ".tmp." not in f)
 
 
+def next_shard_seq(sdir: str) -> int:
+    """1 + the highest `NNNNNN.npz` on disk (0 for none). Never the COUNT of shards: once an
+    unreadable shard is dropped, a count reuses the number of a later, valid shard and the
+    next flush overwrites it — silently, inside an arm then reported complete."""
+    top = -1
+    for path in shard_files(sdir):
+        stem = os.path.basename(path)[:-len(".npz")]
+        if stem.isdigit():
+            top = max(top, int(stem))
+    return top + 1
+
+
 def _save_npz(path: str, **arrays: Any) -> None:
     """Atomic: a kill mid-write leaves no half file for a resume to trust."""
     import numpy as np
@@ -698,7 +710,7 @@ def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batc
     os.makedirs(sdir, exist_ok=True)
     done, bad = embed_shard_keys(sdir)
     todo = [it for it in items if it[0] not in done and it[0] not in bad]
-    seq = len(shard_files(sdir))
+    seq = next_shard_seq(sdir)
     ids: list[Any] = []
     vecs: list[Any] = []
     bads: list[Any] = []
@@ -745,7 +757,8 @@ def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batc
              "seconds": round(dt, 1), "img_per_s": round(fresh / dt, 2) if dt else None,
              "batch": batch, "prefetch": prefetch, "rss_gb": round(rss_bytes() / 2**30, 2)}
     if cut:
-        return {**stats, "n": len(done) + fresh, "partial": True, "shards": seq}
+        return {**stats, "n": len(done) + fresh, "partial": True,
+                "shards": len(shard_files(sdir))}
     keys: list[Any] = []
     mats: list[Any] = []
     for path in shard_files(sdir):
@@ -1035,7 +1048,7 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
         os.replace(legacy, os.path.join(sdir, "legacy.npz"))
     done = {(int(r[0]), int(r[1])) for path in shard_files(sdir) for r in load_match_rows(path)}
     resumed = len(done)
-    seq = len(shard_files(sdir))
+    seq = next_shard_seq(sdir)
     fresh: list[tuple[Any, ...]] = []
     written = 0
 
@@ -1093,7 +1106,7 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
              "feature_extractions": cache.misses}
     if cut:
         # A deadline leaves the shards; a re-dispatch of the same run continues them.
-        return {**stats, "pairs": resumed + written, "shards": seq}
+        return {**stats, "pairs": resumed + written, "shards": len(shard_files(sdir))}
     rows = [r for path in shard_files(sdir) for r in load_match_rows(path)]
     save_match_rows(out_path, rows)
     shutil.rmtree(sdir, ignore_errors=True)
