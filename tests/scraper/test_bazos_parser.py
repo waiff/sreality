@@ -642,3 +642,44 @@ def test_parse_detail_a_room_sized_first_figure_is_not_the_flat():
         _bazos_page("Prodej bytu 3+1", "Byt 3+1 o výměře 24 m², sklep 2 m²."),
         source_url=url, category_main="byt", category_type="prodej")
     assert (flat.area_m2, flat.area_basis) == (24.0, "unknown")
+
+
+def _bazos_page_in(section: str, title: str, body: str) -> str:
+    """A detail page whose breadcrumb names the deal type, the way live bazos renders it."""
+    return ("<html><body>"
+            f'<div class="drobky"><a href="https://reality.bazos.cz/{section}/byt/">x</a></div>'
+            f'<h1 class="nadpisdetail">{title}</h1>'
+            f'<div class="popisdetail">{body}</div>'
+            "</body></html>")
+
+
+def test_parse_detail_a_rental_room_keeps_its_size_and_a_sale_is_still_held_per_room():
+    """Production, 2026-09-27: 247 bazos rentals sat under the per-room band (25 active), and
+    the hand-read found room rentals — "pronájem pokoje 20m2 ve sdíleném bytě 3+1" (bazos
+    18625955, 18850769) — beside defects it cannot tell apart. The band is a SALE's alone,
+    and the deal type is the page's own breadcrumb."""
+    url = "https://reality.bazos.cz/inzerat/1/x.php"
+    room = parse_detail(
+        _bazos_page_in("pronajmu", "Pronájem pokoje 20m2 ve sdíleném bytě 3+1",
+                       "Pronajmu pokoj 20m2 ve sdíleném bytě 3+1, kuchyň a koupelna společné."),
+        source_url=url, category_main="byt", category_type=None)
+    assert (room.category_type, room.disposition) == ("pronajem", "3+1")
+    assert (room.area_m2, room.area_basis) == (20.0, "unknown")
+
+    small = parse_detail(
+        _bazos_page_in("pronajmu", "Pronájem pokoje ve sdíleném bytě 3+1",
+                       "Volný pokoj o velikosti 12,5 m² ve sdíleném bytě 3+1."),
+        source_url=url, category_main="byt", category_type=None)
+    assert (small.category_type, small.disposition) == ("pronajem", "3+1")
+    assert (small.area_m2, small.area_basis) == (12.5, "unknown")
+
+    balcony = parse_detail(
+        _bazos_page_in("prodam", "Prodej bytu 3+1", "Byt 3+1 po rekonstrukci, balkon 8 m², sklep."),
+        source_url=url, category_main="byt", category_type=None)
+    assert (balcony.category_type, balcony.disposition) == ("prodej", "3+1")
+    assert (balcony.area_m2, balcony.area_basis) == (None, None)
+
+    flat = parse_detail(
+        _bazos_page_in("prodam", "Prodej bytu 3+1", "Byt 3+1 o výměře 24 m², sklep 2 m²."),
+        source_url=url, category_main="byt", category_type=None)
+    assert (flat.category_type, flat.area_m2, flat.area_basis) == ("prodej", 24.0, "unknown")

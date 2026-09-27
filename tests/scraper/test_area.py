@@ -273,21 +273,25 @@ def test_dotted_thousands_are_one_number_and_a_decimal_point_still_is_one():
 
 def test_a_prose_figure_under_eight_square_metres_a_room_is_a_part_of_the_unit():
     """Mechová 3+1 (bazos 14012930): the only m² in the advert is the cellar's 2 m², and a
-    3+1 of 8 m² (bazos 18453993) is a room. Both are absence; the band is the advert's own
-    room count, so a 12 m² chata that states no disposition keeps its area."""
+    3+1 of 8 m² (bazos 18453993) is a room. Both are absence on a sale; the band is the
+    advert's own room count, so a 12 m² chata that states no disposition keeps its area."""
+    from functools import partial
+
     from scraper.area import derive_headline_area, dwelling_area_band
 
-    assert derive_headline_area(category_main="byt", prose=2.0, disposition="3+1") == (None, None)
-    assert derive_headline_area(category_main="byt", prose=8.0, disposition="3+1") == (None, None)
-    assert derive_headline_area(category_main="byt", prose=23.9, disposition="3+1") == (None, None)
-    assert derive_headline_area(category_main="byt", prose=24.0, disposition="3+1") == (24.0, "unknown")
-    assert derive_headline_area(category_main="byt", prose=76.0, disposition="3+1") == (76.0, "unknown")
-    assert derive_headline_area(category_main="dum", prose=12.0) == (12.0, "unknown")
-    assert derive_headline_area(category_main="dum", prose=8.0, disposition="1+1") == (8.0, "unknown")
-    assert derive_headline_area(category_main="dum", prose=7.9, disposition="1+1") == (None, None)
-    assert derive_headline_area(category_main="komercni", prose=6.0, disposition="3+1") == (6.0, "unknown")
+    sale = partial(derive_headline_area, category_type="prodej")
+
+    assert sale(category_main="byt", prose=2.0, disposition="3+1") == (None, None)
+    assert sale(category_main="byt", prose=8.0, disposition="3+1") == (None, None)
+    assert sale(category_main="byt", prose=23.9, disposition="3+1") == (None, None)
+    assert sale(category_main="byt", prose=24.0, disposition="3+1") == (24.0, "unknown")
+    assert sale(category_main="byt", prose=76.0, disposition="3+1") == (76.0, "unknown")
+    assert sale(category_main="dum", prose=12.0) == (12.0, "unknown")
+    assert sale(category_main="dum", prose=8.0, disposition="1+1") == (8.0, "unknown")
+    assert sale(category_main="dum", prose=7.9, disposition="1+1") == (None, None)
+    assert sale(category_main="komercni", prose=6.0, disposition="3+1") == (6.0, "unknown")
     # Only a stated N+kk / N+1 scales the band; anything else keeps the flat 5 m² floor.
-    assert derive_headline_area(category_main="byt", prose=6.0, disposition="atypicky") == (6.0, "unknown")
+    assert sale(category_main="byt", prose=6.0, disposition="atypicky") == (6.0, "unknown")
     assert dwelling_area_band("byt", "3+1") == (24.0, 1_000.0)
     assert dwelling_area_band("byt", "atypicky") == (MIN_AREA_M2, 1_000.0)
     assert dwelling_area_band("byt", None) == (MIN_AREA_M2, 1_000.0)
@@ -316,7 +320,35 @@ def test_a_structured_figure_under_eight_square_metres_a_room_is_a_room_rental()
         category_main="byt", usable=13.0, prose=76.0, disposition="3+1") == (13.0, "usable")
     # A declined prose figure is absence, like any declined measure.
     assert derive_headline_area(
-        category_main="byt", prose=13.0, disposition="3+1") == (None, None)
+        category_main="byt", prose=13.0, disposition="3+1", category_type="prodej") == (None, None)
+
+
+def test_a_rental_prose_figure_under_eight_square_metres_a_room_is_the_room_it_lets():
+    """Production, 2026-09-27: 247 bazos pronajem rows sat under the per-room band (25
+    active), and the hand-read found room rentals — "pronájem pokoje 20m2 ve sdíleném bytě
+    3+1" (bazos 18625955, 18850769), "pronájem lůžka v pokojích" — beside genuine defects
+    (2+kk 5 m², 1+1 6 m²) that the rule cannot tell apart. The per-room floor is a SALE's;
+    a rental, and an advert whose deal type is unknown, keep the 5 m² floor alone."""
+    from scraper.area import MIN_AREA_M2, derive_headline_area
+
+    for category_type in ("pronajem", None):
+        assert derive_headline_area(
+            category_main="byt", prose=20.0, disposition="3+1",
+            category_type=category_type) == (20.0, "unknown")
+        assert derive_headline_area(
+            category_main="byt", prose=12.5, disposition="3+1",
+            category_type=category_type) == (12.5, "unknown")
+        assert derive_headline_area(
+            category_main="dum", prose=7.9, disposition="1+1",
+            category_type=category_type) == (7.9, "unknown")
+        assert derive_headline_area(
+            category_main="byt", prose=MIN_AREA_M2 - 0.1, disposition="1+1",
+            category_type=category_type) == (None, None)
+        assert derive_headline_area(
+            category_main="byt", prose=1_000.0, disposition="3+1",
+            category_type=category_type) == (None, None)
+    assert derive_headline_area(
+        category_main="byt", prose=20.0, disposition="3+1", category_type="prodej") == (None, None)
 
 
 def test_a_flat_at_a_thousand_square_metres_is_a_site_area_and_the_next_measure_speaks():
@@ -360,5 +392,6 @@ def test_bazos_mechova_cellar_is_not_the_flat():
         "a podíl na třináctimetrové sklepní místnosti.")
     disposition = vocabulary.disposition("bazos", haystack)
     assert disposition == "3+1"
-    areas = areas_from_text(haystack, category_main="byt", disposition=disposition)
+    areas = areas_from_text(haystack, category_main="byt", category_type="prodej",
+                            disposition=disposition)
     assert (areas.area_m2, areas.area_basis) == (None, None)
