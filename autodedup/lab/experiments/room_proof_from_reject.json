@@ -1,0 +1,62 @@
+{
+ "name": "room_proof_from_reject",
+ "note": "room proof also rescuing score rejects (cos >= 0.98)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  },
+  {
+   "rung": "column_proof",
+   "name": "room",
+   "from": [
+    "band",
+    "reject"
+   ],
+   "all": [
+    [
+     "tag_room_clip_min2",
+     ">=",
+     0.98
+    ],
+    [
+     "tag_rooms_private",
+     ">=",
+     2
+    ]
+   ],
+   "veto": [
+    [
+     "floorplan_conflict",
+     "==",
+     1
+    ]
+   ],
+   "fact_veto": true
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

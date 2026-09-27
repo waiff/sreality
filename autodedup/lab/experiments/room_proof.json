@@ -1,0 +1,69 @@
+{
+ "name": "room_proof",
+ "note": "the operator's kitchen-to-kitchen proof on today's CLIP room tags: second-weakest private room cosine, >=2 private rooms, fact veto + floor-plan veto; band pairs only",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  },
+  {
+   "rung": "column_proof",
+   "name": "room",
+   "from": [
+    "band"
+   ],
+   "all": [
+    [
+     "tag_room_clip_min2",
+     ">=",
+     0.97
+    ],
+    [
+     "tag_rooms_private",
+     ">=",
+     2
+    ]
+   ],
+   "veto": [
+    [
+     "floorplan_conflict",
+     "==",
+     1
+    ]
+   ],
+   "fact_veto": true
+  }
+ ],
+ "group": {
+  "step": "relation"
+ },
+ "sweep": {
+  "ladder.8.all.0.2": [
+   0.95,
+   0.97,
+   0.98,
+   0.99
+  ]
+ }
+}

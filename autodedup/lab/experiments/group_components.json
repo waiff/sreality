@@ -1,0 +1,34 @@
+{
+ "name": "group_components",
+ "note": "no repair at group grain: plain components of the merge edges",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "components"
+ }
+}

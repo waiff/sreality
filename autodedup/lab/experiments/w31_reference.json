@@ -1,0 +1,16 @@
+{
+ "name": "w31_reference",
+ "note": "decide_pair under w31 + w6_gold, rung by rung, then cluster_pairs with the D43 relation; blind (no rulings bound). verify reproduces the stored generation row for row.",
+ "model": "ref",
+ "ladder": [
+  {"rung": "veto"},
+  {"rung": "auto_reject"},
+  {"rung": "proof"},
+  {"rung": "score"},
+  {"rung": "context"},
+  {"rung": "gate"},
+  {"rung": "demonstrate"},
+  {"rung": "policy"}
+ ],
+ "group": {"step": "relation"}
+}

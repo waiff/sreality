@@ -1,0 +1,55 @@
+{
+ "name": "room_proof_unguarded",
+ "note": "room proof with NO veto (the operator's point: what does kitchen-to-kitchen merge before mitigation?)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  },
+  {
+   "rung": "column_proof",
+   "name": "room",
+   "from": [
+    "band"
+   ],
+   "all": [
+    [
+     "tag_room_clip_min2",
+     ">=",
+     0.97
+    ],
+    [
+     "tag_rooms_private",
+     ">=",
+     2
+    ]
+   ],
+   "veto": [],
+   "fact_veto": false
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

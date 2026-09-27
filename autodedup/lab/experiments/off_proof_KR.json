@@ -1,0 +1,38 @@
+{
+ "name": "off_proof_KR",
+ "note": "proof K-R off: those pairs fall to the score",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof",
+   "allow": [
+    "K-B",
+    "K-C"
+   ]
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}
