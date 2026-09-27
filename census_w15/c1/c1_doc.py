@@ -158,7 +158,7 @@ rows = [
     ("L17", "D43 promotion (band → merge when no fact differs)", "decide.py:572-588; indist:3187-3213", "missing the duplicates the score under-rates", f3("merge_by:D43_promote"),
      "the model cut (L13) reaches most of the same pairs", d("D43:promote"), "KEEP (load-bearing)"),
     ("L17a", "  warrant: agree:2 / photo / unit (E131/E191)", "indistinguishable.py:3127-3246", "promoting pairs that state nothing", "agree " + f3("D43_promote:agree:2") + "; photo " + f3("D43_promote:photo") + "; unit " + f3("D43_promote:unit*"),
-     "`agreeing_attributes` counts price and floor when both are STATED, not equal (indist:3155,3166); D50 A then demands area+disposition+price+obec agreement and B unit-grade evidence (demonstrate.py:449-477, 627-662)",
+     "`agreeing_attributes` counts price and floor when both are STATED, not equal (indistinguishable.py:3155-3156, 3168-3169); D50 A then demands area+disposition+price+obec agreement and B unit-grade evidence (demonstrate.py:449-477, 627-662)",
      d("D43:warrant->predicate") + "; photo alt off " + d("D43:warrant_photo_alt", ("trial",)) + "; unit off " + d("D43:warrant_unit_evidence", ("trial",)),
      "MERGE-INTO D50 (the warrant blocks 13 / 60 edges and 20 / 0 co-pairs; 4 dials)"),
     ("L18", "D50 demonstration (E157/E158)", "decide.py:639-664; demonstrate.py:295-477, 578-702", "promotion on the mere absence of a fact", "refusals " + f3("D50_refuse:*"),
@@ -414,7 +414,7 @@ P("- A1 §7.5 'E48 … only K-A is propose-only': the table is effectively ONE s
 P("  (certificates only test `is None`), the two model cells are equal, the global `t_hi` 1.0 is never read.")
 P("- A1 §7.11 '59 readers switched on': 64 fact names are emitted, 5 off; `FACT_NAMES` (47) is stale.")
 P("- A1 §7.8 'warrant = 2 of 9 attributes stated … step 1 has already ruled out that they differ': `price` and `floor`")
-P("  count when merely STATED (indistinguishable.py:3155-3166), so 'agree:2' is ~every priced flat pair; the warrant blocks")
+P("  count when merely STATED (indistinguishable.py:3155-3156, 3168-3169), so 'agree:2' is ~every priced flat pair; the warrant blocks")
 P("  13 trial / 60 c17 edges and 20 / 0 co-pairs.")
 P("- A1 §8 'the whole-group check reads leniently as at the gate but with photo facts': there are FOUR readings — the")
 P("  E193 rejoin re-reads the relation at the PROMOTE bar (d43.py:72-80).")
