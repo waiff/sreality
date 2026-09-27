@@ -1530,8 +1530,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prefetch=prefetch, on_shard=checkpoint)
                 del enc
                 checkpoint(f"embed_{name}")
-            rep.phase("embed", "ok", json.dumps({k: v for k, v in report["phases"].items()
-                                                 if k.startswith("embed")})[:1800])
+            embeds = {k: v for k, v in report["phases"].items() if k.startswith("embed")}
+            # An arm cut by the deadline is unfinished (its shards wait for a resume): the
+            # row says so rather than "ok".
+            rep.phase("embed", "failed" if any(v.get("partial") for v in embeds.values())
+                      else "ok", json.dumps(embeds)[:1800])
             # A checkpoint upload: the descriptors alone answer half the question, and a
             # watchdog teardown later must not cost them.
             checkpoint("after embed", force=True)
@@ -1649,7 +1652,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ex, pairs, paths, device=device, out_path=os.path.join(out_dir, f"lg_{ex}.npz"),
                     beat=beat_for(phase), deadline=deadline, workers=min(8, workers),
                     on_shard=checkpoint)
-                rep.phase(phase, "ok", json.dumps(report["phases"][phase]))
+                rep.phase(phase, "failed" if report["phases"][phase].get("partial") else "ok",
+                          json.dumps(report["phases"][phase]))
             except Exception as exc:  # noqa: BLE001 - one extractor must not lose the other
                 LOG.exception("%s failed", phase)
                 rep.phase(phase, "failed", f"{type(exc).__name__}: {exc}")
