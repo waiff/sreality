@@ -460,20 +460,21 @@ def ad_haystack(title: str | None, description: str | None) -> str:
 
 
 def areas_from_text(haystack: str | None, *, category_main: str | None,
-                    disposition: str | None) -> PortalAreas:
+                    category_type: str | None, disposition: str | None) -> PortalAreas:
     """bazos's area, such as it is — spelled here once and nowhere else.
 
     bazos has no structured area field at all: no interior measure and no
     "plocha pozemku", so `plot` is genuinely absent rather than unread, and the
     resolver's `prose` arm is the whole story here (on land it stamps that free-text
     number 'plot', which is what it is on a parcel ad). It is the one arm the per-room
-    floor reads, because the first m² in an advert's prose may be its cellar. Free prose
-    is also the one substrate where a parcel is always written "1 500 m2", which is why
-    the naive grammar cost ~12,400 of these rows their thousands digit.
+    floor reads, on a sale only, because the first m² in a sale's prose may be its cellar
+    while a rental's may be the room it lets. Free prose is also the one substrate where a
+    parcel is always written "1 500 m2", which is why the naive grammar cost ~12,400 of
+    these rows their thousands digit.
     """
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, plot=None, prose=parse_area_text(haystack),
-        disposition=disposition,
+        disposition=disposition, category_type=category_type,
     )
     return PortalAreas(area_m2=area_m2, area_basis=area_basis)
 
@@ -544,7 +545,8 @@ def parse_detail(
     posted_text = _text(tree.css_first("span.velikost10"))
 
     disposition = vocabulary.disposition("bazos", haystack)
-    areas = areas_from_text(haystack, category_main=category_main, disposition=disposition)
+    areas = areas_from_text(haystack, category_main=category_main,
+                            category_type=category_type, disposition=disposition)
 
     raw = {
         "id": source_id,
