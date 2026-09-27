@@ -47,7 +47,7 @@ def f3(key, src="f"):
     return " / ".join(vals)
 
 
-def d(arm, cohorts=("trial", "c17")):
+def d(arm, cohorts=("trial", "c17"), auto18=True):
     """ablation delta, trial ‖ c17 (‖ c18 when run)"""
     out = []
     for c in cohorts:
@@ -64,15 +64,20 @@ def d(arm, cohorts=("trial", "c17")):
             extra.append(f"opSame{a['dsame']:+d}")
         if a["ddiff"]:
             extra.append(f"opDiff{a['ddiff']:+d}")
+        if a.get("dbrowse"):
+            extra.append(f"Browse{a['dbrowse']:+d}")
         gl, ll = a.get("gained_labels", {}), a.get("lost_labels", {})
         if "ref_cd" in gl or "ref_cd" in ll:
             if gl.get("ref_cd", 0) or ll.get("ref_cd", 0) or gl.get("ref_cn", 0) or ll.get("ref_cn", 0):
                 extra.append(f"CD+{gl.get('ref_cd', 0)}/−{ll.get('ref_cd', 0)} CN+{gl.get('ref_cn', 0)}")
         out.append(s + ((" " + " ".join(extra)) if extra else ""))
-    if any(ARMS[c].get(arm) for c in ("c18",)) and "c18" not in cohorts:
+    if auto18 and any(ARMS[c].get(arm) for c in ("c18",)) and "c18" not in cohorts:
         a = ARMS["c18"][arm]
         if "invalid" not in a:
-            out.append(f"c18: m{a['dmerge']:+d} g{a['dgroups']:+d} cp+{a['cp_gained']}/−{a['cp_lost']}")
+            gl, ll = a.get("gained_labels", {}), a.get("lost_labels", {})
+            cd = (f" CD+{gl.get('ref_cd', 0)}/−{ll.get('ref_cd', 0)} CN+{gl.get('ref_cn', 0)}"
+                  if (gl.get("ref_cd", 0) or ll.get("ref_cd", 0) or gl.get("ref_cn", 0)) else "")
+            out.append(f"c18: m{a['dmerge']:+d} g{a['dgroups']:+d} cp+{a['cp_gained']}/−{a['cp_lost']}{cd}")
     return " ‖ ".join(out)
 
 

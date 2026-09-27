@@ -1,0 +1,500 @@
+# C1 — rules and layers census (W0, AUTODEDUP simplification sprint)
+
+Data for the coordinator. Every number is reproducible from `/home/hejtm/autodedup-artifacts/w15/census/c1/` (§9).
+Code pointers are `file:line` under `autodedup/` at **origin/main b2454fa1**; the decision code (`decide`, `guards`,
+`indistinguishable`, `demonstrate`, `d43`, `cluster`, `repartition`, `features`) is byte-identical at 092ce2ca (A1's
+pointers hold). Newer main afd121ae touches only lane/apply/ui (`apply.py` group-verdict newest-wins, `incremental.py`
+G4 ruling-change seeds, E919/E920); the lane/apply pointers below are b2454fa1's.
+
+## 0. The answer in numbers
+
+- **Measured**: 245 single-rule arms on the trial export (5,195 adverts; w31 + w6_gold; engine alone: no must-link, no
+  operator must-not-link loaded, so the operator's rulings stay out of the input and serve as the yardstick),
+  55 arms on cohort 17 (17,897 adverts), 13 on cohort 18 (17,422 adverts, final check), 21 trial arms re-read
+  against the label-free reference, and the deletion bundle executed as CODE through the official `harness run`
+  (trial + c17). The in-process replay is faithful: clusters, conflicts and reasons identical to `python3 -m
+  autodedup.harness run` on the trial (which equals the stored g15 `pairs.jsonl.gz` byte for byte), and the c18 replay
+  reproduces every stored c18 w31 reason count and all 3,754 groups.
+- **Baselines (engine alone)**: trial merge edges 7971, groups 1134, co-pairs 7866; operator-same together 470/511, operator-different together 2/162, Browse-merge yardstick 11/21. c17: merge 39845, groups 3888, co-pairs 42924; label-free reference (truth16 builder, `cohort17_read/ref`) certain duplicates together 26841/28230 (95.1 %), structural negatives together 0/14651; operator labels on c17: 47 same, 0 different (the rulings live in the trial area).
+- c18 (replay, engine alone): merge 25237, groups 3754, co-pairs 25088; CD together 15977/17626, CN together 0/13312.
+- **147 of 241 valid trial arms change not one pair's zone; 162 change no group.** Zero at group grain on the trial:
+  47/64 fact readers, 85/126 valid D43/D50/floor/repartition dials, E61, E48, E63, the D43 gate, 4/6 set-level cluster
+  invariants, the whole repartition repair ensemble, and the category walls (their pairs are caught downstream).
+- **The code bundle** (E61 veto, decide-time wall re-check, K-A, E48 strata, E45/E46/E47, E11, E63, D43 gate, D65,
+  cluster size/category_type/compat_class/area_spread/disposition/floor-spread limbs, repartition repairs; branch
+  `census/w15-c1-bundle` = −88/+7 lines in `decide.py`+`guards.py` before any dead function is removed):
+  **trial 0 co-pairs gained / 0 lost (groups 1,134 = 1,134)**; c17 m+406 g+2 cp+4/−10 CD+3/−8 CN+0 of 42,924 co-pairs (official harness on the code = its settings/patch twin, exactly); c18 (the twin) m+323 g+3 cp+19/−41 CD+8/−13 CN+0 of 25,088. On c17 and c18 the whole
+  delta is the repartition repairs (identical to the repairs-only arm); every other bundle member is exactly 0 on both.
+- **What the ladder actually runs on** (merge edges g15 / c17 / c18): D43 promotion 2,192 / 21,237 / 7,823; K-C 2,100 / 6,492 / 6,915; model cut 1,942 / 7,794 / 7,995; K-B 1,564 / 2,614 / 1,445; K-R 173 / 1,708 / 1,059.
+  Removing any single certificate or the model cut moves ≤ 177 merge edges on c17 (another rung re-derives the pair);
+  removing D43 promotion loses 22,502 co-pairs on c17 (11,699 certain duplicates). **Load-bearing: D43 promotion + the
+  D50 demonstration (incl. its E164 recover-missing waiver), the certificates as a group, the D43 cluster relation (incl.
+  E157 price + image facts) and the base repartition. Everything else is a duplicate of one of those, a sub-limb
+  excuse of one reader, or dormant.**
+
+## 1. Method
+
+- `scripts/c1_engine.py`: `harness.run_engine` re-run in-process (fingerprints → blocking → `pair_features` →
+  `decide_pair` → `storable` → `relation_for` → `cluster_pairs`, w31 has the E85/E88 deferred path off), features cached
+  per cohort; rules without a dial are ablated by a named patch (a wall dropped from `pair_veto` at blocking AND decide;
+  one fact name filtered out of `distinguishing_facts` in all three readings; one A-limb of D50 waived with the later
+  limbs still read; one set-level invariant neutralised with the later limbs still read). An arm touching nothing
+  `_decide_layers` reads re-uses the base layer decisions (exactly equivalent).
+- Coupled dials: 126 validator `raise`s make dials depend on dials; an arm switches off every dial the validator names
+  as depending on it (`coupled_off` in the arm row) — a rule cannot be ablated without its dependants.
+- Yardsticks: (1) operator rulings only (labels_g13: `operator_labels.jsonl` + `operator_merges.jsonl` +
+  `must_not_link.jsonl`, latest wins per pair): opSame/opDiff = change in operator-same / operator-different pairs that
+  end in one group; Browse = the 363 Browse-merge groups (the `yardstick.py` population). (2) Label-free, engine-free
+  reference (the program's truth16 builder, already built for c17/c18 and for the g13 trial export): CD = certain
+  duplicates (shared rare order code, ≥4 exact non-stock frames, identical ≥300-char body), CN = structural negatives
+  (two printed unit numbers / a stated-area conflict). CD overlaps the certificates by construction (read certificate
+  arms' CD with that in mind); CN overlaps D43 facts.
+- Notation: `m` merge edges Δ, `g` groups Δ, `cp+a/−b` co-pairs (two adverts in one group) gained/lost vs baseline;
+  `trial ‖ c17` (‖ c18 where run); `·` not run. Fires = `g15 / c17 / c18`: g15 and c18 from the STORED runs
+  (`score_g15/autodedup-score-36244048665`, `cohort18_runs/w31`), c17 from the w31 replay (no w31 run was stored for
+  c17; `cohort17_runs/w30` is w30; walls for c17 are read off the w30 run, whose blocking is identical: 247,900 pairs).
+
+## 2. The pair ladder, in the order the code runs
+
+| # | rule (layer) | code | protects against | fires g15 / c17 / c18 | same fact/signal also compared in | ablation Δ trial ‖ c17 | verdict |
+|---|---|---|---|---|---|---|---|
+| W1 | wall category_type (E2) — retrieval | guards.py:69-71; called blocking.py:202, incremental.py:642, decide.py:708, yardstick.py:286, town_probe.py:175 | sale merged with rent | 55,287 / 530,241 / 522,058 lookups refused | D43 reader `category_type` indistinguishable.py:2619; cluster invariant guards.py:205-207; apply `category_type_mix` apply.py:568-573; chokepoint toolkit/property_identity; probe keys carry deal type | m+0 g+0 cp+0/−0 ‖ ·; band +112 | MERGE-INTO the one fact comparator (keep as retrieval slot filter, one definition) |
+| W2 | wall category_main (E3) | guards.py:72-73 | flat merged with house (dům↔komerční allowed) | 21,834 / 256,516 / 267,685 | D43 `category_main` indist:2624; cluster `compat_class` guards.py:209-213; apply `category_main_incompatible` apply.py:574-579; chokepoint; cat_group probe keys | m+0 g+0 cp+0/−0 ‖ ·; band +229 | MERGE-INTO (as W1) |
+| W3 | wall area >8 % (E5) | guards.py:74-75, area_relation 49-61 | two sizes merged | 357,509 / 1,286,078 / 1,157,744 | feature area_rel_diff (model), K-B ≤1 %, K-C ≤3 %, K-A ≤2 %, E63 ≤1 %, D43 `area` (gate/cluster 8 %, promote 3 %), `stated_area`/`printed_area`/`headline_area`, D50 A:area, `agreeing_attributes`, ATTR family (exact/1 %/2 %), cluster `area_spread` 8 %, attr_area/town probe bands — 12 places, 7 thresholds | m-15 g-1 cp+11/−5 ‖ · | MERGE-INTO (retrieval filter only: −15 merges come from cap-slot displacement, not from a decision) |
+| W4 | wall disposition | guards.py:76-79 | 2+kk merged with 3+kk | 45,576 / 152,333 / 157,471 | feature dispo_equal; K-C/K-A; D43 `disposition` indist:2646; D50 A:disposition; `agreeing_attributes`; cluster `disposition` spread (off); attr_dispo/town probe keys | m-2 g+0 cp+0/−0 ‖ ·; band +258 | MERGE-INTO |
+| W5 | wall floor ≥2 (flats) | guards.py:80-83 | two flats of one building | 45,577 / 91,760 / 69,730 | features floor_diff + same-portal one-floor; K-A; D43 `floor` (camps) + total_floors/prose_floor/subject_floor/storey_word/offered_storey; numeral_conflict (floor); cluster floor spread (off); `agreeing_attributes` | m-2 g+0 cp+0/−0 ‖ ·; band +67; all five walls off: m-123 g-7 cp+41/−21 | MERGE-INTO (a floor fact is D43's; the ≥2 wall is a second, looser definition) |
+| L1 | decide-time wall re-check (7.1) | decide.py:708-710 | pair reaching decide without retrieval | 0 / 0 / 0 | W1-W5 at retrieval | 0 by construction | DELETE |
+| L2 | E61 unit-designator veto | decide.py:712-720; guards.py:87-115; machine vetoes cluster.py:340-347, harness.py:521,629, incremental.py:1302,1630-1635 | developer twin flats (byt č. 3 vs č. 5) | 19 / 4 / 104 | D43 reader `unit_designator` indistinguishable.py:2745-2749 — the SAME predicate (one designator per side, differ, same address block); it never fires only because E61 vetoes first | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0; cluster-only part: m+0 g+0 cp+0/−0 | DELETE (the D43 reader carries it; the pair becomes band, reviewable, instead of an invisible veto) |
+| L3 | auto-reject attr_contradictions ≥3 | decide.py:433-442, 725-727 | look-alikes stating 3 different extra attributes | 12,967 / 23,283 / 24,247 | model feature `attr_contradictions` (features.py:1453) — the rule is a hard cut on a feature the score already weighs; some slots are D43 facts (floor, cellar, accessory) | m+16 g+1 cp+5/−1 opSame+2 | MERGE-INTO the model (measure as a loosening) |
+| L4 | auto-reject numeral_conflict | decide.py:439-441; features.py:1538 | texts stating different floor/rooms/unit numbers | 6,748 / 28,172 / 27,121 | D43 `prose_floor`, `subject_floor`, `unit_code`, `storey_word` read the same prose; model feature `numeral_conflict` | m+5 g+2 cp+2/−0; both auto-rejects off: m+21 g+3 cp+7/−1 opSame+2 ‖ m+85 g+7 cp+50/−0 CD+24/−0 CN+0 (trialr CD+2/−1 CN+0/−0) | MERGE-INTO D43 readers (a loosening: c17 +50 co-pairs, 24 CD, 0 CN; needs the confirmation discipline) |
+| L5 | K-R certificate (E60) | decide.py:228-241, 266-267; features ref_code index features.py:863 | the broker's own order key | 173 / 1,719 / 1,064 (merged 173 / 1,708 / 1,059) | `ref_code_shared` also read by D50 strong_corroboration (demonstrate.py:684), corroboration 'code' (618), unit_grade_warrant (indist:3216), D43 agency_code readers (off), E45 ref arm (off) | m+0 g+0 cp+9/−5 ‖ m-25 g-2 cp+104/−45 CD+19/−35 CN+0 (trialr CD+8/−4 CN+0/−0) | KEEP as proof rung, but note: 0 merge edges on the trial are K-R-only; on c17 25 |
+| L6 | K-A certificate | decide.py:143-153, 269-270 | (off: 52.6 % precision) | 0 / 0 / 0 | features same_ruian_adm_kod, dispo, area, floor | 0 by construction | DELETE |
+| L7 | K-B certificate (E6/E7) + E84 gap | decide.py:190-206, 126-140 | a broker's own re-post | 1,570 / 2,702 / 1,476 (merged 1,564 / 2,614 / 1,445) | same_source/same_broker/containment ≥0.90/area ≤1 %/disjoint windows: one of 19 overlap/clock functions (§7); containment ≥0.90 = E63, E45 repost arm, D43 price-sequential | m-173 g-1 cp+7/−4 ‖ m-46 g-1 cp+296/−268 CD+78/−28 CN+0; E84 gap off (with its coupled honest clock): m-8 g-1 cp+0/−1 | KEEP (proof rung) |
+| L8 | E65 K-B photo floor | decide.py:156-187 | (off) | 0 / 0 / 0 | n_images_min, phash_loose_matches | 0 by construction | DELETE (2 dials) |
+| L9 | K-C certificate | decide.py:209-225 | the same photo shoot on two portals | 2,139 / 6,576 / 7,010 (merged 2,100 / 6,492 / 6,915) | tight ≥4 also: E164 recover (≥3), D43 cellar yield (≥4), price-sequential (≥3), promote photo warrant (≥1), D50 B photo (≥1), E63 images (≥4); area ≤3 % = D43 promote area bar | m-33 g-2 cp+46/−37 ‖ m-62 g-1 cp+51/−105 CD+19/−69 CN+0 (trialr CD+7/−26 CN+0/−0) | KEEP (proof rung) |
+| L10 | E48 per-stratum cut / propose-only | decide.py:406-430, 732-734, 745 | a stratum that could not prove its bar | 0 / 0 / 0 propose-only | w31 cells: K-A (dead), `K-C\|same: 0.0` (never compared: certificates only test `is None`), `model\|same` = `model\|cross` = 0.9788; global `t_hi` 1.0 never read | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | DELETE (one scalar t_hi = 0.9788) |
+| L11 | E45/E46/E47 merge-zone gates | decide.py:278-399, 445-453 | (off) | 0 / 0 / 0 | unit arms re-read K-B/K-R/interior | 0 by construction | DELETE (~12 dials) |
+| L12 | E11 evidence-family gate (min 1) | decide.py:729, 738-743, 749-752 | images alone merging | 0 / 0 / 0 `evidence_gate` | families (features.py:1675) stay as reporting; min 1 is vacuous for every certificate/cut pair | dial cannot be 0 (validator); fires 0 | DELETE |
+| L13 | model cut t_hi 0.9788 | decide.py:745-752 | merging on the learned score | 1,942 / 7,794 / 7,995 model merges | D43 promotion re-derives most model merges (only 39 / 177 are model-only) | m-39 g-6 cp+0/−67 opSame-4 ‖ m-177 g-13 cp+77/−96 opSame-2 Browse-2 CD+36/−52 CN+0 (trialr CD+0/−21 CN+0/−0) | KEEP (score rung) — but it and D43 promotion are two roads to one outcome (§7) |
+| L14 | band floor t_lo 0.1823 | decide.py:753-755 | band (review/promotion pool) growing | band(model) 1,488 / 10,436 / 8,138 | store_floor 0.02 (store), E25 budget | t_lo→0.02: m+2 g+0 cp+0/−0 ‖ m+46 g+1 cp+8/−0 CD+1/−0 CN+0 | KEEP (the review-budget dial; promotions below it are ~0) |
+| L15 | E63 context rule (+E64 rail) | decide.py:456-540; hazard_context.py (401 lines); incremental.py:1655-1708 | (promote band pairs with identical text+price) | 0 / 0 / 0 | containment ≥0.90 (K-B), price ratio (D50 A:price), area ≤1 % (K-B) | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | DELETE (+10 dials, hazard census) |
+| L16 | D43 gate (demote a merge on any stated fact) | decide.py:543-571; indistinguishable GATE reading | certified merge across a stated fact | 92 / 406 / 319 | the D43 CLUSTER reading re-reads every fact on the group (d43.py:86-114) — a demoted edge and a refused union give the same groups | m+92 g+0 cp+0/−0 ‖ m+406 g+0 cp+0/−0 ‖ c18: m+319 g+0 cp+0/−0 | DELETE (and with it one of the three readings) |
+| L17 | D43 promotion (band → merge when no fact differs) | decide.py:572-588; indist:3187-3213 | missing the duplicates the score under-rates | 2,192 / 21,237 / 7,823 | the model cut (L13) reaches most of the same pairs | m-2192 g-104 cp+12/−1702 opSame-57 opDiff-1 ‖ m-21237 g-285 cp+122/−22502 opSame-8 Browse-5 CD+65/−11699 CN+0 | KEEP (load-bearing) |
+| L17a |   warrant: agree:2 / photo / unit (E131/E191) | indistinguishable.py:3127-3246 | promoting pairs that state nothing | agree 2,114 / 21,156 / 7,663; photo 48 / 73 / 134; unit 30 / 8 / 26 | `agreeing_attributes` counts price and floor when both are STATED, not equal (indist:3155,3166); D50 A then demands area+disposition+price+obec agreement and B unit-grade evidence (demonstrate.py:449-477, 627-662) | m+13 g-2 cp+20/−0 ‖ m+60 g+0 cp+0/−0 ‖ c18: m+21 g+0 cp+16/−0 CD+2/−0 CN+0; photo alt off m-21 g+1 cp+0/−18; unit off m-30 g-3 cp+0/−30 | MERGE-INTO D50 (the warrant blocks 13 / 60 edges and 20 / 0 co-pairs; 4 dials) |
+| L18 | D50 demonstration (E157/E158) | decide.py:639-664; demonstrate.py:295-477, 578-702 | promotion on the mere absence of a fact | refusals 406 / 2,910 / 2,632 | A re-reads area/disposition/price/obec (all D43 facts too) at stricter bars; B re-reads K-C/K-B/K-R evidence | m+376 g+29 cp+278/−38 ‖ m+2902 g+31 cp+1951/−32 CD+410/−15 CN+0 (trialr CD+93/−34 CN+0/−0) | KEEP (load-bearing) — but see L18a-g |
+| L18a |   A:area | demonstrate.py:178-186, 458-460 | promoting across an unread area | 106 / 758 / 422 | D43 area (promote 3 %), printed/stated area | m+67 g+3 cp+149/−0 | KEEP |
+| L18b |   A:disposition | demonstrate.py:187-195, 461-463 |  | 37 / 258 / 33 | W4 wall + D43 disposition (both need both stated; A also refuses a MISSING side) | m+12 g+0 cp+0/−0 ‖ m+242 g+1 cp+6/−3 CD+2/−1 CN+0 | KEEP (c17 +242 edges); fold its MISSING case into E164 |
+| L18c |   A:price (exact / rounding / path / sequential) | demonstrate.py:295-337 | co-live neighbouring units at close prices | 146 / 973 / 1,277 | D43 price (5 %/60 %), E157 cluster price, E63 ratio, features price_last_ratio/ppm2/path | m+121 g+4 cp+66/−0 | KEEP |
+| L18d |   A:obec | demonstrate.py:196-199, 467-473 |  | 0 / 32 / 39 | blocking block key; D43 obec/obec_prose/body_obec | m+0 g+0 cp+0/−0 ‖ m+24 g-2 cp+32/−0 | KEEP (c17 +32 co-pairs, 0 CD) |
+| L18e |   A:onesided (E162) | demonstrate.py:578-607 | development twins printing a unit fact on one side | onesided 3 / 11 / 30 | D43 unit_code/floor/printed_area | m+3 g+1 cp+1/−0 | KEEP (small) |
+| L18f |   E164 recover-missing waiver | decide.py:655-660; demonstrate.py:665-702 | losing re-posts that state nothing | n/a (a waiver) | strong_corroboration = K-C/K-R/K-B evidence again | m-466 g-31 cp+2/−407 opSame-25 | KEEP (load-bearing: −407 co-pairs, 25 opSame if off) |
+| L18g |   B corroboration (+ identical twin) | demonstrate.py:610-662, 265-292 | promotion with no unit-grade evidence | 114 / 878 / 831 | photo/body/code = certificate evidence again | B off m+114 g+14 cp+70/−3; twin off m+0 g+0 cp+0/−0 ‖ m-12 g+1 cp+0/−12 CD+0/−4 CN+0 | KEEP B; twin KEEP (c17 −12 co-pairs, 4 CD) |
+| L19 | D65 merge policy (category hold) | decide.py:589-636, 690 | (empty table since Decision 2) | 0 / 0 / 0 | apply scope row category_types | 0 by construction | DELETE (+ the 15 `*_hold.json` settings files) |
+| L20 | F3/E93/E908 evidence hold (lane only) | incremental.py:157-235, 1256-1270; incremental_lane.py:286 | deciding on photos not yet processed | live only: 118 holds in the G1 read (TRIAL_LIVE.md:194) | the batch/harness path has no equivalent (withheld-evidence replay in rt_equivalence.py only) | n/a offline | KEEP the behaviour, MOVE into decide_pair as an input (one code path) |
+
+## 3. The D43 fact readers (64 names emitted by `distinguishing_facts`, indistinguishable.py:2591-3109)
+
+Fires are `any/sole` pairs in the gate / promote / cluster readings (sole = the only fact on that pair; a reader with
+sole 0 everywhere cannot change any decision alone). Ablation = the fact name filtered out of all three readings.
+`FACT_NAMES` (indistinguishable.py:209-258) lists 47 names; 64 are emitted — the registry is stale (17 unlisted).
+
+| reader | fires trial \| c17 \| c18 (gate promote cluster, any/sole) | ablation Δ trial ‖ c17 | verdict |
+|---|---|---|---|
+| accessory | 6/0 0/0 0/0 \| 0/0 25/0 0/0 \| 5/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| accessory_area | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| accessory_price | 0/0 21/0 0/0 \| 0/0 27/1 0/0 \| 2/2 34/2 4/4 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| agency_code | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| agency_code_colive | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| agency_code_plus | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| area | 0/0 137/39 12/12 \| 0/0 819/169 18/14 \| 0/0 1103/319 83/73 | m+27 g+1 cp+29/−1 ‖ · | KEEP (moves groups) |
+| body_align | 17/7 127/10 1/0 \| 79/41 3270/2336 30/22 \| 122/95 1093/152 44/27 | m+14 g+1 cp+15/−0 ‖ · | KEEP (moves groups) |
+| body_obec | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 1/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| category_main | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | KEEP (the one definition once E61 / the walls' re-checks / C6-C7 go; ~0 today only because a duplicate fires first) |
+| category_type | 0/0 0/0 0/0 \| 0/0 0/0 1/1 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | KEEP (the one definition once E61 / the walls' re-checks / C6-C7 go; ~0 today only because a duplicate fires first) |
+| cellar_area | 5/3 35/3 0/0 \| 0/0 30/2 0/0 \| 0/0 12/0 0/0 | m+4 g+0 cp+0/−0 ‖ · | KEEP (moves groups) |
+| charge | 1/1 13/0 1/1 \| 1/0 127/4 2/1 \| 0/0 103/5 0/0 | m+1 g+0 cp+0/−0 ‖ · | KEEP (moves groups) |
+| commercial_subtype | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| disposition | 0/0 0/0 2/2 \| 0/0 0/0 2/2 \| 0/0 0/0 1/1 | m+0 g+0 cp+4/−0 ‖ · | KEEP (the one definition once E61 / the walls' re-checks / C6-C7 go; ~0 today only because a duplicate fires first) |
+| english_unit_code | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| extent | 0/0 5/4 0/0 \| 3/3 1/1 2/2 \| 6/4 9/4 5/4 | m+0 g+0 cp+0/−0 ‖ m+3 g+0 cp+5/−0 CD+5/−0 CN+0 | keep-measure (0 trial, moves c17) |
+| extent_package | 0/0 2/0 0/0 \| 0/0 52/0 0/0 \| 0/0 94/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| extent_variant | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| floor | 14/5 75/15 11/8 \| 89/74 216/73 227/202 \| 23/13 304/38 86/68 | m+12 g+2 cp+69/−0 opSame+3 ‖ · | KEEP (moves groups) |
+| floorplan | 0/0 39/9 12/11 \| 0/0 56/8 47/12 \| 0/0 98/10 9/9 | m+8 g-2 cp+30/−0 ‖ · | KEEP (moves groups) |
+| headline_area | 0/0 0/0 0/0 \| 0/0 20/7 3/1 \| 2/0 8/1 2/0 | m+0 g+0 cp+0/−0 ‖ m+1 g+0 cp+5/−0 CD+3/−0 CN+0 | keep-measure (0 trial, moves c17) |
+| interior | 0/0 370/151 29/25 \| 0/0 1753/699 195/158 \| 0/0 1693/580 107/100 | m+16 g-2 cp+90/−9 ‖ · | KEEP (moves groups) |
+| labelled_unit | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| lot_label | 0/0 0/0 0/0 \| 1/0 2/0 0/0 \| 0/0 11/3 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| named_villa | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| neighbour_plot | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| obec | 0/0 0/0 0/0 \| 0/0 8/0 0/0 \| 0/0 41/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| obec_prose | 0/0 5/0 0/0 \| 0/0 79/7 0/0 \| 0/0 234/8 0/0 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| offer_area | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| offered_storey | 0/0 5/0 0/0 \| 8/0 44/0 10/0 \| 4/0 39/0 10/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| offered_use | 0/0 0/0 0/0 \| 0/0 1/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| orientation | 1/1 1/0 0/0 \| 0/0 27/0 0/0 \| 0/0 27/0 0/0 | m+1 g+1 cp+1/−0 opDiff+1 ‖ · | KEEP (moves groups) |
+| outdoor_accessory | 0/0 8/0 0/0 \| 0/0 19/0 2/0 \| 0/0 24/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| parcel | 0/0 0/0 0/0 \| 0/0 81/0 0/0 \| 0/0 141/5 15/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| part_addition | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| part_whole | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| plan_space | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| plot_area | 8/8 35/13 3/3 \| 50/24 883/117 30/30 \| 20/13 568/49 23/20 | m+12 g-1 cp+25/−0 ‖ · | KEEP (moves groups) |
+| plot_attribute | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| plot_prose | 0/0 0/0 0/0 \| 0/0 48/0 0/0 \| 0/0 65/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| plot_prose_exact | 0/0 2/0 0/0 \| 0/0 34/6 0/0 \| 1/0 61/0 1/0 | m+0 g+0 cp+0/−0 ‖ m+6 g-1 cp+10/−0 | keep-measure (0 trial, moves c17) |
+| position_designator | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| price | 11/11 337/117 49/45 \| 116/38 1876/587 492/477 \| 60/59 1944/638 322/305 | m+19 g-2 cp+61/−0 ‖ · | KEEP (moves groups) |
+| priced_row | 0/0 0/0 0/0 \| 76/3 20/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ m+3 g+0 cp+0/−0 | DELETE (0 trial, 0 c17, no sole fire c18) |
+| printed_area | 10/3 198/25 1/0 \| 46/5 1477/34 5/0 \| 20/8 1236/69 4/0 | m+3 g+1 cp+1/−0 ‖ · | KEEP (moves groups) |
+| printed_designator | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 5/0 147/36 15/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| printed_house_number | 0/0 0/0 0/0 \| 0/0 1/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| product_class | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 7/2 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| prose_floor | 6/1 89/10 0/0 \| 7/2 127/5 10/6 \| 16/7 184/32 10/0 | m+1 g+1 cp+1/−0 ‖ · | KEEP (moves groups) |
+| rental_colive | 2/1 11/1 0/0 \| 0/0 32/4 0/0 \| 1/1 27/4 1/1 | m+1 g+0 cp+0/−0 ‖ · | KEEP (moves groups) |
+| slug_unit | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| space_number | 0/0 0/0 0/0 \| 0/0 1/0 1/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| stated_area | 2/2 50/7 12/12 \| 25/18 316/79 37/32 \| 14/9 191/4 14/4 | m+4 g-1 cp+21/−0 ‖ · | KEEP (moves groups) |
+| stored_house_number | 0/0 5/0 0/0 \| 0/0 4/1 1/1 \| 0/0 8/1 0/0 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| storey_word | 0/0 3/0 0/0 \| 1/1 40/6 0/0 \| 8/8 4/0 0/0 | m+0 g+0 cp+0/−0 ‖ m+6 g+1 cp+7/−0 | keep-measure (0 trial, moves c17) |
+| street | 9/9 89/35 0/0 \| 3/3 189/13 3/3 \| 23/18 400/29 7/7 | m+13 g-1 cp+13/−0 opSame+3 ‖ · | KEEP (moves groups) |
+| street_prose | 0/0 26/5 0/0 \| 6/6 204/33 13/13 \| 3/3 253/63 0/0 | m+0 g+0 cp+0/−0 ‖ m+12 g-2 cp+97/−0 | keep-measure (0 trial, moves c17) |
+| subject_floor | 0/0 0/0 0/0 \| 19/11 49/11 36/22 \| 4/0 45/0 10/0 | m+0 g+0 cp+0/−0 ‖ m+17 g+0 cp+0/−0 | DELETE (0 trial, 0 c17, no sole fire c18) |
+| total_floors | 23/20 58/21 18/16 \| 66/55 260/81 105/91 \| 42/39 349/67 34/29 | m+31 g+1 cp+41/−1 opSame+14 Browse+10 ‖ · | KEEP (moves groups) |
+| two_unit | 0/0 145/2 0/0 \| 0/0 891/40 3/3 \| 3/1 713/12 2/0 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| unit_code | 0/0 63/0 0/0 \| 0/0 8/2 0/0 \| 0/0 116/3 1/1 | m+0 g+0 cp+0/−0 ‖ m+2 g+0 cp+0/−0 | DELETE-candidate (0 trial, 0 c17; sole fire on c18) |
+| unit_count | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 1/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | DELETE (0 trial, 0 c17, no sole fire c18) |
+| unit_designator | 0/0 0/0 0/0 \| 0/0 0/0 0/0 \| 0/0 0/0 0/0 | m+0 g+0 cp+0/−0 ‖ · | KEEP (the one definition once E61 / the walls' re-checks / C6-C7 go; ~0 today only because a duplicate fires first) |
+
+## 4. Cluster invariants and closures (cluster.py, repartition.py, d43.py, guards.py:180-245)
+
+| # | rule | code | protects against | fires g15 / c17 / c18 | also compared in | ablation Δ trial ‖ c17 | verdict |
+|---|---|---|---|---|---|---|---|
+| C1 | must-link closures (E910) | cluster.py:164-211, 342-349 | engine splitting an operator merge | g15: 1,251 pairs, 41 closures, 0 dissolved; c17/c18 not loaded offline | apply operator checks | n/a (operator input) | KEEP |
+| C2 | closure validity (size/type/category/MNL) | cluster.py:191-211 | operator rulings contradicting each other | 0 dissolved (g15) | the set invariants C5-C8 with relation=None | n/a | KEEP, re-expressed on the D43 relation once C5-C8 go |
+| C3 | must-not-link (operator + E61 machine vetoes) | guards.py:236-241; cluster.py:345-347 | joining what the operator split | conflicts 2 / 0 / 0 | apply `operator_pair_verdict`/`must_not_link`; lane rulings read | machine part: m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | KEEP operator part; machine part goes with E61 |
+| C4 | D43 cluster relation (E132) incl. image facts + E157 price | d43.py:86-114; guards.py:243-244 | A=B, B=C each clean while A≠C | conflicts 260 / 1,361 / 1,023 | the same readers as the gate (L16) and promote readings; E157 = D50 A:price at cluster grain | m+0 g-12 cp+441/−0 opSame+23 Browse+10 ‖ m+0 g-71 cp+2993/−18 opSame+1 Browse+1 CD+712/−6 CN+3 (trialr CD+113/−0 CN+0/−0) | KEEP (the one group-grain fact check) |
+| C4a |   E157 cluster price limb | d43.py:99-112; demonstrate.py:405-423 | estate units at 9.65/9.75/9.85 M chained | member pairs refused: 38 / 145 / 109 | D50 A:price, D43 price | m+0 g+3 cp+28/−4 opSame-1 ‖ m+0 g-3 cp+232/−18 CD+124/−9 CN+0 (trialr CD+16/−1 CN+0/−0) | KEEP-measure (c17: costs 124 CD, 0 CN caught; CN cannot see price twins) |
+| C4b |   image facts at cluster (interior, floorplan) | settings d43_cluster_image_facts; indist:3080-3107 | dev units sharing a shoot | interior/floorplan cluster sole: trial 25/11, c17 158/12 | gate reading drops them (d43_gate_image_facts false) — two answers to one question | m+0 g-5 cp+134/−5 ‖ m+0 g-12 cp+378/−12 CD+102/−5 CN+0 (trialr CD+8/−4 CN+0/−0) | KEEP-measure (c17 costs 102 CD, 0 CN) |
+| C5 | size > 256 | guards.py:202-203 | a runaway group | 0 / 0 / 0 (max group 40 / 116 / 32) | lane component cap 400 (incremental.py:1518-1571) | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | DELETE |
+| C6 | category_type across the set | guards.py:205-207 | sale+rent via a NULL-type bridge | conflicts 0 / 1 / 0 | D43 `category_type` in C4 reads every member pair (the c17 conflict is a drazba/prodej/NULL auction: C4 refuses it identically) | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | DELETE |
+| C7 | compat_class across the set | guards.py:209-213 | flat+house via a NULL bridge | 0 / 0 / 0 | D43 `category_main` in C4 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE |
+| C8 | area_spread 8 % (+E280 printed excuse) | guards.py:215-221, 129-152 | area chains | conflicts 3 / 8 / 34 | D43 `area` at the lenient 8 % in C4 (the extreme pair of the set) with the same E280 excuse | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | DELETE (conflicts are relabelled d43_distinguishable, groups identical) |
+| C9 | disposition / floor spread | guards.py:223-234 | (off) | 0 / 0 / 0 | D43 disposition / floor | 0 by construction | DELETE (2 dials) |
+| C10 | edge rank (certificate first, score, ids) | cluster.py:103-112; repartition.py:31-49 | arrival-order dependence (E33) | every run | CERTIFICATE_WEIGHT 1000 in the objective | n/a | KEEP |
+| C11 | repartition (E137) greedy + local search | cluster.py:214-325; repartition.py:73-164 | one bad member vetoing a family | components cut 54 / 203 / 179 | union-find path (C13) | → union-find: m+0 g+5 cp+23/−83 opSame-2 Browse-2 | KEEP |
+| C12 |   repairs: E156 keep-factless, E193 rejoin (strict relation), E253 shed + outer rounds, E262 shed guard, E263 reconcile-first | repartition.py:166-526; cluster.py:254-281; d43.py:72-80 | factless separations after the greedy pass | n/a (no counter) | the strict relation re-reads D43 at the PROMOTE bar = a fourth reading | all off: m+0 g+0 cp+0/−0 ‖ m+0 g+2 cp+4/−10 CD+3/−8 CN+0 ‖ c18: m+0 g+3 cp+19/−41 CD+8/−13 CN+0; singly: E156 m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0; E193 m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0; E253 m+0 g-1 cp+10/−5 ‖ m+0 g+4 cp+215/−194 CD+41/−67 CN+0; rounds m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0; E262 m+0 g-2 cp+52/−19 ‖ m+0 g-9 cp+219/−84 CD+118/−42 CN+0; E263 m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | DELETE the ensemble (net −5 CD on c17 of 26,841 and −5 on c18 of 15,977, 0 CN, trial 0; the parts interact: E253 alone +215/−194, E262 alone +219/−84 on c17, together ~0) |
+| C13 | constrained union-find + E57 bridges | cluster.py:115-161, 376-451 | (not run: repartition true) | 0 / 0 / 0 | C11 | n/a | DELETE (3 dials) |
+| C14 | E303 K-C house-number price excuse | d43.py:109-112; indist:1738 | (off, prepared) | 0 / 0 / 0 |  | 0 by construction | DELETE |
+
+## 5. Apply refusals (apply.py:637-848, 955-1095; one planner for batch apply and the lane reconcile)
+
+Counts are summed over the 7 live applies of the trial (g12, g13 ×2, g14, g14 rentals, g15; `apply_fires.json`).
+
+| reason | code | protects against | live fires (sum) | also checked in | verdict |
+|---|---|---|---|---|---|
+| category_outside_scope | apply.py:97, 177 | merging outside the rollout | 1701 | lane rt_scope | DELETE with the scope row (W6) |
+| member_outside_blocks / member_without_location / member_outside_listing_ids | apply.py:98-100, 178-185 |  | 0 |  | DELETE with the scope row (W6) |
+| unattached_member | apply.py:105, 759 | advert without a property | 0 | chokepoint | KEEP (live-state rail) |
+| property_not_active | apply.py:106, 763, 988 | merging into a retired record | 0 | chokepoint | KEEP |
+| operator_group_verdict | apply.py:107, 485 | a set the operator ruled not one | 1 | NOT read by the clustering (only kind='pair' rulings become must-links, incremental_sql.py:1094-1104) | MERGE-INTO the clustering (group verdict → pair must-not-links); then delete here |
+| operator_pair_verdict / must_not_link | apply.py:108-109, 487-496 | joining what the operator split | 0 | cluster C3 every lane pass + `changed_since_plan` in-lock | MERGE-INTO `changed_since_plan` |
+| category_type_mix / category_main_incompatible | apply.py:110-111, 568-579 | sale+rent / flat+house on one survivor | 0 | W1/W2, D43 facts, C6/C7, and the chokepoint itself (CLAUDE.md rule 15) | DELETE |
+| carries_out_of_scope_listings | apply.py:112, 583-586 | dragging an out-of-scope advert along | 200 |  | DELETE with the scope row (W6) |
+| property_spans_groups | apply.py:115, 785 | fusing two engine groups through one property | 22 |  | KEEP |
+| carries_ungrouped_listings | apply.py:116, 794 | absorbing an advert the engine never grouped | 42 |  | KEEP |
+| refused_at_chokepoint_before | apply.py:117, 805 | retrying a refused set | 0 |  | KEEP |
+| restored_outside_engine (E905) | apply.py:118, 810-813, 1000 | re-merging what the operator undid | 0 |  | KEEP |
+| changed_since_plan | apply.py:120, 974 | state moving between plan and merge | 0 |  | KEEP (absorbs pair verdict/MNL) |
+| asset_linked_units | apply.py:114, 1135 | two asset links on one survivor | 0 | chokepoint raises it | KEEP |
+| deferred_run_cap | apply.py:827-832 | one run merging too much | 101 | lane per-pass cap | KEEP one cap (lane) |
+| ruled_different_after_merge (report only) | apply.py:123, 741-751 | silently keeping a contradicted merge | 1 | proposed splits page | KEEP |
+
+## 6. Lane rails and holds (incremental_lane.py, incremental.py, reconcile.py)
+
+No offline fire counts exist; the trial log (`TRIAL_LIVE.md`) records: storage budget refused twice (15:26, 15:40 CEST 09-26),
+seed-vs-lease refused once (16:10), 118 evidence holds (G1 read, :194), 0 reconcile quarantines named.
+
+| rail | code | protects against | also in | verdict |
+|---|---|---|---|---|
+| F3/E93 evidence hold (merge → band `evidence_pending`, 48 h horizon) | incremental.py:157-235, 1256-1270; incremental_lane.py:286 | deciding on photos not yet evidence | rt_equivalence withheld replay | KEEP, move into decide_pair (§2 L20) |
+| E64 context rail | incremental.py:1655-1708 | E63 promotions in a growing block | E63 | DELETE with E63 |
+| E83/E85/E88 NotImplementedError refusals | incremental.py:994-1035 | lane diverging from batch | family.py, development.py, harness.py:492-603 | DELETE with the dials |
+| component cap 400 | incremental.py:696, 1518-1571; incremental_lane.py:230 | re-grouping from a partial view | cluster size 256 (C5) | KEEP (one cap) |
+| pair budget 150,000 (E75) | incremental.py:695, 1203 | a pass that cannot fit |  | KEEP |
+| pass deadline 1,050 s (E913) + rate budget | incremental_lane.py:205, 322-330, 1939 | stalled passes |  | KEEP |
+| storage budget 800 MB (E916) | incremental_lane.py:360, 1639-1695 | an unwatched schema |  | KEEP (fired 2× on 09-26) |
+| retire rail 5 %/24 h | incremental_lane.py:338, 1367-1411 | a broken scope retiring the store |  | KEEP |
+| enter-scan cap 60/day | incremental_lane.py:296 | public-schema scan cost |  | KEEP |
+| lease `autodedup_realtime` | rt_lease.py:1-90; incremental_lane.py:205-212 | two writers | apply/unapply/seed | KEEP |
+| seed version / bootstrap gate | incremental.py:77-120 | merging from an unbuilt stream | reconcile SEED_MISMATCH | KEEP |
+| calibration recut (coverage < 0.85, ≥ 6 h) | incremental_lane.py:235-240, 1852-1905 | stale photo populations |  | KEEP |
+| reconcile: block_not_fully_read wait, quarantine 3/24 h, 3 unexplained errors, 30 s margin, never split | reconcile.py:56-73, 146-259 | merging on a partial block; retry storms | apply planner | KEEP |
+
+## 7. Where one signal is compared many times (the duplication map)
+
+| signal | places it is compared (file:line) | count |
+|---|---|---|
+| deal type / category | guards.py:69-73 (W1/W2); indistinguishable.py:2619-2625 (D43); guards.py:205-213 (C6/C7); apply.py:568-579; cluster.py:191-211 (closure validity); probe keys (fingerprint cat_group, blocking); chokepoint toolkit/property_identity | 7 |
+| area | guards.py:49-75 (W3, E5 3-way); features.py:1403 (model); decide.py:145,194,213,466 (K-A ≤2 %, K-B ≤1 %, K-C ≤3 %, E63 ≤1 %); indistinguishable.py:2629-2641 (D43 gate/cluster 8 %, promote 3 %), 2645 stated_area, printed/headline area readers; demonstrate.py:178-186 (D50 A); indistinguishable.py:3149 (agreeing); features.py:408-409 (ATTR family exact/1 %/2 %); guards.py:215-221 (C8 8 %); blocking attr_area + town bands (±25 %) | 12 places, 7 thresholds (1/2/3/8/20-25 %, exact, printed) |
+| floor / storeys | guards.py:80-83 (W5 ≥2); features floor_diff + same-portal one-floor; decide.py:150 (K-A); indistinguishable.py:2652-2690 (floor with camps, total_floors) + prose_floor, subject_floor, storey_word, offered_storey readers; features numeral_conflict (floor); demonstrate onesided floor; guards.py:230-234 (spread, off); 11 excuse dials (floor_camps*, d43_floor_within_camp*, feed*, total_floors_camp, gate slack) | 9 places + 11 excuses |
+| unit identity (designators / codes) | guards.py:87-115 (E61) = indistinguishable.py:2745-2749 (same predicate); text_facts.unit_designators:148, printed_unit_codes:207, reference_codes:112; D43 unit_code/labelled_unit/english_unit_code/slug_unit/printed_designator/position_designator/space_number/plan_space/named_villa; features unit_number_shared, numeral_conflict (unit); demonstrate onesided code | 4 extractors, 10 readers, 1 veto |
+| order code | decide.py:228-241 (K-R); features.py:863 (index); demonstrate.py:618, 684 (B code, E164 code); indistinguishable.py:3216 (unit warrant); agency_code / agency_code_colive / agency_code_plus readers; decide.py:370 (E45 arm, off) | 7 |
+| text containment | features.py:1487 (containment_max) AND indistinguishable.py:836-860 (its own shingles + memo: a second implementation); thresholds 0.80 (D50 B), 0.90 (K-B, E45, E63, price-sequential), 0.97 (agency body ceiling), 0.98 (E164), 0.99 (twin, same-source one-text) | 2 implementations, 6 thresholds |
+| tight photo matches | K-C ≥4 (decide.py:209-225); E164 ≥3 (demonstrate.py:690); price-sequential ≥3; cellar yield ≥4; promote photo warrant ≥1 (indist:376); D50 B photo ≥1 (demonstrate.py:614); E63 ≥4 images; E65 floor (off) | 8 places, 4 bars |
+| co-live / live windows (clock) | features.window_end_stamp:1360 + _window:1378; decide.window_gap_days:112, disjoint_windows:126; hazard_context.live_window:59, live_overlap_days:67, disjoint_windows:77; demonstrate.overlap_days_local:202, honest_overlap_local:232, _sequential:212, sequential_for:242; indistinguishable.overlap_days:318, _honest_overlap_days:421, honest_overlap_days:430, _co_live:333, _windows_overlap:341, _never_live_together:435, _live_together:942, _sequential_for_price:810; family._overlap_days:121; structural_truth.overlap_days:147; 6 `_stamp` parsers; 5 `*_honest_clock` dials | 19 functions, 5 clock dials |
+| 'a development' | demonstrate.in_development:480 (PROJECT_TERMS either side); demonstrate.development_context:520 (NEW_BUILD_TERMS both sides + unit/price list; mode off/vocab/narrow/template); indistinguishable._development_pair:783 (PROJECT_TERMS both sides); hazard_context census (E63); development.py (E88, off); two vocabularies development.py:66, demonstrate.py:499 | 5 definitions, 2 word lists |
+| price | features price_last_ratio/ppm2/path; indistinguishable.py:2677-2730 (5 %/60 %, path, same-source bar) + charge/accessory_price/rental readers; demonstrate.price_demonstrated:295 (exact/rounding/path/sequential); d43.py:99-112 (E157 20 %); decide.py:469 (E63 0.5 %); broker probe decile | 6 places, 5 tolerances |
+| 'the same fact' readings | GATE (decide.py:561), PROMOTE (indist:3201), CLUSTER (d43.py:97), strict PROMOTE again at cluster (d43.py:72-80, E193 rejoin) | 4 readings of one reader set |
+
+## 8. Top-ten suspects ablated in the worktree, top five confirmed on cohort 17, final check on cohort 18
+
+Suspects, chosen for never firing, duplicating another rule, or existing for a case the data no longer shows. Each was
+ablated on the trial (patch or settings) AND as code in `census/w15-c1-bundle` (S1-S4, S6-S8, S10), run through the
+official `harness run` (its result is on the `all` row: the bundle holds S1-S4, S6-S8 and S10 at once).
+
+| # | suspect | trial ‖ c17 | c18 | code-bundle harness |
+|---|---|---|---|---|
+| S1 | D43 gate reading | m+92 g+0 cp+0/−0 ‖ m+406 g+0 cp+0/−0 | m+319 g+0 cp+0/−0 |  |
+| S2 | E61 designator veto (+ machine vetoes) | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S3 | set-level cluster invariants: area_spread | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S3 |   size 256 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S3 |   category_type | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S3 |   compat_class | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | · |  |
+| S4 | repartition repair ensemble | m+0 g+0 cp+0/−0 ‖ m+0 g+2 cp+4/−10 CD+3/−8 CN+0 | m+0 g+3 cp+19/−41 CD+8/−13 CN+0 |  |
+| S5 | D43 warrant → predicate | m+13 g-2 cp+20/−0 ‖ m+60 g+0 cp+0/−0 | m+21 g+0 cp+16/−0 CD+2/−0 CN+0 |  |
+| S6 | E63 context rule | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S7 | E48 strata → scalar t_hi | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 | m+0 g+0 cp+0/−0 |  |
+| S9 | K-R certificate | m+0 g+0 cp+9/−5 ‖ m-25 g-2 cp+104/−45 CD+19/−35 CN+0 | · |  |
+| all | settings/patch twin of the code bundle | · ‖ m+406 g+2 cp+4/−10 CD+3/−8 CN+0 | m+323 g+3 cp+19/−41 CD+8/−13 CN+0 | trial: cp+0/−0 groups 1134→1134; c17: cp+4/−10 groups 3888→3890;  |
+| Z1 | 47 trial-zero fact readers dropped together | · ‖ m+59 g-3 cp+149/−4 CD+9/−0 CN+0 | m+35 g+0 cp+31/−2 CD+10/−2 CN+0 |  |
+| Z2 | 85 trial-zero dials flipped together | · ‖ m+21 g+3 cp+166/−213 CD+14/−95 CN+0 | m-33 g+7 cp+40/−301 CD+12/−121 CN+0 |  |
+
+S8 (dead by configuration: K-A, E45/E46/E47 + unit arms, E65, E11, D65, E85/E88/E83, union-find + E57 bridges, E303,
+E301/E301b/E302, the 5 off readers) and S10 (decide-time wall re-check) fire 0 on g15/c17/c18: Δ = 0 by construction.
+
+## 9. Dials census (the D43 / D50 / floor / repartition families)
+
+- 129 dial arms on the trial (every ON boolean/mode dial of the families, each switched off with its validator dependants);
+  126 valid; **85 change nothing** (not one pair zone). Invalid: E11:evidence_gate, dial:d43_cellar_area, dial:d43_price_path, dial:d43_rental_colive_furnishing_corroboration.
+- Flipped together on c17 (`bundle:trial_zero_dials`): m+21 g+3 cp+166/−213 CD+14/−95 CN+0 ‖ c18: m-33 g+7 cp+40/−301 CD+12/−121 CN+0. Bisected by family on c17:
+  - `unitcode`: m+0 g+0 cp+0/−0 ‖ c18: m+14 g+0 cp+0/−0
+  - `rental`: m+0 g+0 cp+0/−0
+  - `location`: m+12 g-2 cp+97/−0
+  - `land`: m+22 g-3 cp+31/−11 CD+6/−4 CN+0
+  - `area`: m-1 g+0 cp+5/−3 CD+3/−3 CN+0
+  - `price`: m-17 g+5 cp+0/−99 CD+0/−62 CN+0
+  - `storey`: m+25 g+2 cp+30/−80 CD+2/−15 CN+0
+  - `other`: m-20 g+1 cp+3/−20 CD+3/−11 CN+0
+  → **the 14 `unitcode` + 11 `rental` dials are 0 on the trial AND on c17** (delete-ready); the rest move c17 through a
+  handful of readers (`street_prose` alone = the `location` +97; `subject_floor`, `plot_prose_exact`, `storey_word`,
+  `extent`, `headline_area` below). Zero dials by name: d43_accessory_area, d43_accessory_area_colive_only, d43_accessory_designators, d43_agency_code_with_difference, d43_block_plot_area, d43_body_obec, d43_capacity_english, d43_cellar_area_photo_yield, d43_charge_keywords_wide, d43_commercial_product_class, d43_entrance_two_agencies, d43_extent_package, d43_extent_package_honest_colive, d43_extent_variant, d43_extent_variant_sequential, d43_floor_column_body_prevails, d43_floor_cross_form_agreement, d43_floor_sequential_address_split, d43_floor_within_camp_price_escape, d43_ground_vs_upper, d43_headline_vs_column, d43_house_number_entrance, d43_interior_sequential_repost, d43_labelled_unit_ids, d43_lot_labels, d43_neighbour_plot_attribute, d43_obec_street_grain_only, d43_offered_extent, d43_offered_storey, d43_offered_use_alone, d43_outdoor_accessory_area, d43_outdoor_accessory_colive_only, d43_outdoor_accessory_price, d43_outdoor_accessory_same_source, d43_parcel_forms_wide, d43_parcel_numbers, d43_parcel_table, d43_part_addition, d43_part_addition_colive_only, d43_part_addition_same_source_only, d43_part_whole, d43_plan_space, d43_plot_area_exact, d43_plot_attribute_code_escape, d43_plot_attribute_conflict, d43_plot_attribute_requires_colive, d43_plot_column_body_prevails, d43_position_designator, d43_price_per_m2_path, d43_price_per_square_metre, d43_price_same_source_bar, d43_price_same_source_printed_area_wins, d43_price_same_source_unit_sale_only, d43_priced_land_rows, d43_printed_area_decimals_decide, d43_printed_designator, d43_printed_house_number, d43_prose_floor_words, d43_prose_obec, d43_prose_plot_conflict, d43_prose_plot_exact, d43_prose_plot_requires_price_gap, d43_prose_street, d43_rental_colive_charge_requires_equal_rent, d43_rental_colive_charges, d43_rental_colive_facility, d43_rental_colive_flooring, d43_rental_colive_furnishing_needs_ruian, d43_rental_colive_honest_clock, d43_rental_colive_parking_level, d43_rental_colive_renovation, d43_rental_colive_same_source_only, d43_rental_colive_sanitary, d43_rental_colive_services_below_rent, d43_slug_area_same_source_only, d43_space_numbers, d43_stated_beds, d43_stated_unit_count, d43_stored_house_number, d43_subject_floor, d43_two_unit_signature, d43_unit_codes_english, d43_unit_codes_slug, demonstrate_area_printed_decides, demonstrate_obec_one_text_sequential.
+- The 40 dials that DO move the trial are almost all EXCUSES of one reader (a fact reader + N switches that un-say it):
+  floor (floor_camps, floor_camps_reads, d43_total_floors_camp, d43_gate_total_floors_slack, d43_floor_within_camp×4,
+  floor_same_source_feed, floor_feed_unknown_closed, d43_floor_same_feed_sequential), price (d43_price_sequential_path,
+  _storey_fact, _text_identity, _honest_clock, demonstrate_price_exact/_path_exact/_rounding_aware,
+  d43_colive_charge_requires_price_gap), area (d43_printed_area_prevails, d43_headline_vs_column_*), interior
+  (d43_interior_requires_no_tight_photo). Largest: d43_total_floors_camp m-225 g+9 cp+4/−418 opSame-11; d43_price_sequential_path m-117 g+11 cp+19/−212. This is the patchwork shape the
+  mandate names: each reader was made too eager, then excused case by case.
+
+## 10. Ranked deletion list
+
+Rank = confidence (measured zero, on how many cohorts) × what it removes. Lines are the function bodies that go (AST
+count at b2454fa1), not counting tests, docs and settings files.
+
+| rank | delete | evidence | removes |
+|---|---|---|---|
+| 1 | Dead by configuration: E85 family guard, E88 development hold, E83 carrier-aware stock (family.py, development.py, harness.py:492-603 deferred K-B path, incremental.py:994-1035 refusals), K-A, E45/E46/E47 + 5 unit arms, E65, D65 merge policy (+13 `*_hold.json`), union-find + E57 bridges, E303, E301/E301b/E302 prepared dials, the 5 OFF readers (offer_area, agency_code, agency_code_colive, commercial_subtype, named_villa) | fire 0 on g15/c17/c18; Δ 0 by construction | ~1,250 lines (family 335 + development 361 + harness ~110 + decide 200 + cluster 83 + lane ~40 + 5 readers 124), ~60 dials, 13 settings files |
+| 2 | E63 context rule + E64 rail + hazard census (`hazard_context.py`, the `context` blob on every stored pair row) | fires 0/0/0; m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | ~565 lines (decide 79, lane 85, hazard_context 401), 10 dials, one stored column's reason to exist |
+| 3 | E61 designator veto + machine vetoes in clustering and the lane | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0; c18 in §8 | 29 + ~25 plumbing lines, 1 dial; the D43 `unit_designator` reader already carries the same predicate |
+| 4 | D43 gate reading (decide.py:560-571, the GATE branch of every reader, d43_gate / d43_gate_image_facts) | m+92 g+0 cp+0/−0 ‖ m+406 g+0 cp+0/−0 ‖ c18: m+319 g+0 cp+0/−0 (merge edges become cluster conflicts; groups identical) | 1 of 4 readings; 2 dials |
+| 5 | E48 per-stratum cut → one t_hi = 0.9788 | m+0 g+0 cp+0/−0 ‖ m+0 g+0 cp+0/−0 ‖ c18: m+0 g+0 cp+0/−0 | 23 lines + `t_hi_by_stratum` (5 cells, 3 dead) + evaluate.decide_stratum coupling |
+| 6 | Set-level cluster invariants size / category_type / compat_class / area_spread (+E280 spread excuse) / disposition / floor spread; decide-time wall re-check; E11; apply category_type_mix / category_main_incompatible | 0 trial, 0 c17 (each and together); apply reasons 0 in 7 live applies | ~45 + 12 lines, 5 dials, 2 apply reasons |
+| 7 | Repartition repair ensemble (E156, E193 rejoin + the strict 4th reading, E253 shed + outer rounds, E262, E263) | m+0 g+0 cp+0/−0 ‖ m+0 g+2 cp+4/−10 CD+3/−8 CN+0 ‖ c18: m+0 g+3 cp+19/−41 CD+8/−13 CN+0 | 296 lines + cluster.py:254-281 + d43.strict, 8 dials |
+| 8 | 30 fact readers: accessory, accessory_area, agency_code, agency_code_colive, agency_code_plus, body_obec, commercial_subtype, english_unit_code, extent_package, extent_variant, labelled_unit, named_villa, neighbour_plot, obec, offer_area, offered_storey, offered_use, outdoor_accessory, part_addition, part_whole, plan_space, plot_attribute, plot_prose, position_designator, priced_row, printed_house_number, slug_unit, space_number, subject_floor, unit_count; dial groups `unitcode` (14) and `rental` (11) | trial 0 each (measured); c17 0 (measured, or no sole fire = 0 by construction); c18 no sole fire; unitcode dials c18 m+14 cp 0. The 47 trial-zero readers dropped TOGETHER: c17 m+59 g-3 cp+149/−4 CD+9/−0 CN+0, c18 m+35 g+0 cp+31/−2 CD+10/−2 CN+0 — carried by accessory_price, lot_label, obec_prose, parcel, printed_designator, product_class, stored_house_number, two_unit, unit_code, extent, headline_area, plot_prose_exact, storey_word, street_prose (kept out of this row) | 30 of 64 readers, 25 dials (+ their text_facts extractors where no other reader uses them) |
+| 9 | D43 promotion warrant (agree:2 / photo / unit / body-sequential) → merge into D50 | m+13 g-2 cp+20/−0 ‖ m+60 g+0 cp+0/−0 ‖ c18: m+21 g+0 cp+16/−0 CD+2/−0 CN+0 | 106 lines, 4 dials |
+| 10 | apply operator_pair_verdict / must_not_link (→ `changed_since_plan`), operator_group_verdict (→ clustering reads group verdicts) | 0 / 0 / 1 fires in 7 live applies | 3 reasons, 1 negatives reader |
+
+Not deletions (measured load-bearing or a loosening that needs the confirmation discipline): D43 promotion, D50 (A:area,
+A:price, A:disposition, A:obec, B, E164, twin), the certificates as a group, the model cut, the D43 cluster relation with
+E157 and image facts, base repartition, the retrieval walls as a slot filter; auto-reject ×2 (a loosening: c17 +50 co-pairs,
+24 CD, 0 CN) and K-R-as-certificate (c17 +104/−45) are MERGE-INTO candidates for a measured wave, not W1 deletions.
+
+## 11. Assumptions validated / refuted
+
+Validated: A1's ladder order and every A1 count for g15 (zones, reasons, certificates, 92 gate demotions, 406 demonstration
+refusals, conflicts 260/3/2, 54 components, 7,971 edges → 1,133 groups) — reproduced byte for byte; 7.1 never fires; E63
+0 promotions (also c17/c18); E11 never fires; D65 empty; K-A/E45/E46/E47/E65/E85/E88/E83 off; all D43 promotions come from
+model-band pairs (a gate-demoted certificate is never re-promoted: `promoted_from` = model on g15/c17/c18).
+
+Refuted / corrected:
+- A1 §7.5 'E48 … only K-A is propose-only': the table is effectively ONE scalar — `K-C|same: 0.0` is never compared
+  (certificates only test `is None`), the two model cells are equal, the global `t_hi` 1.0 is never read.
+- A1 §7.11 '59 readers switched on': 64 fact names are emitted, 5 off; `FACT_NAMES` (47) is stale.
+- A1 §7.8 'warrant = 2 of 9 attributes stated … step 1 has already ruled out that they differ': `price` and `floor`
+  count when merely STATED (indistinguishable.py:3155-3166), so 'agree:2' is ~every priced flat pair; the warrant blocks
+  13 trial / 60 c17 edges and 20 / 0 co-pairs.
+- A1 §8 'the whole-group check reads leniently as at the gate but with photo facts': there are FOUR readings — the
+  E193 rejoin re-reads the relation at the PROMOTE bar (d43.py:72-80).
+- 'E61 protects twin flats': true, but not alone — the D43 `unit_designator` reader is the same predicate; E61 off = 0 Δ.
+- 'The D43 gate protects certified merges from facts': its 92 / 406 / 319 demotions change no group; the cluster relation
+  refuses the same unions.
+- 'The repartition repairs recover factless separations': as an ensemble they are ~0 (trial 0, c17 +4/−10, c18 +19/−41); singly they
+  move hundreds of co-pairs in opposite directions (E253 +215/−194, E262 +219/−84 on c17) — they mostly undo each other.
+- My own first single-invariant patch returned None before the D43 limb; corrected, re-run (C:category_type_inv c17 0).
+
+## 12. Open questions for the coordinator
+
+- The retrieval walls: keep as a slot filter with the D43 comparator as the one definition (the floor wall ≥2 vs the
+  D43 floor fact with camps are two definitions today; making the filter the fact tightens retrieval — needs a measured arm).
+- The D43 cluster relation as a whole: trial off = +441 co-pairs (23 operator-same, 0 of 162 operator-different, 113 CD, 0 CN);
+  c17 off = +2,993 (712 CD, 3 CN). E157 cluster price and cluster image facts cost 124 / 102 CD on c17 and catch 0 CN;
+  the CN reference cannot see price twins or shared-shoot twins, so only the operator/judge labels can settle them.
+- F3 hold lives only in the lane: moving it into `decide_pair` (an evidence-completeness input) is the one-code-path fix;
+  it changes the lane's replay-equivalence proof, not its behaviour.
+
+## 13. Files
+
+- `c1/scripts/c1_engine.py` (replay + patches), `c1_ablate.py` (arms; `--adhoc`), `c1_read_stored.py` → `c1/stored_fires.json`,
+  `c1_read_apply.py` → `c1/apply_fires.json`, `c1_facts.py` → `c1/<cohort>_fact_fires.json`, `c1_table.py` →
+  `c1/<cohort>_ablation.{json,md}`, `c1_compare_runs.py` (harness-run vs harness-run), `c1_doc.py` (this file), `chain_rest.sh`.
+- `c1/runs/<cohort>_arms.jsonl` (one row per arm, with the gained/lost label breakdown), `c1/runs/<cohort>_arm_pairs/` (full
+  gained/lost co-pair lists, c17/c18/trialr), `c1/runs/<cohort>_base_{facts,decisions,clusters,price_limb}`, official runs
+  `c1/runs/{trial_w31_official,trial_bundle_official,c17_bundle_official}`.
+- Worktrees: `/home/hejtm/dev/sreality/.claude/worktrees/w15-census-c1` (branch census/w15-c1-rules, pristine code the
+  replay imports + the census scripts committed), `/home/hejtm/dev/sreality/.claude/worktrees/w15-census-c1-bundle` (branch
+  census/w15-c1-bundle, the code deletion bundle + `autodedup/settings/c1_bundle.json`).
+
+## Appendix A. Every dial arm on the trial (one row per dial; coupled dependants switched off with it)
+
+| dial (w31 value → ablated) | Δ trial | coupled off |
+|---|---|---|
+| floor_camps → {} | m-52 g-3 cp+9/−9 | d43_total_floors_camp |
+| floor_camps_reads → off | m-55 g-6 cp+39/−103 opSame-5 |  |
+| d43_price_path → False | invalid: d43_price_same_source_bar must be wide or area_moved: off | |
+| d43_obec_street_grain_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_gate_total_floors_slack → False | m-11 g+1 cp+44/−95 opSame+1 Browse+4 |  |
+| d43_total_floors_camp → False | m-225 g+9 cp+4/−418 opSame-11 |  |
+| d43_parcel_numbers → False | m+0 g+0 cp+0/−0 |  |
+| d43_accessory_designators → False | m+0 g+0 cp+0/−0 |  |
+| d43_offered_extent → False | m+0 g+0 cp+0/−0 |  |
+| d43_two_unit_signature → False | m+0 g+0 cp+0/−0 |  |
+| floor_same_source_feed → portal | m-8 g+0 cp+0/−48 |  |
+| d43_body_align → False | m+14 g+1 cp+15/−0 | d43_body_align_heal |
+| d43_prose_street → False | m+0 g+0 cp+0/−0 |  |
+| d43_prose_obec → False | m+0 g+0 cp+0/−0 |  |
+| d43_printed_area → False | m+3 g+1 cp+1/−0 |  |
+| floor_feed_unknown_closed → False | m+2 g+0 cp+46/−0 opSame+1 |  |
+| d43_parcel_forms_wide → False | m+0 g+0 cp+0/−0 |  |
+| demonstrate_price_exact → False | m+15 g+3 cp+25/−1 | demonstrate_price_path_exact, demonstrate_price_rounding_aware |
+| demonstrate_area_printed_decides → False | m+0 g+0 cp+0/−0 |  |
+| d43_printed_area_decimals_decide → False | m+0 g+0 cp+0/−0 |  |
+| d43_unit_codes → False | m+2 g+1 cp+1/−0 | d43_unit_codes_wide |
+| d43_unit_codes_wide → False | m+0 g-1 cp+0/−1 |  |
+| d43_printed_designator → False | m+0 g+0 cp+0/−0 |  |
+| development_context_mode → off | m+3 g+1 cp+1/−0 | demonstrate_onesided |
+| d43_body_align_heal → False | m-1 g+0 cp+0/−2 |  |
+| d43_two_unit_requires_colive → False | m-13 g+0 cp+0/−21 |  |
+| d43_prose_floor → False | m+1 g+1 cp+1/−0 |  |
+| d43_floor_within_camp → False | m+2 g+0 cp+9/−0 | d43_floor_within_camp_colive |
+| d43_floor_within_camp_colive → False | m-15 g+0 cp+27/−126 opSame-2 |  |
+| d43_floor_within_camp_scope → camp | m-24 g+0 cp+37/−106 |  |
+| d43_floor_within_camp_price_escape → False | m+0 g+0 cp+0/−0 |  |
+| d43_floor_within_camp_honest_window → False | m-3 g+0 cp+27/−70 opSame-1 |  |
+| d43_subject_floor → False | m+0 g+0 cp+0/−0 |  |
+| d43_ground_vs_upper → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_area_exact → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_truncation_residue → False | m+6 g-1 cp+5/−1 |  |
+| d43_parcel_table → False | m+0 g+0 cp+0/−0 |  |
+| d43_stated_unit_count → off | m+0 g+0 cp+0/−0 |  |
+| d43_price_sequential_path → False | m-117 g+11 cp+19/−212 | d43_price_sequential_identity |
+| d43_price_sequential_identity → False | m-1 g+0 cp+0/−0 |  |
+| demonstrate_price_path_exact → False | m+1 g+2 cp+6/−0 |  |
+| demonstrate_price_rounding_aware → False | m-3 g+0 cp+0/−0 |  |
+| d43_prose_floor_words → False | m+0 g+0 cp+0/−0 |  |
+| d43_colive_charge_conflict → False | m+1 g+0 cp+0/−0 |  |
+| d43_colive_charge_requires_price_gap → False | m-37 g+3 cp+1/−40 |  |
+| d43_prose_plot_conflict → False | m+0 g+0 cp+0/−0 |  |
+| d43_prose_plot_requires_price_gap → False | m+0 g+0 cp+0/−0 |  |
+| d43_part_whole → False | m+0 g+0 cp+0/−0 |  |
+| d43_floor_cross_form_agreement → False | m+0 g+0 cp+0/−0 |  |
+| d43_headline_vs_column → False | m+0 g+0 cp+0/−0 |  |
+| d43_headline_vs_column_colive_only → False | m-1 g+0 cp+0/−10 |  |
+| d43_headline_vs_column_same_source_only → False | m-8 g-4 cp+0/−29 opSame-1 |  |
+| d43_offered_storey → False | m+0 g+0 cp+0/−0 |  |
+| d43_labelled_unit_ids → False | m+0 g+0 cp+0/−0 |  |
+| d43_accessory_area → False | m+0 g+0 cp+0/−0 |  |
+| d43_accessory_area_colive_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_capacity_english → False | m+0 g+0 cp+0/−0 |  |
+| d43_stated_beds → False | m+0 g+0 cp+0/−0 |  |
+| d43_body_obec → False | m+0 g+0 cp+0/−0 |  |
+| d43_prose_plot_exact → False | m+0 g+0 cp+0/−0 |  |
+| d43_priced_land_rows → False | m+0 g+0 cp+0/−0 |  |
+| d43_neighbour_plot_attribute → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive → False | m+1 g+0 cp+0/−0 | d43_rental_colive_furnishing_corroborated, d43_rental_colive_facility |
+| d43_rental_colive_same_source_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_number_same_source_only → False | m-14 g+0 cp+0/−11 |  |
+| d43_rental_colive_honest_clock → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_services_below_rent → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_charge_requires_equal_rent → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_charges → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_sanitary → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_renovation → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_flooring → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_parking_level → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_furnishing_corroborated → False | m+1 g+0 cp+0/−0 |  |
+| d43_rental_colive_furnishing_needs_ruian → False | m+0 g+0 cp+0/−0 |  |
+| d43_rental_colive_furnishing_corroboration → off | invalid: d43_rental_colive_furnishing_corroboration must be 'split' or 'any': o | |
+| d43_rental_colive_facility → False | m+0 g+0 cp+0/−0 |  |
+| d43_price_per_square_metre → False | m+0 g+0 cp+0/−0 |  |
+| d43_charge_keywords_wide → False | m+0 g+0 cp+0/−0 |  |
+| d43_unit_codes_english → False | m+0 g+0 cp+0/−0 |  |
+| d43_unit_codes_slug → False | m+0 g+0 cp+0/−0 |  |
+| d43_slug_area_same_source_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_agency_code_with_difference → False | m+0 g+0 cp+0/−0 |  |
+| d43_offered_use_conflict → False | m-1 g+1 cp+0/−20 |  |
+| d43_offered_use_alone → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_attribute_conflict → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_attribute_requires_colive → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_attribute_code_escape → False | m+0 g+0 cp+0/−0 |  |
+| d43_commercial_product_class → False | m+0 g+0 cp+0/−0 |  |
+| d43_space_numbers → off | m+0 g+0 cp+0/−0 |  |
+| d43_part_addition → False | m+0 g+0 cp+0/−0 |  |
+| d43_part_addition_same_source_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_part_addition_colive_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_printed_house_number → False | m+0 g+0 cp+0/−0 |  |
+| d43_stored_house_number → off | m+0 g+0 cp+0/−0 | d43_house_number_entrance |
+| d43_interior_requires_no_tight_photo → False | m-69 g-2 cp+4/−86 opSame-5 |  |
+| d43_plan_space → False | m+0 g+0 cp+0/−0 |  |
+| d43_extent_variant → False | m+0 g+0 cp+0/−0 | d43_extent_variant_sequential |
+| d43_extent_variant_sequential → False | m+0 g+0 cp+0/−0 |  |
+| demonstrate_cluster_price_honest_clock → False | m+0 g+1 cp+0/−194 opSame-2 |  |
+| d43_lot_labels → off | m+0 g+0 cp+0/−0 |  |
+| d43_house_number_entrance → off | m+0 g+0 cp+0/−0 |  |
+| d43_floor_sequential_address_split → False | m+0 g+0 cp+0/−0 |  |
+| d43_price_same_source_bar → wide | m+0 g+0 cp+0/−0 |  |
+| d43_price_same_source_unit_sale_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_price_same_source_printed_area_wins → False | m+0 g+0 cp+0/−0 |  |
+| d43_entrance_two_agencies → False | m+0 g+0 cp+0/−0 |  |
+| d43_extent_package_honest_colive → False | m+0 g+0 cp+0/−0 |  |
+| d43_extent_package → False | m+0 g+0 cp+0/−0 |  |
+| d43_price_sequential_honest_clock → False | m-5 g+1 cp+0/−28 |  |
+| d43_printed_area_prevails → False | m-25 g+0 cp+0/−24 opSame-1 opDiff-1 |  |
+| d43_price_sequential_storey_fact → False | m-18 g+1 cp+0/−44 |  |
+| d43_price_sequential_text_identity → False | m+0 g+2 cp+0/−33 |  |
+| demonstrate_sequential_honest_clock → False | m-2 g-1 cp+0/−1 |  |
+| d43_price_per_m2_path → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_column_body_prevails → False | m+0 g+0 cp+0/−0 |  |
+| d43_plot_column_echo → False | m-1 g+0 cp+0/−14 |  |
+| d43_floor_column_body_prevails → False | m+0 g+0 cp+0/−0 |  |
+| d43_interior_sequential_repost → False | m+0 g+0 cp+0/−0 |  |
+| d43_floor_same_feed_sequential → False | m-1 g-1 cp+0/−1 opSame-1 |  |
+| demonstrate_obec_one_text_sequential → False | m+0 g+0 cp+0/−0 |  |
+| d43_block_plot_area → False | m+0 g+0 cp+0/−0 |  |
+| d43_outdoor_accessory_area → False | m+0 g+0 cp+0/−0 |  |
+| d43_outdoor_accessory_colive_only → False | m+0 g+0 cp+0/−0 |  |
+| d43_outdoor_accessory_same_source → False | m+0 g+0 cp+0/−0 |  |
+| d43_outdoor_accessory_price → False | m+0 g+0 cp+0/−0 |  |
+| d43_position_designator → False | m+0 g+0 cp+0/−0 |  |
+| d43_cellar_area → False | invalid: d43_cellar_area_photo_yield (E305r) refines d43_cellar_area (E305): sw | |
+| d43_cellar_area_photo_yield → False | m+0 g+0 cp+0/−0 |  |
+

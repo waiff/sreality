@@ -30,11 +30,14 @@ P("G4 ruling-change seeds, E919/E920); the lane/apply pointers below are b2454fa
 P("")
 P("## 0. The answer in numbers")
 P("")
-P("- **Measured**: 245 single-rule arms on the trial export (5,195 adverts; w31 + w6_gold; engine alone: no must-link, no")
-P("  operator must-not-link loaded, so the operator's rulings stay out of the input and serve as the yardstick), 55 arms on")
-P("  cohort 17 (17,897 adverts), a cohort-18 final check (17,422 adverts), and the deletion bundle executed as CODE through")
-P("  the official `harness run` (trial + c17). The in-process replay is faithful: clusters, conflicts and reasons identical")
-P("  to `python3 -m autodedup.harness run` on the trial, and that run equals the stored g15 `pairs.jsonl.gz` byte for byte.")
+_n_t = len(ARMS["trial"]); _n_17 = len(ARMS["c17"]); _n_18 = len(ARMS["c18"]); _n_r = len(ARMS["trialr"])
+P(f"- **Measured**: {_n_t} single-rule arms on the trial export (5,195 adverts; w31 + w6_gold; engine alone: no must-link, no")
+P("  operator must-not-link loaded, so the operator's rulings stay out of the input and serve as the yardstick),")
+P(f"  {_n_17} arms on cohort 17 (17,897 adverts), {_n_18} on cohort 18 (17,422 adverts, final check), {_n_r} trial arms re-read")
+P("  against the label-free reference, and the deletion bundle executed as CODE through the official `harness run`")
+P("  (trial + c17). The in-process replay is faithful: clusters, conflicts and reasons identical to `python3 -m")
+P("  autodedup.harness run` on the trial (which equals the stored g15 `pairs.jsonl.gz` byte for byte), and the c18 replay")
+P("  reproduces every stored c18 w31 reason count and all 3,754 groups.")
 P(f"- **Baselines (engine alone)**: trial merge edges {tb.get('merge_pairs')}, groups {tb.get('groups')}, co-pairs {tb.get('copairs')};"
   f" operator-same together {tb.get('label_same_together')}/{tb.get('label_same_total')}, operator-different together"
   f" {tb.get('label_diff_together')}/{tb.get('label_diff_total')}, Browse-merge yardstick {tb.get('yardstick_browse_together')}/"
@@ -45,15 +48,21 @@ P(f"- **Baselines (engine alone)**: trial merge edges {tb.get('merge_pairs')}, g
 if c18b:
     P(f"- c18 (replay, engine alone): merge {c18b.get('merge_pairs')}, groups {c18b.get('groups')}, co-pairs {c18b.get('copairs')};"
       f" CD together {c18b.get('ref_cd_together')}/{c18b.get('ref_cd_total')}, CN together {c18b.get('ref_cn_together')}/{c18b.get('ref_cn_total')}.")
-P("- **147 of 243 valid trial arms change not one pair's zone; 162 change no group.** Zero at group grain on the trial:")
-P("  47/64 fact readers, 85/125 valid D43/D50/floor/repartition dials, E61, E48, E63, the D43 gate, 4/6 set-level cluster")
+_ta = ARMS["trial"]
+_tv = {k: v for k, v in _ta.items() if "invalid" not in v}
+_tz = [k for k, v in _tv.items() if v["dmerge"] == 0 and v["dband"] == 0 and v["cp_gained"] == 0 and v["cp_lost"] == 0 and v["dgroups"] == 0]
+_tzg = [k for k, v in _tv.items() if v["cp_gained"] == 0 and v["cp_lost"] == 0 and v["dgroups"] == 0]
+_nf = sum(1 for k in _tv if k.startswith("fact:")); _nfz = sum(1 for k in _tz if k.startswith("fact:"))
+_nd = sum(1 for k in _tv if k.startswith("dial:")); _ndz = sum(1 for k in _tz if k.startswith("dial:"))
+P(f"- **{len(_tz)} of {len(_tv)} valid trial arms change not one pair's zone; {len(_tzg)} change no group.** Zero at group grain on the trial:")
+P(f"  {_nfz}/{_nf} fact readers, {_ndz}/{_nd} valid D43/D50/floor/repartition dials, E61, E48, E63, the D43 gate, 4/6 set-level cluster")
 P("  invariants, the whole repartition repair ensemble, and the category walls (their pairs are caught downstream).")
 P("- **The code bundle** (E61 veto, decide-time wall re-check, K-A, E48 strata, E45/E46/E47, E11, E63, D43 gate, D65,")
 P("  cluster size/category_type/compat_class/area_spread/disposition/floor-spread limbs, repartition repairs; branch")
 P("  `census/w15-c1-bundle` = −88/+7 lines in `decide.py`+`guards.py` before any dead function is removed):")
-P("  **trial 0 co-pairs gained / 0 lost (groups 1,134 = 1,134)**; c17 " + d("bundle:c1_code_bundle_settings", ("c17",))
-  + " of 42,924 co-pairs — all of it the repartition repairs (the same +4/−10 as the repairs arm alone); every other bundle"
-  " member is exactly 0 on c17.")
+P("  **trial 0 co-pairs gained / 0 lost (groups 1,134 = 1,134)**; c17 " + d("bundle:c1_code_bundle_settings", ("c17",)).split(" ‖ ")[0]
+  + " of 42,924 co-pairs (official harness on the code = its settings/patch twin, exactly); c18 (the twin) " + d("bundle:c1_code_bundle_settings", ("c18",)).split(" ‖ ")[0] + " of 25,088. On c17 and c18 the whole")
+P("  delta is the repartition repairs (identical to the repairs-only arm); every other bundle member is exactly 0 on both.")
 P("- **What the ladder actually runs on** (merge edges g15 / c17 / c18): D43 promotion " + f3("merge_by:D43_promote")
   + "; K-C " + f3("merge_by:K-C") + "; model cut 1,942 / 7,794 / 7,995; K-B " + f3("merge_by:K-B") + "; K-R " + f3("merge_by:K-R") + ".")
 P("  Removing any single certificate or the model cut moves ≤ 177 merge edges on c17 (another rung re-derives the pair);")
@@ -124,14 +133,14 @@ rows = [
     ("L6", "K-A certificate", "decide.py:143-153, 269-270", "(off: 52.6 % precision)", "0 / 0 / 0",
      "features same_ruian_adm_kod, dispo, area, floor", "0 by construction", "DELETE"),
     ("L7", "K-B certificate (E6/E7) + E84 gap", "decide.py:190-206, 126-140", "a broker's own re-post", f3("cert_fired:K-B") + " (merged " + f3("merge_by:K-B") + ")",
-     "same_source/same_broker/containment ≥0.90/area ≤1 %/disjoint windows: the SAME clock as 9 other overlap implementations (§7); containment ≥0.90 = E63, E45 repost arm, D43 price-sequential",
+     "same_source/same_broker/containment ≥0.90/area ≤1 %/disjoint windows: one of 19 overlap/clock functions (§7); containment ≥0.90 = E63, E45 repost arm, D43 price-sequential",
      d("cert:K-B") + "; E84 gap off (with its coupled honest clock): " + d("cert:K-B_gap_E84", ("trial",)), "KEEP (proof rung)"),
     ("L8", "E65 K-B photo floor", "decide.py:156-187", "(off)", "0 / 0 / 0", "n_images_min, phash_loose_matches", "0 by construction", "DELETE (2 dials)"),
     ("L9", "K-C certificate", "decide.py:209-225", "the same photo shoot on two portals", f3("cert_fired:K-C") + " (merged " + f3("merge_by:K-C") + ")",
      "tight ≥4 also: E164 recover (≥3), D43 cellar yield (≥4), price-sequential (≥3), promote photo warrant (≥1), D50 B photo (≥1), E63 images (≥4); area ≤3 % = D43 promote area bar",
      d("cert:K-C") + " (trialr " + ref("cert:K-C") + ")", "KEEP (proof rung)"),
     ("L10", "E48 per-stratum cut / propose-only", "decide.py:406-430, 732-734, 745", "a stratum that could not prove its bar", "0 / 0 / 0 propose-only",
-     "w31 cells: K-A (dead), `K-C|same: 0.0` (never compared: certificates only test `is None`), `model|same` = `model|cross` = 0.9788; global `t_hi` 1.0 never read",
+     "w31 cells: K-A (dead), `K-C\\|same: 0.0` (never compared: certificates only test `is None`), `model\\|same` = `model\\|cross` = 0.9788; global `t_hi` 1.0 never read",
      d("E48:strata_table->t_hi"), "DELETE (one scalar t_hi = 0.9788)"),
     ("L11", "E45/E46/E47 merge-zone gates", "decide.py:278-399, 445-453", "(off)", "0 / 0 / 0", "unit arms re-read K-B/K-R/interior", "0 by construction", "DELETE (~12 dials)"),
     ("L12", "E11 evidence-family gate (min 1)", "decide.py:729, 738-743, 749-752", "images alone merging", "0 / 0 / 0 `evidence_gate`",
@@ -178,6 +187,7 @@ P("")
 P("| reader | fires trial \\| c17 \\| c18 (gate promote cluster, any/sole) | ablation Δ trial ‖ c17 | verdict |")
 P("|---|---|---|---|")
 names = sorted(FF["trial"]) if FF["trial"] else []
+DEL_READERS, CAND_READERS, MEAS_READERS = [], [], []
 for n in names:
     a = ARMS["trial"].get("fact:" + n, {})
     zero_t = a and "invalid" not in a and a["dmerge"] == 0 and a["cp_gained"] == 0 and a["cp_lost"] == 0 and a["dgroups"] == 0
@@ -185,12 +195,17 @@ for n in names:
     sole18 = any(FF["c18"].get(n, {}).get(m, [0, 0])[1] > 0 for m in ("gate", "promote", "cluster")) if FF["c18"] else None
     a17 = ARMS["c17"].get("fact:" + n)
     zero17 = (not sole17) or (a17 and "invalid" not in a17 and a17["cp_gained"] == 0 and a17["cp_lost"] == 0 and a17["dgroups"] == 0)
-    if zero_t and zero17 and not sole18:
+    if n in ("unit_designator", "category_type", "category_main", "disposition"):
+        v = "KEEP (the one definition once E61 / the walls' re-checks / C6-C7 go; ~0 today only because a duplicate fires first)"
+    elif zero_t and zero17 and not sole18:
         v = "DELETE (0 trial, 0 c17" + (", no sole fire c18)" if sole18 is False else ")")
+        DEL_READERS.append(n)
     elif zero_t and zero17:
         v = "DELETE-candidate (0 trial, 0 c17; sole fire on c18)"
+        CAND_READERS.append(n)
     elif zero_t:
         v = "keep-measure (0 trial, moves c17)"
+        MEAS_READERS.append(n)
     else:
         v = "KEEP (moves groups)"
     P(f"| {n} | {fr(n)} | {d('fact:' + n)} | {v} |")
@@ -205,7 +220,7 @@ crow = [
     ("C3", "must-not-link (operator + E61 machine vetoes)", "guards.py:236-241; cluster.py:345-347", "joining what the operator split", "conflicts " + f3("must_not_link", "cl"), "apply `operator_pair_verdict`/`must_not_link`; lane rulings read", "machine part: " + d("E61:cluster_machine_veto_only"), "KEEP operator part; machine part goes with E61"),
     ("C4", "D43 cluster relation (E132) incl. image facts + E157 price", "d43.py:86-114; guards.py:243-244", "A=B, B=C each clean while A≠C", "conflicts " + f3("d43_distinguishable", "cl"),
      "the same readers as the gate (L16) and promote readings; E157 = D50 A:price at cluster grain", d("C:d43_cluster_invariant") + " (trialr " + ref("C:d43_cluster_invariant") + ")", "KEEP (the one group-grain fact check)"),
-    ("C4a", "  E157 cluster price limb", "d43.py:99-112; demonstrate.py:405-423", "estate units at 9.65/9.75/9.85 M chained", "member pairs refused: c17 145", "D50 A:price, D43 price", d("C:E157_cluster_price") + " (trialr " + ref("C:E157_cluster_price") + ")", "KEEP-measure (c17: costs 124 CD, 0 CN caught; CN cannot see price twins)"),
+    ("C4a", "  E157 cluster price limb", "d43.py:99-112; demonstrate.py:405-423", "estate units at 9.65/9.75/9.85 M chained", "member pairs refused: 38 / 145 / 109", "D50 A:price, D43 price", d("C:E157_cluster_price") + " (trialr " + ref("C:E157_cluster_price") + ")", "KEEP-measure (c17: costs 124 CD, 0 CN caught; CN cannot see price twins)"),
     ("C4b", "  image facts at cluster (interior, floorplan)", "settings d43_cluster_image_facts; indist:3080-3107", "dev units sharing a shoot", "interior/floorplan cluster sole: trial 25/11, c17 158/12", "gate reading drops them (d43_gate_image_facts false) — two answers to one question", d("C:cluster_image_facts") + " (trialr " + ref("C:cluster_image_facts") + ")", "KEEP-measure (c17 costs 102 CD, 0 CN)"),
     ("C5", "size > 256", "guards.py:202-203", "a runaway group", "0 / 0 / 0 (max group 40 / 116 / 32)", "lane component cap 400 (incremental.py:1518-1571)", d("C:max_cluster_size"), "DELETE"),
     ("C6", "category_type across the set", "guards.py:205-207", "sale+rent via a NULL-type bridge", "conflicts " + f3("category_type", "cl"), "D43 `category_type` in C4 reads every member pair (the c17 conflict is a drazba/prodej/NULL auction: C4 refuses it identically)", d("C:category_type_inv"), "DELETE"),
@@ -217,7 +232,7 @@ crow = [
     ("C12", "  repairs: E156 keep-factless, E193 rejoin (strict relation), E253 shed + outer rounds, E262 shed guard, E263 reconcile-first", "repartition.py:166-526; cluster.py:254-281; d43.py:72-80",
      "factless separations after the greedy pass", "n/a (no counter)", "the strict relation re-reads D43 at the PROMOTE bar = a fourth reading",
      "all off: " + d("C:repartition_ALL_repairs") + "; singly: E156 " + d("C:keep_factless(E156)") + "; E193 " + d("C:rejoin_cells(E193)") + "; E253 " + d("C:shed_blockers(E253)") + "; rounds " + d("C:outer_rounds(E253)->1") + "; E262 " + d("C:shed_factless_guard(E262)") + "; E263 " + d("C:reconcile_factless_first(E263)"),
-     "DELETE the ensemble (net c17 −5 CD of 26,841, 0 CN; the parts interact: E253 alone +215/−194, E262 alone +219/−84, together ~0)"),
+     "DELETE the ensemble (net −5 CD on c17 of 26,841 and −5 on c18 of 15,977, 0 CN, trial 0; the parts interact: E253 alone +215/−194, E262 alone +219/−84 on c17, together ~0)"),
     ("C13", "constrained union-find + E57 bridges", "cluster.py:115-161, 376-451", "(not run: repartition true)", "0 / 0 / 0", "C11", "n/a", "DELETE (3 dials)"),
     ("C14", "E303 K-C house-number price excuse", "d43.py:109-112; indist:1738", "(off, prepared)", "0 / 0 / 0", "", "0 by construction", "DELETE"),
 ]
@@ -302,7 +317,7 @@ P("## 8. Top-ten suspects ablated in the worktree, top five confirmed on cohort 
 P("")
 P("Suspects, chosen for never firing, duplicating another rule, or existing for a case the data no longer shows. Each was")
 P("ablated on the trial (patch or settings) AND as code in `census/w15-c1-bundle` (S1-S4, S6-S8, S10), run through the")
-P("official `harness run`.")
+P("official `harness run` (its result is on the `all` row: the bundle holds S1-S4, S6-S8 and S10 at once).")
 P("")
 P("| # | suspect | trial ‖ c17 | c18 | code-bundle harness |")
 P("|---|---|---|---|---|")
@@ -327,7 +342,7 @@ for num, name, arm in sus:
     c18s = ("m%+d g%+d cp+%d/−%d" % (a18["dmerge"], a18["dgroups"], a18["cp_gained"], a18["cp_lost"])
             + ((" CD+%d/−%d CN+%d" % (a18["gained_labels"].get("ref_cd", 0), a18["lost_labels"].get("ref_cd", 0), a18["gained_labels"].get("ref_cn", 0))) if "ref_cd" in a18.get("gained_labels", {}) else "")
             if a18 and "invalid" not in a18 else "·")
-    P(f"| {num} | {name} | {d(arm)} | {c18s} | {HARNESS.get(arm, '')} |")
+    P(f"| {num} | {name} | {d(arm, auto18=False)} | {c18s} | {HARNESS.get(arm, '')} |")
 P("")
 P("S8 (dead by configuration: K-A, E45/E46/E47 + unit arms, E65, E11, D65, E85/E88/E83, union-find + E57 bridges, E303,")
 P("E301/E301b/E302, the 5 off readers) and S10 (decide-time wall re-check) fire 0 on g15/c17/c18: Δ = 0 by construction.")
@@ -366,14 +381,16 @@ P("| rank | delete | evidence | removes |")
 P("|---|---|---|---|")
 dl = [
     ("1", "Dead by configuration: E85 family guard, E88 development hold, E83 carrier-aware stock (family.py, development.py, harness.py:492-603 deferred K-B path, incremental.py:994-1035 refusals), K-A, E45/E46/E47 + 5 unit arms, E65, D65 merge policy (+13 `*_hold.json`), union-find + E57 bridges, E303, E301/E301b/E302 prepared dials, the 5 OFF readers (offer_area, agency_code, agency_code_colive, commercial_subtype, named_villa)",
-     "fire 0 on g15/c17/c18; Δ 0 by construction", "~1,500 lines (family 335 + development 361 + harness ~110 + decide 200 + cluster 83 + lane 40 + readers), ~60 dials, 13 settings files"),
+     "fire 0 on g15/c17/c18; Δ 0 by construction", "~1,250 lines (family 335 + development 361 + harness ~110 + decide 200 + cluster 83 + lane ~40 + 5 readers 124), ~60 dials, 13 settings files"),
     ("2", "E63 context rule + E64 rail + hazard census (`hazard_context.py`, the `context` blob on every stored pair row)", "fires 0/0/0; " + d("E63:context_rule"), "~565 lines (decide 79, lane 85, hazard_context 401), 10 dials, one stored column's reason to exist"),
     ("3", "E61 designator veto + machine vetoes in clustering and the lane", d("E61:unit_designator_veto") + "; c18 in §8", "29 + ~25 plumbing lines, 1 dial; the D43 `unit_designator` reader already carries the same predicate"),
     ("4", "D43 gate reading (decide.py:560-571, the GATE branch of every reader, d43_gate / d43_gate_image_facts)", d("D43:gate") + " (merge edges become cluster conflicts; groups identical)", "1 of 4 readings; 2 dials"),
     ("5", "E48 per-stratum cut → one t_hi = 0.9788", d("E48:strata_table->t_hi"), "23 lines + `t_hi_by_stratum` (5 cells, 3 dead) + evaluate.decide_stratum coupling"),
     ("6", "Set-level cluster invariants size / category_type / compat_class / area_spread (+E280 spread excuse) / disposition / floor spread; decide-time wall re-check; E11; apply category_type_mix / category_main_incompatible", "0 trial, 0 c17 (each and together); apply reasons 0 in 7 live applies", "~45 + 12 lines, 5 dials, 2 apply reasons"),
     ("7", "Repartition repair ensemble (E156, E193 rejoin + the strict 4th reading, E253 shed + outer rounds, E262, E263)", d("C:repartition_ALL_repairs"), "296 lines + cluster.py:254-281 + d43.strict, 8 dials"),
-    ("8", "Fact readers zero on the trial with no sole fire on c17 (34 incl. the 5 OFF), dial groups `unitcode` (14) and `rental` (11)", "trial 0 each; c17 0 by construction (no sole fire) / 0 measured (dial groups)", "34 readers of 64, 25 dials (+ their text_facts extractors where no other reader uses them)"),
+    ("8", f"{len(DEL_READERS)} fact readers: " + ", ".join(DEL_READERS) + "; dial groups `unitcode` (14) and `rental` (11)",
+     "trial 0 each (measured); c17 0 (measured, or no sole fire = 0 by construction); c18 no sole fire; unitcode dials c18 m+14 cp 0. The 47 trial-zero readers dropped TOGETHER: c17 " + d("bundle:trial_zero_facts", ("c17",)).split(" ‖ ")[0] + ", c18 " + d("bundle:trial_zero_facts", ("c18",)).split(" ‖ ")[0] + " — carried by " + ", ".join(CAND_READERS + MEAS_READERS) + " (kept out of this row)",
+     f"{len(DEL_READERS)} of 64 readers, 25 dials (+ their text_facts extractors where no other reader uses them)"),
     ("9", "D43 promotion warrant (agree:2 / photo / unit / body-sequential) → merge into D50", d("D43:warrant->predicate"), "106 lines, 4 dials"),
     ("10", "apply operator_pair_verdict / must_not_link (→ `changed_since_plan`), operator_group_verdict (→ clustering reads group verdicts)", "0 / 0 / 1 fires in 7 live applies", "3 reasons, 1 negatives reader"),
 ]
@@ -404,7 +421,7 @@ P("  E193 rejoin re-reads the relation at the PROMOTE bar (d43.py:72-80).")
 P("- 'E61 protects twin flats': true, but not alone — the D43 `unit_designator` reader is the same predicate; E61 off = 0 Δ.")
 P("- 'The D43 gate protects certified merges from facts': its 92 / 406 / 319 demotions change no group; the cluster relation")
 P("  refuses the same unions.")
-P("- 'The repartition repairs recover factless separations': as an ensemble they are ~0 (trial 0, c17 +4/−10); singly they")
+P("- 'The repartition repairs recover factless separations': as an ensemble they are ~0 (trial 0, c17 +4/−10, c18 +19/−41); singly they")
 P("  move hundreds of co-pairs in opposite directions (E253 +215/−194, E262 +219/−84 on c17) — they mostly undo each other.")
 P("- My own first single-invariant patch returned None before the D43 limb; corrected, re-run (C:category_type_inv c17 0).")
 P("")
@@ -412,7 +429,8 @@ P("## 12. Open questions for the coordinator")
 P("")
 P("- The retrieval walls: keep as a slot filter with the D43 comparator as the one definition (the floor wall ≥2 vs the")
 P("  D43 floor fact with camps are two definitions today; making the filter the fact tightens retrieval — needs a measured arm).")
-P("- E157 cluster price and cluster image facts cost 124 / 102 certain duplicates on c17 and catch 0 structural negatives;")
+P("- The D43 cluster relation as a whole: trial off = +441 co-pairs (23 operator-same, 0 of 162 operator-different, 113 CD, 0 CN);")
+P("  c17 off = +2,993 (712 CD, 3 CN). E157 cluster price and cluster image facts cost 124 / 102 CD on c17 and catch 0 CN;")
 P("  the CN reference cannot see price twins or shared-shoot twins, so only the operator/judge labels can settle them.")
 P("- F3 hold lives only in the lane: moving it into `decide_pair` (an evidence-completeness input) is the one-code-path fix;")
 P("  it changes the lane's replay-equivalence proof, not its behaviour.")
@@ -428,6 +446,23 @@ P("  `c1/runs/{trial_w31_official,trial_bundle_official,c17_bundle_official}`.")
 P("- Worktrees: `/home/hejtm/dev/sreality/.claude/worktrees/w15-census-c1` (branch census/w15-c1-rules, pristine code the")
 P("  replay imports + the census scripts committed), `/home/hejtm/dev/sreality/.claude/worktrees/w15-census-c1-bundle` (branch")
 P("  census/w15-c1-bundle, the code deletion bundle + `autodedup/settings/c1_bundle.json`).")
+P("")
+P("## Appendix A. Every dial arm on the trial (one row per dial; coupled dependants switched off with it)")
+P("")
+P("| dial (w31 value → ablated) | Δ trial | coupled off |")
+P("|---|---|---|")
+import json as _j2
+_rows = [_j2.loads(x) for x in (Path("/home/hejtm/autodedup-artifacts/w15/census/c1/runs/trial_arms.jsonl").read_text().splitlines()) if x.strip()]
+for _r in _rows:
+    if not _r["name"].startswith("dial:"):
+        continue
+    _n = _r["name"][5:]
+    _ov = _r.get("over", {}).get(_n)
+    _co = _r.get("coupled_off") or ""
+    if "invalid" in _r:
+        P(f"| {_n} → {_ov} | invalid: {_r['invalid'][:70]} | |")
+    else:
+        P(f"| {_n} → {_ov} | {d('dial:' + _n, ('trial',))} | {', '.join(_co) if _co else ''} |")
 P("")
 Path("/home/hejtm/autodedup-artifacts/w15/census/c1/doc_part1.md").write_text("\n".join(L) + "\n")
 print("\n".join(L))
