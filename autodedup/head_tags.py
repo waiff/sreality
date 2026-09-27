@@ -106,3 +106,31 @@ def apply_head_tags(images: Any, *, floor: float = HEAD_FLOOR, margin: float = H
             image.tags = []
             counts["untagged"] += 1
     return counts
+
+
+def load_head_dump(path: str) -> dict[int, list[Any]]:
+    """`tag_model dump`'s JSONL (image_id, room, winner, runner_up) -> {image_id: head record}, so an
+    offline arm reads the real winners on an export made before the export carried them."""
+    import gzip
+
+    out: dict[int, list[Any]] = {}
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt") as handle:
+        for line in handle:
+            row = json.loads(line)
+            if row.get("room") is None:
+                raise UnknownHeadLabel(f"dump row {row.get('image_id')} names no engine room")
+            out[int(row["image_id"])] = [str(row["room"]), float(row["winner"]),
+                                         float(row["runner_up"])]
+    return out
+
+
+def attach_heads(images: Any, dump: Mapping[int, Sequence[Any]]) -> int:
+    """Set `image.head` from a dump (None when the dump does not carry the image); returns how many
+    images it carried."""
+    found = 0
+    for image in images:
+        head = dump.get(int(image.image_id))
+        image.head = None if head is None else list(head)
+        found += head is not None
+    return found

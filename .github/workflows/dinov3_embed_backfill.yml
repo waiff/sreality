@@ -91,11 +91,11 @@ on:
         default: "60"
         type: string
       scope:
-        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input)."
+        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input); scored = the images the active tag model already scored (the population gate)."
         required: false
         default: "all"
         type: choice
-        options: ["all", "rt", "ids", "blocks"]
+        options: ["all", "rt", "ids", "blocks", "scored"]
       listing_ids_file:
         description: "scope=ids only: a repo path of listing ids (one per line, .gz allowed) at the dispatched ref."
         required: false
@@ -207,8 +207,8 @@ jobs:
           ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
           ARGS="${ARGS} --container-disk-gb ${CONTAINER_DISK_GB:-60}"
           case "${SCOPE:-all}" in
-            all|rt|ids|blocks) ;;
-            *) echo "::error::scope must be all, rt, ids or blocks"; exit 1 ;;
+            all|rt|ids|blocks|scored) ;;
+            *) echo "::error::scope must be all, rt, ids, blocks or scored"; exit 1 ;;
           esac
           case "${LISTING_IDS_FILE:-}" in
             *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;

@@ -103,7 +103,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "ensembles.py",
             "family.py", "features.py",
         "d43.py", "fingerprint.py", "floor_convention.py", "guards.py",
-        "hazard_context.py", "incremental.py",
+        "hazard_context.py", "head_tags.py", "incremental.py",
             "indistinguishable.py", "proposed_splits.py", "repartition.py",
         "incremental_scope.py", "incremental_store.py",
         "model.py", "normalize.py", "oss_pod.py", "revocation.py", "settings.py",

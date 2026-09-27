@@ -1106,6 +1106,7 @@
         }
       ],
       "secrets": [
+        "HF_TOKEN",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -1692,7 +1693,7 @@
         },
         {
           "name": "scope",
-          "description": "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input).",
+          "description": "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input); scored = the images the active tag model already scored (the population gate).",
           "required": false,
           "type": "choice",
           "default": "all",
@@ -1700,7 +1701,8 @@
             "all",
             "rt",
             "ids",
-            "blocks"
+            "blocks",
+            "scored"
           ]
         },
         {

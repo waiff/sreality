@@ -46,6 +46,7 @@ from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
 from autodedup.development import holds as development_holds
 from autodedup.family import refusals as family_guard_refusals
 from autodedup.hazard_context import ContextIndex
+from autodedup.head_tags import apply_head_tags
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
@@ -443,6 +444,20 @@ def _merge_pairs_file(
     part.unlink()
 
 
+def use_head_tags(dataset: Dataset, settings: Settings) -> dict[str, int]:
+    """`image_tags = heads`: every photo's room becomes the active tag model's winner under the live
+    rule (`autodedup.head_tags`). Refuses an export none of whose images carries a head record —
+    that is an export made without `head_tags=1`, and untagging every photo would be a silent arm T."""
+    if settings.image_tags != "heads":
+        return {}
+    images = [img for bucket in dataset.images_by_listing.values() for img in bucket]
+    counts = apply_head_tags(images)
+    if images and counts["unscored"] == len(images):
+        raise ValueError("image_tags=heads but no image carries a head record: export with "
+                         "head_tags=1 or attach a tag_model dump")
+    return counts
+
+
 def run_engine(
     dataset: Dataset,
     settings: Settings,
@@ -456,6 +471,7 @@ def run_engine(
     `must_link` is the operator's `same` rulings (Decision 8, E910): they bind the clustering
     exactly as the real-time lane binds it."""
     timings: dict[str, float] = {}
+    head_counts = use_head_tags(dataset, settings)
     clock = time.perf_counter()
     fps = build_all(dataset, settings)
     timings["fingerprints_s"] = time.perf_counter() - clock
@@ -688,6 +704,7 @@ def run_engine(
         "must_link": {"loaded": len(must_link)},
         "family_guard": family_report,
         "development_hold": hold_report,
+        "image_tags": {"source": settings.image_tags, **head_counts},
         "timings": timings,
     }
     return summary

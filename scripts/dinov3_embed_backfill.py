@@ -95,6 +95,11 @@ SCOPES: dict[str, str] = {
     "blocks": "AND i.listing_id = any(%(listing_ids)s::bigint[])",
     "rt": ("AND i.listing_id IN (SELECT s.listing_id FROM autodedup.rt_scope_ids s "
            "WHERE s.generation = 'rt')"),
+    # The population gate (G4): the images the active model already scored from the bake-off
+    # arm's own vectors. Re-embedding exactly those through the production path and re-scoring
+    # them tells whether production vectors ARE the population the heads were trained on.
+    "scored": ("AND i.id IN (SELECT t.image_id FROM image_tag_scores t JOIN tag_head_models m "
+               "ON m.id = t.model_id AND m.status = 'active')"),
 }
 
 _PENDING_SQL = _PENDING_TEMPLATE.format(scope="")
@@ -361,7 +366,8 @@ def main() -> int:
                         "wrote instead of being killed mid-flight.")
     p.add_argument("--scope", choices=sorted(SCOPES), default="all",
                    help="all = the corpus; rt = the live lane's scope snapshot; ids = the "
-                        "listings in --listing-ids-file.")
+                        "listings in --listing-ids-file; scored = the images the active tag "
+                        "model already scored (the population gate).")
     p.add_argument("--listing-ids-file", default="",
                    help="With --scope ids: a file (optionally .gz) of listing ids, one per "
                         "line, in the ref the pod fetched.")

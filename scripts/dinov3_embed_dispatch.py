@@ -230,7 +230,7 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
-    p.add_argument("--scope", choices=("all", "rt", "ids", "blocks"), default="all",
+    p.add_argument("--scope", choices=("all", "rt", "ids", "blocks", "scored"), default="all",
                    help="Passed to the payload: all = corpus, rt = the live lane's scope, "
                         "ids = --listing-ids-file (a path inside the fetched ref).")
     p.add_argument("--listing-ids-file", default="")
