@@ -196,6 +196,9 @@ class Settings:
     photo_override_exclusive: bool = False
     photo_override_exclusive_bits: int = 0
     photo_override_no_colive: bool = False
+    # G4 K-K strict: False = the rung EXCUSES nothing (no wall lifted, no retrieval admission,
+    # every D43 fact read); it only certifies a band/reject pair no stated fact separates.
+    photo_override_excuse: bool = True
     # E45: the merge zone needs one UNIT-specific corroboration. K-A + interior_match_ratio >= 0.5
     # scored 88.6% (n=35) against K-A's 52.6% overall; K-B (the disjoint-window re-post shape)
     # scored 100% (n=94).

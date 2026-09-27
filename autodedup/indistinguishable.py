@@ -2646,7 +2646,8 @@ def distinguishing_facts(
     lenient = mode in (GATE, CLUSTER)
     gate_area_tol = cfg.d43_gate_area_tol if lenient else None
     # C7: a photo-proven pair's three column facts (area, disposition, floor) yield.
-    proven = photo_override(a, b, _present(feats, "room_proof_frames"), cfg)
+    proven = cfg.photo_override_excuse and photo_override(
+        a, b, _present(feats, "room_proof_frames"), cfg)
     # E280: two columns the two bodies' own printed figures contradict are not two areas.
     printed_prevail = cfg.d43_printed_area_prevails and _printed_areas_prevail(a, b)
     # E293: an empty land column is filled from the bažoš attribute block (identity when off).

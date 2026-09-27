@@ -719,7 +719,8 @@ def _decide_layers(
         fb.listing_id, fa.listing_id
     )
     # C7: the photo-override rung, read once on the two adverts and the frame count.
-    proven = photo_override(la, lb, present_value(feats, "room_proof_frames"), settings)
+    proven = settings.photo_override_excuse and photo_override(
+        la, lb, present_value(feats, "room_proof_frames"), settings)
     veto = pair_veto(fa, fb, settings, proven)
     if veto is not None:
         return Decision(lo, hi, "veto", 0.0, set(), None, veto, f"guard:{veto}")

@@ -206,7 +206,7 @@ class BlockIndex:
         # C7: retrieval admits a photo-proven pair past the attribute limbs on the frame count
         # alone; the decision re-reads the whole rung (price, development) on the two adverts.
         n = self.settings.photo_override_frames
-        if (n > 0 and veto in ATTRIBUTE_LIMBS
+        if (n > 0 and self.settings.photo_override_excuse and veto in ATTRIBUTE_LIMBS
                 and room_proof_frames(fp, other_fp, self.settings) >= n):
             self.photo_admitted = getattr(self, "photo_admitted", 0) + 1
             return False

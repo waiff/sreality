@@ -123,7 +123,7 @@ class ClusterRelation:
             return False
         slot = slots.get("room_proof_frames")
         frames = float(slot[0]) if slot and slot[1] else None
-        return photo_override(a, b, frames, self._settings)
+        return self._settings.photo_override_excuse and photo_override(a, b, frames, self._settings)
 
     def violating_pair(self, ids: Sequence[int]) -> tuple[int, int] | None:
         """The first pair of the member set a stated fact separates, in id order."""
