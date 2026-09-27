@@ -11,12 +11,16 @@ certificate, the E11 family count, the E46/E47 block, the E63 warrant and its fu
 the lane's census), the model score, the D43 gate's facts, the promotion warrant, the D50 refusal
 and the (B) corroboration. The two expensive families (gate, promote) are computed for the pairs a
 ladder can reach at the run's store floor; the lab fills any other pair it reaches with these same
-functions. The version hashes the export, the settings row, the model and every module the run
-imports (`code_digest`): an engine change is a new version, never a stale read."""
+functions. The version hashes the export, the settings row, the model, the operator rulings the run
+bound, and every module the run imports plus the data files they read (`code_digest`): an engine
+change is a new version, never a stale read. An export a preregistration seals is refused unless the
+caller names its freeze (`check_seal`); only the export's meta line is read to decide that."""
 
 from __future__ import annotations
 
 import ast
+import glob
+import gzip
 import hashlib
 import json
 import os
@@ -26,7 +30,7 @@ from array import array
 from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Listing
 from autodedup.decide import (
@@ -52,6 +56,12 @@ FILE: str = "evidence.pkl"
 MANIFEST: str = "evidence.json"
 REPO: Path = Path(__file__).resolve().parents[1]
 DIGEST_ROOTS: tuple[str, ...] = ("autodedup/harness.py", "autodedup/evidence.py")
+# The data files a digest module reads that shape a decision (fingerprint.py's CLIP taxonomy: its
+# collapse map makes the logical room tags the tag features and image facts read). Settings rows and
+# model files are hashed into the version by content; `test_lab_verify`'s census fails on a new one.
+DIGEST_DATA: tuple[str, ...] = ("data/clip_taxonomy.json",)
+SEAL_GLOB: str = "docs/design/autodedup/preregistrations/preregistration_cohort*.json"
+SEALS_ENV: str = "AUTODEDUP_SEALS"
 BASE_SIGNALS: tuple[str, ...] = ("veto", "auto", "cert", "nfam", "block", "ctx_arm", "ctx_refused",
                                  "score_ref")
 LAZY_SIGNALS: dict[str, tuple[str, ...]] = {"gate": ("gate",),
@@ -102,9 +112,24 @@ def _sha(parts: Sequence[bytes]) -> str:
     return digest.hexdigest()
 
 
+def engine_files(roots: Sequence[str] = DIGEST_ROOTS) -> list[str]:
+    """What `code_digest` hashes: the import closure and the data files it reads."""
+    return engine_modules(roots) + list(DIGEST_DATA)
+
+
 def code_digest(roots: Sequence[str] = DIGEST_ROOTS) -> str:
     return _sha([rel.encode() + (REPO / rel).read_bytes()
-                 for rel in engine_modules(roots)])[:12]
+                 for rel in engine_files(roots)])[:12]
+
+
+def rulings_digest(must_not_link: Iterable[tuple[int, int]] = (),
+                   must_link: Iterable[tuple[int, int]] = (), withhold_photos: bool = False) -> str:
+    """The run's bound rulings and its photo arm: two runs that bound different rulings decide
+    differently and must never share a version."""
+    body = {"must_not_link": sorted([int(a), int(b)] for a, b in must_not_link),
+            "must_link": sorted([int(a), int(b)] for a, b in must_link),
+            "withhold_photos": bool(withhold_photos)}
+    return _sha([json.dumps(body, sort_keys=True).encode()])[:12]
 
 
 def file_digest(path: str | Path, memo: Path | None = None) -> str:
@@ -139,9 +164,55 @@ def settings_bytes(settings: Settings) -> bytes:
     return json.dumps(settings.to_dict(), sort_keys=True, default=list).encode()
 
 
-def version_of(export_digest: str, settings: Settings, model: LogisticModel, code: str) -> str:
+def version_of(export_digest: str, settings: Settings, model: LogisticModel, code: str,
+               rulings: str = "") -> str:
     return _sha([str(SCHEMA).encode(), export_digest.encode(), settings_bytes(settings),
-                 json.dumps(model.to_json(), sort_keys=True).encode(), code.encode()])[:12]
+                 json.dumps(model.to_json(), sort_keys=True).encode(), code.encode(),
+                 (rulings or rulings_digest()).encode()])[:12]
+
+
+# --- the seals: a preregistered cohort is read once, at its freeze ------------------------------
+
+class SealedExport(RuntimeError):
+    """The export holds a block a preregistration seals, and no freeze was named."""
+
+
+def seal_files(extra: Iterable[str | Path] = ()) -> list[Path]:
+    """The committed preregistrations, plus any named in `$AUTODEDUP_SEALS` (os.pathsep) or here."""
+    paths = [Path(p) for p in sorted(glob.glob(str(REPO / SEAL_GLOB)))]
+    paths += [Path(p) for p in os.environ.get(SEALS_ENV, "").split(os.pathsep) if p]
+    paths += [Path(p) for p in extra]
+    return paths
+
+
+def sealed_blocks(paths: Iterable[str | Path]) -> dict[str, str]:
+    """`grain:code` -> the preregistration that seals it (its `blocks.spelling`)."""
+    out: dict[str, str] = {}
+    for path in paths:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        for block in str((doc.get("blocks") or {}).get("spelling", "")).split():
+            out[block] = str(path)
+    return out
+
+
+def export_blocks(export: str | Path) -> set[str]:
+    """The export's blocks as `grain:code`, read off its meta line alone (no advert is read)."""
+    with gzip.open(export, "rt", encoding="utf-8") as handle:
+        meta = json.loads(handle.readline() or "{}")
+    if meta.get("t") != "meta":
+        return set()
+    out = {f"{b.get('grain')}:{b.get('code')}" for b in meta.get("blocks") or ()
+           if b.get("grain") and b.get("code") is not None}
+    return out | set(str((meta.get("params") or {}).get("blocks") or "").split())
+
+
+def check_seal(export: str | Path, extra: Iterable[str | Path] = (), freeze: bool = False) -> None:
+    """Refuse an export that holds a sealed block unless its freeze is named."""
+    sealed = sealed_blocks(seal_files(extra))
+    hit = sorted(export_blocks(export) & set(sealed))
+    if hit and not freeze:
+        raise SealedExport(f"{export} holds sealed blocks {hit} ({sorted({sealed[b] for b in hit})}); "
+                           "a sealed cohort is read once, at its freeze: pass --freeze only then")
 
 
 # --- the per-pair signals: one engine function each ------------------------------------------
@@ -262,12 +333,14 @@ def job(keys: list[tuple[int, int]], feats: list[Feats], fps: Mapping[int, Finge
 @dataclass(frozen=True)
 class Request:
     """What `harness run --evidence` was asked for: the export's content digest (part of the
-    version), the fork width for the signal computation, and the engine code digest taken when
-    the run STARTED (a file edited while a run is in flight must not re-label its output)."""
+    version), the fork width for the signal computation, the engine code digest taken when the run
+    STARTED (a file edited while a run is in flight must not re-label its output) and the digest of
+    the rulings the run bound (`rulings_digest`)."""
 
     export_digest: str
     workers: int = 1
     code_digest: str = ""
+    rulings: str = ""
 
 
 def write(out_dir: Path, rows: Mapping[tuple[int, int], Any], dataset: Dataset,
@@ -328,9 +401,12 @@ def write(out_dir: Path, rows: Mapping[tuple[int, int], Any], dataset: Dataset,
         done[kind] = bytes(mask)
         timings[f"{kind}_s"] = time.perf_counter() - clock
     code = request.code_digest or code_digest()
+    rulings = request.rulings or rulings_digest()
     manifest = {
-        "schema": SCHEMA, "version": version_of(request.export_digest, settings, model, code),
-        "code_digest": code, "engine_modules": engine_modules(),
+        "schema": SCHEMA, "version": version_of(request.export_digest, settings, model, code,
+                                                rulings),
+        "code_digest": code, "engine_modules": engine_modules(), "engine_data": list(DIGEST_DATA),
+        "rulings_digest": rulings,
         "export_digest": request.export_digest, "model_version": model.version,
         "pairs": len(keys), "stored": sum(decision["stored"]), "reachable": len(reach),
         "listings": len(dataset.listings), "feature_order": list(FEATURE_ORDER),
@@ -348,6 +424,15 @@ def write(out_dir: Path, rows: Mapping[tuple[int, int], Any], dataset: Dataset,
     (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True),
                                     encoding="utf-8")
     return manifest
+
+
+def read_manifest(run_dir: str | Path) -> dict[str, Any]:
+    """The artefact's manifest alone (a few KB), so a stale artefact is refused before its
+    pickle is read."""
+    path = Path(run_dir) / MANIFEST
+    if not path.is_file():
+        raise FileNotFoundError(f"{path}: run `harness run ... --evidence` to write it")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def read(run_dir: str | Path) -> dict[str, Any]:

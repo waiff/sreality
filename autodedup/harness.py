@@ -422,10 +422,13 @@ def run(
     hold held on the way.
 
     `evidence` also writes every decided pair's features, decision and rung signals (the lab's
-    only input, `autodedup.evidence`), off the final store and the lane's final census."""
+    only input, `autodedup.evidence`), off the final store and the lane's final census; its
+    version carries the rulings bound here."""
     clock = time.perf_counter()
-    if evidence is not None and not evidence.code_digest:
-        evidence = replace(evidence, code_digest=pair_evidence.code_digest())
+    if evidence is not None:
+        evidence = replace(evidence, code_digest=evidence.code_digest or pair_evidence.code_digest(),
+                           rulings=pair_evidence.rulings_digest(must_not_link, must_link,
+                                                                withhold_photos))
     fps, calibration = calibrated(dataset, settings)
     facts = CohortFacts(dataset)
     store = MemoryStore(now=WITHHELD_T0 if withhold_photos else None)
@@ -570,6 +573,8 @@ def write_run(store: MemoryStore, dataset: Dataset, fps: Mapping[int, Fingerprin
 def cmd_run(args: argparse.Namespace, out: Any) -> int:
     settings = named_settings(args.settings)
     model = named_model(args.model)
+    if args.evidence:
+        pair_evidence.check_seal(args.artifact, freeze=args.freeze)
     clock = time.perf_counter()
     dataset = load(args.artifact)
     load_seconds = time.perf_counter() - clock
@@ -988,6 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "rung signals, the lab's only input (autodedup/evidence.py)")
     run.add_argument("--evidence-workers", type=int, default=1,
                      help="forked workers for the evidence signals")
+    run.add_argument("--freeze", action="store_true",
+                     help="write evidence off an export a preregistration seals (only at its freeze)")
     run.set_defaults(func=cmd_run)
 
     pair = sub.add_parser("pair", help="side-by-side evidence for one pair")
