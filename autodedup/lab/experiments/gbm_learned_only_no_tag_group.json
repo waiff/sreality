@@ -1,0 +1,32 @@
+{
+ "name": "gbm_learned_only_no_tag_group",
+ "note": "the challenger (one gradient-boosted cut at 0.9 between the walls and the stated-fact gate) grouped by the relation without the tag-derived facts; E157's price limb kept",
+ "model": {
+  "npz": "$AUTODEDUP_LAB_MODELS/gbm_{cohort}.npz"
+ },
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation",
+  "settings": {
+   "d43_cluster_image_facts": false
+  }
+ }
+}
