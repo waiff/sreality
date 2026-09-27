@@ -465,13 +465,14 @@ def areas_from_text(haystack: str | None, *, category_main: str | None,
 
     bazos has no structured area field at all: no interior measure and no
     "plocha pozemku", so `plot` is genuinely absent rather than unread, and the
-    resolver's untyped fallback arm is the whole story here (on land it stamps that
-    free-text number 'plot', which is what it is on a parcel ad). Free prose is also the
-    one substrate where a parcel is always written "1 500 m2", which is why the naive
-    grammar cost ~12,400 of these rows their thousands digit.
+    resolver's `prose` arm is the whole story here (on land it stamps that free-text
+    number 'plot', which is what it is on a parcel ad). It is the one arm the per-room
+    floor reads, because the first m² in an advert's prose may be its cellar. Free prose
+    is also the one substrate where a parcel is always written "1 500 m2", which is why
+    the naive grammar cost ~12,400 of these rows their thousands digit.
     """
     area_m2, area_basis = derive_headline_area(
-        category_main=category_main, plot=None, fallback=parse_area_text(haystack),
+        category_main=category_main, plot=None, prose=parse_area_text(haystack),
         disposition=disposition,
     )
     return PortalAreas(area_m2=area_m2, area_basis=area_basis)

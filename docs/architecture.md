@@ -52,10 +52,13 @@ emits". That is now one table and one module rather than nine copies of each:
   own snapshot): a storey outside -3..40 is absence on either convention and a building count
   outside 1..40 is absence (`scraper/floor.py` `floor_from_portal` / `total_floors_from_portal`,
   every parser and the text lane); a dwelling headline must sit in `scraper/area.py`
-  `dwelling_area_band` — ≥ 5 m² on byt/dum/komercni, ≥ 8 m² a room when a byt/dum states
-  `N+kk`/`N+1`, and < 1,000 m² on a byt and on a house's UNLABELLED figure (bazos's first prose
-  m², a title figure: at 1,000 m² or more that is the parcel) — and a declined measure falls
-  through to the next one.
+  `dwelling_area_band` — ≥ 5 m² on byt/dum/komercni, and < 1,000 m² on a byt and on a house's
+  UNLABELLED figure (bazos's first prose m², a title figure: at 1,000 m² or more that is the
+  parcel) — and a declined measure falls through to the next one. The per-room floor (≥ 8 m² a
+  room when a byt/dum states `N+kk`/`N+1`) reads ONLY the `prose` arm, bazos's first m² in the
+  advert text (the cellar, a balcony): a structured cell or title figure under it is a ROOM
+  RENTAL's real size (280 structured rows on production, 2026-09-27: "pronájem bytu 5+1 a více"
+  at 11-38 m²), never held to it.
   A portal-specific placeholder is a contract **sentinel** instead (idnes's floor-select top,
   "20. patro a vyšší"). Rows stored before a band existed are NOT cleared by ingest (a `text`
   cell preserves on NULL, inactive rows never refetch, `reparse.py` never blanks): each such heal

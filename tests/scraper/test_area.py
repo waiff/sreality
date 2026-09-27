@@ -271,27 +271,52 @@ def test_dotted_thousands_are_one_number_and_a_decimal_point_still_is_one():
 
 
 
-def test_a_headline_under_eight_square_metres_a_room_is_a_part_of_the_unit():
+def test_a_prose_figure_under_eight_square_metres_a_room_is_a_part_of_the_unit():
     """Mechová 3+1 (bazos 14012930): the only m² in the advert is the cellar's 2 m², and a
     3+1 of 8 m² (bazos 18453993) is a room. Both are absence; the band is the advert's own
     room count, so a 12 m² chata that states no disposition keeps its area."""
     from scraper.area import derive_headline_area, dwelling_area_band
 
-    assert derive_headline_area(category_main="byt", fallback=2.0, disposition="3+1") == (None, None)
-    assert derive_headline_area(category_main="byt", fallback=8.0, disposition="3+1") == (None, None)
-    assert derive_headline_area(category_main="byt", fallback=76.0, disposition="3+1") == (76.0, "unknown")
-    assert derive_headline_area(category_main="byt", usable=18.0, disposition="2+kk") == (18.0, "usable")
-    assert derive_headline_area(category_main="dum", usable=12.0) == (12.0, "usable")
-    assert derive_headline_area(category_main="dum", usable=8.0, disposition="1+1") == (8.0, "usable")
-    assert derive_headline_area(category_main="dum", usable=7.9, disposition="1+1") == (None, None)
-    assert derive_headline_area(category_main="komercni", usable=6.0, disposition="3+1") == (6.0, "usable")
-    # A declined measure falls through to the next one, exactly like the 5 m² rail.
-    assert derive_headline_area(
-        category_main="byt", usable=13.0, total=76.0, disposition="3+1") == (76.0, "total")
+    assert derive_headline_area(category_main="byt", prose=2.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", prose=8.0, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", prose=23.9, disposition="3+1") == (None, None)
+    assert derive_headline_area(category_main="byt", prose=24.0, disposition="3+1") == (24.0, "unknown")
+    assert derive_headline_area(category_main="byt", prose=76.0, disposition="3+1") == (76.0, "unknown")
+    assert derive_headline_area(category_main="dum", prose=12.0) == (12.0, "unknown")
+    assert derive_headline_area(category_main="dum", prose=8.0, disposition="1+1") == (8.0, "unknown")
+    assert derive_headline_area(category_main="dum", prose=7.9, disposition="1+1") == (None, None)
+    assert derive_headline_area(category_main="komercni", prose=6.0, disposition="3+1") == (6.0, "unknown")
     # Only a stated N+kk / N+1 scales the band; anything else keeps the flat 5 m² floor.
+    assert derive_headline_area(category_main="byt", prose=6.0, disposition="atypicky") == (6.0, "unknown")
+    assert dwelling_area_band("byt", "3+1") == (24.0, 1_000.0)
     assert dwelling_area_band("byt", "atypicky") == (MIN_AREA_M2, 1_000.0)
     assert dwelling_area_band("byt", None) == (MIN_AREA_M2, 1_000.0)
     assert dwelling_area_band("pozemek", "3+1") == (0.0, MAX_AREA_M2)
+
+
+def test_a_structured_figure_under_eight_square_metres_a_room_is_a_room_rental():
+    """Production, 2026-09-27: the per-room band hit 280 structured rows, and the hand-read
+    found room rentals listed under the whole flat's disposition — ceskereality "pronájem
+    bytu 5+1 a více" at 11-38 m² (18933121, 18747125, ...), the same rooms on idnes as
+    5+kk 11-12 m² (18749058, 19004720), bezrealitky 3+1 / 2+kk / 4+1 at 15-23 m². The
+    figure is the room's real size, so no labelled cell and no title figure is held to
+    the per-room floor; the 5 m² floor and the flat ceiling still hold."""
+    from scraper.area import derive_headline_area
+
+    assert derive_headline_area(category_main="byt", usable=14.0, disposition="5+1") == (14.0, "usable")
+    assert derive_headline_area(category_main="byt", usable=12.0, disposition="5+kk") == (12.0, "usable")
+    assert derive_headline_area(category_main="byt", total=20.0, disposition="3+1") == (20.0, "total")
+    assert derive_headline_area(category_main="byt", fallback=12.0, disposition="4+1") == (12.0, "unknown")
+    assert derive_headline_area(category_main="dum", usable=7.9, disposition="1+1") == (7.9, "usable")
+    assert derive_headline_area(category_main="byt", usable=4.9, disposition="5+1") == (None, None)
+    assert derive_headline_area(category_main="byt", fallback=1.0, disposition="1+kk") == (None, None)
+    assert derive_headline_area(category_main="byt", usable=1225.0, disposition="1+kk") == (None, None)
+    # A labelled measure leads, and the prose arm is never reached beside it.
+    assert derive_headline_area(
+        category_main="byt", usable=13.0, prose=76.0, disposition="3+1") == (13.0, "usable")
+    # A declined prose figure is absence, like any declined measure.
+    assert derive_headline_area(
+        category_main="byt", prose=13.0, disposition="3+1") == (None, None)
 
 
 def test_a_flat_at_a_thousand_square_metres_is_a_site_area_and_the_next_measure_speaks():

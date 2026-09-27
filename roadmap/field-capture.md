@@ -155,11 +155,13 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       idnes `"20. patro a vyšší"` is a floor sentinel; a bare storey outside -3..40 and a
       building count outside 1..40 are absence on every portal (`scraper/floor.py`); the
       dwelling band scales with the advert's rooms (8 m² a room on byt/dum, byt < 1,000 m²,
-      `scraper/area.py`); dotted thousands are one number (the grammar half of #1595), and a
-      house's UNLABELLED figure stays under 1,000 m² (bazos's first prose m² there is the parcel).
-      **Owed, operator/coordinator:** migration 573 is its own PR (#1633,
+      `scraper/area.py`; the per-room floor narrowed to bazos's prose figure by #1637 on
+      2026-09-27, because 280 structured rows under it were room rentals); dotted thousands
+      are one number (the grammar half of #1595), and a house's UNLABELLED figure stays under
+      1,000 m² (bazos's first prose m² there is the parcel).
+      **Owed, operator/coordinator:** migration 573 is its own PR (#1633, stacked on #1637;
       destructive: NULLs the stored leftovers after a backup to `backup_a4.listing_cells`):
-      after this PR is merged + deployed, run its count query, get the operator's OK, apply it
+      after #1637 is merged + deployed, re-run its count query, get the operator's OK, apply it
       from THAT branch, then merge it; then `reparse.yml fields=area_m2` per portal, then the
       autodedup lane re-seed (it reads snapshots only).
 

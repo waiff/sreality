@@ -522,3 +522,25 @@ def test_street_parking_is_not_the_property_s_own_parking():
     )
     assert listing.has_parking is False
     assert listing.garage is False
+
+
+def test_a_room_rental_under_a_five_room_disposition_keeps_the_room_s_size():
+    """ceskereality 18933121 / 18747125 / 18905876 (production, 2026-09-27): Praha rooms
+    rented as "Pronájem bytu 5+1 a více" at 11-38 m². The spec cell is the room's real
+    size; the per-room band reads bazos's prose alone, never a structured cell or title."""
+    html = (DETAIL_HTML
+            .replace("Prodej bytu 1+1 41 m²", "Pronájem bytu 5+1 a více 14 m²")
+            .replace('<span class="i-info__value"> 41 m² </span>',
+                     '<span class="i-info__value"> 14 m² </span>'))
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="pronajem",
+    )
+    assert listing.disposition == "5+1"
+    assert (listing.area_m2, listing.area_basis, listing.usable_area) == (14.0, "usable", 14.0)
+
+    title_only = parse_detail(
+        html.replace('<div class="i-info"><span class="i-info__title">Plocha užitná</span>'
+                     '<span class="i-info__value"> 14 m² </span></div>', ""),
+        source_url=_DETAIL_URL, category_main="byt", category_type="pronajem",
+    )
+    assert (title_only.area_m2, title_only.area_basis) == (14.0, "unknown")
