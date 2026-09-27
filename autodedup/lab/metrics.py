@@ -192,7 +192,8 @@ def _run_seconds(c: Cohort) -> float | None:
 
 
 def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
-        why: dict[str, Any] | None = None, verified: bool | None = None) -> dict[str, Any]:
+        why: dict[str, Any] | None = None, verified: bool | None = None, stamp: str = ""
+        ) -> dict[str, Any]:
     d, g = arm.decisions, arm.groups
     ids = set(c.ds.listings)
     merges = d.zone == MERGE
@@ -202,8 +203,8 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
     sizes = [len(v) for v in g.clusters.values()]
     out: dict[str, Any] = {
         "experiment": arm.config.get("name"), "config_id": config_id(arm.config),
-        "cohort": c.name, "cache": c.version, "engine": c.code_digest, "code": git_head(),
-        "verified": verified, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "cohort": c.name, "cache": c.version, "stamp": stamp, "engine": c.code_digest,
+        "code": git_head(), "verified": verified, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "zones": {"merge": int(merges.sum()), "band": int((d.zone == BAND).sum()),
                   "reject": int((d.zone == REJECT).sum()), "veto": int((d.zone == VETO).sum())},
         "merge_by": _count(f"{r}:{n}" if r in ("proof", "context") else r

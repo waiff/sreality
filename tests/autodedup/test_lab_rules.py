@@ -16,7 +16,7 @@ VERIFIED = {"v-trial", "v-c17", "v-c18"}
 
 def _row(cohort: str, m1: int, m2: int = 0, together: list[str] | None = None,
          m4: dict[str, Any] | None = None, cache: str | None = None) -> dict[str, Any]:
-    return {"experiment": "x", "cohort": cohort, "cache": cache or f"v-{cohort}",
+    return {"experiment": "x", "cohort": cohort, "stamp": cache or f"v-{cohort}",
             "m": {"M1": {"together": m1, "n": 60}, "M2": {"together": m2, "n": 12},
                   "M3": {"together": together or []}, "M7": {"band": 1},
                   **({"M4": m4} if m4 else {})}}
@@ -96,3 +96,24 @@ def test_the_board_is_one_table_with_m1_to_m9(tmp_path: Path) -> None:
         assert m in head
     assert "| 46/60 |" in line and "| 10/12 (6/7 cases) |" in line and "≤8.8%" in line
     assert "(1295.5)" in line and "| yes |" in line
+
+
+def test_a_verify_certifies_the_engine_artefact_and_the_lab_code(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from autodedup.lab import verify
+
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (lab / "board.py").write_text("RUNG = 1\n")
+    monkeypatch.setattr(verify, "LAB_DIR", lab)
+    cohort = SimpleNamespace(name="c18", version="v1", code_digest="e1")
+    verify.record(tmp_path, cohort, {"rows": {"identical": 1}, "groups": {"harness_run": 1}}, True)
+    assert verify.verified(tmp_path) == {verify.stamp("v1")}
+    old = verify.stamp("v1")
+    (lab / "board.py").write_text("RUNG = 2\n")
+    assert verify.stamp("v1") not in verify.verified(tmp_path)
+    verify.record(tmp_path, cohort, {}, False)
+    assert verify.verified(tmp_path) == {old}
+    verify.record(tmp_path, cohort, {}, True)
+    assert verify.verified(tmp_path) == {old, verify.stamp("v1")}

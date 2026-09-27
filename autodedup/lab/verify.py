@@ -7,11 +7,14 @@ Three reads, all against the SAME `harness run --evidence` directory the cohort 
 3. rungs: each reference rung against the engine function it restates (`decide._decide_layers`,
    `apply_context_rule`, `apply_d43_rule`, `apply_merge_policy`), pair by pair, rung by rung, so a
    rung that drifts is named even when a later rung happens to mask it.
-A passing verify is recorded under the cache root; `lab keep` counts only rows from verified caches."""
+A passing verify is recorded under the cache root against a STAMP: the artefact's version (the
+engine) plus a digest of the lab's own modules (the rungs), so editing a rung un-verifies every
+cache until it is verified again. `lab keep` counts only rows whose stamp passed."""
 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -32,6 +35,20 @@ from autodedup.lab.cache import ZONE_CODE, Cohort
 
 SCORE_TOL: float = 1e-6
 VERIFIED_FILE: str = "verified.jsonl"
+LAB_DIR: Path = Path(__file__).resolve().parent
+
+
+def lab_digest() -> str:
+    """The lab's own code (rungs, group steps, scorers): not part of the artefact's version."""
+    digest = hashlib.sha1()
+    for path in sorted(LAB_DIR.glob("*.py")):
+        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()[:12]
+
+
+def stamp(version: str) -> str:
+    """What a verify certifies and a leaderboard row carries: the engine's artefact AND the lab."""
+    return f"{version}+{lab_digest()}"
 
 
 def rows(c: Cohort, outcome: Outcome) -> dict[str, Any]:
@@ -175,15 +192,15 @@ def rung_equivalence(c: Cohort, idx: Sequence[int] | None = None,
 def record(root: Path, c: Cohort, report: dict[str, Any], ok: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
     with open(root / VERIFIED_FILE, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"cohort": c.name, "cache": c.version, "code_digest": c.code_digest,
-                                 "ok": ok, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        handle.write(json.dumps({"cohort": c.name, "cache": c.version, "stamp": stamp(c.version),
+                                 "code_digest": c.code_digest, "ok": ok, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                  "rows": report.get("rows", {}).get("identical"),
                                  "groups": report.get("groups", {}).get("harness_run")},
                                 sort_keys=True) + "\n")
 
 
 def verified(root: Path) -> set[str]:
-    """The cache versions whose newest verify passed."""
+    """The stamps whose newest verify passed."""
     path = root / VERIFIED_FILE
     if not path.is_file():
         return set()
@@ -191,8 +208,8 @@ def verified(root: Path) -> set[str]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             entry = json.loads(line)
-            newest[entry["cache"]] = bool(entry["ok"])
-    return {cache for cache, ok in newest.items() if ok}
+            newest[entry.get("stamp", "")] = bool(entry["ok"])
+    return {key for key, ok in newest.items() if ok and key}
 
 
 def passed(report: dict[str, Any]) -> bool:

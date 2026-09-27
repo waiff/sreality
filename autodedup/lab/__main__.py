@@ -85,19 +85,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     for name in args.cohort:
         clock = time.perf_counter()
         cohort = open_cohort(name, args.cohorts, workers=args.workers)
+        stamp = verify.stamp(cohort.version)
         print(f"[{name}] cache {cohort.version} ready in {time.perf_counter() - clock:.1f}s "
-              f"({cohort.n} pairs){'' if cohort.version in ok else ' NOT VERIFIED'}", flush=True)
+              f"({cohort.n} pairs){'' if stamp in ok else ' NOT VERIFIED'}", flush=True)
         base = lab_board.run(cohort, base_config)
         why = (metrics.why_summary(metrics.why_refused(cohort, base, labels))
                if args.why else None)
-        metrics.append(board, metrics.row(cohort, base, None, labels, why, cohort.version in ok))
+        metrics.append(board, metrics.row(cohort, base, None, labels, why, stamp in ok, stamp))
         for config in configs:
             if lab_board.config_id(config) == lab_board.config_id(base_config):
                 continue
             outcome = lab_board.run(cohort, config)
             why = (metrics.why_summary(metrics.why_refused(cohort, outcome, labels))
                    if args.why else None)
-            entry = metrics.row(cohort, outcome, base, labels, why, cohort.version in ok)
+            entry = metrics.row(cohort, outcome, base, labels, why, stamp in ok, stamp)
             metrics.append(board, entry)
             vs, r = entry["vs_base"], entry["rulings"]
             print(f"[{name}] {entry['experiment']}: merge {entry['zones']['merge']} groups "

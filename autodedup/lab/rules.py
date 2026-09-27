@@ -1,5 +1,6 @@
 """GLOBAL_SEARCH 6.1 (a), pre-registered before any post-heal arm: the keep rule and the cut rule,
-read off leaderboard rows. A row counts only when its cache passed `lab verify`.
+read off leaderboard rows. A row counts only when its stamp (the engine's artefact and the lab's
+code) passed `lab verify`.
 
 Keep: an arm is kept only if its c18 M1 is not lower than the incumbent's, M3 holds on the extended
 fixture list (every present fixture apart, unless the operator took the case off the bar at an RP),
@@ -34,7 +35,7 @@ def keep(arm: Rows, incumbent: Rows, verified: set[str], validate: str = VALIDAT
     reasons: list[str] = []
     rows = [*arm.values(), *incumbent.values()]
     unverified = sorted({f"{r['experiment']}@{r['cohort']}" for r in rows
-                         if r.get("cache") not in verified})
+                         if r.get("stamp") not in verified})
     checks["verified"] = not unverified
     if unverified:
         reasons.append(f"rows from unverified caches: {', '.join(unverified)}")
@@ -85,7 +86,7 @@ def cut(sweep: Mapping[float, Rows], incumbent: Rows, verified: set[str],
             table[f"{t:.2f}"] = "no row"
             continue
         row = rows[validate]
-        ok_row = row.get("cache") in verified
+        ok_row = row.get("stamp") in verified
         m1 = _m(row, "M1").get("together")
         table[f"{t:.2f}"] = {"M1": m1, "verified": ok_row}
         if ok_row and m1 is not None and m1 >= bar:
