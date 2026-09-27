@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from autodedup.lab import board as lab_board
-from autodedup.lab import metrics
+from autodedup.lab import metrics, page
 from autodedup.lab.cache import open_cohort, registry
 
 REFERENCE = Path(__file__).parent / "experiments" / "w31_reference.json"
@@ -97,6 +97,14 @@ def cmd_lost(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_page(args: argparse.Namespace) -> int:
+    review = json.loads(Path(args.review).read_text(encoding="utf-8"))
+    out = Path(args.out or Path(args.review).with_suffix(".html"))
+    out.write_text(page.render(review, args.n, args.seed), encoding="utf-8")
+    print(out)
+    return 0
+
+
 def cmd_board(args: argparse.Namespace) -> int:
     reg = registry(args.cohorts)
     table = metrics.render(_board_path(reg, args.board), args.cohort or None)
@@ -131,6 +139,12 @@ def build_parser() -> argparse.ArgumentParser:
     lost.add_argument("--why", action="store_true",
                       help="for merge edges the group step refused: the invariant and the facts")
     lost.set_defaults(fn=cmd_lost)
+    review = sub.add_parser("page", help="one review page from an arm's review file")
+    review.add_argument("review")
+    review.add_argument("--out")
+    review.add_argument("--n", type=int, default=60, help="groups in the seeded sample (0 = all)")
+    review.add_argument("--seed", type=int, default=1)
+    review.set_defaults(fn=cmd_page)
     show = sub.add_parser("board")
     show.add_argument("--cohort", action="append")
     show.add_argument("--board")

@@ -10,7 +10,7 @@ import json
 import subprocess
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -32,6 +32,19 @@ JUDGE_DIFFERENT: frozenset[str] = frozenset({"different_property", "same_buildin
 class Labels:
     rulings: dict[tuple[int, int], str]
     judges: dict[str, dict[tuple[int, int], str]]
+    groups: dict[frozenset[int], str] = field(default_factory=dict)
+
+
+def read_group_reads(paths: Iterable[str | Path]) -> dict[frozenset[int], str]:
+    """The review page's exported reads: one member set per line, the newest read winning."""
+    out: dict[frozenset[int], str] = {}
+    for path in paths:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                if entry.get("kind") == "group_read" and entry.get("verdict") in (SAME, DIFFERENT):
+                    out[frozenset(int(x) for x in entry["members"])] = entry["verdict"]
+    return out
 
 
 def load_labels(reg: dict[str, Any]) -> Labels:
@@ -50,7 +63,7 @@ def load_labels(reg: dict[str, Any]) -> Labels:
             elif verdict in JUDGE_DIFFERENT:
                 out[key] = DIFFERENT
         judges[name] = out
-    return Labels(rulings, judges)
+    return Labels(rulings, judges, read_group_reads(reg.get("group_reads") or ()))
 
 
 def _read(groups: Groups, labels: dict[tuple[int, int], str], ids: set[int]) -> dict[str, Any]:
@@ -118,6 +131,12 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[s
                           "groups_arm_only": len(arm_sets - base_sets),
                           "groups_base_only": len(base_sets - arm_sets),
                           "adverts_moved": len(moved)}
+        if labels.groups:
+            out["group_reads"] = {
+                side: {v: sum(1 for m in sets if labels.groups.get(m) == v)
+                       for v in (SAME, DIFFERENT)}
+                for side, sets in (("arm_only", arm_sets - base_sets),
+                                   ("base_only", base_sets - arm_sets))}
     return out
 
 
@@ -298,10 +317,11 @@ def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
 
 # --- the review input: the groups an arm changes, with each advert's stated facts --------------
 
-def review(c: Cohort, arm: Outcome, base: Outcome, labels: Labels, limit: int = 200
+def review(c: Cohort, arm: Outcome, base: Outcome, labels: Labels, limit: int | None = None
            ) -> dict[str, Any]:
-    """Groups the arm forms that the base does not, and the reverse, each advert with its stated
-    facts and each member pair with its decision and its ruling: the input of one review page."""
+    """Every group the arm forms that the base does not, and the reverse (all of them, so a page
+    can draw an unbiased sample), each advert with its stated facts and each decided or labelled
+    member pair with its decision and its labels: the input of one review page."""
     index = {key: i for i, key in enumerate(c.keys)}
     d = arm.decisions
     arm_sets = {frozenset(v) for v in arm.groups.clusters.values()}
@@ -319,13 +339,16 @@ def review(c: Cohort, arm: Outcome, base: Outcome, labels: Labels, limit: int = 
         for k, a in enumerate(ids):
             for b in ids[k + 1:]:
                 i = index.get((a, b))
+                judged = {n: j.get((a, b)) for n, j in labels.judges.items()}
+                if i is None and (a, b) not in labels.rulings and not any(judged.values()):
+                    continue
                 pairs.append({"lo": a, "hi": b,
                               "zone": None if i is None else int(d.zone[i]),
                               "rung": None if i is None else d.rung[i],
                               "name": None if i is None else d.name[i],
                               "carrier": None if i is None else d.carrier[i],
                               "ruling": labels.rulings.get((a, b)),
-                              "judge": {n: j.get((a, b)) for n, j in labels.judges.items()}})
+                              "judge": judged})
         return {"members": [advert(i) for i in ids], "pairs": pairs}
     gained = sorted(arm_sets - base_sets, key=len, reverse=True)[:limit]
     lost = sorted(base_sets - arm_sets, key=len, reverse=True)[:limit]
