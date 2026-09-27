@@ -1691,6 +1691,46 @@
           "options": null
         },
         {
+          "name": "scope",
+          "description": "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input).",
+          "required": false,
+          "type": "choice",
+          "default": "all",
+          "options": [
+            "all",
+            "rt",
+            "ids",
+            "blocks"
+          ]
+        },
+        {
+          "name": "listing_ids_file",
+          "description": "scope=ids only: a repo path of listing ids (one per line, .gz allowed) at the dispatched ref.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "blocks",
+          "description": "scope=blocks only: export block specs joined by commas, e.g. town:563510,town:577626,quarter:490245.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "score_heads",
+          "description": "Also score every written vector with the ACTIVE tag model into image_tag_scores in the same pass.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
           "name": "dry_run",
           "description": "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing.",
           "required": false,
@@ -1711,9 +1751,9 @@
         "RUNPOD_API_KEY",
         "SUPABASE_DB_URL"
       ],
-      "concurrencyGroup": "dinov3-embed-backfill",
+      "concurrencyGroup": "dinov3-embed-backfill-${{ inputs.shards }}-${{ inputs.shard }}",
       "cancelInProgress": false,
-      "timeoutMinutes": 90,
+      "timeoutMinutes": 360,
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dinov3_embed_backfill.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dinov3_embed_backfill.yml"
@@ -4672,7 +4712,8 @@
             "status",
             "promote",
             "score",
-            "activate"
+            "activate",
+            "dump"
           ]
         },
         {
@@ -4769,6 +4810,14 @@
             "false",
             "true"
           ]
+        },
+        {
+          "name": "listing_ids_file",
+          "description": "dump only: a repo path of listing ids (one per line, .gz allowed); empty = every image the model scored.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
         },
         {
           "name": "dry_run",

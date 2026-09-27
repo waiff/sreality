@@ -43,7 +43,7 @@ on:
         required: true
         default: "status"
         type: choice
-        options: ["status", "promote", "score", "activate"]
+        options: ["status", "promote", "score", "activate", "dump"]
       version:
         description: "Model version string, e.g. v1. Required for promote/score/activate; optional detail filter for status."
         required: false
@@ -101,6 +101,11 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      listing_ids_file:
+        description: "dump only: a repo path of listing ids (one per line, .gz allowed); empty = every image the model scored."
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: "Report the plan and exit. promote trains nothing, score writes nothing, activate flips nothing."
         required: false
@@ -165,7 +170,7 @@ jobs:
           case "${SOURCE:-bakeoff}" in
             *[!A-Za-z0-9:_-]*) echo "::error::source must be bakeoff, bakeoff:<run_id> or production"; exit 1 ;;
           esac
-          if [ "${STAGE}" != "status" ] && [ -z "${VERSION:-}" ]; then
+          if [ "${STAGE}" != "status" ] && [ "${STAGE}" != "dump" ] && [ -z "${VERSION:-}" ]; then
             echo "::error::stage=${STAGE} needs a version"; exit 1
           fi
           if [ "${STAGE}" = "promote" ]; then
@@ -236,6 +241,30 @@ jobs:
           if [ "${FORCE:-false}" = "true" ]; then ARGS+=(--force); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Dump the winners (read-only)
+        if: inputs.stage == 'dump'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+          LISTING_IDS_FILE: ${{ inputs.listing_ids_file }}
+        run: |
+          set -euo pipefail
+          case "${LISTING_IDS_FILE:-}" in
+            *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;
+          esac
+          ARGS=(dump --out tag_dump)
+          if [ -n "${VERSION:-}" ]; then ARGS+=(--version "${VERSION}"); fi
+          if [ -n "${LISTING_IDS_FILE:-}" ]; then ARGS+=(--listing-ids-file "${LISTING_IDS_FILE}"); fi
+          python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Upload the dump
+        if: inputs.stage == 'dump'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tag-dump-${{ github.run_id }}
+          path: tag_dump/
+          retention-days: 14
 
       - name: Activate one version
         if: inputs.stage == 'activate'
