@@ -37,6 +37,12 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #      possible. `force_arms` (with `arms`) additionally re-opens finished arms.
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
+#   g1-image-stack — the AUTODEDUP w15 G1 image-stack bake-off (SSCD + DINOv2/DINOv3 +
+#      LightGlue on the frozen pair list data/g1_image_stack/pairs.json.gz): by-id export +
+#      manifest on the runner, one pod through the same bootstrap/watchdog, results
+#      collected into the `g1-image-stack` artifact. `g1_stage` picks all/prepare/pod/collect,
+#      or resume (pod + collect on an existing run_id: the new pod restores the last R2
+#      checkpoint). `arms` doubles as the pod phase list for this stage.
 #
 # START WITH dry_run (the default). The manifest stage's dry run reports which heads the
 # operator has marked ready on /new-dedup/training-set and how many distinct images the run
@@ -65,7 +71,7 @@ on:
         required: true
         default: "manifest"
         type: choice
-        options: ["manifest", "embed", "train"]
+        options: ["manifest", "embed", "train", "g1-image-stack"]
       run_id:
         description: "Bake-off run id. Required for embed and train; the manifest stage mints one and prints it."
         required: false
@@ -127,6 +133,12 @@ on:
         required: false
         default: "60"
         type: string
+      g1_stage:
+        description: "g1-image-stack only: all (prepare -> pod -> collect), prepare, pod, collect, or resume (pod -> collect). pod/collect/resume need run_id."
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "prepare", "pod", "collect", "resume"]
       dry_run:
         description: "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing."
         required: false
@@ -141,7 +153,10 @@ concurrency:
 jobs:
   bakeoff:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # g1-image-stack waits out one pod inside this job (4h payload budget + 20 min grace +
+    # the by-id export); GitHub's 6h job ceiling is the hard bound, so the budget stays
+    # under it and a killed runner cannot orphan a pod the `finally` never tore down.
+    timeout-minutes: ${{ inputs.stage == 'g1-image-stack' && 350 || 180 }}
     permissions:
       contents: read
     steps:
@@ -198,15 +213,21 @@ jobs:
           case "${ARMS:-}" in
             *[!A-Za-z0-9@/.,_-]*) echo "::error::arms must be comma-separated arm names"; exit 1 ;;
           esac
-          if [ "${STAGE}" != "manifest" ] && [ -z "${RUN_ID:-}" ]; then
+          if [ "${STAGE}" != "manifest" ] && [ "${STAGE}" != "g1-image-stack" ] && [ -z "${RUN_ID:-}" ]; then
             echo "::error::stage=${STAGE} needs run_id (the manifest stage prints it)"; exit 1
           fi
 
       # The manifest stage reads the database and presigns R2 — no torch, no GPU, no
       # RunPod key, no HF token. Base install only.
       - name: Install (manifest / embed)
-        if: inputs.stage != 'train'
+        if: inputs.stage != 'train' && inputs.stage != 'g1-image-stack'
         run: pip install -e .
+
+      # The by-id export and the manifest assembly need numpy beside the base install;
+      # the model never runs here.
+      - name: Install (g1-image-stack)
+        if: inputs.stage == 'g1-image-stack'
+        run: pip install -e . numpy
 
       # The trainer needs scikit-learn; the runner never installs torch in any stage,
       # because the model only ever runs inside the pod.
@@ -289,3 +310,50 @@ jobs:
           if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"
+
+      # AUTODEDUP w15 G1. The pod half is the ONLY part that spends (one GPU, bounded by
+      # job_max_seconds + a 1200s grace and the same watchdog as the embed stage).
+      - name: G1 image-stack bake-off
+        if: inputs.stage == 'g1-image-stack'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          RUN_ID: ${{ inputs.run_id }}
+          G1_STAGE: ${{ inputs.g1_stage }}
+          ARMS: ${{ inputs.arms }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          WORKERS: ${{ inputs.workers }}
+          JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
+          BOOTSTRAP_DEADLINE_SECONDS: ${{ inputs.bootstrap_deadline_seconds }}
+          STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
+          CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "${G1_STAGE:-all}" in
+            all|prepare|pod|collect|resume) ;;
+            *) echo "::error::g1_stage must be all, prepare, pod, collect or resume"; exit 1 ;;
+          esac
+          ARGS=(--stage "${G1_STAGE:-all}" --out g1_out --batch-size "${BATCH_SIZE:-32}")
+          ARGS+=(--workers "${WORKERS:-16}" --job-max-seconds "${JOB_MAX_SECONDS:-14400}")
+          ARGS+=(--bootstrap-deadline-s "${BOOTSTRAP_DEADLINE_SECONDS:-1800}")
+          ARGS+=(--stall-deadline-s "${STALL_DEADLINE_SECONDS:-900}")
+          ARGS+=(--container-disk-gb "${CONTAINER_DISK_GB:-100}")
+          if [ -n "${RUN_ID:-}" ]; then ARGS+=(--run-id "${RUN_ID}"); fi
+          if [ -n "${ARMS:-}" ]; then ARGS+=(--phases "${ARMS}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.g1_image_stack_dispatch "${ARGS[@]}"
+
+      - name: Upload the G1 artifact
+        if: always() && inputs.stage == 'g1-image-stack'
+        uses: actions/upload-artifact@v4
+        with:
+          name: g1-image-stack
+          path: g1_out/
+          if-no-files-found: warn
+          retention-days: 14

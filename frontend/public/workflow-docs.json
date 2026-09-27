@@ -4812,7 +4812,8 @@
           "options": [
             "manifest",
             "embed",
-            "train"
+            "train",
+            "g1-image-stack"
           ]
         },
         {
@@ -4915,6 +4916,20 @@
           "options": null
         },
         {
+          "name": "g1_stage",
+          "description": "g1-image-stack only: all (prepare -> pod -> collect), prepare, pod, collect, or resume (pod -> collect). pod/collect/resume need run_id.",
+          "required": false,
+          "type": "choice",
+          "default": "all",
+          "options": [
+            "all",
+            "prepare",
+            "pod",
+            "collect",
+            "resume"
+          ]
+        },
+        {
           "name": "dry_run",
           "description": "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing.",
           "required": false,
@@ -4937,7 +4952,7 @@
       ],
       "concurrencyGroup": "tagging-bakeoff",
       "cancelInProgress": false,
-      "timeoutMinutes": 180,
+      "timeoutMinutes": null,
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/tagging_bakeoff.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/tagging_bakeoff.yml"
