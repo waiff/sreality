@@ -43,7 +43,7 @@ from autodedup.indistinguishable import GATE, distinguishing_facts, promotion_wa
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
-SCHEMA: int = 1
+SCHEMA: int = 2
 ENGINE_DIR: Path = Path(__file__).resolve().parents[1]
 REPO: Path = ENGINE_DIR.parent
 FIDX: dict[str, int] = {name: i for i, name in enumerate(FEATURE_ORDER)}
@@ -74,9 +74,32 @@ def code_digest() -> str:
     return _sha([p.name.encode() + p.read_bytes() for p in sorted(ENGINE_DIR.glob("*.py"))])[:12]
 
 
-def file_digest(path: Path) -> str:
+def file_digest(path: Path, memo: Path | None = None) -> str:
+    """The file's CONTENT (sha1), so a cache built on one machine keeps its version on another.
+    Hashing a 1-2 GB export takes seconds, so the digest is memoised in `memo` (one JSON under
+    the cache root, never beside another job's files) against the file's size and mtime."""
     stat = path.stat()
-    return _sha([str(path).encode(), str(stat.st_size).encode(), str(int(stat.st_mtime)).encode()])[:12]
+    key, stamp = str(path.resolve()), f"{stat.st_size}:{stat.st_mtime_ns}"
+    known: dict[str, list[str]] = {}
+    if memo is not None and memo.is_file():
+        try:
+            known = json.loads(memo.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            known = {}
+        if known.get(key, [None])[0] == stamp:
+            return known[key][1]
+    digest = hashlib.sha1()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(chunk)
+    out = digest.hexdigest()[:12]
+    if memo is not None:
+        known[key] = [stamp, out]
+        memo.parent.mkdir(parents=True, exist_ok=True)
+        tmp = memo.with_suffix(".tmp")
+        tmp.write_text(json.dumps(known, indent=1, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, memo)
+    return out
 
 
 def feats_of(V: np.ndarray, P: np.ndarray, i: int) -> Feats:
@@ -283,12 +306,13 @@ def _features(spec: dict[str, Any], ds: Dataset, settings: Settings,
     return keys, [frozenset(pairs[k]) for k in keys], V, P
 
 
-def version_of(name: str, spec: dict[str, Any]) -> str:
-    parts = [str(SCHEMA).encode(), name.encode(), file_digest(Path(spec["export"])).encode(),
+def version_of(name: str, spec: dict[str, Any], memo: Path | None = None) -> str:
+    parts = [str(SCHEMA).encode(), name.encode(),
+             file_digest(Path(spec["export"]), memo).encode(),
              (REPO / spec["settings"]).read_bytes(), (REPO / spec["model"]).read_bytes(),
              code_digest().encode()]
     if spec.get("features"):
-        parts.append(file_digest(Path(spec["features"])).encode())
+        parts.append(file_digest(Path(spec["features"]), memo).encode())
     return _sha(parts)[:12]
 
 
@@ -298,7 +322,7 @@ def open_cohort(name: str, registry_path: str | Path | None = None, workers: int
     reg = registry(registry_path)
     spec = reg["cohorts"][name]
     root = Path(cache_root or reg["cache_root"])
-    version = version_of(name, spec)
+    version = version_of(name, spec, root / "digests.json")
     path = root / name / version
     clock = time.perf_counter()
     ds, settings, model, fps, hazard = _engine_objects(spec)
