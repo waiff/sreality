@@ -3,6 +3,7 @@ way `decide_pair` does, a new rung is one registered function, and a sweep is on
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -142,3 +143,38 @@ def test_a_learner_from_anywhere_is_one_config_line(tmp_path: Path, monkeypatch:
     out = board.run(c, arm)
     assert _zones(out) == ["veto", "reject", "reject", "reject", "reject", "merge", "reject"]
     assert out.groups.clusters == {11: (11, 12)}
+
+
+def _review() -> dict[str, Any]:
+    def card(ids: list[int]) -> dict[str, Any]:
+        return {"members": [{"id": i, "source": "sreality", "area_m2": 50.0, "price": 1e6,
+                             "source_url": f"https://example.test/{i}"} for i in ids],
+                "pairs": [{"lo": ids[0], "hi": ids[1], "zone": 4, "rung": "score", "name": "cut",
+                           "carrier": "NONE", "ruling": None, "judge": {"vision": "different"}}]}
+    return {"experiment": "toy", "base": "ref", "cohort": "trial",
+            "groups_gained": [card([1, 2]), card([3, 4, 5])], "groups_lost": [card([6, 7])]}
+
+
+def test_one_review_page_per_experiment_with_a_seeded_sample() -> None:
+    from autodedup.lab import page
+
+    review = _review()
+    assert [c["members"][0]["id"] for c in page.sample(review, 2, 7)] == [
+        c["members"][0]["id"] for c in page.sample(review, 2, 7)]
+    assert {c["side"] for c in page.sample(review, 0, 1)} == {"gained", "lost"}
+    out = page.render(review, 0, 1)
+    assert out.count('class="card"') == 3 and 'data-key="3-4-5"' in out
+    assert "One property" in out and "Not one property" in out and "vision different" in out
+
+
+def test_group_reads_come_back_as_labels(tmp_path: Path) -> None:
+    from autodedup.lab import metrics
+
+    path = tmp_path / "reads.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in (
+        {"kind": "group_read", "members": [3, 4, 5], "verdict": "same"},
+        {"kind": "group_read", "members": [6, 7], "verdict": "different"},
+        {"kind": "group_read", "members": [6, 7], "verdict": "same"},
+        {"kind": "other", "members": [1, 2], "verdict": "same"})) + "\n")
+    assert metrics.read_group_reads([path]) == {frozenset({3, 4, 5}): "same",
+                                                frozenset({6, 7}): "same"}
