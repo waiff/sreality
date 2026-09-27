@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 
 from autodedup import dataset as ds
-from autodedup import features
 from autodedup import harness
 from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs

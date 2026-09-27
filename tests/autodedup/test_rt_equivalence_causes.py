@@ -29,7 +29,6 @@ import pytest
 
 from autodedup.incremental import EVIDENCE_HOLD_REASON
 from autodedup.rt_equivalence import (
-    EQUIVALENCE_FILE,
     EVIDENCE_HOLD,
     HOLD_CAP_S,
     Hold,
