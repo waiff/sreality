@@ -980,9 +980,120 @@ def test_restorable_takes_results_and_shards_and_nothing_that_climbs_out():
     assert pod.restorable("emb_sscd.npz") and pod.restorable("synthetic.json")
     assert pod.restorable("emb_dinov3.shards/000012.npz")
     assert pod.restorable("lg_disk.shards/legacy.npz")
+    assert pod.restorable("emb_dinov2.shards/meta.json") and pod.restorable("identity.json")
     for bad in ("report.json", "../x.npz", "a/b/c.npz", "emb_dinov3.shards/../x.npz",
-                "notshards/000001.npz", "emb_x.shards/000001.npz.tmp.npz", "x.txt"):
+                "notshards/000001.npz", "emb_x.shards/000001.npz.tmp.npz", "x.txt",
+                "emb_x.shards/other.json", "emb_x.shards/meta.json.part"):
         assert not pod.restorable(bad), bad
+
+
+# --- resume keeps one model per arm and does not re-download its own tar ----------------
+
+
+def test_an_arm_resumed_under_another_model_discards_its_shards_never_mixes(tmp_path):
+    import time as _t
+
+    out = str(tmp_path / "emb_dinov2.npz")
+    items = [(i, i) for i in range(1, 7)]
+    a = {"model": "facebook/dinov2-with-registers-large", "revision": "sha-A"}
+    b = {"model": "facebook/dinov2-with-registers-large", "revision": "sha-B"}
+    pod.embed_arm("dinov2", _Encoder(), items, batch=2, workers=1, loader=_Decoded,
+                  out_path=out, beat=lambda m: None, deadline=_t.monotonic() - 1, prefetch=1,
+                  shard_size=2, identity=a, versions="py3.12 torch2.7.1")
+    sdir = pod.shard_dir(out)
+    assert len(pod.shard_files(sdir)) == 1
+    # Same model, other torch: resumed (recorded), not refused.
+    same = _Encoder()
+    pod.embed_arm("dinov2", same, items, batch=2, workers=1, loader=_Decoded, out_path=out,
+                  beat=lambda m: None, deadline=_t.monotonic() - 1, prefetch=1, shard_size=2,
+                  identity=a, versions="py3.12 torch2.8.0")
+    assert same.seen == [3, 4]
+    import json as _json
+
+    meta = _json.loads((tmp_path / "emb_dinov2.shards" / "meta.json").read_text())
+    assert meta["identity"]["revision"] == "sha-A" and len(meta["versions"]) == 2
+    # Another revision: the shards of sha-A are dropped and every item is embedded again.
+    other = _Encoder()
+    done = pod.embed_arm("dinov2", other, items, batch=2, workers=1, loader=_Decoded,
+                         out_path=out, beat=lambda m: None, deadline=None, prefetch=1,
+                         shard_size=2, identity=b)
+    assert other.seen == [1, 2, 3, 4, 5, 6] and done["n"] == 6
+    assert "discarded 2 shards" in done["shards_note"]
+
+
+def test_a_resume_loads_the_revision_the_run_already_embedded_with():
+    dinov2 = {"model": "facebook/dinov2-with-registers-large"}
+    known = {"dinov2": {"revision": "sha-A"}, "dinov3": {"revision": "sha-old"}}
+    assert pod.encoder_pin(dinov2, known, "dinov2") == "sha-A"      # not the hub's new main
+    assert pod.encoder_pin(dinov2, {}, "dinov2") is None             # first pass: resolve it
+    # The active tag model's own pin always wins: its heads score only that encoder.
+    assert pod.encoder_pin({"revision": "sha-heads"}, known, "dinov3") == "sha-heads"
+
+
+def test_identities_survive_the_restore_that_report_json_does_not(tmp_path):
+    out = tmp_path / "run"
+    out.mkdir()
+    pod.record_identity(str(out), "dinov2", {"model": "m", "revision": "sha-A"})
+    pod.record_identity(str(out), "dinov2", {"model": "m", "revision": "sha-B"}, replace=False)
+    pod.record_identity(str(out), "sscd", {"model": "sscd_disc_mixup", "revision": "sha256:x"})
+    assert pod.load_identities(str(out)) == {
+        "dinov2": {"model": "m", "revision": "sha-A"},
+        "sscd": {"model": "sscd_disc_mixup", "revision": "sha256:x"}}
+    assert pod.restorable(pod.IDENTITY_FILE)
+    assert pod.durable_units(str(out)) == 0              # an identity is not progress
+
+
+class _TarR2:
+    """A fake R2 holding one results tar; counts the downloads."""
+
+    def __init__(self, blob: bytes) -> None:
+        self.blob = blob
+        self.downloads = 0
+        self.uploaded: dict = {}
+
+    def object_size(self, key):
+        return len(self.blob)
+
+    def download_file(self, key, path):
+        self.downloads += 1
+        with open(path, "wb") as fh:
+            fh.write(self.blob)
+
+    def upload_file(self, key, path, content_type=None):
+        with open(path, "rb") as fh:
+            self.blob = fh.read()
+
+
+def test_a_restarted_pass_does_not_re_download_its_own_checkpoint(tmp_path, monkeypatch):
+    import io as _io
+    import tarfile as _tar
+    from scraper import image_storage
+
+    src = tmp_path / "src"
+    src.mkdir()
+    np.savez(src / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
+    blob = _io.BytesIO()
+    with _tar.open(fileobj=blob, mode="w") as tar:
+        tar.add(src, arcname="g1_results")
+    r2 = _TarR2(blob.getvalue())
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **kw: r2))
+    out = tmp_path / "run-2"
+    out.mkdir()
+    assert pod.restore_checkpoint(str(out), 2) == ["emb_sscd.npz"] and r2.downloads == 1
+    # Pass 2 on the same disk: the tar is the one it restored — nothing to fetch.
+    assert pod.restore_checkpoint(str(out), 2) == [] and r2.downloads == 1
+    # This disk uploads a newer tar; a restart after that fetches nothing either.
+    np.savez(out / "emb_dinov2.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
+    pod.upload_results(str(out), 2, local_only=False)
+    assert pod.restore_checkpoint(str(out), 2) == [] and r2.downloads == 1
+    # A tar this disk never saw (another pod uploaded it) is fetched.
+    r2.blob += b"\0" * 512
+    pod.restore_checkpoint(str(out), 2)
+    assert r2.downloads == 2
+    # A NEW pod (another disk) always restores.
+    fresh = tmp_path / "other-pod" / "run-2"
+    fresh.mkdir(parents=True)
+    assert "emb_dinov2.npz" in pod.restore_checkpoint(str(fresh), 2)
 
 
 def test_restore_brings_back_shards_of_an_unfinished_arm(tmp_path, monkeypatch):

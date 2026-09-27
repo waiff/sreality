@@ -702,6 +702,83 @@ def embed_shard_keys(sdir: str) -> tuple[set[Any], set[Any]]:
     return done, bad
 
 
+SHARD_META = "meta.json"
+IDENTITY_FILE = "identity.json"
+
+
+def _json_norm(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def _write_json(path: str, value: Any) -> None:
+    with open(path + ".part", "w") as fh:
+        json.dump(value, fh, indent=1, sort_keys=True, default=str)
+    os.replace(path + ".part", path)
+
+
+def pin_shards(sdir: str, identity: dict[str, Any] | None, versions: str = "") -> str | None:
+    """Keep an unfinished arm's shards on ONE model identity (`<arm>.shards/meta.json`).
+
+    DINOv2 resolves `revision=None` to the hub's CURRENT main on every load, so a resume on
+    a later pod could append vectors of other weights to the same arm without a trace. The
+    first pass writes the identity; a pass whose identity differs DISCARDS the shards
+    rather than mixing two models (the caller pins the recorded revision first, so this
+    fires only when the model itself changed). Runtime versions (torch, transformers) are
+    recorded per pass, never refused on: the bootstrap does not pin them, and a bf16 kernel
+    change is noise where a checkpoint change is another arm. Returns a note, or None."""
+    if identity is None:
+        return None
+    path = os.path.join(sdir, SHARD_META)
+    want = _json_norm(identity)
+    try:
+        with open(path) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        meta = None
+    note = None
+    if shard_files(sdir) and isinstance(meta, dict) and meta.get("identity") != want:
+        LOG.warning("%s: shards of %s DISCARDED — this pass embeds %s", sdir,
+                    meta.get("identity"), want)
+        note = f"discarded {len(shard_files(sdir))} shards of another identity"
+        for shard in shard_files(sdir):
+            os.remove(shard)
+        meta = None
+    seen = list((meta or {}).get("versions") or [])
+    if versions and versions not in seen:
+        seen.append(versions)
+    if note is None and len(seen) > 1:
+        note = f"resumed across {len(seen)} runtime versions (recorded in {SHARD_META})"
+    _write_json(path, {"identity": want, "versions": seen})
+    return note
+
+
+def encoder_pin(arm: dict[str, Any], known: dict[str, Any], name: str) -> str | None:
+    """The revision an embed arm loads: its own pin wins (DINOv3: the active tag model's),
+    else the one this run already embedded with (identity.json), so a resume never
+    re-resolves the hub's moving `main` — DINOv2 has no pin of its own."""
+    return arm.get("revision") or (known.get(name) or {}).get("revision") or None
+
+
+def load_identities(out_dir: str) -> dict[str, Any]:
+    """{arm: identity} of every arm this run started, restored with the checkpoint:
+    report.json is rewritten by every pass, so the identity of an arm finished on an
+    earlier pod lives here instead."""
+    try:
+        with open(os.path.join(out_dir, IDENTITY_FILE)) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_identity(out_dir: str, name: str, identity: dict[str, Any],
+                    replace: bool = True) -> None:
+    data = load_identities(out_dir)
+    if replace or name not in data:
+        data[name] = _json_norm(identity)
+        _write_json(os.path.join(out_dir, IDENTITY_FILE), data)
+
+
 def durable_units(out_dir: str, synth_dir: str | None = None) -> int:
     """Finished work on local disk: result files, the shards of unfinished arms and the
     synthetic copies in hundreds. Compared by the dispatcher's watchdog, never read as a
@@ -711,7 +788,8 @@ def durable_units(out_dir: str, synth_dir: str | None = None) -> int:
         for entry in os.scandir(out_dir):
             if entry.is_dir() and entry.name.endswith(".shards"):
                 n += len(shard_files(entry.path))
-            elif entry.name.endswith((".npz", ".json")) and entry.name != "report.json":
+            elif entry.name.endswith((".npz", ".json")) and entry.name not in (
+                    "report.json", IDENTITY_FILE):
                 n += 1
     if synth_dir and os.path.isdir(synth_dir):
         n += sum(1 for _ in os.scandir(synth_dir)) // (100 * len(SYNTH_TRANSFORMS))
@@ -722,17 +800,20 @@ def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batc
               workers: int, loader: Callable[[Any], Any], out_path: str,
               beat: Callable[[str], None], deadline: float | None, prefetch: int = 2,
               shard_size: int = EMBED_SHARD,
-              on_shard: Callable[[str], None] | None = None) -> dict[str, Any]:
+              on_shard: Callable[[str], None] | None = None,
+              identity: dict[str, Any] | None = None, versions: str = "") -> dict[str, Any]:
     """One descriptor (a global vector per image, nothing else) over `items`, written as it
     is produced: every `shard_size` vectors land atomically in `<arm>.shards/`, so RAM holds
     one shard and a restarted pass resumes after the last one instead of from zero. The
-    arm's own file appears only once every item was tried; a deadline leaves the shards."""
+    arm's own file appears only once every item was tried; a deadline leaves the shards.
+    `identity` pins the shards to one model (pin_shards)."""
     import numpy as np
 
     if os.path.exists(out_path):
         return {"arm": name, "skipped": "exists"}
     sdir = shard_dir(out_path)
     os.makedirs(sdir, exist_ok=True)
+    pinned = pin_shards(sdir, identity, versions)
     done, bad = embed_shard_keys(sdir)
     todo = [it for it in items if it[0] not in done and it[0] not in bad]
     seq = next_shard_seq(sdir)
@@ -781,6 +862,8 @@ def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batc
     stats = {"arm": name, "of": len(items), "resumed": len(done), "fresh": fresh,
              "seconds": round(dt, 1), "img_per_s": round(fresh / dt, 2) if dt else None,
              "batch": batch, "prefetch": prefetch, "rss_gb": round(rss_bytes() / 2**30, 2)}
+    if pinned:
+        stats["shards_note"] = pinned
     if cut:
         return {**stats, "n": len(done) + fresh, "partial": True,
                 "shards": len(shard_files(sdir))}
@@ -1039,7 +1122,8 @@ def ransac_counts(p0: Any, p1: Any, scale: float) -> tuple[int, int]:
 def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: dict[int, str], *,
                 device: str, out_path: str, beat: Callable[[str], None],
                 deadline: float | None, workers: int,
-                on_shard: Callable[[str], None] | None = None) -> dict[str, Any]:
+                on_shard: Callable[[str], None] | None = None,
+                identity: dict[str, Any] | None = None) -> dict[str, Any]:
     """LightGlue over the planned frame pairs. It needs nothing from the embed arms but the
     plan: it extracts its own keypoints from the cached JPEGs (FeatureCache, on the device)
     and keeps only nine numbers per pair, written MATCH_SHARD pairs at a time to
@@ -1071,6 +1155,7 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
     if os.path.exists(legacy):
         # A partial file from a pod that predates the shards is simply one more shard.
         os.replace(legacy, os.path.join(sdir, "legacy.npz"))
+    pinned = pin_shards(sdir, identity)
     done = {(int(r[0]), int(r[1])) for path in shard_files(sdir) for r in load_match_rows(path)}
     resumed = len(done)
     seq = next_shard_seq(sdir)
@@ -1129,6 +1214,8 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
              "partial": cut, "seconds": round(dt, 1),
              "pairs_per_s": round(written / dt, 2) if dt else None,
              "feature_extractions": cache.misses}
+    if pinned:
+        stats["shards_note"] = pinned
     if cut:
         # A deadline leaves the shards; a re-dispatch of the same run continues them.
         return {**stats, "pairs": resumed + written, "shards": len(shard_files(sdir))}
@@ -1372,7 +1459,8 @@ def restorable(name: str) -> bool:
         return False
     if len(parts) == 1:
         return name.endswith((".npz", ".json"))
-    return len(parts) == 2 and parts[0].endswith(".shards") and parts[1].endswith(".npz")
+    return len(parts) == 2 and parts[0].endswith(".shards") and (
+        parts[1].endswith(".npz") or parts[1] == SHARD_META)
 
 
 def restore_checkpoint(out_dir: str, run_id: int) -> list[str]:
@@ -1383,7 +1471,14 @@ def restore_checkpoint(out_dir: str, run_id: int) -> list[str]:
 
     key = f"{RESULTS_PREFIX}/{run_id}/results.tar"
     r2 = image_storage.R2Client.from_env()
-    if r2.object_size(key) is None:
+    size = r2.object_size(key)
+    if size is None:
+        return []
+    mark = checkpoint_mark(out_dir)
+    if _read_text(mark) == str(size):
+        # This disk uploaded (or restored) exactly this tar and has only added to it since:
+        # a restarted pass on the same pod re-downloaded the whole tar for nothing.
+        LOG.info("checkpoint %s (%d bytes) is this disk's own: not downloaded", key, size)
         return []
     tar_path = out_dir.rstrip("/") + ".restore.tar"
     r2.download_file(key, tar_path)
@@ -1408,7 +1503,23 @@ def restore_checkpoint(out_dir: str, run_id: int) -> list[str]:
                 restored.append(name)
     finally:
         os.remove(tar_path)
+    _mark_checkpoint(out_dir, size)
     return restored
+
+
+def checkpoint_mark(out_dir: str) -> str:
+    """Beside the out dir, never in it (so never in a tar): the size of the last results
+    tar this disk uploaded or restored."""
+    return out_dir.rstrip("/") + ".checkpoint"
+
+
+def _mark_checkpoint(out_dir: str, size: int) -> None:
+    try:
+        with open(checkpoint_mark(out_dir) + ".part", "w") as fh:
+            fh.write(str(int(size)))
+        os.replace(checkpoint_mark(out_dir) + ".part", checkpoint_mark(out_dir))
+    except OSError:
+        pass
 
 
 def upload_results(out_dir: str, run_id: int, local_only: bool) -> str:
@@ -1425,6 +1536,7 @@ def upload_results(out_dir: str, run_id: int, local_only: bool) -> str:
 
     key = f"{RESULTS_PREFIX}/{run_id}/results.tar"
     image_storage.R2Client.from_env().upload_file(key, tar_path, content_type="application/x-tar")
+    _mark_checkpoint(out_dir, os.path.getsize(tar_path))
     return key
 
 
@@ -1585,6 +1697,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             rep.run_note(alive=f"restored {len(report['restored'])} files from the checkpoint")
         except Exception as exc:  # noqa: BLE001 - a fresh start is the fallback
             LOG.warning("checkpoint restore failed: %s", exc)
+    # Every arm this run started, finished on this pod or an earlier one: the skip path of
+    # a finished arm sets no identity, and report.json is never restored.
+    report["identity"] = load_identities(out_dir)
     if device != "cpu":
         import torch
 
@@ -1675,14 +1790,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             rep.phase("embed", "running", "sscd")
             if not os.path.exists(os.path.join(out_dir, "emb_sscd.npz")):
                 enc = SSCD(fetch_sscd(args.root), device)
-                report["identity"]["sscd"] = {"model": "sscd_disc_mixup", "revision": enc.revision,
-                                              "resolution": SSCD_SIZE,
-                                              "preprocessing": "square_squash"}
+                sscd_identity = {"model": "sscd_disc_mixup", "revision": enc.revision,
+                                 "resolution": SSCD_SIZE, "preprocessing": "square_squash"}
+                report["identity"]["sscd"] = sscd_identity
+                record_identity(out_dir, "sscd", sscd_identity)
                 batch, prefetch = decode_plan("embed_sscd", 64, SSCD_SIZE**2 * PIL_RGB_BYTES)
                 report["phases"]["embed_sscd"] = embed_arm(
                     "sscd", enc, items, batch=batch, workers=workers, loader=sscd_loader,
                     out_path=os.path.join(out_dir, "emb_sscd.npz"), beat=beat_for("embed"),
-                    deadline=deadline, prefetch=prefetch, on_shard=checkpoint)
+                    deadline=deadline, prefetch=prefetch, on_shard=checkpoint,
+                    identity=sscd_identity, versions=versions)
                 del enc
                 checkpoint("embed_sscd")
             # DINOv2 is the licence-clean comparison arm, read on the labelled pairs only;
@@ -1694,15 +1811,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report["phases"][f"embed_{name}"] = {"arm": name, "skipped": "exists"}
                     continue
                 rep.phase("embed", "running", name)
-                enc, rev = load_hf_encoder(arm, arm.get("revision") or None, device, threads=vcpus)
+                enc, rev = load_hf_encoder(arm, encoder_pin(arm, report["identity"], name),
+                                           device, threads=vcpus)
                 report["identity"][name] = {**arm, "revision": rev}
+                record_identity(out_dir, name, report["identity"][name])
                 batch, prefetch = decode_plan(f"embed_{name}", args.batch_size,
                                               int(arm["resolution"])**2 * PIL_RGB_BYTES)
                 report["phases"][f"embed_{name}"] = embed_arm(
                     name, enc, arm_items, batch=batch, workers=workers,
                     loader=preprocessed_loader(arm["preprocessing"], int(arm["resolution"])),
                     out_path=out_path, beat=beat_for("embed"), deadline=deadline,
-                    prefetch=prefetch, on_shard=checkpoint)
+                    prefetch=prefetch, on_shard=checkpoint,
+                    identity=report["identity"][name], versions=versions)
                 del enc
                 checkpoint(f"embed_{name}")
             embeds = {k: v for k, v in report["phases"].items() if k.startswith("embed")}
@@ -1784,7 +1904,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "synth_sscd", enc, q_items, batch=batch, workers=workers,
                         loader=sscd_loader, out_path=os.path.join(out_dir, "syn_sscd.npz"),
                         beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
-                        on_shard=checkpoint)
+                        on_shard=checkpoint, versions=versions,
+                        identity={"model": "sscd_disc_mixup", "revision": enc.revision,
+                                  "resolution": SSCD_SIZE, "preprocessing": "square_squash"})
                     del enc
                 for name, arm in (("dinov2", dino_arm), ("dinov3", v3_arm), ("clip", clip_arm)):
                     if name not in missing:
@@ -1805,19 +1927,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                    threads=vcpus)
                         loader = preprocessed_loader(arm["preprocessing"], int(arm["resolution"]))
                         image_bytes = int(arm["resolution"])**2 * PIL_RGB_BYTES
-                    report["identity"].setdefault(name, {**arm, "revision": rev})
+                    syn_identity = {**arm, "revision": rev}
+                    report["identity"].setdefault(name, syn_identity)
+                    record_identity(out_dir, name, syn_identity, replace=False)
                     batch, prefetch = decode_plan(f"synth_{name}", args.batch_size, image_bytes)
                     report["phases"][f"synth_{name}"] = embed_arm(
                         f"synth_{name}", enc, q_items, batch=batch, workers=workers,
                         loader=loader, out_path=os.path.join(out_dir, f"syn_{name}.npz"),
                         beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
-                        on_shard=checkpoint)
+                        on_shard=checkpoint, identity=syn_identity, versions=versions)
                     if name == "clip":
                         report["phases"]["gallery_clip"] = embed_arm(
                             "gallery_clip", enc, g_items, batch=batch, workers=workers,
                             loader=loader, out_path=os.path.join(out_dir, "gal_clip.npz"),
                             beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
-                            on_shard=checkpoint)
+                            on_shard=checkpoint, identity=syn_identity, versions=versions)
                     del enc
                 rep.phase("synthetic", "ok", f"{len(rows)} transformed copies")
             except Exception as exc:  # noqa: BLE001 - the matchers still run
@@ -1837,7 +1961,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report["phases"][phase] = match_phase(
                     ex, pairs, paths, device=device, out_path=os.path.join(out_dir, f"lg_{ex}.npz"),
                     beat=beat_for(phase), deadline=deadline, workers=min(8, workers),
-                    on_shard=checkpoint)
+                    on_shard=checkpoint,
+                    identity={"lightglue": args.lightglue_sha, "extractor": ex,
+                              "max_keypoints": MAX_KEYPOINTS, "resize": MATCH_RESIZE})
                 rep.phase(phase, "failed" if report["phases"][phase].get("partial") else "ok",
                           json.dumps(report["phases"][phase]))
             except Exception as exc:  # noqa: BLE001 - one extractor must not lose the other
