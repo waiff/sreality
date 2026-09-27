@@ -988,6 +988,28 @@ def test_restorable_takes_results_and_shards_and_nothing_that_climbs_out():
         assert not pod.restorable(bad), bad
 
 
+def test_a_resume_never_inherits_the_bootstrap_s_failure_counters(tmp_path):
+    # The restart bound's counters live in the bootstrap's root, BESIDE the payload's out dir:
+    # the checkpoint tar holds the out dir only, and the restore admits none of their names,
+    # so a new pod restoring run 2 starts at pass 1 with no failures (GitHub run 36353934278).
+    import tarfile
+
+    root = tmp_path / "podboot"
+    out = root / "g1" / "run-2"
+    out.mkdir(parents=True)
+    (out / "emb_sscd.npz").write_bytes(b"x")
+    for name, text in (("pass", "11"), ("payload_failures", "3"), ("payload_state", "gave-up"),
+                       ("steps.json", "[]")):
+        (root / name).write_text(text)
+    assert pod.DEFAULT_ROOT.startswith(pod_bootstrap.CONTAINER_ROOT + "/")
+    with tarfile.open(pod.upload_results(str(out), 2, local_only=True)) as tar:
+        assert [m.name for m in tar.getmembers() if m.isfile()] == ["g1_results/emb_sscd.npz"]
+    # And a restore writes under the out dir only: nothing can climb to the counters.
+    for name in ("pass", "payload_failures", "payload_state", "../../payload_failures",
+                 "../../steps.json", "../../pass"):
+        assert not pod.restorable(name), name
+
+
 # --- resume keeps one model per arm and does not re-download its own tar ----------------
 
 

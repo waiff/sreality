@@ -70,6 +70,7 @@ from scripts.pod_watchdog import (
     DEFAULT_STALL_DEADLINE_S,
     PodWatchdog,
     Progress,
+    own_records,
 )
 from scripts.runpod_client import GpuOption, NoCapacityError, RunPodClient, RunPodError
 from scripts.tagging_bakeoff_arms import STORED_CLIP_ARM
@@ -153,8 +154,9 @@ _RESET_ARMS_SQL = """
     WHERE run_id = %(run_id)s AND arm = ANY(%(arms)s::text[])
 """
 
-# The pod's clock is not the runner's. A boot stamp this much older than the launch is
-# still accepted as this pod's, and anything older is a previous dispatch's.
+# The pod's clock is not the runner's. A boot stamp, units line or step record this much
+# older than the launch is still accepted as this pod's, and anything older is a previous
+# dispatch's (the watchdog's own step guard is given the same grace).
 CLOCK_SKEW_GRACE_S = 120
 
 _ARM_PROGRESS_SQL = """
@@ -196,6 +198,7 @@ STEP_PREFIX = "pod step "
 
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?")
 _UNITS_RE = re.compile(r"\bunits=(\d+)\b")
+_ALIVE_POD_RE = re.compile(r"\bpod=(\S+)")
 ALIVE_PREFIX = "pod alive "
 
 
@@ -290,9 +293,12 @@ def _boot_at(run_note: str | None) -> datetime | None:
     return None
 
 
-def _alive_units(run_note: str | None, since: datetime) -> tuple[int, str] | None:
+def _alive_units(run_note: str | None, since: datetime,
+                 pod_id: str = "") -> tuple[int, str] | None:
     """(durable-work count, the alive line's text) from the payload's `pod alive` line
-    (`units=N`), when a payload of THIS dispatch wrote it (stamped after `since`)."""
+    (`units=N`), when a payload of THIS dispatch wrote it: stamped after `since` and, once
+    the watchdog knows its pod, naming that pod (`pod=`, G1's `Reporter.progress_tag`). A
+    line from a payload too old to name its pod is judged by its stamp alone."""
     for line in (run_note or "").splitlines():
         if not line.startswith(ALIVE_PREFIX):
             continue
@@ -305,13 +311,22 @@ def _alive_units(run_note: str | None, since: datetime) -> tuple[int, str] | Non
             return None
         if when < since:
             return None
+        named = _ALIVE_POD_RE.findall(line)
+        if pod_id and named and named[-1] != pod_id:
+            return None
         return int(units.group(1)), line[len(ALIVE_PREFIX):][:240]
     return None
 
 
+def _without_steps(run_note: str | None) -> str:
+    """The note less its bootstrap heartbeat line, whose stamps are scoped separately."""
+    return "\n".join(line for line in (run_note or "").splitlines()
+                     if not line.startswith((STEPS_PREFIX, STEP_PREFIX)))
+
+
 def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
                           launched_at: datetime, baseline_vectors: int,
-                          units: bool = False) -> Progress:
+                          units: bool = False, pod_id: str = "") -> Progress:
     """One watchdog reading, out of the rows the payload writes anyway.
 
     BOOTED is the payload's own boot stamp, dated AFTER this dispatch launched — a stale
@@ -324,6 +339,11 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     writes no vector row) the heartbeat counts only until this dispatch's payload reports
     its durable-work count; from then on the marker is that count alone, so a payload that
     restarts and heartbeats without finishing a shard is a stall (2026-09-27).
+
+    `pod_id` (the pod this dispatch launched, from the watchdog) scopes every step record
+    and the units line: the run row keeps a PREVIOUS pod's history until the new pod first
+    reports (GitHub run 36353934278), and none of it may move this pod's marker. The
+    records themselves go to the watchdog verbatim; it scopes its own rails the same way.
     """
     wanted = {a.strip() for a in only if a.strip()}
     with conn.cursor() as cur:
@@ -337,17 +357,17 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     terminal = bool(considered) and all(r[1] in TERMINAL_ARM_STATUSES
                                         for r in considered)
     run_note = run_row[0] if run_row else None
-    heartbeat = _latest_iso([run_note] + [r[2] for r in considered])
-    boot_at = _boot_at(run_note)
-    fresh_boot = (boot_at is not None
-                  and boot_at >= launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
-    done = sum(1 for r in considered if r[1] in TERMINAL_ARM_STATUSES)
-    # The bootstrap's step line carries its own ISO stamp, so `heartbeat` (and with it
-    # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to
-    # look exactly like a dead pod from here.
+    since = launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S)
     steps = _steps(run_note)
-    alive = (_alive_units(run_note, launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
-             if units else None)
+    # The bootstrap's step records carry their own ISO stamps, so `heartbeat` (and with it
+    # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to look
+    # exactly like a dead pod from here. Only THIS pod's records count.
+    heartbeat = _latest_iso([_without_steps(run_note)] + [r[2] for r in considered]
+                            + own_records(steps, pod_id=pod_id or None, since=since))
+    boot_at = _boot_at(run_note)
+    fresh_boot = boot_at is not None and boot_at >= since
+    done = sum(1 for r in considered if r[1] in TERMINAL_ARM_STATUSES)
+    alive = _alive_units(run_note, since, pod_id) if units else None
     return Progress(
         booted=fresh_boot or vectors > baseline_vectors,
         marker=(f"{vectors}|{heartbeat}" if alive is None
@@ -457,18 +477,26 @@ def make_watchdog(args: argparse.Namespace, *, only: Sequence[str],
     except Exception as exc:  # noqa: BLE001 - a baseline we cannot read is 0
         LOG.warning("could not read the vector baseline (assuming 0): %s", exc)
 
+    watchdog: PodWatchdog | None = None
+
     def poll() -> Progress:
+        # The pod id is the watchdog's: it learns it from run_job's PodContext before it
+        # polls, so this read scopes the run row's history to the pod it is watching.
         with _connect(db_url) as conn:
             return read_bakeoff_progress(conn, run_id=args.run_id, only=only,
                                          launched_at=launched_at,
-                                         baseline_vectors=baseline, units=units)
+                                         baseline_vectors=baseline, units=units,
+                                         pod_id=watchdog.pod_id if watchdog else "")
 
     LOG.info("watchdog: bootstrap_deadline=%.0fs stall_deadline=%.0fs poll=%.0fs "
-             "baseline_vectors=%d", args.bootstrap_deadline_s, args.stall_deadline_s,
-             DEFAULT_POLL_INTERVAL_S, baseline)
-    return PodWatchdog(poll, bootstrap_deadline_s=args.bootstrap_deadline_s,
-                       stall_deadline_s=args.stall_deadline_s,
-                       poll_interval_s=DEFAULT_POLL_INTERVAL_S, max_passes=max_passes)
+             "baseline_vectors=%d launched_at=%s", args.bootstrap_deadline_s,
+             args.stall_deadline_s, DEFAULT_POLL_INTERVAL_S, baseline,
+             launched_at.isoformat(timespec="seconds"))
+    watchdog = PodWatchdog(poll, bootstrap_deadline_s=args.bootstrap_deadline_s,
+                           stall_deadline_s=args.stall_deadline_s,
+                           poll_interval_s=DEFAULT_POLL_INTERVAL_S, max_passes=max_passes,
+                           launched_at=launched_at, clock_skew_s=CLOCK_SKEW_GRACE_S)
+    return watchdog
 
 
 def plan_stage(args: argparse.Namespace) -> Plan:

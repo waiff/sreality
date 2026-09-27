@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -993,3 +993,103 @@ def test_the_trainer_still_rejects_a_mode_that_does_not_exist():
                  ["--run-id", "1", "--heads=4,not-a-number"]):
         with pytest.raises(SystemExit):
             trainer.parse_args(argv)
+
+
+# --- a previous pod's history under the same run (GitHub run 36353934278) -------------
+
+OLD_POD, NEW_POD = "udlpld675b3zwp", "04lgy6nzcv1l8x"
+
+
+def _steps_line(pod: str, stamps_msgs) -> str:
+    return "pod steps " + json.dumps([{"ts": ts, "msg": msg, "pod": pod, "python": "3.10.12"}
+                                      for ts, msg in stamps_msgs])
+
+
+OLD_LINE = _steps_line(OLD_POD, [("2026-09-07T13:56:54+00:00", "pass=1 exit=137 step=payload"),
+                                 ("2026-09-07T16:40:39+00:00", "pass=11 step=payload starting"),
+                                 ("2026-09-07T16:45:52+00:00", "pass=11 exit=0 step=payload")])
+
+
+def test_a_previous_pods_steps_do_not_move_this_pods_marker():
+    # Before the new pod reports, the row still holds the old pod's line: a baseline that
+    # no longer carries its stamps, and never this pod's heartbeat.
+    before = _g1_reading(f"manifest\n{OLD_LINE}", arm_note=None, units=False)
+    assert "2026-09-07" not in before.marker
+    assert len(before.steps) == 3          # verbatim to the watchdog, which scopes its rails
+    # A foreign pod writing AFTER the launch (an orphan) is not our heartbeat either...
+    orphan = _steps_line(OLD_POD, [("2026-09-08T12:05:00+00:00", "pass=12 step=deps ok")])
+    conn = _progress_conn(arms=[("a", "pending", None, 0)], run_note=orphan)
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[], launched_at=LAUNCHED,
+                                             baseline_vectors=0, pod_id=NEW_POD)
+    assert "12:05:00" not in reading.marker
+    # ...while this pod's own record is.
+    ours = _steps_line(NEW_POD, [("2026-09-08T12:05:00+00:00", "pass=1 step=deps ok")])
+    conn = _progress_conn(arms=[("a", "pending", None, 0)], run_note=ours)
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[], launched_at=LAUNCHED,
+                                             baseline_vectors=0, pod_id=NEW_POD)
+    assert "2026-09-08T12:05:00" in reading.marker
+
+
+def test_units_from_another_pod_are_not_this_pods_baseline():
+    note = "pod alive 2026-09-08T12:10:00+00:00 embed dinov3 units=7 rss=3.1GB pod={}"
+    conn = _progress_conn(arms=[("g1:embed", "running", None, 0)],
+                          run_note=note.format(OLD_POD))
+    other = dispatch.read_bakeoff_progress(conn, run_id=2, only=[], launched_at=LAUNCHED,
+                                           baseline_vectors=0, units=True, pod_id=NEW_POD)
+    assert "units" not in other.marker
+    conn = _progress_conn(arms=[("g1:embed", "running", None, 0)],
+                          run_note=note.format(NEW_POD))
+    ours = dispatch.read_bakeoff_progress(conn, run_id=2, only=[], launched_at=LAUNCHED,
+                                          baseline_vectors=0, units=True, pod_id=NEW_POD)
+    assert ours.marker == "0|units=7"
+
+
+def test_the_g1_units_line_names_its_pod(monkeypatch):
+    from scripts import g1_image_stack_pod as g1pod
+
+    monkeypatch.setenv("RUNPOD_POD_ID", NEW_POD)
+    tag = g1pod.Reporter(None, 2, units_fn=lambda: 5).progress_tag()
+    assert tag.startswith("units=5 rss=") and tag.endswith(f" pod={NEW_POD}")
+    monkeypatch.delenv("RUNPOD_POD_ID")
+    assert "pod=" not in g1pod.Reporter(None, 2, units_fn=lambda: 5).progress_tag()
+
+
+class _StoreConn(_FakeConn):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_g1_resume_is_watched_on_its_own_pods_history_only(monkeypatch):
+    # The whole lane against a fake store: make_watchdog, the poller, the watchdog, fed the
+    # PodContext run_job passes. The row holds the old pod's pass-11 history, then the new
+    # pod's first records beside it; only the new pod's own pass 4 may end the run.
+    from scripts.runpod_client import PodContext
+
+    store = {"note": f"g1 manifest\n{OLD_LINE}", "units": 0}
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://unused")
+    monkeypatch.setattr(dispatch, "_connect", lambda url: _StoreConn({
+        "FROM dedup_sim.tag_head_bakeoff_arms a": lambda p: [("g1:embed", "pending", None, 0)],
+        "SELECT note FROM dedup_sim.tag_head_bakeoff_runs": lambda p: [(store["note"],)],
+    }))
+    args = _args(stage="embed", run_id=2, bootstrap_deadline_s=1800.0, stall_deadline_s=900.0)
+    watchdog = dispatch.make_watchdog(args, only=["g1:embed"], units=True, max_passes=3)
+    ctx = PodContext(pod_id=NEW_POD, gpu_type_id="NVIDIA RTX A4000", cost_per_hr=0.17)
+    now = datetime.now(timezone.utc)
+
+    def new(minutes: float, msg: str) -> tuple[str, str]:
+        return ((now + timedelta(minutes=minutes)).isoformat(timespec="seconds"), msg)
+
+    assert watchdog(0.5, ctx) is None                     # run 36353934278's first poll
+    assert watchdog.pod_id == NEW_POD
+    store["note"] = (f"g1 manifest\n{OLD_LINE}\n"
+                     + _steps_line(NEW_POD, [new(1, "pass=1 step=start"),
+                                             new(2, "pass=1 step=deps ok")]))
+    assert watchdog(60.5, ctx) is None and watchdog.verdict is None
+    assert "pass=1 step=deps ok" in watchdog.last_step
+    store["note"] = _steps_line(NEW_POD, [new(1, "pass=1 step=start"),
+                                          new(30, "pass=4 step=deps ok")])
+    stop = watchdog(120.5, ctx)
+    assert watchdog.verdict == "crash-loop" and "pass 4 (limit 3)" in stop

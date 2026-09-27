@@ -182,9 +182,11 @@ def rss_bytes(status: str = "/proc/self/status") -> int:
 class Reporter:
     """Heartbeats into the dispatcher's rows; a no-op without a database (local runs).
 
-    Every `pod alive` line ends in `units=<n> rss=<GB>`: n is `units_fn()`, the durable work
-    on local disk (shards and result files), which is what the dispatcher's stall deadline
-    compares — a heartbeat that finished nothing is not progress (2026-09-27)."""
+    Every `pod alive` line ends in `units=<n> rss=<GB> pod=<id>`: n is `units_fn()`, the
+    durable work on local disk (shards and result files), which is what the dispatcher's
+    stall deadline compares — a heartbeat that finished nothing is not progress
+    (2026-09-27) — and the pod id is how the dispatcher knows the count is its own pod's,
+    not a previous pod's under the same run."""
 
     def __init__(self, conn: Any, run_id: int,
                  units_fn: Callable[[], int] | None = None) -> None:
@@ -199,7 +201,8 @@ class Reporter:
             units = self.units_fn() if self.units_fn is not None else 0
         except OSError:
             units = 0
-        return f"units={units} rss={rss_bytes() / 2**30:.1f}GB"
+        pod = os.environ.get("RUNPOD_POD_ID", "")
+        return f"units={units} rss={rss_bytes() / 2**30:.1f}GB" + (f" pod={pod}" if pod else "")
 
     def run_note(self, *, boot: str | None = None, alive: str | None = None) -> None:
         if alive is not None:

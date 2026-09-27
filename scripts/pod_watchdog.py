@@ -49,6 +49,17 @@ outside. This module turns that into three terminations, all cheaper than the wi
       closes every arm (the all-terminal cue) a second before the bootstrap reports, and a
       poll in that second would have read a give-up as a clean finish (a green dispatch).
 
+EVERY RULE THAT READS STEP RECORDS READS ONLY THIS POD'S (2026-09-27, GitHub run
+36353934278): a resume of G1 run 2 launched pod 04lgy6nzcv1l8x and tore it down two seconds
+later as a crash loop "on pass 11" — pass 11 was the PREVIOUS dispatch's pod
+(udlpld675b3zwp), whose history was still the run row's `pod steps` line because the new pod
+had not reported yet. The history is keyed by bake-off run, not by pod, so (d), (e), the
+finalize wait and the teardown's last-step line now admit a record only when its `pod` is the
+pod `run_job` launched (its `PodContext`) and, as a second guard, when its `ts` is no earlier
+than the launch less `clock_skew_s`. A record that cannot prove either is not ours, and is
+logged once as ignored. A lane that folds step timestamps into its marker must scope them the
+same way (`own_records`; the tagging lane reads `pod_id` off this watchdog).
+
 WHAT COUNTS AS PROGRESS IS THE CALLER'S QUESTION, not this module's: a poller returns a
 `Progress` whose `marker` is any string that CHANGES when the job advances (a vector
 count, a heartbeat timestamp, both). This module only compares markers to the last one
@@ -68,10 +79,12 @@ against the last CONFIRMED progress, so a broken read cannot buy the pod unlimit
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Sequence
 
 LOG = logging.getLogger("pod_watchdog")
 
@@ -90,7 +103,54 @@ FINALIZE_TOKEN = "step=finalize starting"
 # How long all-terminal waits for the give-up report once a finalize has begun; past it the
 # pod ends as all-terminal anyway (a reporter that cannot write must not buy it the window).
 DEFAULT_FINALIZE_GRACE_S = 300.0
+# The pod's clock is not the runner's: a record this much older than the launch still counts
+# as this pod's. The same grace the tagging lane gives a boot stamp.
+DEFAULT_CLOCK_SKEW_S = 120.0
 _PASS_RE = re.compile(r"\bpass=(\d+)\b")
+# A lane may cut a record short (the tagging lane keeps 2000 chars), which leaves it invalid
+# JSON; `pod` and `ts` precede the tail in `pod_report.build_record`, so they survive the cut.
+_POD_FIELD_RE = re.compile(r'"pod":\s*"([^"\\]*)"')
+_TS_FIELD_RE = re.compile(r'"ts":\s*"([^"\\]*)"')
+
+
+def _parse_ts(text: str) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def record_origin(record: str) -> tuple[str, datetime | None]:
+    """(pod id, timestamp) a bootstrap heartbeat record names: '' and None where it names
+    neither (a pre-(h) text record, a test's bare string)."""
+    try:
+        data = json.loads(record)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        pod, ts = data.get("pod"), data.get("ts")
+        return (str(pod) if pod else ""), (_parse_ts(ts) if isinstance(ts, str) else None)
+    pod_m, ts_m = _POD_FIELD_RE.search(record), _TS_FIELD_RE.search(record)
+    return (pod_m.group(1) if pod_m else ""), (_parse_ts(ts_m.group(1)) if ts_m else None)
+
+
+def is_own_record(record: str, *, pod_id: str | None, since: datetime | None) -> bool:
+    """Whether THIS dispatch's pod wrote the record: its pod id is `pod_id` and its stamp is
+    not before `since` (the launch less the clock skew). Each guard applies when its side is
+    known; a record that cannot prove what is asked of it is not ours."""
+    if not pod_id and since is None:
+        return True
+    pod, ts = record_origin(record)
+    if pod_id and pod != pod_id:
+        return False
+    return since is None or (ts is not None and ts >= since)
+
+
+def own_records(records: Sequence[str], *, pod_id: str | None,
+                since: datetime | None) -> list[str]:
+    """The records `is_own_record` admits, in their order."""
+    return [r for r in records if is_own_record(r, pod_id=pod_id, since=since)]
 
 
 @dataclass(frozen=True)
@@ -105,9 +165,10 @@ class Progress:
       Logged as it changes and printed after teardown, so the GitHub run shows WHICH
       step failed and the error tail it shipped.
     `steps` — the bootstrap's whole bounded heartbeat history, oldest first (see
-      `scripts/pod_report.py`). Every NEW record is logged, and two `exit=` records in it
-      are a crash loop. A lane that reports only the newest record leaves this empty and
-      keeps the three original rails.
+      `scripts/pod_report.py`), verbatim: the watchdog, not the lane, sorts this pod's
+      records from a previous pod's. Every NEW record of this pod is logged, and two `exit=`
+      records in it are a crash loop. A lane that reports only the newest record leaves
+      this empty and keeps the three original rails.
     """
 
     booted: bool
@@ -120,7 +181,11 @@ class Progress:
 
 class PodWatchdog:
     """A `run_job(progress=...)` hook. Returns None to keep waiting, or the reason to
-    tear the pod down now."""
+    tear the pod down now.
+
+    `launched_at` (wall clock, taken by the lane before the launch) arms the timestamp
+    guard on step records; the pod-id guard arms itself from the `PodContext` every call
+    carries, and `pod_id` is public so a lane's poller can scope its own reads by it."""
 
     def __init__(
         self,
@@ -131,9 +196,14 @@ class PodWatchdog:
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         max_passes: int | None = None,
         finalize_grace_s: float = DEFAULT_FINALIZE_GRACE_S,
+        launched_at: datetime | None = None,
+        clock_skew_s: float = DEFAULT_CLOCK_SKEW_S,
         log: logging.Logger | None = None,
     ) -> None:
         self._poll = poll
+        self.pod_id = ""
+        self._since = (None if launched_at is None
+                       else launched_at - timedelta(seconds=float(clock_skew_s)))
         self._max_passes = None if max_passes is None else int(max_passes)
         self._finalize_grace_s = float(finalize_grace_s)
         self._finalizing_at: float | None = None
@@ -156,6 +226,9 @@ class PodWatchdog:
         self.first_exit: str = ""
 
     def __call__(self, elapsed_s: float, context: Any = None) -> str | None:
+        pod_id = getattr(context, "pod_id", None)
+        if pod_id:
+            self.pod_id = str(pod_id)
         if (self._last_poll_at is not None
                 and elapsed_s - self._last_poll_at < self._poll_interval_s):
             return None
@@ -174,13 +247,13 @@ class PodWatchdog:
             crash = self._absorb_steps(reading, elapsed_s)
             if crash is not None:
                 return self._terminate(crash[0], elapsed_s, context, crash[1])
-            if reading.step:
+            if not reading.steps and reading.step and self._owns(reading.step):
                 self.last_step = reading.step
-            if not reading.steps and reading.step and reading.step != self._step:
-                # The bootstrap naming its own progress — the thing 2026-09-08 could not
-                # see at all.
-                self._log.info("WATCHDOG step=%s at %.0fs", reading.step, elapsed_s)
-                self._step = reading.step
+                if reading.step != self._step:
+                    # The bootstrap naming its own progress — the thing 2026-09-08 could
+                    # not see at all.
+                    self._log.info("WATCHDOG step=%s at %.0fs", reading.step, elapsed_s)
+                    self._step = reading.step
             if reading.booted and not self._booted:
                 self._booted = True
                 self._progress_at = elapsed_s
@@ -233,10 +306,25 @@ class PodWatchdog:
         The records are opaque strings — this module compares them, it does not parse
         them, except for three tokens the bootstrap writes for exactly this: `exit=` (its
         EXIT trap: the bootstrap died), `pass=N` (which container run this is) and
-        `payload gave-up` (its restart bound was reached)."""
+        `payload gave-up` (its restart bound was reached) — and for the `pod` and `ts` that
+        say whose they are: only this pod's records reach any of the rules below."""
+        own: list[str] = []
+        ignored: list[str] = []
+        for record in reading.steps:
+            if self._owns(record):
+                own.append(record)
+            elif record not in self._seen:
+                self._seen.add(record)
+                ignored.append(record)
+        if ignored:
+            self._log.info("WATCHDOG ignoring %d step record(s) not written by pod %s since "
+                           "%s (a previous pod's history under the same run): newest %s",
+                           len(ignored), self.pod_id or "(unknown)",
+                           self._since.isoformat() if self._since else "(any time)",
+                           ignored[-1][:300])
         gave_up = ""
         top_pass = 0
-        for record in reading.steps:
+        for record in own:
             match = _PASS_RE.search(record)
             if match:
                 top_pass = max(top_pass, int(match.group(1)))
@@ -254,8 +342,8 @@ class PodWatchdog:
                 self._exits.append((elapsed_s, record))
                 if not self.first_exit:
                     self.first_exit = record
-        if reading.steps:
-            self._step = reading.step
+        if own:
+            self._step = self.last_step = own[-1]
         cause = (f"THE FIRST FAILURE (the cause; the rest are its restarts): "
                  f"{self.first_exit[:2000]}" if self.first_exit else "")
         if gave_up:
@@ -277,6 +365,9 @@ class PodWatchdog:
                 f"the pod's bootstrap exited {len(self._exits)} times in {span:.0f}s — "
                 "RunPod re-runs the start command whenever it exits, so this pod is "
                 "restarting on the clock and will never boot. " + cause)
+
+    def _owns(self, record: str) -> bool:
+        return is_own_record(record, pod_id=self.pod_id or None, since=self._since)
 
     def _terminate(self, case: str, elapsed_s: float, context: Any, why: str) -> str:
         self.verdict = case

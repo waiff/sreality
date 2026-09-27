@@ -543,3 +543,174 @@ def test_all_terminal_without_a_finalize_in_view_is_immediate():
                            bootstrap_deadline_s=1800, stall_deadline_s=900, poll_interval_s=60)
     stop, at = _run(watchdog, [60, 120])
     assert watchdog.verdict == "all-terminal" and at == 60
+
+
+# --- a previous pod's history under the same run (GitHub run 36353934278) ----------------
+# The G1 resume of run 2 launched pod 04lgy6nzcv1l8x and tore it down 2 s later as a crash
+# loop "on pass 11": the run row still held pod udlpld675b3zwp's history, because the new pod
+# had not reported yet. These are that note's own records.
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from scripts.pod_watchdog import is_own_record, record_origin  # noqa: E402
+
+OLD_POD, NEW_POD = "udlpld675b3zwp", "04lgy6nzcv1l8x"
+LAUNCHED = datetime(2026, 9, 27, 22, 3, 46, tzinfo=timezone.utc)
+
+
+class _Pod:
+    pod_id = NEW_POD
+    gpu_type_id = "NVIDIA RTX A4000"
+    cost_per_hr = 0.17
+
+
+def _pod_rec(pod: str, ts: datetime, msg: str, tail: str = "") -> str:
+    record = {"ts": ts.isoformat(timespec="seconds"), "msg": msg, "pod": pod,
+              "python": "3.10.12"}
+    if tail:
+        record["tail"] = tail
+    return json.dumps(record)
+
+
+def _old_history() -> tuple[str, ...]:
+    """What pod udlpld675b3zwp left on the run row: its first OOM, then pass 11."""
+    at = datetime(2026, 9, 27, 16, 40, 31, tzinfo=timezone.utc)
+    return ((_pod_rec(OLD_POD, datetime(2026, 9, 27, 13, 56, 54, tzinfo=timezone.utc),
+                      "pass=1 exit=137 step=payload", tail="Killed"),)
+            + tuple(_pod_rec(OLD_POD, at + timedelta(seconds=i), f"pass=11 step={s}")
+                    for i, s in enumerate(("uv ok", "venv ok", "torch ok", "repo ok",
+                                           "payload starting")))
+            + (_pod_rec(OLD_POD, datetime(2026, 9, 27, 16, 45, 52, tzinfo=timezone.utc),
+                        "pass=11 exit=0 step=payload"),))
+
+
+def _new(minute: float, msg: str, tail: str = "") -> str:
+    return _pod_rec(NEW_POD, LAUNCHED + timedelta(minutes=minute), msg, tail)
+
+
+def _scoped(poller, **kw) -> PodWatchdog:
+    kw = {"bootstrap_deadline_s": 1800, "stall_deadline_s": 900, "poll_interval_s": 60,
+          "max_passes": 3, "launched_at": LAUNCHED, **kw}
+    return PodWatchdog(poller, **kw)
+
+
+def _run_pod(watchdog: PodWatchdog, elapsed: list[float]) -> tuple[str | None, float | None]:
+    for now in elapsed:
+        stop = watchdog(now, _Pod())
+        if stop:
+            return stop, now
+    return None, None
+
+
+def test_the_incidents_first_poll_no_longer_tears_the_new_pod_down(caplog):
+    # Exactly run 36353934278's first poll: only the old pod's history is on the row.
+    poller = _Poller([Progress(booted=False, marker="0|t0", steps=_old_history(),
+                               step=_old_history()[-1])])
+    watchdog = _scoped(poller)
+    with caplog.at_level("INFO"):
+        stop, _at = _run_pod(watchdog, [0.5])
+    assert stop is None and watchdog.verdict is None
+    assert watchdog.last_step == "" and watchdog.first_exit == ""
+    assert "ignoring 7 step record(s) not written by pod 04lgy6nzcv1l8x" in caplog.text
+
+
+def test_an_old_pods_pass_11_beside_the_new_pods_pass_1_is_not_a_crash_loop():
+    # A store holding BOTH histories: neither the pass rail (11 > 3) nor the exit rail (two
+    # exits, 0 s apart) may read the old pod's records as this pod's.
+    new = [_new(1, "pass=1 step=start"), _new(1.2, "pass=1 step=deps ok"),
+           _new(9, "pass=1 step=repo ok"), _new(9.1, "pass=1 step=payload starting failures=0")]
+    readings = [Progress(booted=n >= 3, marker=f"0|units={n // 5}",
+                         steps=_old_history() + tuple(new[:min(n, len(new))]))
+                for n in range(0, 60)]
+    watchdog = _scoped(_Poller(readings))
+    stop, _at = _run_pod(watchdog, [60.0 * i for i in range(0, 50)])
+    assert stop is None and watchdog.verdict is None
+    assert watchdog.last_step == new[-1] and watchdog.first_exit == ""
+
+
+def test_the_exit_rail_ignores_the_old_history_in_a_lane_without_a_pass_rail_too():
+    # The tagging lane (no max_passes): the old pod's two exits used to be a crash loop
+    # on the first poll all the same.
+    poller = _Poller([Progress(booted=False, marker="0|t0", steps=_old_history())])
+    watchdog = _scoped(poller, max_passes=None)
+    stop, _at = _run_pod(watchdog, [0.5, 60.5, 120.5])
+    assert stop is None and watchdog.verdict is None
+
+
+def test_the_new_pods_own_fourth_pass_is_still_a_crash_loop():
+    own = (_new(1, "pass=1 exit=137 step=payload", tail="Killed"),
+           _new(40, "pass=4 step=deps ok"))
+    poller = _Poller([Progress(booted=True, marker="0|units=1", steps=_old_history()),
+                      Progress(booted=True, marker="0|units=1", steps=_old_history() + own)])
+    watchdog = _scoped(poller)
+    stop, at = _run_pod(watchdog, [30.0, 90.0])
+    assert watchdog.verdict == "crash-loop" and at == 90.0
+    assert "pass 4 (limit 3)" in stop and "pass 11" not in stop
+    # The cause named is this pod's first failure, not the old pod's.
+    assert NEW_POD in stop and OLD_POD not in stop
+
+
+def test_an_old_pods_give_up_does_not_tear_the_new_pod_down():
+    at = datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc)
+    old = (_pod_rec(OLD_POD, at, "pass=3 step=finalize starting code=137"),
+           _pod_rec(OLD_POD, at + timedelta(seconds=45), "pass=3 payload gave-up code=137 "
+                    "failures=3 finalize=ok step=payload", tail="Killed"))
+    readings = [Progress(booted=n >= 2, marker=f"0|units={n}",
+                         steps=old + ((_new(1, "pass=1 step=start"),) if n else ()))
+                for n in range(0, 30)]
+    watchdog = _scoped(_Poller(readings))
+    stop, _at = _run_pod(watchdog, [60.0 * i for i in range(0, 25)])
+    assert stop is None and watchdog.verdict is None
+
+
+def test_an_old_pods_finalize_does_not_hold_back_this_pods_clean_finish():
+    old = (_pod_rec(OLD_POD, datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc),
+                    "pass=3 step=finalize starting code=137"),)
+    poller = _Poller([Progress(booted=True, marker="0|units=9", terminal=True,
+                               steps=old + (_new(200, "pass=1 step=payload ok"),))])
+    watchdog = _scoped(poller)
+    stop, at = _run_pod(watchdog, [60.0])
+    assert watchdog.verdict == "all-terminal" and at == 60.0
+
+
+def test_the_timestamp_guard_holds_even_without_a_pod_id():
+    # The second guard: a watchdog that never learnt its pod (no context) still refuses a
+    # record dated before the launch less the clock skew — and accepts one inside it.
+    poller = _Poller([Progress(booted=False, marker="0|t0", steps=_old_history())])
+    watchdog = _scoped(poller)
+    assert watchdog(0.5) is None and watchdog.verdict is None
+    skewed = _pod_rec(NEW_POD, LAUNCHED - timedelta(seconds=90), "pass=1 step=start")
+    stale = _pod_rec(NEW_POD, LAUNCHED - timedelta(seconds=150), "pass=1 step=start")
+    since = LAUNCHED - timedelta(seconds=120)
+    assert is_own_record(skewed, pod_id=NEW_POD, since=since)
+    assert not is_own_record(stale, pod_id=NEW_POD, since=since)
+    assert not is_own_record(_new(5, "x"), pod_id=OLD_POD, since=since)
+    # A record that names no pod cannot prove it is ours once the pod is known.
+    assert not is_own_record(json.dumps({"ts": LAUNCHED.isoformat(), "msg": "x"}),
+                             pod_id=NEW_POD, since=since)
+    # Neither side known: the pre-scope behaviour, every record counts.
+    assert is_own_record("step=fetch ok", pod_id=None, since=None)
+
+
+def test_a_record_cut_short_by_a_lane_is_still_scoped_by_its_leading_fields():
+    # The tagging lane keeps 2000 chars of each record, which cuts a long tail mid-string.
+    full = _new(3, "pass=1 exit=137 step=payload", tail="x" * 5000)
+    cut = full[:2000]
+    assert record_origin(cut) == (NEW_POD, LAUNCHED + timedelta(minutes=3))
+    old_cut = _pod_rec(OLD_POD, LAUNCHED + timedelta(minutes=3), "pass=9 exit=1",
+                       tail="y" * 5000)[:2000]
+    poller = _Poller([Progress(booted=True, marker="0|u", steps=(old_cut,)),
+                      Progress(booted=True, marker="0|u", steps=(old_cut, cut))])
+    watchdog = _scoped(poller)
+    _run_pod(watchdog, [30.0, 90.0])
+    assert watchdog.first_exit == cut
+
+
+def test_the_old_history_is_logged_once_not_on_every_poll(caplog):
+    poller = _Poller([Progress(booted=False, marker="0|t0", steps=_old_history())])
+    watchdog = _scoped(poller)
+    with caplog.at_level("INFO"):
+        _run_pod(watchdog, [0.5, 60.5, 120.5])
+    assert caplog.text.count("ignoring 7 step record(s)") == 1
+    # Ignored records never reach the per-record step log that this pod's records get.
+    assert "WATCHDOG step=" not in caplog.text
