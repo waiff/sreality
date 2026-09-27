@@ -199,40 +199,6 @@ def cluster_invariants_ok(
     exactly. The relation must be bound to the same closures by the caller.
     """
     cfg = settings or Settings()
-    if len(members) > cfg.max_cluster_size:
-        return "size"
-
-    types = {fp.category_type for fp in members if fp.category_type is not None}
-    if len(types) > 1:
-        return "category_type"
-
-    cats = sorted({fp.category_main for fp in members if fp.category_main is not None})
-    for index, left in enumerate(cats):
-        for right in cats[index + 1:]:
-            if not category_main_compatible(left, right):
-                return "compat_class"
-
-    sized = [(fp.listing_id, fp.area_m2) for fp in members
-             if fp.area_m2 is not None and fp.area_m2 > 0.0]
-    if _apart(sized, closure_of,
-              lambda lo, hi: abs(hi - lo) / max(lo, hi) > cfg.cluster_area_spread):
-        if not (cfg.d43_printed_area_prevails and relation is not None
-                and _spread_is_printed_one(members, cfg, relation, closure_of)):
-            return "area_spread"
-
-    is_land = any(fp.category_main == LAND_CATEGORY for fp in members)
-    if cfg.cluster_disposition and not is_land:
-        stated = [(fp.listing_id, fp.disposition) for fp in members
-                  if fp.disposition is not None]
-        if _apart(stated, closure_of, lambda a, b: a != b):
-            return "disposition"
-
-    if cfg.cluster_floor_spread:
-        floors = [(fp.listing_id, fp.floor) for fp in members
-                  if fp.category_main == FLAT_CATEGORY and fp.floor is not None]
-        if _apart(floors, closure_of, lambda a, b: a != b):
-            return "floor_spread"
-
     ids = [fp.listing_id for fp in members]
     for index, left in enumerate(ids):
         for right in ids[index + 1:]:

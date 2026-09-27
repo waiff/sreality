@@ -266,8 +266,6 @@ def certificate_of(
     it never manufactures a contradiction."""
     if (settings is None or settings.certificate_kr_enabled) and certificate_r(feats):
         return "K-R"
-    if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
-        return "K-A"
     if not kb_refused and certificate_b(feats, la, lb, settings):
         return "K-B"
     if certificate_c(feats):
@@ -557,17 +555,6 @@ def apply_d43_rule(
     A veto or an auto-reject is never reached — the ruling is about which adverts are one unit,
     not about the rule floor that says they cannot be compared at all.
     """
-    if decision.zone == "merge" and settings.d43_gate:
-        facts = distinguishing_facts(la, lb, feats, settings, GATE)
-        if facts:
-            return Decision(
-                decision.lo, decision.hi, "band", decision.score, decision.families,
-                decision.certificate, None,
-                f"{decision.reason}:{D43_GATE_REASON}:{facts[0].name}",
-                {**decision.evidence,
-                 f"{D43_GATE_REASON}_facts": ",".join(fact.name for fact in facts)},
-            )
-        return decision
     if decision.zone == "band" and settings.d43_promote:
         warrant = promotion_warrant(la, lb, feats, settings)
         if warrant is None:
@@ -684,10 +671,7 @@ def decide_pair(
     is the one path back out of that band, and it can only ever read a pair the layers above it
     have already decided — it never reaches a veto, an auto-reject or a developer guard."""
     decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
-    decision = apply_context_rule(decision, feats, la, lb, settings, context)
-    decision = apply_d43_rule(decision, la, lb, feats, settings)
-    # D65 last: a cell the operator holds propose-only must survive every promotion above it.
-    return apply_merge_policy(decision, la, lb, settings)
+    return apply_d43_rule(decision, la, lb, feats, settings)
 
 
 def _decide_layers(
@@ -701,24 +685,11 @@ def _decide_layers(
     settings: Settings,
     kb_refused: bool = False,
 ) -> Decision:
-    """The rule floor and the calibrated score — every zone E63 is then allowed to re-read."""
+    """C1 bundle: auto-reject, certificates, then ONE cut. The walls live at retrieval, the
+    unit designator is a D43 fact, and no stratum, family or developer gate is read."""
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
         fb.listing_id, fa.listing_id
     )
-    veto = pair_veto(fa, fb, settings)
-    if veto is not None:
-        return Decision(lo, hi, "veto", 0.0, set(), None, veto, f"guard:{veto}")
-
-    # E61 is a guard, not a score: it reads the two BODIES, which `pair_veto`'s fingerprint-grain
-    # sides cannot see, so it stands here rather than inside it.
-    designators = unit_designator_conflict(la, lb, settings)
-    if designators is not None:
-        return Decision(
-            lo, hi, "veto", 0.0, set(), None, UNIT_DESIGNATOR_VETO,
-            f"guard:{UNIT_DESIGNATOR_VETO}",
-            {"unit_lo": designators[0], "unit_hi": designators[1]},
-        )
-
     families = evidence_families(feats)
     score = model.predict_proba(feats)
 
@@ -726,30 +697,12 @@ def _decide_layers(
     if rejected is not None:
         return Decision(lo, hi, "reject", score, families, None, None, f"auto_reject:{rejected}")
 
-    diverse = len(families) >= settings.min_evidence_families
     certificate = certificate_of(feats, la, lb, settings, kb_refused)
     if certificate is not None:
-        if stratum_t_hi(feats, certificate, settings) is None:
-            return Decision(lo, hi, "band", score, families, certificate, None,
-                            f"certificate:{certificate}:stratum_propose_only")
-        blocked = merge_zone_block(feats, settings)
-        if blocked is not None:
-            return Decision(lo, hi, "band", score, families, certificate, None,
-                            f"certificate:{certificate}:{blocked}")
-        if diverse:
-            return Decision(lo, hi, "merge", score, families, certificate, None,
-                            f"certificate:{certificate}")
-        return Decision(lo, hi, "band", score, families, certificate, None,
-                        f"certificate:{certificate}:evidence_gate")
-
-    cut = stratum_t_hi(feats, None, settings)
-    if cut is not None and score >= cut:
-        blocked = merge_zone_block(feats, settings)
-        if blocked is not None:
-            return Decision(lo, hi, "band", score, families, None, None, blocked)
-        if diverse:
-            return Decision(lo, hi, "merge", score, families, None, None, "model")
-        return Decision(lo, hi, "band", score, families, None, None, "evidence_gate")
+        return Decision(lo, hi, "merge", score, families, certificate, None,
+                        f"certificate:{certificate}")
+    if score >= settings.t_hi:
+        return Decision(lo, hi, "merge", score, families, None, None, "model")
     if score > settings.t_lo:
         return Decision(lo, hi, "band", score, families, None, None, "model")
     return Decision(lo, hi, "reject", score, families, None, None, "model")
