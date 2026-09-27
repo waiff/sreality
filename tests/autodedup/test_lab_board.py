@@ -152,7 +152,8 @@ def _review() -> dict[str, Any]:
                 "pairs": [{"lo": ids[0], "hi": ids[1], "zone": 4, "rung": "score", "name": "cut",
                            "carrier": "NONE", "ruling": None, "judge": {"vision": "different"}}]}
     return {"experiment": "toy", "base": "ref", "cohort": "trial",
-            "groups_gained": [card([1, 2]), card([3, 4, 5])], "groups_lost": [card([6, 7])]}
+            "groups_gained": [card([1, 2]), card([3, 4, 5])],
+            "groups_lost": [card([6, 7]), card([3, 4])]}
 
 
 def test_one_review_page_per_experiment_with_a_seeded_sample() -> None:
@@ -162,8 +163,10 @@ def test_one_review_page_per_experiment_with_a_seeded_sample() -> None:
     assert [c["members"][0]["id"] for c in page.sample(review, 2, 7)] == [
         c["members"][0]["id"] for c in page.sample(review, 2, 7)]
     assert {c["side"] for c in page.sample(review, 0, 1)} == {"gained", "lost"}
+    assert [c["members"][0]["id"] for c in page.splits(review)] == [6]
     out = page.render(review, 0, 1)
     assert out.count('class="card"') == 3 and 'data-key="3-4-5"' in out
+    assert 'data-key="3-4"' not in out and "1 base groups the arm only absorbed" in out
     assert "One property" in out and "Not one property" in out and "vision different" in out
 
 

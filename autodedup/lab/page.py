@@ -15,10 +15,22 @@ ZONES = ("undecided", "veto", "reject", "band", "merge")
 FACTS = ("category_type", "category_main", "area_m2", "price", "disposition", "floor", "street")
 
 
+def _ids(card: dict[str, Any]) -> frozenset[int]:
+    return frozenset(m["id"] for m in card["members"])
+
+
+def splits(review: dict[str, Any]) -> list[dict[str, Any]]:
+    """The base groups the arm really breaks up: a base group wholly inside a group the arm forms
+    was absorbed, and the formed group is the one question to ask about it."""
+    formed = [_ids(card) for card in review["groups_gained"]]
+    return [card for card in review["groups_lost"] if not any(_ids(card) <= f for f in formed)]
+
+
 def sample(review: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
-    """`n` changed groups drawn with one seed, the two sides in proportion to their sizes."""
+    """`n` changed groups drawn with one seed from the groups the arm forms and the ones it breaks
+    up, the two sides in proportion to their sizes."""
     cards = ([dict(card, side="gained") for card in review["groups_gained"]]
-             + [dict(card, side="lost") for card in review["groups_lost"]])
+             + [dict(card, side="lost") for card in splits(review)])
     rng = random.Random(seed)
     rng.shuffle(cards)
     return cards[:n] if n else cards
@@ -65,16 +77,19 @@ def _card(card: dict[str, Any], k: int) -> str:
 
 def render(review: dict[str, Any], n: int = 60, seed: int = 1) -> str:
     cards = sample(review, n, seed)
+    broken = len(splits(review))
     meta = {"experiment": review["experiment"], "base": review["base"],
             "cohort": review["cohort"], "seed": seed,
-            "changed": len(review["groups_gained"]) + len(review["groups_lost"])}
+            "changed": len(review["groups_gained"]) + broken,
+            "absorbed": len(review["groups_lost"]) - broken}
     title = f"{review['experiment']} on {review['cohort']}"
     body = "".join(_card(card, k + 1) for k, card in enumerate(cards))
     return PAGE.replace("@@TITLE@@", html.escape(title)).replace(
         "@@META@@", json.dumps(meta)).replace("@@CARDS@@", body).replace(
         "@@SUB@@", html.escape(
             f"{len(cards)} of {meta['changed']} changed groups (seed {seed}) against "
-            f"{review['base']}. Is each group one property?"))
+            f"{review['base']}; {meta['absorbed']} base groups the arm only absorbed into a "
+            f"larger one are asked about through that one. Is each group one property?"))
 
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
