@@ -8,8 +8,9 @@ Three reads, all against the SAME `harness run --evidence` directory the cohort 
    `apply_context_rule`, `apply_d43_rule`, `apply_merge_policy`), pair by pair, rung by rung, so a
    rung that drifts is named even when a later rung happens to mask it.
 A passing verify is recorded under the cache root against a STAMP: the artefact's version (the
-engine) plus a digest of the lab's own modules (the rungs), so editing a rung un-verifies every
-cache until it is verified again. `lab keep` counts only rows whose stamp passed."""
+engine) plus a digest of the lab modules that decide (the rungs, the group steps, the scorers and
+this check), so editing a rung un-verifies every cache until it is verified again; a metric, a page
+or a rule edit does not. `lab keep` counts only rows whose stamp passed."""
 
 from __future__ import annotations
 
@@ -36,13 +37,15 @@ from autodedup.lab.cache import ZONE_CODE, Cohort
 SCORE_TOL: float = 1e-6
 VERIFIED_FILE: str = "verified.jsonl"
 LAB_DIR: Path = Path(__file__).resolve().parent
+DECIDING: tuple[str, ...] = ("board.py", "cache.py", "score.py", "verify.py")
 
 
 def lab_digest() -> str:
-    """The lab's own code (rungs, group steps, scorers): not part of the artefact's version."""
+    """The lab code that decides (not part of the artefact's version)."""
     digest = hashlib.sha1()
-    for path in sorted(LAB_DIR.glob("*.py")):
-        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    for name in DECIDING:
+        path = LAB_DIR / name
+        digest.update(name.encode() + b"\0" + (path.read_bytes() if path.is_file() else b"") + b"\0")
     return digest.hexdigest()[:12]
 
 

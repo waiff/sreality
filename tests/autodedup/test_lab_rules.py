@@ -32,7 +32,9 @@ def test_keep_needs_c18_m1_m3_and_m2() -> None:
     lower = {**arm, "c18": _row("c18", 45)}
     assert "c18 M1 45 < incumbent 46" in rules.keep(lower, INCUMBENT, VERIFIED)["reasons"]
     joined = {**arm, "c17": _row("c17", 47, together=["Na Zertvach (624 x 18356370)"])}
-    assert rules.keep(joined, INCUMBENT, VERIFIED)["verdict"] == "DROP"
+    dropped = rules.keep(joined, INCUMBENT, VERIFIED)
+    assert dropped["verdict"] == "DROP" and dropped["checks"]["M3"]["arm_only"] == [
+        "c17: Na Zertvach (624 x 18356370)"]
     assert rules.keep(joined, INCUMBENT, VERIFIED, accepted=["Na Zertvach"])["verdict"] == "KEEP"
     m2 = {**arm, "trial": _row("trial", 480, 3)}
     assert "trial M2 3 != incumbent 2" in rules.keep(m2, INCUMBENT, VERIFIED)["reasons"]
@@ -106,11 +108,14 @@ def test_a_verify_certifies_the_engine_artefact_and_the_lab_code(tmp_path: Path,
     lab = tmp_path / "lab"
     lab.mkdir()
     (lab / "board.py").write_text("RUNG = 1\n")
+    (lab / "metrics.py").write_text("M = 1\n")
     monkeypatch.setattr(verify, "LAB_DIR", lab)
     cohort = SimpleNamespace(name="c18", version="v1", code_digest="e1")
     verify.record(tmp_path, cohort, {"rows": {"identical": 1}, "groups": {"harness_run": 1}}, True)
     assert verify.verified(tmp_path) == {verify.stamp("v1")}
     old = verify.stamp("v1")
+    (lab / "metrics.py").write_text("M = 2\n")
+    assert verify.stamp("v1") == old
     (lab / "board.py").write_text("RUNG = 2\n")
     assert verify.stamp("v1") not in verify.verified(tmp_path)
     verify.record(tmp_path, cohort, {}, False)

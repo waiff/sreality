@@ -48,15 +48,16 @@ def keep(arm: Rows, incumbent: Rows, verified: set[str], validate: str = VALIDAT
         if mine.get("together") is None or mine["together"] < theirs.get("together", 0):
             reasons.append(f"{validate} M1 {mine.get('together')} < incumbent "
                            f"{theirs.get('together')}")
-    joined: list[str] = []
-    for cohort, row in sorted(arm.items()):
-        for item in _m(row, "M3").get("together", []):
-            case = item.split(" (")[0]
-            if case not in off_bar:
-                joined.append(f"{cohort}: {item}")
-    checks["M3"] = {"together": joined, "accepted": sorted(off_bar)}
+    def together(rows: Rows) -> list[str]:
+        return [f"{cohort}: {item}" for cohort, row in sorted(rows.items())
+                for item in _m(row, "M3").get("together", []) if item.split(" (")[0] not in off_bar]
+    joined, theirs = together(arm), together(incumbent)
+    checks["M3"] = {"together": joined, "accepted": sorted(off_bar),
+                    "incumbent_together": theirs,
+                    "arm_only": sorted(set(joined) - set(theirs))}
     if joined:
-        reasons.append(f"M3: {len(joined)} fixture pair(s) together")
+        reasons.append(f"M3: {len(joined)} fixture pair(s) together ({len(theirs)} in the "
+                       f"incumbent; {len(set(joined) - set(theirs))} only in the arm)")
     m2: dict[str, Any] = {}
     for cohort in m2_cohorts:
         if cohort in arm and cohort in incumbent:
