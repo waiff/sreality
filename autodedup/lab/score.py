@@ -5,6 +5,7 @@ log-odds split that names a score decision's carrier (LADDER_SPEC section 4, E12
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -72,11 +73,12 @@ def load_model(ref: str | Path) -> LogisticModel:
 
 def scores(spec: Any, c: Cohort) -> tuple[np.ndarray, LogisticModel | None]:
     """The score column an arm decides on: `ref` (the cache's exact `predict_proba`), a model
-    file path, `{"npz": path}`, or `{"const": p}` (no learned score at all)."""
+    file path, `{"npz": path}` (`{cohort}` is the cohort's name, `$VARS` expand), or `{"const": p}`
+    (no learned score at all)."""
     if spec in (None, "ref"):
         return c.sig["score_ref"], c.model
     if isinstance(spec, dict) and "npz" in spec:
-        return external_scores(spec["npz"], c), None
+        return external_scores(os.path.expandvars(str(spec["npz"]).format(cohort=c.name)), c), None
     if isinstance(spec, dict) and "const" in spec:
         return np.full(c.n, float(spec["const"])), None
     model = load_model(spec)

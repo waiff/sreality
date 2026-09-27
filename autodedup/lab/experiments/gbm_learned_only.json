@@ -1,0 +1,37 @@
+{
+ "name": "gbm_learned_only",
+ "note": "plug demo: walls + pair-grain facts + ONE cut on the gradient-boosted score + the stated-fact gate + policy; no proofs, no context, no demonstration",
+ "model": {
+  "npz": "$AUTODEDUP_LAB_MODELS/gbm_{cohort}.npz"
+ },
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ },
+ "sweep": {
+  "ladder.2.t_hi": [
+   0.8,
+   0.9,
+   0.95,
+   0.98
+  ]
+ }
+}

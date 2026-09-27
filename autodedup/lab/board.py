@@ -13,6 +13,7 @@ import copy
 import hashlib
 import itertools
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -453,7 +454,7 @@ def run(c: Cohort, config: dict[str, Any]) -> Outcome:
     clock = time.perf_counter()
     c.extra = {}
     for path in config.get("extra_features", ()):
-        c.load_extra(path)
+        c.load_extra(os.path.expandvars(str(path).format(cohort=c.name)))
     score, model = scores(config.get("model", "ref"), c)
     d = Decisions.blank(c.n, score)
     for step in config.get("ladder", [{"rung": name} for name in REFERENCE_LADDER]):

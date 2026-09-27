@@ -162,6 +162,38 @@ def groups_identical(outcome: Outcome, run_dir: str | Path) -> dict[str, Any]:
             "only_lab": len(mine - theirs), "only_harness_run": len(theirs - mine)}
 
 
+def where_lost(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, int]]:
+    """Each labelled pair the arm does not put together, by where it was lost: never a candidate
+    (retrieval), settled below merge by a rung (the rung and, for a fact, its family), or a merge
+    edge the group step refused. The ceiling read: which stage owns the misses."""
+    index = {key: i for i, key in enumerate(c.keys)}
+    d, member_of = arm.decisions, arm.groups.member_of
+    ids = set(c.ds.listings)
+    zone_names = ("undecided", "veto", "reject", "band", "merge")
+    out: dict[str, dict[str, int]] = {}
+    for source, pairs in [("operator", labels.rulings)] + list(labels.judges.items()):
+        for verdict in (SAME, DIFFERENT):
+            counts: dict[str, int] = {}
+            for (a, b), value in pairs.items():
+                if value != verdict or a not in ids or b not in ids:
+                    continue
+                if a in member_of and member_of[a] == member_of.get(b):
+                    where = "together"
+                else:
+                    i = index.get((a, b))
+                    if i is None:
+                        where = "not a candidate"
+                    elif d.zone[i] == MERGE:
+                        where = "merge edge, group refused"
+                    elif d.rung[i] == "fact":
+                        where = f"{zone_names[d.zone[i]]} by fact:{d.carrier[i]}"
+                    else:
+                        where = f"{zone_names[d.zone[i]]} by {d.rung[i]}"
+                counts[where] = counts.get(where, 0) + 1
+            out[f"{source}:{verdict}"] = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+    return out
+
+
 # --- the leaderboard ----------------------------------------------------------------------------
 
 def append(board: Path, entry: dict[str, Any]) -> None:

@@ -1,0 +1,34 @@
+{
+ "name": "learned_only_components",
+ "note": "learned_only with plain components: no group-grain repair either",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9788
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "components"
+ },
+ "sweep": {
+  "ladder.2.t_hi": [
+   0.95,
+   0.9788,
+   0.99
+  ]
+ }
+}

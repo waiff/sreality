@@ -84,6 +84,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lost(args: argparse.Namespace) -> int:
+    reg = registry(args.cohorts)
+    cohort = open_cohort(args.cohort, args.cohorts, workers=args.workers)
+    outcome = lab_board.run(cohort, lab_board.load_config(args.config or REFERENCE))
+    print(json.dumps({"cohort": args.cohort, "experiment": outcome.config.get("name"),
+                      "lost": metrics.where_lost(cohort, outcome, metrics.load_labels(reg))},
+                     indent=1))
+    return 0
+
+
 def cmd_board(args: argparse.Namespace) -> int:
     reg = registry(args.cohorts)
     table = metrics.render(_board_path(reg, args.board), args.cohort or None)
@@ -112,6 +122,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--board")
     run.add_argument("--review", help="directory for each arm's changed-groups review file")
     run.set_defaults(fn=cmd_run)
+    lost = sub.add_parser("lost", help="where each labelled pair the arm misses was lost")
+    lost.add_argument("cohort")
+    lost.add_argument("--config")
+    lost.set_defaults(fn=cmd_lost)
     show = sub.add_parser("board")
     show.add_argument("--cohort", action="append")
     show.add_argument("--board")
