@@ -56,9 +56,11 @@ emits". That is now one table and one module rather than nine copies of each:
   UNLABELLED figure (bazos's first prose m², a title figure: at 1,000 m² or more that is the
   parcel) — and a declined measure falls through to the next one. The per-room floor (≥ 8 m² a
   room when a byt/dum states `N+kk`/`N+1`) reads ONLY the `prose` arm, bazos's first m² in the
-  advert text (the cellar, a balcony): a structured cell or title figure under it is a ROOM
-  RENTAL's real size (280 structured rows on production, 2026-09-27: "pronájem bytu 5+1 a více"
-  at 11-38 m²), never held to it.
+  advert text (the cellar, a balcony), and ONLY on a sale (`category_type='prodej'`): a
+  structured cell or title figure under it is a ROOM RENTAL's real size (280 structured rows on
+  production, 2026-09-27: "pronájem bytu 5+1 a více" at 11-38 m²), and so is a bazos rental's
+  prose figure often ("pronájem pokoje 20m2 ve sdíleném bytě 3+1"; 25 active rentals
+  hand-read, room rentals mixed with defects the rule cannot tell apart) — neither is held to it.
   A portal-specific placeholder is a contract **sentinel** instead (idnes's floor-select top,
   "20. patro a vyšší"). Rows stored before a band existed are NOT cleared by ingest (a `text`
   cell preserves on NULL, inactive rows never refetch, `reparse.py` never blanks): each such heal

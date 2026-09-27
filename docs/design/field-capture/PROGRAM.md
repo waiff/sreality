@@ -614,9 +614,10 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   126 — the same broker feed garbles one flat as idnes 20 AND sreality 1xx, so F1 and F2 ship together).
 - **A building count outside 1..40 is absence** (`scraper.floor.total_floors_from_portal`): one function for the
   seven structured reads and the text lane (bezrealitky 731,463,379 / 113, mmreality 0).
-- **The dwelling band scales with the advert's own rooms — on bazos's PROSE figure only**
+- **The dwelling band scales with the advert's own rooms — on bazos's PROSE figure of a SALE only**
   (`scraper.area.dwelling_area_band`, the `prose` arm of `derive_headline_area`): beside the 5 m² floor, a prose
-  figure for a byt / dum stating `N+kk` / `N+1` is at least 8 m² a room, and a byt stays under 1,000 m². bazos's
+  figure for a byt / dum stating `N+kk` / `N+1` on a sale (`category_type = 'prodej'`, `PER_ROOM_CATEGORY_TYPE`)
+  is at least 8 m² a room, and a byt stays under 1,000 m². bazos's
   headline is the FIRST m² figure in its prose, and in 32 of the 40,514 A4 rows that was a PART of the unit — the
   cellar (Mechová 3+1, 2 m²), a room, a balcony; a flat `dum < 20 m²` bound would have taken 133 real chaty. A
   declined measure falls through to the next one, like the 5 m² rail; re-parsing to "the first plausible figure"
@@ -631,7 +632,17 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   never held to it, and the structured parsers no longer hand the resolver a disposition. **Residual, named:** the
   few genuine structured typos in the same sample (one broker's "prodej bytu 3+kk 8 m²" in Benátky nad Jizerou on
   ceskereality 18628455 / idnes 18628153 / realitymix 18629569, idnes 12539595 2+kk 9 m²) keep their stored figure;
-  a 1 m² placeholder is still the 5 m² rail's.
+  a 1 m² placeholder is still the 5 m² rail's. **Narrowed again 2026-09-27 (PR #1638): a sale only.** The bazos
+  rows under the per-room floor split by deal type on production as **prodej 617 inactive + 160 active** and
+  **pronajem 222 inactive + 25 active**, and the hand-read of the 25 active rentals found the same mix one level
+  down — ROOM RENTALS whose prose figure is the room's real size (16757869 "pronájem pokoje 20m2 ve sdíleném bytě
+  3+1", 18625955, 18718428 "pronájem pokojů v rodinném domě", 18798750 "dva pokoje o velikostech cca 20m2 a 15m2",
+  18850769, 18938443, 18998832 "pronájem lůžka v pokojích", 19016712, 18677344, 13336828) beside genuine defects.
+  The rule cannot tell the two apart, so on a rental — and on an advert whose deal type is unknown — it does not
+  fire; bazos parse_detail hands the resolver the breadcrumb's deal type. **Residual, named:** the bazos RENTAL
+  defects keep their figure — 18565661 2+kk 6.7 m², 18677626 3+kk 5 m², 19006537 2+kk 5 m², 18907479 1+1 6 m²,
+  19034313 1+1 5 m², 18677321 / 18702811 2+kk 10 m², 18701470 2+kk 15 m²; only 17940680 (2+1, 1.5 m²) is still
+  the 5 m² rail's. Migration 573's A1 arm is bazos sales only (777 rows: 617 inactive, 160 active).
 - **Dotted thousands** ("1.910 m2" read 1,91) are one number in the one area grammar (`AREA_NUMBER_SRC`,
   `area_token_to_float`; the grammar half of PR #1595) — and on a HOUSE the unlabelled figure stays under the
   flat ceiling (1,000 m², `derive_headline_area`), because bazos's first prose m² on a dum is its parcel: the

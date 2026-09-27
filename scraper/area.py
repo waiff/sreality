@@ -40,12 +40,13 @@ headline.
 The dwelling band (`dwelling_area_band`): a byt stays under MAX_FLAT_AREA_M2, and a
 PROSE figure — the `prose` arm, the first m² anywhere in an advert's free text, which is
 bazos's whole area (the text lane) — must also be at least N x MIN_AREA_PER_ROOM_M2 for a
-stated N+kk / N+1. The per-room floor reads the prose arm ONLY, never a structured
-portal's cell or title figure: there a small figure beside a big disposition is a ROOM
-RENTAL's real size ("pronájem pokoje" in a 5+1, ~280 structured rows on production
-2026-09-27), while in prose it is the cellar or a balcony. A measure outside its band is
-declined like any other, so the resolver tries the next one and a prose figure that named
-the cellar reads as absence. The UNLABELLED figures (`fallback`, `prose`) are held under
+stated N+kk / N+1 ON A SALE (`category_type='prodej'`). The per-room floor reads the prose
+arm ONLY, never a structured portal's cell or title figure, and never a rental: in both a
+small figure beside a big disposition is a ROOM RENTAL's real size ("pronájem pokoje" in a
+5+1, ~280 structured rows and 10 of the 25 active bazos rentals under it on production
+2026-09-27), while in a sale's prose it is the cellar or a balcony. A measure outside its
+band is declined like any other, so the resolver tries the next one and a prose figure that
+named the cellar reads as absence. The UNLABELLED figures (`fallback`, `prose`) are held under
 MAX_FLAT_AREA_M2 on a house too: a figure of a thousand m² or more that no label calls the
 house's own is its parcel, and a wrong area vetoes a true pair where an unknown one does
 not.
@@ -180,9 +181,14 @@ MIN_AREA_M2 = 5.0
 # production (2026-09-27) the band hit ~280 structured rows (ceskereality 93,
 # idnes 120, bezrealitky 39, realitymix 12, sreality 16), and the hand-read found ROOM
 # RENTALS listed under the whole flat's disposition — "pronájem bytu 5+1 a více" at
-# 11-38 m², "pronájem pokoje 20 m² ve sdíleném bytě 3+1" — the room's real size. A flat
-# bound on houses instead (dum under 20 m²) would take 133 real chaty.
+# 11-38 m², "pronájem pokoje 20 m² ve sdíleném bytě 3+1" — the room's real size. Nor is a
+# bazos RENTAL: of the 247 bazos pronajem rows under it (25 active, 2026-09-27) the hand-read
+# found room rentals ("pronájem pokoje 20m2 ve sdíleném bytě 3+1", 18625955, 18850769) beside
+# genuine defects (2+kk 5 m², 1+1 6 m²) the rule cannot tell apart, so it holds on a SALE
+# alone (PER_ROOM_CATEGORY_TYPE). A flat bound on houses instead (dum under 20 m²) would
+# take 133 real chaty.
 MIN_AREA_PER_ROOM_M2 = 8.0
+PER_ROOM_CATEGORY_TYPE = "prodej"
 ROOMED_CATEGORIES: frozenset[str] = frozenset({"byt", "dum"})
 _ROOMS_RE = re.compile(r"^([1-9])\+(?:kk|1)$")
 
@@ -234,11 +240,13 @@ def derive_headline_area(
     fallback: float | None = None,
     prose: float | None = None,
     disposition: str | None = None,
+    category_type: str | None = None,
 ) -> tuple[float | None, str | None]:
     """Return (area_m2, area_basis) for one listing. See module docstring.
 
     `fallback` is a structured portal's unlabelled figure (its title); `prose` is the first
-    figure in an advert's free text, and `disposition` scales the band of `prose` alone.
+    figure in an advert's free text, and `disposition` scales the band of `prose` alone, on
+    a sale (`category_type` PER_ROOM_CATEGORY_TYPE) alone.
     """
     if category_main in LAND_CATEGORIES:
         # A parcel has no interior: whichever measure the page carried IS the plot.
@@ -250,7 +258,8 @@ def derive_headline_area(
                 return value, "plot"
         return None, None
     min_m2, max_m2 = dwelling_area_band(category_main)
-    prose_min, _ = dwelling_area_band(category_main, disposition)
+    prose_min, _ = dwelling_area_band(
+        category_main, disposition if category_type == PER_ROOM_CATEGORY_TYPE else None)
     unlabelled_max = (min(max_m2, MAX_FLAT_AREA_M2)
                       if category_main in ROOMED_CATEGORIES else max_m2)
     for value, basis, low, high in (
