@@ -49,6 +49,7 @@ MODULE = "scripts.g1_image_stack_pod"
 PHASES = ("embed", "heads", "route", "synthetic", "match-aliked", "match-disk", "upload")
 OPTIONAL_PHASES = ("match-superpoint",)
 STARTUP_GRACE_S = 1200
+PAYLOAD_MARGIN_S = 900
 SIDE_FILES = (("manifest.json.gz", "application/gzip"),
               ("clip_b32_stored.npz", "application/octet-stream"),
               ("counts.json", "application/json"))
@@ -147,8 +148,11 @@ def prepare(args: Namespace) -> int:
 
 
 def pod(args: Namespace) -> int:
+    # The wait window (job_max_seconds + STARTUP_GRACE_S) also has to hold the bootstrap
+    # (10-15 min) and the final upload, so the payload's own deadline stops earlier.
     payload = [f"--run-id={args.run_id}", "--device=cuda", f"--workers={args.workers}",
-               f"--batch-size={args.batch_size}", f"--max-seconds={int(args.job_max_seconds)}"]
+               f"--batch-size={args.batch_size}",
+               f"--max-seconds={max(600, int(args.job_max_seconds) - PAYLOAD_MARGIN_S)}"]
     if args.phases:
         payload.append(f"--phases={args.phases}")
     start_cmd = pod_bootstrap.build_start_cmd(ref=args.ref, module=MODULE, payload_args=payload,
