@@ -100,7 +100,7 @@ EMBED_SHARD = 4096            # vectors per on-disk shard (~1.5 GPU-min of DINOv
 MATCH_SHARD = 1000            # LightGlue pairs per on-disk shard
 DECODE_RAM_SHARE = 0.10       # of the pod's memory limit, for decoded images awaiting the GPU
 PIL_RGB_BYTES = 4             # Pillow stores an RGB image at 4 bytes per pixel
-FULL_DECODE_BYTES = 2048 * 1536 * PIL_RGB_BYTES   # an un-resized photo (the CLIP loader)
+FULL_DECODE_BYTES = 2048 * 1536 * PIL_RGB_BYTES   # the floor for an un-resized photo (CLIP)
 UNLIMITED = 1 << 60           # cgroup v1 writes "no limit" as a number near 2^63
 
 ROUTE_CLIP, ROUTE_HEAD, ROUTE_DINO, ROUTE_SSCD, ROUTE_DHASH, ROUTE_NB = 1, 2, 4, 8, 16, 32
@@ -431,6 +431,9 @@ def decoded_batches(items: Sequence[tuple[Any, Any]], batch: int, workers: int,
             result = head.result()
             del head
             yield result
+            # Dropped BEFORE the next submit and the next wait: held across them, the
+            # batch the consumer already embedded made the queue prefetch+2 deep.
+            del result
 
 
 # ---------------------------------------------------------------------------------------
@@ -612,20 +615,42 @@ def fs_type(path: str, mounts: str = "/proc/mounts") -> str:
     return kind
 
 
+# Batches alive beside the prefetched ones: the one being embedded, and the encoder's own
+# copy of it (a processor's float tensors outweigh the PIL images they came from).
+DECODE_EXTRA_BATCHES = 2
+
+
 def plan_decode(limit: int | None, workers: int, requested_batch: int,
                 image_bytes: int) -> tuple[int, int]:
     """(batch, prefetch) for one embed arm, from the pod's memory limit.
 
     A decoded image waiting for the GPU costs `image_bytes` (resolution^2 x 4 for the
-    square arms), and the queue — the batches decoded ahead plus the one being embedded —
+    square arms), and the queue — the batches decoded ahead plus DECODE_EXTRA_BATCHES —
     may hold DECODE_RAM_SHARE of the limit. Within that, one batch in flight per decode
     worker (each batch decodes in one thread), never fewer than one; the batch shrinks
-    only when two of them would not fit."""
+    only when the smallest queue (one ahead + the extras) would not fit."""
     budget = int((limit or 8 * 2**30) * DECODE_RAM_SHARE)
     per = max(1, image_bytes)
-    batch = max(1, min(requested_batch, budget // (2 * per)))
-    prefetch = max(1, min(workers, budget // (batch * per) - 1))
+    batch = max(1, min(requested_batch, budget // ((1 + DECODE_EXTRA_BATCHES) * per)))
+    prefetch = max(1, min(workers, budget // (batch * per) - DECODE_EXTRA_BATCHES))
     return batch, prefetch
+
+
+def decoded_bytes(srcs: Iterable[str], floor: int = FULL_DECODE_BYTES) -> int:
+    """The largest decoded RGB image among `srcs`, from the headers alone, never below
+    `floor`: sizes the queue of a loader that does not resize (CLIP decodes full
+    originals, and a remax original can be ~12 MP, 4x the floor)."""
+    from PIL import Image
+
+    top = 0
+    for src in srcs:
+        try:
+            with Image.open(src) as img:
+                w, h = img.size
+        except Exception:  # noqa: BLE001 - the embed arm records it as undecodable
+            continue
+        top = max(top, w * h)
+    return max(floor, top * PIL_RGB_BYTES)
 
 
 def shard_dir(out_path: str) -> str:
@@ -1204,38 +1229,131 @@ def synthetic_plan(manifest: dict[str, Any], paths: dict[int, str], n: int, gall
             "gallery": sorted(src_ids) + distract}
 
 
+def load_synthetic(out_dir: str) -> dict[str, Any] | None:
+    """The written synthetic record (`synthetic.json`: plan + rows), or None."""
+    try:
+        with open(os.path.join(out_dir, "synthetic.json")) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    ok = isinstance(data, dict) and isinstance(data.get("plan"), dict) \
+        and isinstance(data.get("rows"), list)
+    return data if ok else None
+
+
+def synthetic_setup(out_dir: str, manifest: dict[str, Any], paths: dict[int, str], n: int,
+                    gallery: int) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+    """(plan, the rows already written or None). ONCE WRITTEN, THE PLAN IS FIXED.
+
+    synthetic_plan depends on the exact cached image set and on list position: dropping 3
+    of 89,449 images kept 205 of 1,500 sources (13 in place). A resume on a pod that cached
+    a slightly different set would have rebuilt it, paired the restored `syn_*` shards
+    (keyed `iid:transform`) with other JPEGs and a rewritten synthetic.json, and grown the
+    gallery by the union — a silently wrong copy bar. So a written plan is reused."""
+    prior = load_synthetic(out_dir)
+    if prior is None:
+        return synthetic_plan(manifest, paths, n, gallery), None
+    tags = {int(r["image_id"]): r.get("tag") for r in manifest["images"]}
+    sources = [int(i) for i in prior["plan"].get("sources", [])]
+    plan = {"sources": sources, "source_tag": {i: tags.get(i) for i in sources},
+            "gallery": [int(i) for i in prior["plan"].get("gallery", [])]}
+    return plan, list(prior["rows"])
+
+
+def write_synthetic(out_dir: str, plan: dict[str, Any], rows: Sequence[dict[str, Any]]) -> None:
+    path = os.path.join(out_dir, "synthetic.json")
+    with open(path + ".part", "w") as fh:
+        json.dump({"plan": {k: v for k, v in plan.items() if k != "source_tag"},
+                   "rows": [{k: v for k, v in r.items() if k != "path"} for r in rows]}, fh)
+    os.replace(path + ".part", path)
+
+
+def synth_rng(iid: int, name: str) -> random.Random:
+    """One stream per (source, transform): the realisation depends on neither the cached
+    image set nor the list position, so a lost JPEG is regenerated byte for byte."""
+    return random.Random(f"{SEED}:{int(iid)}:{name}")
+
+
 def synthetic_phase(plan: dict[str, Any], paths: dict[int, str], root: str,
-                    beat: Callable[[str], None] | None = None) -> list[dict[str, Any]]:
-    """Writes the transformed JPEGs and records the engine's dHash of each."""
+                    beat: Callable[[str], None] | None = None,
+                    known_rows: Sequence[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Writes the transformed JPEGs and records the engine's dHash of each.
+
+    RESUMABLE, NEVER REDONE. A JPEG on disk is kept (the write is atomic, and synth_rng
+    makes it the one this call would write): only its dHash is read. With `known_rows` (a
+    written synthetic.json) the row set is fixed: a known row whose JPEG exists costs
+    nothing, a known row whose JPEG is gone (a new pod) is regenerated from its source, and
+    one whose source is not cached stays as written — its path is absent, so the embed
+    arms skip it."""
     from scraper.image_phash import compute_dhash, hamming
 
-    rng = random.Random(SEED + 1)
+    known = None if known_rows is None else {r["synth_id"]: r for r in known_rows}
     out_dir = os.path.join(root, "synth")
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     for n, iid in enumerate(plan["sources"], 1):
         if beat is not None and n % 100 == 0:
             beat(f"transforms {n}/{len(plan['sources'])}")
-        with open(paths[iid], "rb") as fh:
-            raw = fh.read()
-        try:
-            base = compute_dhash(raw)
-            img = decode(paths[iid])
-        except Exception:  # noqa: BLE001
-            continue
+        base: list[int | None] = []
+        img: list[Any] = []
+
+        def base_hash() -> int | None:
+            if not base:
+                try:
+                    with open(paths[iid], "rb") as fh:
+                        base.append(compute_dhash(fh.read()))
+                except Exception:  # noqa: BLE001
+                    base.append(None)
+            return base[0]
+
+        def source_image() -> Any:
+            if not img:
+                try:
+                    img.append(decode(paths[iid]))
+                except Exception:  # noqa: BLE001
+                    img.append(None)
+            return img[0]
+
         for t in SYNTH_TRANSFORMS:
             sid = f"{iid}:{t}"
             p = os.path.join(out_dir, f"{iid}_{t}.jpg")
-            try:
-                im = transform(img, t, rng)
-                im.save(p, "JPEG", quality=95)
-                with open(p, "rb") as fh:
-                    dh = compute_dhash(fh.read())
-            except Exception:  # noqa: BLE001
+            old = known.get(sid) if known is not None else None
+            if known is not None and old is None:
                 continue
-            rows.append({"synth_id": sid, "image_id": iid, "transform": t, "path": p,
-                         "tag": plan["source_tag"].get(iid), "dhash_hamming": hamming(base, dh)})
+            if old is not None and os.path.exists(p):
+                rows.append({**old, "path": p})
+                continue
+            new = None
+            if iid in paths and base_hash() is not None:
+                try:
+                    if not os.path.exists(p):
+                        src = source_image()
+                        if src is None:
+                            raise ValueError("undecodable source")
+                        transform(src, t, synth_rng(iid, t)).save(p + ".part", "JPEG",
+                                                                  quality=95)
+                        os.replace(p + ".part", p)
+                    with open(p, "rb") as fh:
+                        dh = compute_dhash(fh.read())
+                    new = {"synth_id": sid, "image_id": iid, "transform": t, "path": p,
+                           "tag": plan["source_tag"].get(iid),
+                           "dhash_hamming": hamming(base_hash(), dh)}
+                except Exception:  # noqa: BLE001
+                    new = None
+            if new is not None:
+                rows.append(new)
+            elif old is not None:
+                rows.append({**old, "path": p})
     return rows
+
+
+def synth_arms_missing(out_dir: str) -> list[str]:
+    """The synthetic embed arms whose output is not on disk yet: only these load an encoder
+    (CLIP's is the query arm and its gallery, together)."""
+    need = {"sscd": ("syn_sscd.npz",), "dinov2": ("syn_dinov2.npz",),
+            "dinov3": ("syn_dinov3.npz",), "clip": ("syn_clip.npz", "gal_clip.npz")}
+    return [name for name, files in need.items()
+            if not all(os.path.exists(os.path.join(out_dir, f)) for f in files)]
 
 
 # ---------------------------------------------------------------------------------------
@@ -1532,7 +1650,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch, prefetch = plan_decode(mem["limit"], workers, requested_batch, image_bytes)
         report.setdefault("decode_plan", {})[phase] = {
             "batch": batch, "prefetch": prefetch, "image_mb": round(image_bytes / 2**20, 2),
-            "queue_gb": round((prefetch + 1) * batch * image_bytes / 2**30, 2)}
+            "queue_gb": round((prefetch + DECODE_EXTRA_BATCHES) * batch * image_bytes / 2**30,
+                              2)}
         return batch, prefetch
 
     status = "ok"
@@ -1645,22 +1764,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif "synthetic" in phases:
             try:
                 rep.phase("synthetic", "running", "transforms")
-                plan = synthetic_plan(manifest, paths, 60 if args.smoke else SYNTH_N,
-                                      200 if args.smoke else SYNTH_GALLERY)
-                rows = synthetic_phase(plan, paths, args.root, beat=beat_for("synthetic"))
-                json.dump({"plan": {k: v for k, v in plan.items() if k != "source_tag"},
-                           "rows": [{k: v for k, v in r.items() if k != "path"} for r in rows]},
-                          open(os.path.join(out_dir, "synthetic.json"), "w"))
-                q_items = [(r["synth_id"], r["path"]) for r in rows]
+                plan, known = synthetic_setup(out_dir, manifest, paths,
+                                              60 if args.smoke else SYNTH_N,
+                                              200 if args.smoke else SYNTH_GALLERY)
+                rows = synthetic_phase(plan, paths, args.root, beat=beat_for("synthetic"),
+                                       known_rows=known)
+                if known is None:
+                    write_synthetic(out_dir, plan, rows)
+                q_items = [(r["synth_id"], r["path"]) for r in rows if os.path.exists(r["path"])]
                 g_items = [(i, paths[i]) for i in plan["gallery"] if i in paths]
-                enc = SSCD(fetch_sscd(args.root), device)
-                batch, prefetch = decode_plan("synth_sscd", 64, SSCD_SIZE**2 * PIL_RGB_BYTES)
-                report["phases"]["synth_sscd"] = embed_arm(
-                    "synth_sscd", enc, q_items, batch=batch, workers=workers, loader=sscd_loader,
-                    out_path=os.path.join(out_dir, "syn_sscd.npz"), beat=beat_for("synthetic"),
-                    deadline=None, prefetch=prefetch, on_shard=checkpoint)
-                del enc
+                missing = synth_arms_missing(out_dir)
+                report["synthetic_resume"] = {"reused_plan": known is not None,
+                                              "rows": len(rows), "queries": len(q_items),
+                                              "arms_missing": missing}
+                if "sscd" in missing:
+                    enc = SSCD(fetch_sscd(args.root), device)
+                    batch, prefetch = decode_plan("synth_sscd", 64, SSCD_SIZE**2 * PIL_RGB_BYTES)
+                    report["phases"]["synth_sscd"] = embed_arm(
+                        "synth_sscd", enc, q_items, batch=batch, workers=workers,
+                        loader=sscd_loader, out_path=os.path.join(out_dir, "syn_sscd.npz"),
+                        beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
+                        on_shard=checkpoint)
+                    del enc
                 for name, arm in (("dinov2", dino_arm), ("dinov3", v3_arm), ("clip", clip_arm)):
+                    if name not in missing:
+                        report["phases"][f"synth_{name}"] = {"arm": f"synth_{name}",
+                                                             "skipped": "exists"}
+                        continue
                     if name == "clip":
                         # The incumbent through PRODUCTION's own embedder (the pinned
                         # CLIPModel + CLIPProcessor that wrote image_clip_embeddings), not a
@@ -1668,7 +1798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # CLIPVisionModelWithProjection from this checkpoint's CLIPConfig.
                         enc, rev = load_production_clip(threads=vcpus)
                         loader = decode
-                        image_bytes = FULL_DECODE_BYTES
+                        image_bytes = decoded_bytes(src for _k, src in q_items + g_items)
                     else:
                         enc, rev = load_hf_encoder(arm, report["identity"].get(name, {}).get("revision")
                                                    or arm.get("revision") or None, device,

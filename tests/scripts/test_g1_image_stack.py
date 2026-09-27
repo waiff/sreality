@@ -651,6 +651,35 @@ def test_decoded_batches_keeps_only_the_batches_in_flight_alive():
     assert peak <= 8 * (3 + 2), peak
 
 
+def test_decoded_batches_holds_prefetch_plus_one_while_it_waits():
+    # Review of 17bea70d: while blocking on the next head, the generator frame still held
+    # the batch the consumer had already embedded. With an uneven decoder (every third
+    # batch slow) the batches behind a slow head finish, free a thread, the next submit
+    # starts — and prefetch+2 batches were alive (40 here on 17bea70d, measured). The peak
+    # is read where it happens: inside the loader.
+    import threading
+    import time as _t
+    import weakref
+
+    live: weakref.WeakSet = weakref.WeakSet()
+    lock = threading.Lock()
+    peak = [0]
+
+    def loader(src):
+        if (src // 8) % 3 == 0:
+            _t.sleep(0.004)
+        img = _Decoded(src)
+        with lock:
+            live.add(img)
+            peak[0] = max(peak[0], len(live))
+        return img
+
+    items = [(i, i) for i in range(480)]
+    for _ids, imgs in pod.decoded_batches(items, batch=8, workers=4, loader=loader, prefetch=3):
+        del imgs
+    assert peak[0] <= 8 * (3 + 1), peak[0]
+
+
 def test_decoded_batches_blocks_the_decoder_while_the_consumer_is_behind():
     calls = []
     items = [(i, i) for i in range(1000)]
@@ -670,11 +699,27 @@ def test_plan_decode_sizes_the_queue_from_the_pods_memory():
     # a 3090 pod (~60 GB cgroup limit), DINOv3 @768: the full batch, one batch per worker
     assert pod.plan_decode(60 * gb, 16, 32, 768 * 768 * 4) == (32, 16)
     # a 2 GB box, SSCD @320: the batch holds, the prefetch shrinks to what 10 % of RAM holds
+    # — counting the batch being embedded AND the encoder's own copy of it
     batch, prefetch = pod.plan_decode(2 * gb, 16, 64, 320 * 320 * 4)
     assert batch == 64 and 1 <= prefetch < 16
-    assert (prefetch + 1) * batch * 320 * 320 * 4 <= 0.1 * 2 * gb
+    assert (prefetch + 2) * batch * 320 * 320 * 4 <= 0.1 * 2 * gb
+    # a ~85 GB pod, CLIP over 12 MP originals: the queue stays inside its 10 %
+    batch, prefetch = pod.plan_decode(85 * gb, 16, 32, 4000 * 3000 * 4)
+    assert (prefetch + 2) * batch * 4000 * 3000 * 4 <= 0.1 * 85 * gb
     # so little RAM that two batches would not fit: the batch shrinks, never below one
     assert pod.plan_decode(64 * 2**20, 8, 64, 768 * 768 * 4) == (1, 1)
+
+
+def test_the_clip_queue_is_sized_from_the_largest_original_not_a_guess(tmp_path):
+    from PIL import Image
+
+    small, big = tmp_path / "s.jpg", tmp_path / "b.jpg"
+    Image.new("RGB", (640, 480)).save(small, "JPEG")
+    Image.new("RGB", (4000, 3000)).save(big, "JPEG")
+    (tmp_path / "junk.img").write_bytes(b"not an image")
+    assert pod.decoded_bytes([str(small)]) == pod.FULL_DECODE_BYTES       # the floor
+    assert pod.decoded_bytes([str(small), str(big), str(tmp_path / "junk.img")]) == (
+        4000 * 3000 * pod.PIL_RGB_BYTES)                                   # 4x the old guess
 
 
 def test_pod_memory_reads_meminfo_and_the_cgroup_limit(tmp_path):
@@ -830,6 +875,105 @@ def test_synthetic_string_keys_survive_the_shard_round_trip(tmp_path):
     assert rest.seen == [3, 4, 5]                   # the sources of 3..5:crop10 only
     keys, _ = pod.load_vecs(out)
     assert sorted(keys.tolist()) == [f"{i}:crop10" for i in range(1, 6)]
+
+
+# --- the synthetic phase resumes the plan it wrote (review of 17bea70d) -----------------
+
+
+def _synth_manifest(n: int = 40) -> dict:
+    return {"images": [{"image_id": i, "listing_id": 100 + i,
+                        "tag": "floor_plan" if i % 5 == 0 else "kitchen", "pop": 1}
+                       for i in range(1, n + 1)]}
+
+
+def _photos(tmp_path, ids) -> dict:
+    from PIL import Image
+
+    d = tmp_path / "img"
+    d.mkdir(exist_ok=True)
+    out = {}
+    for i in ids:
+        rng = np.random.default_rng(i)
+        arr = (rng.random((48, 64, 3)) * 255).astype(np.uint8)
+        path = d / f"{i}.img"
+        Image.fromarray(arr).save(path, "JPEG", quality=90)
+        out[i] = str(path)
+    return out
+
+
+def test_a_written_synthetic_plan_is_reused_whatever_the_cache_now_holds(tmp_path):
+    manifest = _synth_manifest()
+    paths = {i: f"/x/{i}" for i in range(1, 41)}
+    fewer = {i: p for i, p in paths.items() if i not in (4, 17, 33)}
+    out = tmp_path / "run"
+    out.mkdir()
+    first, known = pod.synthetic_setup(str(out), manifest, paths, 12, 20)
+    assert known is None
+    # The hazard: rebuilt over a slightly different cache, the plan is another plan.
+    assert pod.synthetic_plan(manifest, fewer, 12, 20)["sources"] != first["sources"]
+    rows = [{"synth_id": f"{first['sources'][0]}:crop10", "image_id": first["sources"][0],
+             "transform": "crop10", "path": "/gone", "tag": "kitchen", "dhash_hamming": 3}]
+    pod.write_synthetic(str(out), first, rows)
+    again, known = pod.synthetic_setup(str(out), manifest, fewer, 12, 20)
+    assert again["sources"] == first["sources"] and again["gallery"] == first["gallery"]
+    assert again["source_tag"] == first["source_tag"]
+    assert known == [{k: v for k, v in rows[0].items() if k != "path"}]
+
+
+def test_synthetic_transforms_depend_on_their_source_only_and_are_never_redone(tmp_path,
+                                                                            monkeypatch):
+    paths = _photos(tmp_path, [1, 2, 3])
+    plan_a = {"sources": [1, 2, 3], "source_tag": {1: "kitchen", 2: "kitchen", 3: "bathroom"},
+              "gallery": [1, 2, 3]}
+    plan_b = {"sources": [3, 1], "source_tag": plan_a["source_tag"], "gallery": [1, 3]}
+    rows_a = pod.synthetic_phase(plan_a, paths, str(tmp_path / "a"))
+    rows_b = pod.synthetic_phase(plan_b, paths, str(tmp_path / "b"))
+    assert len(rows_a) == 18 and len(rows_b) == 12
+    for iid in (1, 3):
+        for t in pod.SYNTH_TRANSFORMS:
+            a = (tmp_path / "a" / "synth" / f"{iid}_{t}.jpg").read_bytes()
+            b = (tmp_path / "b" / "synth" / f"{iid}_{t}.jpg").read_bytes()
+            assert a == b, (iid, t)          # neither the list position nor the others matter
+    # A second pass on the same disk transforms nothing and writes the same rows.
+    calls: list = []
+    real = pod.transform
+    monkeypatch.setattr(pod, "transform", lambda img, t, rng: calls.append(t) or real(img, t, rng))
+    assert pod.synthetic_phase(plan_a, paths, str(tmp_path / "a")) == rows_a
+    assert calls == []
+    # A new pod restored the rows but not the JPEGs: the lost one comes back byte for byte.
+    lost = tmp_path / "a" / "synth" / "2_combo.jpg"
+    before = lost.read_bytes()
+    lost.unlink()
+    known = [{k: v for k, v in r.items() if k != "path"} for r in rows_a]
+    again = pod.synthetic_phase(plan_a, paths, str(tmp_path / "a"), known_rows=known)
+    assert calls == ["combo"] and lost.read_bytes() == before
+    assert [r["synth_id"] for r in again] == [r["synth_id"] for r in rows_a]
+    assert [r["dhash_hamming"] for r in again] == [r["dhash_hamming"] for r in rows_a]
+
+
+def test_a_known_row_whose_source_is_not_cached_is_kept_but_never_embedded(tmp_path):
+    paths = _photos(tmp_path, [1])
+    plan = {"sources": [1, 2], "source_tag": {1: "kitchen", 2: "kitchen"}, "gallery": [1, 2]}
+    known = [{"synth_id": "2:tone_q75", "image_id": 2, "transform": "tone_q75",
+              "tag": "kitchen", "dhash_hamming": 9},
+             {"synth_id": "1:tone_q75", "image_id": 1, "transform": "tone_q75",
+              "tag": "kitchen", "dhash_hamming": 1}]
+    rows = pod.synthetic_phase(plan, paths, str(tmp_path / "r"), known_rows=known)
+    # The row set is the written one: no new transforms of source 1 join it.
+    assert [r["synth_id"] for r in rows] == ["1:tone_q75", "2:tone_q75"]
+    import os as _os
+
+    assert _os.path.exists(rows[0]["path"]) and not _os.path.exists(rows[1]["path"])
+
+
+def test_only_the_missing_synthetic_arms_load_an_encoder(tmp_path):
+    assert pod.synth_arms_missing(str(tmp_path)) == ["sscd", "dinov2", "dinov3", "clip"]
+    for f in ("syn_sscd.npz", "syn_dinov3.npz", "syn_clip.npz"):
+        (tmp_path / f).write_bytes(b"x")
+    # CLIP's query arm alone is not enough: its gallery is the other half.
+    assert pod.synth_arms_missing(str(tmp_path)) == ["dinov2", "clip"]
+    (tmp_path / "gal_clip.npz").write_bytes(b"x")
+    assert pod.synth_arms_missing(str(tmp_path)) == ["dinov2"]
 
 
 def test_restorable_takes_results_and_shards_and_nothing_that_climbs_out():
