@@ -56,8 +56,11 @@ def feats_of(V: np.ndarray, P: np.ndarray, i: int) -> Feats:
 
 
 def _objects(values: Any) -> np.ndarray:
+    """An object column, element by element: a slice assignment would let numpy read a column of
+    equal-length tuples (the gate's facts) as a 2-D array."""
     out = np.empty(len(values), dtype=object)
-    out[:] = list(values)
+    for i, value in enumerate(values):
+        out[i] = value
     return out
 
 
