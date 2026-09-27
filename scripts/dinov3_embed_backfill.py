@@ -63,10 +63,11 @@ SELECT_TIMEOUT_MS = 300_000
 # images all failed to download (a transient R2 blip writes no rows) from being selected
 # forever inside one run. A fresh run starts at 0 again, so a transient failure is
 # retried on the next pass while a permanent one costs one download per run, not a wedge.
-_PENDING_SQL = """
+_PENDING_TEMPLATE = """
     SELECT i.id, i.storage_path
     FROM images i
     WHERE i.storage_path IS NOT NULL
+      {scope}
       AND i.id > %(after_id)s
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
       AND NOT EXISTS (
@@ -83,6 +84,34 @@ _PENDING_SQL = """
     ORDER BY i.id
     LIMIT %(batch)s
 """
+
+# Which images a pass may consider. `all` is the corpus (the original lane). `ids` is a
+# listing-id file shipped with the ref the pod fetches (the offline cohorts), `rt` is the live
+# lane's own scope snapshot, so the engine's population is embedded first.
+SCOPES: dict[str, str] = {
+    "all": "",
+    "ids": "AND i.listing_id = any(%(listing_ids)s::bigint[])",
+    "rt": ("AND i.listing_id IN (SELECT s.listing_id FROM autodedup.rt_scope_ids s "
+           "WHERE s.generation = 'rt')"),
+}
+
+_PENDING_SQL = _PENDING_TEMPLATE.format(scope="")
+
+
+def pending_sql(scope: str = "all") -> str:
+    """The pending anti-join restricted to one scope; `all` is byte-for-byte `_PENDING_SQL`."""
+    return _PENDING_TEMPLATE.format(scope=SCOPES[scope])
+
+
+def read_listing_ids(path: str) -> list[int]:
+    """One listing id per line, `#` comments allowed; a .gz file is read transparently."""
+    import gzip
+
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as handle:
+        return sorted({int(line.split("#", 1)[0]) for line in handle
+                       if line.split("#", 1)[0].strip()})
+
 
 _PENDING_COUNT_SQL = """
     SELECT count(*)
@@ -224,14 +253,45 @@ def embedded_count(conn, identity: dict[str, Any],
 
 
 def select_pending(conn, *, identity: dict[str, Any], batch: int, shard: int,
-                   shards: int, after_id: int) -> list[tuple[int, str]]:
+                   shards: int, after_id: int, scope: str = "all",
+                   listing_ids: list[int] | None = None) -> list[tuple[int, str]]:
     """One chunk of images with no vector under this exact six-fact identity."""
     params = {**identity, "batch": batch, "shard": shard, "shards": shards,
               "after_id": after_id}
+    if scope == "ids":
+        params["listing_ids"] = list(listing_ids or [])
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
-        cur.execute(_PENDING_SQL, params)
+        cur.execute(pending_sql(scope), params)
         return [(r[0], r[1]) for r in cur.fetchall()]
+
+
+class HeadScorer:
+    """Scores the vectors a chunk just wrote with the ACTIVE tag model, in the same process, so
+    `image_tag_scores` fills beside the vectors (one download, one job). Refuses unless the active
+    model's seven encoder facts equal the vectors' own: heads read a population, not a width."""
+
+    def __init__(self, conn, identity: dict[str, Any]) -> None:
+        from toolkit import tag_models as tm
+
+        model = tm.active_model(conn)
+        if model is None:
+            raise RuntimeError("--score-heads: no active tag model to score with")
+        if model.encoder.as_dict() != {**identity, "resolution": int(identity["resolution"])}:
+            raise RuntimeError(
+                f"--score-heads: active model {model.version} was trained on "
+                f"{model.encoder.as_dict()} but this pass writes {identity} - a new population")
+        self._tm, self.model, self.written = tm, model, 0
+
+    def score(self, conn, vectors: dict[int, Any]) -> int:
+        from toolkit import tag_heads as th
+
+        source = self._tm.ScoringSource(name="embed-pass", candidates=lambda _a, _l: [],
+                                        vectors=th.mapping_vector_source(vectors))
+        report = self._tm.score(conn, model=self.model, source=source,
+                                image_ids=list(vectors), force=True)
+        self.written += report.written
+        return report.written
 
 
 def resolve_device(requested: str = "") -> str:
@@ -283,6 +343,16 @@ def main() -> int:
                    help="Time budget; stop cleanly at a chunk boundary. 0 = unbounded. "
                         "Set it under the runner/pod timeout so the pass reports what it "
                         "wrote instead of being killed mid-flight.")
+    p.add_argument("--scope", choices=sorted(SCOPES), default="all",
+                   help="all = the corpus; rt = the live lane's scope snapshot; ids = the "
+                        "listings in --listing-ids-file.")
+    p.add_argument("--listing-ids-file", default="",
+                   help="With --scope ids: a file (optionally .gz) of listing ids, one per "
+                        "line, in the ref the pod fetched.")
+    p.add_argument("--score-heads", action="store_true",
+                   help="Also score each written vector with the ACTIVE tag model and upsert "
+                        "image_tag_scores in the same pass (refused unless the model's encoder "
+                        "identity equals this pass's).")
     p.add_argument("--dry-run", action="store_true",
                    help="Report the resolved encoder identity and the pending count, then "
                         "exit. Downloads nothing, embeds nothing, writes nothing.")
@@ -305,6 +375,14 @@ def main() -> int:
     LOG.info("DINOV3 identity %s",
              " ".join(f"{k}={identity[k]}" for k in IDENTITY_FIELDS))
 
+    listing_ids: list[int] | None = None
+    if args.scope == "ids":
+        if not args.listing_ids_file:
+            print("ERROR: --scope ids needs --listing-ids-file.", file=sys.stderr)
+            return 2
+        listing_ids = read_listing_ids(args.listing_ids_file)
+        LOG.info("DINOV3 scope=ids listings=%d file=%s", len(listing_ids), args.listing_ids_file)
+
     import psycopg
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
@@ -326,6 +404,8 @@ def main() -> int:
 
         from scraper.dinov3_tagger import Dinov3Tagger
 
+        scorer = HeadScorer(conn, identity) if args.score_heads else None
+
         device = resolve_device(args.device)
         LOG.info("DINOV3 device=%s (requested=%s)", device, args.device or "auto")
         tagger = Dinov3Tagger.load(threads=args.threads, device=device)
@@ -346,7 +426,8 @@ def main() -> int:
                 break
             rows = select_pending(
                 conn, identity=identity, batch=min(args.chunk, args.limit - seen),
-                shard=args.shard, shards=args.shards, after_id=after_id)
+                shard=args.shard, shards=args.shards, after_id=after_id,
+                scope=args.scope, listing_ids=listing_ids)
             if not rows:
                 break
             seen += len(rows)
@@ -369,6 +450,9 @@ def main() -> int:
                     cur.executemany(_INSERT_SQL, params)
                 chunk_written = len(params)
                 written += chunk_written
+                if scorer is not None:
+                    scorer.score(conn, {image_id: [float(x) for x in emb[i].tolist()]
+                                        for i, (image_id, _img) in enumerate(decoded)})
             elapsed = time.monotonic() - t0
 
             # Progress is a Postgres fact, not a local counter: embedded_before was read
@@ -386,10 +470,10 @@ def main() -> int:
         embedded_after = _scalar(conn, _EMBEDDED_COUNT_SQL, identity)
 
     LOG.info("DINOV3 done stop=%s run_written=%d failed=%d embedded=%d/%d (%.2f%%) "
-             "throttle_slept_s=%.0f",
+             "throttle_slept_s=%.0f heads_scored=%d scope=%s",
              stopped, written, failed, embedded_after, total_images,
              100.0 * embedded_after / total_images if total_images else 0.0,
-             throttle.slept_s)
+             throttle.slept_s, scorer.written if scorer is not None else 0, args.scope)
     return 0
 
 

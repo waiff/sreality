@@ -38,6 +38,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from autodedup import cohort
 from autodedup.cohort import Block
+from autodedup.head_tags import COHORT_HEAD_TAGS_SQL, head_record
 from autodedup.export_sql import (
     ATTR_COLUMNS,
     COHORT_CLIP_COUNT_SQL,
@@ -347,8 +348,12 @@ def build_image_record(
     clip: str | None,
     tags: Sequence[Sequence[Any]] = (),
     pop: dict[int, int] | None = None,
+    head: Sequence[Any] | None | bool = False,
 ) -> dict[str, Any]:
-    """`pop=None` means the corpus-wide population is UNKNOWN (the probe did not run or
+    """`head=False` (the default) leaves the record without a `head` key; None records an
+    image the active tag model has not scored.
+
+    `pop=None` means the corpus-wide population is UNKNOWN (the probe did not run or
     timed out), and the record says so with a null — never a 0, which a consumer would read
     as "this photo is unique" and E9's catalog subtraction would silently become a no-op.
 
@@ -370,7 +375,7 @@ def build_image_record(
                else int(pop[phash]),
         "clip": clip,
         "tags": [list(tag) for tag in tags],
-    }
+    } | ({} if head is False else {"head": None if head is None else list(head)})
 
 
 def tag_pairs(rows: Sequence[dict[str, Any]]) -> list[list[Any]]:
@@ -457,6 +462,10 @@ ARG_DEFAULTS: dict[str, Any] = {
     "batch": 1000,
     "clip_model": DEFAULT_CLIP_MODEL,
     "negctl_max": cohort.NEGATIVE_CONTROL.max_listings,
+    # 1 = every image record also carries `head`: the ACTIVE tag model's winner as
+    # [engine room, winner score, runner-up score] (or null when unscored), beside the CLIP
+    # `tags`, so one export serves both tag sources (G4 arms H / H+R).
+    "head_tags": 0,
 }
 
 
@@ -469,7 +478,7 @@ def parse_export_args(args: dict[str, str]) -> dict[str, Any]:
         )
     out: dict[str, Any] = dict(ARG_DEFAULTS)
     out.update(args)
-    for key in ("timeout_s", "phash_timeout_s", "batch", "negctl_max"):
+    for key in ("timeout_s", "phash_timeout_s", "batch", "negctl_max", "head_tags"):
         try:
             out[key] = int(out[key])
         except (TypeError, ValueError):
@@ -650,6 +659,10 @@ def run_export(
                     conn, COHORT_CLIP_TAGS_SQL, {"ids": chunk_ids, "model": model}, timeout_ms
                 ):
                     tags.setdefault(int(row["image_id"]), []).append(row)
+                heads: dict[int, list[Any]] = {}
+                if params["head_tags"]:
+                    for row in _run(conn, COHORT_HEAD_TAGS_SQL, {"ids": chunk_ids}, timeout_ms):
+                        heads[int(row["image_id"])] = head_record(row)
                 for row in chunk:
                     image_id = int(row["image_id"])
                     emit(
@@ -658,6 +671,7 @@ def run_export(
                             clip=clips.get(image_id),
                             tags=tag_pairs(tags.get(image_id, [])),
                             pop=pop,
+                            head=heads.get(image_id) if params["head_tags"] else False,
                         )
                     )
                 written += len(chunk)

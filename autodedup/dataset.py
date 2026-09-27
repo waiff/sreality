@@ -260,6 +260,9 @@ class Image:
     pop: int | None = None
     clip: str | None = None
     tags: list[tuple[str, float | None]] = field(default_factory=list)
+    # The active tag model's winner as exported ([room, winner, runner-up]; `head_tags=1`),
+    # read only by the harness's head-tag arm (`autodedup.head_tags.apply_head_tags`).
+    head: list[Any] | None = None
     _clip_vector: "array[float] | None" = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -280,6 +283,7 @@ class Image:
             pop=_int(raw.get("pop")),
             clip=_str(raw.get("clip")),
             tags=tags,
+            head=raw.get("head"),
         )
 
     def clip_vector(self) -> "array[float] | None":

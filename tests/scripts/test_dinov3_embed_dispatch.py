@@ -280,6 +280,7 @@ def test_a_watchdog_teardown_fails_the_lane(monkeypatch):
 
 
 def test_an_under_specified_encoder_is_refused_before_a_pod_is_rented(monkeypatch):
+    _provisional(monkeypatch)
     monkeypatch.setattr(sys, "argv",
                         ["dinov3_embed_dispatch", "--max-write-mb-per-hour", "500"])
     monkeypatch.setattr(
@@ -289,3 +290,31 @@ def test_an_under_specified_encoder_is_refused_before_a_pod_is_rented(monkeypatc
     with pytest.raises(RuntimeError) as exc:
         dispatch.main()
     assert "ENCODER-DECISION" in str(exc.value)
+
+
+def test_scope_and_head_scoring_reach_the_payload(monkeypatch, caplog):
+    monkeypatch.setattr(sys, "argv", [
+        "dinov3_embed_dispatch", "--max-write-mb-per-hour", "400", "--dry-run",
+        "--scope", "ids", "--listing-ids-file", "data/g4/cohort_listing_ids.txt.gz",
+        "--score-heads"])
+    with caplog.at_level("INFO"):
+        assert dispatch.main() == 0
+    text = caplog.text
+    assert "--scope=ids" in text
+    assert "--listing-ids-file=data/g4/cohort_listing_ids.txt.gz" in text
+    assert "--score-heads" in text
+
+
+def _provisional(monkeypatch):
+    """An under-specified config file, standing in for the pre-G4 shipped one."""
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    from scraper import dinov3_config
+
+    raw = dinov3_config.load_dinov3_config()
+    raw.update(resolution=None, preprocessing=None, dtype=None)
+    path = _Path(tempfile.mkdtemp()) / "dinov3_config.json"
+    path.write_text(_json.dumps(raw))
+    monkeypatch.setattr(dinov3_config, "_CONFIG_PATH", path)

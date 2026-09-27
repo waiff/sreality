@@ -90,6 +90,23 @@ on:
         required: false
         default: "60"
         type: string
+      scope:
+        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file."
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "rt", "ids"]
+      listing_ids_file:
+        description: "scope=ids only: a repo path of listing ids (one per line, .gz allowed) at the dispatched ref."
+        required: false
+        default: ""
+        type: string
+      score_heads:
+        description: "Also score every written vector with the ACTIVE tag model into image_tag_scores in the same pass."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
       dry_run:
         description: "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing."
         required: false
@@ -97,14 +114,16 @@ on:
         type: choice
         options: ["true", "false"]
 
+# One group PER SHARD: shards are disjoint (image_id % shards), so N shards are N pods in
+# parallel; a second dispatch of the SAME shard queues behind the first instead of racing it.
 concurrency:
-  group: dinov3-embed-backfill
+  group: dinov3-embed-backfill-${{ inputs.shards }}-${{ inputs.shard }}
   cancel-in-progress: false
 
 jobs:
   embed:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
@@ -141,6 +160,9 @@ jobs:
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
           CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
           DRY_RUN: ${{ inputs.dry_run }}
+          SCOPE: ${{ inputs.scope }}
+          LISTING_IDS_FILE: ${{ inputs.listing_ids_file }}
+          SCORE_HEADS: ${{ inputs.score_heads }}
         # Inputs travel via env and are case-validated before use, never interpolated
         # into the shell by ${{ }}.
         run: |
@@ -178,6 +200,16 @@ jobs:
           ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1800}"
           ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
           ARGS="${ARGS} --container-disk-gb ${CONTAINER_DISK_GB:-60}"
+          case "${SCOPE:-all}" in
+            all|rt|ids) ;;
+            *) echo "::error::scope must be all, rt or ids"; exit 1 ;;
+          esac
+          case "${LISTING_IDS_FILE:-}" in
+            *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;
+          esac
+          ARGS="${ARGS} --scope ${SCOPE:-all}"
+          if [ -n "${LISTING_IDS_FILE:-}" ]; then ARGS="${ARGS} --listing-ids-file ${LISTING_IDS_FILE}"; fi
+          if [ "${SCORE_HEADS:-false}" = "true" ]; then ARGS="${ARGS} --score-heads"; fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"
           python -m scripts.dinov3_embed_dispatch ${ARGS}

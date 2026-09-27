@@ -337,8 +337,8 @@ def test_missing_db_url_is_a_hard_error(monkeypatch):
 
 
 def test_an_under_specified_encoder_is_refused_before_any_db_work(monkeypatch):
-    # The shipped config is provisional on purpose; main() must raise the rail rather
-    # than embed against a guessed resolution/dtype.
+    _provisional(monkeypatch)
+    # main() must raise the rail rather than embed against a guessed resolution/dtype.
     import psycopg
 
     monkeypatch.setattr(sys, "argv",
@@ -396,3 +396,80 @@ def test_an_explicit_cuda_without_a_gpu_falls_back_loudly(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert bf.resolve_device("cuda") == "cpu"
     assert "no GPU" in caplog.text
+
+
+# --- scope and in-pass head scoring (G4) -----------------------------------------
+
+
+def test_the_all_scope_is_the_original_anti_join_byte_for_byte():
+    assert bf.pending_sql("all") == bf._PENDING_SQL
+
+
+@pytest.mark.parametrize("scope, needle", [
+    ("ids", "i.listing_id = any(%(listing_ids)s::bigint[])"),
+    ("rt", "autodedup.rt_scope_ids"),
+])
+def test_a_scope_only_adds_its_listing_clause(scope, needle):
+    sql = bf.pending_sql(scope)
+    assert needle in sql
+    assert " ".join(sql.replace(bf.SCOPES[scope], "").split()) == " ".join(bf._PENDING_SQL.split())
+
+
+def test_listing_ids_file_is_read_plain_or_gz(tmp_path):
+    import gzip
+
+    plain = tmp_path / "ids.txt"
+    plain.write_text("# trial\n5\n3\n\n5\n")
+    packed = tmp_path / "ids.txt.gz"
+    with gzip.open(packed, "wt") as handle:
+        handle.write("7\n1\n")
+    assert bf.read_listing_ids(str(plain)) == [3, 5]
+    assert bf.read_listing_ids(str(packed)) == [1, 7]
+
+
+def test_ids_scope_binds_the_listing_ids():
+    conn = _RecordingConn()
+    bf.select_pending(conn, identity=IDENTITY, batch=10, shard=0, shards=1, after_id=0,
+                      scope="ids", listing_ids=[4, 2])
+    sql, params = conn.last
+    assert "listing_ids" in sql and params["listing_ids"] == [4, 2]
+
+
+class _RecordingConn:
+    last: tuple = ()
+
+    def transaction(self):
+        return _Transaction()
+
+    def cursor(self):
+        conn = self
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, sql, params=None):
+                if not sql.startswith("SET"):
+                    conn.last = (sql, params)
+
+            def fetchall(self):
+                return []
+        return _Cur()
+
+
+def _provisional(monkeypatch):
+    """An under-specified config file, standing in for the pre-G4 shipped one."""
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    from scraper import dinov3_config
+
+    raw = dinov3_config.load_dinov3_config()
+    raw.update(resolution=None, preprocessing=None, dtype=None)
+    path = _Path(tempfile.mkdtemp()) / "dinov3_config.json"
+    path.write_text(_json.dumps(raw))
+    monkeypatch.setattr(dinov3_config, "_CONFIG_PATH", path)

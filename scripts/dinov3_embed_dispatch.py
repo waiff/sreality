@@ -230,6 +230,13 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
+    p.add_argument("--scope", choices=("all", "rt", "ids"), default="all",
+                   help="Passed to the payload: all = corpus, rt = the live lane's scope, "
+                        "ids = --listing-ids-file (a path inside the fetched ref).")
+    p.add_argument("--listing-ids-file", default="")
+    p.add_argument("--score-heads", action="store_true",
+                   help="Passed to the payload: score each written vector with the active "
+                        "tag model into image_tag_scores in the same pass.")
     p.add_argument("--job-max-seconds", type=float, default=3600,
                    help="The payload's own time budget. The pod's wait window is this "
                         "plus a startup grace, so teardown lands after a clean stop.")
@@ -283,7 +290,12 @@ def main() -> int:
         # Explicit, not left to the payload's probe: this command only ever runs on a
         # rented GPU pod, so anything but cuda there is a fault worth a loud fallback.
         "--device=cuda",
+        f"--scope={args.scope}",
     ]
+    if args.listing_ids_file:
+        backfill_args.append(f"--listing-ids-file={args.listing_ids_file}")
+    if args.score_heads:
+        backfill_args.append("--score-heads")
     start_cmd = build_start_cmd(ref=args.ref, backfill_args=backfill_args)
     env = pod_env()
     missing = [k for k in POD_ENV_KEYS if k not in env]
