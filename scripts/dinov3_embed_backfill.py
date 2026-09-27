@@ -21,7 +21,20 @@ AUTO-EXPANDS at 90% of allocated disk and the project goes READ-ONLY at 95% with
 quota exhausted — which takes down the scrapers, the API's writes, the SPA and the
 pipeline, not just this job. Disk also cannot shrink. The safe rate therefore depends
 on the dashboard's live disk-utilisation reading at run time and cannot be baked into a
-default, so the flag is required and the operator must look before dispatching.
+default, so the flag is required and the operator must look before dispatching. The
+budget counts MEASURED on-disk bytes per image (VECTOR_ROW_BYTES, SCORE_ROW_BYTES), so
+"200 MB/h" means 200 MB/h of table + index growth.
+
+ONE PENDING SCAN PER PAGE, NOT PER CHUNK (2026-09-27). The pending query is a cross-table
+anti-join over ~12.5 M images; run once per 256-image chunk it cost ~220 s of every ~250 s
+chunk in run 36334588774 (1 image/s on a 4090). `--select-page` fetches many chunks' worth
+at once; the pod lane passes min(limit, 200,000), so a pass pays the scan once.
+
+VECTORS IN POSTGRES OR IN R2. `--vectors-to postgres` (the default, and what the hourly
+live step uses) writes image_dinov3_embeddings. `--vectors-to r2` writes float16 shard files
+plus a manifest under one R2 prefix (toolkit/vector_shards.py) and only the head scores to
+Postgres: the engine reads scores, and a later head version re-scores from R2
+(`tag_model score --source r2:<prefix>`). In R2 mode the manifest is the checkpoint.
 
 RUNS ON THE GPU IT IS PAYING FOR. `--device` defaults to `cuda` when torch reports a
 card and `cpu` otherwise, resolved at run time and logged. Until 2026-09-08 this script
@@ -42,6 +55,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from scraper import image_storage
@@ -49,11 +63,25 @@ from scraper.dinov3_config import IDENTITY_FIELDS, encoder_identity
 
 LOG = logging.getLogger("dinov3_embed_backfill")
 
-# A halfvec(768) row on disk: 768 x 2 B payload + the varlena/halfvec headers + the
-# key columns and tuple header ~= 1,552 B. The identity index stores its own copy on
-# top, so this is a FLOOR on bytes written, not a guarantee — set the ceiling with
-# margin against the dashboard reading.
-HALFVEC_ROW_BYTES = 1552
+# THE COST MODEL, MEASURED 2026-09-27 after GitHub run 36334588774 (3,584 vectors written,
+# 9,514 head-score rows present):
+#   pg_total_relation_size('image_dinov3_embeddings') = 8,440 kB / 3,584 rows = 2,412 B a row,
+#     heap + TOAST + both 8-column B-trees (_pkey, _encoder_idx). The arithmetic agrees: a
+#     ~1.72 kB tuple (halfvec 1,544 B + seven key columns + header) fits FOUR to an 8 kB page,
+#     so the heap alone is 2,048 B a row, and each index adds ~180 B.
+#   pg_total_relation_size('image_tag_scores') = 5,224 kB / 9,514 rows = 563 B a row (three
+#     indexes; it includes the dead versions the run's DO UPDATE left, so it errs high).
+# Until 2026-09-27 the model charged 1,552 B an image (the vector's payload alone): 1.55x
+# under a vector row and 1.9x under a vector + score image. WAL comes on top, roughly the same
+# volume again, and is recycled at checkpoints; the budget is the durable growth.
+VECTOR_ROW_BYTES = 2412
+SCORE_ROW_BYTES = 563
+
+VECTORS_TO = ("postgres", "r2")
+EMBED_DIM = 768   # the halfvec(768) column, and the width of an R2 shard row
+
+# The pod lane's page: one pending scan covers this many images (memory ~150 B each).
+MAX_SELECT_PAGE = 200_000
 
 # The pending scan is a large anti-join during the bulk phase and the pooler's 2-min
 # OLTP default is the wrong limit for it (the same reasoning as clip_tag_backfill).
@@ -104,10 +132,28 @@ SCOPES: dict[str, str] = {
 
 _PENDING_SQL = _PENDING_TEMPLATE.format(scope="")
 
+# R2 mode: the scope's images alone. Its checkpoint is the R2 manifest, subtracted in Python,
+# so there is no anti-join to pay for at all.
+_SCOPE_TEMPLATE = """
+    SELECT i.id, i.storage_path
+    FROM images i
+    WHERE i.storage_path IS NOT NULL
+      {scope}
+      AND i.id > %(after_id)s
+      AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
+    ORDER BY i.id
+    LIMIT %(batch)s
+"""
+
 
 def pending_sql(scope: str = "all") -> str:
     """The pending anti-join restricted to one scope; `all` is byte-for-byte `_PENDING_SQL`."""
     return _PENDING_TEMPLATE.format(scope=SCOPES[scope])
+
+
+def scope_sql(scope: str = "all") -> str:
+    """The scope's stored images, no anti-join (R2 mode)."""
+    return _SCOPE_TEMPLATE.format(scope=SCOPES[scope])
 
 
 def read_listing_ids(path: str) -> list[int]:
@@ -164,6 +210,12 @@ _INSERT_SQL = """
 """
 
 
+def bytes_per_image(*, vectors_to: str, score_heads: bool) -> int:
+    """Postgres bytes one embedded image costs under this pass's mode."""
+    return (VECTOR_ROW_BYTES if vectors_to == "postgres" else 0) + \
+        (SCORE_ROW_BYTES if score_heads else 0)
+
+
 class WriteThrottle:
     """Paces writes to a bytes/hour ceiling by sleeping between batches.
 
@@ -175,25 +227,30 @@ class WriteThrottle:
         mb_per_hour: float,
         *,
         sleep: Callable[[float], Any] = time.sleep,
-        row_bytes: int = HALFVEC_ROW_BYTES,
+        image_bytes: int = VECTOR_ROW_BYTES,
     ) -> None:
         if mb_per_hour <= 0:
             raise ValueError("--max-write-mb-per-hour must be > 0")
         self.mb_per_hour = float(mb_per_hour)
         self.bytes_per_second = self.mb_per_hour * 1024 * 1024 / 3600.0
-        self.row_bytes = row_bytes
+        self.image_bytes = int(image_bytes)
         self._sleep = sleep
         self.slept_s = 0.0
 
-    def budget_s(self, rows: int) -> float:
-        """How long `rows` worth of bytes is allowed to take at the configured rate."""
-        return (rows * self.row_bytes) / self.bytes_per_second
+    def images_per_hour(self) -> float:
+        """The ceiling in images: what the budget allows under the measured model."""
+        return float("inf") if self.image_bytes <= 0 else \
+            self.bytes_per_second * 3600.0 / self.image_bytes
 
-    def pace(self, rows: int, elapsed_s: float) -> float:
+    def budget_s(self, images: int) -> float:
+        """How long `images` worth of bytes is allowed to take at the configured rate."""
+        return (images * self.image_bytes) / self.bytes_per_second
+
+    def pace(self, images: int, elapsed_s: float) -> float:
         """Sleep off whatever of the batch's byte budget the batch did not already
         spend in wall time. Returns the delay slept (0.0 when already slower than the
         ceiling)."""
-        delay = self.budget_s(rows) - elapsed_s
+        delay = self.budget_s(images) - elapsed_s
         if delay <= 0:
             return 0.0
         self._sleep(delay)
@@ -206,11 +263,25 @@ def _vec_str(row) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in row.tolist()) + "]"
 
 
-def _download_decode(r2, rows: list, workers: int):
+def _f16_bytes(emb) -> bytes:
+    """Row-major float16 bytes of an (N, dim) embedding: torch on the pod, lists in tests."""
+    if hasattr(emb, "to"):
+        import torch
+
+        return emb.to(torch.float16).contiguous().cpu().numpy().tobytes()
+    from toolkit.vector_shards import pack_f16
+
+    return pack_f16(emb)
+
+
+def _download_decode(r2, rows: list, workers: int,
+                     prepare: Callable[[Any], Any] | None = None):
     """(decoded, failed): decoded = [(image_id, RGB image)]. A failure — transient R2
     error or bytes that will never decode — is simply left unwritten; the anti-join
     picks the image up again on the next run, and the in-run cursor stops it wedging
-    this one. Nothing is staged on local disk."""
+    this one. Nothing is staged on local disk. `prepare` (the tagger's own geometry
+    transform) runs here, on the worker threads, so the chunk holds res x res images
+    instead of full-size ones and the resize is no longer serial."""
     from PIL import Image  # base dep
 
     def _one(row):
@@ -220,7 +291,8 @@ def _download_decode(r2, rows: list, workers: int):
         except Exception:  # noqa: BLE001 - transient R2 error: retried next run
             return image_id, None
         try:
-            return image_id, Image.open(io.BytesIO(data)).convert("RGB")
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            return image_id, (prepare(img) if prepare is not None else img)
         except Exception:  # noqa: BLE001 - stored bytes won't decode
             return image_id, None
 
@@ -270,6 +342,20 @@ def select_pending(conn, *, identity: dict[str, Any], batch: int, shard: int,
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
         cur.execute(pending_sql(scope), params)
+        return [(r[0], r[1]) for r in cur.fetchall()]
+
+
+def select_scope(conn, *, batch: int, shard: int, shards: int, after_id: int,
+                 scope: str = "all", listing_ids: list[int] | None = None
+                 ) -> list[tuple[int, str]]:
+    """One page of the scope's stored images, with no vector anti-join (R2 mode)."""
+    params: dict[str, Any] = {"batch": batch, "shard": shard, "shards": shards,
+                              "after_id": after_id}
+    if scope in ("ids", "blocks"):
+        params["listing_ids"] = list(listing_ids or [])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
+        cur.execute(scope_sql(scope), params)
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
@@ -355,6 +441,78 @@ def pod_vcpus(env: dict[str, str] | None = None, cgroup_root: str = "/sys/fs/cgr
     return max(1, visible)
 
 
+def pod_ram_bytes(env: dict[str, str] | None = None, cgroup_root: str = "/sys/fs/cgroup",
+                  meminfo: str = "/proc/meminfo") -> int | None:
+    """The RAM this pod may use. /proc/meminfo is the HOST's inside a container, so
+    RunPod's RUNPOD_MEM_GB wins, then the cgroup limit (v2 memory.max, v1
+    memory.limit_in_bytes), then MemTotal; None when nothing is readable."""
+    env = os.environ if env is None else env
+    try:
+        gb = float(str(env.get("RUNPOD_MEM_GB", "")).strip())
+        if gb > 0:
+            return int(gb * 1024 ** 3)
+    except ValueError:
+        pass
+    for path in (os.path.join(cgroup_root, "memory.max"),
+                 os.path.join(cgroup_root, "memory", "memory.limit_in_bytes")):
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+            if raw.isdigit() and 0 < int(raw) < 1 << 60:
+                return int(raw)
+        except OSError:
+            pass
+    try:
+        with open(meminfo) as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+# Sizing, per pod. One prepared image is res x res x 3 bytes (1.77 MB at 768 px) and the
+# chunk holds them all; each worker also has one full-size decode in flight (~12 MP x 3 B
+# plus its JPEG, ~48 MB). The chunk gets 40% of RAM after that, the rest is torch, the
+# model and slack. The chunk is also TIME-bounded (TARGET_CHUNK_S): it sets the watchdog's
+# progress cadence (stall deadline 900 s) and how far a pass overshoots --max-seconds.
+# Batch stays 32, the bake-off's own forward batch: the GPU is not the bottleneck (12 img/s
+# is ~7 TFLOPS on a 3090), and a batch change can move bf16 numerics by a kernel choice.
+WORKER_INFLIGHT_BYTES = 48 * 1024 ** 2
+CHUNK_RAM_SHARE = 0.4
+MIN_CHUNK, MAX_CHUNK = 64, 2048
+FIRST_CHUNK = 512
+TARGET_CHUNK_S = 180.0
+FORWARD_BATCH = 32
+ASSUMED_RAM_BYTES = 16 * 1024 ** 3
+
+
+@dataclass(frozen=True)
+class Sizing:
+    chunk: int          # the memory ceiling; the time target may use less
+    batch_size: int
+    workers: int
+
+
+def plan_sizes(*, vcpus: int, ram_bytes: int | None, resolution: int) -> Sizing:
+    """Chunk, forward batch and download workers from what the pod actually has."""
+    workers = max(8, min(48, 4 * max(1, vcpus)))
+    ram = ram_bytes or ASSUMED_RAM_BYTES
+    room = CHUNK_RAM_SHARE * ram - workers * WORKER_INFLIGHT_BYTES
+    by_ram = int(room // (resolution * resolution * 3)) // FORWARD_BATCH * FORWARD_BATCH
+    return Sizing(chunk=max(MIN_CHUNK, min(MAX_CHUNK, by_ram)), batch_size=FORWARD_BATCH,
+                  workers=workers)
+
+
+def next_chunk(ceiling: int, images: int, seconds: float) -> int:
+    """The next auto chunk: what the last one's rate does in TARGET_CHUNK_S, inside
+    [MIN_CHUNK, ceiling]."""
+    if images <= 0 or seconds <= 0:
+        return min(ceiling, FIRST_CHUNK)
+    return max(MIN_CHUNK, min(ceiling, int(images / seconds * TARGET_CHUNK_S)))
+
+
 def resolve_device(requested: str = "") -> str:
     """The torch device to run the forward pass on, measured rather than assumed.
 
@@ -375,11 +533,28 @@ def resolve_device(requested: str = "") -> str:
     return "cpu"
 
 
+def _r2_dry_run(identity: dict[str, Any], prefix: str) -> None:
+    from toolkit import vector_shards as vs
+
+    if not image_storage.is_configured():
+        LOG.info("DINOV3 dry_run vectors_to=r2 prefix=%s (R2 env vars missing: not read)", prefix)
+        return
+    store = image_storage.R2Client.from_env()
+    stored = vs.read_identity(store, prefix)
+    manifest = vs.load_manifest(store, prefix)
+    LOG.info("DINOV3 dry_run vectors_to=r2 prefix=%s r2_vectors=%d identity=%s",
+             prefix, len(manifest), "unset" if stored is None
+             else ("match" if vs.canonical_identity(stored) == vs.canonical_identity(identity)
+                   else f"MISMATCH {stored}"))
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--max-write-mb-per-hour", type=float, required=True,
-                   help="REQUIRED, no default. Ceiling on vector bytes written per hour. "
+                   help="REQUIRED, no default. Ceiling on the Postgres bytes (table + indexes, "
+                        f"measured: a vector row {VECTOR_ROW_BYTES} B, a head-score row "
+                        f"{SCORE_ROW_BYTES} B) this pass adds per hour. "
                         "The safe value depends on the Supabase dashboard's LIVE disk-"
                         "utilisation reading at run time: gp3 disk auto-expands at 90%% of "
                         "allocated disk and the project goes READ-ONLY at 95%% with the "
@@ -388,9 +563,17 @@ def main() -> int:
                         "shrink. Look at the dashboard, then pass a number.")
     p.add_argument("--limit", type=int, default=200_000, help="Max images per run.")
     p.add_argument("--chunk", type=int, default=256,
-                   help="Images per download+embed+commit cycle (bounds memory).")
-    p.add_argument("--batch-size", type=int, default=32, help="Model forward batch.")
-    p.add_argument("--workers", type=int, default=16, help="Parallel R2 downloads.")
+                   help="Images per download+embed+commit cycle (bounds memory). 0 = sized "
+                        "from the pod's RAM and re-sized to ~TARGET_CHUNK_S of work.")
+    p.add_argument("--batch-size", type=int, default=32,
+                   help="Model forward batch. 0 = the sizing default (32).")
+    p.add_argument("--workers", type=int, default=16,
+                   help="Parallel R2 downloads (+ decode + resize). 0 = 4 per vCPU, 8..48.")
+    p.add_argument("--select-page", type=int, default=0,
+                   help="Images per pending SELECT. 0 = one chunk (one scan per chunk, the "
+                        "pre-09-27 behaviour). The scan is a full-table anti-join, so a big "
+                        "pass wants one page for the whole run (the pod lane passes "
+                        f"min(limit, {MAX_SELECT_PAGE:,})).")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1, help="image_id %% shards == shard.")
     p.add_argument("--threads", type=int, default=0,
@@ -420,6 +603,14 @@ def main() -> int:
                    help="Also score each written vector with the ACTIVE tag model and upsert "
                         "image_tag_scores in the same pass (refused unless the model's encoder "
                         "identity equals this pass's).")
+    p.add_argument("--vectors-to", choices=VECTORS_TO, default="postgres",
+                   help="postgres = image_dinov3_embeddings (the default; the live hourly "
+                        "step). r2 = float16 shard files + manifest under --r2-prefix, and only "
+                        "the head scores reach Postgres; the manifest is the checkpoint.")
+    p.add_argument("--r2-prefix", default="",
+                   help="With --vectors-to r2: the store's prefix. Empty = one per encoder "
+                        "identity (toolkit.vector_shards.default_prefix), shared by every "
+                        "scope and dispatch, so a re-dispatch resumes.")
     p.add_argument("--dry-run", action="store_true",
                    help="Report the resolved encoder identity and the pending count, then "
                         "exit. Downloads nothing, embeds nothing, writes nothing.")
@@ -441,6 +632,12 @@ def main() -> int:
     identity = encoder_identity()
     LOG.info("DINOV3 identity %s",
              " ".join(f"{k}={identity[k]}" for k in IDENTITY_FIELDS))
+    r2_mode = args.vectors_to == "r2"
+    prefix = ""
+    if r2_mode:
+        from toolkit import vector_shards as vs
+
+        prefix = args.r2_prefix.strip("/") or vs.default_prefix(identity)
 
     listing_ids: list[int] | None = None
     if args.scope == "ids":
@@ -462,6 +659,9 @@ def main() -> int:
         total_images = _scalar(conn, _TOTAL_IMAGES_SQL)
         embedded_before = _scalar(conn, _EMBEDDED_COUNT_SQL, identity)
         if args.dry_run:
+            if r2_mode:
+                _r2_dry_run(identity, prefix)
+                return 0
             pending = _scalar(conn, _PENDING_COUNT_SQL,
                               {**identity, "shard": args.shard, "shards": args.shards})
             LOG.info("DINOV3 dry_run pending=%d shard=%d/%d embedded=%d/%d (%.2f%%) "
@@ -480,75 +680,135 @@ def main() -> int:
         scorer = HeadScorer(conn, identity) if args.score_heads else None
 
         device = resolve_device(args.device)
-        threads = args.threads or pod_vcpus()
-        LOG.info("DINOV3 device=%s (requested=%s) threads=%d host_cpu_count=%s workers=%d",
-                 device, args.device or "auto", threads, os.cpu_count(), args.workers)
+        vcpus = pod_vcpus()
+        threads = args.threads or vcpus
+        sizing = plan_sizes(vcpus=vcpus, ram_bytes=pod_ram_bytes(),
+                            resolution=int(identity["resolution"]))
+        auto_chunk = args.chunk <= 0
+        chunk_ceiling = sizing.chunk if auto_chunk else args.chunk
+        batch_size = args.batch_size if args.batch_size > 0 else sizing.batch_size
+        workers = args.workers if args.workers > 0 else sizing.workers
+        LOG.info("DINOV3 device=%s (requested=%s) threads=%d host_cpu_count=%s workers=%d "
+                 "chunk=%s batch=%d select_page=%s vectors_to=%s%s",
+                 device, args.device or "auto", threads, os.cpu_count(), workers,
+                 f"auto<={chunk_ceiling}" if auto_chunk else chunk_ceiling, batch_size,
+                 args.select_page or "chunk", args.vectors_to,
+                 f" prefix={prefix}" if r2_mode else "")
         tagger = Dinov3Tagger.load(threads=threads, device=device)
         # Stamp what the LOADED weights actually were, never the file we read — a tagger
         # loaded some other way can then never write a row claiming a revision it did
         # not use (the rail clip_tag_backfill.py already applies to CLIP).
         write_identity = {**identity, "revision": tagger.revision}
-        throttle = WriteThrottle(args.max_write_mb_per_hour)
-        r2 = image_storage.R2Client.from_env(max_pool_connections=args.workers + 4)
+        throttle = WriteThrottle(args.max_write_mb_per_hour,
+                                 image_bytes=bytes_per_image(vectors_to=args.vectors_to,
+                                                             score_heads=scorer is not None))
+        LOG.info("DINOV3 write budget %.0f MB/h at %d B an image = %.0f images/h",
+                 args.max_write_mb_per_hour, throttle.image_bytes, throttle.images_per_hour())
+        r2 = image_storage.R2Client.from_env(max_pool_connections=workers + 4)
+        writer = None
+        done: set[int] = set()
+        if r2_mode:
+            vs.ensure_identity(r2, prefix, write_identity)
+            writer = vs.ShardWriter(store=r2, prefix=prefix, shard=args.shard,
+                                    shards=args.shards, dim=EMBED_DIM)
+            done = set(vs.load_manifest(r2, prefix))
+            embedded_before = len(done)
+            LOG.info("DINOV3 r2 prefix=%s already_stored=%d", prefix, len(done))
         deadline = time.monotonic() + args.max_seconds if args.max_seconds else None
 
         written = failed = seen = 0
         after_id = 0
+        select_s = 0.0
+        page: list[tuple[int, str]] = []
+        page_exhausted = False
+        chunk = min(chunk_ceiling, FIRST_CHUNK) if auto_chunk else chunk_ceiling
         stopped = "drained"
+        last_pace = time.monotonic()
         while seen < args.limit:
             if deadline and time.monotonic() >= deadline:
                 stopped = "time-budget"
                 break
-            rows = select_pending(
-                conn, identity=identity, batch=min(args.chunk, args.limit - seen),
-                shard=args.shard, shards=args.shards, after_id=after_id,
-                scope=args.scope, listing_ids=listing_ids)
-            if not rows:
-                break
+            if not page:
+                if page_exhausted:
+                    break
+                want = min(args.select_page or chunk, args.limit - seen)
+                t_sel = time.monotonic()
+                if r2_mode:
+                    fetched = select_scope(conn, batch=want, shard=args.shard,
+                                           shards=args.shards, after_id=after_id,
+                                           scope=args.scope, listing_ids=listing_ids)
+                else:
+                    fetched = select_pending(conn, identity=identity, batch=want,
+                                             shard=args.shard, shards=args.shards,
+                                             after_id=after_id, scope=args.scope,
+                                             listing_ids=listing_ids)
+                select_s += time.monotonic() - t_sel
+                if not fetched:
+                    break
+                after_id = max(r[0] for r in fetched)
+                page_exhausted = len(fetched) < want
+                page = [r for r in fetched if r[0] not in done]
+                if not page:
+                    continue
+            rows, page = page[:chunk], page[chunk:]
             seen += len(rows)
-            after_id = max(r[0] for r in rows)
 
             t0 = time.monotonic()
-            decoded, chunk_failed = _download_decode(r2, rows, args.workers)
+            decoded, chunk_failed = _download_decode(r2, rows, workers, tagger.prepare)
             failed += chunk_failed
             chunk_written = 0
             if decoded:
-                emb = tagger.embed([d[1] for d in decoded], args.batch_size)
-                params = [
-                    (image_id, write_identity["model"], write_identity["revision"],
-                     write_identity["library"], write_identity["pooling"],
-                     write_identity["resolution"], write_identity["preprocessing"],
-                     write_identity["dtype"], _vec_str(emb[i]))
-                    for i, (image_id, _img) in enumerate(decoded)
-                ]
-                with conn.cursor() as cur:
-                    cur.executemany(_INSERT_SQL, params)
-                chunk_written = len(params)
+                ids = [image_id for image_id, _img in decoded]
+                emb = tagger.embed([d[1] for d in decoded], batch_size, prepared=True)
+                if writer is not None:
+                    f16 = _f16_bytes(emb)
+                    part = writer.put_part(ids, f16)
+                    if scorer is not None:
+                        # Scored from the float16 that is STORED, so a re-score of the same
+                        # model from R2 reproduces these numbers exactly.
+                        stored = vs.Part(image_ids=tuple(ids), dim=writer.dim, raw=f16)
+                        scorer.score(conn, {i: stored.vector(row) for row, i in enumerate(ids)})
+                    writer.commit(ids, part)
+                else:
+                    params = [
+                        (image_id, write_identity["model"], write_identity["revision"],
+                         write_identity["library"], write_identity["pooling"],
+                         write_identity["resolution"], write_identity["preprocessing"],
+                         write_identity["dtype"], _vec_str(emb[i]))
+                        for i, image_id in enumerate(ids)
+                    ]
+                    with conn.cursor() as cur:
+                        cur.executemany(_INSERT_SQL, params)
+                    if scorer is not None:
+                        scorer.score(conn, {image_id: [float(x) for x in emb[i].tolist()]
+                                            for i, image_id in enumerate(ids)})
+                chunk_written = len(ids)
                 written += chunk_written
-                if scorer is not None:
-                    scorer.score(conn, {image_id: [float(x) for x in emb[i].tolist()]
-                                        for i, (image_id, _img) in enumerate(decoded)})
             elapsed = time.monotonic() - t0
 
-            # Progress is a Postgres fact, not a local counter: embedded_before was read
-            # from the table and every increment is a committed row. The full count is
-            # NOT re-read per chunk — it is a 10M-row scan — but it is re-read once at
-            # the end, and `count(*) for this config / count(images)` answers "how far
-            # along is it?" from outside the job at any moment.
-            slept = throttle.pace(chunk_written, elapsed)
+            # Progress is a Postgres (or manifest) fact, not a local counter: every
+            # increment is a committed row or a committed part. The full count is NOT
+            # re-read per chunk — it is a 10M-row scan — but it is re-read at the end.
+            slept = throttle.pace(chunk_written, time.monotonic() - last_pace)
+            last_pace = time.monotonic()
             LOG.info("DINOV3 progress embedded=%d/%d (%.2f%%) run_written=%d seen=%d/%d "
-                     "failed=%d chunk_s=%.1f slept_s=%.1f",
+                     "failed=%d chunk=%d chunk_s=%.1f img_s=%.1f select_s=%.1f slept_s=%.1f",
                      embedded_before + written, total_images,
                      100.0 * (embedded_before + written) / total_images if total_images else 0.0,
-                     written, seen, args.limit, failed, elapsed, slept)
+                     written, seen, args.limit, failed, len(rows), elapsed,
+                     len(rows) / elapsed if elapsed > 0 else 0.0, select_s, slept)
+            if auto_chunk:
+                chunk = next_chunk(chunk_ceiling, len(rows), elapsed)
 
-        embedded_after = _scalar(conn, _EMBEDDED_COUNT_SQL, identity)
+        embedded_after = (len(vs.load_manifest(r2, prefix)) if r2_mode
+                          else _scalar(conn, _EMBEDDED_COUNT_SQL, identity))
 
     LOG.info("DINOV3 done stop=%s run_written=%d failed=%d embedded=%d/%d (%.2f%%) "
-             "throttle_slept_s=%.0f heads_scored=%d scope=%s",
+             "throttle_slept_s=%.0f select_s=%.0f heads_scored=%d scope=%s vectors_to=%s%s",
              stopped, written, failed, embedded_after, total_images,
              100.0 * embedded_after / total_images if total_images else 0.0,
-             throttle.slept_s, scorer.written if scorer is not None else 0, args.scope)
+             throttle.slept_s, select_s, scorer.written if scorer is not None else 0,
+             args.scope, args.vectors_to, f" prefix={prefix}" if r2_mode else "")
     return 0
 
 

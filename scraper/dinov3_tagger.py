@@ -299,15 +299,19 @@ class Dinov3Tagger:
             )
         return pooled
 
-    def embed(self, images: list, batch_size: int = 32):
+    def prepare(self, image):
+        """The configured geometry transform alone — the same function `embed` applies, so a
+        caller may run it on its own threads (PIL releases the GIL) and pass `prepared=True`."""
+        return apply_preprocessing(image, self.preprocessing, self.resolution)
+
+    def embed(self, images: list, batch_size: int = 32, prepared: bool = False):
         """L2-normalized 768-d embeddings, one row per image, in input order."""
         import torch
 
         chunks = []
         for i in range(0, len(images), batch_size):
-            batch = [
-                apply_preprocessing(img, self.preprocessing, self.resolution)
-                for img in images[i:i + batch_size]
+            batch = list(images[i:i + batch_size]) if prepared else [
+                self.prepare(img) for img in images[i:i + batch_size]
             ]
             # do_resize/do_center_crop off: the geometry is already ours, and leaving
             # them on would silently re-impose the checkpoint's 224 square default over
