@@ -16,8 +16,10 @@ name: Dedup — CLIP image tagging (sharded)
 # its DINOv3 v1 head tags — the vector under v1's own identity (dinov3-b16@768, letterbox_pad, bf16:
 # bf16 on CPU, so the population is the heads' own) and the active tag model's winner in
 # image_tag_scores, which `image_tags = heads` reads and the F3 hold waits for. Scoped, not global:
-# the trial scope takes in ~400-950 images a day and one shard embeds ~90 an hour on CPU; the corpus
-# and any scope growth are backfilled on a GPU (dinov3_embed_backfill.yml, scope rt / all).
+# the trial scope takes in ~400-950 images a day (~20-40 an hour) and one shard embeds ~40 in its
+# 1,500 s budget (bf16 on a CPU without native bf16: ~37 s an image on 4 threads, measured on an
+# i7-1260P; unmeasured on the runner), so the four shards carry ~160 an hour; the corpus and any
+# scope growth are backfilled on a GPU (dinov3_embed_backfill.yml, scope rt / all).
 #
 # Required secrets: SUPABASE_DB_URL + the R2_* set (same as compute_image_phash.yml), HF_TOKEN
 # (the DINOv3 weights are licence-gated).
