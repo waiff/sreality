@@ -22,7 +22,7 @@ import numpy as np
 from autodedup_w15_g2.engine_g2 import EngineCfg, run_engine
 from autodedup_w15_g2.facts7 import FACTS, FactCfg, first_fact
 from autodedup_w15_g2.fit import Ground, ground
-from autodedup_w15_g2.learn import W6, Model, auc, fit_isotonic, load_cohort
+from autodedup_w15_g2.learn import W6, Model, auc, fit_isotonic, load_cohort, load_g1
 from autodedup_w15_g2.metrics import copairs, measure
 from autodedup_w15_g2.paths import OUT
 
@@ -38,6 +38,10 @@ ADV_NEG = {
             "Mirosovice/Hrusice villa (obec_prose, 52; 0 CD, unread)": (214312, 214313)},
     "c12": {"novostavba RD domu c.1 vs dum 3 (printed_designator, 12)": (13438069, 13438071),
             "Jihlava 3+kk JE600 vs JE700 (unit_code, 10)": (25413, 404955)},
+    # G2's read of the judge-negative pairs only the model-first engine co-clusters (pair_read_t3_trial)
+    "trial": {"Cerna Studnice 3+kk 95 vs 96 m2, co-live on ceskereality (pair read 2)": (420144, 420145),
+              "Harfa Living atelier 152-03-184 vs 152-03-117 (pair read 5)": (28957, 18644036),
+              "Anenske nam. 2+kk, 4. NP vs 5. NP in the bodies (pair read 11)": (33553, 519077)},
     # G2's own D83 read of the model-first engine's new screened groups (read_t3_*_mf.json)
     "c18": {"Mlynska 3+kk fl2 vs fl3, co-live on sreality (read 5)": (58214, 58249),
             "Mlynska 4+kk fl2 vs fl3, co-live on sreality (read 6)": (58215, 58380)},
@@ -51,6 +55,10 @@ SOURCES = {
     "op": lambda lab: lab.origin == "operator",
     "judge": lambda lab: lab.origin in ("judge_trial", "w6"),
 }
+
+
+def score_file(key: str) -> str:
+    return key.replace("[", "-").replace("]", "")
 
 
 def towns(g: Ground) -> list[str]:
@@ -87,13 +95,21 @@ def oof(grounds: dict[str, Ground], kind: str, keep=None, log: str = "") -> dict
     return out
 
 
+POOLED = True
+
+
 def calibrate(grounds: dict[str, Ground], raw: dict[str, np.ndarray], keep=None) -> dict:
-    """p per cohort through an isotonic map fitted on the OTHER cohorts' labelled out-of-town rows."""
+    """p per cohort through ONE isotonic map fitted on every cohort's labelled OUT-OF-TOWN rows.
+
+    The map sees the evaluated cohort's labels (on scores of models that never saw its towns);
+    the ranking never does. `POOLED = False` fits the map on the OTHER cohorts only, which is
+    sealed but unstable for the trial: the other cohorts hold 103 negatives against 3,300
+    positives, and the trial's band then moved 1,867 -> 5,791 on a 34-label change (s4)."""
     out = {}
     for n in grounds:
         xs, ys, ws = [], [], []
         for m, h in grounds.items():
-            if m == n:
+            if m == n and not POOLED:
                 continue
             sel = np.array([keep(lab) for lab in h.labs]) if keep else np.ones(len(h.idx), bool)
             xs.append(raw[m][h.idx[sel]]); ys.append(h.y[sel]); ws.append(h.w[sel])
@@ -131,12 +147,18 @@ def adversary(name: str, groups: dict) -> dict:
 def main(tag: str, names: list[str]) -> None:
     clock = time.perf_counter()
     mode = next((a.split("=", 1)[1] for a in names if a.startswith("--mode=")), "none")
+    # G1's image-retrieval side file per cohort (JSONL: lo, hi and the G1_SLOTS), "{cohort}" in path
+    g1 = next((a.split("=", 1)[1] for a in names if a.startswith("--g1=")), None)
     quick = "--quick" in names
     names = [a for a in names if not a.startswith("--")]
     cs = {n: load_cohort(n) for n in names}
     grounds: dict[str, Ground] = {}
     for n, c in cs.items():
         g = ground(c, mode)
+        if g1:
+            G = load_g1(g1.format(cohort=n), c.keys)
+            g.V = np.hstack([g.V, np.nan_to_num(G)])
+            g.P = np.hstack([g.P, ~np.isnan(G)])
         pos = {k: i for i, k in enumerate(c.keys)}
         g.labs = [c.labels[c.keys[i]] for i in g.idx]
         grounds[n] = g
@@ -156,6 +178,8 @@ def main(tag: str, names: list[str]) -> None:
     scores["w6_gold"] = {n: w6.score(c.V, c.P) for n, c in cs.items()}
     for kind in (("hgb",) if quick else ("hgb", "lr", "mlp")):
         raw = oof(grounds, kind, log=tag)
+        for n, arr in raw.items():
+            np.save(OUT / f"cache/raw_{tag}_{n}_{kind}.npy", arr)
         scores[kind] = calibrate(grounds, raw)
     for src in (() if quick else ("op_c7", "op", "judge")):
         raw = oof(grounds, "hgb", keep=SOURCES[src], log=f"{tag}:{src}")
@@ -183,6 +207,9 @@ def main(tag: str, names: list[str]) -> None:
         ("hgb[op]", "hgb[op]", 0.9, 0.2, None, "f7"),
         ("hgb[judge]", "hgb[judge]", 0.9, 0.2, None, "f7"),
     ]
+    for key, per in scores.items():
+        for n, arr in per.items():
+            np.save(OUT / f"cache/p_{tag}_{n}_{score_file(key)}.npy", arr)
     configs = [cfg for cfg in configs if cfg[1] in scores]
     results = {"tag": tag, "mode": mode, "cohorts": {}, "configs": configs, "facts": list(FACTS),
                "fact_dials": FactCfg().dials()}

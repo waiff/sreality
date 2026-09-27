@@ -14,20 +14,21 @@ from autodedup_w15_g2.metrics import group_sets, screened
 from autodedup_w15_g2.paths import OUT
 
 
-def main(tag: str, name: str, n: int) -> None:
+def main(tag: str, name: str, n: int, suffix: str = "hgb", skip: str = "") -> None:
     c = load_cohort(name)
-    groups = {int(k): v for k, v in json.load(open(OUT / f"cache/groups_{tag}_{name}_hgb.json")).items()}
+    groups = {int(k): v for k, v in json.load(open(OUT / f"cache/groups_{tag}_{name}_{suffix}.json")).items()}
+    seen = {tuple(g) for path in filter(None, skip.split(",")) for g in json.load(open(path))}
     ladder = group_sets(c.ladder["FULL"]["clusters"])
     mine = group_sets(groups)
     for side, flagged in (("mf", screened(groups, c.recs) - ladder),
                           ("ladder", screened(c.ladder["FULL"]["clusters"], c.recs) - mine)):
-        new = sorted((sorted(g) for g in flagged), key=lambda g: (-len(g), g))
+        new = sorted((sorted(g) for g in flagged if tuple(sorted(g)) not in seen), key=lambda g: (-len(g), g))
         pick = random.Random(20260927).sample(new, min(n, len(new)))
-        path = OUT / f"read_{tag}_{name}_{side}.json"
+        path = OUT / f"read_{tag}_{name}_{suffix}_{side}.json"
         path.write_text(json.dumps(pick))
         sizes = sorted((len(g) for g in new), reverse=True)
         print(f"{name} {side}-only screened groups: {len(new)}, sizes {sizes[:12]}; sample {len(pick)} -> {path}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], int(sys.argv[3]))
+    main(sys.argv[1], sys.argv[2], int(sys.argv[3]), *sys.argv[4:6])
