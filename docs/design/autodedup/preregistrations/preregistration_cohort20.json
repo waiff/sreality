@@ -80,9 +80,9 @@
   "commands_at_the_freeze": [
    "PYTHONPATH=<WR> python3 -m autodedup.harness run <F> --out /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/REF --settings <WR>/autodedup/settings/<reference settings>.json --model <WR>/autodedup/models/w6_gold.json",
    "PYTHONPATH=<WMF> python3 -m autodedup.harness run <F> --out /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/MF --settings <WMF>/autodedup/settings/w40.json --model <path of the production model file>",
-   "PYTHONPATH=<WMF> python3 /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/seal_draw.py <F> /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/REF /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/MF /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_reads --seed 20260928 --flagged /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_flagged_ids.txt"
+   "PYTHONPATH=<WR> python3 /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/seal_draw.py <F> /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/REF /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_runs/MF /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_reads --seed 20260928 --flagged /home/hejtm/autodedup-artifacts/w15/global_search/preregistrations/c20_flagged_ids.txt"
   ],
-  "placeholders": "<WR> = a fresh worktree at the reference's sha; <WMF> = a fresh worktree at MF's frozen sha; <F> = input_file. `harness run --settings / --model` take file paths, not the lane's names. There is no B0 here: REF and MF are different engines by design, and REF is the live engine at its own sha.",
+  "placeholders": "<WR> = a fresh worktree at the reference's sha; <WMF> = a fresh worktree at MF's frozen sha; <F> = input_file. `harness run --settings / --model` take file paths, not the lane's names. There is no B0 here: REF and MF are different engines by design, and REF is the live engine at its own sha. seal_draw.py runs on the reference's code, because its screen calls the ladder's indistinguishable.honest_overlap_days and price_paths_agree, which R2 may delete.",
   "engine_only": "no must-link and no must-not-link loaded."
  },
  "read_protocol": {
