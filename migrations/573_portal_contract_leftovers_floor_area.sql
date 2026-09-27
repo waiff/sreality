@@ -4,24 +4,26 @@
 -- dwelling headline area outside the dwelling band. DATA ONLY, DESTRUCTIVE (a value
 -- becomes NULL), every cleared cell backed up first in this same statement.
 --
--- APPLY ORDER. This file is its OWN PR (#1633), stacked on the narrowed per-room rail
--- (#1637, fix/area-per-room-rail-bazos-only), which follows the rails PR #1630, so it can
--- be applied from its branch while it is still open (apply_migration.yml's contract: a
--- merged file is never unapplied):
---   1. #1630 merged AND deployed (done: b2454fa1), and #1637 merged AND deployed (Railway
---      status + the next Actions scrape on main). Before #1630, a live idnes / sreality /
---      ... refetch re-writes a structured cell (`floor = EXCLUDED.floor`) with the old
---      parser's value; before #1637, the ingest rail still NULLs a structured room
---      rental's area at its next fetch, the rows this file's A1 now leaves alone.
+-- APPLY ORDER. This file is its OWN PR (#1633), stacked on the sale-only per-room rail
+-- (#1638, fix/area-per-room-rail-sales-only), which follows the prose-only narrowing
+-- (#1637) and the rails PR #1630, so it can be applied from its branch while it is still
+-- open (apply_migration.yml's contract: a merged file is never unapplied):
+--   1. #1630 merged AND deployed (done: b2454fa1), #1637 merged AND deployed (merged:
+--      35c7f3ea), and #1638 merged AND deployed (Railway status + the next Actions scrape
+--      on main). Before #1630, a live idnes / sreality / ... refetch re-writes a structured
+--      cell (`floor = EXCLUDED.floor`) with the old parser's value; before #1637, the
+--      ingest rail still NULLs a structured room rental's area at its next fetch; before
+--      #1638, it still NULLs a bazos RENTAL's prose figure — both populations this file's
+--      A1 now leaves alone.
 --   2. The COUNT QUERY below, read-only, re-run and compared with the 2026-09-27 COUNTS;
 --      the stop conditions below checked.
 --   3. The operator's OK (destructive).
 --   4. apply_migration.yml with --ref this branch.
 --   5. Merge this PR.
 --
--- THE RAILS (#1630 as narrowed by #1637, the parser half). Each predicate below is exactly
--- one of them, so the file NULLs only rows whose stored value the current parser would
--- decline. The literals are pinned to the Python constants by
+-- THE RAILS (#1630 as narrowed by #1637 and #1638, the parser half). Each predicate
+-- below is exactly one of them, so the file NULLs only rows whose stored value the
+-- current parser would decline. The literals are pinned to the Python constants by
 -- tests/test_migration_573_rails.py (static) and executed over seeded hits and misses by
 -- tests/test_migration_573_live.py (CI replay):
 --   F1  idnes floor = 20: the top option of the portal's select, "20. patro a vyšší", a
@@ -39,11 +41,13 @@
 --       structured read + the text lane (bezrealitky 731,463,379 / 113, mmreality 0).
 --   A0  byt / dum / komercni area_m2 < 5 (MIN_AREA_M2, the 2026-08-25 rail): PRE-rail
 --       leftovers — bazos Mechová 3+1 stored its cellar's 2 m².
---   A1  BAZOS byt / dum area_m2 < 8 m² x N for a stated N+kk / N+1 (MIN_AREA_PER_ROOM_M2,
---       the resolver's `prose` arm since #1637): bazos's first m² figure was a room, a
---       balcony, a cellar. bazos is the one portal whose area_m2 contract cell is `text`
---       — its whole area is that prose figure — so `source = 'bazos'` IS the prose arm. A
---       structured cell or title figure is never held to the per-room floor.
+--   A1  BAZOS SALE byt / dum area_m2 < 8 m² x N for a stated N+kk / N+1
+--       (MIN_AREA_PER_ROOM_M2, the resolver's `prose` arm since #1637, on a sale alone —
+--       `category_type = 'prodej'`, PER_ROOM_CATEGORY_TYPE — since #1638): a sale's first
+--       m² figure was a room, a balcony, a cellar. bazos is the one portal whose area_m2
+--       contract cell is `text` — its whole area is that prose figure — so
+--       `source = 'bazos'` IS the prose arm. A structured cell or title figure is never
+--       held to the per-room floor, and neither is a rental's prose figure.
 --   A2  byt area_m2 >= 1,000 (MAX_FLAT_AREA_M2): a project's site area or a typo.
 -- NOT HERE: #1630 also holds a HOUSE's unlabelled figure (area_basis 'unknown') under
 -- 1,000 m², because bazos's first prose m² on a dum is its parcel. Its stored leftovers
@@ -53,6 +57,9 @@
 -- rentals, a real value — and the handful of genuine structured typos among them (one
 -- broker's "prodej bytu 3+kk 8 m²", Benátky nad Jizerou, on ceskereality 18628455 / idnes
 -- 18628153 / realitymix 18629569; idnes 12539595, 2+kk 9 m²): a named residual.
+-- NOR the bazos RENTALS under the per-room floor (247: 222 inactive, 25 active; COUNTS
+-- below): room rentals whose prose figure is the room's real size, mixed with genuine
+-- defects the rule cannot tell apart — a named residual, listed in the verdicts below.
 --
 -- WHY A MIGRATION. A parser that declines returns NULL, and a NULL does not reach the
 -- stored row for these populations: `text` / `none` cells (bazos area_m2 + area_basis,
@@ -72,7 +79,7 @@
 --       remax 0/1, sreality 39/15                                                =   236
 --   A0  bazos 693/88, bezrealitky 16/0, ceskereality 56/11, idnes 88/51,
 --       realitymix 31/34, remax 0/1, sreality 54/26                              = 1,149
---   A1  bazos 506/154                                                            =   660
+--   A1  bazos 506/154, every deal type (the sale-only split: BY DEAL TYPE below) =   660
 --   A2  bazos 40/17, bezrealitky 1/0, ceskereality 8/8, idnes 15/16,
 --       realitymix 9/3, remax 0/5, sreality 14/12                                =   148
 --   F1-other: none. In all 5,306 cells, 2,252 of them on active rows.
@@ -94,6 +101,25 @@
 --       real size: EXCLUDED here, and #1637 stops the ingest rail NULLing it.
 -- The first count, on the investigation's exports (A4, 2026-09-26, 40,514 listings, 107
 -- rows), held none of those rentals, which is why #1630 first applied A1 everywhere.
+-- BAZOS A1 BY DEAL TYPE, a second read-only read on production, 2026-09-27 (inactive /
+-- active): prodej 617 / 160 = 777, pronajem 222 / 25 = 247.
+--   A1 bazos rentals (all 25 active read) a MIXED population. ROOM RENTALS whose figure
+--       is the room's real size: 16757869 "pronájem pokoje 20m2 ve sdíleném bytě 3+1",
+--       18625955 "pronájem pokoje ve sdíleném bytě 3+1", 18718428 "pronájem pokojů v
+--       rodinném domě", 18798750 "dva pokoje o velikostech cca 20m2 a 15m2", 18850769
+--       "pronájem pokoje 20m2", 18938443 "pronájem zařízeného pokoje, spolubydlení v 3+1",
+--       18998832 "pronájem lůžka v pokojích", 19016712 "pronájem pokoje v domě", 18677344
+--       "3+1 pro spolubydlení", 13336828 "pronájem jednotlivých pokojů". Beside them,
+--       GENUINE DEFECTS: 18565661 2+kk 6.7 m², 18677626 3+kk 5 m², 19006537 2+kk 5 m²,
+--       17940680 2+1 1.5 m², 18907479 1+1 6 m², 19034313 1+1 5 m², 18677321 and 18702811
+--       2+kk 10 m², 18701470 2+kk 15 m². The per-room rule cannot tell the two apart, so
+--       on a rental it does not fire (#1638): EXCLUDED here, and the rental defects are a
+--       named residual (17940680's 1.5 m² is still A0's).
+-- EXPECTED A1 NOW: the bazos sales, 777 (617 inactive, 160 active). NOTE: that read
+-- counted the per-room predicate on its own, while the count query below files a row
+-- under 5 m² as A0 first — which is the likely reason its all-deal-type bazos A1 above
+-- reads 660 (506 / 154) against 1,024 (839 / 185) here. The re-run's A1 line should
+-- therefore read at or under 777; a bazos sale under 5 m² appears on the A0 line.
 -- RE-RUN THE COUNT BELOW FIRST (read-only), by rail, portal and liveness, and record it
 -- with the apply:
 --
@@ -112,15 +138,16 @@
 --                 else 'A1' end, source, is_active
 --       from listings
 --      where (category_main in ('byt','dum','komercni') and area_m2 < 5)
---         or (source = 'bazos' and category_main in ('byt','dum')
+--         or (source = 'bazos' and category_type = 'prodej' and category_main in ('byt','dum')
 --             and area_m2 < 8 * (case when disposition ~ '^[1-9]\+(kk|1)$'
 --                                     then left(disposition, 1)::int end))
 --         or (category_main = 'byt' and area_m2 >= 1000)
 --   ) r group by rail, source, is_active order by rail, source, is_active;
 --
 -- STOP CONDITIONS — do not apply; hand-read the rows first (and report them) when:
---   1. the A1 total is far above the 660 bazos rows of 2026-09-27 (over 1,000). A1 outside
---      bazos is 0 by construction (the predicate names the source); a jump is a bazos
+--   1. the A1 total is over 1,000 (777 bazos sales expected), OR any A1 row is not a bazos
+--      sale. A1 outside bazos sales is 0 by construction (the predicate names the source
+--      and the deal type), so such a row means the predicate moved; a jump is a bazos
 --      population nobody has read.
 --   2. any 'F1-other' row exists (an idnes 20 whose raw podlaží is not the placeholder).
 --   3. the F1 total is far from the 3,016 counted on 2026-09-27 (under 2,000 or over
@@ -235,7 +262,7 @@ with hit as (
               else 'A1' end as rail
     from listings l
    where (l.category_main in ('byt','dum','komercni') and l.area_m2 < 5)
-      or (l.source = 'bazos' and l.category_main in ('byt','dum')
+      or (l.source = 'bazos' and l.category_type = 'prodej' and l.category_main in ('byt','dum')
           and l.area_m2 < 8 * (case when l.disposition ~ '^[1-9]\+(kk|1)$'
                                     then left(l.disposition, 1)::int end))
       or (l.category_main = 'byt' and l.area_m2 >= 1000)

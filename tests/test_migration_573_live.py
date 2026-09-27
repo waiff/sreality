@@ -59,6 +59,13 @@ _ROWS: tuple[tuple[Any, ...], ...] = (
     ("a1 miss on band", "bazos", "area_m2", 24.0, "byt", "3+1", "unknown", None, None),
     ("a1 miss atypical", "bazos", "area_m2", 6.0, "byt", "atypicky", "unknown", None, None),
     ("a1 miss hall", "bazos", "area_m2", 6.0, "komercni", "3+1", "unknown", None, None),
+    # A bazos RENTAL's prose figure is often the room it lets (production 2026-09-27:
+    # 16757869 "pronájem pokoje 20m2 ve sdíleném bytě 3+1"), so A1 is a sale's alone; the
+    # 5 m² floor still holds on a rental (17940680, a 2+1 at 1.5 m²).
+    ("a1 miss rental room", "bazos", "area_m2", 20.0, "byt", "3+1", "unknown", None, None),
+    ("a1 miss rental small room", "bazos", "area_m2", 12.5, "byt", "3+1", "unknown", None,
+     None),
+    ("a0 rental placeholder", "bazos", "area_m2", 1.5, "byt", "2+1", "unknown", None, "A0"),
     # Room rentals under the whole flat's disposition (production 2026-09-27): a structured
     # cell or title figure is the room's real size, never held to the per-room floor.
     ("a1 miss room rental cell", "ceskereality", "area_m2", 14.0, "byt", "5+1", "usable",
@@ -74,6 +81,13 @@ _ROWS: tuple[tuple[Any, ...], ...] = (
     # The house ceiling on an UNLABELLED figure has no backfill here (a named residual).
     ("residual dum parcel", "bazos", "area_m2", 1256.0, "dum", None, "unknown", None, None),
 )
+# Seeded as category_type 'pronajem'; every other row is a sale ('prodej').
+_RENTALS = frozenset({"a1 miss rental room", "a1 miss rental small room",
+                      "a0 rental placeholder"})
+
+
+def _deal(row: tuple[Any, ...]) -> str:
+    return "pronajem" if row[0] in _RENTALS else "prodej"
 
 
 @pytest.fixture()
@@ -105,11 +119,11 @@ def _seed(cur: Any, row: tuple[Any, ...]) -> tuple[int, int]:
     cur.execute(
         "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, category_main, "
         "category_type, price_czk, disposition, floor, total_floors, area_m2, area_basis, "
-        "is_active, property_id) VALUES (%s, %s, %s, %s::jsonb, %s, 'prodej', 5000000, %s, %s, "
+        "is_active, property_id) VALUES (%s, %s, %s, %s::jsonb, %s, %s, 5000000, %s, %s, "
         "%s, %s, %s, true, %s) RETURNING id",
         (next(_SREALITY_IDS) if source == "sreality" else None, source,
-         f"m573-{uuid.uuid4()}", json.dumps(raw), category, disposition, cells["floor"],
-         cells["total_floors"], cells["area_m2"], cells["area_basis"], pid),
+         f"m573-{uuid.uuid4()}", json.dumps(raw), category, _deal(row), disposition,
+         cells["floor"], cells["total_floors"], cells["area_m2"], cells["area_basis"], pid),
     )
     return int(cur.fetchone()[0]), pid
 
@@ -127,7 +141,7 @@ def _python_declines(row: tuple[Any, ...]) -> bool:
         return total_floors_from_portal(value) is None
     arm = "prose" if source == "bazos" else "fallback" if basis == "unknown" else "usable"
     return derive_headline_area(category_main=category, disposition=disposition,
-                                **{arm: value}) == (None, None)
+                                category_type=_deal(row), **{arm: value}) == (None, None)
 
 
 def _read(cur: Any, listing_id: int, column: str) -> tuple[Any, Any]:
