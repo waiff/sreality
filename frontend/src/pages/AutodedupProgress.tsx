@@ -29,6 +29,7 @@
 
 import { type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 
 import {
   getAutodedupIterations,
@@ -39,6 +40,7 @@ import {
 import { useReasonLabels } from '@/components/autodedup/VerdictNotes';
 import AgreementPanel from '@/components/autodedup/AgreementPanel';
 import ErrorBanner from '@/components/ErrorBanner';
+import { ROUTES, withQuery } from '@/lib/routes';
 import Spinner from '@/components/Spinner';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
@@ -447,6 +449,14 @@ export default function AutodedupProgress() {
           what sample, with which tools, what it measured, and what it cost. Spend is read back from
           the recorded model calls after the fact, never forecast — so an iteration that has not
           been billed yet says so instead of showing a zero.
+        </p>
+        <p className="mt-1 text-[0.78rem]">
+          <Link
+            to={withQuery(ROUTES.autodedupRulings.build(), { engine: 'disagrees' })}
+            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+          >
+            Rozhodnutí, se kterými engine nebo nemovitosti nesouhlasí
+          </Link>
         </p>
       </header>
 

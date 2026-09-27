@@ -454,7 +454,6 @@ def areas_from_params(
     *,
     title: str | None,
     category_main: str | None,
-    disposition: str | None,
 ) -> PortalAreas:
     """ceskereality's area slots — the KEYS are the contract's, this owns the measure.
 
@@ -476,7 +475,6 @@ def areas_from_params(
     estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        disposition=disposition,
         usable=usable,
         plot=estate_area,
         fallback=parse_area_text(title),
@@ -535,8 +533,7 @@ def parse_detail(
     )
 
     disposition = vocabulary.disposition(SOURCE, title)
-    areas = areas_from_params(params, title=title, category_main=category_main,
-                              disposition=disposition)
+    areas = areas_from_params(params, title=title, category_main=category_main)
 
     description = unescape(ld.get("description") or "") or _text(
         tree.css_first("div.popisdetail")

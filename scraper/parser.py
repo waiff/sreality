@@ -102,7 +102,6 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     )
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        disposition=disposition,
         usable=_numeric_or_none(raw.get("usable_area")),
         plot=estate_area,
     )

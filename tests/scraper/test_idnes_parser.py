@@ -563,8 +563,7 @@ def test_the_area_derivation_is_one_function_both_callers_share():
         category_main="dum", category_type="prodej",
     )
     replay = areas_from_params(
-        listing.raw["params"], title=listing.raw["title"], category_main="dum",
-        disposition=listing.disposition)
+        listing.raw["params"], title=listing.raw["title"], category_main="dum")
     assert (replay.area_m2, replay.area_basis) == (listing.area_m2, listing.area_basis)
     assert replay.usable_area == listing.usable_area
     assert replay.estate_area == listing.estate_area
@@ -624,3 +623,21 @@ def test_the_top_of_the_floor_select_is_absence_and_the_page_keeps_saying_it():
         category_main="byt", category_type="prodej")
     assert listing.floor is None
     assert listing.raw["params"]["podlaží"] == "20. patro a vyšší"
+
+
+def test_a_room_rental_under_a_five_room_disposition_keeps_the_room_s_size() -> None:
+    """idnes 18749058 / 19004720 (production, 2026-09-27): the ceskereality Praha rooms,
+    listed here as 5+kk at 11-12 m². The Užitná plocha cell is the room's real size and
+    the title says the same; neither is held to the per-room band (a bazos prose rail)."""
+    html = (RENT_DOHODOU_HTML
+            .replace("Pronájem bytu 2+kk 48 m²", "Pronájem bytu 5+kk 12 m²")
+            .replace("<dd>48 m<sup>2</sup></dd>", "<dd>12 m<sup>2</sup></dd>"))
+    url = "https://reality.idnes.cz/detail/pronajem/byt/praha/6a18deadbeefdeadbeef0099/"
+    listing = parse_detail(html, source_url=url, category_main="byt", category_type="pronajem")
+    assert listing.disposition == "5+kk"
+    assert (listing.area_m2, listing.area_basis, listing.usable_area) == (12.0, "usable", 12.0)
+
+    title_only = parse_detail(
+        html.replace("<dt>Užitná plocha</dt><dd>12 m<sup>2</sup></dd>", ""),
+        source_url=url, category_main="byt", category_type="pronajem")
+    assert (title_only.area_m2, title_only.area_basis) == (12.0, "unknown")

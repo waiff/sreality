@@ -573,6 +573,49 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_unit_price_masquerade.yml"
     },
     {
+      "filename": "backup_before_drop.yml",
+      "name": "Ops: back up what a destructive migration drops",
+      "description": "Dumps what a DROP TABLE / DROP COLUMN migration is about to destroy, BEFORE it is applied (CLAUDE.md rule 1 / the `database` skill: back up first, then the operator's explicit OK). Each target is `table` (pg_dump of the whole relation) or `table:key,col[,col...]` (a CSV of the key plus those columns, rows where one of them is set), uploaded to R2 under backups/<label>/<UTC date>/ and read back. Never a workflow artifact: the repository is public. workflow_dispatch only; safe to re-run (a same-day re-run overwrites).",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "label",
+          "description": "Names the backup (a-z 0-9 -), e.g. mf-legacy-columns",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "targets",
+          "description": "Space-separated: `table` or `table:key,col[,col...]`",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "backup-before-drop",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backup_before_drop.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backup_before_drop.yml"
+    },
+    {
       "filename": "bazos_detail_drain.yml",
       "name": "Scraping: Bazos detail drain",
       "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
@@ -3186,32 +3229,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/new_dedup_runpod_smoke_test.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/new_dedup_runpod_smoke_test.yml"
-    },
-    {
-      "filename": "new_dedup_teardown_backup.yml",
-      "name": "NEW DEDUP teardown backup (one-off)",
-      "description": "One-off pg_dump backup of the tables docs/design/new-dedup/CUTOFF.md §4 marks for drop, uploaded to R2 under backups/new-dedup-teardown/<date>/. Run manually once, before the teardown migration (PR-3) drops those tables — the destructive-migration safety net (CLAUDE.md rule 1 / the `database` skill: pg_dump first, then explicit operator OK to apply). Not scheduled; workflow_dispatch only. Safe to re-run (each run writes to its own date prefix).",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [],
-      "secrets": [
-        "R2_ACCESS_KEY_ID",
-        "R2_ACCOUNT_ID",
-        "R2_BUCKET_NAME",
-        "R2_SECRET_ACCESS_KEY",
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "new-dedup-teardown-backup",
-      "cancelInProgress": false,
-      "timeoutMinutes": 20,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/new_dedup_teardown_backup.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/new_dedup_teardown_backup.yml"
     },
     {
       "filename": "property_maintenance.yml",

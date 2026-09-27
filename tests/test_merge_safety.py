@@ -94,8 +94,14 @@ def test_the_merge_retires_and_the_detach_reactivates_in_one_statement_each():
 
 
 def test_the_ruling_writes_are_the_review_pages_own_statements():
-    source = inspect.getsource(pi.record_rulings)
-    for name in ("VERDICT_PAIR_UPSERT_SQL", "MUST_NOT_LINK_UPSERT_SQL", "MUST_NOT_LINK_RETRACT_SQL"):
+    source = inspect.getsource(pi.record_ruling)
+    for name in ("VERDICT_PAIR_APPEND_SQL", "MUST_NOT_LINK_UPSERT_SQL", "MUST_NOT_LINK_RETRACT_SQL"):
         assert f"usql.{name}" in source
-    assert "'pair'" in usql.VERDICT_PAIR_UPSERT_SQL
+    assert "record_ruling(" in inspect.getsource(pi.record_rulings)
+    # A bare operator veto is written down as its `different` BEFORE the newer word lands.
+    assert source.index("usql.VERDICT_PAIR_FROM_VETO_SQL") < source.index(
+        "usql.VERDICT_PAIR_APPEND_SQL")
+    veto = " ".join(usql.VERDICT_PAIR_FROM_VETO_SQL.split())
+    assert "m.source = 'operator'" in veto and "AND NOT EXISTS (SELECT 1 FROM autodedup.verdicts" in veto
+    assert "'pair'" in usql.VERDICT_PAIR_APPEND_SQL
     assert "different" in usql.NEGATIVE_VERDICTS, "the adapter's negatives read this value"

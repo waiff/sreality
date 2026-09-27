@@ -190,12 +190,14 @@ def test_out_of_band_storeys_are_absence_not_numbers(sample):
     assert parse_listing({**sample, "floors": 0})["total_floors"] is None
 
 
-def test_the_flat_band_is_read_with_the_advert_s_own_disposition(sample):
-    # A 3+kk of 20 m² is a room, and a flat of 1,800 m² is a site area: the resolver is
-    # handed the disposition the parser read, so both are absence (sreality's content
-    # hash is over raw_json, so a declined value churns no snapshot here).
-    assert parse_listing({**sample, "usable_area": 20})["area_m2"] is None
+def test_the_flat_band_holds_and_a_room_rental_keeps_its_size(sample):
+    # A flat of 1,800 m² is a site area, so it is absence (sreality's content hash is over
+    # raw_json, so a declined value churns no snapshot here). A 3+kk of 20 m² is a room
+    # rented under the flat's disposition: `usable_area` is a structured cell, which the
+    # per-room band (a bazos prose rail) never reads (production 2026-09-27).
     assert parse_listing({**sample, "usable_area": 1800})["area_m2"] is None
+    assert parse_listing({**sample, "usable_area": 4})["area_m2"] is None
+    assert parse_listing({**sample, "usable_area": 20})["area_m2"] == 20.0
     assert parse_listing({**sample, "usable_area": 24})["area_m2"] == 24.0
 
 

@@ -153,6 +153,11 @@ async function authHeader(useJwt: boolean | undefined): Promise<Record<string, s
  * tells the operator nothing about which parameter was rejected. */
 function detailText(detail: unknown): string {
   if (typeof detail === 'string') return detail;
+  /* A structured refusal (`{code, message, ids}`, the split route's): its message. */
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+  }
   if (Array.isArray(detail)) {
     const parts = detail.map((item) => {
       if (typeof item === 'string') return item;
@@ -3050,37 +3055,121 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-/* The one split: ONE advert back to the property its merge ledger says it came
- * from, or — no merge brought it — to a new record of its own (`outcome:
- * 'split_native'`), ruled "different" from every advert that stays, with the
- * operator's optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says
- * why nothing moved (`outcome`) — a second click answers `not_on_property`. */
+/* The operator's split statement (E919), `POST /properties/{id}/split`: every
+ * advert the operator was shown (`adverts`, the stale-view guard), the units to
+ * separate (`separate`: each leaves as ONE record — back where it came from, or
+ * new), and `keep_together` (the rest ruled one property). Across units the
+ * adverts are ruled "different" with a permanent must-not-link. One transaction:
+ * all of it or nothing. The property page's row split is `separate: [[id]],
+ * keep_together: false`; the proposals page always keeps the rest together. */
 export const DETACH_REASON_MAX = 500;
 
-export interface DetachResult {
-  listing_id: number;
-  detached: boolean;
-  outcome: string;
-  survivor_property_id: number | null;
-  restored_property_id: number | null;
-  rulings_written: number;
+export interface SplitStatement {
+  adverts: number[];
+  separate: number[][];
+  keep_together: boolean;
+  reason?: string;
+  confirm_retract?: boolean;
 }
 
-export const detachListing = (
-  propertyId: number,
-  listingId: number,
-  reason?: string,
-): Promise<DetachResult> =>
-  request<DetachResult>(`/properties/${propertyId}/detach`, {
+/* Issued by the server in a split's response; `undoSplit` posts it back verbatim. */
+export interface SplitUndoBody {
+  call_id: string;
+  placements: Record<string, number>;
+  rulings: {
+    listing_lo: number;
+    listing_hi: number;
+    verdict: string | null;
+    note: string | null;
+    reasons: string[];
+    /* The pair's must-not-link row before the split (a machine's included), put back by the undo. */
+    must_not_link?: { source: string; reason: string | null } | null;
+  }[];
+}
+
+export interface SplitUnit {
+  unit: string;
+  /* 'kept' = the adverts the operator left together; 'separated' = a unit that left. */
+  role: 'kept' | 'separated';
+  listing_ids: number[];
+  /* Where the unit sits now. */
+  property_id: number;
+  moved: { listing_id: number; outcome: string; from: number; to: number }[];
+  /* Set when the unit landed on two records and the one merge joined them. */
+  merge_group_id: string | null;
+}
+
+export interface SplitResult {
+  call_id: string;
+  property_id: number;
+  /* The unit that keeps the property record (its notes, tags, pipeline card). */
+  record_kept_by: string;
+  units: SplitUnit[];
+  moved: number;
+  rulings: {
+    written: number;
+    same: number;
+    different: number;
+    must_not_link_written: number;
+    must_not_link_retracted: number;
+  };
+  reversed_pairs: [number, number][];
+  /* Null when the statement changed nothing (a re-send). */
+  undo: SplitUndoBody | null;
+}
+
+export interface SplitUndoResult {
+  call_id: string;
+  undone: true;
+  property_id: number | null;
+  merge_group_id: string | null;
+  rulings: { restored: number };
+}
+
+export type SplitRefusalCode =
+  | 'invalid'
+  | 'not_found'
+  | 'stale'
+  | 'reverses_rulings'
+  | 'cannot_move'
+  | 'join_would_drag'
+  | 'refused'
+  | 'busy';
+
+/* Why a statement wrote nothing: `reverses_rulings` names the pairs (E52) and a
+ * re-send with `confirm_retract` goes ahead; `stale` means the property changed
+ * since the page read it. */
+export interface SplitRefusal {
+  code: SplitRefusalCode;
+  message: string;
+  ids: unknown[];
+}
+
+export function splitRefusal(err: unknown): SplitRefusal | null {
+  if (!(err instanceof ApiError)) return null;
+  const detail = (err.body as { detail?: unknown } | null)?.detail;
+  if (detail && typeof detail === 'object' && 'code' in detail) return detail as SplitRefusal;
+  return null;
+}
+
+export const splitProperty = (propertyId: number, statement: SplitStatement): Promise<SplitResult> =>
+  request<SplitResult>(`/properties/${propertyId}/split`, {
     method: 'POST',
-    json: { listing_id: listingId, ...(reason ? { reason } : {}) },
+    json: statement,
+    jwt: true,
+  });
+
+export const undoSplit = (propertyId: number, undo: SplitUndoBody): Promise<SplitUndoResult> =>
+  request<SplitUndoResult>(`/properties/${propertyId}/split`, {
+    method: 'POST',
+    json: { undo },
     jwt: true,
   });
 
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
  * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
- * what a detach would answer now; `splittable`: that moves it (back to its origin,
- * or to a new record). */
+ * what separating it would do now; `splittable`: that moves it (back to its
+ * origin, or to a new record). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
@@ -3101,9 +3190,10 @@ export const fetchPropertyOrigins = (
 /* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
  * generation groups its adverts apart (the canonical advert's group first), each
  * split pair with the engine's stated reason and the operator's newest ruling.
- * The split itself is `detachListing`, advert by advert; `detach_outcome` is what
- * that detach would answer now and `splittable` says it moves the advert (one no
- * merge brought gets a new record while another own advert stays). */
+ * The split itself is the operator's statement, `splitProperty`, one per card;
+ * `detach_outcome` is what separating an advert would do now and `splittable`
+ * says it moves it (one no merge brought gets a new record while another own
+ * advert stays). */
 export interface ProposedSplitAdvert {
   listing_id: number;
   source: string;
@@ -3151,6 +3241,165 @@ export const getProposedSplits = (
   }>
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
+
+/* ----- the rulings page (E920) ------------------------------------------------
+ *
+ * EVERY operator ruling in one list (`GET /autodedup/rulings`), newest first,
+ * beside the engine's current view and where the adverts sit now. The newest
+ * row per pair / per (group key, pass) IS the ruling (migration 574): `status`
+ * says whether it states something (`standing`), was taken back (`withdrawn`:
+ * a newer `unsure`) or never said more than `unsure`; a group ruling a newer
+ * ruling on the same adverts outranks, under another key or pass, is
+ * `superseded` (apply reads the newest word per set). `agreement` puts it
+ * against production and the engine: a standing `same` disagrees when the two
+ * adverts are apart now or the engine holds them apart; a standing negative
+ * when they are together now or in one engine group. */
+
+export type RulingStatus = 'standing' | 'withdrawn' | 'unsure' | 'superseded';
+export type RulingAgreement = 'agrees' | 'disagrees' | 'none';
+export type RulingEngineView = 'together' | 'apart' | 'unseen';
+/* `implied`: a member pair of a group confirmed `same` with no pair ruling of
+ * its own — the lane never binds it; `must_not_link`: a veto with no ruling. */
+export type RulingPairSource = 'pair' | 'browse_merge' | 'implied' | 'must_not_link';
+export type RulingGroupSource = 'group' | 'browse_merge';
+
+export interface RulingPairRow {
+  /* The `verdicts.id` a correction supersedes — the group's row for an implied
+   * pair (`ruling_kind: 'cluster'`), null for a bare veto. */
+  ruling_id: number | null;
+  ruling_kind: 'pair' | 'cluster' | 'must_not_link';
+  listing_lo: number;
+  listing_hi: number;
+  verdict: AutodedupVerdictValue;
+  status: RulingStatus;
+  source: RulingPairSource;
+  merge_group_id: string | null;
+  group_cluster_key: number | null;
+  group_generation: string | null;
+  note: string | null;
+  reasons: string[];
+  decided_by: string;
+  decided_at: string;
+  n_rows: number;
+  /* The veto's source ('operator') when one stands, else null. */
+  must_not_link: string | null;
+  property_lo: number | null;
+  property_hi: number | null;
+  together_now: boolean;
+  adverts_on_property: number | null;
+  obec_kod: number | null;
+  obec_name: string | null;
+  cast_obce_kod: number | null;
+  cast_obce_name: string | null;
+  street_lo: string | null;
+  cp_lo: string | null;
+  street_hi: string | null;
+  cp_hi: string | null;
+  zone: AutodedupZone | null;
+  score: number | null;
+  decision: string | null;
+  guard_veto: string | null;
+  engine_decided_at: string | null;
+  engine_group_lo: number | null;
+  engine_group_hi: number | null;
+  seen_lo: boolean;
+  seen_hi: boolean;
+  engine_view: RulingEngineView;
+  agreement: RulingAgreement;
+  certificate: string | null;
+  why_not_merged: string | null;
+  generation: string | null;
+  /* Every row of the key, newest first — the group's rows for an implied pair. */
+  history: AutodedupVerdictRow[];
+}
+
+export interface RulingGroupRow {
+  ruling_key: string;
+  ruling_id: number | null;
+  source: RulingGroupSource;
+  cluster_key: number | null;
+  generation: string | null;
+  merge_group_id: string | null;
+  member_ids: number[];
+  /* False on a ruling taken before migration 538 recorded its set. */
+  set_recorded: boolean;
+  verdict: AutodedupVerdictValue;
+  status: RulingStatus;
+  note: string | null;
+  reasons: string[];
+  decided_by: string;
+  decided_at: string;
+  n_rows: number;
+  n_members: number;
+  property_ids: number[];
+  n_properties: number;
+  together_now: boolean;
+  n_engine_groups: number;
+  n_grouped: number;
+  n_seen: number;
+  obec_kod: number | null;
+  obec_name: string | null;
+  cast_obce_kod: number | null;
+  cast_obce_name: string | null;
+  engine_view: RulingEngineView;
+  agreement: RulingAgreement;
+  history: AutodedupVerdictRow[];
+}
+
+export interface RulingTown {
+  grain: 'o' | 'c';
+  code: number;
+  name: string | null;
+  n: number;
+}
+
+export interface RulingsPage<T> {
+  grain: 'pair' | 'group';
+  generation: string | null;
+  items: T[];
+  next_after: string | null;
+  total: number;
+  facets: Record<'source' | 'status' | 'verdict' | 'engine', Record<string, number>>;
+  towns: RulingTown[];
+}
+
+/* Filter KEYS the server validates against its registry; a blank value is no
+ * filter and is dropped here rather than sent. */
+export interface RulingFilters {
+  grain?: 'pair' | 'group';
+  verdict?: string | null;
+  source?: string | null;
+  status?: string | null;
+  engine?: string | null;
+  now?: string | null;
+  decided_from?: string | null;
+  decided_to?: string | null;
+  town?: string | null;
+  listing?: number | null;
+  property?: number | null;
+  merge_group?: string | null;
+  generation?: string | null;
+  after?: string | null;
+  limit?: number;
+}
+
+function blankToNull(f: RulingFilters): Record<string, QueryValue> {
+  return Object.fromEntries(
+    Object.entries(f).map(([k, v]) => [k, v === '' || v === undefined ? null : v]),
+  ) as Record<string, QueryValue>;
+}
+
+export function getAutodedupRulings(
+  f: RulingFilters & { grain: 'group' },
+): Promise<AutodedupEnvelope<RulingsPage<RulingGroupRow>>>;
+export function getAutodedupRulings(
+  f: RulingFilters,
+): Promise<AutodedupEnvelope<RulingsPage<RulingPairRow>>>;
+export function getAutodedupRulings(
+  f: RulingFilters,
+): Promise<AutodedupEnvelope<RulingsPage<RulingPairRow | RulingGroupRow>>> {
+  return request('/autodedup/rulings', { query: blankToNull(f), jwt: true });
+}
 
 /* ----- price-stats datasets ---------------------------------------------- */
 
@@ -4420,6 +4669,11 @@ export interface AutodedupVerdictInput {
   /* Reason CODES, never labels: the label is the registry's rendering of the
    * code and changing one must not change what a past verdict recorded. */
   reasons?: string[];
+  /* A CORRECTION (the rulings page, E920): the `verdicts.id` the page showed.
+   * The server takes the key from that row — a group's pass and member set
+   * included — and answers 409 when it is no longer the newest word on its key.
+   * The write is a NEW row: a withdrawal is `unsure`, never a delete. */
+  supersedes?: number | null;
 }
 
 /* The route answers `{data: {verdict, must_not_link}}` — the stored row is

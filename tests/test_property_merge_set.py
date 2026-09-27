@@ -1,6 +1,6 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
 record survives, one asset link rides onto it and two refuse, ONE group and ONE recompute per
-set, the operator's cards ruled "same"; and migration 560's copy. Over tests/test_detach_listing's
+set, the operator's cards ruled "same"; and migration 560's copy. Over tests/_property_ledger's
 stateful fake."""
 
 from __future__ import annotations
@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 import toolkit.property_identity as pi
-from tests.test_detach_listing import OP, T0, _Ledger
+from tests._property_ledger import OP, T0, _Ledger
+from tests.test_detach_listing import _appended
 from toolkit.property_identity import AssetLinkConflict, MergeError
 
 MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "560_one_merge_one_undo.sql"
@@ -112,7 +113,7 @@ def test_a_refusal_on_a_later_pair_rolls_the_whole_set_back(monkeypatch):
 def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
     db = _Ledger({30: 3, 31: 3, 70: 7, 90: 9}, canonical={3: 30, 7: 70, 9: 90})
     out = _merge(db, [3, 7, 9], source="operator", decided_by=OP)
-    rows = db.sql("INSERT INTO autodedup.verdicts")
+    rows = _appended(db)
     assert [(r["listing_lo"], r["listing_hi"]) for r in rows] == [(30, 70), (30, 90), (70, 90)]
     assert {(r["verdict"], r["decided_by"], r["note"]) for r in rows} == {
         ("same", OP, f"operator merge {out['merge_group_id']}")}

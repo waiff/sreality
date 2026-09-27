@@ -162,15 +162,16 @@ def test_a_dwelling_never_takes_surface_land_as_its_headline():
 
 
 
-def test_the_room_band_reaches_bezrealitky():
-    """A1 wiring: bezrealitky calls derive_headline_area inline, where `disposition` is an
-    optional keyword — dropping it would silently switch the per-room band off here. A
-    3+kk is at least 24 m² (8 m² a room): 20 m² is a part of the unit, 24 m² is the unit."""
-    under = parse_advert(_advert(disposition="DISP_3_KK", surface=20))
-    assert under.disposition == "3+kk"
-    assert (under.area_m2, under.area_basis) == (None, None)
-    on_band = parse_advert(_advert(disposition="DISP_3_KK", surface=24))
-    assert (on_band.area_m2, on_band.area_basis) == (24.0, "usable")
+def test_a_room_rental_keeps_the_room_s_size():
+    """bezrealitky 18976135 / 18928333 / 18322802 (production, 2026-09-27): a room in a
+    3+1 / 2+kk / 4+1 is rented at 15-23 m² under the whole flat's disposition. `surface` is
+    a structured cell, so the per-room band (a bazos prose rail) never reads it; the 5 m²
+    floor still does."""
+    room = parse_advert(_advert(offerType="PRONAJEM", disposition="DISP_3_KK", surface=20))
+    assert room.disposition == "3+kk"
+    assert (room.area_m2, room.area_basis) == (20.0, "usable")
+    placeholder = parse_advert(_advert(offerType="PRONAJEM", disposition="DISP_3_KK", surface=1))
+    assert (placeholder.area_m2, placeholder.area_basis) == (None, None)
 
 def test_zero_surface_is_none_sentinel():
     # bezrealitky uses 0 as the "not specified" sentinel for numeric fields.
