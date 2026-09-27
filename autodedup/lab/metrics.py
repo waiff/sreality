@@ -236,9 +236,12 @@ def why_refused(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, 
         fps = [c.fps[i] for i in ids if i in c.fps]
         return cluster_invariants_ok(fps, parts.settings, vetoed, parts.relation, None) or "ok"
 
+    unlabelled = {c.keys[i]: "edge" for i in np.flatnonzero(d.zone == MERGE)}
+    sources = [("operator", labels.rulings)] + list(labels.judges.items())
     out: dict[str, dict[str, Any]] = {}
-    for source, pairs in [("operator", labels.rulings)] + list(labels.judges.items()):
-        for verdict in (SAME, DIFFERENT):
+    for source, pairs, verdicts in [(s, p, (SAME, DIFFERENT)) for s, p in sources] + [
+            ("all_refused_edges", unlabelled, ("edge",))]:
+        for verdict in verdicts:
             where: Counter[str] = Counter()
             facts: Counter[str] = Counter()
             for (a, b), value in pairs.items():
@@ -263,8 +266,9 @@ def why_refused(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, 
                                                      CLUSTER)
                         seen |= {f.name for f in found} or {"price_limb"}
                 facts.update(seen)
-            out[f"{source}:{verdict}"] = {"where": dict(where.most_common()),
-                                          "separating_facts": dict(facts.most_common())}
+            out[source if verdict == "edge" else f"{source}:{verdict}"] = {
+                "where": dict(where.most_common()), "separating_facts": dict(facts.most_common()),
+                "n": sum(where.values())}
     return out
 
 
