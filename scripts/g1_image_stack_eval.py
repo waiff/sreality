@@ -784,17 +784,25 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
     out["B1_copy"] = {"sscd": s1, "clip": c1,
                       "pass": None if s1 is None else bool(s1 >= 0.95 and (c1 is None or s1 >= c1 + 0.10))}
     b2 = {}
-    # +0.10 per room (n ~ 60-100 positives each: at the edge of detection), +0.08 on the
-    # pooled five private rooms (n ~ 270-430).
+    # Amended 2026-09-27 before any GPU number was read (GLOBAL_SEARCH review): a single room has
+    # ~60-125 positives, a 95 % half-width of ~0.09 against a +0.10 margin, so a per-room AND would
+    # STOP on noise about half the time. STOP rests on the pooled private rooms (n ~ 430, +-0.045);
+    # kitchen and bathroom are readouts with their interval, never the gate.
     for room, margin in (("kitchen", 0.10), ("bathroom", 0.10), ("private", 0.08)):
         where, best = _best(rooms, room, "recall@labFMR0.05", NEW_ARMS)
         base = (rooms.get(f"clip@clip:{room}") or {}).get("recall@labFMR0.05")
-        b2[room] = {"best": where, "recall": best, "clip": base, "margin": margin,
+        n_pos = (rooms.get(where) or {}).get("n_pos") if where else None
+        half = (1.96 * math.sqrt(best * (1 - best) / n_pos)
+                if best is not None and n_pos else None)
+        b2[room] = {"best": where, "recall": best, "clip": base, "margin": margin, "n_pos": n_pos,
+                    "ci95_half_width": half,
                     "pass": None if best is None or base is None else bool(best >= base + margin)}
     kitchen_ok = b2["kitchen"]["recall"] is not None and b2["kitchen"]["recall"] >= 0.75
-    parts = [v["pass"] for v in b2.values()]
     out["B2_same_room"] = {**b2, "kitchen_floor_0.75": kitchen_ok,
-                           "pass": None if None in parts else bool(all(parts) and kitchen_ok)}
+                           "gate": "private (pooled); kitchen, bathroom and the 0.75 floor are PARTIAL readouts",
+                           "per_room_partial": [r for r in ("kitchen", "bathroom") if b2[r]["pass"] is False]
+                           + ([] if kitchen_ok else ["kitchen_floor_0.75"]),
+                           "pass": b2["private"]["pass"]}
     lg_where, lg_auc = _best(rooms, "private", "auc_vs_hard", ("lg_aliked", "lg_disk"))
     _, lg_rec = _best(rooms, "private", "recall@hardFMR0.01", ("lg_aliked", "lg_disk"))
     _, d_rec = _best(rooms, "private", "recall@hardFMR0.01", ("dinov3", "dinov2", "sscd"))
@@ -858,6 +866,10 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
     else:
         decision = "PARTIAL: read the failing bars; no engine arm until they are understood"
     out["decision"] = decision
+    # A pixel verdict is never an engine adoption: the lab arm MF+G1 vs MF must also gain.
+    out["engine_adoption_bar"] = ("M1 +2 on c17 AND c18, or >= 10 % of MF's lost band co-pairs recovered, "
+                                  "at 0 fused on the strict read; features admissible only if the lane "
+                                  "computes them from stored data for every scored pair")
     out["sscd_replaces_dhash_for_copies"] = b["B1_copy"]
     out["lightglue_needed"] = b["B3_geometry"]
     return out

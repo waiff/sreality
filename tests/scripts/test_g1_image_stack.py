@@ -566,3 +566,30 @@ def test_cpu_bound_pools_never_exceed_the_pods_vcpus():
     assert pod.cpu_workers(16, 32) == 16     # the requested ceiling still holds
     assert pod.cpu_workers(0, 9) == 9        # 0 = one per vCPU
     assert pod.cpu_workers(4, 0) == 1
+
+
+def _rooms(kitchen, bathroom, private, n=100):
+    out = {}
+    for room, (clip, new) in (("kitchen", kitchen), ("bathroom", bathroom), ("private", private)):
+        out[f"clip@clip:{room}"] = {"recall@labFMR0.05": clip, "n_pos": n}
+        out[f"dinov3@head:{room}"] = {"recall@labFMR0.05": new, "n_pos": n}
+    return out
+
+
+def test_stop_rests_on_the_pooled_private_bar_not_on_one_room():
+    # kitchen misses its +0.10 margin and the 0.75 floor, but the pooled private rooms clear +0.08
+    report = {"arms_new": ["dinov3"], "rooms": _rooms((0.717, 0.74), (0.538, 0.70), (0.631, 0.73))}
+    v = ev.verdict(report)
+    assert v["B2_same_room"]["pass"] is True
+    assert v["B2_same_room"]["per_room_partial"] == ["kitchen", "kitchen_floor_0.75"]
+    assert not v["decision"].startswith("STOP")
+    half = v["B2_same_room"]["kitchen"]["ci95_half_width"]
+    assert half == pytest.approx(1.96 * math.sqrt(0.74 * 0.26 / 100))
+
+
+def test_stop_when_the_pooled_private_bar_fails_even_if_the_rooms_pass():
+    report = {"arms_new": ["dinov3"], "rooms": _rooms((0.717, 0.83), (0.538, 0.65), (0.631, 0.70))}
+    v = ev.verdict(report)
+    assert v["B2_same_room"]["pass"] is False
+    assert v["decision"].startswith("STOP")
+    assert "M1 +2" in v["engine_adoption_bar"]
