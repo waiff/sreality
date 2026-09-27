@@ -837,7 +837,9 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
                                best_r["R@5"] >= base_r["R@5"] + 0.10
                                and (best_r.get("neg_above") or 0) <= 0.10)}
     b = {k: v.get("pass") for k, v in out.items()}
-    if b["B2_same_room"] is False:
+    if not report.get("arms_new"):
+        decision = "NO NEW ARM: incumbent reading only (the bars need the pod's results)"
+    elif b["B2_same_room"] is False:
         decision = "STOP: the stack does not find the room dHash cannot; keep dHash/CLIP evidence"
     elif b["B2_same_room"] and b["B4_catalogue"] and b["B5_layered"]:
         decision = ("ADOPT: build the image proof on the stack (engine arms next: K-C on "
@@ -1025,6 +1027,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     if unit_router != "clip" and "clip" in arms:
         for k, v in retrieval_eval(manifest, {"clip": arms["clip"]}, routers["clip"]).items():
             report["retrieval"][f"{k}@clip-router"] = v
+    report["arms_new"] = sorted(set(arms) - {"clip"}) + [f"lg_{e}" for e in sorted(lg)]
     report["verdict"] = verdict(report)
     with open(args.out, "w") as fh:
         json.dump(report, fh, indent=1, default=str)
