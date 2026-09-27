@@ -1453,7 +1453,12 @@ renumber.** Navigate by area:
     of the six facts that identify a vector (model, revision, library, pooling, resolution,
     preprocessing, dtype) is null. Those six are the target table's primary key, because any
     one of them changing means a **new population, not a new value**. The CLIP lane keeps
-    running in parallel for comparison; nothing has been retired.
+    running in parallel for comparison; nothing has been retired. Since 2026-09-27 a pass may
+    instead keep its vectors in **R2** (`vectors_to=r2`: float16 shard files plus an
+    (image_id, shard, row) manifest under one prefix per encoder identity,
+    `toolkit/vector_shards.py`) and write only the head scores to Postgres; the manifest is
+    that mode's checkpoint and `tag_model score --source r2:<prefix>` re-scores from it. Its
+    write budget charges measured bytes (2,412 B a vector row, 563 B a head-score row).
     A fifth producer is the **versioned tag model** (migration 490, `toolkit/tag_models.py` →
     `scripts/tag_model.py` / `tag_model.yml`): a promoted bake-off cell — one encoder, one
     training mode, one frozen head set — stored under a version name, at most one of which is
