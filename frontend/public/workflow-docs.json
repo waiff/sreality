@@ -1733,6 +1733,26 @@
           ]
         },
         {
+          "name": "gpu_allowlist",
+          "description": "Comma-separated RunPod GPU ids or whole-word names (e.g. NVIDIA RTX A4000 or 3090), tried in this order. Empty = the default ladder (nineteen 16 GB+ Ampere/Ada cards, 3090/A5000/3090 Ti first: dinov3_embed_dispatch.DEFAULT_GPU_ALLOWLIST, the same ladder as G1's).",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "cloud_type",
+          "description": "Where to look for each card. ANY = the community cloud, then the secure one, before moving to the next card. Always under the lane's $1.00/h cap; no capacity anywhere rents nothing and fails the run.",
+          "required": false,
+          "type": "choice",
+          "default": "ANY",
+          "options": [
+            "ANY",
+            "COMMUNITY",
+            "SECURE"
+          ]
+        },
+        {
           "name": "dry_run",
           "description": "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing.",
           "required": false,

@@ -1,6 +1,6 @@
 """scripts/dinov3_embed_dispatch.py — the pod plan: credentials reach the pod through
 the REST body's `env` (never argv), the wait window covers the payload's own budget,
-the GPU is not picked on price alone, and the git ref cannot smuggle shell.
+the GPU is an ordered ladder over both clouds, and the git ref cannot smuggle shell.
 
 Hermetic: a fake RunPodClient and a fake requests.Session. No RunPod call, no pod, no
 network, no spend.
@@ -8,12 +8,13 @@ network, no spend.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 
 import pytest
 
 from scripts import dinov3_embed_dispatch as dispatch
-from scripts.runpod_client import GpuOption
+from scripts.runpod_client import GpuOption, RunPodClient, RunPodError
 
 IDENTITY = {
     "model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
@@ -77,7 +78,9 @@ def test_pod_env_includes_the_gated_weights_token_and_the_r2_credentials(monkeyp
     assert "HF_TOKEN" in dispatch.POD_ENV_KEYS  # facebook/dinov3-* is gated: manual
 
 
-# --- GPU selection -------------------------------------------------------------
+# --- GPU selection: an ordered ladder over both clouds (B-k, 2026-09-27) ---------
+# GitHub run 36316992243 found no COMMUNITY capacity for any card of G1's three-card
+# allowlist; this lane allowed two of them, community only, so it would have rented nothing.
 
 
 class _FakeClient:
@@ -86,8 +89,8 @@ class _FakeClient:
         self.jobs: list[dict] = []
         self.stop_reason = stop_reason
 
-    def eligible_gpus(self, *, max_price_per_hr=None):
-        return list(self._gpus)
+    def eligible_gpus(self, *, max_price_per_hr=None, cloud_type="COMMUNITY"):
+        return [dataclasses.replace(g, cloud_type=cloud_type) for g in self._gpus]
 
     def run_job_with_fallback(self, **kwargs):
         self.jobs.append(kwargs)
@@ -97,28 +100,219 @@ class _FakeClient:
 
 
 CATALOG = [
-    GpuOption("rtx4090", "RTX 4090", 24, 0.20),     # fastest card, FEWEST vCPUs (6)
-    GpuOption("rtxa5000", "RTX A5000", 24, 0.16),
-    GpuOption("rtx3090", "RTX 3090", 24, 0.22),
+    GpuOption("NVIDIA GeForce RTX 4090", "RTX 4090", 24, 0.20),     # fastest, FEWEST vCPUs (6)
+    GpuOption("NVIDIA RTX A5000", "RTX A5000", 24, 0.16),
+    GpuOption("NVIDIA GeForce RTX 3090", "RTX 3090", 24, 0.22),
+]
+
+_LIVE = [
+    # id, displayName, GB, community $/h, secure $/h, in community, in secure
+    ("NVIDIA GeForce RTX 3090", "RTX 3090", 24, 0.22, 0.43, True, True),
+    ("NVIDIA GeForce RTX 3090 Ti", "RTX 3090 Ti", 24, 0.27, 0.0, True, False),
+    ("NVIDIA RTX A5000", "RTX A5000", 24, 0.16, 0.27, True, True),
+    ("NVIDIA GeForce RTX 4090", "RTX 4090", 24, 0.34, 0.59, True, True),
+    ("NVIDIA L4", "L4", 24, 0.0, 0.43, False, True),
+    ("NVIDIA L40S", "L40S", 48, 0.79, 1.09, True, True),
+    ("NVIDIA GeForce RTX 3070", "RTX 3070", 8, 0.13, 0.0, True, False),
+    ("NVIDIA A100 80GB PCIe", "A100 PCIe", 80, 1.19, 1.64, True, True),
+    ("Tesla V100-PCIE-16GB", "Tesla V100", 16, 0.19, 0.0, True, False),
+    ("NVIDIA GeForce RTX 5090", "RTX 5090", 32, 0.69, 0.99, True, True),
 ]
 
 
-def test_gpu_selection_prefers_the_cpu_adequate_boxes_over_the_cheapest():
-    # JPEG decode is CPU-side; eligible_gpus ranks on price and knows nothing about
-    # vCPU, so the 4090 would otherwise win and starve the GPU (§5.3).
-    chosen = dispatch.select_gpus(_FakeClient(CATALOG), dispatch.DEFAULT_GPU_ALLOWLIST)
-    assert [g.id for g in chosen] == ["rtxa5000", "rtx3090"]
+class _Resp:
+    def __init__(self, status: int = 200, body=None, text: str = "") -> None:
+        self.status_code, self._body, self.text = status, body, text
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def iter_lines(self, decode_unicode: bool = True):
+        return iter(())
+
+    def close(self) -> None:
+        pass
 
 
-def test_gpu_selection_falls_back_to_the_catalog_when_no_preferred_type_is_listed(caplog):
-    with caplog.at_level("WARNING"):
-        chosen = dispatch.select_gpus(_FakeClient([CATALOG[0]]), dispatch.DEFAULT_GPU_ALLOWLIST)
-    assert [g.id for g in chosen] == ["rtx4090"]
-    assert "vCPU" in caplog.text
+class _Session:
+    """RunPod's two APIs, faked: the GraphQL catalogue and REST pod CRUD. `no_capacity`
+    names the (card, cloud) rungs that answer RunPod's real no-instances 500."""
+
+    def __init__(self, no_capacity=(), catalog=_LIVE) -> None:
+        self.headers: dict[str, str] = {}
+        self.no_capacity = set(no_capacity)
+        self.catalog = catalog
+        self.launches: list[dict] = []
+        self.deleted: list[str] = []
+
+    def post(self, url, json=None, timeout=30):
+        if url.endswith("/pods"):
+            self.launches.append(json)
+            if (json["gpuTypeIds"][0], json["cloudType"]) in self.no_capacity:
+                return _Resp(500, text='{"error":"create pod: There are no instances '
+                                       'currently available","status":500}')
+            return _Resp(201, {"id": f"pod{len(self.launches)}", "costPerHr": 0.3})
+        return _Resp(200, {"data": {"gpuTypes": [
+            {"id": i, "displayName": d, "memoryInGb": m, "communityPrice": c, "securePrice": s,
+             "communityCloud": ic, "secureCloud": isc} for i, d, m, c, s, ic, isc in self.catalog]}})
+
+    def get(self, url, timeout=30, stream=False):
+        return _Resp(200, {"desiredStatus": "EXITED"})
+
+    def delete(self, url, timeout=30):
+        self.deleted.append(url.rsplit("/", 1)[-1])
+        return _Resp(204)
 
 
-def test_an_empty_allowlist_means_the_price_ranked_catalog():
-    assert dispatch.select_gpus(_FakeClient(CATALOG), ()) == CATALOG
+def _rungs(ladder):
+    return [(g.id.replace("NVIDIA ", "").replace("GeForce ", ""), g.cloud_type[0]) for g in ladder]
+
+
+def test_the_ladder_walks_the_allowlist_in_order_each_card_community_then_secure():
+    client = RunPodClient("k", session=_Session())
+    allow = ("NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090 Ti", "NVIDIA L4")
+    assert _rungs(dispatch.gpu_ladder(client, allow, dispatch.CLOUD_TYPES["ANY"])) == [
+        ("RTX 3090", "C"), ("RTX 3090", "S"), ("RTX A5000", "C"), ("RTX A5000", "S"),
+        ("RTX 3090 Ti", "C"), ("L4", "S")]
+    assert _rungs(dispatch.gpu_ladder(client, allow, dispatch.CLOUD_TYPES["COMMUNITY"])) == [
+        ("RTX 3090", "C"), ("RTX A5000", "C"), ("RTX 3090 Ti", "C")]
+    assert _rungs(dispatch.gpu_ladder(client, allow, dispatch.CLOUD_TYPES["SECURE"])) == [
+        ("RTX 3090", "S"), ("RTX A5000", "S"), ("L4", "S")]
+
+
+def test_the_ladder_prices_each_rung_in_its_own_cloud_under_the_cap():
+    client = RunPodClient("k", session=_Session())
+    ladder = dispatch.gpu_ladder(client, ("NVIDIA RTX A5000", "NVIDIA L40S"), ("COMMUNITY", "SECURE"))
+    # The L40S is $1.09 in the secure cloud: over the cap there, so one rung, not two.
+    assert [(g.id, g.cloud_type, g.price_per_hr()) for g in ladder] == [
+        ("NVIDIA RTX A5000", "COMMUNITY", 0.16), ("NVIDIA RTX A5000", "SECURE", 0.27),
+        ("NVIDIA L40S", "COMMUNITY", 0.79)]
+    assert all(g.price_per_hr() <= dispatch.MAX_PRICE_PER_HR for g in ladder)
+
+
+def test_the_ladder_matches_whole_words_and_exact_ids():
+    client = RunPodClient("k", session=_Session())
+    # Shorthand keeps working ("3090" is both 3090s, cheaper first); a full id is that card
+    # only; "NVIDIA L4" is never the L40S.
+    assert _rungs(dispatch.gpu_ladder(client, ("3090", "NVIDIA L4"), ("COMMUNITY", "SECURE"))) == [
+        ("RTX 3090", "C"), ("RTX 3090", "S"), ("RTX 3090 Ti", "C"), ("L4", "S")]
+    assert _rungs(dispatch.gpu_ladder(client, ("NVIDIA GeForce RTX 3090",), ("COMMUNITY",))) == [
+        ("RTX 3090", "C")]
+
+
+def test_the_ladder_drops_small_and_over_cap_cards_and_refuses_an_empty_ladder():
+    client = RunPodClient("k", session=_Session())
+    assert _rungs(dispatch.gpu_ladder(client, ("3070", "a100", "a5000"), ("COMMUNITY", "SECURE"))) == [
+        ("RTX A5000", "C"), ("RTX A5000", "S")]
+    with pytest.raises(RunPodError):
+        dispatch.gpu_ladder(client, ("3070", "a100"), ("COMMUNITY", "SECURE"))
+
+
+def test_the_ladder_survives_one_cloud_whose_catalogue_read_fails():
+    class _Half(RunPodClient):
+        def eligible_gpus(self, *, max_price_per_hr=None, cloud_type="COMMUNITY"):
+            if cloud_type == "COMMUNITY":
+                raise RunPodError("no COMMUNITY GPU type available under the given price cap")
+            return super().eligible_gpus(max_price_per_hr=max_price_per_hr, cloud_type=cloud_type)
+
+    ladder = dispatch.gpu_ladder(_Half("k", session=_Session()), ("a5000",), ("COMMUNITY", "SECURE"))
+    assert _rungs(ladder) == [("RTX A5000", "S")]
+
+
+def test_the_default_ladder_is_g1s_and_leaves_the_tagging_lane_alone():
+    from scripts import tagging_bakeoff_dispatch as tb
+
+    assert tb.DEFAULT_GPU_ALLOWLIST == ("3090", "a5000")
+    assert dispatch.DEFAULT_GPU_ALLOWLIST[:3] == ("NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000",
+                                                  "NVIDIA GeForce RTX 3090 Ti")
+    assert len(set(dispatch.DEFAULT_GPU_ALLOWLIST)) == len(dispatch.DEFAULT_GPU_ALLOWLIST) == 19
+    assert dispatch.MIN_GPU_MEMORY_GB == 16 and dispatch.MAX_PRICE_PER_HR == 1.00
+    # bf16 (no Volta/Turing) on a cu118 torch (no Blackwell).
+    assert not any(b in name for name in dispatch.DEFAULT_GPU_ALLOWLIST
+                   for b in ("V100", "Tesla T4", "RTX 5080", "RTX 5090", "RTX PRO", "Blackwell"))
+
+
+def test_the_default_ladder_equals_g1s_wherever_both_exist():
+    g1d = pytest.importorskip("scripts.g1_image_stack_dispatch")
+    assert dispatch.DEFAULT_GPU_ALLOWLIST == g1d.G1_GPU_ALLOWLIST
+    assert dispatch.MIN_GPU_MEMORY_GB == g1d.MIN_GPU_MEMORY_GB
+    assert dispatch.CLOUD_TYPES == g1d.CLOUD_TYPES
+
+
+def test_the_default_ladder_on_a_live_shaped_catalogue():
+    ladder = dispatch.gpu_ladder(RunPodClient("k", session=_Session()),
+                                 dispatch.DEFAULT_GPU_ALLOWLIST, dispatch.CLOUD_TYPES["ANY"])
+    assert [(g.id, g.cloud_type[0], g.price_per_hr()) for g in ladder] == [
+        ("NVIDIA GeForce RTX 3090", "C", 0.22), ("NVIDIA GeForce RTX 3090", "S", 0.43),
+        ("NVIDIA RTX A5000", "C", 0.16), ("NVIDIA RTX A5000", "S", 0.27),
+        ("NVIDIA GeForce RTX 3090 Ti", "C", 0.27),       # not offered in secure
+        ("NVIDIA GeForce RTX 4090", "C", 0.34), ("NVIDIA GeForce RTX 4090", "S", 0.59),
+        ("NVIDIA L40S", "C", 0.79),                      # $1.09 secure is over the cap
+        ("NVIDIA L4", "S", 0.43)]                        # secure only; V100/5090/3070 never
+
+
+def _dispatch_live(monkeypatch, session, *args):
+    _argv(monkeypatch, "--max-write-mb-per-hour", "200", "--job-max-seconds", "60", *args)
+    monkeypatch.setenv("RUNPOD_API_KEY", "rp_key")
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.setattr(dispatch, "RunPodClient", lambda key: RunPodClient(key, session=session))
+    return dispatch.main()
+
+
+def test_the_dispatch_falls_back_from_community_to_secure_for_the_same_card(monkeypatch):
+    session = _Session(no_capacity={("NVIDIA RTX A5000", "COMMUNITY")})
+    rc = _dispatch_live(monkeypatch, session, "--gpu-allowlist", "NVIDIA RTX A5000,3090",
+                        "--cloud-type", "ANY")
+    assert rc == 0
+    assert [(b["gpuTypeIds"][0], b["cloudType"]) for b in session.launches] == [
+        ("NVIDIA RTX A5000", "COMMUNITY"), ("NVIDIA RTX A5000", "SECURE")]
+    assert session.deleted == ["pod2"]          # the rented pod was torn down
+
+
+def test_the_dispatch_rents_nothing_and_fails_when_no_rung_has_capacity(monkeypatch):
+    rungs = {(i, c) for i, *_ in _LIVE for c in ("COMMUNITY", "SECURE")}
+    session = _Session(no_capacity=rungs)
+    rc = _dispatch_live(monkeypatch, session, "--cloud-type", "COMMUNITY")
+    assert rc == 1
+    # The default ladder, community only: the cards this catalogue lists under the cap.
+    assert [b["gpuTypeIds"][0] for b in session.launches] == [
+        "NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090 Ti",
+        "NVIDIA GeForce RTX 4090", "NVIDIA L40S"]
+    assert {b["cloudType"] for b in session.launches} == {"COMMUNITY"}
+    assert session.deleted == []
+
+
+def test_an_empty_allowlist_means_the_default_ladder_in_both_clouds(monkeypatch):
+    session = _Session(no_capacity={("NVIDIA GeForce RTX 3090", "COMMUNITY")})
+    rc = _dispatch_live(monkeypatch, session, "--gpu-allowlist", "")
+    assert rc == 0
+    assert [(b["gpuTypeIds"][0], b["cloudType"]) for b in session.launches] == [
+        ("NVIDIA GeForce RTX 3090", "COMMUNITY"), ("NVIDIA GeForce RTX 3090", "SECURE")]
+
+
+def test_the_workflow_hands_the_dispatcher_its_allowlist_and_cloud():
+    import pathlib
+
+    import yaml
+
+    wf = yaml.safe_load((pathlib.Path(__file__).resolve().parents[2]
+                         / ".github/workflows/dinov3_embed_backfill.yml").read_text())
+    inputs = (wf.get("on") or wf[True])["workflow_dispatch"]["inputs"]
+    assert inputs["gpu_allowlist"]["default"] == ""
+    assert inputs["cloud_type"]["default"] == "ANY"
+    assert inputs["cloud_type"]["options"] == ["ANY", "COMMUNITY", "SECURE"]
+    step = next(s for s in wf["jobs"]["embed"]["steps"]
+                if s.get("name") == "Dispatch DINOv3 embedding pass")
+    assert step["env"]["GPU_ALLOWLIST"] == "${{ inputs.gpu_allowlist }}"
+    assert step["env"]["CLOUD_TYPE"] == "${{ inputs.cloud_type }}"
+    # An array, so a GPU id with spaces reaches argparse as ONE argument.
+    assert 'ARGS+=(--gpu-allowlist "${GPU_ALLOWLIST}")' in step["run"]
+    assert 'ARGS+=(--cloud-type "${CLOUD_TYPE:-ANY}")' in step["run"]
+    assert 'python -m scripts.dinov3_embed_dispatch "${ARGS[@]}"' in step["run"]
 
 
 # --- the dispatch itself --------------------------------------------------------

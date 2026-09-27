@@ -398,6 +398,61 @@ def test_an_explicit_cuda_without_a_gpu_falls_back_loudly(monkeypatch, caplog):
     assert "no GPU" in caplog.text
 
 
+# --- the pod's vCPUs, read at run time (B-k) ---------------------------------------
+# os.cpu_count() inside a RunPod container is the HOST's count (a 4090 pod gets 6 of a
+# 64+ core host), so torch's threads were sized to a machine the pod does not have.
+
+
+def test_pod_vcpus_reads_runpod_then_the_cgroup_quota_then_affinity(tmp_path, monkeypatch):
+    monkeypatch.setattr(bf.os, "sched_getaffinity", lambda _pid: set(range(64)), raising=False)
+    empty = tmp_path / "none"
+    assert bf.pod_vcpus({"RUNPOD_CPU_COUNT": "6"}, str(empty)) == 6
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "cpu.max").write_text("900000 100000\n")
+    assert bf.pod_vcpus({}, str(v2)) == 9
+    (v2 / "cpu.max").write_text("max 100000\n")
+    assert bf.pod_vcpus({}, str(v2)) == 64
+    v1 = tmp_path / "v1"
+    (v1 / "cpu").mkdir(parents=True)
+    (v1 / "cpu" / "cpu.cfs_quota_us").write_text("1600000\n")
+    (v1 / "cpu" / "cpu.cfs_period_us").write_text("100000\n")
+    assert bf.pod_vcpus({"RUNPOD_CPU_COUNT": "junk"}, str(v1)) == 16
+    assert bf.pod_vcpus({}, str(empty)) == 64
+
+
+def test_the_pod_vcpu_reader_is_g1s_wherever_both_exist(tmp_path, monkeypatch):
+    g1pod = pytest.importorskip("scripts.g1_image_stack_pod")
+    monkeypatch.setattr(bf.os, "sched_getaffinity", lambda _pid: set(range(64)), raising=False)
+    (tmp_path / "cpu.max").write_text("600000 100000\n")
+    for env in ({"RUNPOD_CPU_COUNT": "9"}, {}, {"RUNPOD_CPU_COUNT": "0"}):
+        assert bf.pod_vcpus(env, str(tmp_path)) == g1pod.pod_vcpus(env, str(tmp_path))
+
+
+@pytest.mark.parametrize("argv, expected", [([], 6), (["--threads", "3"], 3)])
+def test_torch_threads_are_the_pods_vcpus_unless_told(monkeypatch, argv, expected):
+    from scraper import dinov3_tagger
+
+    loaded: list[dict] = []
+
+    class _Tagger:
+        revision = IDENTITY["revision"]
+
+    def fake_load(**kwargs):
+        loaded.append(kwargs)
+        return _Tagger()
+
+    monkeypatch.setenv("RUNPOD_CPU_COUNT", "6")
+    monkeypatch.setattr(bf.os, "sched_getaffinity", lambda _pid: set(range(64)), raising=False)
+    monkeypatch.setattr(bf.image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(bf.image_storage.R2Client, "from_env", classmethod(lambda cls, **k: object()))
+    monkeypatch.setattr(dinov3_tagger.Dinov3Tagger, "load", staticmethod(fake_load))
+    conn = _FakeConn(images=[(1, "img/1.jpg")], embeddings=[_emb(1)])   # nothing pending
+    assert _run(monkeypatch, conn, ["--max-write-mb-per-hour", "1", "--device", "cpu",
+                                    *argv]) == 0
+    assert loaded == [{"threads": expected, "device": "cpu"}]
+
+
 # --- scope and in-pass head scoring (G4) -----------------------------------------
 
 

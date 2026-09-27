@@ -18,10 +18,13 @@ docs/design/new-dedup/ENCODER-DECISION.md §5.3/§5.5 or a live RunPod run:
     it means the wait window is effectively "how long the pod is allowed to live". It
     is therefore derived from the payload's own --max-seconds plus a startup grace, so
     the pod is torn down shortly AFTER the job stops cleanly, never in the middle of it.
-  * THE GPU IS NOT PICKED ON PRICE ALONE. `eligible_gpus` ranks by price and knows
-    nothing about vCPU or system RAM, and JPEG decode is CPU-side — §5.3 names the
-    RTX 3090 (16 vCPU) and RTX A5000 (9 vCPU) and warns off the 4090 (6 vCPU). The
-    allowlist below is that judgement, applied cheapest-first within it.
+  * THE GPU IS A LADDER, NOT A PRICE LIST. `eligible_gpus` ranks by price and knows
+    nothing about vCPU or capacity. The pod walks DEFAULT_GPU_ALLOWLIST in its own order,
+    each card in the community cloud and then the secure one, under the $1.00/h cap and
+    with MIN_GPU_MEMORY_GB — the ladder G1 proved after run 36316992243 found no community
+    capacity for the two cards this lane used to allow. §5.3's CPU-adequate boxes (3090,
+    A5000) stay first; a box with fewer vCPUs is still better than no box, and the payload
+    sizes torch's threads from the vCPUs the pod actually got.
   * THE WINDOW IS A CEILING, NOT A PLAN. The sibling bake-off lane rented a 3090 for its
     full 8,115 s window on 2026-09-08 and wrote nothing — the pod had died in its first
     seconds and the blind wait could not tell. The watchdog
@@ -39,9 +42,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
+import re
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 from scraper.dinov3_config import IDENTITY_FIELDS, encoder_identity
 from scripts import pod_bootstrap
@@ -62,11 +67,37 @@ REPO_URL = pod_bootstrap.REPO_URL
 # interpreter and torch (scripts/pod_bootstrap.py). Chasing a newer image tag is not
 # the fix — RunPod's newer tags do not state a Python version at all.
 DEFAULT_IMAGE = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
-# §5.3's boxes, in the order it prefers them. Matched case-insensitively against the
-# catalog's id and display name; an empty match falls back to the price-ranked list
-# with a warning rather than failing the dispatch.
-DEFAULT_GPU_ALLOWLIST = ("3090", "a5000")
+# G1's ladder (g1_image_stack_dispatch.G1_GPU_ALLOWLIST at bbd7e5ae), kept identical so the
+# two GPU lanes rent from one list: every card RunPod listed on 2026-09-27 with >=16 GB under
+# the $1.00/h cap in either cloud, less Volta (no bf16) and Blackwell (the pod's torch is
+# cu118). The order IS the preference: §5.3's 3090 / A5000 (and the 3090 Ti) first, then
+# 3090-class or faster, then the slower cards. The DINOv3-B/16@768 bf16 pass at batch 32 needs
+# about 2-3 GB, so 16 GB is a floor with room, not a fit.
+DEFAULT_GPU_ALLOWLIST = (
+    "NVIDIA GeForce RTX 3090",
+    "NVIDIA RTX A5000",
+    "NVIDIA GeForce RTX 3090 Ti",
+    "NVIDIA GeForce RTX 4080",
+    "NVIDIA GeForce RTX 4080 SUPER",
+    "NVIDIA RTX A6000",
+    "NVIDIA GeForce RTX 4090",
+    "NVIDIA A40",
+    "NVIDIA RTX 5000 Ada Generation",
+    "NVIDIA L40",
+    "NVIDIA RTX 6000 Ada Generation",
+    "NVIDIA L40S",
+    "NVIDIA A100-SXM4-40GB",
+    "NVIDIA RTX A4000",
+    "NVIDIA RTX 4000 SFF Ada Generation",
+    "NVIDIA RTX A4500",
+    "NVIDIA RTX 4000 Ada Generation",
+    "NVIDIA RTX 2000 Ada Generation",
+    "NVIDIA L4",
+)
+MIN_GPU_MEMORY_GB = 16.0
 MAX_PRICE_PER_HR = 1.00
+CLOUD_TYPES = {"COMMUNITY": ("COMMUNITY",), "SECURE": ("SECURE",),
+               "ANY": ("COMMUNITY", "SECURE")}
 
 # Credentials the payload needs INSIDE the pod. Names only ever appear in logs.
 POD_ENV_KEYS = (
@@ -194,24 +225,48 @@ def make_watchdog(args: argparse.Namespace, identity: dict[str, Any]) -> PodWatc
                        poll_interval_s=DEFAULT_POLL_INTERVAL_S)
 
 
-def select_gpus(client: RunPodClient, allowlist: tuple[str, ...]):
-    """Cheapest-first, restricted to §5.3's CPU-adequate boxes when any are available."""
-    gpus = client.eligible_gpus(max_price_per_hr=MAX_PRICE_PER_HR)
-    if not allowlist:
-        return gpus
-    preferred = [
-        g for g in gpus
-        if any(pat in g.id.lower() or pat in g.display_name.lower() for pat in allowlist)
-    ]
-    if preferred:
-        return preferred
-    LOG.warning(
-        "none of the preferred GPU types %s are available — falling back to the "
-        "price-ranked catalog, which does NOT constrain vCPU/RAM and may pick a box "
-        "whose CPU-side JPEG decode starves the GPU (ENCODER-DECISION §5.3)",
-        ",".join(allowlist),
-    )
-    return gpus
+def _cards_for(pattern: str, listed: Sequence[Any]) -> list[str]:
+    """Card ids a pattern names: its exact id or display name when one is listed, else
+    every card carrying it as whole words ("3090" -> 3090 and 3090 Ti; "NVIDIA L4" is
+    never the L40S)."""
+    pat = " ".join(pattern.lower().replace("_", " ").split())
+    exact = [g.id for g in listed if pat in (g.id.lower(), g.display_name.lower())]
+    if exact:
+        return list(dict.fromkeys(exact))
+    word = re.compile(rf"(?<![a-z0-9]){re.escape(pat)}(?![a-z0-9])")
+    return list(dict.fromkeys(g.id for g in listed
+                              if word.search(g.id.lower()) or word.search(g.display_name.lower())))
+
+
+def gpu_ladder(client: Any, allowlist: Sequence[str], clouds: Sequence[str]) -> list[Any]:
+    """The launch order for `run_job_with_fallback`: the allowlist in its own order, each
+    card once per cloud (community first), only where RunPod lists it under the lane's
+    price cap and with MIN_GPU_MEMORY_GB. A cloud whose catalogue read fails is skipped;
+    an empty ladder is a RunPodError, the same failure as an empty catalogue."""
+    listed: dict[str, list[Any]] = {}
+    for cloud in clouds:
+        try:
+            listed[cloud] = [g for g in client.eligible_gpus(max_price_per_hr=MAX_PRICE_PER_HR,
+                                                             cloud_type=cloud)
+                             if g.memory_gb >= MIN_GPU_MEMORY_GB]
+        except RunPodError as exc:
+            LOG.warning("no %s card listed under $%.2f/h: %s", cloud, MAX_PRICE_PER_HR, exc)
+            listed[cloud] = []
+    everything = [g for cloud in clouds for g in listed[cloud]]
+    price: dict[str, float] = {}
+    for g in everything:
+        price[g.id] = min(price.get(g.id, math.inf), g.price_per_hr())
+    ladder: list[Any] = []
+    seen: set[str] = set()
+    for pattern in allowlist:
+        for card in sorted((c for c in _cards_for(pattern, everything) if c not in seen),
+                           key=lambda c: price[c]):
+            seen.add(card)
+            ladder += [g for cloud in clouds for g in listed[cloud] if g.id == card]
+    if not ladder:
+        raise RunPodError(f"none of {list(allowlist)} is listed with >={MIN_GPU_MEMORY_GB:.0f} GB "
+                          f"under ${MAX_PRICE_PER_HR:.2f}/h in {'/'.join(clouds)}")
+    return ladder
 
 
 def main() -> int:
@@ -260,8 +315,10 @@ def main() -> int:
                         "weights. No pod volume is rented (minimum "
                         f"{MIN_CONTAINER_DISK_GB}GB).")
     p.add_argument("--gpu-allowlist", default=",".join(DEFAULT_GPU_ALLOWLIST),
-                   help="Comma-separated substrings of preferred GPU ids/names. "
-                        "Empty = price-ranked catalog only (not recommended).")
+                   help="Comma-separated RunPod GPU ids or whole-word names, tried in this "
+                        "order (empty = the default ladder).")
+    p.add_argument("--cloud-type", choices=tuple(CLOUD_TYPES), default="ANY",
+                   help="ANY tries each card in the community cloud, then the secure one.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the resolved plan and exit. Contacts neither RunPod nor "
                         "the database, launches nothing, spends nothing.")
@@ -304,10 +361,13 @@ def main() -> int:
     env = pod_env()
     missing = [k for k in POD_ENV_KEYS if k not in env]
     max_wait_s = args.job_max_seconds + STARTUP_GRACE_S
-    allowlist = tuple(s.strip().lower() for s in args.gpu_allowlist.split(",") if s.strip())
+    allowlist = tuple(s.strip() for s in args.gpu_allowlist.split(",") if s.strip()) \
+        or DEFAULT_GPU_ALLOWLIST
+    clouds = CLOUD_TYPES[args.cloud_type]
 
-    LOG.info("image=%s ref=%s max_wait_s=%.0f gpu_allowlist=%s",
-             args.image, args.ref, max_wait_s, ",".join(allowlist) or "(none)")
+    LOG.info("image=%s ref=%s max_wait_s=%.0f", args.image, args.ref, max_wait_s)
+    LOG.info("gpu ladder: %s, each in %s, $%.2f/h cap, >=%.0f GB", ",".join(allowlist),
+             " then ".join(clouds), MAX_PRICE_PER_HR, MIN_GPU_MEMORY_GB)
     LOG.info("container_disk_gb=%d volume_gb=%d (the bootstrap works in %s on the "
              "CONTAINER disk; %s is the volume this lane does not rent)",
              args.container_disk_gb, POD_VOLUME_GB, pod_bootstrap.CONTAINER_ROOT,
@@ -338,12 +398,12 @@ def main() -> int:
 
     client = RunPodClient(api_key)
     try:
-        gpus = select_gpus(client, allowlist)
+        gpus = gpu_ladder(client, allowlist, clouds)
     except RunPodError as exc:
         LOG.error("could not list eligible GPUs: %s", exc)
         return 1
-    LOG.info("%d candidate GPU(s), cheapest first: %s", len(gpus),
-             ", ".join(f"{g.id} (${g.community_price_per_hr:.3f}/hr)" for g in gpus[:5]))
+    LOG.info("%d candidate GPU(s), in launch order: %s", len(gpus),
+             ", ".join(f"{g.id} [{g.cloud_type}] (${g.price_per_hr():.3f}/hr)" for g in gpus))
 
     watchdog = make_watchdog(args, identity)
     try:

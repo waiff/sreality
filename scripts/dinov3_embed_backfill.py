@@ -315,6 +315,46 @@ def block_listing_ids(conn, spec: str) -> list[int]:
     return sorted(ids)
 
 
+def _cgroup_cpus(root: str) -> float | None:
+    """The container's CPU quota (cgroup v2 `cpu.max`, else v1 CFS), None when unlimited."""
+    try:
+        with open(os.path.join(root, "cpu.max")) as fh:
+            quota, period = fh.read().split()[:2]
+        if quota != "max" and int(period) > 0:
+            return int(quota) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(root, "cpu", "cpu.cfs_quota_us")) as fh:
+            quota_us = int(fh.read())
+        with open(os.path.join(root, "cpu", "cpu.cfs_period_us")) as fh:
+            period_us = int(fh.read())
+        if quota_us > 0 and period_us > 0:
+            return quota_us / period_us
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def pod_vcpus(env: dict[str, str] | None = None, cgroup_root: str = "/sys/fs/cgroup") -> int:
+    """The vCPUs this pod may use (G1's g1_image_stack_pod.pod_vcpus at bbd7e5ae).
+    os.cpu_count() is the HOST's count inside a RunPod container (a 4090 pod gets 6 of a
+    64+ core host), so RunPod's RUNPOD_CPU_COUNT wins, then the cgroup quota, then the
+    affinity mask."""
+    env = os.environ if env is None else env
+    try:
+        visible = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        visible = os.cpu_count() or 1
+    raw = str(env.get("RUNPOD_CPU_COUNT", "")).strip()
+    if raw.isdigit() and int(raw) > 0:
+        return min(int(raw), visible)
+    quota = _cgroup_cpus(cgroup_root)
+    if quota:
+        return max(1, min(visible, int(quota)))
+    return max(1, visible)
+
+
 def resolve_device(requested: str = "") -> str:
     """The torch device to run the forward pass on, measured rather than assumed.
 
@@ -353,7 +393,9 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=16, help="Parallel R2 downloads.")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1, help="image_id %% shards == shard.")
-    p.add_argument("--threads", type=int, default=0, help="torch threads (0=cpus).")
+    p.add_argument("--threads", type=int, default=0,
+                   help="torch threads (0 = the vCPUs this pod or runner may use, read at "
+                        "run time: RUNPOD_CPU_COUNT, else the cgroup quota, else affinity).")
     p.add_argument("--device", default="",
                    help="Torch device for the forward pass. Empty (the default) "
                         "resolves to 'cuda' when torch reports a GPU and 'cpu' "
@@ -438,8 +480,10 @@ def main() -> int:
         scorer = HeadScorer(conn, identity) if args.score_heads else None
 
         device = resolve_device(args.device)
-        LOG.info("DINOV3 device=%s (requested=%s)", device, args.device or "auto")
-        tagger = Dinov3Tagger.load(threads=args.threads, device=device)
+        threads = args.threads or pod_vcpus()
+        LOG.info("DINOV3 device=%s (requested=%s) threads=%d host_cpu_count=%s workers=%d",
+                 device, args.device or "auto", threads, os.cpu_count(), args.workers)
+        tagger = Dinov3Tagger.load(threads=threads, device=device)
         # Stamp what the LOADED weights actually were, never the file we read — a tagger
         # loaded some other way can then never write a row claiming a revision it did
         # not use (the rail clip_tag_backfill.py already applies to CLIP).
