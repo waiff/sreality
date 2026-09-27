@@ -1,6 +1,6 @@
 {
  "name": "off_proof_KB",
- "note": "proof K-B off: those pairs fall to the score",
+ "note": "proof K-B withdrawn as E85 withdraws it (certificate_of with kb_refused): those pairs fall to K-C or to the score, as the engine re-decides them",
  "model": "ref",
  "ladder": [
   {

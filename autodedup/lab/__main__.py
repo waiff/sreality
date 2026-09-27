@@ -4,10 +4,11 @@ pre-registered keep and cut rules.
 
     python3 -m autodedup.harness run cohort.jsonl.gz --out RUN --settings w31 --model w6_gold \\
         --evidence --evidence-workers 4                  # the cache: once per export and code
-    python3 -m autodedup.lab verify trial                # no number counts before this passes
+    python3 -m autodedup.lab verify trial --rungs 3000   # no number counts before this passes
+    python3 -m autodedup.lab fit --train trial --cohort c17 --cohort c18 --out MODELS
     python3 -m autodedup.lab run autodedup/lab/experiments/*.json --cohort trial --why
     python3 -m autodedup.lab board --out LEADERBOARD.md
-    python3 -m autodedup.lab keep ARM --incumbent w31_reference
+    python3 -m autodedup.lab keep ARM --incumbent w31_reference [--alias c18=c18_w31r1]
     python3 -m autodedup.lab cut ARM --param t_merge --incumbent w31_reference
 """
 
@@ -23,7 +24,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from autodedup.lab import board as lab_board
-from autodedup.lab import metrics, page, rules, verify
+from autodedup.lab import fit, metrics, page, rules, verify
 from autodedup.lab.cache import open_cohort, registry
 
 REFERENCE = Path(__file__).parent / "experiments" / "w31_reference.json"
@@ -75,6 +76,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def verified_state(stamp_ok: bool, outcome: lab_board.Outcome, cache: str,
+                   fits: dict[str, dict[str, Any]]) -> bool | str:
+    """True when the stamp is verified and the score column is the one path's; a verified
+    cache under any other score file is 'cache verified, scorer external'."""
+    if not stamp_ok:
+        return False
+    return True if fit.scorer_state(outcome.scorer, cache, fits) else \
+        "cache verified, scorer external"
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     reg = registry(args.cohorts)
     labels = metrics.load_labels(reg)
@@ -82,6 +93,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     configs = [arm for path in args.configs for arm in lab_board.expand(lab_board.load_config(path))]
     base_config = lab_board.load_config(args.base or REFERENCE)
     ok = verify.verified(_root(reg))
+    fits = fit.recorded(_root(reg))
     for name in args.cohort:
         clock = time.perf_counter()
         cohort = open_cohort(name, args.cohorts, workers=args.workers)
@@ -91,14 +103,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         base = lab_board.run(cohort, base_config)
         why = (metrics.why_summary(metrics.why_refused(cohort, base, labels))
                if args.why else None)
-        metrics.append(board, metrics.row(cohort, base, None, labels, why, stamp in ok, stamp))
+        metrics.append(board, metrics.row(cohort, base, None, labels, why,
+                                          verified_state(stamp in ok, base, cohort.version, fits),
+                                          stamp))
         for config in configs:
             if lab_board.config_id(config) == lab_board.config_id(base_config):
                 continue
             outcome = lab_board.run(cohort, config)
             why = (metrics.why_summary(metrics.why_refused(cohort, outcome, labels))
                    if args.why else None)
-            entry = metrics.row(cohort, outcome, base, labels, why, stamp in ok, stamp)
+            entry = metrics.row(cohort, outcome, base, labels, why,
+                                verified_state(stamp in ok, outcome, cohort.version, fits), stamp)
             metrics.append(board, entry)
             vs, r = entry["vs_base"], entry["rulings"]
             print(f"[{name}] {entry['experiment']}: merge {entry['zones']['merge']} groups "
@@ -144,25 +159,60 @@ def cmd_board(args: argparse.Namespace) -> int:
     return 0
 
 
-def _rows_of(latest: dict[tuple[str, str, str], dict[str, Any]], experiment: str
+def _rows_of(latest: dict[tuple[str, str, str], dict[str, Any]], experiment: str,
+             like: dict[str, dict[str, Any]] | None = None, aliased: frozenset[str] = frozenset()
              ) -> dict[str, dict[str, Any]]:
-    """The newest row per cohort of one experiment (by name)."""
+    """The newest row per cohort of one experiment (by name); with `like`, the newest row that
+    is comparable with `like`'s row for that cohort when there is one (`rules.comparable`)."""
+    def rank(cohort: str, entry: dict[str, Any]) -> tuple[bool, str]:
+        mate = (like or {}).get(cohort)
+        return (mate is None or rules.comparable(mate, entry, cohort in aliased) is None,
+                entry["at"])
     out: dict[str, dict[str, Any]] = {}
     for (cohort, name, _), entry in latest.items():
-        if name == experiment and (cohort not in out or entry["at"] >= out[cohort]["at"]):
+        if name == experiment and (cohort not in out
+                                   or rank(cohort, entry) >= rank(cohort, out[cohort])):
             out[cohort] = entry
+    return out
+
+
+def _aliases(given: Sequence[str] | None) -> dict[str, str]:
+    """`--alias c18=c18_w31r1`: the arm's rows on a sibling artefact of one export stand for
+    that cohort's."""
+    out: dict[str, str] = {}
+    for item in given or ():
+        cohort, _, sibling = item.partition("=")
+        if not cohort or not sibling:
+            raise SystemExit(f"--alias wants COHORT=SIBLING, got {item!r}")
+        out[cohort] = sibling
+    return out
+
+
+def _arm_rows(latest: dict[tuple[str, str, str], dict[str, Any]], experiment: str,
+              aliases: dict[str, str]) -> dict[str, dict[str, Any]]:
+    rows = _rows_of(latest, experiment)
+    siblings = set(aliases.values())
+    out = {cohort: row for cohort, row in rows.items() if cohort not in siblings
+           and cohort not in aliases}
+    for cohort, sibling in aliases.items():
+        if sibling in rows:
+            out[cohort] = rows[sibling]
     return out
 
 
 def cmd_keep(args: argparse.Namespace) -> int:
     reg = registry(args.cohorts)
     latest = metrics.latest_rows(_board_path(reg, args.board))
-    arm, incumbent = _rows_of(latest, args.arm), _rows_of(latest, args.incumbent)
+    aliases = _aliases(args.alias)
+    arm = _arm_rows(latest, args.arm, aliases)
     if not arm:
         raise SystemExit(f"no leaderboard row for {args.arm}")
+    incumbent = _rows_of(latest, args.incumbent, arm, frozenset(aliases))
     result = rules.keep(arm, incumbent, verify.verified(_root(reg)), args.validate,
-                        accepted=args.accept or ())
-    print(json.dumps({"arm": args.arm, "incumbent": args.incumbent, **result}, indent=1))
+                        accepted=args.accept or (), fixtures=metrics.load_fixtures(),
+                        aliased=aliases)
+    print(json.dumps({"arm": args.arm, "incumbent": args.incumbent, "aliases": aliases,
+                      **result}, indent=1))
     return 0
 
 
@@ -170,15 +220,28 @@ def cmd_cut(args: argparse.Namespace) -> int:
     reg = registry(args.cohorts)
     latest = metrics.latest_rows(_board_path(reg, args.board))
     sweep = {t: _rows_of(latest, f"{args.arm}[{args.param}={t}]") for t in rules.CUTS}
-    result = rules.cut(sweep, _rows_of(latest, args.incumbent), verify.verified(_root(reg)),
-                       args.validate, args.read)
+    like = next((rows for rows in sweep.values() if rows), None)
+    incumbent = _rows_of(latest, args.incumbent, like)
+    ok = verify.verified(_root(reg))
+    result = rules.cut(sweep, incumbent, ok, args.validate, args.read)
     if result.get("cut") is not None:
         rows = sweep[result["cut"]]
-        result["keep"] = rules.keep(rows, _rows_of(latest, args.incumbent),
-                                    verify.verified(_root(reg)), args.validate,
-                                    accepted=args.accept or ())
+        result["keep"] = rules.keep(rows, _rows_of(latest, args.incumbent, rows), ok,
+                                    args.validate, accepted=args.accept or (),
+                                    fixtures=metrics.load_fixtures())
     print(json.dumps({"arm": args.arm, "param": args.param, "incumbent": args.incumbent,
                       **result}, indent=1))
+    return 0
+
+
+def cmd_fit(args: argparse.Namespace) -> int:
+    reg = registry(args.cohorts)
+    labels = metrics.load_labels(reg)
+    train = open_cohort(args.train, args.cohorts, workers=args.workers)
+    others = (open_cohort(name, args.cohorts, workers=args.workers)
+              for name in args.cohort or () if name != args.train)
+    report = fit.fit(train, others, labels, Path(args.out), _root(reg))
+    print(json.dumps(report, indent=1))
     return 0
 
 
@@ -197,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="rung-by-rung against the engine functions on N seeded pairs (-1 all)")
     check.add_argument("--seed", type=int, default=20260927)
     check.set_defaults(fn=cmd_verify)
+    learn = sub.add_parser("fit", help="the challenger's GBM on the artefacts' own V/P and keys")
+    learn.add_argument("--train", default="trial")
+    learn.add_argument("--cohort", action="append", help="a cohort to score (repeat)")
+    learn.add_argument("--out", required=True, help="directory for gbm_<cohort>.npz")
+    learn.set_defaults(fn=cmd_fit)
     run = sub.add_parser("run")
     run.add_argument("configs", nargs="+")
     run.add_argument("--cohort", action="append", required=True)
@@ -233,6 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--validate", default=rules.VALIDATE)
         cmd.add_argument("--accept", action="append",
                          help="a fixture case the operator read as one property at an RP")
+        if name == "keep":
+            cmd.add_argument("--alias", action="append",
+                             help="COHORT=SIBLING: the arm's rows on a sibling artefact of "
+                                  "COHORT's export (another settings row) stand for COHORT's")
         if name == "cut":
             cmd.add_argument("--param", default="t_merge")
             cmd.add_argument("--read", default=rules.READ)

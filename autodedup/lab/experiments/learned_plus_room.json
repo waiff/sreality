@@ -1,6 +1,6 @@
 {
  "name": "learned_plus_room",
- "note": "learned_only plus the room proof (kitchen/bathroom-to-kitchen/bathroom via CLIP tags) under a floor-plan veto and the fact veto",
+ "note": "learned_only plus the room proof (kitchen/bathroom-to-kitchen/bathroom via CLIP tags as evidence) under the stated-fact veto (no tag veto: tags are never facts)",
  "model": "ref",
  "ladder": [
   {
@@ -38,13 +38,7 @@
      2
     ]
    ],
-   "veto": [
-    [
-     "floorplan_conflict",
-     "==",
-     1
-    ]
-   ],
+   "veto": [],
    "fact_veto": true
   }
  ],

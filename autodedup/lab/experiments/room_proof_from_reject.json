@@ -1,6 +1,6 @@
 {
  "name": "room_proof_from_reject",
- "note": "room proof also rescuing score rejects (cos >= 0.98)",
+ "note": "room proof also rescuing score rejects (cos >= 0.98), under the stated-fact veto (no tag veto: tags are never facts)",
  "model": "ref",
  "ladder": [
   {
@@ -46,13 +46,7 @@
      2
     ]
    ],
-   "veto": [
-    [
-     "floorplan_conflict",
-     "==",
-     1
-    ]
-   ],
+   "veto": [],
    "fact_veto": true
   }
  ],

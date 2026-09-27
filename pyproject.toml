@@ -87,6 +87,12 @@ clip = [
 training = [
   "scikit-learn>=1.4",
 ]
+# The dedup lab (autodedup/lab/: the evidence cache as feature/signal columns, the
+# rungs as vectorised masks) and its tests. Lab-only: the engine, the lane and the API
+# never import it. CI installs it explicitly rather than through shapely (geo).
+lab = [
+  "numpy>=1.26",
+]
 # Nearest-neighbor diagnostics for the heads' eval harness (toolkit/tag_heads_eval.py)
 # — analysis-only, read-only, never influences training or a threshold. Also
 # pre-clears the dependency PROGRAM.md's W3 (candidate path B batch k-NN) will

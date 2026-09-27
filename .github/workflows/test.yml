@@ -24,7 +24,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install
-        run: pip install -e ".[dev,api,geo]"
+        run: pip install -e ".[dev,api,geo,lab]"
 
       # -m, not a script path: invoking by path puts scripts/ on sys.path[0] and
       # leaves the repo root off it, so the generator's `from toolkit import ...`

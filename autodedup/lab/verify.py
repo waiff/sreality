@@ -10,7 +10,10 @@ Three reads, all against the SAME `harness run --evidence` directory the cohort 
 A passing verify is recorded under the cache root against a STAMP: the artefact's version (the
 engine) plus a digest of the lab modules that decide (the rungs, the group steps, the scorers and
 this check), so editing a rung un-verifies every cache until it is verified again; a metric, a page
-or a rule edit does not. `lab keep` counts only rows whose stamp passed."""
+or a rule edit does not. The record says how many pairs the rung-by-rung read covered, and a stamp
+counts as verified only when its newest verify passed WITH that read (`--rungs`): rows and groups
+alone can agree while a rung that a later rung masks has drifted. `lab keep` counts only rows
+whose stamp is verified."""
 
 from __future__ import annotations
 
@@ -194,16 +197,19 @@ def rung_equivalence(c: Cohort, idx: Sequence[int] | None = None,
 
 def record(root: Path, c: Cohort, report: dict[str, Any], ok: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    rungs = report.get("rung_equivalence") or {}
     with open(root / VERIFIED_FILE, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"cohort": c.name, "cache": c.version, "stamp": stamp(c.version),
                                  "code_digest": c.code_digest, "ok": ok, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                  "rows": report.get("rows", {}).get("identical"),
-                                 "groups": report.get("groups", {}).get("harness_run")},
+                                 "groups": report.get("groups", {}).get("harness_run"),
+                                 "rungs_checked": int(rungs.get("pairs", 0)) if rungs.get("ok") else 0},
                                 sort_keys=True) + "\n")
 
 
-def verified(root: Path) -> set[str]:
-    """The stamps whose newest verify passed."""
+def verified(root: Path, rungs: bool = True) -> set[str]:
+    """The stamps whose newest verify passed (with the rung-by-rung read, unless `rungs` is
+    False)."""
     path = root / VERIFIED_FILE
     if not path.is_file():
         return set()
@@ -211,7 +217,8 @@ def verified(root: Path) -> set[str]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             entry = json.loads(line)
-            newest[entry.get("stamp", "")] = bool(entry["ok"])
+            newest[entry.get("stamp", "")] = bool(entry["ok"]) and (
+                not rungs or int(entry.get("rungs_checked") or 0) > 0)
     return {key for key, ok in newest.items() if ok and key}
 
 

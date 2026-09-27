@@ -1,6 +1,6 @@
 {
  "name": "off_proof_KC",
- "note": "proof K-C off: those pairs fall to the score",
+ "note": "proof K-C off (no engine switch: K-C is the last certificate, so the pairs fall to the score)",
  "model": "ref",
  "ladder": [
   {

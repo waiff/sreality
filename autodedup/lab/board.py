@@ -22,9 +22,17 @@ from typing import Any, Callable
 
 import numpy as np
 
+from autodedup import store_score
 from autodedup.cluster import cluster_pairs
 from autodedup.d43 import relation_for
-from autodedup.decide import CONTEXT_RULE_NEVER_OVERRIDES, CONTEXT_RULE_REASON, Decision
+from autodedup.decide import (
+    CONTEXT_RULE_REASON,
+    Decision,
+    apply_merge_policy,
+    certificate_of,
+    context_rule_may_promote,
+)
+from autodedup.features import TAG_FEATURE_NAMES
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.lab.cache import FIDX, Cohort
@@ -149,14 +157,21 @@ def _cuts(c: Cohort, layer: np.ndarray, p: dict[str, Any]) -> tuple[np.ndarray, 
     return cut, propose_only
 
 
+def _no_tag_fact(column: str) -> None:
+    """Tags are never facts, in any mode (standing ruling): no rung may veto on a tag column."""
+    if column in TAG_FEATURE_NAMES:
+        raise ValueError(f"{column} is tag-derived: a tag is never a fact that separates a pair")
+
+
 # --- the reference rungs: decide_pair, one rule each --------------------------------------------
 
 @rung("veto")
 def veto_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
-    """The walls re-checked at decide time and E61's unit-designator conflict."""
+    """The walls re-checked at decide time and E61's unit-designator conflict, over every zone:
+    `decide` runs it first whatever the config's order, and again after the last rung."""
     d = d.copy()
     names = c.sig["veto"]
-    m = (d.zone == U) & (names != "")
+    m = names != ""
     families = np.array([FACT_FAMILY.get(x, "ATTR") for x in names], dtype=object)
     d.settle(m, VETO, "fact", names, families, _cat(["guard:", names]))
     d.score[m] = 0.0
@@ -176,13 +191,35 @@ def auto_reject_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     return d
 
 
+def _allowed_certificates(c: Cohort, allow: list[str]) -> np.ndarray:
+    """The certificate each pair earns when only `allow` may certify, read by the engine's own
+    `certificate_of`: K-R and K-A off are its settings switches, K-B off is E85's `kb_refused`
+    (the pair falls to K-C exactly as the engine's family pass re-decides it). K-C is the last
+    certificate, so K-C off leaves the pair uncertified."""
+    cert = c.sig["cert"].copy()
+    redo = np.flatnonzero((cert != "") & ~np.isin(cert, allow))
+    if len(redo) == 0:
+        return cert
+    settings = dataclasses.replace(
+        c.settings, certificate_kr_enabled=c.settings.certificate_kr_enabled and "K-R" in allow,
+        certificate_ka_enabled=c.settings.certificate_ka_enabled and "K-A" in allow)
+    for i in redo:
+        lo, hi = c.keys[i]
+        again = certificate_of(c.feats(int(i)), c.ds.listings[lo], c.ds.listings[hi], settings,
+                               "K-B" not in allow) or ""
+        cert[i] = again if again in allow else ""
+    return cert
+
+
 @rung("proof")
 def proof_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     """K-R, K-B, K-C (whichever `allow` lists): certified pairs merge, subject to E48's
-    propose-only strata, the E46/E47 block and E11's family count."""
+    propose-only strata, the E46/E47 block and E11's family count. A pair whose certificate is
+    not allowed is re-read by `certificate_of` without it (`_allowed_certificates`)."""
     d = d.copy()
-    cert = c.sig["cert"]
-    m = (d.zone == U) & np.isin(cert, list(p.get("allow", ("K-R", "K-A", "K-B", "K-C"))))
+    allow = list(p.get("allow", ("K-R", "K-A", "K-B", "K-C")))
+    cert = _allowed_certificates(c, allow) if "allow" in p else c.sig["cert"]
+    m = (d.zone == U) & (cert != "")
     _, propose_only = _cuts(c, cert, p)
     block = c.sig["block"]
     diverse = c.sig["nfam"] >= int(p.get("min_families", c.settings.min_evidence_families))
@@ -222,14 +259,16 @@ def score_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 @rung("context")
 def context_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     """E63: a band pair with a near-identical body, one price and a top score merges unless a
-    fungible-catalogue limb refuses."""
+    fungible-catalogue limb refuses; `context_rule_may_promote` reads the band reason, as
+    `apply_context_rule` does."""
     d = d.copy()
     if not p.get("enabled", c.settings.context_rule_enabled):
         return d
     arm, refused = c.sig["ctx_arm"], c.sig["ctx_refused"]
-    never = np.isin(c.sig["block"], list(CONTEXT_RULE_NEVER_OVERRIDES))
-    m = ((d.zone == BAND) & ~d.final & ~never & (arm != "")
+    m = ((d.zone == BAND) & ~d.final & (arm != "")
          & (d.score >= float(p.get("min_score", c.settings.context_rule_min_score))))
+    for i in np.flatnonzero(m):
+        m[i] = context_rule_may_promote(d.reason[i])
     fungible = m & (refused != "") & (refused != "unanswered")
     d.reason[fungible] = _cat([CONTEXT_RULE_REASON + ":fungible:", refused])[fungible]
     ok = m & (refused == "")
@@ -240,13 +279,16 @@ def context_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 
 @rung("gate")
 def gate_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
-    """Stated facts cap the zone: a merge the comparator separates is never a merge edge."""
+    """Stated facts cap the zone: a merge the comparator separates is never a merge edge.
+    `settings` re-reads the gate under the row plus those overrides (the engine's own
+    `distinguishing_facts`, filled lazily and kept in the overlay under the overrides)."""
     d = d.copy()
-    if not p.get("enabled", c.settings.d43_gate):
+    settings = c.settings_with(p.get("settings"))
+    if not p.get("enabled", settings.d43_gate):
         return d
     m = d.zone == MERGE
-    c.ensure("gate", np.flatnonzero(m))
-    first = np.array([facts[0] if facts else "" for facts in c.sig["gate"]], dtype=object)
+    sig = c.lazy("gate", np.flatnonzero(m), p.get("settings"))
+    first = np.array([facts[0] if facts else "" for facts in sig["gate"]], dtype=object)
     hit = m & (first != "")
     families = np.array([FACT_FAMILY.get(x, "ATTR") for x in first], dtype=object)
     d.settle(hit, BAND, "fact", first, families, _cat([d.reason, ":d43_gate:", first]))
@@ -257,13 +299,15 @@ def gate_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 @rung("demonstrate")
 def demonstrate_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     """D43 promotion under D50: a band pair no fact separates merges when it positively agrees
-    and one unit-grade corroboration holds."""
+    and one unit-grade corroboration holds. `settings` re-reads the PROMOTE-mode facts under the
+    row plus those overrides (e.g. an image-facts switch: tags are never facts, in any mode)."""
     d = d.copy()
-    if not p.get("enabled", c.settings.d43_promote):
+    settings = c.settings_with(p.get("settings"))
+    if not p.get("enabled", settings.d43_promote):
         return d
     m = (d.zone == BAND) & ~d.final & ~d.gated
-    c.ensure("promote", np.flatnonzero(m))
-    warrant, refusal, corro = c.sig["warrant"], c.sig["refusal"], c.sig["corro"]
+    sig = c.lazy("promote", np.flatnonzero(m), p.get("settings"))
+    warrant, refusal, corro = sig["warrant"], sig["refusal"], sig["corro"]
     refused = m & (warrant != "") & (refusal != "")
     limb = np.array([LIMB_FAMILY.get(r[2:], "ATTR") if r.startswith("A:") else "NONE"
                      for r in refusal], dtype=object)
@@ -277,28 +321,23 @@ def demonstrate_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 
 @rung("policy")
 def policy_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
-    """D65: a category cell the operator holds propose-only never reaches the merge zone."""
+    """D65: a category cell the operator holds propose-only never reaches the merge zone; each
+    merge is read by the engine's own `apply_merge_policy` (`table` overrides the row's)."""
     d = d.copy()
-    table = p.get("table", c.settings.merge_policy) or {}
-    if not table:
+    settings = (dataclasses.replace(c.settings, merge_policy=dict(p["table"] or {}))
+                if "table" in p else c.settings)
+    if not settings.merge_policy:
         return d
-
-    def held(listing_id: int) -> str:
-        """The cell `apply_merge_policy` names when this advert holds the pair, else ""."""
-        listing = c.ds.listings[listing_id]
-        kind, main = listing.category_type or "*", listing.category_main or "*"
-        for key in (f"{kind}|{main}", f"{kind}|*", f"*|{main}", "*|*"):
-            if key in table:
-                return (f"{listing.category_type}|{listing.category_main}"
-                        if table[key] == "propose" else "")
-        return ""
-    m = d.zone == MERGE
-    cells = np.full(c.n, "", dtype=object)
-    for i in np.flatnonzero(m):
+    hold = np.zeros(c.n, dtype=bool)
+    reason = d.reason.copy()
+    for i in np.flatnonzero(d.zone == MERGE):
         lo, hi = c.keys[i]
-        cells[i] = held(lo) or held(hi)
-    hold = cells != ""
-    d.settle(hold, BAND, "policy", "hold", "OPERATOR", _cat([d.reason, ":policy_hold:", cells]))
+        read = apply_merge_policy(Decision(lo, hi, "merge", float(d.score[i]), set(),
+                                           d.cert[i] or None, None, d.reason[i]),
+                                  c.ds.listings[lo], c.ds.listings[hi], settings)
+        if read.zone != "merge":
+            hold[i], reason[i] = True, read.reason
+    d.settle(hold, BAND, "policy", "hold", "OPERATOR", reason)
     return d
 
 
@@ -322,16 +361,18 @@ def _conditions(c: Cohort, conditions: list[list[Any]], absent: bool) -> np.ndar
 def column_proof_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     """A proof written as data: pairs in `from` zones whose columns meet every `all` condition
     merge, unless a stated fact separates them (`fact_veto`) or any `veto` condition holds.
-    The operator's kitchen-to-kitchen proof with a floor-plan veto is one config of this rung;
-    a GPU job's image scores (`extra_features`) are another."""
+    The operator's kitchen-to-kitchen proof (tag columns as EVIDENCE) is one config of this rung;
+    a GPU job's image scores (`extra_features`) are another. A `veto` condition may not read a tag
+    column: tags are never facts."""
     d = d.copy()
     zones = [dict(band=BAND, reject=REJECT)[z] for z in p.get("from", ("band",))]
     m = np.isin(d.zone, zones) & ~d.final & ~d.gated & _conditions(c, p["all"], False)
     for veto in p.get("veto", ()):
+        _no_tag_fact(veto[0])
         m &= ~_conditions(c, [veto], False)
     if p.get("fact_veto", True):
-        c.ensure("gate", np.flatnonzero(m))
-        m &= np.array([not facts for facts in c.sig["gate"]])
+        gate = c.lazy("gate", np.flatnonzero(m), p.get("settings"))["gate"]
+        m &= np.array([not facts for facts in gate])
     d.settle(m, MERGE, "proof", p.get("name", "column"), p.get("carrier", "IMG"),
              "column_proof:" + p.get("name", "column"))
     return d
@@ -339,7 +380,9 @@ def column_proof_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 
 @rung("feature_veto")
 def feature_veto_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
-    """Demote merges on one feature bound, e.g. `{"feature": "floorplan_conflict", "ge": 1}`."""
+    """Demote merges on one feature bound, e.g. `{"feature": "floor_stated_conflict", "ge": 1}`;
+    never on a tag column (tags are never facts)."""
+    _no_tag_fact(p["feature"])
     d = d.copy()
     v, present = c.column(p["feature"])
     hit = present.copy()
@@ -370,9 +413,14 @@ class Groups:
 
 
 def storable(c: Cohort, d: Decisions) -> np.ndarray:
-    """`store_score.storable` as a column: merge and band, E61's evidence, the tail over the floor."""
-    return ((d.zone == MERGE) | (d.zone == BAND) | (c.sig["veto"] == UNIT_DESIGNATOR_VETO)
-            | ((d.zone == REJECT) & (d.score >= c.settings.store_floor)))
+    """`store_score.storable` itself, pair by pair: a row carries evidence only when it is E61's
+    veto (the two unit designators), the one lab decision that stores evidence below the band."""
+    evidence = (d.zone == VETO) & (c.sig["veto"] == UNIT_DESIGNATOR_VETO)
+    floor = c.settings.store_floor
+    return np.fromiter((store_score.storable({"zone": ZONE_NAMES[z], "score": s, "evidence": e},
+                                             floor)
+                        for z, s, e in zip(d.zone.tolist(), d.score.tolist(), evidence.tolist())),
+                       dtype=bool, count=c.n)
 
 
 def merge_edges(c: Cohort, d: Decisions) -> list[Decision]:
@@ -498,6 +546,7 @@ class Outcome:
     groups: Groups
     timings: dict[str, float]
     walls_forced: bool = False
+    scorer: dict[str, Any] = field(default_factory=dict)
 
 
 def config_id(config: dict[str, Any]) -> str:
@@ -505,24 +554,29 @@ def config_id(config: dict[str, Any]) -> str:
     return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:10]
 
 
-def decide(c: Cohort, config: dict[str, Any], finish: bool = True) -> tuple[Decisions, bool]:
+def decide(c: Cohort, config: dict[str, Any], finish: bool = True,
+           scorer: dict[str, Any] | None = None) -> tuple[Decisions, bool]:
     """The arm's ladder over every pair; `finish` settles what no rung reached as an unscored
-    reject and names the score decisions' carriers. Returns the decisions and whether the walls
-    had to be forced in."""
+    reject and names the score decisions' carriers. Returns the decisions and whether the config
+    did not put the walls first (they are put first either way). `scorer` receives the score
+    column's provenance."""
     c.extra = {}
     for path in config.get("extra_features", ()):
         c.load_extra(os.path.expandvars(str(path).format(cohort=c.name)))
-    score, model = scores(config.get("model", "ref"), c)
+    score, model, provenance = scores(config.get("model", "ref"), c)
+    if scorer is not None:
+        scorer.update(provenance)
     d = Decisions.blank(c.n, score)
-    ladder = [step for step in config.get("ladder", [{"rung": name} for name in REFERENCE_LADDER])
-              if step.get("on", True)]
-    walls_forced = not any(step["rung"] == "veto" for step in ladder)
-    if walls_forced:
-        # The standing rulings (never a rental with a sale, never a flat with a commercial unit)
-        # are not a rung an arm may remove: without them no group step is safe to read.
-        ladder = [{"rung": "veto"}] + ladder
+    configured = [step for step in config.get("ladder", [{"rung": name} for name in REFERENCE_LADDER])
+                  if step.get("on", True)]
+    walls_forced = not configured or configured[0]["rung"] != "veto"
+    # The standing rulings (never a rental with a sale, never a flat with a commercial unit) are
+    # not a rung an arm may remove or reorder: the walls settle first, over every pair, and are
+    # read again after the last rung, so no rung can carry a walled pair into any other zone.
+    ladder = [{"rung": "veto"}] + [step for step in configured if step["rung"] != "veto"]
     for step in ladder:
         d = RUNGS[step["rung"]](c, d, step)
+    d = RUNGS["veto"](c, d, {})
     if not finish:
         return d, walls_forced
     rest = d.zone == U
@@ -540,13 +594,14 @@ def decide(c: Cohort, config: dict[str, Any], finish: bool = True) -> tuple[Deci
 
 def run(c: Cohort, config: dict[str, Any]) -> Outcome:
     clock = time.perf_counter()
-    d, walls_forced = decide(c, config)
+    scorer: dict[str, Any] = {}
+    d, walls_forced = decide(c, config, scorer=scorer)
     decide_s = time.perf_counter() - clock
     group = config.get("group", {"step": "relation"})
     groups = GROUPS[group["step"]](c, d, group)
     c.save()
     timings = {"decide_s": decide_s, "group_s": time.perf_counter() - clock - decide_s}
-    return Outcome(config, d, groups, timings, walls_forced)
+    return Outcome(config, d, groups, timings, walls_forced, scorer)
 
 
 def expand(config: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,9 +1,12 @@
 """The learned score as a column: the cache's exact scores, a logistic model file scored in one
-numpy pass, or an external per-pair score file (any learner, any machine), plus the per-family
-log-odds split that names a score decision's carrier (LADDER_SPEC section 4, E12)."""
+numpy pass, or a per-pair score file (any learner, any machine) keyed on EXACTLY the cohort's pairs
+and naming the cache it was scored on, plus the per-family log-odds split that names a score
+decision's carrier (LADDER_SPEC section 4, E12). Every column comes with its provenance, which the
+leaderboard row carries."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,12 +59,38 @@ def logistic_scores(model: LogisticModel, c: Cohort) -> np.ndarray:
     return calibrate(model, 1.0 / (1.0 + np.exp(-total)))
 
 
-def external_scores(path: str | Path, c: Cohort) -> np.ndarray:
-    """An `.npz` with `lo`, `hi`, `p`: any learner's calibrated probability per candidate pair.
-    A pair the file does not carry scores 0.0 (it can only be rejected)."""
+class ScorerMismatch(ValueError):
+    """A score file that is not keyed on this cohort's pairs, or names another cache."""
+
+
+def file_sha(path: str | Path) -> str:
+    return hashlib.sha1(Path(path).read_bytes()).hexdigest()[:12]
+
+
+def npz_meta(data: Any) -> dict[str, Any]:
+    return json.loads(str(data["meta"])) if "meta" in data.files else {}
+
+
+def external_scores(path: str | Path, c: Cohort) -> tuple[np.ndarray, dict[str, Any]]:
+    """An `.npz` with `lo`, `hi`, `p` and a `meta` JSON string: a learner's calibrated probability
+    per candidate pair. It must carry exactly the cohort's pairs in the artefact's order and name
+    the artefact version it scored (`meta.cache`): a file keyed on another retrieval, or scored
+    off another cache, is refused, never silently filled."""
     data = np.load(path)
-    lookup = {(int(a), int(b)): float(p) for a, b, p in zip(data["lo"], data["hi"], data["p"])}
-    return np.array([lookup.get(key, 0.0) for key in c.keys], dtype=np.float64)
+    lo, hi = data["lo"].astype(np.int64), data["hi"].astype(np.int64)
+    if len(lo) != c.n or not (np.array_equal(lo, c.lo) and np.array_equal(hi, c.hi)):
+        theirs = set(zip(lo.tolist(), hi.tolist()))
+        ours = set(c.keys)
+        raise ScorerMismatch(f"{path}: {len(theirs - ours)} pairs not on the one path, "
+                             f"{len(ours - theirs)} one-path pairs missing, or another order; "
+                             "refit it on this cache (`lab fit`)")
+    meta = npz_meta(data)
+    if meta.get("cache") != c.version:
+        raise ScorerMismatch(f"{path}: scored cache {meta.get('cache')!r}, this cohort's is "
+                             f"{c.version}; refit it on this cache (`lab fit`)")
+    return (data["p"].astype(np.float64),
+            {"kind": "npz", "path": str(path), "sha": file_sha(path), "cache": meta["cache"],
+             "fit": meta.get("fit"), "train": meta.get("train")})
 
 
 def load_model(ref: str | Path) -> LogisticModel:
@@ -71,18 +100,21 @@ def load_model(ref: str | Path) -> LogisticModel:
     return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
 
 
-def scores(spec: Any, c: Cohort) -> tuple[np.ndarray, LogisticModel | None]:
-    """The score column an arm decides on: `ref` (the cache's exact `predict_proba`), a model
-    file path, `{"npz": path}` (`{cohort}` is the cohort's name, `$VARS` expand), or `{"const": p}`
-    (no learned score at all)."""
+def scores(spec: Any, c: Cohort) -> tuple[np.ndarray, LogisticModel | None, dict[str, Any]]:
+    """The score column an arm decides on and its provenance: `ref` (the cache's exact
+    `predict_proba`), a model file path, `{"npz": path}` (`{cohort}` is the cohort's name,
+    `$VARS` expand), or `{"const": p}` (no learned score at all)."""
     if spec in (None, "ref"):
-        return c.sig["score_ref"], c.model
+        return c.sig["score_ref"], c.model, {"kind": "ref"}
     if isinstance(spec, dict) and "npz" in spec:
-        return external_scores(os.path.expandvars(str(spec["npz"]).format(cohort=c.name)), c), None
+        column, provenance = external_scores(
+            os.path.expandvars(str(spec["npz"]).format(cohort=c.name)), c)
+        return column, None, provenance
     if isinstance(spec, dict) and "const" in spec:
-        return np.full(c.n, float(spec["const"])), None
+        return np.full(c.n, float(spec["const"])), None, {"kind": "const"}
     model = load_model(spec)
-    return logistic_scores(model, c), model
+    return logistic_scores(model, c), model, {"kind": "model", "path": str(spec),
+                                              "version": model.version}
 
 
 def family_split(model: LogisticModel, c: Cohort) -> dict[str, np.ndarray]:

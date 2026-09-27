@@ -83,10 +83,10 @@ def _read(groups: Groups, labels: dict[tuple[int, int], str], ids: set[int]) -> 
                                        if same_t + diff_t else None)}
 
 
-def load_fixtures(path: Path = KEEP_APART) -> list[tuple[str, int, int, str]]:
+def load_fixtures(path: Path | None = None) -> list[tuple[str, int, int, str]]:
     """The keep-apart fixtures (hard bar M3 / A3) as (cohort, lo, hi, case)."""
     return [(row["cohort"], row["ids"][0], row["ids"][1], row["case"])
-            for row in json.loads(path.read_text(encoding="utf-8"))["fixtures"]]
+            for row in json.loads((path or KEEP_APART).read_text(encoding="utf-8"))["fixtures"]]
 
 
 def fixtures_apart(groups: Groups, fixtures: Iterable[tuple[str, int, int, str]], cohort: str,
@@ -106,7 +106,8 @@ def fixtures_apart(groups: Groups, fixtures: Iterable[tuple[str, int, int, str]]
     cases = {case for *_, case in present}
     return {"n": len(present), "apart": len(present) - len(joined), "cases": len(cases),
             "cases_apart": len(cases - {case for *_, case in joined}),
-            "together": [f"{case} ({a} x {b})" for a, b, case in joined]}
+            "together": [f"{case} ({a} x {b})" for a, b, case in joined],
+            "present": sorted(f"{a}x{b}" for a, b, _ in present)}
 
 
 def _count(values: Iterable[str]) -> dict[str, int]:
@@ -192,8 +193,11 @@ def _run_seconds(c: Cohort) -> float | None:
 
 
 def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
-        why: dict[str, Any] | None = None, verified: bool | None = None, stamp: str = ""
+        why: dict[str, Any] | None = None, verified: bool | str | None = None, stamp: str = ""
         ) -> dict[str, Any]:
+    """One arm's leaderboard row. `verified` is True only when the stamp passed `lab verify`
+    (with its rungs) AND the score column is the one path's; a verified cache under a score file
+    `lab fit` did not write on this cache reads `"cache verified, scorer external"`."""
     d, g = arm.decisions, arm.groups
     ids = set(c.ds.listings)
     merges = d.zone == MERGE
@@ -204,6 +208,7 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
     out: dict[str, Any] = {
         "experiment": arm.config.get("name"), "config_id": config_id(arm.config),
         "cohort": c.name, "cache": c.version, "stamp": stamp, "engine": c.code_digest,
+        "export": c.export_digest, "scorer": dict(arm.scorer),
         "code": git_head(), "verified": verified, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "zones": {"merge": int(merges.sum()), "band": int((d.zone == BAND).sum()),
                   "reject": int((d.zone == REJECT).sum()), "veto": int((d.zone == VETO).sum())},
@@ -220,7 +225,8 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
     m: dict[str, Any] = {
         "M1": {"together": rulings["same_together"], "n": rulings["same_n"]},
         "M2": {"together": rulings["diff_together"], "n": rulings["diff_n"]},
-        "M3": {k: fixtures[k] for k in ("apart", "n", "cases_apart", "cases", "together")},
+        "M3": {k: fixtures[k] for k in ("apart", "n", "cases_apart", "cases", "together",
+                                        "present")},
         "M6": m6(c, d, labels.rulings),
         "M7": {"band": out["zones"]["band"], "groups": len(g.clusters),
                "largest": max(sizes) if sizes else 0},
@@ -370,6 +376,12 @@ def _fmt(value: Any) -> str:
     return "–" if value is None else str(value)
 
 
+def _verified_cell(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return {True: "yes", False: "NO"}.get(value, "–")
+
+
 def latest_rows(board: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
     """The newest row per (cohort, experiment, config)."""
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -444,7 +456,7 @@ def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
             m1, m2 = m.get("M1"), m.get("M2")
             lines.append("| " + " | ".join(_fmt(x).replace("|", "/") for x in (
                 cohort, e["experiment"],
-                {True: "yes", False: "NO"}.get(e.get("verified"), "–"),
+                _verified_cell(e.get("verified")),
                 f"{m1['together']}/{m1['n']}" if m1 else None,
                 f"{m2['together']}/{m2['n']}" if m2 else None,
                 _m3_cell(e.get("fixtures")), _read_cell(m.get("M4")), _read_cell(m.get("M5")),

@@ -1,6 +1,6 @@
 {
  "name": "off_proof_KR",
- "note": "proof K-R off: those pairs fall to the score",
+ "note": "proof K-R off (certificate_of with certificate_kr_enabled false): those pairs fall to K-B, K-C or the score",
  "model": "ref",
  "ladder": [
   {

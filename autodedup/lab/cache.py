@@ -3,14 +3,17 @@
 The pairs, their features and every rung's per-pair signal are the ones the one path decided and
 the engine's own functions computed (`autodedup/evidence.py`); the lab builds nothing by a second
 retrieval path. It adds two things only, both with the same engine functions: lazy fills of the
-gate and promotion signals for pairs an arm reaches beyond the run's store floor, and the D43
-relation memo. Both live in an overlay beside the artefact's version and only ever grow.
+gate and promotion signals (for pairs an arm reaches beyond the run's store floor, or under an
+arm's settings overrides, kept per override), and the D43 relation memo. Both live in an overlay
+beside the artefact's version and only ever grow.
 
-An artefact whose code digest is not the checkout's is refused: its signals were computed by an
-engine that is no longer this one, and a fill would mix the two."""
+An artefact whose code digest is not the checkout's is refused before its pickle is read: its
+signals were computed by an engine that is no longer this one, and a fill would mix the two. An
+export a preregistration seals is refused unless the registry names its freeze."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import pickle
@@ -102,6 +105,8 @@ class Cohort:
     extra: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     relation: dict[tuple[Any, ...], bool] = field(default_factory=dict)
     workers: int = 1
+    export_digest: str = ""
+    tagged: dict[str, dict[str, dict[str, np.ndarray]]] = field(default_factory=dict)
 
     @property
     def n(self) -> int:
@@ -143,32 +148,58 @@ class Cohort:
             self.extra[name] = (values, present)
         return names
 
+    def settings_with(self, overrides: dict[str, Any] | None) -> Settings:
+        """The artefact's settings row plus an arm's overrides (an unknown field raises)."""
+        return dataclasses.replace(self.settings, **overrides) if overrides else self.settings
+
+    def lazy(self, kind: str, idx: np.ndarray, overrides: dict[str, Any] | None = None
+             ) -> dict[str, np.ndarray]:
+        """The lazy signal columns of `kind` (gate / promote), filled for `idx`: the artefact's
+        own under its settings row, or a sibling set computed by the SAME engine functions under
+        the row plus `overrides`, kept in the overlay under the overrides' tag."""
+        if not overrides:
+            self.ensure(kind, idx)
+            return {name: self.sig[name] for name in LAZY_SIGNALS[kind]}
+        tag = json.dumps(overrides, sort_keys=True)
+        slot = self.tagged.setdefault(tag, {"sig": {}, "done": {}})
+        if kind not in slot["done"]:
+            slot["done"][kind] = np.zeros(self.n, dtype=bool)
+            for name in LAZY_SIGNALS[kind]:
+                slot["sig"][name] = _objects([() if name == "gate" else ""] * self.n)
+        self._fill(kind, idx, slot["sig"], slot["done"], self.settings_with(overrides))
+        return {name: slot["sig"][name] for name in LAZY_SIGNALS[kind]}
+
     def ensure(self, kind: str, idx: np.ndarray) -> int:
         """Fill the lazy signal `kind` for the pairs in `idx` that lack it, with the engine
         function the artefact used (`evidence.LAZY_FN`); returns how many."""
-        missing = idx[~self.done[kind][idx]]
+        return self._fill(kind, idx, self.sig, self.done, self.settings)
+
+    def _fill(self, kind: str, idx: np.ndarray, sig: dict[str, np.ndarray],
+              done: dict[str, np.ndarray], settings: Settings) -> int:
+        missing = idx[~done[kind][idx]]
         if len(missing) == 0:
             return 0
         order = [int(i) for i in missing]
         job = evidence.job(self.keys, _LazyFeats(self), self.fps, self.ds.listings, self.model,
-                           self.settings)
+                           settings)
         rows = evidence.pooled(job, evidence.LAZY_FN[kind], order,
                                self.workers if len(order) > 2000 else 1)
         for i, values in zip(order, rows):
             for name, value in zip(LAZY_SIGNALS[kind], values):
-                self.sig[name][i] = value
-        self.done[kind][missing] = True
+                sig[name][i] = value
+        done[kind][missing] = True
         self.dirty = True
         return len(order)
 
     def save(self) -> None:
-        """The overlay: lazy fills and the relation memo (the artefact itself is never written)."""
+        """The overlay: lazy fills (per override tag) and the relation memo (the artefact itself
+        is never written)."""
         if not self.dirty:
             return
         names = [name for names in LAZY_SIGNALS.values() for name in names]
         payload = {"schema": OVERLAY_SCHEMA, "version": self.version,
                    "sig": {name: self.sig[name] for name in names}, "done": self.done,
-                   "relation": self.relation}
+                   "relation": self.relation, "tagged": self.tagged}
         self.path.mkdir(parents=True, exist_ok=True)
         tmp = self.path / "overlay.pkl.tmp"
         with open(tmp, "wb") as handle:
@@ -222,21 +253,29 @@ def from_evidence(name: str, spec: dict[str, Any], payload: dict[str, Any], ds: 
     cohort = Cohort(name, spec, ds, settings, model, fps, keys,
                     [frozenset(p) for p in payload["probes"]], V, P, sig, done,
                     manifest["version"], path, run, payload.get("census"), manifest["code_digest"],
-                    workers=workers)
+                    workers=workers, export_digest=manifest["export_digest"])
     cohort.timings["fingerprints_s"] = time.perf_counter() - clock
     return cohort
 
 
+def check_seal(reg: dict[str, Any], spec: dict[str, Any]) -> None:
+    """A sealed export (a preregistration's block) opens only when the registry names its
+    freeze (`"freeze": "<the addendum>"` on the cohort); the registry's `seals` add files to
+    the committed preregistrations."""
+    evidence.check_seal(spec["export"], reg.get("seals") or (), freeze=bool(spec.get("freeze")))
+
+
 def open_cohort(name: str, registry_path: str | Path | None = None, workers: int = 4,
                 cache_root: str | Path | None = None) -> Cohort:
-    """The cohort's artefact (written by `harness run --evidence`), checked against this
-    checkout's engine code and the registry's export, plus the lab's overlay if it has one."""
+    """The cohort's artefact (written by `harness run --evidence`), checked against the seals,
+    this checkout's engine code (on the manifest, before the pickle) and the registry's export,
+    plus the lab's overlay if it has one."""
     reg = registry(registry_path)
     spec = reg["cohorts"][name]
+    check_seal(reg, spec)
     root = Path(cache_root or reg["cache_root"])
     clock = time.perf_counter()
-    payload = evidence.read(spec["run"])
-    manifest = payload["manifest"]
+    manifest = evidence.read_manifest(spec["run"])
     code = evidence.code_digest()
     if manifest["code_digest"] != code:
         raise StaleEvidence(
@@ -246,6 +285,9 @@ def open_cohort(name: str, registry_path: str | Path | None = None, workers: int
     if export != manifest["export_digest"]:
         raise StaleEvidence(f"{name}: evidence was written off export {manifest['export_digest']}, "
                             f"the registry's export is {export}")
+    payload = evidence.read(spec["run"])
+    if payload["manifest"]["version"] != manifest["version"]:
+        raise StaleEvidence(f"{name}: evidence.json and evidence.pkl disagree on the version")
     timings = {"evidence_s": time.perf_counter() - clock}
     clock = time.perf_counter()
     ds = load(spec["export"])
@@ -260,5 +302,6 @@ def open_cohort(name: str, registry_path: str | Path | None = None, workers: int
             cohort.sig.update(saved["sig"])
             cohort.done.update(saved["done"])
             cohort.relation = saved.get("relation", {})
+            cohort.tagged = saved.get("tagged", {})
     cohort.timings["load_s"] = sum(cohort.timings.values())
     return cohort

@@ -50,7 +50,8 @@ GROUPS = Groups(clusters={1: (1, 2, 7), 3: (3, 8)})
 def test_m3_counts_pairs_and_cases_an_arm_joins() -> None:
     out = metrics.fixtures_apart(GROUPS, FIXTURES, "c1", {1, 2, 3, 4, 7, 8})
     assert out == {"n": 3, "apart": 1, "cases": 2, "cases_apart": 1,
-                   "together": ["joined (1 x 2)", "joined (1 x 7)"]}
+                   "together": ["joined (1 x 2)", "joined (1 x 7)"],
+                   "present": ["1x2", "1x7", "3x4"]}
 
 
 def test_m3_reads_the_ids_not_the_cohort_name() -> None:

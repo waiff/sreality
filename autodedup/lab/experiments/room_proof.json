@@ -1,6 +1,6 @@
 {
  "name": "room_proof",
- "note": "the operator's kitchen-to-kitchen proof on today's CLIP room tags: second-weakest private room cosine, >=2 private rooms, fact veto + floor-plan veto; band pairs only",
+ "note": "the operator's kitchen-to-kitchen proof on today's CLIP room tags as EVIDENCE: second-weakest private room cosine, >=2 private rooms, under the stated-fact veto (no tag veto: tags are never facts); band pairs only",
  "model": "ref",
  "ladder": [
   {
@@ -45,13 +45,7 @@
      2
     ]
    ],
-   "veto": [
-    [
-     "floorplan_conflict",
-     "==",
-     1
-    ]
-   ],
+   "veto": [],
    "fact_veto": true
   }
  ],
