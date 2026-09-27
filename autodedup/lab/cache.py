@@ -107,6 +107,7 @@ class Cohort:
     timings: dict[str, float] = field(default_factory=dict)
     extra: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     relation: dict[tuple[tuple[int, int], bool, bool], bool] = field(default_factory=dict)
+    workers: int = 1
 
     @property
     def n(self) -> int:
@@ -156,8 +157,8 @@ class Cohort:
         fn = _gate_one if kind == "gate" else _promote_one
         global _COHORT
         _COHORT = self
-        for i in missing:
-            values = fn(int(i))
+        rows = _pooled(fn, [int(i) for i in missing], self.workers if len(missing) > 2000 else 1)
+        for i, values in zip(missing, rows):
             for name, value in zip(LAZY_SIGNALS[kind], values):
                 self.sig[name][i] = value
         self.done[kind][missing] = True
@@ -304,7 +305,7 @@ def open_cohort(name: str, registry_path: str | Path | None = None, workers: int
     keys, probes, V, P = _features(spec, ds, settings, fps)
     timings = {"load_s": time.perf_counter() - clock}
     cohort = Cohort(name, spec, ds, settings, model, fps, hazard, keys, probes, V, P, {}, {},
-                    version, path, timings=timings)
+                    version, path, timings=timings, workers=workers)
     signals = path / "signals.pkl"
     if signals.is_file():
         with open(signals, "rb") as handle:
