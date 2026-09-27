@@ -205,3 +205,19 @@ def test_group_reads_come_back_as_labels(tmp_path: Path) -> None:
         {"kind": "other", "members": [1, 2], "verdict": "same"})) + "\n")
     assert metrics.read_group_reads([path]) == {frozenset({3, 4, 5}): "same",
                                                 frozenset({6, 7}): "same"}
+
+
+def test_a_cache_version_follows_content_not_mtime(tmp_path: Path) -> None:
+    import os
+
+    from autodedup.lab import cache
+
+    a, b = tmp_path / "a.gz", tmp_path / "b.gz"
+    a.write_bytes(b"same bytes")
+    b.write_bytes(b"same bytes")
+    os.utime(b, (1, 1))
+    memo = tmp_path / "digests.json"
+    assert cache.file_digest(a, memo) == cache.file_digest(b, memo) == cache.file_digest(a)
+    assert json.loads(memo.read_text())[str(a.resolve())][1] == cache.file_digest(a)
+    b.write_bytes(b"other bytes")
+    assert cache.file_digest(b, memo) != cache.file_digest(a, memo)
