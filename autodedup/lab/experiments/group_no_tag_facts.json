@@ -1,0 +1,37 @@
+{
+ "name": "group_no_tag_facts",
+ "note": "the group relation stops reading the two tag-derived facts (interior, floorplan: CLIP room-tag cosine and the tag floor-plan conflict); the ruling 'tags are never facts'. w31 already keeps them out of the pair gate (d43_gate_image_facts false)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation",
+  "settings": {
+   "d43_cluster_image_facts": false
+  }
+ }
+}

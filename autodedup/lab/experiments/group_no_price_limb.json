@@ -1,0 +1,37 @@
+{
+ "name": "group_no_price_limb",
+ "note": "the group relation stops reading E157's cluster-grain price limb (a price gap is not a stated distinguishing fact of the unit)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation",
+  "settings": {
+   "demonstrate_cluster_price": false
+  }
+ }
+}

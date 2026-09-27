@@ -115,6 +115,19 @@ def test_thresholds_are_config_values(tmp_path: Path, t_lo: float, expected: str
     assert _zones(board.run(c, {"ladder": ladder, "group": {"step": "components"}}))[5] == expected
 
 
+def test_group_step_dials_are_config_values_with_their_own_memo(tmp_path: Path) -> None:
+    c = _cohort(tmp_path)
+    c.relation = {}
+    plain = board._RelationMemo(c, {}, None)
+    ruled = board._RelationMemo(c, {}, None, '{"d43_cluster_image_facts": false}')
+    plain[(1, 2)] = False
+    ruled[(1, 2)] = True
+    assert plain.get((1, 2)) is False and ruled.get((1, 2)) is True
+    blank = board.Decisions.blank(c.n, c.sig["score_ref"])
+    with pytest.raises(TypeError):
+        board.relation_group(c, blank, {"step": "relation", "settings": {"no_such_dial": 1}})
+
+
 def test_a_learner_from_anywhere_is_one_config_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
                                                     ) -> None:
     c = _cohort(tmp_path)
