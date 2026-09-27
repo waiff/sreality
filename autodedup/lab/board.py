@@ -282,16 +282,23 @@ def policy_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     table = p.get("table", c.settings.merge_policy) or {}
     if not table:
         return d
-    def held(listing_id: int) -> bool:
+
+    def held(listing_id: int) -> str:
+        """The cell `apply_merge_policy` names when this advert holds the pair, else ""."""
         listing = c.ds.listings[listing_id]
         kind, main = listing.category_type or "*", listing.category_main or "*"
         for key in (f"{kind}|{main}", f"{kind}|*", f"*|{main}", "*|*"):
             if key in table:
-                return table[key] == "propose"
-        return False
+                return (f"{listing.category_type}|{listing.category_main}"
+                        if table[key] == "propose" else "")
+        return ""
     m = d.zone == MERGE
-    hold = np.array([bool(m[i]) and (held(lo) or held(hi)) for i, (lo, hi) in enumerate(c.keys)])
-    d.settle(hold, BAND, "policy", "hold", "OPERATOR", _cat([d.reason, ":policy_hold"]))
+    cells = np.full(c.n, "", dtype=object)
+    for i in np.flatnonzero(m):
+        lo, hi = c.keys[i]
+        cells[i] = held(lo) or held(hi)
+    hold = cells != ""
+    d.settle(hold, BAND, "policy", "hold", "OPERATOR", _cat([d.reason, ":policy_hold:", cells]))
     return d
 
 
@@ -498,8 +505,10 @@ def config_id(config: dict[str, Any]) -> str:
     return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:10]
 
 
-def run(c: Cohort, config: dict[str, Any]) -> Outcome:
-    clock = time.perf_counter()
+def decide(c: Cohort, config: dict[str, Any], finish: bool = True) -> tuple[Decisions, bool]:
+    """The arm's ladder over every pair; `finish` settles what no rung reached as an unscored
+    reject and names the score decisions' carriers. Returns the decisions and whether the walls
+    had to be forced in."""
     c.extra = {}
     for path in config.get("extra_features", ()):
         c.load_extra(os.path.expandvars(str(path).format(cohort=c.name)))
@@ -514,6 +523,8 @@ def run(c: Cohort, config: dict[str, Any]) -> Outcome:
         ladder = [{"rung": "veto"}] + ladder
     for step in ladder:
         d = RUNGS[step["rung"]](c, d, step)
+    if not finish:
+        return d, walls_forced
     rest = d.zone == U
     d.settle(rest, REJECT, "score", "unscored", "NONE", "unscored")
     if model is not None:
@@ -524,6 +535,12 @@ def run(c: Cohort, config: dict[str, Any]) -> Outcome:
         scored = d.rung == "score"
         d.carrier[scored & (d.zone == MERGE)] = best[scored & (d.zone == MERGE)]
         d.carrier[scored & (d.zone != MERGE)] = worst[scored & (d.zone != MERGE)]
+    return d, walls_forced
+
+
+def run(c: Cohort, config: dict[str, Any]) -> Outcome:
+    clock = time.perf_counter()
+    d, walls_forced = decide(c, config)
     decide_s = time.perf_counter() - clock
     group = config.get("group", {"step": "relation"})
     groups = GROUPS[group["step"]](c, d, group)

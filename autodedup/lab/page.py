@@ -9,7 +9,7 @@ from __future__ import annotations
 import html
 import json
 import random
-from typing import Any
+from typing import Any, Iterable
 
 ZONES = ("undecided", "veto", "reject", "band", "merge")
 FACTS = ("category_type", "category_main", "area_m2", "price", "disposition", "floor", "street")
@@ -24,6 +24,27 @@ def splits(review: dict[str, Any]) -> list[dict[str, Any]]:
     was absorbed, and the formed group is the one question to ask about it."""
     formed = [_ids(card) for card in review["groups_gained"]]
     return [card for card in review["groups_lost"] if not any(_ids(card) <= f for f in formed)]
+
+
+M45_N: int = 40
+M45_SEED: int = 20260927
+
+
+def draw(groups: Iterable[frozenset[int]], n: int, seed: int) -> list[frozenset[int]]:
+    """`n` groups drawn with one seed, from an order that does not depend on how they were found:
+    the one draw M4 / M5 count reads on and the page shows."""
+    ordered = sorted(groups, key=lambda g: tuple(sorted(g)))
+    return random.Random(seed).sample(ordered, min(n, len(ordered)))
+
+
+def read_sample(review: dict[str, Any], n: int = M45_N, seed: int = M45_SEED
+                ) -> list[dict[str, Any]]:
+    """M4 and M5's cards (GLOBAL_SEARCH 2.2): `n` groups only the arm forms and `n` base groups it
+    breaks up, each side drawn on its own with the pre-registered seed."""
+    gained = {_ids(card): card for card in review["groups_gained"]}
+    lost = {_ids(card): card for card in splits(review)}
+    return ([dict(gained[g], side="gained") for g in draw(gained, n, seed)]
+            + [dict(lost[g], side="lost") for g in draw(lost, n, seed)])
 
 
 def sample(review: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
@@ -75,8 +96,10 @@ def _card(card: dict[str, Any], k: int) -> str:
             f"<button data-v=\"different\">Not one property</button></div></section>")
 
 
-def render(review: dict[str, Any], n: int = 60, seed: int = 1) -> str:
-    cards = sample(review, n, seed)
+def render(review: dict[str, Any], n: int = 60, seed: int = 1, m45: bool = False) -> str:
+    cards = read_sample(review) if m45 else sample(review, n, seed)
+    if m45:
+        seed = M45_SEED
     broken = len(splits(review))
     meta = {"experiment": review["experiment"], "base": review["base"],
             "cohort": review["cohort"], "seed": seed,

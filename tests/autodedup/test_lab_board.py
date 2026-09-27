@@ -47,7 +47,7 @@ def _cohort(tmp_path: Path) -> Cohort:
         "corro": _obj(["", "", "", "", "photo", "", ""]),
     }
     done = {"gate": np.ones(n, dtype=bool), "promote": np.ones(n, dtype=bool)}
-    return Cohort("toy", {}, None, Settings.from_json(SETTINGS), None, {}, None,  # type: ignore[arg-type]
+    return Cohort("toy", {}, None, Settings.from_json(SETTINGS), None, {},  # type: ignore[arg-type]
                   keys, [frozenset()] * n, V, P, sig, done, "toy", tmp_path)
 
 
@@ -210,14 +210,14 @@ def test_group_reads_come_back_as_labels(tmp_path: Path) -> None:
 def test_a_cache_version_follows_content_not_mtime(tmp_path: Path) -> None:
     import os
 
-    from autodedup.lab import cache
+    from autodedup import evidence
 
     a, b = tmp_path / "a.gz", tmp_path / "b.gz"
     a.write_bytes(b"same bytes")
     b.write_bytes(b"same bytes")
     os.utime(b, (1, 1))
     memo = tmp_path / "digests.json"
-    assert cache.file_digest(a, memo) == cache.file_digest(b, memo) == cache.file_digest(a)
-    assert json.loads(memo.read_text())[str(a.resolve())][1] == cache.file_digest(a)
+    assert evidence.file_digest(a, memo) == evidence.file_digest(b, memo) == evidence.file_digest(a)
+    assert json.loads(memo.read_text())[str(a.resolve())][1] == evidence.file_digest(a)
     b.write_bytes(b"other bytes")
-    assert cache.file_digest(b, memo) != cache.file_digest(a, memo)
+    assert evidence.file_digest(b, memo) != evidence.file_digest(a, memo)

@@ -1,11 +1,11 @@
 """One arm, one row: the pair zones and who carried each merge, the groups, the move against the
-base arm, and the arm read against the operator's rulings and a judged sample. Rows append to
-one leaderboard (JSONL) and render as one table. The rulings are the test set; the judged sample
-is labelled data only (a model may label, never decide a live merge)."""
+base arm, and the arm read against the operator's rulings and a judged sample, as GLOBAL_SEARCH
+2.2's M1-M9. Rows append to one leaderboard (JSONL) and render as one table file. The rulings are
+the test set; the judged sample is labelled data only (a model may label, never decide a live
+merge)."""
 
 from __future__ import annotations
 
-import gzip
 import json
 import subprocess
 import time
@@ -16,13 +16,14 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from autodedup.evaluate import DIFFERENT, SAME, read_rulings, wilson_lower
+from autodedup.evaluate import DIFFERENT, SAME, read_rulings, wilson_interval, wilson_lower
 from autodedup.guards import cluster_invariants_ok
 from autodedup.indistinguishable import CLUSTER, distinguishing_facts
 from autodedup.labels import pair_key
 from autodedup.lab.board import (BAND, MERGE, REJECT, VETO, Groups, Outcome, config_id,
                                  relation_parts)
 from autodedup.lab.cache import REPO, Cohort
+from autodedup.lab.page import M45_N, M45_SEED, draw
 
 JUDGE_SAME: frozenset[str] = frozenset({"same_property"})
 JUDGE_DIFFERENT: frozenset[str] = frozenset({"different_property", "same_building_different_unit"})
@@ -123,27 +124,109 @@ def git_head() -> str:
         return "unknown"
 
 
-def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[str, Any]:
+def _reads(sample: list[frozenset[int]], reads: dict[frozenset[int], str]) -> dict[str, Any]:
+    """M4 / M5: the seeded sample's group reads; `fused` is a `different` read (the strict
+    classification, undecidable counted as fused, is the reader's), with its Wilson upper bound."""
+    same = sum(1 for g in sample if reads.get(g) == SAME)
+    fused = sum(1 for g in sample if reads.get(g) == DIFFERENT)
+    read = same + fused
+    return {"sampled": len(sample), "read": read, "fused": fused, "one_property": same,
+            "fused_upper": round(wilson_interval(fused, read)[1], 4) if read else None}
+
+
+def _splits(arm_sets: set[frozenset[int]], base_sets: set[frozenset[int]]) -> set[frozenset[int]]:
+    """The base groups the arm breaks up (a base group wholly inside an arm group was absorbed)."""
+    formed = arm_sets - base_sets
+    return {g for g in base_sets - arm_sets if not any(g <= f for f in formed)}
+
+
+def auc(score: np.ndarray, positive: np.ndarray) -> float | None:
+    """Mann-Whitney AUC, ties shared."""
+    n_pos, n_neg = int(positive.sum()), int((~positive).sum())
+    if not n_pos or not n_neg:
+        return None
+    order = np.argsort(score, kind="stable")
+    ranks = np.empty(len(score))
+    sorted_scores = score[order]
+    i = 0
+    while i < len(score):
+        j = i
+        while j + 1 < len(score) and sorted_scores[j + 1] == sorted_scores[i]:
+            j += 1
+        ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+        i = j + 1
+    return round(float((ranks[positive].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)), 4)
+
+
+def m6(c: Cohort, d: Any, labels: dict[tuple[int, int], str], min_negatives: int = 30
+       ) -> dict[str, Any]:
+    """M6, DESCRIPTIVE ONLY (D11): the arm's score column on the cohort's operator-ruled candidate
+    pairs, overall and per scope with enough negatives. Sealed by town only when the arm's score
+    file was fitted so; the lab cannot tell."""
+    index = {key: i for i, key in enumerate(c.keys)}
+    rows = [(index[k], v == SAME) for k, v in labels.items() if k in index]
+    if not rows:
+        return {"n": 0, "auc": None, "scopes": {}}
+    idx = np.array([i for i, _ in rows])
+    pos = np.array([p for _, p in rows])
+    score = d.score[idx]
+    out: dict[str, Any] = {"n": len(rows), "auc": auc(score, pos), "scopes": {}}
+    scopes = np.array([f"{c.ds.listings[c.keys[i][0]].category_type}|"
+                       f"{c.ds.listings[c.keys[i][0]].category_main}" for i in idx], dtype=object)
+    for scope in sorted(set(scopes)):
+        hit = scopes == scope
+        if int((~pos[hit]).sum()) >= min_negatives:
+            out["scopes"][scope] = {"n": int(hit.sum()), "neg": int((~pos[hit]).sum()),
+                                    "auc": auc(score[hit], pos[hit])}
+    return out
+
+
+def _run_seconds(c: Cohort) -> float | None:
+    if c.run is None:
+        return None
+    try:
+        timings = json.loads((c.run.dir / "run.json").read_text(encoding="utf-8"))["timings"]
+    except (OSError, ValueError, KeyError):
+        return None
+    return round(float(timings.get("decide_s", 0.0)), 1)
+
+
+def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels,
+        why: dict[str, Any] | None = None, verified: bool | None = None) -> dict[str, Any]:
     d, g = arm.decisions, arm.groups
     ids = set(c.ds.listings)
     merges = d.zone == MERGE
     co = g.co_pairs()
+    rulings = _read(g, labels.rulings, ids)
+    fixtures = fixtures_apart(g, load_fixtures(), c.name, ids)
+    sizes = [len(v) for v in g.clusters.values()]
     out: dict[str, Any] = {
         "experiment": arm.config.get("name"), "config_id": config_id(arm.config),
-        "cohort": c.name, "cache": c.version, "code": git_head(),
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "cohort": c.name, "cache": c.version, "engine": c.code_digest, "code": git_head(),
+        "verified": verified, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "zones": {"merge": int(merges.sum()), "band": int((d.zone == BAND).sum()),
                   "reject": int((d.zone == REJECT).sum()), "veto": int((d.zone == VETO).sum())},
         "merge_by": _count(f"{r}:{n}" if r in ("proof", "context") else r
                            for r, n in zip(d.rung[merges], d.name[merges])),
         "merge_carrier": _count(d.carrier[merges]),
-        "groups": len(g.clusters), "grouped": sum(len(v) for v in g.clusters.values()),
-        "copairs": len(co),
-        "rulings": _read(g, labels.rulings, ids),
-        "fixtures": fixtures_apart(g, load_fixtures(), c.name, ids),
+        "groups": len(g.clusters), "grouped": sum(sizes), "copairs": len(co),
+        "rulings": rulings, "fixtures": fixtures,
         "judges": {name: _read(g, pairs, ids) for name, pairs in labels.judges.items()},
         "timings": {k: round(v, 2) for k, v in arm.timings.items()},
         "walls_forced": arm.walls_forced,
+    }
+    lost = where_lost(c, arm, labels).get(f"operator:{SAME}", {})
+    m: dict[str, Any] = {
+        "M1": {"together": rulings["same_together"], "n": rulings["same_n"]},
+        "M2": {"together": rulings["diff_together"], "n": rulings["diff_n"]},
+        "M3": {k: fixtures[k] for k in ("apart", "n", "cases_apart", "cases", "together")},
+        "M6": m6(c, d, labels.rulings),
+        "M7": {"band": out["zones"]["band"], "groups": len(g.clusters),
+               "largest": max(sizes) if sizes else 0},
+        "M8": {"lost_same": {k: v for k, v in lost.items() if k != "together"},
+               "why": why},
+        "M9": {"decide_s": out["timings"].get("decide_s"), "group_s": out["timings"].get("group_s"),
+               "harness_run_s": _run_seconds(c)},
     }
     if base is not None:
         base_co = base.groups.co_pairs()
@@ -155,63 +238,36 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[s
         zone_moves = _count(f"{a}->{b}" for a, b in zip(
             np.array(["u", "veto", "reject", "band", "merge"])[base.decisions.zone],
             np.array(["u", "veto", "reject", "band", "merge"])[d.zone]) if a != b)
+        splits = _splits(arm_sets, base_sets)
         out["vs_base"] = {"base": base.config.get("name"), "zone_moves": zone_moves,
                           "copairs_gained": len(co - base_co), "copairs_lost": len(base_co - co),
                           "groups_arm_only": len(arm_sets - base_sets),
                           "groups_base_only": len(base_sets - arm_sets),
                           "adverts_moved": len(moved)}
+        m["M4"] = _reads(draw(arm_sets - base_sets, M45_N, M45_SEED), labels.groups)
+        m["M5"] = _reads(draw(splits, M45_N, M45_SEED), labels.groups)
+        m["M7"].update({"copairs_gained": len(co - base_co), "copairs_lost": len(base_co - co),
+                        "groups_arm_only": len(arm_sets - base_sets),
+                        "groups_base_split": len(splits)})
         if labels.groups:
             out["group_reads"] = {
-                side: {v: sum(1 for m in sets if labels.groups.get(m) == v)
+                side: {v: sum(1 for x in sets if labels.groups.get(x) == v)
                        for v in (SAME, DIFFERENT)}
                 for side, sets in (("arm_only", arm_sets - base_sets),
                                    ("base_only", base_sets - arm_sets))}
+    out["m"] = m
     return out
 
 
-def verify(c: Cohort, outcome: Outcome, stored: str | Path) -> dict[str, Any]:
-    """The arm against a stored generation's rows: zone, reason and score, row by row."""
-    index = {key: i for i, key in enumerate(c.keys)}
-    zone_names = np.array(["undecided", "veto", "reject", "band", "merge"])
-    d = outcome.decisions
-    n = same = 0
-    differ: dict[str, int] = {"zone": 0, "reason": 0, "score": 0, "missing": 0}
-    examples: list[Any] = []
-    with gzip.open(stored, "rt", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            stored_row = json.loads(line)
-            n += 1
-            i = index.get((stored_row["lo"], stored_row["hi"]))
-            if i is None:
-                differ["missing"] += 1
-                continue
-            ok = True
-            for field_name, mine, theirs in (
-                    ("zone", zone_names[d.zone[i]], stored_row["zone"]),
-                    ("reason", d.reason[i], stored_row["reason"])):
-                if mine != theirs:
-                    differ[field_name] += 1
-                    ok = False
-            if abs(float(d.score[i]) - float(stored_row["score"])) > 1e-12:
-                differ["score"] += 1
-                ok = False
-            same += ok
-            if not ok and len(examples) < 8:
-                examples.append({"key": [stored_row["lo"], stored_row["hi"]],
-                                 "stored": [stored_row["zone"], stored_row["reason"]],
-                                 "lab": [str(zone_names[d.zone[i]]), d.reason[i]]})
-    return {"stored_rows": n, "identical": same, "differ": differ, "examples": examples}
-
-
-def groups_identical(outcome: Outcome, run_dir: str | Path) -> dict[str, Any]:
-    """The arm's groups against a `harness run` output (SW1's one path)."""
-    raw = json.loads((Path(run_dir) / "clusters.json").read_text(encoding="utf-8"))["clusters"]
-    theirs = {frozenset(int(m) for m in v) for v in raw.values() if len(v) > 1}
-    mine = {frozenset(v) for v in outcome.groups.clusters.values()}
-    return {"lab": len(mine), "harness_run": len(theirs), "identical": mine == theirs,
-            "only_lab": len(mine - theirs), "only_harness_run": len(theirs - mine)}
+def why_summary(report: dict[str, dict[str, Any]], top: int = 3) -> dict[str, Any]:
+    """M8's `--why` in one cell: refused merge edges and the facts that separate them, plus the
+    operator `same` pairs among them."""
+    edges = report.get("all_refused_edges", {})
+    same = report.get(f"operator:{SAME}", {})
+    return {"refused_edges": edges.get("n", 0),
+            "facts": dict(list(edges.get("separating_facts", {}).items())[:top]),
+            "operator_same_refused": same.get("n", 0),
+            "operator_same_facts": dict(list(same.get("separating_facts", {}).items())[:top])}
 
 
 def where_lost(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, int]]:
@@ -313,41 +369,89 @@ def _fmt(value: Any) -> str:
     return "–" if value is None else str(value)
 
 
-def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
-    """The one table: newest row per (experiment, cohort, config), cohorts in order."""
+def latest_rows(board: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """The newest row per (cohort, experiment, config)."""
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    if not board.is_file():
+        return latest
     for line in board.read_text(encoding="utf-8").splitlines():
         if line.strip():
             entry = json.loads(line)
             latest[(entry["cohort"], entry["experiment"], entry["config_id"])] = entry
+    return latest
+
+
+def _read_cell(r: dict[str, Any] | None) -> str | None:
+    if not r:
+        return None
+    if not r["read"]:
+        return f"unread (0/{r['sampled']})"
+    ub = f" ≤{100 * r['fused_upper']:.1f}%" if r.get("fused_upper") is not None else ""
+    return f"{r['fused']} fused/{r['read']} read of {r['sampled']}{ub}"
+
+
+def _m3_cell(fx: dict[str, Any] | None) -> str | None:
+    if not fx:
+        return None
+    cell = f"{fx['apart']}/{fx['n']}"
+    if "cases" in fx:
+        cell += f" ({fx['cases_apart']}/{fx['cases']} cases)"
+    return cell
+
+
+def _m6_cell(m6_: dict[str, Any] | None) -> str | None:
+    if not m6_ or m6_.get("auc") is None:
+        return None
+    scopes = ", ".join(f"{k} {v['auc']}" for k, v in m6_.get("scopes", {}).items())
+    return f"{m6_['auc']} (n {m6_['n']}{'; ' + scopes if scopes else ''})"
+
+
+def _m7_cell(m7: dict[str, Any], vs: dict[str, Any]) -> str:
+    cell = f"band {m7['band']}, groups {m7['groups']}, max {m7['largest']}"
+    if "copairs_gained" in m7:
+        cell += (f"; co +{m7['copairs_gained']}/−{m7['copairs_lost']}, "
+                 f"groups +{m7['groups_arm_only']}/−{m7['groups_base_split']}")
+    return cell
+
+
+def _m8_cell(m8: dict[str, Any]) -> str:
+    lost = ", ".join(f"{k} {v}" for k, v in list(m8.get("lost_same", {}).items())[:3]) or "none"
+    why = m8.get("why")
+    if why:
+        facts = ", ".join(f"{k} {v}" for k, v in why["facts"].items()) or "–"
+        lost += (f"; why: {why['refused_edges']} refused edges ({facts}), "
+                 f"op same {why['operator_same_refused']}")
+    return lost
+
+
+def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
+    """The one table (GLOBAL_SEARCH 2.2): one row per arm per cohort, M1-M9, newest row per
+    (cohort, experiment, config), cohorts in the order given."""
+    latest = latest_rows(board)
     wanted = list(cohorts) if cohorts else sorted({k[0] for k in latest})
-    lines = ["| cohort | experiment | merge | band | groups | co-pairs | Δco +/− | adverts moved "
-             "| op same together | op diff together | fixtures apart | op prec. LB | judge(vision) same | "
-             "judge(vision) diff | judge(gold) diff | decide s | group s |",
-             "|" + "---|" * 17]
+    head = ("cohort", "arm", "verified", "M1 op same together", "M2 op different + MNL together",
+            "M3 fixtures apart", "M4 arm-only read", "M5 base-only read", "M6 AUC (descriptive)",
+            "M7 label-free", "M8 lost op same; why", "M9 decide s / group s (harness run s)")
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for cohort in wanted:
         rows = sorted((e for k, e in latest.items() if k[0] == cohort),
-                      key=lambda e: (e["rulings"]["diff_together"],
-                                     -(e["rulings"]["same_together"])))
+                      key=lambda e: (e["rulings"]["diff_together"], -e["rulings"]["same_together"],
+                                     e["experiment"]))
         for e in rows:
-            vs = e.get("vs_base") or {}
-            r = e["rulings"]
-            jv = e["judges"].get("vision", {})
-            jg = e["judges"].get("gold", {})
-            fx = e.get("fixtures")
-            lines.append("| " + " | ".join(_fmt(x) for x in (
-                cohort, e["experiment"], e["zones"]["merge"], e["zones"]["band"], e["groups"],
-                e["copairs"],
-                f"+{vs.get('copairs_gained', 0)}/−{vs.get('copairs_lost', 0)}" if vs else None,
-                vs.get("adverts_moved") if vs else None,
-                f"{r['same_together']}/{r['same_n']}", f"{r['diff_together']}/{r['diff_n']}",
-                (f"{fx['apart']}/{fx['n']}" + (f" ({fx['cases_apart']}/{fx['cases']} cases)" if "cases" in fx else "")
-                 if fx else None),
-                r["precision_wilson_lower"],
-                f"{jv.get('same_together')}/{jv.get('same_n')}" if jv else None,
-                f"{jv.get('diff_together')}/{jv.get('diff_n')}" if jv else None,
-                f"{jg.get('diff_together')}/{jg.get('diff_n')}" if jg else None,
-                e["timings"].get("decide_s"), e["timings"].get("group_s"))) + " |")
+            m = e.get("m") or {}
+            m9 = m.get("M9") or {}
+            m1, m2 = m.get("M1"), m.get("M2")
+            lines.append("| " + " | ".join(_fmt(x).replace("|", "/") for x in (
+                cohort, e["experiment"],
+                {True: "yes", False: "NO"}.get(e.get("verified"), "–"),
+                f"{m1['together']}/{m1['n']}" if m1 else None,
+                f"{m2['together']}/{m2['n']}" if m2 else None,
+                _m3_cell(e.get("fixtures")), _read_cell(m.get("M4")), _read_cell(m.get("M5")),
+                _m6_cell(m.get("M6")),
+                _m7_cell(m["M7"], e.get("vs_base") or {}) if m.get("M7") else None,
+                _m8_cell(m["M8"]) if m.get("M8") else None,
+                f"{m9.get('decide_s')} / {m9.get('group_s')} ({_fmt(m9.get('harness_run_s'))})"
+                if m9 else None)) + " |")
     return "\n".join(lines) + "\n"
 
 
