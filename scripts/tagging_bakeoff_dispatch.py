@@ -61,7 +61,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from scripts import pod_bootstrap
 from scripts.pod_watchdog import (
@@ -71,7 +71,7 @@ from scripts.pod_watchdog import (
     PodWatchdog,
     Progress,
 )
-from scripts.runpod_client import NoCapacityError, RunPodClient, RunPodError
+from scripts.runpod_client import GpuOption, NoCapacityError, RunPodClient, RunPodError
 from scripts.tagging_bakeoff_arms import STORED_CLIP_ARM
 
 LOG = logging.getLogger("tagging_bakeoff_dispatch")
@@ -490,7 +490,10 @@ def plan_stage(args: argparse.Namespace) -> Plan:
     return Plan(stage="train", where="runner", argv=argv, execute=not args.dry_run)
 
 
-def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
+def _run_pod(plan: Plan, args: argparse.Namespace,
+             select: Callable[[RunPodClient], list[GpuOption]] | None = None) -> int:
+    """`select` builds the launch ladder for a lane with its own GPU policy (G1: an
+    ordered allowlist walked in both clouds); the default is this lane's `select_gpus`."""
     env = pod_env(args.run_id)
     missing = [k for k in POD_ENV_KEYS if k not in env]
     allowlist = tuple(s.strip().lower() for s in args.gpu_allowlist.split(",")
@@ -535,12 +538,12 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
 
     client = RunPodClient(api_key)
     try:
-        gpus = select_gpus(client, allowlist)
+        gpus = select(client) if select is not None else select_gpus(client, allowlist)
     except RunPodError as exc:
         LOG.error("could not list eligible GPUs: %s", exc)
         return 1
-    LOG.info("%d candidate GPU(s), cheapest first: %s", len(gpus),
-             ", ".join(f"{g.id} (${g.community_price_per_hr:.3f}/hr)" for g in gpus[:5]))
+    LOG.info("%d candidate GPU(s), in launch order: %s", len(gpus),
+             ", ".join(f"{g.id} [{g.cloud_type}] (${g.price_per_hr():.3f}/hr)" for g in gpus))
 
     watchdog = make_watchdog(args, only=only)
     try:

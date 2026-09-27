@@ -4930,6 +4930,26 @@
           ]
         },
         {
+          "name": "gpu_allowlist",
+          "description": "g1-image-stack only: comma-separated RunPod GPU ids or whole-word names (e.g. NVIDIA RTX A4000 or 3090), tried in this order. Empty = the G1 default ladder (nineteen 16 GB+ Ampere/Ada cards, measured 3090/A5000/3090 Ti first: g1_image_stack_dispatch.G1_GPU_ALLOWLIST).",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "cloud_type",
+          "description": "g1-image-stack only: where to look for each card. ANY = the community cloud, then the secure one, before moving to the next card. Always under the lane's $1.00/h cap.",
+          "required": false,
+          "type": "choice",
+          "default": "ANY",
+          "options": [
+            "ANY",
+            "COMMUNITY",
+            "SECURE"
+          ]
+        },
+        {
           "name": "dry_run",
           "description": "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing.",
           "required": false,

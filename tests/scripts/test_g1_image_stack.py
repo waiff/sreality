@@ -281,3 +281,288 @@ def test_head_rooms_come_from_the_registry_label_not_the_id():
     assert rooms[22] == "kitchen" and rooms[25] == "bathroom"      # swapped ids, right rooms
     assert rooms[39] == "plan_3d" and rooms[46] == "floor_plan"
     assert 77 not in rooms and rooms[28] == "living_room"            # unknown label: id map stays
+
+
+# --- the pod's GPU: an ordered ladder over both clouds (2026-09-27) ---------------------
+# GitHub run 36316992243 prepared run 2 and then found no COMMUNITY capacity for any of the
+# three allowed cards; the lane never looked in the secure cloud or at another card.
+
+from scripts import g1_image_stack_dispatch as g1d  # noqa: E402
+from scripts import tagging_bakeoff_dispatch as tb  # noqa: E402
+from scripts.runpod_client import RunPodClient, RunPodError  # noqa: E402
+
+_CATALOG = [
+    # id, displayName, GB, community $/h, secure $/h, in community, in secure
+    ("NVIDIA GeForce RTX 3090", "RTX 3090", 24, 0.22, 0.43, True, True),
+    ("NVIDIA GeForce RTX 3090 Ti", "RTX 3090 Ti", 24, 0.27, 0.0, True, False),
+    ("NVIDIA RTX A5000", "RTX A5000", 24, 0.16, 0.27, True, True),
+    ("NVIDIA L4", "L4", 24, 0.0, 0.43, False, True),
+    ("NVIDIA L40S", "L40S", 48, 0.79, 0.86, True, True),
+    ("NVIDIA GeForce RTX 3070", "RTX 3070", 8, 0.13, 0.0, True, False),
+    ("NVIDIA A100 80GB PCIe", "A100 PCIe", 80, 1.19, 1.64, True, True),
+]
+
+
+class _Resp:
+    def __init__(self, status: int = 200, body=None, text: str = "") -> None:
+        self.status_code, self._body, self.text = status, body, text
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def iter_lines(self, decode_unicode: bool = True):
+        return iter(())
+
+    def close(self) -> None:
+        pass
+
+
+class _Session:
+    """RunPod's two APIs, faked: the GraphQL catalogue and REST pod CRUD. `no_capacity`
+    names the (card, cloud) rungs that answer RunPod's real no-instances 500."""
+
+    def __init__(self, no_capacity=()) -> None:
+        self.headers: dict[str, str] = {}
+        self.no_capacity = set(no_capacity)
+        self.launches: list[dict] = []
+        self.deleted: list[str] = []
+
+    def post(self, url, json=None, timeout=30):
+        if url.endswith("/pods"):
+            self.launches.append(json)
+            if (json["gpuTypeIds"][0], json["cloudType"]) in self.no_capacity:
+                return _Resp(500, text='{"error":"create pod: There are no instances '
+                                       'currently available","status":500}')
+            return _Resp(201, {"id": f"pod{len(self.launches)}", "costPerHr": 0.3})
+        return _Resp(200, {"data": {"gpuTypes": [
+            {"id": i, "displayName": d, "memoryInGb": m, "communityPrice": c, "securePrice": s,
+             "communityCloud": ic, "secureCloud": isc} for i, d, m, c, s, ic, isc in _CATALOG]}})
+
+    def get(self, url, timeout=30, stream=False):
+        return _Resp(200, {"desiredStatus": "EXITED"})
+
+    def delete(self, url, timeout=30):
+        self.deleted.append(url.rsplit("/", 1)[-1])
+        return _Resp(204)
+
+
+def _rungs(ladder):
+    return [(g.id.replace("NVIDIA ", "").replace("GeForce ", ""), g.cloud_type[0]) for g in ladder]
+
+
+def test_g1_ladder_walks_the_allowlist_in_order_each_card_community_then_secure():
+    client = RunPodClient("k", session=_Session())
+    allow = ("NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090 Ti", "NVIDIA L4")
+    assert _rungs(g1d.gpu_ladder(client, allow, g1d.CLOUD_TYPES["ANY"])) == [
+        ("RTX 3090", "C"), ("RTX 3090", "S"), ("RTX A5000", "C"), ("RTX A5000", "S"),
+        ("RTX 3090 Ti", "C"), ("L4", "S")]
+    assert _rungs(g1d.gpu_ladder(client, allow, g1d.CLOUD_TYPES["COMMUNITY"])) == [
+        ("RTX 3090", "C"), ("RTX A5000", "C"), ("RTX 3090 Ti", "C")]
+    assert _rungs(g1d.gpu_ladder(client, allow, g1d.CLOUD_TYPES["SECURE"])) == [
+        ("RTX 3090", "S"), ("RTX A5000", "S"), ("L4", "S")]
+
+
+def test_g1_ladder_prices_each_rung_in_its_own_cloud_under_the_lane_cap():
+    client = RunPodClient("k", session=_Session())
+    ladder = g1d.gpu_ladder(client, ("NVIDIA RTX A5000", "NVIDIA L40S"), ("COMMUNITY", "SECURE"))
+    assert [(g.cloud_type, g.price_per_hr()) for g in ladder] == [
+        ("COMMUNITY", 0.16), ("SECURE", 0.27), ("COMMUNITY", 0.79), ("SECURE", 0.86)]
+    assert all(g.price_per_hr() <= tb.MAX_PRICE_PER_HR for g in ladder)
+
+
+def test_g1_ladder_matches_whole_words_and_exact_ids():
+    client = RunPodClient("k", session=_Session())
+    # Shorthand keeps working ("3090" is both 3090s, cheaper first); a full id is that card
+    # only; "NVIDIA L4" is never the L40S.
+    assert _rungs(g1d.gpu_ladder(client, ("3090", "NVIDIA L4"), ("COMMUNITY", "SECURE"))) == [
+        ("RTX 3090", "C"), ("RTX 3090", "S"), ("RTX 3090 Ti", "C"), ("L4", "S")]
+    assert _rungs(g1d.gpu_ladder(client, ("NVIDIA GeForce RTX 3090",), ("COMMUNITY",))) == [
+        ("RTX 3090", "C")]
+
+
+def test_g1_ladder_drops_small_and_over_cap_cards_and_refuses_an_empty_ladder():
+    client = RunPodClient("k", session=_Session())
+    assert _rungs(g1d.gpu_ladder(client, ("3070", "a100", "a5000"), ("COMMUNITY", "SECURE"))) == [
+        ("RTX A5000", "C"), ("RTX A5000", "S")]
+    with pytest.raises(RunPodError):
+        g1d.gpu_ladder(client, ("3070", "a100"), ("COMMUNITY", "SECURE"))
+
+
+def test_g1_ladder_survives_one_cloud_whose_catalogue_read_fails():
+    class _Half(RunPodClient):
+        def eligible_gpus(self, *, max_price_per_hr=None, cloud_type="COMMUNITY"):
+            if cloud_type == "COMMUNITY":
+                raise RunPodError("no COMMUNITY GPU type available under the given price cap")
+            return super().eligible_gpus(max_price_per_hr=max_price_per_hr, cloud_type=cloud_type)
+
+    ladder = g1d.gpu_ladder(_Half("k", session=_Session()), ("a5000",), ("COMMUNITY", "SECURE"))
+    assert _rungs(ladder) == [("RTX A5000", "S")]
+
+
+def test_g1_widens_its_own_default_and_leaves_the_tagging_lane_alone():
+    assert tb.DEFAULT_GPU_ALLOWLIST == ("3090", "a5000")
+    assert g1d.G1_GPU_ALLOWLIST[:3] == ("NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000",
+                                        "NVIDIA GeForce RTX 3090 Ti")
+    assert len(set(g1d.G1_GPU_ALLOWLIST)) == len(g1d.G1_GPU_ALLOWLIST) == 19
+    assert g1d.MIN_GPU_MEMORY_GB == 16
+    # bf16 arms (no Volta/Turing) on a cu118 torch (no Blackwell).
+    assert not any(b in name for name in g1d.G1_GPU_ALLOWLIST
+                   for b in ("V100", "Tesla T4", "RTX 5080", "RTX 5090", "RTX PRO", "Blackwell"))
+
+
+def test_the_default_ladder_on_the_live_catalogue_of_2026_09_27():
+    # RunPod's public gpuTypes answer (no key) on the day run 36316992243 found no
+    # community capacity, trimmed to the fields eligible_gpus reads.
+    live = [
+        ("NVIDIA GeForce RTX 3090", "RTX 3090", 24, 0.22, 0.5, True, True),
+        ("NVIDIA RTX A5000", "RTX A5000", 24, 0.16, 0.27, True, True),
+        ("NVIDIA GeForce RTX 3090 Ti", "RTX 3090 Ti", 24, 0.27, 0.46, True, False),
+        ("NVIDIA L40", "L40", 48, 0.69, 0.82, True, True),
+        ("NVIDIA L40S", "L40S", 48, 0.79, 1.09, True, True),
+        ("NVIDIA L4", "L4", 24, 0.44, 0.49, False, True),
+        ("NVIDIA GeForce RTX 5090", "RTX 5090", 32, 0.69, 0.99, True, True),
+        ("Tesla V100-PCIE-16GB", "Tesla V100", 16, 0.19, 0.0, True, False),
+        ("NVIDIA GeForce RTX 3080 Ti", "RTX 3080 Ti", 12, 0.18, 0.0, True, False),
+    ]
+    session = _Session()
+    session.post = lambda url, json=None, timeout=30: _Resp(200, {"data": {"gpuTypes": [
+        {"id": i, "displayName": d, "memoryInGb": m, "communityPrice": c, "securePrice": s,
+         "communityCloud": ic, "secureCloud": isc} for i, d, m, c, s, ic, isc in live]}})
+    ladder = g1d.gpu_ladder(RunPodClient("k", session=session), g1d.G1_GPU_ALLOWLIST,
+                            g1d.CLOUD_TYPES["ANY"])
+    assert [(g.id, g.cloud_type[0], g.price_per_hr()) for g in ladder] == [
+        ("NVIDIA GeForce RTX 3090", "C", 0.22), ("NVIDIA GeForce RTX 3090", "S", 0.5),
+        ("NVIDIA RTX A5000", "C", 0.16), ("NVIDIA RTX A5000", "S", 0.27),
+        ("NVIDIA GeForce RTX 3090 Ti", "C", 0.27),       # not offered in secure
+        ("NVIDIA L40", "C", 0.69), ("NVIDIA L40", "S", 0.82),
+        ("NVIDIA L40S", "C", 0.79),                      # $1.09 secure is over the cap
+        ("NVIDIA L4", "S", 0.49)]                        # secure only
+
+
+class _Cur:
+    def __init__(self, log: list) -> None:
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+    def execute(self, sql, params=None) -> None:
+        self.log.append((" ".join(sql.split())[:40], params))
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _Conn:
+    def __init__(self, log: list) -> None:
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+    def cursor(self):
+        return _Cur(self.log)
+
+
+def _dispatch_pod(monkeypatch, argv, session):
+    sql: list = []
+    monkeypatch.setenv("RUNPOD_API_KEY", "k")
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://fake")
+    monkeypatch.setattr(tb, "_connect", lambda url: _Conn(sql))
+    monkeypatch.setattr(tb, "RunPodClient", lambda key: RunPodClient(key, session=session))
+    # pod() swaps this module attribute for the run; monkeypatch restores it afterwards.
+    monkeypatch.setattr(tb, "_log_arm_reset", tb._log_arm_reset)
+    return g1d.main(["--stage", "pod", "--run-id", "2", "--ref", "main", *argv]), sql
+
+
+def test_the_pod_stage_passes_the_allowlist_through_and_falls_back_to_secure(monkeypatch):
+    session = _Session(no_capacity={("NVIDIA RTX A5000", "COMMUNITY")})
+    rc, sql = _dispatch_pod(monkeypatch, ["--gpu-allowlist", "NVIDIA RTX A5000,3090",
+                                          "--cloud-type", "ANY"], session)
+    assert rc == 0
+    assert [(b["gpuTypeIds"][0], b["cloudType"]) for b in session.launches] == [
+        ("NVIDIA RTX A5000", "COMMUNITY"), ("NVIDIA RTX A5000", "SECURE")]
+    assert session.deleted == ["pod2"]          # the rented pod was torn down
+    assert any("UPDATE dedup_sim.tag_head_bakeoff_arms" in s for s, _ in sql)
+
+
+def test_the_pod_stage_rents_nothing_when_no_rung_has_capacity(monkeypatch):
+    rungs = {(i, c) for i, *_ in _CATALOG for c in ("COMMUNITY", "SECURE")}
+    session = _Session(no_capacity=rungs)
+    rc, _ = _dispatch_pod(monkeypatch, ["--cloud-type", "COMMUNITY"], session)
+    assert rc == 1
+    # The default ladder, community only: the cards this catalogue lists under the cap.
+    assert [b["gpuTypeIds"][0] for b in session.launches] == [
+        "NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090 Ti", "NVIDIA L40S"]
+    assert {b["cloudType"] for b in session.launches} == {"COMMUNITY"}
+    assert session.deleted == []
+
+
+def test_an_empty_allowlist_means_the_g1_default(monkeypatch):
+    session = _Session(no_capacity={("NVIDIA GeForce RTX 3090", "COMMUNITY")})
+    rc, _ = _dispatch_pod(monkeypatch, ["--gpu-allowlist", ""], session)
+    assert rc == 0
+    assert [(b["gpuTypeIds"][0], b["cloudType"]) for b in session.launches] == [
+        ("NVIDIA GeForce RTX 3090", "COMMUNITY"), ("NVIDIA GeForce RTX 3090", "SECURE")]
+
+
+def test_the_workflow_hands_g1_its_allowlist_and_cloud_and_the_embed_stage_neither():
+    import pathlib
+
+    import yaml
+
+    wf = yaml.safe_load((pathlib.Path(__file__).resolve().parents[2]
+                         / ".github/workflows/tagging_bakeoff.yml").read_text())
+    inputs = (wf.get("on") or wf[True])["workflow_dispatch"]["inputs"]
+    assert inputs["gpu_allowlist"]["default"] == ""
+    assert inputs["cloud_type"]["default"] == "ANY"
+    assert inputs["cloud_type"]["options"] == ["ANY", "COMMUNITY", "SECURE"]
+    steps = {s.get("name"): s for s in wf["jobs"]["bakeoff"]["steps"]}
+    g1 = steps["G1 image-stack bake-off"]
+    assert g1["env"]["GPU_ALLOWLIST"] == "${{ inputs.gpu_allowlist }}"
+    assert g1["env"]["CLOUD_TYPE"] == "${{ inputs.cloud_type }}"
+    assert '--gpu-allowlist "${GPU_ALLOWLIST}"' in g1["run"]
+    assert '--cloud-type "${CLOUD_TYPE:-ANY}"' in g1["run"]
+    embed = steps["Dispatch the embedding pass to a GPU pod"]
+    assert "gpu-allowlist" not in embed["run"] and "cloud-type" not in embed["run"]
+
+
+# --- the pod sizes its CPU pools from what RunPod gave it ---------------------------------
+
+
+def test_pod_vcpus_reads_runpod_then_the_cgroup_quota_then_affinity(tmp_path, monkeypatch):
+    monkeypatch.setattr(pod.os, "sched_getaffinity", lambda _pid: set(range(64)), raising=False)
+    empty = tmp_path / "none"
+    assert pod.pod_vcpus({"RUNPOD_CPU_COUNT": "6"}, str(empty)) == 6
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "cpu.max").write_text("900000 100000\n")
+    assert pod.pod_vcpus({}, str(v2)) == 9
+    (v2 / "cpu.max").write_text("max 100000\n")
+    assert pod.pod_vcpus({}, str(v2)) == 64
+    v1 = tmp_path / "v1"
+    (v1 / "cpu").mkdir(parents=True)
+    (v1 / "cpu" / "cpu.cfs_quota_us").write_text("1600000\n")
+    (v1 / "cpu" / "cpu.cfs_period_us").write_text("100000\n")
+    assert pod.pod_vcpus({"RUNPOD_CPU_COUNT": "junk"}, str(v1)) == 16
+    assert pod.pod_vcpus({}, str(empty)) == 64
+
+
+def test_cpu_bound_pools_never_exceed_the_pods_vcpus():
+    assert pod.cpu_workers(16, 6) == 6       # a 4090 pod
+    assert pod.cpu_workers(16, 32) == 16     # the requested ceiling still holds
+    assert pod.cpu_workers(0, 9) == 9        # 0 = one per vCPU
+    assert pod.cpu_workers(4, 0) == 1

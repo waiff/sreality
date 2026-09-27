@@ -381,21 +381,71 @@ def fetch_sscd(root: str) -> str:
     return path
 
 
-def load_hf_encoder(arm: dict[str, Any], revision: str | None, device: str):
+def load_hf_encoder(arm: dict[str, Any], revision: str | None, device: str, threads: int = 0):
     """The tagging lane's own loaders (DINO: post-LN CLS, our letterbox geometry)."""
     from scripts import tagging_bakeoff_arms as arms_mod
     from scripts import tagging_bakeoff_embed as embed_mod
 
     rev = revision or arms_mod.hub_sha(arm["model"], token=os.environ.get("HF_TOKEN"))
-    return embed_mod.load_encoder(arm, revision=rev, device=device), rev
+    enc = embed_mod.load_encoder(arm, revision=rev, device=device)
+    if threads:
+        # The loader sets torch's threads to os.cpu_count(): the HOST's count in a pod.
+        import torch
+
+        torch.set_num_threads(threads)
+    return enc, rev
 
 
-def load_production_clip() -> tuple[Any, str | None]:
+def load_production_clip(threads: int = 0) -> tuple[Any, str | None]:
     """scraper.clip_tagger's Tagger: the embedder of the stored vectors (CPU; ~20k images)."""
     from scraper import clip_tagger
 
-    tagger = clip_tagger.Tagger.load()
+    tagger = clip_tagger.Tagger.load(threads=threads)
     return tagger, getattr(tagger, "revision", None)
+
+
+def _cgroup_cpus(root: str) -> float | None:
+    """The container's CPU quota (cgroup v2 `cpu.max`, else v1 CFS), None when unlimited."""
+    try:
+        with open(os.path.join(root, "cpu.max")) as fh:
+            quota, period = fh.read().split()[:2]
+        if quota != "max" and int(period) > 0:
+            return int(quota) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(root, "cpu", "cpu.cfs_quota_us")) as fh:
+            quota_us = int(fh.read())
+        with open(os.path.join(root, "cpu", "cpu.cfs_period_us")) as fh:
+            period_us = int(fh.read())
+        if quota_us > 0 and period_us > 0:
+            return quota_us / period_us
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def pod_vcpus(env: dict[str, str] | None = None, cgroup_root: str = "/sys/fs/cgroup") -> int:
+    """The vCPUs this pod may use. os.cpu_count() is the HOST's count inside a RunPod
+    container (a 4090 pod gets 6 of a 64+ core host), so RunPod's RUNPOD_CPU_COUNT wins,
+    then the cgroup quota, then the affinity mask."""
+    env = os.environ if env is None else env
+    try:
+        visible = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        visible = os.cpu_count() or 1
+    raw = str(env.get("RUNPOD_CPU_COUNT", "")).strip()
+    if raw.isdigit() and int(raw) > 0:
+        return min(int(raw), visible)
+    quota = _cgroup_cpus(cgroup_root)
+    if quota:
+        return max(1, min(visible, int(quota)))
+    return max(1, visible)
+
+
+def cpu_workers(requested: int, vcpus: int) -> int:
+    """Decode and RANSAC pools are CPU-bound: never more threads than vCPUs; 0 = one each."""
+    return max(1, min(requested, vcpus) if requested > 0 else vcpus)
 
 
 def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batch: int,
@@ -1002,11 +1052,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         import torch
 
         report["gpu"] = torch.cuda.get_device_name(0)
+    # Sized at run time from the pod RunPod actually gave us: the R2 fetch is I/O-bound and
+    # keeps --workers; decode, RANSAC and torch's CPU threads get at most one per vCPU.
+    vcpus = pod_vcpus()
+    workers = cpu_workers(args.workers, vcpus)
+    fetch_workers = args.workers or max(16, 2 * vcpus)
+    report["cpu"] = {"vcpus": vcpus, "host_cpu_count": os.cpu_count(), "workers": workers,
+                     "fetch_workers": fetch_workers}
+    rep.run_note(alive=f"vcpus={vcpus} workers={workers} fetch_workers={fetch_workers}")
+    try:
+        import torch
+
+        torch.set_num_threads(vcpus)
+    except ImportError:
+        pass
 
     rep.run_note(alive=f"caching {len(manifest['images'])} images")
     t0 = time.monotonic()
     paths = cache_images(manifest["images"], cache_dir=os.path.join(args.root, "img"),
-                         image_dir=args.image_dir or None, workers=args.workers,
+                         image_dir=args.image_dir or None, workers=fetch_workers,
                          beat=lambda m: rep.run_note(alive=m))
     report["images"] = {"requested": len(manifest["images"]), "cached": len(paths),
                         "seconds": round(time.monotonic() - t0, 1)}
@@ -1049,7 +1113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                               "resolution": SSCD_SIZE,
                                               "preprocessing": "square_squash"}
                 report["phases"]["embed_sscd"] = embed_arm(
-                    "sscd", enc, items, batch=64, workers=args.workers, loader=sscd_loader,
+                    "sscd", enc, items, batch=64, workers=workers, loader=sscd_loader,
                     out_path=os.path.join(out_dir, "emb_sscd.npz"), beat=beat_for("embed"),
                     deadline=deadline)
                 del enc
@@ -1062,10 +1126,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report["phases"][f"embed_{name}"] = {"arm": name, "skipped": "exists"}
                     continue
                 rep.phase("embed", "running", name)
-                enc, rev = load_hf_encoder(arm, arm.get("revision") or None, device)
+                enc, rev = load_hf_encoder(arm, arm.get("revision") or None, device, threads=vcpus)
                 report["identity"][name] = {**arm, "revision": rev}
                 report["phases"][f"embed_{name}"] = embed_arm(
-                    name, enc, arm_items, batch=args.batch_size, workers=args.workers,
+                    name, enc, arm_items, batch=args.batch_size, workers=workers,
                     loader=preprocessed_loader(arm["preprocessing"], int(arm["resolution"])),
                     out_path=out_path, beat=beat_for("embed"), deadline=deadline)
                 del enc
@@ -1140,7 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 g_items = [(i, paths[i]) for i in plan["gallery"] if i in paths]
                 enc = SSCD(fetch_sscd(args.root), device)
                 report["phases"]["synth_sscd"] = embed_arm(
-                    "synth_sscd", enc, q_items, batch=64, workers=args.workers, loader=sscd_loader,
+                    "synth_sscd", enc, q_items, batch=64, workers=workers, loader=sscd_loader,
                     out_path=os.path.join(out_dir, "syn_sscd.npz"), beat=beat_for("synthetic"),
                     deadline=None)
                 del enc
@@ -1150,20 +1214,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # CLIPModel + CLIPProcessor that wrote image_clip_embeddings), not a
                         # second loader: transformers 4.57 cannot build
                         # CLIPVisionModelWithProjection from this checkpoint's CLIPConfig.
-                        enc, rev = load_production_clip()
+                        enc, rev = load_production_clip(threads=vcpus)
                         loader = decode
                     else:
                         enc, rev = load_hf_encoder(arm, report["identity"].get(name, {}).get("revision")
-                                                   or arm.get("revision") or None, device)
+                                                   or arm.get("revision") or None, device,
+                                                   threads=vcpus)
                         loader = preprocessed_loader(arm["preprocessing"], int(arm["resolution"]))
                     report["identity"].setdefault(name, {**arm, "revision": rev})
                     report["phases"][f"synth_{name}"] = embed_arm(
-                        f"synth_{name}", enc, q_items, batch=args.batch_size, workers=args.workers,
+                        f"synth_{name}", enc, q_items, batch=args.batch_size, workers=workers,
                         loader=loader, out_path=os.path.join(out_dir, f"syn_{name}.npz"),
                         beat=beat_for("synthetic"), deadline=None)
                     if name == "clip":
                         report["phases"]["gallery_clip"] = embed_arm(
-                            "gallery_clip", enc, g_items, batch=args.batch_size, workers=args.workers,
+                            "gallery_clip", enc, g_items, batch=args.batch_size, workers=workers,
                             loader=loader, out_path=os.path.join(out_dir, "gal_clip.npz"),
                             beat=beat_for("synthetic"), deadline=None)
                     del enc
@@ -1184,7 +1249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 report["phases"][phase] = match_phase(
                     ex, pairs, paths, device=device, out_path=os.path.join(out_dir, f"lg_{ex}.npz"),
-                    beat=beat_for(phase), deadline=deadline, workers=min(8, args.workers),
+                    beat=beat_for(phase), deadline=deadline, workers=min(8, workers),
                     checkpoint=checkpoint)
                 rep.phase(phase, "ok", json.dumps(report["phases"][phase]))
             except Exception as exc:  # noqa: BLE001 - one extractor must not lose the other

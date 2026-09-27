@@ -515,6 +515,69 @@ def test_run_job_with_fallback_raises_after_exhausting_every_option():
         )
 
 
+_CATALOG_BOTH_CLOUDS = {
+    "data": {
+        "gpuTypes": [
+            {"id": "NVIDIA RTX A5000", "displayName": "RTX A5000", "memoryInGb": 24,
+             "communityPrice": 0.16, "securePrice": 0.27,
+             "communityCloud": True, "secureCloud": True},
+            {"id": "NVIDIA L40S", "displayName": "L40S", "memoryInGb": 48,
+             "communityPrice": 0.79, "securePrice": 1.19,
+             "communityCloud": True, "secureCloud": True},
+        ]
+    }
+}
+
+
+def test_eligible_gpus_stamps_each_option_with_the_cloud_it_was_priced_for():
+    session = _FakeSession()
+    session.post_response = _FakeResponse(200, _CATALOG_BOTH_CLOUDS)
+    client = _client(session)
+    community = client.eligible_gpus(max_price_per_hr=1.0)
+    secure = client.eligible_gpus(max_price_per_hr=1.0, cloud_type="SECURE")
+    assert [(g.id, g.cloud_type, g.price_per_hr()) for g in community] == [
+        ("NVIDIA RTX A5000", "COMMUNITY", 0.16), ("NVIDIA L40S", "COMMUNITY", 0.79)]
+    # The cap is applied to the price of the cloud asked for: the L40S is $1.19 there.
+    assert [(g.id, g.cloud_type, g.price_per_hr()) for g in secure] == [
+        ("NVIDIA RTX A5000", "SECURE", 0.27)]
+
+
+def test_run_job_launches_in_the_community_cloud_unless_told_otherwise():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "p1"}), _FakeResponse(201, {"id": "p2"})]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "EXITED"}),
+                             _FakeResponse(200, {"desiredStatus": "EXITED"})]
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    client = _client(session)
+    client.run_job(name="j", image="x", gpu_type_id="a", start_cmd=["true"], max_wait_s=1)
+    client.run_job(name="j", image="x", gpu_type_id="a", start_cmd=["true"], max_wait_s=1,
+                   cloud_type="SECURE")
+    launches = [c[2] for c in session.calls if c[0] == "POST" and c[1].endswith("/pods")]
+    assert [b["cloudType"] for b in launches] == ["COMMUNITY", "SECURE"]
+
+
+def test_run_job_with_fallback_moves_from_community_to_secure_for_the_same_card():
+    # 2026-09-27, GitHub run 36316992243: every allowed card was out of COMMUNITY capacity
+    # and the lane never asked the secure cloud. One card in two clouds is two rungs.
+    session = _FakeSession()
+    session.post_response = _FakeResponse(200, _CATALOG_BOTH_CLOUDS)
+    session.launch_responses = [
+        _FakeResponse(500, text='{"error":"create pod: There are no instances currently available"}'),
+        _FakeResponse(201, {"id": "pod-secure", "costPerHr": 0.27}),
+    ]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "EXITED"})]
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    client = _client(session)
+    ladder = [client.eligible_gpus(max_price_per_hr=1.0, cloud_type=c)[0]
+              for c in ("COMMUNITY", "SECURE")]
+    result = client.run_job_with_fallback(name="j", image="x", gpu_options=ladder,
+                                          start_cmd=["true"], max_wait_s=1, poll_interval_s=0)
+    assert result.pod_id == "pod-secure"
+    launches = [c[2] for c in session.calls if c[0] == "POST" and c[1].endswith("/pods")]
+    assert [(b["gpuTypeIds"], b["cloudType"]) for b in launches] == [
+        (["NVIDIA RTX A5000"], "COMMUNITY"), (["NVIDIA RTX A5000"], "SECURE")]
+
+
 def test_run_job_with_fallback_raises_on_empty_gpu_list():
     session = _FakeSession()
     with pytest.raises(RunPodError):
