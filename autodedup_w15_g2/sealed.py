@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from autodedup_w15_g2 import fixtures
 from autodedup_w15_g2.engine_g2 import EngineCfg, run_engine
 from autodedup_w15_g2.facts7 import FACTS, FactCfg, first_fact
 from autodedup_w15_g2.fit import Ground, ground
@@ -26,28 +27,7 @@ from autodedup_w15_g2.learn import W6, Model, auc, fit_isotonic, load_cohort, lo
 from autodedup_w15_g2.metrics import copairs, measure
 from autodedup_w15_g2.paths import OUT
 
-# adversary/PROGRESS.md 14, 18, 21: fusions the case readers exist to stop (example pairs)
-ADV_NEG = {
-    "c16": {"Polna shopping centre (position_designator, 60)": (62329, 62331),
-            "Kovarov apartments (accessory_price, 19)": (417800, 417807),
-            "Kovarov terrace (accessory_price+outdoor_accessory)": (444728, 444729),
-            "Lipno penzion halves (position_designator, 8)": (550158, 550159),
-            "parcel (5)": (550406, 550496), "labelled_unit (4)": (17323, 103815),
-            "parcel (2)": (202329, 18817722)},
-    "c14": {"Pod Sekvoji plots A22 x A21 (lot_label, 18)": (156917, 156989),
-            "Mirosovice/Hrusice villa (obec_prose, 52; 0 CD, unread)": (214312, 214313)},
-    "c12": {"novostavba RD domu c.1 vs dum 3 (printed_designator, 12)": (13438069, 13438071),
-            "Jihlava 3+kk JE600 vs JE700 (unit_code, 10)": (25413, 404955)},
-    # G2's read of the judge-negative pairs only the model-first engine co-clusters (pair_read_t3_trial)
-    "trial": {"Cerna Studnice 3+kk 95 vs 96 m2, co-live on ceskereality (pair read 2)": (420144, 420145),
-              "Harfa Living atelier 152-03-184 vs 152-03-117 (pair read 5)": (28957, 18644036),
-              "Anenske nam. 2+kk, 4. NP vs 5. NP in the bodies (pair read 11)": (33553, 519077)},
-    # G2's own D83 read of the model-first engine's new screened groups (read_t3_*_mf.json)
-    "c18": {"Mlynska 3+kk fl2 vs fl3, co-live on sreality (read 5)": (58214, 58249),
-            "Mlynska 4+kk fl2 vs fl3, co-live on sreality (read 6)": (58215, 58380)},
-    "c17": {"Znojmo Smutneho 4+kk, two agency refs, co-live prices 3 % apart (read 5)": (514099, 10102388),
-            "Kutna Hora Residence: ordinace c. 3 80 m2 vs 350-700 m2 space (read 8)": (37943, 451886)},
-}
+ADV_NEG = fixtures.by_cohort()
 
 SOURCES = {
     "all": lambda lab: True,

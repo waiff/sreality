@@ -16,7 +16,6 @@ import numpy as np
 from autodedup.body_align import aligned_difference
 from autodedup.dataset import load
 
-from autodedup_w15_g2.arms2 import FUSED_READS
 from autodedup_w15_g2.engine_g2 import EngineCfg, run_engine
 from autodedup_w15_g2.facts7 import first_fact
 from autodedup_w15_g2.labels_g2 import operator_eval_pairs
@@ -53,13 +52,10 @@ def main(tag: str, names: list[str]) -> None:
                              EngineCfg(t_merge=CUT, t_band=BAND, t_neg=T_NEG, facts=FACTS, lazy_fact=unit_text),
                              must_link=ml, must_not=mnl, pair_facts=pf, lazy_memo=lazy)
             m = slim(measure(n, run.groups, c.recs, c.labels, ref))
-            where = {x: r for r, ms in run.groups.items() for x in ms}
             m.update({"band": run.band, "merge_edges": run.edges, "refused_group_fact": run.refused_fact,
                       "refused_group_neg": run.refused_neg, "lazy": run.fact_pairs.get("lazy_pairs_fired"),
                       "groups_ge10": sum(1 for v in run.groups.values() if len(v) >= 10),
-                      "adversary": adversary(n, run.groups), "seconds": round(time.perf_counter() - t0, 1),
-                      "read_fusions_together": {k: where.get(a) is not None and where.get(a) == where.get(b)
-                                                for k, (a, b) in FUSED_READS.get(n, {}).items()}})
+                      "adversary": adversary(n, run.groups), "seconds": round(time.perf_counter() - t0, 1)})
             res[arm] = m
             (OUT / f"cache/groups_{tag}_{n}_{arm}.json").write_text(
                 json.dumps({str(k): v for k, v in run.groups.items()}))

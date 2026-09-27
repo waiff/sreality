@@ -13,7 +13,6 @@ import numpy as np
 from autodedup.body_align import aligned_difference
 from autodedup.dataset import load
 
-from autodedup_w15_g2.arms2 import FUSED_READS
 from autodedup_w15_g2.engine_g2 import EngineCfg, run_engine
 from autodedup_w15_g2.facts7 import first_fact
 from autodedup_w15_g2.learn import load_cohort
@@ -56,17 +55,14 @@ def main(tag: str, names: list[str]) -> None:
                              EngineCfg(t_merge=0.8, t_band=0.2, t_neg=0.2, facts=FACTS, lazy_fact=veto),
                              pair_facts=pf)
             m = slim(measure(n, run.groups, c.recs, c.labels, c.ladder["FULL"]["clusters"]))
-            where = {x: r for r, ms in run.groups.items() for x in ms}
-            m.update({"band": run.band, "adversary": adversary(n, run.groups), "readers": len(rs),
-                      "read_fusions_together": {k: where.get(a) is not None and where.get(a) == where.get(b)
-                                                for k, (a, b) in FUSED_READS.get(n, {}).items()}})
+            m.update({"band": run.band, "adversary": adversary(n, run.groups), "readers": len(rs)})
             res[arm] = m
             print(n, arm, len(rs), {k: m[k] for k in ("groups", "copairs", "op_same_together", "op_diff_apart",
                                                         "judge_neg_apart", "c7_fused_pairs_apart", "c7_one_pairs_together",
                                                         "screen_flagged_groups", "copairs_gained_vs_ladder",
                                                         "copairs_lost_vs_ladder", "band")},
                   "adv_apart", sum(1 for v in m["adversary"].values() if not v["together"]), "/", len(m["adversary"]),
-                  "reads_together", sum(m["read_fusions_together"].values()), flush=True)
+                  flush=True)
         (OUT / f"arms5_{tag}_{n}.json").write_text(json.dumps(res, indent=1, default=str))
 
 
