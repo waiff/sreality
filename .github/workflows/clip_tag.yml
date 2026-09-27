@@ -119,8 +119,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # 20 MB/h: ~1.7 kB a vector, so ~12k vectors an hour, 100x what CPU can embed here.
+        # --chunk 8: the time budget is checked between chunks, and one bf16 CPU image is ~37 s, so a
+        # chunk overshoots the 1,500 s budget by at most ~5 min, inside the job's 55.
         run: |
           python -m scripts.dinov3_embed_backfill --scope rt --score-heads --device cpu \
-            --threads 4 --workers 4 --batch-size 4 --chunk 32 --limit 2000 \
+            --threads 4 --workers 4 --batch-size 4 --chunk 8 --limit 2000 \
             --shard ${{ matrix.shard }} --shards 4 --max-seconds 1500 \
             --max-write-mb-per-hour 20
