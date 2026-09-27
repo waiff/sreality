@@ -4,7 +4,8 @@ The active tag model (migration 490, `tag_head_models.status = 'active'`) scores
 every head and stores the winner. The engine reads the WINNER only, mapped to its room vocabulary
 (`toolkit.room_taxonomy`), and routes a photo only when the winner clears the consumer floor
 (0.5, the one floor the NEW DEDUP ledger measured: it keeps 96.8 % of true tags) by at least
-`HEAD_MARGIN` over the runner-up. Below that the photo is untagged: it is still compared by
+`HEAD_MARGIN` over the runner-up. Below that, a photo whose winner is an interior head joins the
+engine's interior catch-all (`hallway`); any other photo is untagged: it is still compared by
 pHash and CLIP cosine, it is only kept out of same-room routing. A head label the map does not
 know is refused, never guessed.
 """
@@ -17,11 +18,12 @@ from typing import Any, Mapping, Sequence
 HEAD_FLOOR: float = 0.5
 HEAD_MARGIN: float = 0.0
 # A sub-floor photo whose winning head is an INTERIOR room (kitchen, bathroom, living room) is still
-# almost surely an interior photo — v1 has no bedroom or hallway head, so those land here. With this set
-# to `hallway` such a photo keeps its family through the engine's existing interior catch-all (excluded
-# from the private rooms, `features.PRIVATE_ROOM_TAGS`), so `interior_match_ratio` and the anchor order
-# still see it; None leaves it untagged. Chosen on day 2 by the real-head arms (G4 section 3).
-SUBFLOOR_CATCH_ALL: str | None = None
+# almost surely an interior photo — v1 has no bedroom or hallway head, so those land here. It keeps its
+# family through the engine's existing interior catch-all `hallway` (excluded from the private rooms,
+# `features.PRIVATE_ROOM_TAGS`), so `interior_match_ratio` and the anchor order still see it. Measured
+# (G4 section 3, CLIP-geometry emulation on trial / c17 / c18): with it, merge flips 0.16-0.34 % vs
+# 0.31-0.40 % without, and no trial operator positive lost (without: 1-3). None = untagged.
+SUBFLOOR_CATCH_ALL: str | None = "hallway"
 INTERIOR_HEAD_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom", "living_room"})
 
 # Normalised operator taxonomy label (prefix `interier - ` / `exterier - ` / `podklad - ` dropped,

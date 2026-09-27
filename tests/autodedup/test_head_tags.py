@@ -37,8 +37,12 @@ def test_the_floor_and_the_margin_decide_routing():
     row = {"label": "interier - kuchyně", "winner_score": 0.62,
            "scores": json.dumps({"25": 0.62, "22": 0.55, "3": 0.1})}
     assert ht.head_tag_pairs([row]) == [["kitchen", 0.62]]
-    assert ht.head_tag_pairs([row], floor=0.7) == []
-    assert ht.head_tag_pairs([row], margin=0.1) == []
+    assert ht.head_tag_pairs([row], floor=0.7, catch_all=None) == []
+    assert ht.head_tag_pairs([row], margin=0.1, catch_all=None) == []
+    # by default a sub-floor INTERIOR winner keeps its family through the catch-all
+    assert ht.head_tag_pairs([row], floor=0.7) == [["hallway", 0.62]]
+    facade = dict(row, label="exterier - fasáda")
+    assert ht.head_tag_pairs([facade], floor=0.7) == []
     assert ht.head_record(row) == ["kitchen", 0.62, 0.55]
 
 
@@ -46,9 +50,11 @@ def test_the_harness_arm_swaps_clip_tags_for_the_head_winner():
     kitchen = Image(listing_id=1, image_id=1, tags=[("hallway", 0.9)], head=["kitchen", 0.8, 0.1])
     weak = Image(listing_id=1, image_id=2, tags=[("bedroom", 0.9)], head=["living_room", 0.4, 0.3])
     unscored = Image(listing_id=1, image_id=3, tags=[("kitchen", 0.9)], head=None)
-    counts = ht.apply_head_tags([kitchen, weak, unscored])
+    counts = ht.apply_head_tags([kitchen, weak, unscored], catch_all=None)
     assert kitchen.tags == [("kitchen", 0.8)] and weak.tags == [] and unscored.tags == []
     assert counts == {"tagged": 1, "untagged": 1, "unscored": 1}
+    assert ht.apply_head_tags([weak]) == {"tagged": 1, "untagged": 0, "unscored": 0}
+    assert weak.tags == [("hallway", 0.4)]
 
 
 def test_the_export_emits_head_only_when_asked():
@@ -151,7 +157,7 @@ def test_the_lane_reads_head_winners_under_heads(monkeypatch):
     gallery = {img.image_id: img for img in facts._galleries([7])[7]}
     assert E.COHORT_CLIP_TAGS_SQL not in asked
     assert gallery[1].tags == [("kitchen", 0.9)] and gallery[1].head == ["kitchen", 0.9, 0.1]
-    assert gallery[2].tags == [] and gallery[2].head == ["bathroom", 0.4, 0.3]
+    assert gallery[2].tags == [("hallway", 0.4)] and gallery[2].head == ["bathroom", 0.4, 0.3]
     assert gallery[3].tags == [] and gallery[3].head is None
 
 
