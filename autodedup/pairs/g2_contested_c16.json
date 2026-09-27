@@ -1,0 +1,6632 @@
+[
+{
+"lo": 281531,
+"hi": 465362,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10499885,
+"hi": 18852674,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 345961,
+"hi": 439290,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 222373,
+"hi": 18726440,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 194649,
+"hi": 437249,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 204044,
+"hi": 18787149,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11091615,
+"hi": 18905677,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 11373797,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 472878,
+"hi": 18673400,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206540,
+"hi": 18852162,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 339262,
+"hi": 13221765,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 194281,
+"hi": 15668870,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 269319,
+"hi": 318138,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 555777,
+"hi": 12088747,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 327339,
+"hi": 351125,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314802,
+"hi": 440061,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 42892,
+"hi": 18984508,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 17072794,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 440560,
+"hi": 18984508,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 16751876,
+"hi": 18711045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18937245,
+"hi": 18941630,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18843094,
+"hi": 19021466,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271302,
+"hi": 439688,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 61248,
+"hi": 545147,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11998224,
+"hi": 15490603,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 246917,
+"hi": 489617,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13666374,
+"hi": 13666639,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 194281,
+"hi": 281356,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322192,
+"hi": 13221765,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273360,
+"hi": 409973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18908922,
+"hi": 18908928,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 529084,
+"hi": 555777,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 210719,
+"hi": 317994,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 524156,
+"hi": 12698873,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 219633,
+"hi": 349718,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 163054,
+"hi": 18754555,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18816944,
+"hi": 18934877,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 113780,
+"hi": 114129,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 11611268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 136356,
+"hi": 147868,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237214,
+"hi": 314802,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314804,
+"hi": 18013504,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18711045,
+"hi": 18950434,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 348751,
+"hi": 440298,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 84761,
+"hi": 199528,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 268818,
+"hi": 439685,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10915045,
+"hi": 12487225,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 244534,
+"hi": 442007,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18624617,
+"hi": 18985444,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 316082,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 263596,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206540,
+"hi": 18624516,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273438,
+"hi": 18917936,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 103614,
+"hi": 17699692,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 149374,
+"hi": 13786148,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258839,
+"hi": 18711045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18794765,
+"hi": 18999112,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 15071111,
+"hi": 18962815,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 154225,
+"hi": 193764,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18669032,
+"hi": 18959434,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 549180,
+"hi": 18656090,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 205982,
+"hi": 442103,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 541792,
+"hi": 14613993,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18984508,
+"hi": 18985846,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 103614,
+"hi": 18124877,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 338134,
+"hi": 18726440,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 194649,
+"hi": 552517,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271226,
+"hi": 362216,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 554157,
+"hi": 12698873,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18289418,
+"hi": 18917936,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 15828289,
+"hi": 15828560,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206944,
+"hi": 17870268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 69093,
+"hi": 18726466,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13388477,
+"hi": 13409384,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271947,
+"hi": 306141,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 281363,
+"hi": 465057,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10308654,
+"hi": 18937507,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18984508,
+"hi": 18989735,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10308654,
+"hi": 18936301,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 316084,
+"hi": 18902794,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 268243,
+"hi": 270715,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 439385,
+"hi": 18751081,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18572691,
+"hi": 18760950,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258837,
+"hi": 442102,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 205160,
+"hi": 219378,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206606,
+"hi": 18712830,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 384781,
+"hi": 487900,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 546139,
+"hi": 11816720,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 503342,
+"hi": 11816720,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 354880,
+"hi": 354881,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18843682,
+"hi": 18908922,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 550453,
+"hi": 10915045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 196647,
+"hi": 424204,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10915045,
+"hi": 11816720,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 61248,
+"hi": 12299415,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 213080,
+"hi": 317994,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 524156,
+"hi": 11816720,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11607308,
+"hi": 18588724,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 529084,
+"hi": 539546,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 349955,
+"hi": 507554,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 497948,
+"hi": 10694669,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 503342,
+"hi": 11192887,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17363480,
+"hi": 18966973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18624516,
+"hi": 18852162,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 279684,
+"hi": 453046,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 518271,
+"hi": 11372526,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 16145417,
+"hi": 18327288,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 269320,
+"hi": 273432,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206137,
+"hi": 18794754,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 554157,
+"hi": 11611268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 476328,
+"hi": 16153993,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 549180,
+"hi": 18568128,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 318137,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 182618,
+"hi": 18673400,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 468933,
+"hi": 18852674,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18698097,
+"hi": 18983687,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18976555,
+"hi": 18978015,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18013504,
+"hi": 18966973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322501,
+"hi": 19001553,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 503342,
+"hi": 546139,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 103614,
+"hi": 12214522,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 522564,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11998224,
+"hi": 18794765,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17881103,
+"hi": 18565641,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 537166,
+"hi": 11994095,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 550453,
+"hi": 12259623,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 16751876,
+"hi": 18684675,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 468922,
+"hi": 13789812,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322192,
+"hi": 362381,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 12259623,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273438,
+"hi": 17363480,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10308624,
+"hi": 18936300,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273438,
+"hi": 18966973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 539546,
+"hi": 10308127,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 46485,
+"hi": 244122,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 524149,
+"hi": 18524450,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 312917,
+"hi": 506444,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 244296,
+"hi": 442007,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 16751876,
+"hi": 18950434,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314804,
+"hi": 17363480,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 327428,
+"hi": 18902794,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 46485,
+"hi": 446179,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10372712,
+"hi": 18632783,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18711045,
+"hi": 18966973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18780262,
+"hi": 18872243,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 292253,
+"hi": 17072795,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 12259623,
+"hi": 12487226,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258838,
+"hi": 489612,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18157878,
+"hi": 18642250,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 529084,
+"hi": 10915045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 405381,
+"hi": 453046,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17570358,
+"hi": 18637501,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258839,
+"hi": 18950434,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 248722,
+"hi": 493611,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13221073,
+"hi": 18747754,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 468922,
+"hi": 10499883,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 163141,
+"hi": 281429,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 289974,
+"hi": 18893314,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206944,
+"hi": 18701473,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 246856,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 149374,
+"hi": 18938468,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 164780,
+"hi": 476328,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273438,
+"hi": 322501,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 263595,
+"hi": 17072795,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 292254,
+"hi": 316082,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18843094,
+"hi": 18933366,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 483520,
+"hi": 10060687,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17881103,
+"hi": 18403571,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 503342,
+"hi": 534116,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 555777,
+"hi": 11816720,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258839,
+"hi": 18497449,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11611268,
+"hi": 12487226,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206944,
+"hi": 16153993,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 316082,
+"hi": 318137,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10473669,
+"hi": 12487225,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18289418,
+"hi": 18711045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 327424,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17724304,
+"hi": 18852162,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 292253,
+"hi": 327425,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18711045,
+"hi": 19001553,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 305796,
+"hi": 18872243,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 524156,
+"hi": 11611268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 510413,
+"hi": 11192887,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 163141,
+"hi": 408050,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206375,
+"hi": 17710474,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 204911,
+"hi": 11091615,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 555777,
+"hi": 10308127,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18157878,
+"hi": 19021466,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 524548,
+"hi": 18889308,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 281421,
+"hi": 430790,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 339262,
+"hi": 405381,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271917,
+"hi": 306141,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 500619,
+"hi": 12032834,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206944,
+"hi": 551017,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 555777,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322494,
+"hi": 327425,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17363480,
+"hi": 18884268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10308127,
+"hi": 10915045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 219633,
+"hi": 12486847,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273438,
+"hi": 314804,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18565641,
+"hi": 18669032,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 85479,
+"hi": 234654,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10060687,
+"hi": 10915045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 8349,
+"hi": 378098,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 40867,
+"hi": 245886,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 237215,
+"hi": 314803,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258837,
+"hi": 489610,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13786148,
+"hi": 18938468,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314803,
+"hi": 322495,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 317755,
+"hi": 18899289,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 249295,
+"hi": 451057,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 460524,
+"hi": 18794754,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18403571,
+"hi": 18902794,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 546139,
+"hi": 10694669,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18817726,
+"hi": 18818073,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18636997,
+"hi": 18655630,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314802,
+"hi": 316081,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13545927,
+"hi": 18900667,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 473760,
+"hi": 18989549,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18649534,
+"hi": 18656040,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18684675,
+"hi": 18711045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18669032,
+"hi": 18902794,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 338134,
+"hi": 18726466,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 206606,
+"hi": 436329,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 534073,
+"hi": 18524450,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 545147,
+"hi": 12313868,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 10308127,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 353512,
+"hi": 13221765,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 8349,
+"hi": 277836,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 84761,
+"hi": 204628,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 273431,
+"hi": 17072795,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 546139,
+"hi": 11373797,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 15478514,
+"hi": 18489461,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 205912,
+"hi": 488005,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 327433,
+"hi": 11994095,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 277764,
+"hi": 18712830,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 160764,
+"hi": 281421,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18717186,
+"hi": 18717188,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 205982,
+"hi": 237215,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 270726,
+"hi": 271226,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 277900,
+"hi": 468922,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10968212,
+"hi": 18524450,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 190909,
+"hi": 18795192,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17881103,
+"hi": 18861817,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11119392,
+"hi": 17519365,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 10060687,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 212945,
+"hi": 277900,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 328631,
+"hi": 335353,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322501,
+"hi": 18966973,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 399787,
+"hi": 497955,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 323937,
+"hi": 500619,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 62332,
+"hi": 489812,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322501,
+"hi": 17724304,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 327339,
+"hi": 460425,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 62337,
+"hi": 273431,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 503342,
+"hi": 12259623,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10568180,
+"hi": 10591486,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 147868,
+"hi": 354880,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17570358,
+"hi": 18731374,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 158155,
+"hi": 10410058,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258839,
+"hi": 314804,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11816720,
+"hi": 12088747,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 518519,
+"hi": 11192887,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 323937,
+"hi": 13576264,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258837,
+"hi": 318137,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 15828288,
+"hi": 15843107,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 555777,
+"hi": 10915045,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 258838,
+"hi": 273431,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 85479,
+"hi": 248039,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 510413,
+"hi": 12259623,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 269320,
+"hi": 314803,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13435814,
+"hi": 13666639,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 15828289,
+"hi": 15843110,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 268243,
+"hi": 271917,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 181633,
+"hi": 283825,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 298096,
+"hi": 13609433,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 513672,
+"hi": 554157,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 263598,
+"hi": 18698097,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18669032,
+"hi": 18698097,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 354880,
+"hi": 506895,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 268243,
+"hi": 439688,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 10624630,
+"hi": 18962815,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 337596,
+"hi": 10309033,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 314804,
+"hi": 489808,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18489461,
+"hi": 18997496,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 362381,
+"hi": 405381,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 13251635,
+"hi": 18743183,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 441846,
+"hi": 487900,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 234654,
+"hi": 489374,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 11065564,
+"hi": 18572691,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 316084,
+"hi": 18157878,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18737190,
+"hi": 18899288,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 472878,
+"hi": 18674038,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 322501,
+"hi": 18884268,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271226,
+"hi": 271928,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 368216,
+"hi": 439290,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 497948,
+"hi": 554157,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 270638,
+"hi": 439685,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 271798,
+"hi": 322192,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 18013504,
+"hi": 18950434,
+"stratum": "g2:s1_ladder_only_edge"
+},
+{
+"lo": 17172297,
+"hi": 17234772,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18700214,
+"hi": 18814792,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 164631,
+"hi": 468903,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 268747,
+"hi": 18887809,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 10260400,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 145498,
+"hi": 360606,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 470729,
+"hi": 18613111,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18583341,
+"hi": 18700658,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 9433,
+"hi": 12076508,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 220024,
+"hi": 18941121,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15007758,
+"hi": 15018013,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 476204,
+"hi": 18905453,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 419329,
+"hi": 10501454,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10308707,
+"hi": 18585198,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10308685,
+"hi": 13462745,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 268747,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 251872,
+"hi": 496606,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17776253,
+"hi": 18969796,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 202727,
+"hi": 236481,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 452887,
+"hi": 478601,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18994263,
+"hi": 18994297,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 436303,
+"hi": 18636431,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 256700,
+"hi": 18300029,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 66450,
+"hi": 440338,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10968212,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 330939,
+"hi": 474779,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 442800,
+"hi": 18836421,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 237217,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 170443,
+"hi": 472575,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 399810,
+"hi": 482075,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 496592,
+"hi": 18818548,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 197663,
+"hi": 17984039,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 436324,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 290160,
+"hi": 17186219,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 507271,
+"hi": 18324026,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 281454,
+"hi": 18777468,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 203978,
+"hi": 510468,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 46390,
+"hi": 18836182,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 171327,
+"hi": 175985,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 319817,
+"hi": 320828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18818553,
+"hi": 18918129,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 484826,
+"hi": 18892386,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 436324,
+"hi": 18887809,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 290398,
+"hi": 479628,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 507272,
+"hi": 507367,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 18641194,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17406661,
+"hi": 17407260,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 17865683,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 354789,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 13590121,
+"hi": 13613263,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 514536,
+"hi": 10774890,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 241456,
+"hi": 281446,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 13427157,
+"hi": 18632583,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 339817,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 40692,
+"hi": 216046,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 236132,
+"hi": 372572,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 35963,
+"hi": 270775,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 305690,
+"hi": 495262,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 525203,
+"hi": 18840656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18986178,
+"hi": 18987812,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18699252,
+"hi": 18699267,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 168028,
+"hi": 480679,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 507271,
+"hi": 15801837,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18892386,
+"hi": 18893826,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 16146526,
+"hi": 18961696,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 262290,
+"hi": 18918692,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 271742,
+"hi": 478695,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 554766,
+"hi": 18686524,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 466941,
+"hi": 18867025,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 74249,
+"hi": 74250,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 200952,
+"hi": 18700903,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 358464,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 72101,
+"hi": 531239,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 39842,
+"hi": 461825,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 72119,
+"hi": 10694195,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 36581,
+"hi": 18833018,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 314661,
+"hi": 475646,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 351178,
+"hi": 18986644,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 290366,
+"hi": 18770274,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 226799,
+"hi": 15801837,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 40267,
+"hi": 440555,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 315784,
+"hi": 554636,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 219749,
+"hi": 505496,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 348752,
+"hi": 440303,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 303361,
+"hi": 18935656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18843679,
+"hi": 18843692,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 334615,
+"hi": 18728691,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 193563,
+"hi": 18976482,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 353226,
+"hi": 18324029,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17270351,
+"hi": 17302049,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 13179665,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 315784,
+"hi": 554766,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 443768,
+"hi": 10305641,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10528615,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 268697,
+"hi": 554133,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15254818,
+"hi": 15277356,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 126279,
+"hi": 417715,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 362954,
+"hi": 401131,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 315092,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 354789,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 254420,
+"hi": 18721166,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18562741,
+"hi": 18698040,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 120996,
+"hi": 347834,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10308707,
+"hi": 18613097,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 510343,
+"hi": 18935656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 268747,
+"hi": 18905453,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 290115,
+"hi": 18771661,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17762302,
+"hi": 18702398,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18969333,
+"hi": 18983338,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 436324,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18584648,
+"hi": 18698040,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11607308,
+"hi": 18918692,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 317756,
+"hi": 488828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 525204,
+"hi": 18840657,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 176303,
+"hi": 353696,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 109726,
+"hi": 11863559,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 534598,
+"hi": 535975,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 332755,
+"hi": 468049,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 497940,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 156471,
+"hi": 501348,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 515369,
+"hi": 10308589,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15627520,
+"hi": 18940216,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 357199,
+"hi": 474779,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 457716,
+"hi": 497618,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 263471,
+"hi": 322405,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 417314,
+"hi": 18795104,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 523717,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 112393,
+"hi": 18795096,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 73602,
+"hi": 504862,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 159139,
+"hi": 434578,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 409542,
+"hi": 15283417,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 326761,
+"hi": 478601,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18677972,
+"hi": 18693151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 379757,
+"hi": 531201,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 279582,
+"hi": 499504,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 417821,
+"hi": 11863559,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 226256,
+"hi": 366377,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 505269,
+"hi": 514211,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10734429,
+"hi": 18748695,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15254818,
+"hi": 15308128,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 507367,
+"hi": 15786584,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 17724286,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 542593,
+"hi": 18781570,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 66450,
+"hi": 505155,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18904727,
+"hi": 18905888,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 10473637,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 48089,
+"hi": 204911,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 515892,
+"hi": 10308589,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 210869,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 263278,
+"hi": 475657,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11607308,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 353466,
+"hi": 507442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 110753,
+"hi": 554680,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11134045,
+"hi": 19002087,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 241255,
+"hi": 290175,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 395252,
+"hi": 11845639,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 220024,
+"hi": 18685590,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 37923,
+"hi": 492379,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 543818,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 319690,
+"hi": 320829,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 484869,
+"hi": 18818548,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 391839,
+"hi": 440343,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 227969,
+"hi": 18786701,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 433508,
+"hi": 18763907,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 386161,
+"hi": 19002087,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 252430,
+"hi": 497618,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 550158,
+"hi": 550159,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 505276,
+"hi": 13462817,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17211378,
+"hi": 17302049,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18590188,
+"hi": 18747578,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18744348,
+"hi": 19013039,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 513764,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 248617,
+"hi": 13590121,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 436303,
+"hi": 18636476,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 49762,
+"hi": 19013665,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 346513,
+"hi": 348810,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 316393,
+"hi": 18935656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 463831,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 36581,
+"hi": 154682,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 500219,
+"hi": 18697375,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 537915,
+"hi": 18986644,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 244592,
+"hi": 320829,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 430279,
+"hi": 18859515,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 484291,
+"hi": 18887809,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11845605,
+"hi": 11895576,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 168727,
+"hi": 478763,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 440309,
+"hi": 507272,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18787132,
+"hi": 18922478,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 326761,
+"hi": 478695,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 36581,
+"hi": 18835010,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 523717,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18658521,
+"hi": 18659975,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 240958,
+"hi": 290230,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 399810,
+"hi": 488828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 526336,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 281423,
+"hi": 404965,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 40855,
+"hi": 244378,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 316393,
+"hi": 19002087,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 29008,
+"hi": 18969801,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 279582,
+"hi": 497618,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 537915,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 240572,
+"hi": 18767477,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18905796,
+"hi": 18906373,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 136266,
+"hi": 517717,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18777994,
+"hi": 18815561,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 534073,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 475661,
+"hi": 478763,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18599056,
+"hi": 18763971,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 353696,
+"hi": 393291,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18699576,
+"hi": 18989968,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18814792,
+"hi": 18989968,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 262290,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 254420,
+"hi": 18969580,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11845605,
+"hi": 11866688,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 271742,
+"hi": 474779,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 17404782,
+"hi": 18768411,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 303361,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 236243,
+"hi": 499504,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 362480,
+"hi": 18992180,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 368053,
+"hi": 18952990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 236243,
+"hi": 502149,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 317756,
+"hi": 507442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 368053,
+"hi": 18887809,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 463831,
+"hi": 18986644,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 84768,
+"hi": 211537,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 175985,
+"hi": 281501,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 346503,
+"hi": 348752,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 87489,
+"hi": 231715,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 550496,
+"hi": 550518,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 461825,
+"hi": 463099,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 303257,
+"hi": 18702269,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 18290473,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 339569,
+"hi": 440309,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 315784,
+"hi": 18685845,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 140869,
+"hi": 18863483,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 11607308,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 361771,
+"hi": 497618,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 40400,
+"hi": 12355003,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 534073,
+"hi": 18935656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 109730,
+"hi": 417786,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 40861,
+"hi": 244378,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 52098,
+"hi": 176926,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 84761,
+"hi": 359021,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 537915,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 256103,
+"hi": 18715744,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 358647,
+"hi": 436256,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 537915,
+"hi": 18905453,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 197994,
+"hi": 18777577,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 388971,
+"hi": 488240,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18685590,
+"hi": 18941121,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 349661,
+"hi": 488828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 353466,
+"hi": 488828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 483968,
+"hi": 18922167,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 346787,
+"hi": 19026151,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 457716,
+"hi": 475657,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18976453,
+"hi": 18976482,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 553535,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 103818,
+"hi": 525198,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18904060,
+"hi": 18937273,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 451908,
+"hi": 490168,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 150509,
+"hi": 18403456,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 319817,
+"hi": 320829,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 322485,
+"hi": 499504,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480673,
+"hi": 18765012,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 362328,
+"hi": 478601,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 264405,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10115856,
+"hi": 10130132,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10408402,
+"hi": 10501538,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 317532,
+"hi": 14067288,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 109165,
+"hi": 417314,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 10694134,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 554139,
+"hi": 18935656,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 391025,
+"hi": 488518,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 29008,
+"hi": 18934186,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 281626,
+"hi": 465358,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 492327,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 340693,
+"hi": 488828,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 342202,
+"hi": 367886,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 273434,
+"hi": 18887809,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 340693,
+"hi": 474779,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 217028,
+"hi": 493120,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 460425,
+"hi": 15308091,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 314661,
+"hi": 475657,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 152461,
+"hi": 515660,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 281495,
+"hi": 321267,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 276194,
+"hi": 475657,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 488341,
+"hi": 18918229,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15254819,
+"hi": 15277356,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 416814,
+"hi": 18965150,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 362099,
+"hi": 18686524,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 18864836,
+"hi": 18865057,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 335353,
+"hi": 355062,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 414973,
+"hi": 18905453,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 346034,
+"hi": 346513,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 346787,
+"hi": 18967442,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 452887,
+"hi": 478695,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 63979,
+"hi": 384428,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 480027,
+"hi": 491910,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 15045721,
+"hi": 15633511,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 358464,
+"hi": 18959990,
+"stratum": "g2:s2_mf_only_edge"
+},
+{
+"lo": 206540,
+"hi": 18632806,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 404564,
+"hi": 17407260,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18678298,
+"hi": 18681147,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 80369,
+"hi": 493043,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17863,
+"hi": 417314,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 418331,
+"hi": 18563041,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 280818,
+"hi": 18581900,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 263598,
+"hi": 18624516,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 319765,
+"hi": 476077,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440072,
+"hi": 489617,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18677973,
+"hi": 18681146,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 526479,
+"hi": 18918794,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 13221073,
+"hi": 18743470,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 445362,
+"hi": 18865105,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 15881793,
+"hi": 18574846,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 543883,
+"hi": 17439837,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18825514,
+"hi": 18852162,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 15912258,
+"hi": 18889433,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281424,
+"hi": 321154,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18811119,
+"hi": 18813632,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 258839,
+"hi": 18959434,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 349830,
+"hi": 417787,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 409089,
+"hi": 18772917,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 272959,
+"hi": 351700,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 384781,
+"hi": 439889,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 447006,
+"hi": 10304961,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 9874,
+"hi": 18989277,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246919,
+"hi": 19001553,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10694720,
+"hi": 18958333,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 196626,
+"hi": 409089,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10914913,
+"hi": 18953343,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 12483101,
+"hi": 18943317,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18776551,
+"hi": 18989575,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 276533,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440075,
+"hi": 18013504,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17174039,
+"hi": 18736556,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440069,
+"hi": 18624516,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 216046,
+"hi": 18604437,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18969796,
+"hi": 18987995,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18904075,
+"hi": 18908922,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 348825,
+"hi": 439889,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 196296,
+"hi": 473403,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 543883,
+"hi": 12077235,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18669032,
+"hi": 18684675,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 290208,
+"hi": 412773,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 11132958,
+"hi": 19016360,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 133139,
+"hi": 18691183,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18816940,
+"hi": 18816944,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17776253,
+"hi": 18987995,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 269325,
+"hi": 17571861,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 170882,
+"hi": 18755187,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 273438,
+"hi": 489810,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10652343,
+"hi": 19003688,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18908922,
+"hi": 18908925,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 155277,
+"hi": 18954566,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 18157878,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 385662,
+"hi": 453286,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17548,
+"hi": 10308669,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 33611,
+"hi": 18777961,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 292255,
+"hi": 17363480,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281413,
+"hi": 321152,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18008851,
+"hi": 18958333,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 439341,
+"hi": 18562861,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17838769,
+"hi": 18811865,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 306169,
+"hi": 18604437,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 13435813,
+"hi": 13435814,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 544244,
+"hi": 12077235,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 18861817,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10774890,
+"hi": 18777220,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 314804,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 190831,
+"hi": 18776552,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 108147,
+"hi": 321601,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 162904,
+"hi": 18755188,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 330981,
+"hi": 18661930,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 520232,
+"hi": 526403,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 62329,
+"hi": 18825514,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 233295,
+"hi": 546086,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 412332,
+"hi": 13206321,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 19001553,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 72319,
+"hi": 439221,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18971067,
+"hi": 18988567,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 322501,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489808,
+"hi": 18825514,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18969333,
+"hi": 18971068,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 92653,
+"hi": 197574,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 473758,
+"hi": 18776552,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281525,
+"hi": 363901,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 246918,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 91087,
+"hi": 18606073,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246917,
+"hi": 18711045,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18983590,
+"hi": 18984515,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 110392,
+"hi": 525201,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17362327,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 12948994,
+"hi": 18997533,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281463,
+"hi": 281498,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489812,
+"hi": 19001553,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 327428,
+"hi": 18684675,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 292255,
+"hi": 316084,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 206070,
+"hi": 17363480,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 270779,
+"hi": 448698,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 62335,
+"hi": 246856,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 548843,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17619080,
+"hi": 18791162,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 340902,
+"hi": 18662589,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 190831,
+"hi": 18772917,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 18565641,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 99292,
+"hi": 388695,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18990013,
+"hi": 18991125,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 17072796,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489374,
+"hi": 19002087,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 489808,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 525198,
+"hi": 19008945,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 537745,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 92654,
+"hi": 445489,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18843692,
+"hi": 18845225,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 189387,
+"hi": 18843093,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 544221,
+"hi": 18790255,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 273438,
+"hi": 18959434,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440077,
+"hi": 18698097,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 180624,
+"hi": 473769,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10420303,
+"hi": 18765329,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17659408,
+"hi": 18791162,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 541774,
+"hi": 18637501,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 43137,
+"hi": 553373,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 162636,
+"hi": 263309,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10914913,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 12948994,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 51895,
+"hi": 17832411,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10408902,
+"hi": 18687410,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 445362,
+"hi": 19002087,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17174081,
+"hi": 18997533,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 446245,
+"hi": 18952990,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 237220,
+"hi": 18642250,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440077,
+"hi": 18966973,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 16929924,
+"hi": 18980269,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10652337,
+"hi": 10679053,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440077,
+"hi": 17363480,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246918,
+"hi": 440075,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246917,
+"hi": 18917936,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18636438,
+"hi": 18997533,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 334559,
+"hi": 13998209,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 62331,
+"hi": 322501,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 145370,
+"hi": 18820007,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 417646,
+"hi": 18323561,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 196626,
+"hi": 18776550,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17548,
+"hi": 17185732,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 424802,
+"hi": 18755188,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 72110,
+"hi": 417794,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 518271,
+"hi": 16145417,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 33611,
+"hi": 516456,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 269325,
+"hi": 17363480,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 263598,
+"hi": 18684675,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 318140,
+"hi": 19001553,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 342402,
+"hi": 18736556,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 30937,
+"hi": 18713426,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 13824084,
+"hi": 18713477,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 318140,
+"hi": 19021466,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 445362,
+"hi": 18918692,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 237220,
+"hi": 18983687,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10075847,
+"hi": 11773641,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 220617,
+"hi": 18703258,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489374,
+"hi": 18656448,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 335535,
+"hi": 534181,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 32982,
+"hi": 375381,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 363087,
+"hi": 443536,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 49922,
+"hi": 18429744,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440072,
+"hi": 18861817,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 472498,
+"hi": 18674038,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 346120,
+"hi": 440299,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 263598,
+"hi": 17724304,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 206540,
+"hi": 17072796,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18665634,
+"hi": 18871455,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 316084,
+"hi": 18624516,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 290051,
+"hi": 409089,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489808,
+"hi": 17881103,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 518512,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 483968,
+"hi": 18918131,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 307892,
+"hi": 18814463,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 17724286,
+"hi": 18958333,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18843682,
+"hi": 18904074,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 273438,
+"hi": 440069,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 11372526,
+"hi": 16145417,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281537,
+"hi": 18888760,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18677936,
+"hi": 18681148,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 12483101,
+"hi": 18665634,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 513764,
+"hi": 19016360,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 418331,
+"hi": 18579667,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 487965,
+"hi": 487967,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 318140,
+"hi": 18403571,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 62336,
+"hi": 440061,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281398,
+"hi": 321153,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 320187,
+"hi": 320197,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 62338,
+"hi": 276531,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 301737,
+"hi": 548272,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 11132958,
+"hi": 18958333,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 146157,
+"hi": 463983,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 316084,
+"hi": 18884268,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 440077,
+"hi": 18861817,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 351241,
+"hi": 464022,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246281,
+"hi": 318138,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10260400,
+"hi": 19016360,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 66827,
+"hi": 250909,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 194028,
+"hi": 290168,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 272959,
+"hi": 350898,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 508287,
+"hi": 15537303,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 258839,
+"hi": 18983687,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489617,
+"hi": 16751876,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246283,
+"hi": 16751876,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 64377,
+"hi": 19021466,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 216067,
+"hi": 265140,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 332973,
+"hi": 342563,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10624050,
+"hi": 10652330,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 484184,
+"hi": 18918131,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18686345,
+"hi": 18791162,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 4547,
+"hi": 380820,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18845225,
+"hi": 18908928,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 85479,
+"hi": 18918692,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10695794,
+"hi": 13381798,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 94301,
+"hi": 17870380,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246919,
+"hi": 18636997,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 269325,
+"hi": 18684675,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 544212,
+"hi": 544876,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 268020,
+"hi": 15307330,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 453281,
+"hi": 17795633,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 258839,
+"hi": 18843094,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 32047,
+"hi": 208481,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 11816708,
+"hi": 18981673,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 276533,
+"hi": 292255,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 446245,
+"hi": 18670902,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10831116,
+"hi": 18933839,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 443693,
+"hi": 18583681,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 375382,
+"hi": 18710445,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10578414,
+"hi": 19003686,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 191561,
+"hi": 465333,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18933427,
+"hi": 18934265,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 10520633,
+"hi": 18713477,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 11895576,
+"hi": 12300779,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18908928,
+"hi": 19009759,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 501348,
+"hi": 13426365,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 246919,
+"hi": 18655630,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18843692,
+"hi": 18904074,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489617,
+"hi": 18950434,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 346503,
+"hi": 440299,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 196628,
+"hi": 18776551,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 269325,
+"hi": 18852162,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 140240,
+"hi": 343548,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 489812,
+"hi": 18711045,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 206437,
+"hi": 442946,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 18677287,
+"hi": 18677970,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 223338,
+"hi": 18862391,
+"stratum": "g2:s3_mf_band"
+},
+{
+"lo": 281433,
+"hi": 15640046,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18713911,
+"hi": 18773079,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 32542,
+"hi": 374494,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 290035,
+"hi": 19005056,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 60619,
+"hi": 215335,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 239479,
+"hi": 463392,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 420369,
+"hi": 10736245,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 87489,
+"hi": 273076,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 327328,
+"hi": 349830,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 369976,
+"hi": 538105,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 117350,
+"hi": 418271,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 351698,
+"hi": 425215,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 129842,
+"hi": 349830,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 52387,
+"hi": 13438054,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 550988,
+"hi": 18744702,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 399265,
+"hi": 18731601,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 36908,
+"hi": 18728129,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18790260,
+"hi": 18894860,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 13145,
+"hi": 381778,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 43137,
+"hi": 387932,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 52387,
+"hi": 95618,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 192655,
+"hi": 289762,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 439884,
+"hi": 440342,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 52387,
+"hi": 397664,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 351698,
+"hi": 415489,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16922,
+"hi": 18790257,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 350879,
+"hi": 425215,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 204573,
+"hi": 205779,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 415800,
+"hi": 422604,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 52387,
+"hi": 235279,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 129842,
+"hi": 417703,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 13146,
+"hi": 147036,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 147036,
+"hi": 381778,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 72271,
+"hi": 457887,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 32542,
+"hi": 417703,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16922,
+"hi": 444728,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 110265,
+"hi": 129721,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 106342,
+"hi": 106344,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16922,
+"hi": 17185835,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 408813,
+"hi": 18754555,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 417652,
+"hi": 18919016,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 178784,
+"hi": 422604,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 161276,
+"hi": 321152,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 87489,
+"hi": 273259,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 350879,
+"hi": 417298,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 452303,
+"hi": 12486847,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 367237,
+"hi": 404181,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 32542,
+"hi": 349830,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16921,
+"hi": 531236,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18869393,
+"hi": 18991865,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16921,
+"hi": 444729,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 206552,
+"hi": 442603,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 158456,
+"hi": 161276,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 416809,
+"hi": 417298,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 72265,
+"hi": 231081,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 32450,
+"hi": 18919595,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 80702,
+"hi": 452303,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 161276,
+"hi": 281367,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 84759,
+"hi": 235480,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 13145,
+"hi": 429839,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 60117,
+"hi": 217601,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 32450,
+"hi": 18919016,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 235279,
+"hi": 18732948,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 506274,
+"hi": 10104810,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 11492135,
+"hi": 18975224,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16921,
+"hi": 18571512,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 15635488,
+"hi": 18894860,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 72319,
+"hi": 443512,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 95618,
+"hi": 18732948,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 129842,
+"hi": 374494,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 367439,
+"hi": 10736647,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 15637460,
+"hi": 18790260,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 193882,
+"hi": 274637,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 321153,
+"hi": 321154,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 129721,
+"hi": 417701,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18687393,
+"hi": 18687397,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 13146,
+"hi": 381785,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 52387,
+"hi": 446918,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 16922,
+"hi": 12077310,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 239479,
+"hi": 281389,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 128429,
+"hi": 368216,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 15633519,
+"hi": 15640046,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 321151,
+"hi": 321154,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 63204,
+"hi": 202356,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 416809,
+"hi": 425215,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 124195,
+"hi": 531241,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 349830,
+"hi": 417701,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 409545,
+"hi": 18794635,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 254677,
+"hi": 452303,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 371433,
+"hi": 371435,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 550505,
+"hi": 551474,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18699779,
+"hi": 18699814,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 231081,
+"hi": 399491,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 129721,
+"hi": 327328,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 18737190,
+"hi": 18858028,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 65295,
+"hi": 393119,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 13462637,
+"hi": 18732948,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 550988,
+"hi": 18565899,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 15633519,
+"hi": 18688629,
+"stratum": "g2:s4_fact_block"
+},
+{
+"lo": 246918,
+"hi": 18825514,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 124196,
+"hi": 18687393,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444729,
+"hi": 15659663,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246918,
+"hi": 489617,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 16921,
+"hi": 17185727,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18684675,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 246918,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18565641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 551338,
+"hi": 552873,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 273438,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18322790,
+"hi": 18687397,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 124195,
+"hi": 15659663,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18565641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18565641,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 16751876,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18497449,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 322501,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18845241,
+"hi": 18953871,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 258839,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550259,
+"hi": 552877,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 15633511,
+"hi": 15635486,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18684675,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 407502,
+"hi": 17211378,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18497449,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 39750,
+"hi": 341822,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 489812,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417807,
+"hi": 18687397,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18624516,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 358895,
+"hi": 359004,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550260,
+"hi": 18924234,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 18565641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550260,
+"hi": 552873,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550260,
+"hi": 551339,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 17571861,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 103271,
+"hi": 103815,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18687397,
+"hi": 18790260,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 19001553,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 103271,
+"hi": 319637,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18698097,
+"hi": 19001553,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531236,
+"hi": 18790257,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444728,
+"hi": 18790260,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17797,
+"hi": 425215,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 316084,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18917936,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440072,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 202223,
+"hi": 204561,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531241,
+"hi": 17185727,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17881103,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417800,
+"hi": 17185727,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 526340,
+"hi": 15635488,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18861817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 205832,
+"hi": 264971,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 316084,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 443768,
+"hi": 18729649,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 12077310,
+"hi": 18571512,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 470736,
+"hi": 18729649,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 202329,
+"hi": 18817722,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18698097,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18917936,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 439383,
+"hi": 10398164,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 465161,
+"hi": 18981807,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18289418,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444729,
+"hi": 12077310,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17185835,
+"hi": 18687393,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 18565641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 16751876,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 489812,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 489617,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17363480,
+"hi": 18861817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 273438,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 543885,
+"hi": 544212,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 16751876,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 158157,
+"hi": 18729344,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 263598,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 258839,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 489812,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18497449,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 124195,
+"hi": 18894860,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 10308668,
+"hi": 15635488,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 124196,
+"hi": 18790260,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 36713,
+"hi": 39750,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18917936,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 407502,
+"hi": 17270351,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18497449,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550163,
+"hi": 551338,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 10308668,
+"hi": 18322790,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531236,
+"hi": 18687397,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 19001553,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531241,
+"hi": 18687393,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 246918,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 263598,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 489617,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18013504,
+"hi": 18861817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440072,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18497449,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 18698097,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18825514,
+"hi": 19001553,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 18013504,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18632806,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 358850,
+"hi": 361453,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18825514,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 18917936,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 246917,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417807,
+"hi": 15637460,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 16751876,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18157878,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18157878,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 273438,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 19021466,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 158157,
+"hi": 18733217,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 322501,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18636997,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417800,
+"hi": 15635488,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 16921,
+"hi": 417807,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531241,
+"hi": 18571512,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 64822,
+"hi": 16929924,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18624516,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 18917936,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 439383,
+"hi": 10372734,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18642250,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 188282,
+"hi": 14181040,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 62329,
+"hi": 327428,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 358850,
+"hi": 359061,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 415489,
+"hi": 416817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17571861,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 39750,
+"hi": 245520,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 16922,
+"hi": 417800,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 526340,
+"hi": 531236,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444728,
+"hi": 18571512,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18684675,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18642250,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 158157,
+"hi": 10309066,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18861817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531236,
+"hi": 18894860,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550259,
+"hi": 551338,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 158157,
+"hi": 10305641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 18497449,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417807,
+"hi": 15659663,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 23172,
+"hi": 417655,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440072,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 273438,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 17571861,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18013504,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 443512,
+"hi": 15663498,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18571512,
+"hi": 18790257,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18013504,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18013504,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 439276,
+"hi": 15909984,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18157878,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 526340,
+"hi": 18571512,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 439383,
+"hi": 10305641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 440072,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17571861,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 439383,
+"hi": 18729254,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 440072,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 15637460,
+"hi": 17185727,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417800,
+"hi": 18322790,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 314804,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 46635,
+"hi": 397552,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 17363480,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 18698097,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 440072,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 431877,
+"hi": 18729254,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444729,
+"hi": 15637460,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 19021466,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 18684675,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444728,
+"hi": 15635488,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18497449,
+"hi": 18983687,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 15635489,
+"hi": 18571515,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531236,
+"hi": 17185835,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 531236,
+"hi": 15659663,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 416817,
+"hi": 425215,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18825514,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 431877,
+"hi": 18733217,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 281518,
+"hi": 18981733,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18157878,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 12077310,
+"hi": 18790260,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 526340,
+"hi": 18322790,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550518,
+"hi": 551215,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 417646,
+"hi": 18571493,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18825514,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 18684675,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 273438,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 470736,
+"hi": 10398164,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 46635,
+"hi": 152985,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 270931,
+"hi": 17211378,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 526340,
+"hi": 17185727,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 440075,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18669032,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550259,
+"hi": 550260,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 440077,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 431877,
+"hi": 18729344,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 301422,
+"hi": 302164,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444729,
+"hi": 526340,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18013504,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18497449,
+"hi": 18843094,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 551011,
+"hi": 18975657,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246917,
+"hi": 292255,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440072,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 440072,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489812,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18852162,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 431877,
+"hi": 18729649,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440077,
+"hi": 18497449,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440075,
+"hi": 17571861,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 322501,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 489808,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 18642250,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 316084,
+"hi": 18950434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 19001553,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 269325,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18571512,
+"hi": 18894860,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489617,
+"hi": 18711045,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 489617,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 543882,
+"hi": 544876,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206258,
+"hi": 440069,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440072,
+"hi": 19021466,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17185727,
+"hi": 18790257,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 489617,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 444729,
+"hi": 18687397,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 263598,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18966973,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 273438,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18884268,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 17724304,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 18497449,
+"hi": 18902794,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18403571,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 17072796,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206070,
+"hi": 258839,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 381778,
+"hi": 381785,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 206540,
+"hi": 17571861,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 237220,
+"hi": 18959434,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 276533,
+"hi": 489810,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 443768,
+"hi": 18729344,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 292255,
+"hi": 18624516,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550159,
+"hi": 18924234,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 359061,
+"hi": 360719,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246919,
+"hi": 18565641,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18632806,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 489812,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 246283,
+"hi": 18636997,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 440069,
+"hi": 18655630,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489810,
+"hi": 18861817,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 489808,
+"hi": 18933366,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 17363480,
+"hi": 18698097,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 124195,
+"hi": 17185835,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 258839,
+"hi": 17881103,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 318140,
+"hi": 18289418,
+"stratum": "g2:s5_case_reader"
+},
+{
+"lo": 550260,
+"hi": 18903859,
+"stratum": "g2:s5_case_reader"
+}
+]
