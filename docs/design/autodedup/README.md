@@ -17,3 +17,6 @@ engine (package `autodedup/`, schema `autodedup`, lane `.github/workflows/autode
   `refit_w7_results.json` (the measured outcome — both candidates refused by the
   pre-registered bars; `w6_gold` stays). The multi-export fit directory is built by
   `autodedup/refit_substrate.py`.
+- **Sealed cohorts** (`preregistrations/`): cohort 19 is R1's seal and cohort 20 is MF's.
+  Each file fixes the blocks, the export line, the seal and read protocol and the bars
+  before its export exists. A seal is read once, at its release's freeze.
