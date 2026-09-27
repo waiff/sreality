@@ -147,7 +147,7 @@ def test_the_fresh_seal_is_committed_named_by_map_and_seed_and_now_SPENT() -> No
     registered spent in the same wave that promoted on it. A later number on it confirms."""
     groups = seals.load(W13_SEAL)
     assert len(groups) == 4456 and len(set(groups.values())) == 664
-    assert seals.seed_for(W13_SEAL) == 20260927
+    assert seals.read_seed(seals.path_for(W13_SEAL)) == 20260927
     assert seals.seal_id(groups, 20260927) == W13_SEAL
     assert split_seal(groups)["sha256"] == W11_SEAL, "same map, different seed, different seal"
     spent = seals.spent(W13_SEAL)

@@ -52,11 +52,10 @@ from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup import harness
 from autodedup.incremental_store import CohortFacts, Schedule
-from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.export import encode_clip
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
-from tests.autodedup.test_incremental import _dataset, _settings
+from tests.autodedup.test_incremental import _dataset, _settings, _state, arrival_order, invariant_state
 from tests.autodedup.lane_world import GENERATION, seed_lane, true_population
 from tests.autodedup.lane_world import world as lane_world
 
@@ -99,9 +98,7 @@ class _LateFacts:
 
 
 def _calibrated(ds: Any, settings: Settings) -> Calibration:
-    from autodedup.fingerprint import build_all
-
-    return Calibration.build(build_all(ds, settings), ds.listings, settings)
+    return harness.calibrated(ds, settings)[1]
 
 
 def test_a_listing_decided_before_its_photographs_carries_no_phash_posting() -> None:
@@ -393,19 +390,16 @@ def test_the_plain_replay_is_untouched_by_the_hold() -> None:
     settings = _settings()
     calibration = _calibrated(ds, settings)
     model = hand_initialised()
-    reference, batch_clusters = cohort_pass(ds, settings, model)
+    reference = invariant_state(ds, settings, calibration)
 
     store = MemoryStore()
     facts = CohortFacts(ds)
     work = Schedule(arrival_order(ds))
     while not work.exhausted():
         run_pass(store, facts, work, settings, model, calibration,
-                 limits=Limits(max_listings=50))
+                 limits=Limits(max_listings=50), hold=None)
 
-    assert {key: row.zone for key, row in store.pairs.items()} == {
-        key: row["zone"] for key, row in reference.items()}
-    assert {tuple(sorted(v)) for v in store.clusters.values()} == {
-        tuple(sorted(v)) for v in batch_clusters.values()}
+    assert _state(store) == reference
 
 
 def test_withholding_the_photographs_and_delivering_them_reaches_the_batch_state(
@@ -416,23 +410,15 @@ def test_withholding_the_photographs_and_delivering_them_reaches_the_batch_state
     ds = _evidence_cohort()
     settings = _settings()
     model = hand_initialised()
-    reference, batch_clusters = cohort_pass(ds, settings, model)
-
-    stats = harness.run(ds, settings, model, tmp_path, withhold_photos=True)
-    pairs = {(row["lo"], row["hi"]): row for row in harness.read_pairs(tmp_path)}
-    clusters = json.loads((tmp_path / harness.CLUSTERS_FILE).read_text())["clusters"]
+    plain = harness.run(ds, settings, model, tmp_path / "plain")
+    stats = harness.run(ds, settings, model, tmp_path / "held", withhold_photos=True)
 
     assert stats["withheld_photos"]["held_on_first_decision"] > 0, "the hold actually fired"
     assert stats["withheld_photos"]["still_held"] == 0, "and nothing is waiting at the end"
-    stored = {key: row for key, row in reference.items()
-              if key in pairs or row["zone"] in ("merge", "band")}
-    assert set(pairs) <= set(reference) and set(stored) <= set(pairs)
-    assert {key: row["zone"] for key, row in pairs.items()} == {
-        key: reference[key]["zone"] for key in pairs}
-    assert {key: row["reason"] for key, row in pairs.items()} == {
-        key: reference[key]["reason"] for key in pairs}
-    assert {tuple(sorted(v)) for v in clusters.values()} == {
-        tuple(sorted(v)) for v in batch_clusters.values()}
+    assert plain["zones"]["merge"] > 0
+    assert harness.read_pairs(tmp_path / "held") == harness.read_pairs(tmp_path / "plain")
+    assert json.loads((tmp_path / "held" / harness.CLUSTERS_FILE).read_text()) == \
+        json.loads((tmp_path / "plain" / harness.CLUSTERS_FILE).read_text())
 
 
 # ======================================= V3: the calibration follows the corpus (A10, E912)

@@ -25,7 +25,7 @@ W6_GOLD_SHA256 = "555893aef142456189528e9589a1e1fbb65fc163f325abfb140c5216f0721d
 
 def test_the_refit_seal_is_committed_named_by_map_and_seed_and_spent() -> None:
     groups = seals.load(W7_SEAL)
-    assert seals.seed_for(W7_SEAL) == 20261002
+    assert seals.read_seed(seals.path_for(W7_SEAL)) == 20261002
     assert seals.seal_id(groups, 20261002) == W7_SEAL
     assert split_seal(groups)["sha256"] == W7_MAP_ONLY, "the fit reports name the map alone"
     assert (len(groups), len(set(groups.values()))) == (4488, 1831)

@@ -127,10 +127,10 @@ def test_the_fresh_seal_is_committed_carries_its_seed_and_is_named_by_both() -> 
     name has to carry it — otherwise the only place to commit it is on top of a SPENT seal."""
     groups = seals.load(W12_SEAL)
     assert len(groups) == 4456 and len(set(groups.values())) == 664
-    assert seals.seed_for(W12_SEAL) == 20260925
+    assert seals.read_seed(seals.path_for(W12_SEAL)) == 20260925
     assert seals.seal_id(groups, 20260925) == W12_SEAL
     assert split_seal(groups)["sha256"] == W11_SEAL, "same map, different seed, different seal"
-    assert seals.seed_for(W11_SEAL) == 20260923, "the spent seal's own seed is untouched"
+    assert seals.read_seed(seals.path_for(W11_SEAL)) == 20260923, "the spent seal's own seed is untouched"
 
 
 def test_the_w12_seal_is_registered_spent_and_says_what_it_is_silent_about() -> None:

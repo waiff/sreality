@@ -67,7 +67,7 @@ def test_a_committed_map_hashes_to_the_name_it_is_filed_under() -> None:
         groups = seals.load(seal)
         # A seal is named by its MAP, or — since W12, whose map reproduced W11's to the listing
         # — by its map AND the seed that partitions it. Either spelling, never a third.
-        names = {split_seal(groups)["sha256"], seals.seal_id(groups, seals.seed_for(seal))}
+        names = {split_seal(groups)["sha256"], seals.seal_id(groups, seals.read_seed(seals.path_for(seal)))}
         assert seal in names, f"{seal[:12]} is filed under the wrong name"
 
 
@@ -188,8 +188,8 @@ def test_every_spent_seal_names_what_spent_it_and_where_the_choice_moved() -> No
 def test_a_committed_map_records_the_seed_that_partitions_it(tmp_path: Path) -> None:
     """`split_of` hashes `<seed>:<group>`: one map under two seeds is two holdouts under one
     name, and `split_seal` hashes the map only — so the seed has to travel with the file."""
-    assert seals.seed_for(W9_SEAL) == 20260922
-    assert seals.seed_for(W6_SEAL) is None, "the legacy bare map predates the seed field"
+    assert seals.read_seed(seals.path_for(W9_SEAL)) == 20260922
+    assert seals.read_seed(seals.path_for(W6_SEAL)) is None, "the legacy bare map predates the seed field"
     local = tmp_path / "split_map.json"
     seals.write_map(local, {7: 1, 9: 2}, seed=123)
     assert seals.read_map(local) == {7: 1, 9: 2}

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from autodedup.blocking import PROBE_PRIORITY, BlockIndex, build_index, generate_pairs
+from autodedup.blocking import PROBE_PRIORITY, BlockIndex
 from autodedup.dataset import Image, Listing, Location
 from autodedup.fingerprint import Fingerprint, build_fingerprint
 from autodedup.guards import pair_veto
 from autodedup.settings import Settings
+from tests.autodedup.whole_cohort import build_index, generate_pairs
 
 SETTINGS = Settings()
 LONG_TEXT = ("Prodej bytu 3+kk v Turnove s vyhledem do zahrady, plocha 68 m2, "

@@ -50,7 +50,6 @@ PairKey = tuple[int, int]
 
 OPERATOR_TIER: str = "operator"
 TIER_PRECEDENCE: tuple[str, ...] = (OPERATOR_TIER, "gold", "vision", "text")
-CHEAP_TIERS: tuple[str, ...] = ("vision", "text")
 
 POSITIVE_VERDICT: str = "same_property"
 NEGATIVE_VERDICTS: tuple[str, ...] = ("different_property", "same_building_different_unit")

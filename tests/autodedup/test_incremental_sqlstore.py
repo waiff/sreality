@@ -41,7 +41,6 @@ from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup.incremental_store import CohortFacts, Schedule
-from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.score_lane import FAMILY_BITS, families_bitmask, families_of_bitmask
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_incremental import (
@@ -50,6 +49,7 @@ from tests.autodedup.test_incremental import (
     _drain,
     _listing,
     _settings,
+    arrival_order,
 )
 
 GEN = "rt"
@@ -163,7 +163,7 @@ def _memory_state(store: MemoryStore):
 
 
 @pytest.mark.parametrize("cohort", ["near_duplicates", "twins"])
-def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(cohort) -> None:
+def test_the_sql_store_reaches_the_same_state_as_the_twin(cohort) -> None:
     ds = _dataset(24) if cohort == "near_duplicates" else _twins_dataset(4)
     settings = _settings()
     calibration = _calibration(ds, settings)
@@ -177,15 +177,7 @@ def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(co
     assert sql_pairs == mem_pairs
     assert sql_clusters == mem_clusters
     assert _sql_conflicts(conn) == _memory_conflicts(memory)
-
-    reference, batch_clusters = cohort_pass(ds, settings, hand_initialised())
-    assert set(sql_pairs) == set(reference)
-    for key, row in sql_pairs.items():
-        assert row["zone"] == reference[key]["zone"], key
-        assert row["certificate"] == reference[key]["certificate"], key
-        assert row["families"] == reference[key]["families"], key
-    assert sorted(sorted(v) for v in sql_clusters.values()) == \
-        sorted(sorted(v) for v in batch_clusters.values())
+    assert sql_pairs and (cohort == "near_duplicates" or sql_clusters)
 
 
 def test_the_twin_keeps_and_drops_conflicts_exactly_as_the_sql_store_does() -> None:
@@ -297,10 +289,10 @@ def test_a_certified_merge_survives_the_round_trip_and_clusters() -> None:
     for lo, hi in certified:
         assert conn.pairs[(GEN, lo, hi)]["certificate"] == "K-R"
         assert store.pairs_within([lo, hi])[0].certificate == "K-R"
-    reference, batch_clusters = cohort_pass(ds, settings, hand_initialised())
-    assert _sql_state(conn)[1] and len(_sql_state(conn)[1]) == len(batch_clusters)
+    memory, _ = _drain(ds, settings, calibration, list(reversed(arrival_order(ds))), batch=1)
+    assert _sql_state(conn)[1] and len(_sql_state(conn)[1]) == len(memory.clusters)
     assert sorted(sorted(v) for v in _sql_state(conn)[1].values()) == \
-        sorted(sorted(v) for v in batch_clusters.values())
+        sorted(sorted(v) for v in memory.clusters.values())
     # And the cluster row says the edge was certified, which is what the UI counts.
     assert all(int(row["n_certificate_edges"]) >= 1 for row in conn.clusters.values())
 

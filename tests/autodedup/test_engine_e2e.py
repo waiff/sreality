@@ -23,7 +23,6 @@ import pytest
 
 from autodedup import dataset as ds
 from autodedup import harness
-from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
 from autodedup.decide import (
     Decision,
@@ -33,9 +32,9 @@ from autodedup.decide import (
     unit_evidence,
 )
 from autodedup.features import FeatureContext, pair_features
-from autodedup.fingerprint import build_all
 from autodedup.model import hand_initialised
 from autodedup.settings import Settings
+from tests.autodedup.whole_cohort import build_all, generate_pairs
 
 BLOCK_A = "turnov"
 BLOCK_B = "praha"
@@ -677,20 +676,21 @@ def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) ->
     assert repost_row["sources"] == ["sreality"]
 
 
-def test_harness_run_is_the_cohort_pass_it_replaced(engine: dict[str, Any], cohort: Path,
-                                                   tmp_path: Path) -> None:
-    """SW1's B0 in miniature: the pass decides every pair the cohort pass decided, identically,
-    and clusters them into the same groups."""
-    harness.run(ds.load(cohort), Settings(), hand_initialised(), tmp_path / "run")
+def test_harness_run_is_run_pass_in_any_order_and_claim(cohort: Path, tmp_path: Path) -> None:
+    """SW1's B0 in miniature: `harness run` writes the state `run_pass` reaches, and that state
+    is the same in every arrival order and every claim size (E70-E72)."""
+    from tests.autodedup.test_incremental import invariant_state
+
+    dataset = ds.load(cohort)
+    harness.run(dataset, Settings(), hand_initialised(), tmp_path / "run")
+    pairs, groups = invariant_state(dataset, Settings(), harness.calibrated(dataset, Settings())[1])
     rows = {(row["lo"], row["hi"]): row for row in harness.read_pairs(tmp_path / "run")}
-    for key, decision in engine["decisions"].items():
-        if key in rows:
-            assert (rows[key]["zone"], rows[key]["reason"]) == (decision.zone, decision.reason)
-            assert rows[key]["score"] == pytest.approx(decision.score, abs=1e-9)
-    batch = cluster_pairs(engine["decision_list"], engine["dataset"].listings, engine["fps"],
-                          engine["settings"])
+    assert rows and set(rows) <= set(pairs)
+    for key, row in rows.items():
+        assert (row["zone"], row["reason"], row["certificate"]) == pairs[key][0:1] + \
+            pairs[key][2:4], key
     clusters = json.loads((tmp_path / "run" / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
-    assert clusters["clusters"] == {str(k): v for k, v in batch.clusters.items()}
+    assert sorted(tuple(v) for v in clusters["clusters"].values()) == groups
 
 
 def test_store_floor_drops_the_low_scoring_tail(cohort: Path, tmp_path: Path) -> None:

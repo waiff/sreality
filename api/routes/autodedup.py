@@ -1809,7 +1809,8 @@ def candidate_detail(
 
     The text is the reason this dialog exists, exactly as on the groups queue: a developer
     project's units share the photos and the attribute row and differ only in what the ad says.
-    It reaches the response through the judge's own scrubber and no other path (E28)."""
+    It reaches the response through `export.scrubbed_text`, the one scrubber, and no other
+    path (E28)."""
     _reject_unknown_filters(request, DETAIL_FILTER_KEYS)
     if not CANDIDATE_KEY_RE.match(candidate_key):
         raise _bad("candidate_key is not a key from this endpoint")

@@ -138,7 +138,7 @@ def test_the_relation_is_the_batch_relation_on_the_same_slots() -> None:
 
 
 def _fps(ds: Dataset, settings: Settings) -> dict:
-    from autodedup.fingerprint import build_all
+    from tests.autodedup.whole_cohort import build_all
 
     return build_all(ds, settings)
 

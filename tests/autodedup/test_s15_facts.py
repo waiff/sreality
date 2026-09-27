@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -29,18 +30,15 @@ from autodedup.blocking import (
     SPLIT_CITY_OBEC_KODS,
     TOWN_PROBE,
     BlockIndex,
-    build_index,
-    generate_pairs,
 )
 from autodedup.d43 import ClusterRelation
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
-from autodedup.fingerprint import Fingerprint, build_all, build_fingerprint
+from autodedup.fingerprint import Fingerprint, build_fingerprint
 from autodedup.incremental import Keyer, guard_row, retrieve
 from autodedup.indistinguishable import CLUSTER, GATE, PROMOTE, distinguishing_facts
-from autodedup.model import hand_initialised
-from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.settings import Settings
-from tests.autodedup.test_incremental import _calibration, _drain
+from tests.autodedup.test_incremental import _calibration, _drain, arrival_order, invariant_state
+from tests.autodedup.whole_cohort import build_all, build_index, generate_pairs
 from tests.autodedup.test_s14_facts import EARLIER_DIGESTS as S14_PINS
 
 HERE = Path(__file__).resolve().parent
@@ -227,15 +225,55 @@ def test_E300_the_real_time_lane_retrieves_exactly_what_the_cohort_pass_does() -
     assert town_only > 0
 
 
-def test_E300_the_real_time_lane_reaches_the_cohort_pass_state_in_any_order() -> None:
+def test_E300_the_real_time_lane_reaches_one_state_in_any_order_and_claim() -> None:
+    """The town probe keeps E70-E72's invariance: one final state whatever the order or the
+    claim, and the town-only pairs are in it."""
     ds = _cross_grain_dataset()
+    pairs, _groups = invariant_state(ds, S15, _calibration(ds, S15))
+    assert any(probes == (TOWN_PROBE,) for *_rest, probes in pairs.values())
+
+
+# --- E71's LIVE defect, named and not fixed in SW1 (the lane code is unchanged) -------------
+# `run_pass` re-probes the postings of an arrival's EXACT index keys (incremental.py
+# `neighbourhood`, and `touched_keys` += `new_keys` ahead of `dirty`). A listing that reaches
+# the arrival only through its OWN +-1 band, or through the town key the arrival posts but does
+# not probe (`probes_town_key`), is posted under a different key, so it is never re-probed and
+# the pair is missed when it arrives first. `neighbourhood`'s symmetry docstring is false for
+# exactly these. This is the c17/c18 B0 pair delta (84+15 / 4+1 reject pairs, SW1_MEASURE
+# difference 1). The fix is owed to a re-seed wave: widen the neighbourhood with the touched
+# listings' probe keys, including the reverse town-key postings, proven by B0 through fake_pg.
+
+
+def _band_edge_pair() -> Dataset:
+    """Two Praha adverts one area band apart: 1 has no quarter (it probes the town key, +-1
+    band); 2 has one (it posts the town key and never probes it). Only 1 can find 2."""
+    edge = math.exp(20 * S15.band_width())
+    stamps = dict(last_seen_at="2026-03-01T08:00:00+00:00", is_active=True)
+    listings = {1: advert(1, PRAHA, None, area_m2=round(edge - 0.4, 1),
+                          first_seen_at="2026-02-01T08:00:00+00:00", **stamps),
+                2: advert(2, PRAHA, 490245, area_m2=round(edge + 0.4, 1),
+                          first_seen_at="2026-02-02T08:00:00+00:00", **stamps)}
+    return Dataset(meta=Meta(), listings=listings, images_by_listing={1: [], 2: []})
+
+
+def test_E71_the_band_edge_pair_is_found_from_one_side_only() -> None:
+    ds = _band_edge_pair()
+    fps = {i: fingerprint(x, S15) for i, x in ds.listings.items()}
+    assert (fps[1].area_band, fps[2].area_band) == (19, 20)
+    index = build_index(fps.values(), S15)
+    assert index.candidates(fps[1]) == {2: {TOWN_PROBE}} and index.candidates(fps[2]) == {}
+    store, _ = _drain(ds, S15, _calibration(ds, S15), [2, 1], batch=1)
+    assert {key: sorted(row.probes) for key, row in store.pairs.items()} == {(1, 2): [TOWN_PROBE]}
+
+
+@pytest.mark.xfail(strict=True, reason="E71 live defect (SW1 review): the arrival's exact index "
+                   "keys are re-probed, not the +-1 / town keys that reach it; owed to a re-seed wave")
+def test_E71_the_band_edge_pair_is_found_in_either_arrival_order() -> None:
+    ds = _band_edge_pair()
     calibration = _calibration(ds, S15)
-    reference, clusters = cohort_pass(ds, S15, hand_initialised())
-    forward, _a = _drain(ds, S15, calibration, arrival_order(ds))
-    backward, _b = _drain(ds, S15, calibration, list(reversed(arrival_order(ds))), batch=3)
-    assert set(forward.pairs) == set(reference) == set(backward.pairs)
-    assert {k: sorted(v) for k, v in forward.clusters.items()} == {
-        k: sorted(v) for k, v in clusters.items()}
+    first, _ = _drain(ds, S15, calibration, [1, 2], batch=1)
+    last, _ = _drain(ds, S15, calibration, [2, 1], batch=1)
+    assert set(first.pairs) == set(last.pairs)
 
 
 # --- E301 / E301b: one storey-counting camp -------------------------------------------------

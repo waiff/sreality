@@ -16,8 +16,8 @@ it, because `MemoryStore` kept the `PairRow` verbatim — which is the other hal
 the twin narrows exactly as the column does, so the proof covers the store path rather than
 stopping at it.
 
-One constant says which type the column is, and `MemoryStore`, the replay and the tests all
-read it here.
+One constant says which type the column is, and `MemoryStore`, `harness run` and the tests
+all read it here.
 """
 
 from __future__ import annotations

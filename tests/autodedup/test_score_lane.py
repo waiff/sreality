@@ -765,6 +765,34 @@ def test_the_g_rows_are_the_memorystore_pass_persisted(lane, tmp_path: Path, coh
         len(members) for members in clusters["clusters"].values())
 
 
+# The g* write parameters the ORIGIN/MAIN writer (afd121ae: `run_engine` + `persist`) bound over
+# this cohort under w31 + w6_gold with one must-not-link, as one digest — computed there by
+# w15/sw1/pa07_golden/g_digest.py, which runs unchanged at both heads. A change to what a g*
+# generation stores moves it, however the decision path is wired (SW1 review: the test above
+# compares the lane with the functions it calls, so it cannot see one).
+G_WRITE_GOLDEN: str = "1c85fa310ceef85a"
+G_WRITE_COUNTS: dict[str, int] = {"PAIR_UPSERT_SQL": 4, "CLUSTER_INSERT_SQL": 2,
+                                  "CLUSTER_MEMBER_INSERT_SQL": 4, "CLUSTER_CONFLICT_INSERT_SQL": 1}
+
+
+def test_the_g_rows_are_the_origin_main_writer_s_rows(lane, tmp_path: Path) -> None:
+    import hashlib
+
+    lane.state["must_not_link"] = [(DUP_A, DUP_B, "operator")]
+    lane(tmp_path / "out", export_run="1", generation="gtest", settings="w31",
+         model="w6_gold")
+    statements = {"PAIR_UPSERT_SQL": PAIR_UPSERT_SQL, "CLUSTER_INSERT_SQL": CLUSTER_INSERT_SQL,
+                  "CLUSTER_MEMBER_INSERT_SQL": CLUSTER_MEMBER_INSERT_SQL,
+                  "CLUSTER_CONFLICT_INSERT_SQL": CLUSTER_CONFLICT_INSERT_SQL}
+    canon = {name: sorted(json.dumps(row, sort_keys=True, default=str)
+                          for params in _params(lane.executed, sql)
+                          for row in (params if isinstance(params, list) else [params]))
+             for name, sql in statements.items()}
+    assert {name: len(rows) for name, rows in canon.items()} == G_WRITE_COUNTS
+    digest = hashlib.sha256(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
+    assert digest == G_WRITE_GOLDEN
+
+
 def test_the_feature_reader_is_the_harness_definition() -> None:
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, True]}}, "gap_days") == 3.0
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, False]}}, "gap_days") is None

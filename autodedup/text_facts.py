@@ -19,7 +19,7 @@ import re
 import unicodedata
 from functools import lru_cache
 from html import unescape
-from typing import Iterable, Iterator, Mapping, TYPE_CHECKING
+from typing import Iterable, Mapping, TYPE_CHECKING
 
 from autodedup.normalize import fact_text
 
@@ -133,13 +133,6 @@ def mask_codes(text: str | None) -> str | None:
         pattern = re.compile(r"\s*".join(re.escape(ch) for ch in code), re.IGNORECASE)
         out = pattern.sub(CODE_MASK, out)
     return out
-
-
-def iter_reference_matches(folded: str) -> Iterator[tuple[str, re.Match[str]]]:
-    """Every reference-code match in already-folded text, as `(code, match)` pairs."""
-    for pattern in (_REFERENCE, _BRACKET_ID):
-        for match in pattern.finditer(folded):
-            yield re.sub(r"\s+", "", match.group(1)).upper().strip("/-"), match
 
 
 def unit_designators(text: str | None) -> set[str]:
@@ -1020,20 +1013,6 @@ def address_block_key(listing: "Listing") -> str:
     if loc.lat is not None and loc.lon is not None:
         return f"pin:{obec}:{loc.lat:.3f}:{loc.lon:.3f}"
     return f"obec:{obec}"
-
-
-def code_population(descriptions: Mapping[int, str | None]) -> dict[str, int]:
-    """How many listings of the corpus print each code — the purity cap's denominator."""
-    population: dict[str, int] = {}
-    for text in descriptions.values():
-        for code in reference_codes(text):
-            population[code] = population.get(code, 0) + 1
-    return population
-
-
-def rare_codes(codes: Iterable[str], population: Mapping[str, int]) -> set[str]:
-    """The codes of one listing that a crowd does not share (E60's population cap)."""
-    return {code for code in codes if population.get(code, 0) <= MAX_CODE_POPULATION}
 
 
 # --- what the advert says the tenant pays BESIDES the rent (E203) ---------------------------

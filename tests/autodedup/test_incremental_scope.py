@@ -56,10 +56,9 @@ from autodedup.incremental_scope import (
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup.incremental_store import CohortFacts
-from tests.autodedup.cohort_pass import arrival_order
 from autodedup.store_score import storable
 from tests.autodedup.fake_pg import FakePg
-from tests.autodedup.test_incremental import _calibration, _dataset, _drain, _settings
+from tests.autodedup.test_incremental import _calibration, _dataset, _drain, _settings, arrival_order
 
 GEN = "rt"
 SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))

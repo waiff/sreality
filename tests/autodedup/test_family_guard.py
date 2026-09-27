@@ -354,7 +354,7 @@ W9_SEAL = "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884"
 def test_the_fresh_seal_is_committed_and_now_registered_spent() -> None:
     """W11's verification opened it ONCE, to read four arms and rule D30 — so it is spent."""
     assert seals.committed(W11_SEAL)
-    assert seals.seed_for(W11_SEAL) == 20260923
+    assert seals.read_seed(seals.path_for(W11_SEAL)) == 20260923
     reason = seals.spent(W11_SEAL)
     assert reason and "D30" in reason
 

@@ -660,3 +660,76 @@ def test_a_component_holding_a_listing_that_arrived_after_the_export_is_an_arriv
 
     assert out["clusters"]["component_causes"] == {"arrival": 1}
     assert out["verdict"]["ok"] is True
+
+
+# ------------------------------------------------- the real path: a real `harness run` directory
+
+
+def test_a_real_harness_run_directory_against_the_lane_drained_over_the_same_cohort(
+        tmp_path) -> None:
+    """The run side here is what `harness run` itself WRITES (pairs.jsonl.gz, clusters.json and
+    run.json naming its artifact), not a hand-spelled copy of the format; the live side is the
+    lane's own `SqlStore` drained over the same cohort. One engine, one calibration: the diff
+    must be empty, so a drift in either writer or in `read_run` fails here (SW1 review)."""
+    import io
+
+    from autodedup import harness
+    from autodedup.dataset import load
+    from autodedup.incremental import Limits, run_pass_bounded
+    from autodedup.incremental_lane import SqlStore
+    from autodedup.incremental_store import CohortFacts, Schedule
+    from autodedup.model import hand_initialised
+    from autodedup.settings import Settings
+    from tests.autodedup.test_engine_e2e import build_records
+
+    cohort = tmp_path / "cohort.jsonl.gz"
+    with gzip.open(cohort, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"t": "meta", "exported_at": EXPORTED.isoformat()}) + "\n")
+        order = {"listing": 0, "image": 1}   # the artifact contract: listings, then images
+        for record in sorted((r for r in build_records() if r.get("t") != "meta"),
+                             key=lambda r: order.get(str(r.get("t")), 2)):
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    run_dir = tmp_path / "run"
+    assert harness.main(["run", str(cohort), "--out", str(run_dir)], out=io.StringIO()) == 0
+
+    dataset, settings, model = load(cohort), Settings(), hand_initialised()
+    db = _db(range(0))
+    db.calibration[LIVE].update({"model_version": model.version,
+                                 "settings": {"store_floor": settings.store_floor}})
+    for listing_id in dataset.listings:
+        db.scope_ids[(LIVE, "obec:563510", listing_id)] = {"resolved_at": EXPORTED}
+        db.listings[listing_id] = {"id": listing_id,
+                                   "first_seen_at": EXPORTED - timedelta(days=5)}
+    store = SqlStore(db, LIVE, store_floor=settings.store_floor)
+    work = Schedule(sorted(dataset.listings))
+    calibration = harness.calibrated(dataset, settings)[1]
+    while not work.exhausted():
+        run_pass_bounded(store, CohortFacts(dataset), work, settings, model, calibration,
+                         limits=Limits(), generation=LIVE)
+
+    report = run_equivalence(lambda: db, {"generation": LIVE, "run": str(run_dir)},
+                             tmp_path / "out")
+    assert report["verdict"]["ok"], report["verdict"]
+    stored = len(harness.read_pairs(run_dir))
+    assert report["pairs"]["identical"] and report["pairs"]["differing"] == 0
+    assert report["pairs"]["both"] == report["pairs"]["batch"] == stored > 0
+    assert report["pairs"]["only_live"] == report["pairs"]["only_batch"] == 0
+    assert report["arrivals"]["cohort"]["listings"] == len(dataset.listings)
+    assert report["clusters"]["member_sets_identical"] is True
+
+
+def test_the_narrowed_instrument_checks_three_store_defects_and_no_longer_re_scores() -> None:
+    """K35 as SW1 left it (E921 iv), stated so a reader of G-live cannot assume more: the three
+    E120 store defects stay; E121's `score_not_from_vector` does not — the tool no longer
+    re-scores a stored vector, so a live row whose score does not follow from its vector reads
+    as drift or `calibration_cohort`. The manual score-vs-vector read is owed on R1's G-live."""
+    import inspect
+
+    from autodedup import rt_equivalence as tool
+
+    every = tool._defects([{"side": "live", "rows_naming_one": 1, "rows_carrying_one": 0}],
+                          False, "real", True, False)
+    assert {entry["defect"] for entry in every} == {
+        "store_write_asymmetry", "clock_anchor", "store_score_precision"}
+    source = inspect.getsource(tool)
+    assert "score_not_from_vector" not in source and "score_from_vector" not in source
