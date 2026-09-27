@@ -296,10 +296,11 @@ def test_scope_and_head_scoring_reach_the_payload(monkeypatch, caplog):
     monkeypatch.setattr(sys, "argv", [
         "dinov3_embed_dispatch", "--max-write-mb-per-hour", "400", "--dry-run",
         "--scope", "ids", "--listing-ids-file", "data/g4/cohort_listing_ids.txt.gz",
-        "--score-heads"])
+        "--score-heads", "--blocks", "town:563510,quarter:490245"])
     with caplog.at_level("INFO"):
         assert dispatch.main() == 0
     text = caplog.text
+    assert "--blocks=town:563510,quarter:490245" in text
     assert "--scope=ids" in text
     assert "--listing-ids-file=data/g4/cohort_listing_ids.txt.gz" in text
     assert "--score-heads" in text

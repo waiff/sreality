@@ -473,3 +473,18 @@ def _provisional(monkeypatch):
     path = _Path(tempfile.mkdtemp()) / "dinov3_config.json"
     path.write_text(_json.dumps(raw))
     monkeypatch.setattr(dinov3_config, "_CONFIG_PATH", path)
+
+
+def test_blocks_scope_resolves_through_the_exports_own_resolver(monkeypatch):
+    from autodedup import export
+
+    seen = []
+
+    def fake_fetch(conn, block, *, timeout_ms, negctl_max):
+        seen.append(block.key)
+        return ([3, 1] if block.grain == "town" else [2, 3]), {}
+
+    monkeypatch.setattr(export, "fetch_block_ids", fake_fetch)
+    assert bf.block_listing_ids(object(), "town:563510,quarter:490245") == [1, 2, 3]
+    assert len(seen) == 2
+    assert bf.pending_sql("blocks") == bf.pending_sql("ids")

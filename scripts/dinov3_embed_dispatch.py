@@ -230,10 +230,12 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
-    p.add_argument("--scope", choices=("all", "rt", "ids"), default="all",
+    p.add_argument("--scope", choices=("all", "rt", "ids", "blocks"), default="all",
                    help="Passed to the payload: all = corpus, rt = the live lane's scope, "
                         "ids = --listing-ids-file (a path inside the fetched ref).")
     p.add_argument("--listing-ids-file", default="")
+    p.add_argument("--blocks", default="",
+                   help="scope=blocks: export block specs joined by ','.")
     p.add_argument("--score-heads", action="store_true",
                    help="Passed to the payload: score each written vector with the active "
                         "tag model into image_tag_scores in the same pass.")
@@ -294,6 +296,8 @@ def main() -> int:
     ]
     if args.listing_ids_file:
         backfill_args.append(f"--listing-ids-file={args.listing_ids_file}")
+    if args.blocks:
+        backfill_args.append(f"--blocks={args.blocks}")
     if args.score_heads:
         backfill_args.append("--score-heads")
     start_cmd = build_start_cmd(ref=args.ref, backfill_args=backfill_args)

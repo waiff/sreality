@@ -86,11 +86,13 @@ _PENDING_TEMPLATE = """
 """
 
 # Which images a pass may consider. `all` is the corpus (the original lane). `ids` is a
-# listing-id file shipped with the ref the pod fetches (the offline cohorts), `rt` is the live
-# lane's own scope snapshot, so the engine's population is embedded first.
+# listing-id file shipped with the ref the pod fetches; `blocks` resolves an export's block spec
+# through the export's own `fetch_block_ids` (so a re-export and the embed see ONE listing set);
+# `rt` is the live lane's own scope snapshot, so the engine's population is embedded first.
 SCOPES: dict[str, str] = {
     "all": "",
     "ids": "AND i.listing_id = any(%(listing_ids)s::bigint[])",
+    "blocks": "AND i.listing_id = any(%(listing_ids)s::bigint[])",
     "rt": ("AND i.listing_id IN (SELECT s.listing_id FROM autodedup.rt_scope_ids s "
            "WHERE s.generation = 'rt')"),
 }
@@ -258,7 +260,7 @@ def select_pending(conn, *, identity: dict[str, Any], batch: int, shard: int,
     """One chunk of images with no vector under this exact six-fact identity."""
     params = {**identity, "batch": batch, "shard": shard, "shards": shards,
               "after_id": after_id}
-    if scope == "ids":
+    if scope in ("ids", "blocks"):
         params["listing_ids"] = list(listing_ids or [])
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
@@ -292,6 +294,20 @@ class HeadScorer:
                                 image_ids=list(vectors), force=True)
         self.written += report.written
         return report.written
+
+
+def block_listing_ids(conn, spec: str) -> list[int]:
+    """An export block spec (`town:563510,quarter:490245`; commas or spaces between blocks) ->
+    the listing ids a fresh export of it would carry, by the export's own resolver."""
+    from autodedup import cohort
+    from autodedup.export import ARG_DEFAULTS, fetch_block_ids
+
+    ids: set[int] = set()
+    for block in cohort.parse_blocks(spec.replace(",", " ")):
+        found, _detail = fetch_block_ids(conn, block, timeout_ms=SELECT_TIMEOUT_MS,
+                                         negctl_max=int(ARG_DEFAULTS["negctl_max"]))
+        ids.update(int(i) for i in found)
+    return sorted(ids)
 
 
 def resolve_device(requested: str = "") -> str:
@@ -349,6 +365,9 @@ def main() -> int:
     p.add_argument("--listing-ids-file", default="",
                    help="With --scope ids: a file (optionally .gz) of listing ids, one per "
                         "line, in the ref the pod fetched.")
+    p.add_argument("--blocks", default="",
+                   help="With --scope blocks: export block specs joined by ',', e.g. "
+                        "town:563510+town:577626+quarter:490245.")
     p.add_argument("--score-heads", action="store_true",
                    help="Also score each written vector with the ACTIVE tag model and upsert "
                         "image_tag_scores in the same pass (refused unless the model's encoder "
@@ -386,6 +405,12 @@ def main() -> int:
     import psycopg
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        if args.scope == "blocks":
+            if not args.blocks:
+                print("ERROR: --scope blocks needs --blocks.", file=sys.stderr)
+                return 2
+            listing_ids = block_listing_ids(conn, args.blocks)
+            LOG.info("DINOV3 scope=blocks listings=%d blocks=%s", len(listing_ids), args.blocks)
         total_images = _scalar(conn, _TOTAL_IMAGES_SQL)
         embedded_before = _scalar(conn, _EMBEDDED_COUNT_SQL, identity)
         if args.dry_run:

@@ -91,13 +91,18 @@ on:
         default: "60"
         type: string
       scope:
-        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file."
+        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input)."
         required: false
         default: "all"
         type: choice
-        options: ["all", "rt", "ids"]
+        options: ["all", "rt", "ids", "blocks"]
       listing_ids_file:
         description: "scope=ids only: a repo path of listing ids (one per line, .gz allowed) at the dispatched ref."
+        required: false
+        default: ""
+        type: string
+      blocks:
+        description: "scope=blocks only: export block specs joined by commas, e.g. town:563510,town:577626,quarter:490245."
         required: false
         default: ""
         type: string
@@ -162,6 +167,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           SCOPE: ${{ inputs.scope }}
           LISTING_IDS_FILE: ${{ inputs.listing_ids_file }}
+          BLOCKS: ${{ inputs.blocks }}
           SCORE_HEADS: ${{ inputs.score_heads }}
         # Inputs travel via env and are case-validated before use, never interpolated
         # into the shell by ${{ }}.
@@ -201,13 +207,17 @@ jobs:
           ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
           ARGS="${ARGS} --container-disk-gb ${CONTAINER_DISK_GB:-60}"
           case "${SCOPE:-all}" in
-            all|rt|ids) ;;
-            *) echo "::error::scope must be all, rt or ids"; exit 1 ;;
+            all|rt|ids|blocks) ;;
+            *) echo "::error::scope must be all, rt, ids or blocks"; exit 1 ;;
           esac
           case "${LISTING_IDS_FILE:-}" in
             *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;
           esac
+          case "${BLOCKS:-}" in
+            *[!a-z0-9:,]*) echo "::error::blocks must be like town:563510,quarter:490245"; exit 1 ;;
+          esac
           ARGS="${ARGS} --scope ${SCOPE:-all}"
+          if [ -n "${BLOCKS:-}" ]; then ARGS="${ARGS} --blocks ${BLOCKS}"; fi
           if [ -n "${LISTING_IDS_FILE:-}" ]; then ARGS="${ARGS} --listing-ids-file ${LISTING_IDS_FILE}"; fi
           if [ "${SCORE_HEADS:-false}" = "true" ]; then ARGS="${ARGS} --score-heads"; fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
