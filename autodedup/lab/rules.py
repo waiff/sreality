@@ -11,7 +11,10 @@ alias, off one export and one engine); a missing row makes the verdict INCOMPLET
 
 Cut: the highest t_merge in {0.70, 0.75, 0.80, 0.85, 0.90} whose c18 M1 is not lower than the
 incumbent's c18 M1, then checked by the c17 M4 read. Never tuned on the trial: the rule reads no
-trial row."""
+trial row.
+
+Readers, 6.1 (b), for a challenger arm: at most two readers or tolerances added back over MF-P14;
+each fixture case only the arm joins needs one of its own."""
 
 from __future__ import annotations
 
@@ -121,6 +124,21 @@ def keep(arm: Rows, incumbent: Rows, verified: set[str], validate: str = VALIDAT
     verdict = "DROP" if reasons else "INCOMPLETE" if missing else "KEEP"
     return {"verdict": verdict, "reasons": reasons, "missing": missing, "checks": checks,
             "owed": ["the M7 read (label-free move) by a person"] if verdict == "KEEP" else []}
+
+
+READERS_MAX: int = 2
+
+
+def readers(kept: Mapping[str, Any], added: int) -> dict[str, Any]:
+    """Rule 6.1 (b) on a `keep` result: at most READERS_MAX readers or tolerances added back over
+    MF-P14 before MF's freeze. Every fixture case the arm alone joins states its own fact, so it
+    needs one reader of its own (until a reader is shown to hold two); a case the operator took off
+    the bar needs none."""
+    cases = sorted({item.split(": ", 1)[1].split(" (")[0]
+                    for item in kept["checks"].get("M3", {}).get("arm_only", [])})
+    needed = added + len(cases)
+    return {"verdict": "DROP" if needed > READERS_MAX else "KEEP", "added": added,
+            "cases_needing_a_reader": cases, "needed": needed, "max": READERS_MAX}
 
 
 def cut(sweep: Mapping[float, Rows], incumbent: Rows, verified: set[str],

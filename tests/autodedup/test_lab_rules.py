@@ -190,3 +190,14 @@ def test_a_verify_certifies_the_engine_artefact_and_the_lab_code(tmp_path: Path,
     assert verify.verified(tmp_path) == {old}
     verify.record(tmp_path, cohort, rungs, True)
     assert verify.verified(tmp_path) == {old, verify.stamp("v1")}
+
+
+def test_rule_b_counts_one_reader_per_case_only_the_arm_joins() -> None:
+    kept = {"checks": {"M3": {"arm_only": ["trial: Anenske nam. 2+kk (33553 x 519077)",
+                                           "c17: Decin gardens (285210 x 18624526)",
+                                           "c17: Decin gardens (162157 x 18624521)"]}}}
+    assert rules.readers(kept, 0) == {"verdict": "KEEP", "added": 0, "needed": 2, "max": 2,
+                                      "cases_needing_a_reader": ["Anenske nam. 2+kk",
+                                                                 "Decin gardens"]}
+    assert rules.readers(kept, 1)["verdict"] == "DROP"
+    assert rules.readers({"checks": {}}, 2)["verdict"] == "KEEP"

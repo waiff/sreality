@@ -212,6 +212,12 @@ def cmd_keep(args: argparse.Namespace) -> int:
     result = rules.keep(arm, incumbent, verify.verified(_root(reg)), args.validate,
                         accepted=args.accept or (), fixtures=metrics.load_fixtures(),
                         aliased=aliases)
+    if args.readers_added is not None:
+        result["rule_b"] = rules.readers(result, args.readers_added)
+        result["stop_rules"] = ("KEEP" if result["verdict"] == "KEEP"
+                                and result["rule_b"]["verdict"] == "KEEP" else
+                                "INCOMPLETE" if result["verdict"] == "INCOMPLETE"
+                                and result["rule_b"]["verdict"] == "KEEP" else "DROP")
     print(json.dumps({"arm": args.arm, "incumbent": args.incumbent, "aliases": aliases,
                       **result}, indent=1))
     return 0
@@ -328,6 +334,9 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--alias", action="append",
                              help="COHORT=SIBLING: the arm's rows on a sibling artefact of "
                                   "COHORT's export (another settings row) stand for COHORT's")
+            cmd.add_argument("--readers-added", type=int,
+                             help="rule 6.1 (b) for a challenger arm: readers or tolerances "
+                                  "it adds back over MF-P14")
         if name == "cut":
             cmd.add_argument("--param", default="t_merge")
             cmd.add_argument("--read", default=rules.READ)
