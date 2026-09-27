@@ -29,6 +29,7 @@ from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.lab.cache import FIDX, Cohort
 from autodedup.lab.score import FAMILIES, family_split, scores
+from toolkit.room_taxonomy import category_main_compatible
 
 U, VETO, REJECT, BAND, MERGE = 0, 1, 2, 3, 4
 ZONE_NAMES: tuple[str, ...] = ("undecided", "veto", "reject", "band", "merge")
@@ -435,20 +436,42 @@ def relation_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
                   dict(result.stats))
 
 
+def _walls(c: Cohort, x: int) -> tuple[frozenset[str], frozenset[str]]:
+    listing = c.ds.listings.get(x) if c.ds is not None else None
+    kind = getattr(listing, "category_type", None)
+    main = getattr(listing, "category_main", None)
+    return frozenset({kind} - {None}), frozenset({main} - {None})
+
+
 @group_step("components")
 def components_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
-    """Plain connected components of the merge edges: the no-repair baseline."""
+    """Connected components of the merge edges, strongest first, with no repair but the walls
+    read on the whole set: an advert with no category is compatible with every other, so without
+    the set read it would chain a flat to a commercial unit, or a sale to a rental."""
     parent: dict[int, int] = {}
+    kinds: dict[int, frozenset[str]] = {}
+    mains: dict[int, frozenset[str]] = {}
 
     def find(x: int) -> int:
-        while parent.setdefault(x, x) != x:
+        if x not in parent:
+            parent[x] = x
+            kinds[x], mains[x] = _walls(c, x)
+        while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-    for i in np.flatnonzero(d.zone == MERGE):
+    edges = np.flatnonzero(d.zone == MERGE)
+    for i in edges[np.argsort(-d.score[edges], kind="stable")]:
         a, b = find(c.keys[i][0]), find(c.keys[i][1])
-        if a != b:
-            parent[max(a, b)] = min(a, b)
+        if a == b:
+            continue
+        kind, main = kinds[a] | kinds[b], mains[a] | mains[b]
+        if len(kind) > 1 or not all(category_main_compatible(x, y)
+                                    for x, y in itertools.combinations(sorted(main), 2)):
+            continue
+        root = min(a, b)
+        parent[max(a, b)] = root
+        kinds[root], mains[root] = kind, main
     members: dict[int, list[int]] = {}
     for x in list(parent):
         members.setdefault(find(x), []).append(x)

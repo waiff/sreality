@@ -107,6 +107,21 @@ def test_the_walls_are_not_a_rung_an_arm_may_remove(tmp_path: Path) -> None:
                              "group": {"step": "components"}}).walls_forced
 
 
+def test_components_never_chain_a_flat_to_a_commercial_unit(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    c = _cohort(tmp_path)
+    c.keys = [(1, 2), (2, 3), (3, 4)]
+    c.ds = SimpleNamespace(listings={  # type: ignore[assignment]
+        1: SimpleNamespace(category_type="prodej", category_main="byt"),
+        2: SimpleNamespace(category_type="prodej", category_main=None),
+        3: SimpleNamespace(category_type="prodej", category_main="komercni"),
+        4: SimpleNamespace(category_type="prodej", category_main="dum")})
+    d = board.Decisions.blank(3, np.array([0.99, 0.95, 0.9]))
+    d.zone[:] = board.MERGE
+    assert board.components_group(c, d, {}).clusters == {1: (1, 2), 3: (3, 4)}
+
+
 def test_sweep_expands_one_arm_per_combination() -> None:
     config = {"name": "t", "ladder": [{"rung": "score", "t_lo": 0.2}],
               "sweep": {"ladder.0.t_lo": [0.1, 0.3], "model": ["ref", "x.json"]}}
