@@ -288,6 +288,7 @@ def test_head_rooms_come_from_the_registry_label_not_the_id():
 # three allowed cards; the lane never looked in the secure cloud or at another card.
 
 from scripts import g1_image_stack_dispatch as g1d  # noqa: E402
+from scripts import pod_bootstrap  # noqa: E402
 from scripts import tagging_bakeoff_dispatch as tb  # noqa: E402
 from scripts.runpod_client import RunPodClient, RunPodError  # noqa: E402
 
@@ -931,16 +932,19 @@ def test_a_complete_run_is_not_partial():
 def test_the_g1_pod_is_launched_with_a_finalize_and_a_units_watchdog(monkeypatch):
     seen = {}
 
-    def fake_run_pod(plan, args, select=None, units=False):
-        seen.update(start=plan.start_cmd[-1], units=units)
+    def fake_run_pod(plan, args, select=None, units=False, max_passes=None):
+        seen.update(start=plan.start_cmd[-1], units=units, max_passes=max_passes)
         return 0
 
     monkeypatch.setattr(tb, "_run_pod", fake_run_pod)
     monkeypatch.setattr(tb, "_log_arm_reset", tb._log_arm_reset)
     assert g1d.main(["--stage", "pod", "--run-id", "2", "--ref", "main", "--dry-run"]) == 0
     assert seen["units"] is True
+    # G1 alone opts in to the restart bound, and its watchdog to the pass rail behind it.
+    assert seen["max_passes"] == pod_bootstrap.MAX_PAYLOAD_FAILURES
     assert "python -m scripts.g1_image_stack_pod --run-id=2" in seen["start"]
     assert "--finalize" in seen["start"] and "payload gave-up" in seen["start"]
+    assert f'-ge {pod_bootstrap.MAX_PAYLOAD_FAILURES} ]' in seen["start"]
 
 
 def test_collect_evaluates_whatever_arms_finished(tmp_path, monkeypatch):

@@ -908,6 +908,25 @@ def test_no_database_on_the_runner_means_no_watchdog_and_a_loud_warning(monkeypa
     assert "no watchdog" in caplog.text
 
 
+def test_this_lanes_watchdog_has_no_pass_rail_unless_a_bounded_lane_asks(monkeypatch):
+    # Review of 17bea70d: the pass rail backs G1's restart bound. This lane's payload
+    # resumes across RunPod's restarts, so pass 4 of it is work, not a crash loop.
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://unused")
+
+    def _no_db(url):
+        raise OSError("no database in a unit test")
+
+    monkeypatch.setattr(dispatch, "_connect", _no_db)
+    args = _args(stage="embed", run_id=1, bootstrap_deadline_s=1800.0,
+                 stall_deadline_s=900.0)
+    assert dispatch.make_watchdog(args, only=[])._max_passes is None
+    assert dispatch.make_watchdog(args, only=[], units=True, max_passes=3)._max_passes == 3
+    # And the bootstrap this lane launches gives nothing up: it exits for RunPod.
+    script = dispatch.build_start_cmd(ref="abc123", module="scripts.tagging_bakeoff_embed",
+                                      payload_args=["--run-id=1"])[-1]
+    assert "payload gave-up" not in script
+
+
 def test_the_train_stage_shells_out_rather_than_importing_the_sibling():
     plan = dispatch.plan_stage(_args(stage="train", run_id=7))
     assert plan.argv[1:4] == ["-m", dispatch.TRAIN_MODULE, "--run-id"]

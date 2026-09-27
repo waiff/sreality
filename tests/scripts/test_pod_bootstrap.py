@@ -308,19 +308,24 @@ def test_preflight_passes_for_the_script_we_ship_and_fails_for_a_broken_one():
 # --- the payload restart bound (2026-09-27) -------------------------------------------
 # The G1 payload was OOM-killed (exit 137) at the same DINOv3 image on every pass; each
 # exit restarted the container and each restart re-ran the payload, ten times, ~$2.17.
+# The bound is OPT-IN (G1): the DB-backed lanes keep RunPod's restart-and-resume.
 
 
 def _g1_script() -> str:
     return pod_bootstrap.build_bootstrap_script(
         ref="2d00061db1089dad5d42cf51124494c2cdbd1032", module="scripts.g1_image_stack_pod",
-        payload_args=["--run-id=2"], finalize_args=["--finalize"])
+        payload_args=["--run-id=2"], finalize_args=["--finalize"],
+        restart_bound=pod_bootstrap.MAX_PAYLOAD_FAILURES)
 
 
 def _msgs(proc) -> list[str]:
     return [r["msg"] for r in _records(proc.stdout + proc.stderr)]
 
 
-def test_an_oom_killed_payload_gives_up_at_once_uploads_and_idles(tmp_path):
+FINALIZE_LINE = "PODBOOT_DRY: skipping python -m scripts.g1_image_stack_pod --run-id=2 --finalize"
+
+
+def test_an_oom_killed_payload_finalizes_then_gives_up_and_idles(tmp_path):
     root = tmp_path / "podboot"
     root.mkdir()
     proc = pod_bootstrap.run_dry(_g1_script(), fail_step="payload", fail_code=137,
@@ -328,15 +333,49 @@ def test_an_oom_killed_payload_gives_up_at_once_uploads_and_idles(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out[-2000:]            # idled: nothing for RunPod to restart
     msgs = _msgs(proc)
-    assert "pass=1 payload gave-up code=137 failures=1 step=payload" in msgs
+    token = "pass=1 payload gave-up code=137 failures=1 finalize=ok step=payload"
+    assert msgs[-1] == token                            # the last word, then the idle
     assert not any("exit=137" in m for m in msgs)       # the trap never fired: no restart
-    # The lane's finalize ran once, after the give-up report, with the payload's own args.
-    assert "PODBOOT_DRY: skipping python -m scripts.g1_image_stack_pod --run-id=2 --finalize" in out
-    assert msgs[-1] == "pass=1 step=gave-up idle"
     assert (root / "payload_state").read_text().strip() == "gave-up"
-    # The give-up report carries the log tail that says why.
+    # The give-up report carries the payload's log tail — taken before the finalize ran.
     gave_up = [r for r in _records(out) if "gave-up code" in r["msg"]][0]
     assert "failing step=payload" in gave_up["tail"]
+    assert FINALIZE_LINE not in gave_up["tail"]
+
+
+def test_the_give_up_token_is_written_only_after_the_finalize_returned(tmp_path):
+    # Review of 17bea70d: the token went out BEFORE the finalize, and the watchdog tears
+    # the pod down within a 60 s poll of reading it — racing the tar and the R2 upload.
+    root = tmp_path / "podboot"
+    root.mkdir()
+    proc = pod_bootstrap.run_dry(_g1_script(), fail_step="payload", fail_code=137,
+                                 root=str(root), timeout_s=60)
+    out = proc.stdout + proc.stderr
+    starting = out.index('"msg": "pass=1 step=finalize starting code=137"')
+    finalize = out.index(FINALIZE_LINE)
+    token = out.index('"msg": "pass=1 payload gave-up code=137')
+    assert starting < finalize < token
+    # The watchdog tears down on the token alone; nothing written before the finalize
+    # returned may carry it.
+    before = [m for m in _msgs(proc) if "payload gave-up" not in m]
+    assert all(pod_bootstrap.GAVE_UP_TOKEN not in m for m in before)
+    history = [r["msg"] for r in json.loads((root / "steps.json").read_text())]
+    assert history.index("pass=1 step=finalize starting code=137") < len(history) - 1
+    assert history[-1].startswith("pass=1 payload gave-up code=137")
+
+
+def test_a_failed_finalize_still_gives_up_and_says_so(tmp_path):
+    # The container died inside the payload twice before; this pass gives up at once, and
+    # its finalize (say R2 unreachable) fails. The token still goes out, naming it.
+    root = tmp_path / "podboot"
+    root.mkdir()
+    (root / "payload_state").write_text("running\n")
+    (root / "payload_failures").write_text("2\n")
+    proc = pod_bootstrap.run_dry(_g1_script(), fail_step="finalize", root=str(root),
+                                 timeout_s=60)
+    assert proc.returncode == 0
+    assert _msgs(proc)[-1] == ("pass=1 payload gave-up code=lost failures=3 finalize=failed "
+                               "step=payload")
 
 
 def test_a_crash_looping_payload_is_restarted_at_most_twice(tmp_path):
@@ -350,11 +389,13 @@ def test_a_crash_looping_payload_is_restarted_at_most_twice(tmp_path):
     assert [p.returncode for p in runs] == [1, 1, 0, 0]
     assert "pass=1 exit=1 step=payload" in _msgs(runs[0])
     assert "pass=2 exit=1 step=payload" in _msgs(runs[1])
-    assert "pass=3 payload gave-up code=1 failures=3 step=payload" in _msgs(runs[2])
+    assert ("pass=3 payload gave-up code=1 failures=3 finalize=ok step=payload"
+            in _msgs(runs[2]))
     # Pass 4 (a restart for any other reason) never runs the payload again.
     fourth = runs[3].stdout + runs[3].stderr
     assert "failing step=payload" not in fourth
-    assert "pass=4 payload gave-up code=earlier failures=3 step=payload" in _msgs(runs[3])
+    assert ("pass=4 payload gave-up code=earlier failures=3 finalize=ok step=payload"
+            in _msgs(runs[3]))
     assert (root / "payload_failures").read_text().strip() == "3"
 
 
@@ -367,7 +408,8 @@ def test_a_pass_that_died_inside_the_payload_counts_as_a_failure(tmp_path):
     (root / "payload_failures").write_text("2\n")
     proc = pod_bootstrap.run_dry(_g1_script(), root=str(root), timeout_s=60)
     assert proc.returncode == 0
-    assert "pass=1 payload gave-up code=lost failures=3 step=payload" in _msgs(proc)
+    assert ("pass=1 payload gave-up code=lost failures=3 finalize=ok step=payload"
+            in _msgs(proc))
     assert "skipping python -m scripts.g1_image_stack_pod --run-id=2\n" not in (
         proc.stdout + proc.stderr)                      # the payload itself did not run
 
@@ -384,21 +426,48 @@ def test_one_failure_then_a_clean_payload_is_an_ordinary_idle(tmp_path):
     assert (root / "payload_state").read_text().strip() == "ok"
 
 
-def test_the_other_lanes_get_the_bound_without_a_finalize_call():
-    script = _script()
-    assert "payload gave-up" in script and "--finalize" not in script
-    proc = pod_bootstrap.run_dry(script, fail_step="payload", fail_code=137, timeout_s=60)
-    assert proc.returncode == 0
-    assert "pass=1 payload gave-up code=137 failures=1 step=payload" in _msgs(proc)
+@pytest.mark.parametrize("lane", ["tagging", "dinov3"])
+def test_the_other_lanes_keep_restart_and_resume(tmp_path, lane):
+    # Review of 17bea70d: the bound was shared, so the tagging and DINOv3 lanes stopped
+    # surviving a transient crash by restarting — and the DINOv3 lane, with no heartbeat
+    # row, would have idled until the 15-min stall. Opt-in: they exit and are restarted.
+    cmd = (tagging_bakeoff_dispatch.build_start_cmd(
+        ref="abc123", module="scripts.tagging_bakeoff_embed", payload_args=["--run-id=1"])
+        if lane == "tagging" else
+        dinov3_embed_dispatch.build_start_cmd(ref="abc123", backfill_args=["--limit=10"]))
+    script = cmd[2]
+    assert pod_bootstrap.GAVE_UP_TOKEN not in script and "--finalize" not in script
+    assert "payload_failures" not in script
+    root = tmp_path / "podboot"
+    root.mkdir()
+    runs = [pod_bootstrap.run_dry(script, fail_step="payload", fail_code=code, root=str(root),
+                                  timeout_s=60) for code in (137, 1, 1, 137, 1)]
+    assert [p.returncode for p in runs] == [137, 1, 1, 137, 1]
+    for n, (proc, code) in enumerate(zip(runs, (137, 1, 1, 137, 1)), 1):
+        assert f"pass={n} exit={code} step=payload" in _msgs(proc)
+        assert "failing step=payload" in proc.stdout + proc.stderr   # the payload ran again
+    ok, lines = pod_bootstrap.preflight(script)
+    assert ok, lines
+    assert any("preflight[oom]" in ln and "rc=137 OK" in ln for ln in lines)
 
 
 def test_preflight_proves_the_oom_give_up_before_a_pod_is_rented():
     ok, lines = pod_bootstrap.preflight(_g1_script())
     assert ok, lines
-    assert any("preflight[oom]" in ln and "OK" in ln for ln in lines)
+    assert any("preflight[oom]" in ln and "rc=0 OK" in ln for ln in lines)
 
 
 def test_a_finalize_arg_is_checked_like_any_payload_arg():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unsafe payload arg"):
         pod_bootstrap.build_bootstrap_script(ref="main", module="scripts.x", payload_args=[],
-                                             finalize_args=["--finalize; rm -rf /"])
+                                             finalize_args=["--finalize; rm -rf /"],
+                                             restart_bound=3)
+
+
+def test_a_finalize_needs_a_restart_bound():
+    with pytest.raises(ValueError, match="restart_bound"):
+        pod_bootstrap.build_bootstrap_script(ref="main", module="scripts.x", payload_args=[],
+                                             finalize_args=["--finalize"])
+    with pytest.raises(ValueError, match="at least 1"):
+        pod_bootstrap.build_bootstrap_script(ref="main", module="scripts.x", payload_args=[],
+                                             restart_bound=0)

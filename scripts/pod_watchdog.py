@@ -31,17 +31,20 @@ outside. This module turns that into three terminations, all cheaper than the wi
       Without that reset, attempt 5 of run 1 read 10/10 terminal two seconds in
       (2026-09-08 (j)).
   (d) CRASH LOOP — two or more `exit=` reports from the pod's own bootstrap within the
-      stall window, OR any report from a pass beyond `max_passes`. RunPod re-runs the
-      docker start command whenever it exits, so a bootstrap that dies keeps dying, on the
-      clock, and the stall rail only catches it a quarter of an hour later (2026-09-08 (h):
-      ~33 min, ~$0.12). A SLOW loop never tripped the first half: on 2026-09-27 the G1
-      payload was OOM-killed every ~18 min for ten passes (exits never 15 min apart, and the
-      bounded history dropped most of them before a poll), so the pass NUMBER is the rail
-      that cannot be missed. The teardown prints the FIRST exit report — the original
-      cause — because every later one is a symptom of the restart.
-  (e) PAYLOAD GAVE UP — the bootstrap's own `payload gave-up` report (at most two payload
-      restarts, and none after an exit 137: `scripts/pod_bootstrap.py`). The pod has
-      uploaded what it had and is idling; every further second is rent.
+      stall window, OR (when the lane sets `max_passes`) any report from a later pass.
+      RunPod re-runs the docker start command whenever it exits, so a bootstrap that dies
+      keeps dying, on the clock, and the stall rail only catches it a quarter of an hour
+      later (2026-09-08 (h): ~33 min, ~$0.12). A SLOW loop never tripped the first half: on
+      2026-09-27 the G1 payload was OOM-killed every ~18 min for ten passes (exits never
+      15 min apart, and the bounded history dropped most of them before a poll), so the
+      pass NUMBER is the rail that cannot be missed — for a lane whose bootstrap bounds its
+      restarts (G1). The DB-backed lanes resume across restarts and pass None. The
+      teardown prints the FIRST exit report — the original cause — because every later
+      one is a symptom of the restart.
+  (e) PAYLOAD GAVE UP — the bootstrap's own `payload gave-up` report (a lane's opt-in
+      restart bound: `scripts/pod_bootstrap.py`). The bootstrap writes it only AFTER its
+      finalize returned, so the pod has uploaded what it had and is idling; every further
+      second is rent. Its `step=finalize starting` record is not the token.
 
 WHAT COUNTS AS PROGRESS IS THE CALLER'S QUESTION, not this module's: a poller returns a
 `Progress` whose `marker` is any string that CHANGES when the job advances (a vector
@@ -75,8 +78,9 @@ LOG = logging.getLogger("pod_watchdog")
 DEFAULT_BOOTSTRAP_DEADLINE_S = 30 * 60.0
 DEFAULT_STALL_DEADLINE_S = 15 * 60.0
 DEFAULT_POLL_INTERVAL_S = 60.0
-# The bootstrap runs a failing payload at most three times (pod_bootstrap), so a fourth
-# pass means something outside that bound is restarting the container.
+# A bounded bootstrap runs a failing payload at most three times (pod_bootstrap), so a
+# fourth pass means something outside that bound is restarting the container. Off unless a
+# lane passes it: an unbounded lane's restarts are its resume.
 DEFAULT_MAX_PASSES = 3
 GAVE_UP_TOKEN = "payload gave-up"
 _PASS_RE = re.compile(r"\bpass=(\d+)\b")
@@ -118,11 +122,11 @@ class PodWatchdog:
         bootstrap_deadline_s: float = DEFAULT_BOOTSTRAP_DEADLINE_S,
         stall_deadline_s: float = DEFAULT_STALL_DEADLINE_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
-        max_passes: int = DEFAULT_MAX_PASSES,
+        max_passes: int | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self._poll = poll
-        self._max_passes = int(max_passes)
+        self._max_passes = None if max_passes is None else int(max_passes)
         self._bootstrap_deadline_s = float(bootstrap_deadline_s)
         self._stall_deadline_s = float(stall_deadline_s)
         self._poll_interval_s = float(poll_interval_s)
@@ -238,10 +242,10 @@ class PodWatchdog:
                  f"{self.first_exit[:2000]}" if self.first_exit else "")
         if gave_up:
             return ("payload-failed",
-                    "the bootstrap gave the payload up (an exit 137, or a third failure) "
-                    "and uploaded what it had; nothing on this pod will move again: "
+                    "the bootstrap gave the payload up (an exit 137, or its restart bound) "
+                    "and its finalize has returned; nothing on this pod will move again: "
                     f"{gave_up[:2000]}" + (f" — {cause}" if cause else ""))
-        if top_pass > self._max_passes:
+        if self._max_passes is not None and top_pass > self._max_passes:
             return ("crash-loop",
                     f"the pod's start command is on pass {top_pass} (limit "
                     f"{self._max_passes}): the container keeps restarting, however slowly. "

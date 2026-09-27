@@ -436,10 +436,11 @@ def _log_arm_reset(args: argparse.Namespace, only: Sequence[str]) -> None:
 
 
 def make_watchdog(args: argparse.Namespace, *, only: Sequence[str],
-                  units: bool = False) -> PodWatchdog | None:
+                  units: bool = False, max_passes: int | None = None) -> PodWatchdog | None:
     """The watchdog for this dispatch, or None when the runner cannot read the database
     (in which case the wait window is the only protection there is, loudly). `units`: see
-    `read_bakeoff_progress`."""
+    `read_bakeoff_progress`. `max_passes`: the pass rail, only for a lane whose bootstrap
+    bounds its restarts (G1); this lane's payload resumes across RunPod's restarts."""
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         LOG.warning("SUPABASE_DB_URL is not set on the RUNNER — no watchdog, so a pod "
@@ -467,7 +468,7 @@ def make_watchdog(args: argparse.Namespace, *, only: Sequence[str],
              DEFAULT_POLL_INTERVAL_S, baseline)
     return PodWatchdog(poll, bootstrap_deadline_s=args.bootstrap_deadline_s,
                        stall_deadline_s=args.stall_deadline_s,
-                       poll_interval_s=DEFAULT_POLL_INTERVAL_S)
+                       poll_interval_s=DEFAULT_POLL_INTERVAL_S, max_passes=max_passes)
 
 
 def plan_stage(args: argparse.Namespace) -> Plan:
@@ -526,10 +527,11 @@ def plan_stage(args: argparse.Namespace) -> Plan:
 
 def _run_pod(plan: Plan, args: argparse.Namespace,
              select: Callable[[RunPodClient], list[GpuOption]] | None = None,
-             units: bool = False) -> int:
+             units: bool = False, max_passes: int | None = None) -> int:
     """`select` builds the launch ladder for a lane with its own GPU policy (G1: an
     ordered allowlist walked in both clouds); the default is this lane's `select_gpus`.
-    `units` measures the stall deadline in the payload's finished work (G1)."""
+    `units` measures the stall deadline in the payload's finished work and `max_passes`
+    arms the pass rail (both G1, whose bootstrap bounds its restarts)."""
     env = pod_env(args.run_id)
     missing = [k for k in POD_ENV_KEYS if k not in env]
     allowlist = tuple(s.strip().lower() for s in args.gpu_allowlist.split(",")
@@ -581,7 +583,7 @@ def _run_pod(plan: Plan, args: argparse.Namespace,
     LOG.info("%d candidate GPU(s), in launch order: %s", len(gpus),
              ", ".join(f"{g.id} [{g.cloud_type}] (${g.price_per_hr():.3f}/hr)" for g in gpus))
 
-    watchdog = make_watchdog(args, only=only, units=units)
+    watchdog = make_watchdog(args, only=only, units=units, max_passes=max_passes)
     try:
         result = client.run_job_with_fallback(
             name=f"tagging-bakeoff-{args.run_id}",

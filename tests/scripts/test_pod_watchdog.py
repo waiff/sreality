@@ -304,17 +304,21 @@ from scripts import pod_report  # noqa: E402
 
 BOOT_S = 62.0
 PASS_S = 1100.0          # one pass: bootstrap, image check, DINOv3 up to the kill
+FINALIZE_S = 45.0        # the give-up's tar + R2 upload + arm close, before the token
 
 
 class _CrashLoopingPod:
-    """A pod whose payload dies every PASS_S; `gives_up` = the new bootstrap (at the first
-    exit 137); `units` = the G1 marker (durable work) instead of a heartbeat timestamp.
-    The step history is the reporter's own bounded, trimmed history."""
+    """A pod whose payload dies every PASS_S; `gives_up` = the bounded bootstrap (at the
+    first exit 137: `step=finalize starting`, then the token `finalize_s` later, once the
+    upload returned); `units` = the G1 marker (durable work) instead of a heartbeat
+    timestamp. The step history is the reporter's own bounded, trimmed history."""
 
-    def __init__(self, *, gives_up: bool, units: bool) -> None:
+    def __init__(self, *, gives_up: bool, units: bool, finalize_s: float = FINALIZE_S) -> None:
         self.gives_up = gives_up
         self.units = units
+        self.finalize_s = finalize_s
         self.now = 0.0
+        self.died_at: float | None = None
 
     def records(self) -> list[dict]:
         out: list[dict] = []
@@ -324,9 +328,12 @@ class _CrashLoopingPod:
             if self.now < BOOT_S + k * PASS_S - 5:
                 break
             if self.gives_up:
-                out.append({"ts": k, "msg": f"pass={k} payload gave-up code=137 failures=1 "
-                                            "step=payload", "tail": "Killed"})
-                out.append({"ts": k, "msg": f"pass={k} step=gave-up idle"})
+                self.died_at = BOOT_S + k * PASS_S - 5
+                out.append({"ts": k, "msg": f"pass={k} step=finalize starting code=137"})
+                if self.now >= self.died_at + self.finalize_s:
+                    out.append({"ts": k, "msg": f"pass={k} payload gave-up code=137 "
+                                                "failures=1 finalize=ok step=payload",
+                                "tail": "Killed"})
                 break
             out.append({"ts": k, "msg": f"pass={k} exit=137 step=payload", "tail": "Killed"})
             k += 1
@@ -334,7 +341,7 @@ class _CrashLoopingPod:
 
     def __call__(self) -> Progress:
         steps = tuple(json.dumps(r) for r in self.records())
-        idle = self.gives_up and any("gave-up" in s for s in steps)
+        idle = self.gives_up and any("finalize" in s for s in steps)
         if self.units:
             # Two shards landed in the first pass; no restart ever finishes another.
             marker = f"0|units={min(2, int(self.now // 400))}"
@@ -359,22 +366,46 @@ def test_the_replayed_crash_loop_is_ended_by_the_pass_number_not_the_window():
     # The old bootstrap (no give-up) and the heartbeat marker: exactly 2026-09-27.
     pod = _CrashLoopingPod(gives_up=False, units=False)
     watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
-                           poll_interval_s=60)
+                           poll_interval_s=60, max_passes=3)
     stop, at = _replay(pod, watchdog)
     assert watchdog.verdict == "crash-loop"
     assert at <= BOOT_S + 3 * PASS_S + 60                # pass 4 appears; 15,613 s before
     assert "pass 4" in stop and "exit=137" in stop       # the first failure is named
 
 
-def test_a_bootstrap_that_gives_up_is_torn_down_within_a_minute():
+def test_a_bootstrap_that_gives_up_is_torn_down_within_a_minute_of_its_finalize():
     pod = _CrashLoopingPod(gives_up=True, units=False)
     watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
-                           poll_interval_s=60)
+                           poll_interval_s=60, max_passes=3)
     stop, at = _replay(pod, watchdog)
     assert watchdog.verdict == "payload-failed"
-    assert BOOT_S + PASS_S - 5 <= at <= BOOT_S + PASS_S + 60
-    assert "code=137" in stop
+    token_at = pod.died_at + FINALIZE_S
+    assert token_at <= at <= token_at + 60
+    assert "code=137" in stop and "finalize=ok" in stop
 
+
+def test_a_slow_finalize_is_never_torn_down_before_the_token():
+    # Review of 17bea70d: the token used to precede the finalize, so a 60 s poll landing
+    # 10-30 s later killed the pod mid-upload. Now the finalize's own record comes first and
+    # is not the token; the watchdog must wait all 45 s for the one that is.
+    pod = _CrashLoopingPod(gives_up=True, units=True, finalize_s=45.0)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60, max_passes=3)
+    died = BOOT_S + PASS_S - 5
+    # Phase the 60 s polls so that one lands 20 s into the finalize.
+    now, polled_during_finalize = (died + 20.0) % 60.0 - 1.0, 0
+    while now < 15_600:
+        now += 1.0
+        pod.now = now
+        stop = watchdog(now)
+        if died <= now < died + 45.0 and watchdog._last_poll_at == now:
+            polled_during_finalize += 1
+        if stop:
+            break
+    assert polled_during_finalize >= 1                  # the watchdog DID look mid-finalize
+    assert watchdog.verdict == "payload-failed"
+    assert died + 45.0 <= now <= died + 45.0 + 60
+    assert "finalize=ok" in stop
 
 def test_restarts_that_finish_nothing_are_a_stall_when_progress_is_units():
     # Even with no give-up and no pass rail, a units marker ignores the heartbeats: the
@@ -429,7 +460,19 @@ def test_a_fourth_pass_is_a_crash_loop_even_without_an_exit_record_in_view():
     steps = tuple(_rec(f"pass=4 step={s} ok") for s in ("fetch", "uv", "venv", "torch"))
     poller = _Poller([Progress(booted=True, marker="0|t1", steps=steps, step=steps[-1])])
     watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
-                           poll_interval_s=60)
+                           poll_interval_s=60, max_passes=3)
     stop, at = _run(watchdog, [60])
     assert watchdog.verdict == "crash-loop" and at == 60
     assert "pass 4" in stop
+
+
+def test_a_lane_without_a_restart_bound_has_no_pass_rail():
+    # The tagging and DINOv3 lanes resume across RunPod's restarts: pass 6 of a payload
+    # that keeps making progress is work, not a loop (review of 17bea70d).
+    readings = [Progress(booted=True, marker=f"{n}|t{n}",
+                         steps=(_rec(f"pass={1 + n // 10} step=payload starting"),))
+                for n in range(0, 120)]
+    watchdog = PodWatchdog(_Poller(readings), bootstrap_deadline_s=1800,
+                           stall_deadline_s=900, poll_interval_s=60)
+    stop, _at = _run(watchdog, [60 * i for i in range(1, 110)])
+    assert stop is None and watchdog.verdict is None

@@ -245,9 +245,11 @@ def pod(args: Namespace) -> int:
     if args.phases:
         payload.append(f"--phases={args.phases}")
     # The bootstrap gives a failing payload up after two restarts, or at once on an OOM
-    # kill, and then runs `--finalize`: upload what exists, close every open arm.
+    # kill, runs `--finalize` (upload what exists, close every open arm) and only then
+    # reports the give-up. Opt-in: the other RunPod lanes keep restart-and-resume.
     start_cmd = pod_bootstrap.build_start_cmd(ref=args.ref, module=MODULE, payload_args=payload,
-                                              extra="clip", finalize_args=["--finalize"])
+                                              extra="clip", finalize_args=["--finalize"],
+                                              restart_bound=pod_bootstrap.MAX_PAYLOAD_FAILURES)
     plan = tb.Plan(stage="embed", where="pod", payload_args=payload, start_cmd=start_cmd,
                    max_wait_s=args.job_max_seconds + STARTUP_GRACE_S, execute=not args.dry_run)
     if not args.dry_run:
@@ -267,8 +269,9 @@ def pod(args: Namespace) -> int:
     tb._log_arm_reset = lambda *a, **k: None  # the g1 reset above is the new attempt
     # units=True: once the payload is up, the stall deadline counts finished shards and
     # arms, never heartbeats (2026-09-27: ten restarts heartbeated through a 4 h 20 min window).
+    # max_passes: the pass rail that backs the bootstrap's own restart bound.
     return tb._run_pod(plan, shim, select=lambda client: gpu_ladder(client, allowlist, clouds),
-                       units=True)
+                       units=True, max_passes=pod_bootstrap.MAX_PAYLOAD_FAILURES)
 
 
 def collect(args: Namespace) -> int:
