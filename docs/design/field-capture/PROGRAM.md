@@ -621,9 +621,8 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   cellar (Mechová 3+1, 2 m²), a room, a balcony; a flat `dum < 20 m²` bound would have taken 133 real chaty. A
   declined measure falls through to the next one, like the 5 m² rail; re-parsing to "the first plausible figure"
   instead was measured and refused (14 of 20 checkable picks were another room). **Narrowed 2026-09-27 (PR
-  fix/area-per-room-rail-bazos-only).** #1630 first applied the per-room floor to every parser that read a
-  disposition, on the A4 sample's "0 of 19,345 dispositioned structured rows". Migration 573's count query on
-  production (2026-09-27) found **280** structured rows under it (ceskereality 93, idnes 120, bezrealitky 39,
+  #1637).** #1630 first applied the per-room floor to every parser that read a disposition, on the A4 sample's
+  "0 of 19,345 dispositioned structured rows". Migration 573's count query on production (2026-09-27) found **280** structured rows under it (ceskereality 93, idnes 120, bezrealitky 39,
   sreality 16, realitymix 12; active 40), and the hand-read of 30 active ones found ROOM RENTALS listed under the
   whole flat's disposition — ceskereality "pronájem bytu 5+1 a více" at 11-38 m² (the same Praha rooms on idnes as
   5+kk 11-12 m²), bezrealitky 3+1 / 2+kk / 4+1 rooms at 15-23 m², realitymix "pronájem pokoje 20 m² ve sdíleném
