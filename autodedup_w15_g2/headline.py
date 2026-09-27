@@ -55,7 +55,7 @@ def main(tag: str, names: list[str]) -> None:
             m.update({"band": run.band, "merge_edges": run.edges, "refused_group_fact": run.refused_fact,
                       "refused_group_neg": run.refused_neg, "lazy": run.fact_pairs.get("lazy_pairs_fired"),
                       "groups_ge10": sum(1 for v in run.groups.values() if len(v) >= 10),
-                      "adversary": adversary(n, run.groups), "seconds": round(time.perf_counter() - t0, 1)})
+                      "adversary": adversary(n, run.groups, c.recs), "seconds": round(time.perf_counter() - t0, 1)})
             res[arm] = m
             (OUT / f"cache/groups_{tag}_{n}_{arm}.json").write_text(
                 json.dumps({str(k): v for k, v in run.groups.items()}))

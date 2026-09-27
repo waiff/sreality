@@ -75,7 +75,7 @@ def main(tag: str, names: list[str]) -> None:
                              must_link=sorted(pos), must_not=sorted(neg), pair_facts=memo[fname])
             m = measure(n, run.groups, c.recs, c.labels, ref)
             m.update({"band": run.band, "merge_edges": run.edges, "refused_fact": run.refused_fact,
-                      "adversary": adversary(n, run.groups), "fact_pairs": run.fact_pairs,
+                      "adversary": adversary(n, run.groups, c.recs), "fact_pairs": run.fact_pairs,
                       "groups_ge10": sum(1 for v in run.groups.values() if len(v) >= 10),
                       "seconds": round(time.perf_counter() - clock, 1)})
             if key == "hgb" and fname == "f7sa+ba" and t == 0.9:

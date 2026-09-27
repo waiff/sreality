@@ -16,6 +16,7 @@ import collections
 import json
 import sys
 import time
+from collections.abc import Container
 
 import numpy as np
 
@@ -27,7 +28,6 @@ from autodedup_w15_g2.learn import W6, Model, auc, fit_isotonic, load_cohort, lo
 from autodedup_w15_g2.metrics import copairs, measure
 from autodedup_w15_g2.paths import OUT
 
-ADV_NEG = fixtures.by_cohort()
 
 SOURCES = {
     "all": lambda lab: True,
@@ -111,10 +111,11 @@ def pair_aucs(g: Ground, p: np.ndarray, nofact: np.ndarray) -> dict:
     return out
 
 
-def adversary(name: str, groups: dict) -> dict:
+def adversary(name: str, groups: dict, ids: Container[int]) -> dict:
+    """M3 on every keep-apart fixture whose two adverts are in `ids` (`fixtures.present` raises on one missing)."""
     where = {m: r for r, ms in groups.items() for m in ms}
     out = {}
-    for label, (a, b) in ADV_NEG.get(name, {}).items():
+    for label, (a, b) in fixtures.present(name, ids).items():
         ra, rb = where.get(a), where.get(b)
         together = ra is not None and ra == rb
         out[label] = {"together": together,
@@ -210,7 +211,7 @@ def main(tag: str, names: list[str]) -> None:
             zone = c.ladder[arm]["zone"]
             m.update({"band": int((zone == "band").sum()), "merge_pairs": int((zone == "merge").sum()),
                       "seconds": round(c.ladder[arm]["seconds"], 1),
-                      "adversary": adversary(n, c.ladder[arm]["clusters"]),
+                      "adversary": adversary(n, c.ladder[arm]["clusters"], c.recs),
                       "groups_ge10": sum(1 for v in c.ladder[arm]["clusters"].values() if len(v) >= 10)})
             res["ladder"][arm] = m
         for cname, key, t_merge, t_band, t_neg, fv in configs:
@@ -223,7 +224,7 @@ def main(tag: str, names: list[str]) -> None:
             m = measure(n, run.groups, c.recs, c.labels, ref)
             m.update({"band": run.band, "merge_edges": run.edges, "refused_fact": run.refused_fact,
                       "refused_neg": run.refused_neg, "seconds": round(time.perf_counter() - t, 2),
-                      "adversary": adversary(n, run.groups),
+                      "adversary": adversary(n, run.groups, c.recs),
                       "groups_ge10": sum(1 for v in run.groups.values() if len(v) >= 10),
                       "pair_auc": pair_aucs(g, p_all, nofact[n])})
             res["engine"][cname] = m

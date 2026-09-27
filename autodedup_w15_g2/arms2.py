@@ -65,7 +65,7 @@ def main(tag: str, names: list[str]) -> None:
                               pair_facts=memo[id(cfg)], lazy_memo=lazy)
             m = slim(measure(n, run_.groups, c.recs, c.labels, ref))
             m.update({"band": run_.band, "refused_group_fact": run_.refused_fact,
-                      "refused_group_neg": run_.refused_neg, "adversary": adversary(n, run_.groups)})
+                      "refused_group_neg": run_.refused_neg, "adversary": adversary(n, run_.groups, c.recs)})
             res[label] = m
             (OUT / f"cache/groups_{tag}_{n}_{label}.json").write_text(
                 json.dumps({str(k): v for k, v in run_.groups.items()}))

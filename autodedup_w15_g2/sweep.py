@@ -66,7 +66,7 @@ def main(tag: str, names: list[str]) -> None:
             if arm in c.ladder:
                 m = slim(measure(n, c.ladder[arm]["clusters"], c.recs, c.labels, ref))
                 m["band"] = int((c.ladder[arm]["zone"] == "band").sum())
-                m["adversary"] = adversary(n, c.ladder[arm]["clusters"])
+                m["adversary"] = adversary(n, c.ladder[arm]["clusters"], c.recs)
                 res["ladder"][arm] = m
         pf = [first_fact(c.recs[a], c.recs[b], FACTS) for a, b in c.cand_keys]
         lazy: dict = {}
@@ -83,7 +83,7 @@ def main(tag: str, names: list[str]) -> None:
                                  pair_facts=pf, lazy_memo=lazy)
                 m = slim(measure(n, run.groups, c.recs, c.labels, ref))
                 m.update({"band": run.band, "merge_edges": run.edges, "refused_group": run.refused_fact,
-                          "adversary": adversary(n, run.groups),
+                          "adversary": adversary(n, run.groups, c.recs),
                           "seconds": round(time.perf_counter() - t0, 1)})
                 res["engine"][f"{label}@{t}"] = m
                 print(n, f"{label}@{t}", {k: m[k] for k in ("groups", "copairs", "op_same_together",
