@@ -5,6 +5,7 @@ ABSENT today and enter as missing values, so a G1 side file fills them without a
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import warnings
 from dataclasses import dataclass
@@ -24,6 +25,12 @@ from autodedup_w15_g2.paths import OUT
 
 G1_SLOTS: tuple[str, ...] = ("g1_sscd_max", "g1_dinov3_max", "g1_lightglue_inliers",
                              "g1_room_matched_frames")
+# where each slot comes from in G1's per-pair feature dict (scripts/g1_image_stack_eval.py
+# `pair_features` on branch global/g1-image-stack): the best SSCD copy score over all frame pairs,
+# the best DINOv3 cosine inside a same private room (head winner, else CLIP tag), LightGlue/ALIKED
+# fundamental-matrix inliers of the best routed frame pair, and DINOv3 frame pairs over the copy cut
+G1_SOURCE: dict[str, str] = {"g1_sscd_max": "sscd:max_any", "g1_dinov3_max": "dinov3@hc:private_max",
+                             "g1_lightglue_inliers": "lg_aliked:max_f", "g1_room_matched_frames": "dinov3:n_copy"}
 FEATURES: tuple[str, ...] = tuple(FEATURE_ORDER) + G1_SLOTS
 
 
@@ -166,8 +173,9 @@ def load_g1(path: str | None, keys: list[tuple[int, int]]) -> np.ndarray:
             if i is None:
                 continue
             for j, slot in enumerate(G1_SLOTS):
-                if r.get(slot) is not None:
-                    G[i, j] = float(r[slot])
+                value = r.get(slot, r.get(G1_SOURCE[slot]))
+                if value is not None and not (isinstance(value, float) and math.isnan(value)):
+                    G[i, j] = float(value)
     return G
 
 

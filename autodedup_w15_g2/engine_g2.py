@@ -41,7 +41,8 @@ class EngineRun:
 
 def run_engine(keys: list[tuple[int, int]], p: np.ndarray, recs: dict[int, Rec], cfg: EngineCfg,
                must_link: Iterable[tuple[int, int]] = (), must_not: Iterable[tuple[int, int]] = (),
-               pair_facts: list[str | None] | None = None) -> EngineRun:
+               pair_facts: list[str | None] | None = None,
+               lazy_memo: dict[tuple[int, int], str | None] | None = None) -> EngineRun:
     if pair_facts is None:
         pair_facts = [first_fact(recs[a], recs[b], cfg.facts) for a, b in keys]
     fact_count: dict[str, int] = {}
@@ -63,7 +64,8 @@ def run_engine(keys: list[tuple[int, int]], p: np.ndarray, recs: dict[int, Rec],
             parent[x], x = root, parent[x]
         return root
 
-    lazy_memo: dict[tuple[int, int], str | None] = {}
+    if lazy_memo is None:
+        lazy_memo = {}  # shared across runs by a caller that sweeps cuts (the lazy fact is cfg-free)
 
     def fact_of(x: int, y: int) -> str | None:
         k = (x, y) if x < y else (y, x)

@@ -43,6 +43,9 @@ class FactCfg:
     colive_floor_delta: int | None = None
     colive_price_tol: float | None = None
     colive_area_tol: float | None = None
+    # one portal publishes one floor convention, live together or not (a sequential sibling: one
+    # broker's unit A, then unit B from the same shoot one storey up); None = off
+    same_portal_floor_delta: int | None = None
 
     def dials(self) -> dict:
         return {k: getattr(self, k) for k in self.__slots__}
@@ -138,8 +141,11 @@ def facts(a: Rec, b: Rec, cfg: FactCfg = FactCfg(), first: bool = False) -> list
         return out
     if a.cmain == FLAT and b.cmain == FLAT and a.floor is not None and b.floor is not None:
         delta = abs(a.floor - b.floor)
+        same_portal = a.source is not None and a.source == b.source
         if (delta >= cfg.floor_delta or (one_portal and cfg.colive_floor_delta is not None
-                                         and delta >= cfg.colive_floor_delta)) and hit("floor"):
+                                         and delta >= cfg.colive_floor_delta)
+                or (same_portal and cfg.same_portal_floor_delta is not None
+                    and delta >= cfg.same_portal_floor_delta)) and hit("floor"):
             return out
     if a.prices and b.prices and _comparable(a.prices, b.prices, cfg.price_units):
         together = colive_days(a, b)
