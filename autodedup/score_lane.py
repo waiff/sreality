@@ -188,13 +188,6 @@ def parse_args(args: dict[str, str]) -> ScoreArgs:
     )
 
 
-def load_settings(parsed: ScoreArgs) -> Settings:
-    """The named row, plus the one dial the lane may override. `replace` re-validates."""
-    settings = harness.named_settings(parsed.settings)
-    return settings if parsed.store_floor is None else replace(
-        settings, store_floor=parsed.store_floor)
-
-
 def download_artifact(run_id: str, dest: Path, mode: str = "export") -> Path:
     """`gh run download <id> -n autodedup-<mode>-<id>` into `dest`, which is returned: an
     `export` dispatch's artifact is the cohort, a `score` dispatch's is a harness run."""
@@ -779,7 +772,9 @@ def run_score(
     parsed = parse_args(args)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    settings = load_settings(parsed)
+    settings = harness.named_settings(parsed.settings)
+    if parsed.store_floor is not None:  # the one dial the lane may override; `replace` re-validates
+        settings = replace(settings, store_floor=parsed.store_floor)
     model = harness.named_model(parsed.model)
 
     cohort_path = (

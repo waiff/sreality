@@ -343,7 +343,3 @@ def test_a_merge_pair_s_standing_decides_whether_it_is_still_same() -> None:
     assert not lb.MergePair(1, 2, standing=lb.STANDING_UNRULED, must_not_link=True).same
 
 
-def test_misaligned_member_arrays_are_refused() -> None:
-    with pytest.raises(ValueError):
-        lb.parse_operator_merge({"merge_group_id": "g", "member_ids": [1, 2],
-                                 "member_sides": [1]})

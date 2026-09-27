@@ -32,8 +32,8 @@ the explicit ones. Precedence inside the tier: explicit > browse_merge > implied
 operator separated by hand after merging its properties is the separation.
 
 `operator_merges.jsonl` (the same lane) carries the Browse merges at GROUP grain — who was
-merged with whom and from which side — which is what `harness yardstick` measures the engine
-against; `load_operator_merges` reads it.
+merged with whom and from which side; `harness evaluate` reads every member pair of it as a
+ruling (`evaluate.read_rulings`).
 
 The judge lane that drew weighted samples is gone (SW1, O7), and with it the Horvitz-Thompson
 sample files: every label weighs its own credibility and nothing more.
@@ -483,9 +483,6 @@ STANDING_BROWSE_MERGE: str = SOURCE_BROWSE_MERGE
 STANDING_EXPLICIT: str = SOURCE_EXPLICIT
 STANDING_MUST_NOT_LINK: str = "must_not_link"
 STANDING_UNRULED: str = "unruled"
-STANDINGS: tuple[str, ...] = (
-    STANDING_BROWSE_MERGE, STANDING_EXPLICIT, STANDING_MUST_NOT_LINK, STANDING_UNRULED,
-)
 OPERATOR_MERGES_FILE: str = "operator_merges.jsonl"
 # The group file's own shape version, stamped on every row: consumers read by field name, and a
 # change that is not append-only bumps this.
@@ -522,16 +519,6 @@ def merge_pairs(
 
 
 @dataclass(slots=True)
-class MergeMember:
-    listing_id: int
-    side: int | None = None
-    property_id: int | None = None
-    source: str | None = None
-    category_type: str | None = None
-    block: str | None = None
-
-
-@dataclass(slots=True)
 class MergePair:
     lo: int
     hi: int
@@ -557,103 +544,3 @@ class MergePair:
         return True
 
 
-@dataclass(slots=True)
-class OperatorMerge:
-    """One Browse merge group: its members with their origin sides, and the pairs it asserts."""
-
-    merge_group_id: str
-    members: list[MergeMember] = field(default_factory=list)
-    pairs: list[MergePair] = field(default_factory=list)
-    merged_at: str | None = None
-    status: str = "live"
-    source: str = "browse"
-    survivor_property_id: int | None = None
-
-    @property
-    def ruled_pairs(self) -> list[MergePair]:
-        """The pairs the operator still says are one property — what a yardstick measures."""
-        return [pair for pair in self.pairs if pair.same]
-
-    @property
-    def member_ids(self) -> list[int]:
-        return [member.listing_id for member in self.members]
-
-
-def _opt_int(value: Any) -> int | None:
-    return None if value is None else int(value)
-
-
-def parse_operator_merge(payload: Mapping[str, Any]) -> OperatorMerge:
-    """One group, from the labels lane's `operator_merges.jsonl` row or from a row of
-    `autodedup.operator_merges` dumped as JSON (the parallel `member_*` arrays)."""
-    members: list[MergeMember] = []
-    raw_members = payload.get("members")
-    if isinstance(raw_members, Sequence) and not isinstance(raw_members, (str, bytes)):
-        for item in raw_members:
-            members.append(MergeMember(
-                listing_id=int(item["listing_id"]),
-                side=_opt_int(item.get("side")),
-                property_id=_opt_int(item.get("property_id_at_copy", item.get("property_id"))),
-                source=(str(item["source"]) if item.get("source") else None),
-                category_type=(
-                    str(item["category_type"]) if item.get("category_type") else None
-                ),
-                block=(str(item["block"]) if item.get("block") else None),
-            ))
-    else:
-        ids = list(payload.get("member_ids") or ())
-        sides = list(payload.get("member_sides") or [None] * len(ids))
-        props = list(payload.get("member_property_ids") or [None] * len(ids))
-        if len(sides) != len(ids) or len(props) != len(ids):
-            raise ValueError(
-                f"group {payload.get('merge_group_id')}: member arrays do not align")
-        members = [
-            MergeMember(listing_id=int(listing), side=_opt_int(side), property_id=_opt_int(prop))
-            for listing, side, prop in zip(ids, sides, props)
-        ]
-    raw_pairs = payload.get("pairs")
-    pairs: list[MergePair] = []
-    if raw_pairs is not None:
-        for item in raw_pairs:
-            if isinstance(item, Mapping):
-                lo, hi = pair_key(item["listing_lo"], item["listing_hi"])
-                pairs.append(MergePair(
-                    lo=lo, hi=hi,
-                    standing=str(item.get("standing") or STANDING_UNRULED),
-                    verdict=(str(item["verdict"]) if item.get("verdict") else None),
-                    must_not_link=bool(item.get("must_not_link")),
-                ))
-            else:
-                lo, hi = pair_key(item[0], item[1])
-                pairs.append(MergePair(lo=lo, hi=hi))
-    else:
-        known_places = any(member.property_id is not None for member in members)
-        for lo, hi in merge_pairs(
-            [member.listing_id for member in members],
-            [member.side for member in members],
-            [member.property_id for member in members] if known_places else None,
-        ):
-            pairs.append(MergePair(lo=lo, hi=hi))
-    return OperatorMerge(
-        merge_group_id=str(payload.get("merge_group_id") or ""),
-        members=members,
-        pairs=sorted(pairs, key=lambda pair: pair.key),
-        merged_at=(str(payload["merged_at"]) if payload.get("merged_at") else None),
-        status=str(payload.get("status") or "live"),
-        source=str(payload.get("source") or "browse"),
-        survivor_property_id=_opt_int(payload.get("survivor_property_id")),
-    )
-
-
-def load_operator_merges(path: str | Path) -> list[OperatorMerge]:
-    """`operator_merges.jsonl` (one group per line), or a JSON dump of the table: a list of
-    rows, or an object holding one under `groups` / `operator_merges`."""
-    text = Path(path).read_text(encoding="utf-8")
-    if Path(path).suffix == ".jsonl":
-        payloads = [json.loads(line) for line in text.splitlines() if line.strip()]
-    else:
-        data = json.loads(text)
-        if isinstance(data, Mapping):
-            data = data.get("groups", data.get("operator_merges", []))
-        payloads = list(data or ())
-    return [parse_operator_merge(payload) for payload in payloads]

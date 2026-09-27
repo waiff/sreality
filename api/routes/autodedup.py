@@ -30,7 +30,6 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -46,7 +45,8 @@ from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
 from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
 from autodedup.export import listing_digest, scrubbed_text
-from autodedup.model import LogisticModel, hand_initialised
+from autodedup.harness import model_of_version
+from autodedup.model import hand_initialised
 from toolkit.property_identity import record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
@@ -378,7 +378,6 @@ AGREEMENT_MAX_CLUSTER_SIZE = 12
 # a key that arrived in a URL whether or not the cap listed it — so the cap costs no filter.
 BLOCKS_LIMIT = 200
 
-_MODELS_DIR = Path(__file__).resolve().parents[2] / "autodedup" / "models"
 _MODEL_CACHE: dict[str, Any] = {}
 
 
@@ -500,25 +499,19 @@ def _feats(raw: Any) -> dict[str, tuple[float, bool]]:
 
 
 def _load_model(version: Any) -> Any:
-    """The model a pair was scored by, for the legible contribution breakdown (E21).
+    """The model a pair was scored by, for the legible contribution breakdown (E21), through the
+    one loader every lane names models with (`harness.model_of_version`).
 
-    A version with no file on disk and no `hand` prefix yields None, and the caller falls back
-    to the highest present features — a breakdown attributed to the WRONG model would be worse
-    than no breakdown at all."""
-    key = str(version or "hand_v1")
+    A version with no file on disk yields None, and the caller falls back to the highest present
+    features — a breakdown attributed to the WRONG model would be worse than no breakdown."""
+    key = str(version or hand_initialised().version)
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         return cached
-    model: Any = None
-    if "/" not in key and ".." not in key:
-        path = _MODELS_DIR / f"{key}.json"
-        try:
-            if path.is_file():
-                model = LogisticModel.from_json(path.read_text(encoding="utf-8"))
-            elif key.startswith("hand"):
-                model = hand_initialised()
-        except Exception:  # noqa: BLE001 — a malformed model file must not 500 the page
-            model = None
+    try:
+        model = model_of_version(key)
+    except (SystemExit, OSError, ValueError):  # a missing or malformed file must not 500
+        model = None
     # Only a HIT is cached: a model file that lands in the image after boot (or a version the
     # lane writes before its file ships) would otherwise stay missing until the API restarts.
     if model is not None:

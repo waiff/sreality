@@ -1,14 +1,11 @@
 """Facts a Czech advert PRINTS, parsed once for both the benchmark and the engine (E60/E61).
 
-`structural_truth` manufactured these parsers to LABEL pairs. W7 then showed the strongest of
-them — a shared agency order code — is evidence the engine itself never sees: there is no
-reference-code slot in `FEATURE_ORDER`, and `rare_token_overlap` is 0.0 on 62.8 % of the pairs
-one certifies. Moving the parsing here gives the rule floor and the benchmark ONE spelling of
-each fact instead of two that can drift apart.
-
-What stays in `structural_truth` is the RULES — which combination of facts settles a pair — so
-the benchmark's verdicts are still stated in one place. What lives here is only parsing: no
-rule, no threshold that decides a pair, nothing that reads an engine feature.
+The benchmark that first needed these parsers (`structural_truth`, deleted in SW1) used them to
+LABEL pairs; W7 then showed the strongest of them — a shared agency order code — is evidence the
+engine itself never sees: there is no reference-code slot in `FEATURE_ORDER`, and
+`rare_token_overlap` is 0.0 on 62.8 % of the pairs one certifies. So the parsing lives here, ONE
+spelling of each fact. What lives here is only parsing: no rule, no threshold that decides a
+pair, nothing that reads an engine feature.
 
 The measurement consequence is stated once, here, so nobody forgets it: the engine's K-R
 certificate and the benchmark's `pos_ref_*` labels now read the SAME string, so scoring K-R

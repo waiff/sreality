@@ -662,16 +662,15 @@ def test_the_group_file_carries_members_sides_places_and_pair_standings(lane, tm
     assert g1["decided_by"] == labels_lane.decider("operator")
 
 
-def test_the_group_file_round_trips_through_the_label_store(lane, tmp_path: Path):
-    from autodedup.labels import load_operator_merges
+def test_the_lane_s_export_is_the_rulings_file_harness_evaluate_reads(lane, tmp_path: Path):
+    """The labels lane writes the directory `harness evaluate` takes as its rulings: every
+    member pair of a Browse merge is a `same` statement there."""
+    from autodedup.evaluate import read_rulings
 
     _with_merges(lane)
     lane(tmp_path)
-    merges = {m.merge_group_id: m for m in
-              load_operator_merges(tmp_path / labels_lane.OPERATOR_MERGES_FILE)}
-    assert [p.key for p in merges["g-1"].ruled_pairs] == [(71, 72)]
-    assert [p.key for p in merges["g-2"].ruled_pairs] == [(81, 82)]
-    assert merges["g-3"].ruled_pairs == [] and merges["g-3"].status == "undone"
+    rulings = read_rulings(tmp_path)
+    assert rulings[(71, 72)] == "same" and rulings[(81, 82)] == "same"
 
 
 def test_the_summary_ranks_the_blocks_an_export_would_need(lane, tmp_path: Path):
