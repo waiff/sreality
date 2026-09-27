@@ -18,7 +18,6 @@ from autodedup.structural_truth import (
     RULES,
     StructuralLabel,
     address_block_key,
-    areas_disjoint,
     build_index,
     label_pair,
     label_pairs,
@@ -124,13 +123,6 @@ def test_unit_numbers(text: str, expected: set[str]) -> None:
 
 def test_stated_areas_reads_the_text_not_the_column() -> None:
     assert stated_areas("byt 3+1 o velikosti 72m2 se zahrádkou 20,2 m²") == {72.0, 20.2}
-
-
-def test_areas_disjoint_tolerates_one_flat_measured_twice() -> None:
-    assert not areas_disjoint({47.6}, {46.6})
-    assert areas_disjoint({39.3}, {43.2})
-    assert not areas_disjoint({50.7, 20.2}, {49.8, 20.2})
-    assert not areas_disjoint(set(), {50.0})
 
 
 def test_address_block_key_falls_back_through_the_grains() -> None:

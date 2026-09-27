@@ -7,6 +7,7 @@ import pytest
 from autodedup.dataset import Listing, Location
 from autodedup.indistinguishable import (
     FACT_NAMES,
+    areas_disjoint,
     distinguishing_facts,
     indistinguishable,
 )
@@ -33,6 +34,13 @@ def names(a: Listing, b: Listing, feats: object = None) -> list[str]:
 def test_identical_adverts_are_indistinguishable() -> None:
     assert indistinguishable(listing(1), listing(2))
     assert names(listing(1), listing(2)) == []
+
+
+def test_areas_disjoint_tolerates_one_flat_measured_twice() -> None:
+    assert not areas_disjoint({47.6}, {46.6})
+    assert areas_disjoint({39.3}, {43.2})
+    assert not areas_disjoint({50.7, 20.2}, {49.8, 20.2})
+    assert not areas_disjoint(set(), {50.0})
 
 
 def test_predicate_is_symmetric() -> None:

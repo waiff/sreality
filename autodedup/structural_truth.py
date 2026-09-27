@@ -38,6 +38,7 @@ from typing import Iterable, Mapping, Sequence
 
 from autodedup.dataset import Listing, live_end_stamp
 from autodedup.export import scrub_description
+from autodedup.indistinguishable import areas_disjoint
 from autodedup.text_facts import (
     MAX_CODE_POPULATION,
     MIN_CODE_LEN,
@@ -82,16 +83,6 @@ RULES: tuple[str, ...] = POSITIVE_RULES + NEGATIVE_RULES
 # Two adverts that ran side by side this long are not one advert replaced by its re-post.
 MIN_OVERLAP_DAYS: float = 21.0
 UNIT_AREA_MAX_REL_DIFF: float = 0.02
-# Two areas a Czech advert PRINTS are the same area when they are this close: 47,6 vs 46,6 m²
-# is one flat measured twice (adjudicated, pair 16438/92824 — identical text, identical price),
-# 50,7 vs 43,3 is two flats. Below this the rule abstains rather than guess.
-#
-# W8 raises it from 3 % to the engine's own `area_reject_pct`: a printed area is a per-portal
-# reading of one tape measure, and 3 % is finer than the measurement is. 464483 × 509660 prints
-# 80 and 75 m² for one 13th-floor 2+kk with 9 of 10 photos byte-identical (6.2 % apart), and
-# 355436 × 518123 cleared the old bar by 0.3 points. A structural NEGATIVE may not be stricter
-# than the guard that would have rejected the pair anyway.
-STATED_AREA_MIN_REL_DIFF: float = 0.08
 
 
 def reference_context(text: str | None, code: str, width: int = 44) -> str:
@@ -105,16 +96,6 @@ def reference_context(text: str | None, code: str, width: int = 44) -> str:
         window = text[start : match.end() + 4]
         return " ".join((scrub_description(window) or "").split())
     return ""
-
-
-def areas_disjoint(a: Iterable[float], b: Iterable[float]) -> bool:
-    """No area either text prints is within `STATED_AREA_MIN_REL_DIFF` of one the other prints."""
-    left, right = list(a), list(b)
-    if not left or not right:
-        return False
-    return not any(
-        abs(x - y) <= STATED_AREA_MIN_REL_DIFF * max(x, y) for x in left for y in right
-    )
 
 
 def _parse(stamp: str | None) -> datetime | None:

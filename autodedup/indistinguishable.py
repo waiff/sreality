@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from autodedup.body_align import (
     aligned_difference,
@@ -90,7 +90,6 @@ from autodedup.floor_convention import (
 )
 from autodedup.guards import LAND_CATEGORY, area_rel_diff, area_relation
 from autodedup.settings import Settings
-from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
     block_plot_area,
@@ -188,6 +187,22 @@ PRICE_SAME_SOURCE_TOL: float = 0.60
 ROOM_CLIP_FLOOR: float = 0.90
 # The floor plan, read only together with a weak room match: the bare conflict is chance.
 FLOORPLAN_ROOM_CLIP_FLOOR: float = 0.90
+
+# Two areas the adverts PRINT are one area when they are this close: 47,6 vs 46,6 m² is one
+# flat measured twice (pair 16438/92824); 50,7 vs 43,3 is two flats. The engine's own
+# `area_reject_pct`: a printed area is one tape measure read per portal, never finer than that.
+STATED_AREA_MIN_REL_DIFF: float = 0.08
+
+
+def areas_disjoint(a: Iterable[float], b: Iterable[float]) -> bool:
+    """No area either text prints is within `STATED_AREA_MIN_REL_DIFF` of one the other prints."""
+    left, right = list(a), list(b)
+    if not left or not right:
+        return False
+    return not any(
+        abs(x - y) <= STATED_AREA_MIN_REL_DIFF * max(x, y) for x in left for y in right
+    )
+
 
 FLAT_CATEGORY: str = "byt"
 
