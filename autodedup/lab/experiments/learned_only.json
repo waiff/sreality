@@ -1,0 +1,35 @@
+{
+ "name": "learned_only",
+ "note": "the 64-reader ladder removed: hard walls, the pair-grain facts, ONE learned cut, the stated-fact gate, the operator policy; no proofs, no context rule, no demonstration",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9788
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ },
+ "sweep": {
+  "ladder.2.t_hi": [
+   0.9,
+   0.95,
+   0.9788,
+   0.99
+  ]
+ }
+}

@@ -1,0 +1,36 @@
+{
+ "name": "gbm_reference_ladder",
+ "note": "plug demo: the reference ladder with the learned score swapped for a gradient-boosted model trained elsewhere (an npz of per-pair probabilities; g3/scripts/fit_gbm.py)",
+ "model": {
+  "npz": "$AUTODEDUP_LAB_MODELS/gbm_{cohort}.npz"
+ },
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

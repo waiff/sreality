@@ -113,3 +113,19 @@ def test_thresholds_are_config_values(tmp_path: Path, t_lo: float, expected: str
     ladder = [{"rung": r} for r in board.REFERENCE_LADDER]
     ladder[3] = {"rung": "score", "t_lo": t_lo}
     assert _zones(board.run(c, {"ladder": ladder, "group": {"step": "components"}}))[5] == expected
+
+
+def test_a_learner_from_anywhere_is_one_config_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+                                                    ) -> None:
+    c = _cohort(tmp_path)
+    lo = np.array([k[0] for k in c.keys])
+    hi = np.array([k[1] for k in c.keys])
+    np.savez(tmp_path / "m_toy.npz", lo=lo, hi=hi, p=np.array([0.99, 0.99, 0.0, 0.0, 0.0, 0.99, 0.0]))
+    monkeypatch.setenv("LAB_MODELS", str(tmp_path))
+    arm = {"model": {"npz": "$LAB_MODELS/m_{cohort}.npz"},
+           "ladder": [{"rung": "veto"}, {"rung": "auto_reject"},
+                      {"rung": "score", "t_hi_by_stratum": {}, "t_hi": 0.9}, {"rung": "gate"}],
+           "group": {"step": "components"}}
+    out = board.run(c, arm)
+    assert _zones(out) == ["veto", "reject", "reject", "reject", "reject", "merge", "reject"]
+    assert out.groups.clusters == {11: (11, 12)}
