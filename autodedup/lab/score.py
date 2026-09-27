@@ -1,0 +1,99 @@
+"""The learned score as a column: the cache's exact scores, a logistic model file scored in one
+numpy pass, or an external per-pair score file (any learner, any machine), plus the per-family
+log-odds split that names a score decision's carrier (LADDER_SPEC section 4, E12)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from autodedup.features import FAMILY_OF
+from autodedup.lab.cache import FIDX, REPO, Cohort
+from autodedup.model import CALIBRATION_TIE_BREAK, LogisticModel
+
+FAMILIES: tuple[str, ...] = ("ATTR", "PRICE", "TXT", "BRK", "LOC", "IMG", "TIME")
+
+
+def _z(model: LogisticModel, c: Cohort) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    for name in model.feature_order:
+        j = FIDX[name]
+        raw = np.where(c.P[:, j], c.V[:, j], 0.0)
+        scale = model.scales.get(name, 1.0) or 1.0
+        out[name] = (raw - model.means.get(name, 0.0)) / scale
+    return out
+
+
+def terms(model: LogisticModel, c: Cohort) -> dict[str, np.ndarray]:
+    """Every log-odds term as a column: `v:` value, `p:` presence, `i:` interaction."""
+    z = _z(model, c)
+    out: dict[str, np.ndarray] = {}
+    for name in model.feature_order:
+        out[f"v:{name}"] = model.weights.get(name, 0.0) * z[name]
+        out[f"p:{name}"] = model.presence_weights.get(name, 0.0) * c.P[:, FIDX[name]]
+    for left, right, coef in model.interactions:
+        out[f"i:{left}*{right}"] = coef * z.get(left, 0.0) * z.get(right, 0.0)
+    return out
+
+
+def calibrate(model: LogisticModel, p: np.ndarray) -> np.ndarray:
+    knots = model.calibration
+    if not knots:
+        return p
+    xs = np.array([k[0] for k in knots])
+    ys = np.array([k[1] for k in knots])
+    return np.interp(p, xs, ys) * (1.0 - CALIBRATION_TIE_BREAK) + CALIBRATION_TIE_BREAK * p
+
+
+def logistic_scores(model: LogisticModel, c: Cohort) -> np.ndarray:
+    total = np.full(c.n, model.intercept)
+    for column in terms(model, c).values():
+        total = total + column
+    return calibrate(model, 1.0 / (1.0 + np.exp(-total)))
+
+
+def external_scores(path: str | Path, c: Cohort) -> np.ndarray:
+    """An `.npz` with `lo`, `hi`, `p`: any learner's calibrated probability per candidate pair.
+    A pair the file does not carry scores 0.0 (it can only be rejected)."""
+    data = np.load(path)
+    lookup = {(int(a), int(b)): float(p) for a, b, p in zip(data["lo"], data["hi"], data["p"])}
+    return np.array([lookup.get(key, 0.0) for key in c.keys], dtype=np.float64)
+
+
+def load_model(ref: str | Path) -> LogisticModel:
+    path = Path(ref)
+    if not path.is_absolute():
+        path = REPO / path
+    return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
+
+
+def scores(spec: Any, c: Cohort) -> tuple[np.ndarray, LogisticModel | None]:
+    """The score column an arm decides on: `ref` (the cache's exact `predict_proba`), a model
+    file path, `{"npz": path}`, or `{"const": p}` (no learned score at all)."""
+    if spec in (None, "ref"):
+        return c.sig["score_ref"], c.model
+    if isinstance(spec, dict) and "npz" in spec:
+        return external_scores(spec["npz"], c), None
+    if isinstance(spec, dict) and "const" in spec:
+        return np.full(c.n, float(spec["const"])), None
+    model = load_model(spec)
+    return logistic_scores(model, c), model
+
+
+def family_split(model: LogisticModel, c: Cohort) -> dict[str, np.ndarray]:
+    """Log-odds per family over PRESENT features; an interaction is split half and half; an
+    absent feature's terms are MISSING, never a carrier (E12)."""
+    out = {family: np.zeros(c.n) for family in FAMILIES}
+    for key, column in terms(model, c).items():
+        kind, name = key.split(":", 1)
+        parts = name.split("*") if kind == "i" else [name]
+        for base in parts:
+            family = FAMILY_OF.get(base)
+            if family not in out:
+                continue
+            present = c.P[:, FIDX[base]]
+            out[family] += np.where(present, column / len(parts), 0.0)
+    return out

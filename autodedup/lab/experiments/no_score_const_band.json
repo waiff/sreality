@@ -1,0 +1,36 @@
+{
+ "name": "no_score_const_band",
+ "note": "the learned score removed: every candidate is band and only proofs + demonstration merge (C2 const_band)",
+ "model": {
+  "const": 0.5
+ },
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}
