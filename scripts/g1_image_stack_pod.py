@@ -94,7 +94,28 @@ NB_ANCHOR_FRAMES = 2          # anchor frames per room searched against the neig
 HEAD_ROOM = {25: "kitchen", 22: "bathroom", 28: "living_room", 46: "floor_plan",
              39: "plan_3d", 3: "exterior_facade", 17: "garage", 48: "technical",
              42: "site_plan", 43: "site_plan", 45: "property_document"}
+# Routing by the head's registry LABEL, not its id: C6 infers 10 of the 11 id-to-label
+# pairings from list order (only 39 = 3d plan is verified), so the ids above are a
+# fallback. Order matters only for labels that carry two keys (none today).
+HEAD_LABEL_ROOMS = (("kuchy", "kitchen"), ("koupel", "bathroom"), ("obývací", "living_room"),
+                    ("obyvaci", "living_room"), ("3d", "plan_3d"), ("půdorys", "floor_plan"),
+                    ("pudorys", "floor_plan"), ("fasád", "exterior_facade"),
+                    ("fasad", "exterior_facade"), ("garáž", "garage"), ("garaz", "garage"),
+                    ("technick", "technical"), ("katastr", "site_plan"), ("letecký", "site_plan"),
+                    ("letecky", "site_plan"), ("property", "property_document"))
 HARD_CLASSES = frozenset({"neg_rule", "neg_unit", "neg_mnl", "neg_fused", "neg_sib_hard"})
+
+
+def head_room_map(heads: Sequence[dict[str, Any]]) -> dict[int, str]:
+    """tag id -> engine room, read from each head's label; unknown labels keep the id map."""
+    out = dict(HEAD_ROOM)
+    for h in heads:
+        label = (h.get("label") or "").lower()
+        for key, room in HEAD_LABEL_ROOMS:
+            if key in label:
+                out[int(h["tag_id"])] = room
+                break
+    return out
 
 # SuperPoint's weights are Magic Leap's "academic or non-profit, noncommercial research use
 # only" licence: never in the default phases; `--phases ...,match-superpoint` is an
@@ -456,7 +477,8 @@ def score_heads(vec_ids: Any, vecs: Any, heads: list[dict[str, Any]]) -> dict[st
 
 def build_routes(manifest: dict[str, Any], *, dino: tuple[Any, Any] | None,
                  sscd: tuple[Any, Any] | None, heads: dict[str, Any] | None,
-                 topk_dino: int = TOPK_DINO, topk_sscd: int = TOPK_SSCD) -> dict[tuple[int, int], int]:
+                 topk_dino: int = TOPK_DINO, topk_sscd: int = TOPK_SSCD,
+                 room_map: dict[int, str] | None = None) -> dict[tuple[int, int], int]:
     """Frame pairs to verify geometrically, each with the bitmask of routes that chose it."""
     import numpy as np
 
@@ -526,7 +548,7 @@ def build_routes(manifest: dict[str, Any], *, dino: tuple[Any, Any] | None,
     # The catalogue neighbourhood: each anchor frame in a unit room, against the most
     # similar same-room frame of the anchor's stated-different co-live siblings (by SSCD
     # and by DINO), so LightGlue can say whether a sibling carries the same scene.
-    room = rooms_of(manifest, heads)
+    room = rooms_of(manifest, heads, room_map)
     for key, sibs in (manifest.get("neighbours") or {}).items():
         anchor_imgs = by_listing.get(int(key), [])
         nb_frames: dict[str, list[int]] = defaultdict(list)
@@ -554,14 +576,16 @@ def build_routes(manifest: dict[str, Any], *, dino: tuple[Any, Any] | None,
     return dict(routes)
 
 
-def rooms_of(manifest: dict[str, Any], heads: dict[str, Any] | None) -> dict[int, str]:
+def rooms_of(manifest: dict[str, Any], heads: dict[str, Any] | None,
+             room_map: dict[int, str] | None = None) -> dict[int, str]:
     """One room per image: the active head's winner at the consumer floor, else the CLIP
     top tag the export carries (the heads have no bedroom, toilet or hallway)."""
+    room_map = room_map or HEAD_ROOM
     out = {int(r["image_id"]): r["tag"] for r in manifest["images"] if r.get("tag")}
     if heads is not None:
         for k, w, s in zip(heads["key"], heads["winner"], heads["winner_score"]):
-            if float(s) >= HEAD_FLOOR and int(w) in HEAD_ROOM:
-                out[int(k)] = HEAD_ROOM[int(w)]
+            if float(s) >= HEAD_FLOOR and int(w) in room_map:
+                out[int(k)] = room_map[int(w)]
     return out
 
 
@@ -1074,16 +1098,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if heads and dino is not None and not args.smoke:
                 heads_pack = score_heads(dino[0], dino[1], heads)
                 np.savez(os.path.join(out_dir, "heads_v1.npz"), **heads_pack)
-                json.dump({"model": heads_model, "heads": [{"tag_id": h["tag_id"], "label": h["label"],
-                                                            "threshold": h["artifact"].get("threshold")}
-                                                           for h in heads]},
+                json.dump({"model": heads_model, "rooms": {str(k): v for k, v in head_room_map(heads).items()},
+                           "heads": [{"tag_id": h["tag_id"], "label": h["label"],
+                                      "threshold": h["artifact"].get("threshold")} for h in heads]},
                           open(os.path.join(out_dir, "heads_v1.json"), "w"), default=str, indent=1)
                 rep.phase("heads", "ok", f"{len(heads)} heads over {len(dino[0])} images")
             else:
                 rep.phase("heads", "skipped", "no active model, no DINOv3 vectors, or smoke")
 
-        routes = build_routes(manifest, dino=dino, sscd=sscd, heads=heads_pack)
-        pairs = lg_plan(routes, manifest, rooms_of(manifest, heads_pack))
+        room_map = head_room_map(heads)
+        report["head_rooms"] = {str(k): v for k, v in sorted(room_map.items())}
+        routes = build_routes(manifest, dino=dino, sscd=sscd, heads=heads_pack, room_map=room_map)
+        pairs = lg_plan(routes, manifest, rooms_of(manifest, heads_pack, room_map))
         every = sorted(routes)
         np.savez(os.path.join(out_dir, "frame_pairs.npz"),
                  a=np.array([p[0] for p in every], dtype=np.int64),

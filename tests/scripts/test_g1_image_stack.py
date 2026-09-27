@@ -271,3 +271,13 @@ def test_public_pairs_doc_cuts_case_notes_to_cohort_and_reason():
     assert pub["pairs"][0]["notes"] == ["c17:floor", "a5:showflat floors 2 vs 5",
                                         "a5195e0f-225b-4f01-b86f-46a5a22ed56e"]
     assert doc["pairs"][0]["notes"][0].startswith("c17:floor:Ruska")   # the input is untouched
+
+
+def test_head_rooms_come_from_the_registry_label_not_the_id():
+    heads = [{"tag_id": 22, "label": "interier - kuchyně"}, {"tag_id": 25, "label": "interier - koupelna"},
+             {"tag_id": 39, "label": "podklad - 3d plán"}, {"tag_id": 46, "label": "podklad - půdorys"},
+             {"tag_id": 77, "label": "something new"}]
+    rooms = pod.head_room_map(heads)
+    assert rooms[22] == "kitchen" and rooms[25] == "bathroom"      # swapped ids, right rooms
+    assert rooms[39] == "plan_3d" and rooms[46] == "floor_plan"
+    assert 77 not in rooms and rooms[28] == "living_room"            # unknown label: id map stays

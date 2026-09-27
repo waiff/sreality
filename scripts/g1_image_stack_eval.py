@@ -264,10 +264,15 @@ def load_head_router(results: str, floor: float = 0.5) -> dict[int, str] | None:
     if not os.path.exists(path):
         return None
     z = np.load(path)
+    rooms = dict(HEAD_ROOM)
+    meta = os.path.join(results, "heads_v1.json")
+    if os.path.exists(meta):
+        # The pod's label-read map (the id map is C6's inference; the labels are the registry's).
+        rooms.update({int(k): v for k, v in (json.load(open(meta)).get("rooms") or {}).items()})
     out = {}
     for k, w, s in zip(z["key"], z["winner"], z["winner_score"]):
         if float(s) >= floor:
-            out[int(k)] = HEAD_ROOM.get(int(w), f"tag{int(w)}")
+            out[int(k)] = rooms.get(int(w), f"tag{int(w)}")
     return out
 
 
