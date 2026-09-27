@@ -82,22 +82,30 @@ def _read(groups: Groups, labels: dict[tuple[int, int], str], ids: set[int]) -> 
                                        if same_t + diff_t else None)}
 
 
-def load_fixtures(path: Path = KEEP_APART) -> dict[str, list[tuple[int, int, str]]]:
-    """The keep-apart fixtures (hard bar M3 / A3) by cohort, as (lo, hi, case)."""
-    out: dict[str, list[tuple[int, int, str]]] = {}
-    for row in json.loads(path.read_text(encoding="utf-8"))["fixtures"]:
-        out.setdefault(row["cohort"], []).append((row["ids"][0], row["ids"][1], row["case"]))
-    return out
+def load_fixtures(path: Path = KEEP_APART) -> list[tuple[str, int, int, str]]:
+    """The keep-apart fixtures (hard bar M3 / A3) as (cohort, lo, hi, case)."""
+    return [(row["cohort"], row["ids"][0], row["ids"][1], row["case"])
+            for row in json.loads(path.read_text(encoding="utf-8"))["fixtures"]]
 
 
-def fixtures_apart(groups: Groups, fixtures: Iterable[tuple[int, int, str]],
+def fixtures_apart(groups: Groups, fixtures: Iterable[tuple[str, int, int, str]], cohort: str,
                    ids: set[int]) -> dict[str, Any]:
-    """M3: of the fixture pairs whose two adverts are in the cohort, how many the arm keeps apart."""
+    """M3 on every fixture whose two adverts are in the cohort, whatever cohort the file names it under.
+
+    A fixture listed under `cohort`, or with one advert in it, that is not whole here raises: the export
+    dropped or renumbered a fixture advert (G2's `fixtures.present` counts and fails the same way)."""
+    absent = [f"{case} ({a} x {b})" for name, a, b, case in fixtures
+              if (name == cohort or a in ids or b in ids) and not (a in ids and b in ids)]
+    if absent:
+        raise ValueError(f"keep-apart fixtures absent from cohort {cohort}: {absent}; re-read them against "
+                         "this export and edit autodedup/lab/keep_apart.json")
     member_of = groups.member_of
-    present = [(a, b, case) for a, b, case in fixtures if a in ids and b in ids]
-    together = [f"{case} ({a} x {b})" for a, b, case in present
-                if a in member_of and member_of[a] == member_of.get(b)]
-    return {"n": len(present), "apart": len(present) - len(together), "together": together}
+    present = [(a, b, case) for _, a, b, case in fixtures if a in ids and b in ids]
+    joined = [(a, b, case) for a, b, case in present if a in member_of and member_of[a] == member_of.get(b)]
+    cases = {case for *_, case in present}
+    return {"n": len(present), "apart": len(present) - len(joined), "cases": len(cases),
+            "cases_apart": len(cases - {case for *_, case in joined}),
+            "together": [f"{case} ({a} x {b})" for a, b, case in joined]}
 
 
 def _count(values: Iterable[str]) -> dict[str, int]:
@@ -132,7 +140,7 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[s
         "groups": len(g.clusters), "grouped": sum(len(v) for v in g.clusters.values()),
         "copairs": len(co),
         "rulings": _read(g, labels.rulings, ids),
-        "fixtures": fixtures_apart(g, load_fixtures().get(c.name, ()), ids),
+        "fixtures": fixtures_apart(g, load_fixtures(), c.name, ids),
         "judges": {name: _read(g, pairs, ids) for name, pairs in labels.judges.items()},
         "timings": {k: round(v, 2) for k, v in arm.timings.items()},
         "walls_forced": arm.walls_forced,
@@ -333,7 +341,8 @@ def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
                 f"+{vs.get('copairs_gained', 0)}/−{vs.get('copairs_lost', 0)}" if vs else None,
                 vs.get("adverts_moved") if vs else None,
                 f"{r['same_together']}/{r['same_n']}", f"{r['diff_together']}/{r['diff_n']}",
-                f"{fx['apart']}/{fx['n']}" if fx else None,
+                (f"{fx['apart']}/{fx['n']}" + (f" ({fx['cases_apart']}/{fx['cases']} cases)" if "cases" in fx else "")
+                 if fx else None),
                 r["precision_wilson_lower"],
                 f"{jv.get('same_together')}/{jv.get('same_n')}" if jv else None,
                 f"{jv.get('diff_together')}/{jv.get('diff_n')}" if jv else None,
