@@ -596,6 +596,14 @@ def _side(fp: Fingerprint, listing: Listing) -> list[tuple[str, str]]:
     ]
 
 
+def pair_probes(keyer: Keyer, fa: Fingerprint, fb: Fingerprint) -> list[str]:
+    """The blocking probes that pair two adverts: a key one probes and the other is indexed
+    under, neither exploded — empty when retrieval never pairs them."""
+    return sorted({probe for x, y in ((fa, fb), (fb, fa))
+                   for probe, token in set(keyer.probe_keys(x)) & set(keyer.index_keys(y))
+                   if not keyer.is_exploded(probe, token)})
+
+
 def cmd_pair(args: argparse.Namespace, out: Any) -> int:
     settings = named_settings(args.settings)
     model = named_model(args.model)
@@ -611,10 +619,7 @@ def cmd_pair(args: argparse.Namespace, out: Any) -> int:
                         row["certificate"], row["veto"], row["reason"])
     feats = {name: (value, present) for name, (value, present) in row["feats"].items()}
     fa, fb, la, lb = fps[lo], fps[hi], dataset.listings[lo], dataset.listings[hi]
-    keyer = Keyer(settings, calibration)
-    probes = sorted({probe for x, y in ((fa, fb), (fb, fa))
-                     for probe, token in set(keyer.probe_keys(x)) & set(keyer.index_keys(y))
-                     if not keyer.is_exploded(probe, token)})
+    probes = pair_probes(Keyer(settings, calibration), fa, fb)
 
     left = _side(fa, la)
     right = _side(fb, lb)

@@ -1,0 +1,2205 @@
+"""The judge lane end to end against fakes — no network, no database, no provider, no spend.
+
+Every seam the lane owns is exercised here: the `--max-usd` refusal (E31), the dry run that
+builds prompts and calls nothing, the budget that stops LAUNCHING mid-pass while keeping the
+verdicts already paid for, the "done, not merely drawn" exit code, the `autodedup.judgements`
+column contract of migration 528, sample determinism, and the three gold votes plus their
+fallback when the independent model family is unavailable.
+"""
+
+from __future__ import annotations
+
+import gzip
+import io
+import json
+import os
+import re
+from itertools import combinations
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from PIL import Image as PILImage
+
+from autodedup import harness, judge, judge_lane, score_lane
+from autodedup.dataset import load
+from autodedup.model import hand_initialised
+from autodedup.settings import Settings
+from autodedup.judge_sql import (
+    GOLD_PAIRS_SQL,
+    JUDGEMENT_CACHED_SQL,
+    JUDGEMENT_COST_SQL,
+    JUDGEMENT_POD_COST_SQL,
+    JUDGEMENT_UPSERT_SQL,
+)
+from tests.autodedup.test_engine_e2e import build_records
+
+MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / "528_autodedup_foundation.sql"
+
+
+# --- fakes -------------------------------------------------------------------------------
+
+
+def _jpeg() -> bytes:
+    buf = io.BytesIO()
+    PILImage.new("RGB", (24, 18), (120, 140, 160)).save(buf, format="JPEG", quality=70)
+    return buf.getvalue()
+
+
+class FakeR2:
+    def __init__(self) -> None:
+        self.reads: list[str] = []
+
+    def download_bytes(self, key: str) -> bytes:
+        self.reads.append(key)
+        return _jpeg()
+
+
+class FakeResponse:
+    def __init__(self, tool_calls: list[dict[str, Any]], cost_usd: float, call_id: int,
+                 duration_ms: int = 0) -> None:
+        self.tool_calls = tool_calls
+        self.cost_usd = cost_usd
+        self.llm_call_id = call_id
+        self.duration_ms = duration_ms
+        self.text = ""
+
+
+VERDICT_INPUT: dict[str, Any] = {
+    "verdict": "different_property",
+    "confidence": 0.82,
+    "deal_or_category_conflict": False,
+    "unit_discriminator": "floor 2 versus floor 5",
+    "key_evidence": ["same street", "same broker"],
+    "contradicting_evidence": ["different floor"],
+    "developer_project_suspected": True,
+}
+
+
+class FakeLLM:
+    """One canned forced-tool verdict per call, with a per-model failure switch."""
+
+    def __init__(self, calls: list[dict[str, Any]], cost: float = 0.001,
+                 fail_models: tuple[str, ...] = (), fail_all: bool = False,
+                 error: str = "provider says no",
+                 transient_fails: dict[str, int] | None = None,
+                 fail_after: dict[str, int] | None = None,
+                 duration_ms: int = 0) -> None:
+        self.calls = calls
+        self.cost = cost
+        self.fail_models = fail_models
+        self.fail_all = fail_all
+        self.error = error
+        self.transient_fails = dict(transient_fails or {})
+        # `{model: n}` — n calls answered, every call after that fails with `error` and stays
+        # failed. An account that runs out of quota mid-pass, which is not a state any
+        # always-fails switch can reproduce.
+        self.fail_after = dict(fail_after or {})
+        self.seen: dict[str, int] = {}
+        self.duration_ms = duration_ms
+
+    def call(self, **kwargs: Any) -> FakeResponse:
+        self.calls.append(kwargs)
+        model = kwargs["model"]
+        self.seen[model] = self.seen.get(model, 0) + 1
+        left = self.transient_fails.get(model, 0)
+        if left:
+            self.transient_fails[model] = left - 1
+            raise RuntimeError("openai call failed: HTTP 429 slow down")
+        budget = self.fail_after.get(model)
+        if budget is not None and self.seen[model] > budget:
+            raise RuntimeError(self.error)
+        if self.fail_all or model in self.fail_models:
+            raise RuntimeError(self.error)
+        return FakeResponse(
+            [{"id": "t1", "name": judge.TOOL_NAME, "input": dict(VERDICT_INPUT)}],
+            self.cost,
+            len(self.calls),
+            self.duration_ms,
+        )
+
+
+class FakeCursor:
+    def __init__(self, conn: "FakeConn") -> None:
+        self._conn = conn
+        self._rows: list[tuple[Any, ...]] = []
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._conn.executed.append((sql, params))
+        if sql is JUDGEMENT_UPSERT_SQL and self._conn.upserts_fail:
+            raise RuntimeError('relation "autodedup.judgements" does not exist')
+        if sql is JUDGEMENT_CACHED_SQL:
+            self._rows = list(self._conn.cached)
+        elif sql is GOLD_PAIRS_SQL:
+            self._rows = list(self._conn.gold)
+        elif sql is JUDGEMENT_COST_SQL:
+            self._rows = [self._conn.cost_row]
+        else:
+            self._rows = []
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+
+class FakeConn:
+    def __init__(self, executed: list[tuple[str, Any]], cached: list[tuple[int, int]],
+                 cost_row: tuple[Any, Any], upserts_fail: bool = False,
+                 gold: list[tuple[int, int]] | None = None) -> None:
+        self.executed = executed
+        self.cached = cached
+        self.gold = list(gold or [])
+        self.cost_row = cost_row
+        self.upserts_fail = upserts_fail
+        self.closed = False
+
+    def cursor(self) -> FakeCursor:
+        return FakeCursor(self)
+
+    def commit(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture()
+def cohort(tmp_path: Path) -> Path:
+    path = tmp_path / "cohort.jsonl.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for record in build_records():
+            handle.write(json.dumps(record) + "\n")
+    return path
+
+
+@pytest.fixture()
+def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
+    """Return a runner: `lane(tier=..., **args) -> (summary, calls, executed, r2)`."""
+    calls: list[dict[str, Any]] = []
+    executed: list[tuple[str, Any]] = []
+    state: dict[str, Any] = {
+        "client": FakeLLM(calls),
+        "cached": [],
+        "cost_row": (None, 0),
+        "r2": FakeR2(),
+        "downloads": [],
+        "upserts_fail": False,
+        "gold": [],
+        "pod": SimpleNamespace(
+            base_url="https://pod-1-8000.proxy.runpod.net",
+            pod_id="pod-1",
+            gpu="NVIDIA L4",
+            usd_per_hr=0.44,
+            started_at=0.0,   # restamped at launch, exactly as PodHandle is
+            model_id=judge_lane.MODEL_OSS,
+            dry_run=False,
+        ),
+        "pod_starts": [],
+        "pod_args": [],
+        "pod_stops": [],
+        "receipt_dirs": [],
+        "oss_base_urls": [],
+    }
+
+    def fake_download(export_run: str, dest: Path) -> Path:
+        state["downloads"].append((export_run, Path(dest)))
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        target = Path(dest) / score_lane.COHORT_FILE
+        target.write_bytes(cohort.read_bytes())
+        return target
+
+    state["sleeps"] = []
+    state["paces"] = []
+    # One fake clock behind every wait the lane takes, so a pass that backs off and paces
+    # itself costs the suite nothing and the two kinds of sleep stay separately readable.
+    state["clock"] = 1000.0
+
+    def fake_retry_sleep(seconds: float) -> None:
+        state["sleeps"].append(seconds)
+        state["clock"] += seconds
+
+    def fake_pace_sleep(seconds: float) -> None:
+        state["paces"].append(seconds)
+        state["clock"] += seconds
+
+    monkeypatch.setattr(judge_lane, "RETRY_SLEEP", fake_retry_sleep)
+    monkeypatch.setattr(judge_lane, "PACE_SLEEP", fake_pace_sleep)
+    monkeypatch.setattr(judge_lane, "MONOTONIC", lambda: state["clock"])
+    # The ladder is jittered in production; 0.5 is the middle of the draw, which is the rung
+    # itself — the jitter's own bounds are asserted in `test_the_ladder_is_jittered`.
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.5)
+    monkeypatch.setattr(judge_lane, "download_cohort", fake_download)
+    monkeypatch.setattr(judge_lane, "llm_client", lambda conn: state["client"])
+    monkeypatch.setattr(judge_lane, "image_store", lambda: state["r2"])
+
+    def fake_pod_start(parsed: Any, out_dir: Path | None = None) -> Any:
+        state["pod_starts"].append((parsed.oss_model, parsed.oss_gpu))
+        state["pod_args"].append(parsed)
+        state["receipt_dirs"].append(out_dir)
+        pod = state["pod"]
+        pod.started_at = judge_lane.CLOCK()   # as `launch_vllm_pod` stamps a real handle
+        return pod
+
+    def fake_oss_client(conn: Any) -> Any:
+        # Recorded AT CONSTRUCTION: the provider reads its endpoint once, so a base URL set
+        # after this point would leave every worker talking to nothing.
+        state["oss_base_urls"].append(os.environ.get(judge_lane.OSS_BASE_URL_ENV))
+        return state["client"]
+
+    monkeypatch.setenv(judge_lane.OSS_BASE_URL_ENV, "")
+    monkeypatch.setattr(judge_lane, "pod_start", fake_pod_start)
+    monkeypatch.setattr(
+        judge_lane, "pod_stop",
+        lambda pod, out_dir=None: state["pod_stops"].append(pod),
+    )
+    monkeypatch.setattr(judge_lane, "oss_llm_client", fake_oss_client)
+
+    def factory() -> FakeConn:
+        return FakeConn(executed, state["cached"], state["cost_row"],
+                        bool(state.get("upserts_fail")), state["gold"])
+
+    def run(out: Path, **args: Any) -> dict[str, Any]:
+        raw = {key: str(value) for key, value in args.items()}
+        return judge_lane.run_judge(factory, raw, out)
+
+    run.state = state  # type: ignore[attr-defined]
+    run.calls = calls  # type: ignore[attr-defined]
+    run.executed = executed  # type: ignore[attr-defined]
+    return run
+
+
+def _upserts(executed: list[tuple[str, Any]]) -> list[dict[str, Any]]:
+    return [params for sql, params in executed if sql is JUDGEMENT_UPSERT_SQL]
+
+
+def _judgements(out: Path) -> list[dict[str, Any]]:
+    path = out / judge_lane.JUDGEMENTS_FILE
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+# --- the budget contract -------------------------------------------------------------------
+
+
+def test_the_lane_refuses_to_start_without_max_usd(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="123", tier="text", n=2)
+    assert "max_usd" in str(exc.value)
+    assert not lane.calls
+
+
+@pytest.mark.parametrize("bad", [{"max_usd": "0"}, {"max_usd": "nope"}, {"tier": "deep"}])
+def test_bad_arguments_are_refused_before_any_work(lane, tmp_path: Path, bad: dict) -> None:
+    args = {"export_run": "123", "tier": "text", "n": 2, "max_usd": 5}
+    args.update(bad)
+    with pytest.raises(SystemExit):
+        lane(tmp_path / "out", **args)
+    assert not lane.calls
+
+
+def test_export_run_is_required_and_the_download_is_used(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="4242", tier="text", n=2, max_usd=5, workers=1)
+    assert lane.state["downloads"] and lane.state["downloads"][0][0] == "4242"
+    assert summary["export_run"] == "4242"
+
+
+def test_dry_run_builds_prompts_and_calls_nothing(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="vision", n=4, max_usd=5, dry_run=1)
+    assert lane.calls == []
+    assert summary["spent_usd"] == 0.0
+    estimate = summary["estimate"]
+    assert estimate["pairs"] == summary["drawn"] > 0
+    assert estimate["calls"] == estimate["pairs"]
+    assert estimate["images"] > 0
+    assert estimate["prompt_chars"] > 0
+    assert estimate["est_cost_usd"] == round(
+        estimate["calls"] * judge_lane.EST_COST_USD["vision"], 4
+    )
+    assert estimate["fits_budget"] is True
+    assert not _upserts(lane.executed)
+    assert lane.state["r2"].reads == []
+
+
+def test_budget_stop_marks_skipped_and_keeps_the_verdicts_already_paid_for(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    # One call fits under the cap; the second look-ahead does not.
+    summary = lane(out, export_run="1", tier="text", n=4, max_usd=0.002, workers=1)
+    assert summary["attempted"] == 1
+    assert summary["done"] == 1
+    assert summary["skipped_budget"] == summary["drawn"] - 1 > 0
+    assert summary["budget_stopped"] is True
+    assert summary["spent_usd"] == pytest.approx(0.001)
+    assert len(_upserts(lane.executed)) == 1
+    assert len(_judgements(out)) == 1
+
+
+def test_done_zero_with_attempts_exits_non_zero(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_all=True)
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert "0 done" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["attempted"] > 0 and written["done"] == 0
+    assert written["failed"] == written["attempted"]
+
+
+def test_the_lane_exits_non_zero_through_the_mode_registry(lane, tmp_path: Path) -> None:
+    from autodedup import lane as lane_module
+
+    assert lane_module.MODES["judge"] is judge_lane.run_judge
+    assert lane_module.ITERATION_META["judge"]["wave"] == "W3"
+
+
+# --- persistence ----------------------------------------------------------------------------
+
+
+def _migration_columns() -> list[str]:
+    body = MIGRATION.read_text(encoding="utf-8")
+    block = re.search(
+        r"create table if not exists autodedup\.judgements \((.*?)\n\);", body, re.S
+    )
+    assert block
+    columns: list[str] = []
+    for line in block.group(1).splitlines():
+        line = line.strip()
+        match = re.match(r"^([a-z_]+)\s+(bigint|text|real|boolean|numeric|timestamptz)", line)
+        if match and match.group(1) not in ("primary", "constraint"):
+            columns.append(match.group(1))
+    return columns
+
+
+def test_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    params = _upserts(lane.executed)
+    assert params
+    expected = set(_migration_columns()) - {"created_at"}
+    assert expected and set(params[0]) == expected
+    row = params[0]
+    assert row["listing_lo"] < row["listing_hi"]
+    assert row["tier"] == "text" and row["model"] == judge_lane.MODEL_TEXT
+    assert row["judge_version"] == judge.JUDGE_VERSION
+    assert row["verdict"] == "different_property"
+    assert row["key_evidence"] == VERDICT_INPUT["key_evidence"]
+    assert row["developer_project_suspected"] is True
+    assert row["llm_call_id"] and row["cost_usd"] == pytest.approx(0.001)
+
+
+def test_every_upsert_column_appears_in_the_sql() -> None:
+    for column in set(_migration_columns()) - {"created_at"}:
+        assert f"%({column})s" in JUDGEMENT_UPSERT_SQL
+
+
+def test_a_cached_pair_is_never_paid_for_twice(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    first = lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    pairs = [(row["lo"], row["hi"]) for row in _judgements(out)]
+    lane.state["cached"] = pairs
+    again = lane(tmp_path / "out2", export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert again["skipped_cached"] == first["done"]
+    assert again["attempted"] == first["attempted"] - first["done"]
+
+
+def test_cost_is_reconciled_from_llm_calls_when_the_ledger_answers(
+    lane, tmp_path: Path
+) -> None:
+    lane.state["cost_row"] = (0.0425, 3)
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert summary["spent_usd"] == pytest.approx(0.0425)
+    assert summary["spent_usd_source"] == "llm_calls"
+    assert any(sql is JUDGEMENT_COST_SQL for sql, _ in lane.executed)
+
+
+# --- the sample -------------------------------------------------------------------------------
+
+
+def test_the_sample_is_deterministic_by_seed(lane, tmp_path: Path) -> None:
+    one = lane(tmp_path / "a", export_run="1", tier="text", n=4, max_usd=5, dry_run=1, seed=7)
+    two = lane(tmp_path / "b", export_run="1", tier="text", n=4, max_usd=5, dry_run=1, seed=7)
+    pairs_a = [(row["lo"], row["hi"]) for row in json.loads(
+        (tmp_path / "a" / judge_lane.SAMPLE_FILE).read_text())["pairs"]]
+    pairs_b = [(row["lo"], row["hi"]) for row in json.loads(
+        (tmp_path / "b" / judge_lane.SAMPLE_FILE).read_text())["pairs"]]
+    assert pairs_a == pairs_b and one["drawn"] == two["drawn"] > 0
+
+
+def test_text_and_vision_tiers_judge_the_same_sample(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "t", export_run="1", tier="text", n=4, max_usd=5, dry_run=1, seed=11)
+    lane(tmp_path / "v", export_run="1", tier="vision", n=4, max_usd=5, dry_run=1, seed=11)
+    text = json.loads((tmp_path / "t" / judge_lane.SAMPLE_FILE).read_text())
+    vision = json.loads((tmp_path / "v" / judge_lane.SAMPLE_FILE).read_text())
+    assert [(r["lo"], r["hi"]) for r in text["pairs"]] == [
+        (r["lo"], r["hi"]) for r in vision["pairs"]
+    ]
+
+
+def test_the_strata_carry_the_catalogue_only_class(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5, dry_run=1)
+    assert judge_lane.CATALOG_ONLY_STRATUM in summary["sample_strata"]
+    assert any("|K-" in key for key in summary["sample_strata"])
+
+
+def test_a_stratum_filter_narrows_the_population(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5,
+                   dry_run=1, strata="merge")
+    assert summary["sample_strata"]
+    assert all(key.startswith("merge") for key in summary["sample_strata"])
+
+
+# --- tiers --------------------------------------------------------------------------------------
+
+
+def test_vision_sends_images_read_through_the_store(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="vision", n=2, max_usd=5, workers=1)
+    assert summary["calls"] == {"vision": summary["attempted"]}
+    assert lane.state["r2"].reads
+    first = lane.calls[0]
+    assert first["model"] == judge_lane.MODEL_VISION
+    assert first["called_for"] == "autodedup_judge_vision"
+    assert first["tool_choice"] == judge.TOOL_NAME
+    assert first["max_tokens"] == judge_lane.MAX_TOKENS
+    content = first["messages"][0]["content"]
+    assert sum(1 for block in content if block.get("type") == "image") > 0
+
+
+def test_smoke_is_ten_pairs_of_text_and_vision(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="smoke", n=400, max_usd=5, workers=1)
+    assert summary["drawn"] <= judge_lane.SMOKE_PAIRS
+    assert summary["calls"]["text"] == summary["drawn"]
+    assert summary["calls"]["vision"] == summary["drawn"]
+    tiers = {row["tier"] for row in _judgements(tmp_path / "out")}
+    assert tiers == {"text", "vision"}
+
+
+def test_gold_casts_three_votes_and_stores_one_aggregate(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    pairs = summary["drawn"]
+    assert summary["calls"]["gold"] == 3 * pairs
+    models = [call["model"] for call in lane.calls[:3]]
+    assert models == [judge_lane.MODEL_VISION, judge_lane.MODEL_VISION,
+                      judge_lane.MODEL_GOLD_THIRD]
+    assert {call["called_for"] for call in lane.calls} == {"autodedup_judge_gold"}
+    rows = _judgements(out)
+    aggregates = [row for row in rows if row.get("n_votes")]
+    assert len(aggregates) == pairs
+    assert aggregates[0]["n_votes"] == 3
+    assert aggregates[0]["verdict"]["unanimous"] is True
+    upserts = _upserts(lane.executed)
+    assert len(upserts) == pairs and {row["tier"] for row in upserts} == {"gold"}
+    assert upserts[0]["confidence"] == pytest.approx(1.0)
+
+
+def test_an_unavailable_third_family_falls_back_and_is_flagged_weaker(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,))
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert summary["failed"] == summary["drawn"]
+    assert summary["done"] == 3 * summary["drawn"]
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert aggregates and all(row["weaker"] is True for row in aggregates)
+    assert all(row["n_votes"] == 3 for row in aggregates)
+
+
+# --- the summary ------------------------------------------------------------------------------
+
+
+def test_summary_reports_every_required_field(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="9", tier="text", n=4, max_usd=5, workers=2)
+    for key in ("drawn", "attempted", "done", "failed", "skipped_budget", "spent_usd",
+                "tier", "judge_version", "seed", "max_usd", "budget_stopped", "engine",
+                "sample_strata", "elapsed_s", "mean_cost_usd", "verdicts"):
+        assert key in summary, key
+    assert summary["done"] == summary["attempted"] == summary["drawn"]
+    assert summary["verdicts"] == {"different_property": summary["done"]}
+    assert summary["engine"]["pairs_scored"] > 0
+    assert (out / judge_lane.RUN_FILE).is_file()
+    assert (out / judge_lane.SAMPLE_FILE).is_file()
+    assert json.loads((out / judge_lane.SUMMARY_FILE).read_text()) == summary
+
+
+def test_descriptions_are_rescrubbed_before_they_are_sent() -> None:
+    from autodedup.dataset import Listing
+
+    listing = Listing(id=1, block="b", description="Volejte +420 777 123 456 " + "x" * 4000)
+    out = judge_lane.scrubbed(listing)
+    assert "777 123 456" not in (out.description or "")
+    assert len(out.description or "") == judge_lane.DESCRIPTION_MAX
+
+
+# --- the rails: every way a paid pass can look green while doing nothing -------------------
+
+
+def test_a_budget_below_one_pair_is_refused_before_the_sample_is_drawn(
+    lane, tmp_path: Path
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=0.0005)
+    assert "single text pair" in str(exc.value)
+    assert not lane.calls
+
+
+def test_max_usd_above_the_hard_cap_is_refused(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=50)
+    assert "hard per-run cap" in str(exc.value)
+    assert not lane.calls
+
+
+def test_a_drawn_but_unjudged_pass_exits_non_zero() -> None:
+    counters = judge_lane.Counters(drawn=17, pairs_processed=17, skipped_budget=17)
+    with pytest.raises(SystemExit) as exc:
+        judge_lane._rails(counters, judge_lane.Budget(1.0),
+                          judge_lane.parse_args({"export_run": "1", "tier": "text",
+                                                 "max_usd": "1"}), 0.0)
+    assert "0 done" in str(exc.value)
+
+
+def test_a_pair_that_vanishes_from_the_accounting_exits_non_zero() -> None:
+    counters = judge_lane.Counters(drawn=17, pairs_processed=16, done=16)
+    with pytest.raises(SystemExit) as exc:
+        judge_lane._rails(counters, judge_lane.Budget(1.0),
+                          judge_lane.parse_args({"export_run": "1", "tier": "text",
+                                                 "max_usd": "1"}), 0.1)
+    assert "never judged and never accounted for" in str(exc.value)
+
+
+def test_a_pair_that_raises_before_the_call_is_counted_not_lost(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out"
+    real = judge_lane._inputs
+    seen: list[int] = []
+
+    def exploding(judge_mod, job, la, lb, settings=None, mask_codes=False):
+        seen.append(job.lo)
+        if len(seen) == 1:
+            raise ValueError("digest blew up")
+        return real(judge_mod, job, la, lb, settings, mask_codes)
+
+    monkeypatch.setattr(judge_lane, "_inputs", exploding)
+    summary = lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
+    assert summary["pairs_failed"] == 1
+    assert summary["pairs_processed"] == summary["drawn"] - 1
+    assert summary["done"] == summary["drawn"] - 1 > 0
+    assert any("digest blew up" in message for message in summary["errors"])
+
+
+def test_a_fatal_provider_error_exits_non_zero_and_is_not_called_a_budget_stop(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_all=True,
+                                   error="openai call failed: HTTP 401 invalid_api_key")
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
+    assert "failed fatally" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["fatal"]
+    assert written["skipped_fatal"] == written["drawn"] - 1
+    assert written["skipped_budget"] == 0
+    assert written["budget_stopped"] is False
+
+
+def test_a_store_that_takes_nothing_fails_the_lane(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane.state["upserts_fail"] = True
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="text", n=4, max_usd=5, workers=1)
+    assert "store write(s) failed" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["done"] > 0
+    assert written["persist_failed"] == written["persist_attempted"] == written["done"]
+    assert written["errors_total"] == written["done"]
+    assert len(_judgements(out)) == written["done"]
+
+
+# --- gold is ground truth: it is never written from a short plan -----------------------------
+
+
+def test_a_short_gold_plan_writes_no_row_and_is_reported(lane, tmp_path: Path) -> None:
+    """The PRIMARY votes are the ones with nowhere to fall back to: a rate limit they never
+    survive leaves the pair one vote short, and gold — the program's ground truth — is never
+    written from a short plan. (The THIRD family's failures take `GOLD_FALLBACK` instead.)"""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_VISION,),
+        error="openai call failed: HTTP 429 slow down",
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert summary["gold_incomplete"] == summary["drawn"]
+    assert not _upserts(lane.executed)
+    records = [row for row in _judgements(out) if row.get("incomplete")]
+    assert records and all(row["n_votes"] == 1 for row in records)
+
+
+def test_a_transient_failure_on_the_third_family_is_retried_not_downgraded(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, transient_fails={judge_lane.MODEL_GOLD_THIRD: 1}
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert lane.state["sleeps"] == [judge_lane.RETRY_BACKOFF_S[0]]
+    assert summary["failed"] == 0
+    assert summary["gold_incomplete"] == 0
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert aggregates and all(row["weaker"] is False for row in aggregates)
+    assert {row["model"] for row in _upserts(lane.executed)} == {
+        f"{judge_lane.MODEL_VISION}+{judge_lane.MODEL_VISION}+{judge_lane.MODEL_GOLD_THIRD}"
+    }
+
+
+QUOTA_429 = (
+    "qwen call failed: HTTP 429 {\"error\":{\"message\":\"You exceeded your current quota, "
+    "please check your plan and billing details.\",\"type\":\"insufficient_quota\"}}"
+)
+
+
+def test_provider_errors_are_classified_by_what_they_survive() -> None:
+    """The distinction the outage turned on: a 429 that says "quota" is the account being out
+    of allowance and will never clear; a 429 that says "slow down" clears in two seconds."""
+    cases = {
+        QUOTA_429: judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 429 quota exceeded for your plan": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 402 payment required": judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 403 {\"code\":\"Arrearage\"}": judge_lane.ERROR_QUOTA,
+        "openai call failed: no credits remaining": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 429 slow down": judge_lane.ERROR_RATE_LIMIT,
+        "HTTP 429 Too Many Requests": judge_lane.ERROR_RATE_LIMIT,
+        "openai call failed: HTTP 401 invalid_api_key": judge_lane.ERROR_FATAL,
+        "qwen call failed: HTTP 404 model_not_found": judge_lane.ERROR_FATAL,
+        "QWEN_API_KEY is not set; cannot call qwen": judge_lane.ERROR_FATAL,
+        "openai call failed: HTTP 503 upstream unavailable": judge_lane.ERROR_TRANSIENT,
+        "openai call failed: Read timed out": judge_lane.ERROR_TRANSIENT,
+        "no compare_listings tool call in the response": judge_lane.ERROR_UNKNOWN,
+    }
+    for message, expected in cases.items():
+        assert judge_lane.classify_provider_error(RuntimeError(message)) == expected, message
+    # Only the two that clear with time are worth another call; the two that do not put the
+    # arm down for the rest of the run.
+    assert judge_lane.RETRYABLE == {judge_lane.ERROR_RATE_LIMIT, judge_lane.ERROR_TRANSIENT}
+    assert judge_lane.ARM_KILLING == {judge_lane.ERROR_QUOTA, judge_lane.ERROR_FATAL}
+    # A body that merely CONTAINS the digits is not a status (`_is_transient`'s old test was a
+    # substring match, and a verdict quoting "429 m2" would have read as a rate limit).
+    assert judge_lane.http_status("the flat is 429 m2") is None
+
+
+def test_a_qwen_quota_exhaustion_disables_the_arm_instead_of_stopping_the_run(
+    lane, tmp_path: Path
+) -> None:
+    """Judge run 35146813906: DashScope answered "you exceeded your current quota" and the lane
+    stopped a gold pass 1,642 calls short — with `gpt-5-mini` answering every call and a
+    fallback vote sitting in the file for exactly this. The arm goes down, the pass finishes."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_after={judge_lane.MODEL_GOLD_THIRD: 3}, error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+
+    healthy = 3
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("quota:")
+    assert "exceeded your current quota" in summary["qwen_arm_disabled_reason"]
+    assert summary["qwen_arm_disabled_at_pair"] == healthy
+    # Every drawn pair was judged, and every one of them with three votes.
+    assert summary["pairs_processed"] == summary["drawn"] > healthy
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["fatal"] is None and summary["budget_stopped"] is False
+    # One VOTE hit the quota; the arm was down before any of the rest launched.
+    assert summary["failed"] == 1
+    assert summary["weaker_votes"] == summary["drawn"] - healthy
+    qwen_calls = [call for call in lane.calls
+                  if call["model"] == judge_lane.MODEL_GOLD_THIRD]
+    # That one vote is several CALLS now: the wording arrived after this arm had already
+    # answered three times, which W6 showed is DashScope pacing rather than an empty account,
+    # so the ladder and every step-down are spent before the arm is written off — and it still
+    # is written off, on the unindulged classification, which is the guard staying intact.
+    ladder = len(judge_lane.RETRY_BACKOFF_S) + 1
+    assert len(qwen_calls) == healthy + ladder * (judge_lane.MAX_STEP_DOWNS + 1)
+    assert summary["pacing"]["qwen"]["step_downs"], summary["pacing"]
+    assert summary["pacing"]["qwen"]["backoff_s"] > 0
+    # Spend is the calls that were MADE: three votes a pair either way, plus the one that 429'd
+    # and bought nothing.
+    assert summary["spent_usd_in_process"] == pytest.approx(0.001 * summary["done"])
+    assert summary["spent_usd"] == pytest.approx(0.001 * summary["done"])
+
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert len(aggregates) == summary["drawn"]
+    assert all(row["n_votes"] == 3 for row in aggregates)
+    assert [row["weaker"] for row in aggregates[:healthy]] == [False] * healthy
+    assert all(row["weaker"] is True for row in aggregates[healthy:])
+    assert all("(weaker)" in row["model"] for row in _upserts(lane.executed)[healthy:])
+    assert summary["gold_incomplete"] == summary["gold_unstarted"] == 0
+
+
+def test_a_rate_limited_third_family_is_retried_to_the_ladder_then_falls_back(
+    lane, tmp_path: Path
+) -> None:
+    """A 429 with no quota in it is a burst: back off 2/4/8s, and only then take the weaker
+    vote — the arm stays UP, because the next pair may well get through."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,),
+        error="qwen call failed: HTTP 429 Too Many Requests",
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert lane.state["sleeps"][:3] == list(judge_lane.RETRY_BACKOFF_S)
+    # The first pair walks the ladder, narrows the arm, walks it again — twice — and only then
+    # falls back; by the second pair there is nothing left to narrow and it is the ladder alone.
+    ladder = len(judge_lane.RETRY_BACKOFF_S)
+    first_pair = ladder * (judge_lane.MAX_STEP_DOWNS + 1) + judge_lane.MAX_STEP_DOWNS
+    assert len(lane.state["sleeps"]) == first_pair + ladder * (summary["drawn"] - 1)
+    assert len(summary["pacing"]["qwen"]["step_downs"]) == judge_lane.MAX_STEP_DOWNS
+    assert summary["pacing_step_downs"] == judge_lane.MAX_STEP_DOWNS
+    assert summary["pacing_backoff_s"] == pytest.approx(
+        sum(lane.state["sleeps"]), abs=0.05
+    )
+    assert summary["qwen_arm_disabled"] is False
+    assert summary["qwen_arm_disabled_reason"] is None
+    assert summary["qwen_arm_disabled_at_pair"] is None
+    # Every pair paid the full ladder and still got its three votes, the third one weaker.
+    assert summary["failed"] == summary["drawn"]
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["weaker_votes"] == summary["drawn"]
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert aggregates and all(row["weaker"] is True for row in aggregates)
+
+
+def test_a_dead_key_on_the_third_family_puts_the_arm_down_not_the_run(
+    lane, tmp_path: Path
+) -> None:
+    """An auth/config failure is permanent, but only for the arm that has it: the primary model
+    is still answering and the tier still has a vote to take."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,),
+        error="qwen call failed: HTTP 401 invalid_api_key",
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("fatal:")
+    assert summary["qwen_arm_disabled_at_pair"] == 0
+    assert summary["fatal"] is None
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["failed"] == 1
+
+
+def test_an_auth_fatal_on_the_primary_arm_still_stops_a_gold_pass(
+    lane, tmp_path: Path
+) -> None:
+    """The other half of the rule: `gpt-5-mini` has no second family behind it, so a dead key
+    there ends the pass rather than failing every remaining pair at full price."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_VISION,),
+        error="openai call failed: HTTP 401 invalid_api_key",
+    )
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert "failed fatally" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["fatal"] and "401" in written["fatal"]
+    assert written["qwen_arm_disabled"] is False
+    assert written["done"] == 0
+
+
+def test_a_quota_exhaustion_on_the_primary_arm_stops_the_run(lane, tmp_path: Path) -> None:
+    """Same rule, the other classification: there is no fallback for the primary, so an
+    exhausted account is the end of the pass and not 2,000 more identical 429s."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_all=True, error=QUOTA_429)
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
+    assert "failed fatally" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["skipped_fatal"] == written["drawn"] - 1
+    assert len(lane.calls) == 1
+
+
+def test_the_weaker_fallback_is_stamped_into_the_stored_model(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,))
+    lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert all("(weaker)" in row["model"] for row in _upserts(lane.executed))
+
+
+# --- cost -------------------------------------------------------------------------------------
+
+
+def test_the_gold_per_call_estimates_sum_to_the_spec_per_pair_price() -> None:
+    plan = judge_lane.vote_plan("gold")
+    assert len(plan) == judge_lane.GOLD_VOTES
+    assert sum(vote.est_usd for vote in plan) == pytest.approx(
+        judge_lane.GOLD_PER_PAIR_USD, rel=0.1
+    )
+    assert judge_lane.min_budget_usd("text") == pytest.approx(
+        judge_lane.EST_COST_USD["text"]
+    )
+
+
+def test_a_gold_dry_run_prices_the_pair_not_three_pairs(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="gold", n=2, max_usd=5, dry_run=1)
+    estimate = summary["estimate"]
+    assert estimate["calls"] == 3 * estimate["pairs"]
+    assert estimate["est_cost_per_pair_usd"] == pytest.approx(
+        judge_lane.GOLD_PER_PAIR_USD, rel=0.1
+    )
+
+
+def test_a_ledger_read_of_zero_never_reports_a_paid_pass_as_free(
+    lane, tmp_path: Path
+) -> None:
+    lane.state["cost_row"] = (0.0, 0)
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert summary["spent_usd_in_process"] > 0
+    assert summary["spent_usd"] == pytest.approx(summary["spent_usd_in_process"])
+    assert summary["spent_usd_source"].startswith("in_process (llm_calls summed 0")
+
+
+def test_every_tier_model_is_priced_by_its_provider() -> None:
+    from api.providers.openai import PRICES as OPENAI_PRICES
+    from api.providers.qwen import PRICES as QWEN_PRICES
+
+    assert judge_lane.MODEL_TEXT in OPENAI_PRICES
+    assert judge_lane.MODEL_VISION in OPENAI_PRICES
+    assert judge_lane.MODEL_GOLD_THIRD in QWEN_PRICES
+
+
+def test_every_called_for_value_is_accepted_by_migration_527() -> None:
+    body = (MIGRATION.parent / "527_autodedup_called_for.sql").read_text(encoding="utf-8")
+    allowed = set(re.findall(r"'(autodedup_judge_[a-z]+)'", body))
+    assert allowed and set(judge_lane.CALLED_FOR.values()) <= allowed
+
+
+def test_the_ledger_row_carries_the_measured_spend() -> None:
+    from autodedup import lane as lane_module
+
+    assert lane_module._spent_usd({"spent_usd": 1.25}) == pytest.approx(1.25)
+    assert lane_module._spent_usd({"counts": {}}) is None
+    assert lane_module._metrics({"spent_usd": 1.25, "done": 4, "drawn": 5})["done"] == 4
+
+
+# --- artifacts ---------------------------------------------------------------------------------
+
+
+def test_the_cache_read_zips_the_two_id_arrays_rather_than_crossing_them() -> None:
+    assert "unnest(%(los)s::bigint[], %(his)s::bigint[])" in JUDGEMENT_CACHED_SQL
+    assert "listing_lo = any" not in JUDGEMENT_CACHED_SQL
+
+
+def test_a_second_pass_into_one_out_dir_does_not_double_the_backstop(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    first = lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    again = lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert len(_judgements(out)) == again["done"] == first["done"]
+
+
+def test_the_sample_reports_how_far_the_floor_pushed_it_past_n(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=1, max_usd=5, dry_run=1)
+    assert summary["n_selected"] == summary["drawn"]
+    assert summary["sample_inflated_by_floor"] == summary["n_selected"] - 1
+
+
+def test_the_dry_run_estimate_counts_the_system_prompt_and_tool_schema(
+    lane, tmp_path: Path
+) -> None:
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=2, max_usd=5, dry_run=1)
+    estimate = summary["estimate"]
+    assert estimate["prompt_chars"] > estimate["calls"] * len(judge.SYSTEM_PROMPT)
+    assert estimate["min_usd"] == pytest.approx(judge_lane.EST_COST_USD["text"])
+
+
+# --- integration pass: what the first end-to-end run against the real cohort exposed ---------
+
+
+def test_a_reservation_holds_its_estimate_until_the_call_settles() -> None:
+    """Six workers cannot all pass the gate on the same stale "nothing spent yet" total."""
+    budget = judge_lane.Budget(0.010)
+    assert budget.reserve(0.004) is True
+    assert budget.reserve(0.004) is True
+    # Nothing has been BILLED yet, but $0.008 is in flight: the third call does not fit.
+    assert budget.reserve(0.004) is False
+    assert budget.stopped is True
+    budget.settle(0.004, 0.003)
+    budget.settle(0.004, 0.003)
+    assert budget.spent == pytest.approx(0.006)
+    assert budget.committed == pytest.approx(0.0)
+
+
+def test_a_released_reservation_returns_its_headroom() -> None:
+    budget = judge_lane.Budget(0.010)
+    assert budget.reserve(0.009) is True
+    budget.release(0.009)
+    assert budget.committed == pytest.approx(0.0)
+    assert budget.reserve(0.009) is True
+
+
+def test_the_pass_never_bills_more_than_max_usd(lane, tmp_path: Path) -> None:
+    """The first real-cohort dry pass reported $1.0068 against a $1.00 cap."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, cost=0.004)
+    summary = lane(out, export_run="1", tier="text", n=8, max_usd=0.012, workers=4)
+    assert summary["done"] > 0
+    assert summary["spent_usd"] <= summary["max_usd"]
+
+
+def test_a_billed_response_that_cannot_be_parsed_still_costs_money(
+    lane, tmp_path: Path
+) -> None:
+    """A response that arrived and failed to parse was paid for; dropping its cost hides
+    real spend from both the cap and the summary."""
+
+    class Unparseable(FakeLLM):
+        def call(self, **kwargs: Any) -> FakeResponse:
+            response = super().call(**kwargs)
+            response.tool_calls = []
+            return response
+
+    out = tmp_path / "out"
+    lane.state["client"] = Unparseable(lane.calls, cost=0.001)
+    with pytest.raises(SystemExit):
+        lane(out, export_run="1", tier="text", n=4, max_usd=5, workers=1)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["done"] == 0
+    assert written["failed"] == written["attempted"] > 0
+    assert written["billed_unparsed"] == written["failed"]
+    assert written["spent_usd_in_process"] == pytest.approx(0.001 * written["failed"])
+
+
+def test_a_gold_pair_that_never_got_a_vote_is_not_called_incomplete(
+    lane, tmp_path: Path
+) -> None:
+    """A budget stop leaves hundreds of untouched gold pairs; counting them as `incomplete`
+    reports money thrown away that was never spent."""
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="gold", n=8, max_usd=0.020, workers=1)
+    assert summary["budget_stopped"] is True
+    assert summary["gold_unstarted"] > 0
+    assert summary["gold_incomplete"] + summary["gold_unstarted"] <= summary["drawn"]
+    unstarted = [row for row in _judgements(out) if row.get("n_votes") == 0]
+    assert len(unstarted) == summary["gold_unstarted"]
+
+
+def test_the_summary_says_up_front_whether_the_budget_covers_the_draw(
+    lane, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="gold", n=8, max_usd=0.020, workers=1)
+    assert summary["est_cost_usd_for_draw"] == pytest.approx(
+        round(summary["drawn"] * judge_lane.min_budget_usd("gold"), 4)
+    )
+    assert summary["budget_covers_draw"] is False
+    rich = lane(tmp_path / "out2", export_run="1", tier="text", n=8, max_usd=5, workers=1)
+    assert rich["budget_covers_draw"] is True
+
+
+# --- the pair facts the feature vector cannot carry -----------------------------------------
+
+
+def _pair_job(feats: dict[str, Any]) -> Any:
+    return judge_lane.PairJob(
+        lo=1,
+        hi=2,
+        row={"lo": 1, "hi": 2, "block": "vysocany", "probes": ["K1"], "families": ["ATTR"],
+             "feats": {name: list(entry) for name, entry in feats.items()}},
+        stratum="mid",
+        votes=judge_lane.vote_plan("text"),
+    )
+
+
+def test_the_named_attribute_conflicts_are_exactly_what_the_feature_counted() -> None:
+    """The prompt may not argue with the engine: the names come from the SAME slots and the same
+    equality the `attr_contradictions` count runs on, so one contradiction is never two lines."""
+    from tests.autodedup.test_features import StubFingerprint, compute
+    from tests.autodedup.test_features import listing as ft_listing
+
+    shared = {"building_type": "cihlová", "condition": "velmi dobrý"}
+    la = ft_listing(1, attrs={**shared, "energy_rating": "B", "ownership": "osobní"})
+    lb = ft_listing(2, attrs={**shared, "energy_rating": "C", "ownership": "družstevní"})
+    conflicts = judge_lane.attribute_conflicts(la, lb)
+    feats = compute(StubFingerprint(1), StubFingerprint(2), la, lb)
+
+    assert [name for name, _, _ in conflicts] == ["energy_rating", "ownership"]
+    assert conflicts[0][1:] == ("B", "C")
+    assert float(len(conflicts)) == feats["attr_contradictions"][0]
+
+    _, evidence = judge_lane._inputs(judge, _pair_job(dict(feats)), la, lb)
+    assert (
+        "- contradicting attributes: energy_rating A=B vs B=C;"
+        " ownership A=osobní vs B=družstevní" in evidence
+    )
+
+
+def test_the_lane_measures_the_metres_only_when_both_pins_are_street_grain() -> None:
+    from autodedup import dataset as ds
+    from tests.autodedup.test_features import listing as ft_listing
+
+    fine = ds.Location(
+        lat=50.1075, lon=14.4880, granularity="address_point", granularity_rank=100,
+        uncertainty_radius_m=10.0,
+    )
+    near = ds.Location(
+        lat=50.1075, lon=14.4938, granularity="street", granularity_rank=60,
+        uncertainty_radius_m=50.0,
+    )
+    coarse = ds.Location(
+        lat=50.0900, lon=14.4200, granularity="obec", granularity_rank=40,
+    )
+    la = ft_listing(1, location=fine)
+    lb = ft_listing(2, location=near)
+    metres = judge_lane.pin_distance_m(la, lb)
+    assert metres is not None and 400.0 < metres < 425.0
+
+    _, evidence = judge_lane._inputs(judge, _pair_job({"dist_norm": (0.32, True)}), la, lb)
+    assert re.search(r"- distance: 41\d m \(pin radii 10 m \+ 50 m\)", evidence)
+
+    lc = ft_listing(3, location=coarse)
+    assert judge_lane.pin_distance_m(la, lc) is None
+    _, coarse_evidence = judge_lane._inputs(
+        judge, _pair_job({"dist_norm": (0.0, False)}), la, lc
+    )
+    assert "distance not comparable" in coarse_evidence
+    assert "(a municipality-grade pin on side B)" in coarse_evidence
+    assert "- distance:" not in coarse_evidence
+
+
+# --- the oss tier: a model rented by the hour, judged on the SAME pairs ----------------------
+
+
+def _pairs_of(out: Path) -> list[tuple[int, int]]:
+    sample = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))
+    return [(int(row["lo"]), int(row["hi"])) for row in sample["pairs"]]
+
+
+def _ticking(step: float = 1.0):
+    state = {"now": 0.0}
+
+    def clock() -> float:
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
+def test_oss_draws_exactly_the_pairs_the_vision_tier_would(lane, tmp_path: Path) -> None:
+    """Same seed, same draw — the comparison is worthless if the two arms answer different
+    questions, and a differently-seeded sample is a different question."""
+    vision = tmp_path / "vision"
+    oss = tmp_path / "oss"
+    lane(vision, export_run="1", tier="vision", n=6, max_usd=5, workers=1)
+    lane(oss, export_run="1", tier="oss", n=6, max_usd=5, workers=1)
+    assert _pairs_of(vision) == _pairs_of(oss)
+
+
+def test_oss_sends_the_vision_prompt_to_the_pod_model(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=4, max_usd=5, workers=1)
+    assert lane.state["pod_starts"] == [(judge_lane.MODEL_OSS, ())]
+    assert lane.calls
+    for call in lane.calls:
+        # The NAMESPACED id, which is what keeps `oss:Qwen/...` from routing to Alibaba's
+        # paid API on the vendor prefix, plus the VISION called_for and real images.
+        assert call["model"] == f"{judge_lane.OSS_PREFIX}{judge_lane.MODEL_OSS}"
+        assert call["provider"] == judge_lane.OSS_PROVIDER
+        assert call["called_for"] == judge_lane.CALLED_FOR["vision"]
+    assert lane.state["r2"].reads
+    assert summary["oss_model"] == judge_lane.MODEL_OSS
+    stored = {row["model"] for row in _upserts(lane.executed)}
+    assert stored == {f"{judge_lane.OSS_PREFIX}{judge_lane.MODEL_OSS}"}
+    assert {row["tier"] for row in _upserts(lane.executed)} == {"oss"}
+
+
+def test_the_prompt_is_the_vision_prompt_to_the_character(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "vision", export_run="1", tier="vision", n=3, max_usd=5, workers=1)
+    vision_messages = [call["messages"] for call in lane.calls]
+    lane.calls.clear()
+    lane(tmp_path / "oss", export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    assert [call["messages"] for call in lane.calls] == vision_messages
+
+
+def test_the_base_url_is_set_before_a_client_exists(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["oss_base_urls"] == [f"{lane.state['pod'].base_url}/v1"]
+
+
+@pytest.mark.parametrize("given, wanted", [
+    ("https://pod-1-8000.proxy.runpod.net", "https://pod-1-8000.proxy.runpod.net/v1"),
+    ("https://pod-1-8000.proxy.runpod.net/", "https://pod-1-8000.proxy.runpod.net/v1"),
+    ("https://pod-1-8000.proxy.runpod.net/v1", "https://pod-1-8000.proxy.runpod.net/v1"),
+])
+def test_the_pod_root_becomes_the_openai_api_root(given: str, wanted: str) -> None:
+    """The handle carries the HTTP root (`oss_pod.wait_ready` polls `/v1/models` off it); an
+    OpenAI-compatible client posts to `{base}/chat/completions`. Whoever adds the suffix, the
+    lane publishes the same URL."""
+    assert judge_lane.openai_base_url(given) == wanted
+
+
+def test_the_pod_bill_is_divided_over_what_it_produced(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(judge_lane, "CLOCK", _ticking(60.0))
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+
+    assert summary["spent_usd_source"] == "pod"
+    assert summary["pod_id"] == "pod-1" and summary["gpu"] == "NVIDIA L4"
+    assert summary["usd_per_hr"] == 0.44 and summary["pod_hours"] > 0
+    assert summary["pod_cost_usd"] == pytest.approx(summary["pod_hours"] * 0.44, abs=1e-5)
+    assert summary["spent_usd"] == pytest.approx(summary["pod_cost_usd"], abs=1e-6)
+    share = summary["cost_per_pair_usd"]
+    assert share == pytest.approx(summary["pod_cost_usd"] / summary["done"], abs=1e-6)
+    assert summary["pod_wall_s_per_pair"] and summary["latency_s_mean"] is not None
+    # Two different clocks, and the names have to keep them apart: `pod_wall_s_per_pair` is
+    # the rental over the pairs, `latency_s_mean` is one call's duration — the one that
+    # `oss_s_per_pair` is expressed in. A summary key spelled `s_per_pair` invites the operator
+    # to feed the wrong one back and cap the next pass `workers` times too low.
+    assert "s_per_pair" not in summary
+
+    # NULL while the pod runs (unknown, not free), settled once it is gone — in the store
+    # and in the artifact the comparison reads.
+    assert [row["cost_usd"] for row in _upserts(lane.executed)] == [None] * summary["done"]
+    settles = [params for sql, params in lane.executed if sql is JUDGEMENT_POD_COST_SQL]
+    assert len(settles) == 1
+    assert settles[0]["cost_usd"] == pytest.approx(share, abs=1e-6)
+    assert settles[0]["tier"] == "oss"
+    assert len(settles[0]["los"]) == summary["done"]
+    assert all(row["cost_usd"] == pytest.approx(share, abs=1e-6)
+               for row in _judgements(out))
+
+
+def test_the_preflight_estimate_counts_the_boot_it_has_already_paid_for(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bill starts at LAUNCH: by the time the estimate is computed, `pod_start` has waited
+    out a weights load that routinely runs longer than the judging window itself. A look-ahead
+    counting only the pairs publishes a fraction of the bill `pod_cost_usd` later prices."""
+    boot_s = 600.0
+    real_start = judge_lane.pod_start
+
+    def slow_boot(parsed: Any, out_dir: Path | None = None) -> Any:
+        pod = real_start(parsed, out_dir)
+        pod.started_at -= boot_s   # as if the launch stamp were ten minutes old
+        return pod
+
+    monkeypatch.setattr(judge_lane, "pod_start", slow_boot)
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=2, max_usd=20, workers=1,
+                   oss_s_per_pair=10)
+    pairs_only = judge_lane.oss_est_usd(0.44, summary["drawn"], 1, 10.0)
+    assert summary["pod_boot_s"] == pytest.approx(boot_s, abs=5.0)
+    assert summary["est_cost_usd_for_draw"] > pairs_only
+    assert summary["est_cost_usd_for_draw"] == pytest.approx(
+        pairs_only + 0.44 * boot_s / 3600.0, abs=1e-3
+    )
+
+
+def test_the_budget_margin_is_one_whole_call_not_a_workers_share(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six workers judging in parallel each occupy `s_per_pair` of WALL clock, so admitting one
+    more pair costs a whole call's duration — a margin of a sixth of it lets the pod run past
+    `max_usd`, and a cap the run can exceed is a number nobody trusts twice."""
+    seen: list[float] = []
+    real = judge_lane.PodBudget
+
+    def record(*args: Any, **kwargs: Any) -> Any:
+        seen.append(float(kwargs["margin_s"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(judge_lane, "PodBudget", record)
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=20, workers=6,
+         oss_s_per_pair=18)
+    assert seen == [18.0]
+
+
+def test_a_pod_that_never_boots_still_writes_the_summary(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one path that can burn 25 minutes of rental and produce no verdict. `_rails`' rule
+    holds here too: the artifact is the evidence, so it lands BEFORE the exception."""
+    def no_capacity(parsed: Any, out_dir: Path | None = None) -> Any:
+        raise RuntimeError("no capacity for any eligible gpu")
+
+    monkeypatch.setattr(judge_lane, "pod_start", no_capacity)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError):
+        lane(out, export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    summary = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert "no capacity" in summary["pod_boot_failed"]
+    assert summary["pod_boot_s"] >= 0 and summary["done"] == 0
+    assert summary["spent_usd_source"].startswith("pod (boot failed")
+
+
+def test_the_pod_is_terminated_once_on_a_clean_pass(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["pod_stops"] == [lane.state["pod"]]
+
+
+def test_the_pod_is_terminated_when_the_pass_dies(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the judge loop fell over")
+
+    monkeypatch.setattr(judge_lane, "_dispatch", explode)
+    with pytest.raises(RuntimeError):
+        lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["pod_stops"] == [lane.state["pod"]]
+
+
+def test_no_pairs_left_to_judge_rents_no_pod(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane(out, export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    lane.state["cached"] = [(row["lo"], row["hi"]) for row in _judgements(out)]
+    lane.state["pod_starts"].clear()
+    lane.state["pod_stops"].clear()
+    again = lane(tmp_path / "out2", export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    assert again["skipped_cached"] == again["drawn"]
+    assert lane.state["pod_starts"] == [] and lane.state["pod_stops"] == []
+
+
+def test_the_pod_budget_stops_on_the_clock_not_on_the_call_count() -> None:
+    # $1 a second, so the numbers read straight off the clock.
+    clock = iter([0.0, 0.5, 1.5])
+    budget = judge_lane.PodBudget(
+        2.0, usd_per_hr=3600.0, margin_s=1.0, started=0.0, clock=lambda: next(clock)
+    )
+    assert budget.reserve(0.0) is True          # 0 s spent + 1 s margin = $1.00, fits
+    assert budget.spent == pytest.approx(0.5, rel=1e-3)
+    assert budget.reserve(0.0) is False         # 1.5 s spent + 1 s margin = $2.50, does not
+    assert budget.stopped is True
+
+
+def test_a_budget_that_cannot_pay_for_a_pod_is_refused(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=2,
+             max_usd=judge_lane.OSS_MIN_USD / 2)
+    assert "oss" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_pairs_from_gold_restricts_the_draw_to_pairs_with_ground_truth(
+    lane, tmp_path: Path
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    assert len(every) > 2
+    lane.state["gold"] = every[:2]
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=8, max_usd=5, workers=1,
+                   pairs_from="gold")
+    assert summary["pairs_from"] == "gold"
+    assert summary["pairs_without_gold_dropped"] > 0
+    assert set(_pairs_of(out)) <= set(every[:2])
+
+
+def test_pairs_from_gold_refuses_when_no_pair_has_a_gold_row(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_from="gold")
+    assert "gold" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_pairs_from_only_accepts_gold(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_from="vision")
+
+
+def _write_pair_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                     pairs: list[list[int]]) -> str:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "targeted.json").write_text(json.dumps(pairs), encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    return "targeted"
+
+
+def test_pairs_file_narrows_the_draw_to_the_named_pairs(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    assert len(every) > 2
+    name = _write_pair_list(tmp_path, monkeypatch, [list(pair) for pair in every[:2]])
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=8, max_usd=5, workers=1,
+                   pairs_file=name)
+    assert summary["pairs_file"] == name
+    assert summary["pairs_file_requested"] == 2
+    assert summary["pairs_file_missing"] == []
+    assert set(_pairs_of(out)) == set(every[:2])
+
+
+def test_pairs_file_reports_a_pair_the_engine_never_stored(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    name = _write_pair_list(
+        tmp_path, monkeypatch, [list(every[0]), [999_000_001, 999_000_002]]
+    )
+
+    summary = lane(tmp_path / "out", export_run="1", tier="oss", n=8, max_usd=5,
+                   workers=1, pairs_file=name)
+    assert summary["pairs_file_requested"] == 2
+    assert summary["pairs_file_missing"] == [[999_000_001, 999_000_002]]
+    assert set(_pairs_of(tmp_path / "out")) == {every[0]}
+
+
+def test_pairs_file_refuses_when_the_pass_stored_none_of_them(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_list(tmp_path, monkeypatch, [[999_000_001, 999_000_002]])
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_file=name)
+    assert "pairs_file" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_load_pair_list_orders_every_pair_lo_first_and_drops_repeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_list(tmp_path, monkeypatch, [[9, 4], [4, 9], [1, 2]])
+    assert judge_lane.load_pair_list(name) == ((4, 9), (1, 2))
+
+
+@pytest.mark.parametrize("payload", ["{}", "[]", "[[1]]", "[[1, \"x\"]]", "not json"])
+def test_load_pair_list_refuses_a_malformed_file(
+    payload: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "bad.json").write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    with pytest.raises(SystemExit):
+        judge_lane.load_pair_list("bad")
+
+
+def test_every_committed_pair_list_is_a_well_formed_lo_first_list() -> None:
+    for path in sorted(judge_lane.PAIRS_DIR.glob("*.json")):
+        pairs = judge_lane.load_pair_list(path.stem)
+        assert pairs, path
+        assert all(lo < hi for lo, hi in pairs), path
+
+
+def test_every_committed_stratum_is_a_named_contested_set() -> None:
+    for path in sorted(judge_lane.PAIRS_DIR.glob("*.json")):
+        _, strata = judge_lane.load_pair_set(path.stem)
+        assert all(name.strip() == name and name for name in strata.values()), path
+
+
+# --- a stratum per listed pair, and the pairs the engine never stored ------------------------
+
+
+def _write_pair_objects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                        entries: list[Any]) -> str:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "stamped.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    return "stamped"
+
+
+def test_load_pair_set_reads_a_stratum_per_pair_and_orders_lo_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"hi": 4, "lo": 9, "stratum": "a:refused_union|price"},
+        [1, 2],
+        {"lo": 4, "hi": 9, "stratum": "a:refused_union|price"},
+        {"lo": 7, "hi": 3},
+    ])
+    pairs, strata = judge_lane.load_pair_set(name)
+    assert pairs == ((4, 9), (1, 2), (3, 7))
+    assert strata == {(4, 9): "a:refused_union|price"}
+    assert judge_lane.load_pair_list(name) == pairs
+
+
+@pytest.mark.parametrize("entries", [
+    [{"lo": 1, "hi": 2, "stratom": "a"}],
+    [{"lo": 1, "stratum": "a"}],
+    [{"lo": 1, "hi": 2, "stratum": "  "}],
+    [{"lo": 1, "hi": 2, "stratum": 3}],
+    [{"lo": 1, "hi": 2, "stratum": "a"}, {"lo": 2, "hi": 1, "stratum": "b"}],
+    [{"lo": 1, "hi": "x"}],
+])
+def test_load_pair_set_refuses_a_malformed_object_entry(
+    entries: list[Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_objects(tmp_path, monkeypatch, entries)
+    with pytest.raises(SystemExit):
+        judge_lane.load_pair_set(name)
+
+
+def test_a_stamped_pairs_file_files_every_pair_under_its_own_stratum(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    first, second = _pairs_of(whole)[:2]
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": first[0], "hi": first[1], "stratum": "a:refused_union|price"},
+        {"lo": second[0], "hi": second[1], "stratum": "e:merged_disagree|floor"},
+    ])
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=8, max_usd=5, workers=1,
+                   pairs_file=name)
+    assert summary["pairs_file_stamped_strata"] == 2
+    assert set(summary["sample_strata"]) == {"a:refused_union|price", "e:merged_disagree|floor"}
+    assert {(row["lo"], row["hi"]): row["stratum"] for row in _judgements(out)} == {
+        first: "a:refused_union|price", second: "e:merged_disagree|floor",
+    }
+    # The stamp travels in sample.json, so a reader takes it without recomputing a key.
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert {(row["lo"], row["hi"]): row["stratum"] for row in drawn}[first] == \
+        "a:refused_union|price"
+
+
+def test_a_strata_filter_reads_the_stamped_stratum(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    first, second = _pairs_of(whole)[:2]
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": first[0], "hi": first[1], "stratum": "a:refused_union|price"},
+        {"lo": second[0], "hi": second[1], "stratum": "c:unscored_block_gap"},
+    ])
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=8, max_usd=5,
+                   dry_run=1, pairs_file=name, strata="c:")
+    assert list(summary["sample_strata"]) == ["c:unscored_block_gap"]
+    assert _pairs_of(tmp_path / "out") == [second]
+
+
+def test_score_unstored_judges_a_listed_pair_the_engine_never_stored(
+    lane, cohort: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    stored = {(int(row["lo"]), int(row["hi"])) for row in harness.read_pairs(whole)}
+    unstored = next(pair for pair in combinations(sorted(load(cohort).listings), 2)
+                    if pair not in stored)
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": unstored[0], "hi": unstored[1], "stratum": "c:unscored_block_gap"},
+        [999_000_001, 999_000_002],
+    ])
+
+    # Without the flag the pair is missing, and a list with nothing stored refuses to start.
+    with pytest.raises(SystemExit):
+        lane(tmp_path / "refused", export_run="1", tier="text", n=4, max_usd=5, dry_run=1,
+             pairs_file=name)
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=4, max_usd=5, workers=1,
+                   pairs_file=name, score_unstored=1)
+    assert summary["score_unstored"] is True
+    assert summary["pairs_file_scored_unstored"] == [list(unstored)]
+    assert summary["pairs_file_missing"] == [[999_000_001, 999_000_002]]
+    assert [(row["lo"], row["hi"], row["stratum"]) for row in _judgements(out)] == [
+        (unstored[0], unstored[1], "c:unscored_block_gap")
+    ]
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert [row["stored"] for row in drawn] == [False]
+
+
+def test_the_committed_trial_contested_list_loads_every_pair_under_its_own_stratum() -> None:
+    """autodedup/pairs/w30_trial_contested.json is the trial's contested list (1,145 pairs, the
+    same set as w14/judge_trial/pairs_trial_contested.jsonl): every entry is stamped, so a pass
+    over it reports per contested set, never per zone grid."""
+    pairs, strata = judge_lane.load_pair_set("w30_trial_contested")
+    assert len(pairs) == 1145 and set(strata) == set(pairs)
+    assert {name.split(":")[0] for name in strata.values()} == {"a", "b", "c", "d", "e"}
+
+
+def test_a_contested_list_runs_offline_up_to_the_model_call(
+    cohort: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge end to end with no database, no network and no provider: a contested list in the
+    committed object form (stored and unstored pairs, each stamped) is decided by `harness run`
+    and `harness.decide_explicit`, drawn, and put into built prompts — and nothing is called."""
+    def refuse(*_: Any) -> Any:
+        raise AssertionError("an offline dry run touched a connection or a provider")
+
+    monkeypatch.setattr(judge_lane, "llm_client", refuse)
+    monkeypatch.setattr(judge_lane, "download_cohort", refuse)
+    dataset = load(cohort)
+    engine = tmp_path / "engine"
+    harness.run(dataset, Settings(), hand_initialised(), engine)
+    stored = sorted((int(row["lo"]), int(row["hi"])) for row in harness.read_pairs(engine))
+    unstored = [pair for pair in combinations(sorted(dataset.listings), 2)
+                if pair not in set(stored)][:3]
+    listed = stored[:5] + unstored
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": lo, "hi": hi, "stratum": f"b:band_not_merged|contested|{index}"}
+        for index, (lo, hi) in enumerate(listed)
+    ])
+    out = tmp_path / "out"
+    summary = judge_lane.run_judge(refuse, {
+        "cohort": str(cohort), "tier": "vision", "n": "1200", "max_usd": "8", "dry_run": "1",
+        "pairs_file": name, "score_unstored": "1"}, out)
+    assert summary["dry_run"] is True and summary["spent_usd"] == 0.0
+    assert summary["pairs_file_requested"] == len(listed) == summary["drawn"]
+    assert summary["pairs_file_missing"] == []
+    assert summary["pairs_file_scored_unstored"] == [list(pair) for pair in unstored]
+    assert summary["pairs_file_stamped_strata"] == len(listed)
+    assert summary["estimate"]["calls"] == len(listed) and summary["estimate"]["prompt_chars"] > 0
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert sorted((row["lo"], row["hi"]) for row in drawn) == sorted(listed)
+    assert all(row["stratum"].startswith("b:band_not_merged|contested|") for row in drawn)
+    assert not (out / judge_lane.JUDGEMENTS_FILE).exists()
+
+
+def test_score_unstored_without_a_pairs_file_is_refused(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5, dry_run=1,
+             score_unstored=1)
+    assert "pairs_file" in str(exc.value)
+
+
+def test_drawn_stratum_prefers_the_stamp_over_the_zone_grid() -> None:
+    row = {"zone": "merge", "certificate": "K-C", "block": "b1", "cross_source": True,
+           "feats": {}}
+    assert judge_lane.drawn_stratum(row) == judge_lane.judge_stratum(row)
+    assert judge_lane.drawn_stratum({**row, "stratum": "a:refused_union"}) == "a:refused_union"
+
+
+def test_an_unstored_row_is_the_run_row_of_a_stored_pair(cohort: Path, tmp_path: Path) -> None:
+    """PA02 rewired: a listed pair the run did not store is decided by `harness.decide_explicit`
+    (the lane's calibration, `decide_pair`), so asked about a pair the run DID store it gives
+    that run's row back, field for field."""
+    dataset = load(cohort)
+    settings, model = Settings(), hand_initialised()
+    harness.run(dataset, settings, model, tmp_path)
+    rows = harness.read_pairs(tmp_path)
+    assert rows
+    for row in rows:
+        [again] = judge_lane.unstored_rows(dataset, settings, model, [(row["hi"], row["lo"])])
+        assert again["stored"] is False
+        for key in ("lo", "hi", "zone", "score", "certificate", "veto", "reason", "families",
+                    "block", "block_key", "source_pair", "cross_source", "probes", "feats"):
+            assert again[key] == row[key], (key, row["lo"], row["hi"])
+    assert judge_lane.unstored_rows(
+        dataset, settings, model, [(rows[0]["lo"], 999_000_001), (rows[0]["lo"], rows[0]["lo"])]
+    ) == []
+
+
+# --- the adapter onto autodedup.oss_pod -----------------------------------------------------
+
+
+class FakeRunPod:
+    """Only what `pod_stop` needs: `terminate_pod` is idempotent on a live client (404 is
+    success) and raises when the pod is still rented."""
+
+    def __init__(self) -> None:
+        self.terminated: list[str] = []
+        self.fail_terminate = False
+
+    def terminate_pod(self, pod_id: str) -> None:
+        self.terminated.append(pod_id)
+        if self.fail_terminate:
+            raise RuntimeError("pod terminate failed (503)")
+
+
+class FakePodModule:
+    """`autodedup.oss_pod`'s four entry points, recorded. Pinning the CALL SHAPE here is the
+    point: the lane and the pod module are written apart, and a renamed keyword would only
+    surface against a real RunPod bill."""
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.fail_on = fail_on
+        self.client = FakeRunPod()
+        self.handle = SimpleNamespace(pod_id="pod-9", base_url="https://pod-9.example",
+                                      gpu="L4", usd_per_hr=0.4, started_at=1.0)
+
+    def _record(self, name: str, **kwargs: Any) -> None:
+        self.calls.append((name, kwargs))
+        if self.fail_on == name:
+            raise RuntimeError(f"{name} failed")
+
+    def launch_vllm_pod(self, client: Any, **kwargs: Any) -> Any:
+        self._record("launch", client=client, **kwargs)
+        return self.handle
+
+    def wait_ready(self, handle: Any, **kwargs: Any) -> float:
+        self._record("wait_ready", handle=handle, **kwargs)
+        return 1.0
+
+    def smoke_chat(self, handle: Any, **kwargs: Any) -> dict[str, Any]:
+        self._record("smoke_chat", handle=handle, **kwargs)
+        return {}
+
+    def terminate(self, handle: Any, **kwargs: Any) -> None:
+        self.calls.append(("terminate", {"handle": handle, **kwargs}))
+
+
+def oss_args(**overrides: Any) -> judge_lane.JudgeArgs:
+    """The parsed args a pod boot reads, built the way the lane builds them."""
+    args = {"export_run": "1", "tier": "oss", "max_usd": "5"}
+    args.update({key: str(value) for key, value in overrides.items()})
+    return judge_lane.parse_args(args)
+
+
+@pytest.fixture()
+def pod_module(monkeypatch: pytest.MonkeyPatch) -> FakePodModule:
+    module = FakePodModule()
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    return module
+
+
+def test_pod_start_launches_waits_and_smokes_before_a_pair_is_judged(
+    pod_module: FakePodModule,
+) -> None:
+    handle = judge_lane.pod_start(oss_args())
+    assert handle is pod_module.handle
+    assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]
+    assert pod_module.calls[0][1]["model_id"] == judge_lane.MODEL_OSS
+    assert "gpu_preference" not in pod_module.calls[0][1]
+    assert pod_module.calls[1][1]["client"] is pod_module.client
+
+
+def test_a_named_gpu_becomes_the_first_preference(pod_module: FakePodModule) -> None:
+    judge_lane.pod_start(oss_args(oss_gpu="L40S"))
+    assert pod_module.calls[0][1]["gpu_preference"] == ("L40S",)
+
+
+def test_the_gpu_list_and_the_cloud_order_reach_the_launch_verbatim(
+    pod_module: FakePodModule,
+) -> None:
+    """One `k=v` holds the whole preference list (`args` splits on commas, so the list is
+    space-separated), and the clouds are walked in the order asked for: the big cards a 30B
+    model needs are mostly in SECURE, the cheap ones in COMMUNITY."""
+    judge_lane.pod_start(oss_args(
+        oss_gpu="H100_80GB A100_80GB L40S A6000 A40",
+        oss_cloud="secure community",
+        oss_model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        oss_image="vllm/vllm-openai:v0.11.0",
+        oss_disk_gb="150",
+        oss_max_model_len="32768",
+        oss_max_usd_hr="3.5",
+        oss_min_gpu_gb="44",
+        oss_tool_parser="hermes",
+        oss_dtype="auto",
+    ))
+    launch = pod_module.calls[0][1]
+    assert launch["gpu_preference"] == (
+        "H100_80GB", "A100_80GB", "L40S", "A6000", "A40"
+    )
+    assert launch["cloud_types"] == ("SECURE", "COMMUNITY")
+    assert launch["model_id"] == "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    assert launch["image"] == "vllm/vllm-openai:v0.11.0"
+    assert launch["container_disk_gb"] == 150
+    assert launch["max_model_len"] == 32768
+    assert launch["max_price_per_hr"] == 3.5
+    assert launch["min_memory_gb"] == 44
+    assert launch["tool_call_parser"] == "hermes"
+    assert launch["dtype"] == "auto"
+
+
+def test_an_unnamed_pod_knob_is_left_to_the_pod_module(pod_module: FakePodModule) -> None:
+    """A default spelled out twice is a default that drifts: anything the args do not name is
+    absent from the call, so `oss_pod` stays the one place the 7B numbers live."""
+    judge_lane.pod_start(oss_args())
+    launch = pod_module.calls[0][1]
+    for key in ("cloud_types", "image", "container_disk_gb", "max_model_len",
+                "max_price_per_hr", "min_memory_gb", "tool_call_parser", "dtype"):
+        assert key not in launch
+
+
+def test_a_named_gpu_is_a_pin_not_a_ranking(pod_module: FakePodModule) -> None:
+    """`select_gpus` ranks by default and only FILTERS under `strict`. An operator names a
+    type for its price, so a silent fallback to the widened rung is the one substitution this
+    arm cannot afford; unpinned, the default preference must stay a ranking."""
+    judge_lane.pod_start(oss_args(oss_gpu="A5000"))
+    assert pod_module.calls[0][1]["strict_gpu"] is True
+    pod_module.calls.clear()
+    judge_lane.pod_start(oss_args())
+    assert "strict_gpu" not in pod_module.calls[0][1]
+
+
+def test_a_cancelled_boot_still_terminates_the_pod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Ctrl-C / Actions cancellation inside the smoke window is a BaseException, so an
+    `except Exception` here would let it past BOTH guards — `pod_start` has not returned, so
+    the lane's `finally` does not know the pod exists — and it would bill until noticed."""
+    module = FakePodModule()
+
+    def cancelled(handle: Any, **kwargs: Any) -> dict[str, Any]:
+        module.calls.append(("smoke_chat", {"handle": handle}))
+        raise KeyboardInterrupt
+
+    module.smoke_chat = cancelled  # type: ignore[method-assign]
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    with pytest.raises(KeyboardInterrupt):
+        judge_lane.pod_start(oss_args())
+    assert pod_module_terminated(module) == [module.handle]
+
+
+@pytest.mark.parametrize("step", ["wait_ready", "smoke_chat"])
+def test_a_pod_that_never_served_is_torn_down_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """The lane's own `finally` only knows about a pod `pod_start` RETURNED, so a rental that
+    dies before that has to clean up after itself or it bills until someone notices."""
+    module = FakePodModule(fail_on=step)
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    with pytest.raises(RuntimeError):
+        judge_lane.pod_start(oss_args())
+    assert pod_module_terminated(module) == [module.handle]
+
+
+def pod_module_terminated(module: FakePodModule) -> list[Any]:
+    return [kwargs["handle"] for name, kwargs in module.calls if name == "terminate"]
+
+
+def test_pod_stop_hands_the_pod_module_a_client(pod_module: FakePodModule) -> None:
+    judge_lane.pod_stop(pod_module.handle)
+    assert pod_module.calls == [("terminate", {"handle": pod_module.handle,
+                                               "client": pod_module.client})]
+
+
+def test_pod_stop_verifies_the_pod_is_actually_gone(pod_module: FakePodModule) -> None:
+    """`oss_pod.terminate` never raises, so on its own it can report a leak only to the log.
+    The second (idempotent) delete is what makes the teardown a signal the lane can read."""
+    judge_lane.pod_stop(pod_module.handle)
+    assert pod_module.client.terminated == ["pod-9"]
+
+
+def test_a_pod_that_would_not_die_raises_out_of_pod_stop(
+    pod_module: FakePodModule,
+) -> None:
+    pod_module.client.fail_terminate = True
+    with pytest.raises(RuntimeError):
+        judge_lane.pod_stop(pod_module.handle)
+
+
+def test_the_real_pod_module_still_exposes_what_the_lane_calls() -> None:
+    from autodedup import oss_pod
+
+    for name in ("launch_vllm_pod", "wait_ready", "smoke_chat", "terminate"):
+        assert callable(getattr(oss_pod, name)), name
+    for field in ("pod_id", "base_url", "gpu", "usd_per_hr", "started_at"):
+        assert field in oss_pod.PodHandle.__dataclass_fields__, field
+
+
+def test_the_lane_and_the_provider_agree_on_the_oss_namespace() -> None:
+    """The lane restates the provider's prefix and name; a drift in either is discovered
+    AFTER a GPU has been rented (`served_model()` stops stripping, and the wire id
+    `oss/Qwen/...` is unknown to vLLM, so every pair fails at full price)."""
+    from api.providers import oss as oss_provider
+
+    assert judge_lane.OSS_PREFIX == oss_provider.MODEL_PREFIX
+    assert judge_lane.OSS_PROVIDER == oss_provider.OssProvider.name
+
+
+def test_latency_is_the_call_not_the_backoff(lane, tmp_path: Path) -> None:
+    """`_call_with_retry` sleeps out a 429 — the steady state at six workers on the paid tiers
+    and unheard of on a rented pod with no rate limit. Billing that sleep to `latency_s` would
+    bias the very yardstick the oss arm is measured against, so the reported number is the
+    provider's own `duration_ms`; the wall span stays beside it as `pair_wall_s`."""
+    lane.state["client"].duration_ms = 4200
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    rows = _judgements(out)
+    assert rows and all(row["latency_s"] == pytest.approx(4.2) for row in rows)
+    # The fake provider returns instantly, so the wall span cannot reach the claimed duration:
+    # the two numbers are measuring different things, which is the point.
+    assert all(row["pair_wall_s"] < 4.2 for row in rows)
+    assert summary["latency_s_mean"] == pytest.approx(4.2)
+
+
+def test_the_experimental_arm_never_becomes_a_pairs_headline_verdict() -> None:
+    """Migration 530 admits a fourth tier into a table two consumers read WITHOUT filtering
+    tier, and the oss arm answers exactly the pairs gold already answered — on `created_at`
+    alone the rented 7B would replace ground truth as the review queue's headline and count
+    itself into `n_judged_edges`. Authority, not recency."""
+    from autodedup import score_sql, ui_sql
+
+    headline = ui_sql.RESIDUAL_SQL
+    assert "WHEN 'gold' THEN 0" in headline
+    assert headline.index("WHEN 'gold' THEN 0") < headline.index("ELSE 3 END")
+    assert "tier <> 'oss'" in score_sql.JUDGED_EDGES_SQL
+
+
+def test_the_oss_lane_gets_every_credential_its_pod_needs() -> None:
+    """A secret that is missing from the workflow env fails LATE and expensively: a gated
+    `oss_model` 401s on the weights inside the container, never binds, and is caught only by
+    `wait_ready`'s 25-minute deadline — a whole rental for a value that was sitting in the
+    repository's secrets. Cheap to assert here, not cheap to discover there."""
+    from pathlib import Path
+
+    body = (Path(__file__).resolve().parents[2] / ".github" / "workflows"
+            / "autodedup.yml").read_text(encoding="utf-8")
+    for secret in ("RUNPOD_API_KEY", "HF_TOKEN"):
+        assert f"{secret}: ${{{{ secrets.{secret} }}}}" in body, secret
+
+
+def test_the_lane_leaves_a_receipt_from_launch_until_the_pod_is_confirmed_gone(
+    tmp_path: Path, pod_module: FakePodModule,
+) -> None:
+    """The receipt has to exist across the whole rental — it is written BEFORE the readiness
+    wait, which is both the longest window and the likeliest one to be cancelled in — and it
+    has to be gone after the verifying DELETE, or the reaper cries leak on every clean run."""
+    written: list[Path] = []
+    cleared: list[Path] = []
+    pod_module.write_receipt = (  # type: ignore[method-assign]
+        lambda handle, out_dir: written.append(Path(out_dir)) or Path(out_dir) / "pod.json"
+    )
+    pod_module.clear_receipt = lambda out_dir: cleared.append(Path(out_dir))  # type: ignore[method-assign]
+
+    judge_lane.pod_start(oss_args(), tmp_path)
+    assert written == [tmp_path]
+    # Written before the wait, not after: the order of the recorded calls is the assertion.
+    assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]
+    assert cleared == []
+
+    judge_lane.pod_stop(pod_module.handle, tmp_path)
+    assert cleared == [tmp_path]
+
+
+def test_the_real_pod_module_exposes_the_receipt_the_lane_writes() -> None:
+    from autodedup import oss_pod
+
+    for name in ("write_receipt", "clear_receipt", "reap_receipt"):
+        assert callable(getattr(oss_pod, name)), name
+
+
+# --- one settings row for the engine and the prompt (W4) -----------------------------------
+
+
+def test_the_lane_takes_one_settings_row_for_the_engine_and_the_prompt() -> None:
+    """The row that scores the cohort is the row the digest is built through (`--args settings=`).
+
+    Two rows would let the prompt name a contradiction on a slot the engine refuses to count."""
+    import inspect
+
+    parsed = judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5", "settings": "s.json"}
+    )
+    assert parsed.settings == "s.json"
+    assert judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5"}
+    ).settings is None
+    for name in ("_inputs", "_estimate", "_run_job", "_dispatch"):
+        assert "settings" in inspect.signature(getattr(judge_lane, name)).parameters, name
+
+
+def test_the_lane_scores_the_cohort_with_the_named_model(tmp_path, monkeypatch) -> None:
+    """`--args model=` picks a fitted model under autodedup/models/; absent = the hand prior."""
+    from autodedup.model import hand_initialised
+
+    parsed = judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5", "model": "w4_gold"}
+    )
+    assert parsed.model == "w4_gold"
+    assert judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5"}
+    ).model is None
+    assert harness.named_model(None).feature_order == hand_initialised().feature_order
+    (tmp_path / "m.json").write_text(
+        json.dumps({**hand_initialised().to_json(), "version": "m"}), encoding="utf-8")
+    monkeypatch.setattr(harness, "MODELS_DIR", tmp_path)
+    loaded = harness.named_model("m")
+    assert loaded.feature_order == hand_initialised().feature_order
+
+
+def test_the_lane_resolves_a_settings_name_under_the_repo_settings_dir(tmp_path, monkeypatch) -> None:
+    """`settings=w4` must find autodedup/settings/w4.json the way the score lane does (run 35145938264
+    died on FileNotFoundError('w4') because the name went straight to the file loader)."""
+    from autodedup.settings import Settings
+
+    assert harness.named_settings(None) == Settings()
+    (tmp_path / "w4.json").write_text(json.dumps(Settings(t_lo=0.2).to_dict()), encoding="utf-8")
+    monkeypatch.setattr(harness, "SETTINGS_DIR", tmp_path)
+    assert harness.named_settings("w4").t_lo == 0.2
+    with pytest.raises(SystemExit):   # one loader, inside the repo: a path is not a name
+        harness.named_settings(str(tmp_path.parent / "elsewhere.json"))
+
+
+def test_reversed_halves_shuffles_inside_the_pairs_not_across_them() -> None:
+    """The weaker gold vote differs from G1 in presentation ORDER only: a plain reverse would
+    also unpair the j2 room pairs, making the two votes differ in two things at once."""
+    blocks = ["p1", "p2", "t1", "t2"]
+    assert judge_lane._reversed_halves(blocks, 2) == ["p2", "p1", "t2", "t1"]
+    assert judge_lane._reversed_halves(blocks, 0) == ["t2", "t1", "p2", "p1"]
+    assert judge_lane._reversed_halves(blocks, 4) == ["t2", "t1", "p2", "p1"]
+    assert judge_lane._reversed_halves([], 0) == []
+
+
+def test_parse_args_takes_the_gold_version_the_labels_live_under() -> None:
+    """A new presentation is compared against the gold labels an OLD one produced: the labels
+    belong to the pair, so the gold lookup must not be pinned to the run's own version."""
+    parsed = judge_lane.parse_args({
+        "export_run": "1", "tier": "vision", "max_usd": "4",
+        "judge_version": "j2", "pairs_from": "gold", "gold_version": "j1",
+    })
+    assert parsed.gold_version == "j1" and parsed.judge_version == "j2"
+    assert judge_lane.parse_args({
+        "export_run": "1", "tier": "vision", "max_usd": "4",
+    }).gold_version is None
+
+
+# --- pacing: a 429 after a success is the provider pacing us, not an empty account ---------
+
+
+def test_a_429_that_follows_a_success_is_pacing_not_an_exhausted_account() -> None:
+    """The truth table W6 cost two Qwen arms to learn.
+
+    DashScope answers a PACING wall in OpenAI's billing wording, so the words alone cannot tell
+    "slow down" from "you are out of allowance". The run can: an account does not refill and
+    drain again between two calls, so the same 429 means one thing on an arm that has already
+    answered and the other on an arm that never has. Only the retry loop passes the flag, and
+    everything else — including the caller that writes an arm off — classifies without it.
+    """
+    after_success_flips = {
+        QUOTA_429: judge_lane.ERROR_RATE_LIMIT,
+        "qwen call failed: HTTP 429 quota exceeded for your plan": judge_lane.ERROR_RATE_LIMIT,
+        "qwen call failed: HTTP 429 insufficient_quota": judge_lane.ERROR_RATE_LIMIT,
+    }
+    for message, expected in after_success_flips.items():
+        assert judge_lane.classify_provider_error(
+            RuntimeError(message), after_success=True
+        ) == expected, message
+        # The first call of a run is taken at its word — the guard run 35146813906 bought.
+        assert judge_lane.classify_provider_error(
+            RuntimeError(message)
+        ) == judge_lane.ERROR_QUOTA, message
+
+    unmoved = {
+        # 402 says money whatever came before it, and a body with no status behind it carries
+        # no evidence of pacing at all.
+        "openai call failed: HTTP 402 payment required": judge_lane.ERROR_QUOTA,
+        "openai call failed: no credits remaining": judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 403 {\"code\":\"Arrearage\"}": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 429 slow down": judge_lane.ERROR_RATE_LIMIT,
+        "HTTP 429 Too Many Requests": judge_lane.ERROR_RATE_LIMIT,
+        "openai call failed: HTTP 401 invalid_api_key": judge_lane.ERROR_FATAL,
+        "qwen call failed: HTTP 404 model_not_found": judge_lane.ERROR_FATAL,
+        "openai call failed: HTTP 503 upstream unavailable": judge_lane.ERROR_TRANSIENT,
+        "openai call failed: Read timed out": judge_lane.ERROR_TRANSIENT,
+        "no compare_listings tool call in the response": judge_lane.ERROR_UNKNOWN,
+    }
+    for message, expected in unmoved.items():
+        for flag in (False, True):
+            assert judge_lane.classify_provider_error(
+                RuntimeError(message), after_success=flag
+            ) == expected, (message, flag)
+
+
+def test_the_ladder_is_jittered_so_throttled_workers_stop_arriving_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact 2/4/8 ladder re-synchronises every worker that tripped the limit together and
+    reproduces the burst one rung later; the spread is what breaks the convoy."""
+    rung = judge_lane.RETRY_BACKOFF_S[0]
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.5)
+    assert judge_lane.jittered(rung) == pytest.approx(rung)
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.0)
+    assert judge_lane.jittered(rung) == pytest.approx(rung * (1 - judge_lane.RETRY_JITTER))
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 1.0)
+    assert judge_lane.jittered(rung) == pytest.approx(rung * (1 + judge_lane.RETRY_JITTER))
+    draws = iter([0.1, 0.9, 0.3, 0.7])
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: next(draws))
+    assert len({judge_lane.jittered(rung) for _ in range(4)}) == 4
+
+
+def test_an_arm_admits_only_its_own_workers_and_spaces_their_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dial itself: at most `workers` of this arm's calls in flight, and no two of them
+    starting closer together than `min_interval_ms`."""
+    import threading
+    import time as real_time
+
+    for workers in (1, 2, 3):
+        pacer = judge_lane.ArmPacer("qwen", workers=workers, min_interval_ms=0)
+        seen = {"now": 0, "max": 0}
+        guard = threading.Lock()
+
+        def one() -> None:
+            with pacer.slot():
+                with guard:
+                    seen["now"] += 1
+                    seen["max"] = max(seen["max"], seen["now"])
+                real_time.sleep(0.05)
+                with guard:
+                    seen["now"] -= 1
+
+        threads = [threading.Thread(target=one) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert not any(thread.is_alive() for thread in threads), workers
+        assert seen["max"] == workers, (workers, seen)
+
+    # Spacing is the second half of the dial, and it is read off a fake clock: the gap is the
+    # provider's to demand and the suite's to not actually wait out.
+    clock = {"t": 0.0}
+    waits: list[float] = []
+    monkeypatch.setattr(judge_lane, "MONOTONIC", lambda: clock["t"])
+
+    def fake_pace(seconds: float) -> None:
+        waits.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(judge_lane, "PACE_SLEEP", fake_pace)
+    spaced = judge_lane.ArmPacer("qwen", workers=1, min_interval_ms=500)
+    for _ in range(3):
+        with spaced.slot():
+            pass
+    assert waits == [pytest.approx(0.5), pytest.approx(0.5)]
+    assert spaced.to_json()["paced_s"] == pytest.approx(1.0)
+    # An unpaced arm never sleeps — the default costs the primary model nothing.
+    waits.clear()
+    unpaced = judge_lane.ArmPacer("primary", workers=6, min_interval_ms=0)
+    for _ in range(3):
+        with unpaced.slot():
+            pass
+    assert waits == []
+
+
+def test_a_step_down_narrows_the_arm_and_then_admits_it_has_nothing_left() -> None:
+    """Parallelism first, then spacing, then the truthful False that lets the arm die."""
+    paced = judge_lane.ArmPacer("qwen", workers=4, min_interval_ms=0)
+    assert paced.step_down("429", at_pair=7) is True
+    assert paced.to_json()["workers_now"] == 1
+    assert paced.to_json()["workers"] == 4
+    assert paced.step_down("429", at_pair=8) is True
+    assert paced.to_json()["min_interval_ms_now"] == judge_lane.STEP_DOWN_INTERVAL_MS
+    assert paced.step_down("429", at_pair=9) is False
+    steps = paced.to_json()["step_downs"]
+    assert len(steps) == judge_lane.MAX_STEP_DOWNS == 2
+    assert steps[0]["at_pair"] == 7 and steps[0]["to_workers"] == 1
+    assert steps[1]["to_min_interval_ms"] == judge_lane.STEP_DOWN_INTERVAL_MS
+    # An arm that is already at its narrowest has nothing to offer at all.
+    assert judge_lane.ArmPacer(
+        "qwen", workers=1, min_interval_ms=judge_lane.STEP_DOWN_INTERVAL_MAX_MS
+    ).step_down("429") is False
+
+
+def test_the_secondary_arm_is_paced_apart_from_the_primary_one() -> None:
+    """`workers` is the PRIMARY model's parallelism and it was never the arm being throttled:
+    the routing has to send the DashScope votes — and only those — to the secondary dial."""
+    parsed = judge_lane.parse_args({
+        "export_run": "1", "tier": "gold", "n": "4", "max_usd": "5",
+        "workers": "6", "qwen_workers": "2", "qwen_min_interval_ms": "750",
+    })
+    assert (parsed.workers, parsed.qwen_workers, parsed.qwen_min_interval_ms) == (6, 2, 750)
+    pacing = judge_lane.build_pacing(parsed)
+    plan = judge_lane.vote_plan("gold")
+    assert [pacing.for_vote(vote).name for vote in plan] == ["primary", "primary", "qwen"]
+    assert pacing.for_vote(judge_lane.vote_plan("vision")[0]).name == "primary"
+    # The rented pod serves a Qwen id too, and it has neither a rate limit nor a per-call
+    # bill: pacing it on DashScope's dial would be idle GPU at $0.44 an hour.
+    oss_vote = judge_lane.vote_plan("oss")[0]
+    assert oss_vote.model.lower().startswith(f"{judge_lane.OSS_PREFIX}qwen")
+    assert pacing.for_vote(oss_vote).name == "primary"
+    assert pacing.qwen.to_json()["workers"] == 2
+    assert pacing.primary.to_json()["workers"] == 6
+
+
+def test_the_pacing_dials_default_to_one_worker_and_refuse_nonsense() -> None:
+    """One worker is what actually finished a W6 pass; the defaults say so."""
+    base = {"export_run": "1", "tier": "gold", "n": "4", "max_usd": "5"}
+    parsed = judge_lane.parse_args(dict(base))
+    assert parsed.qwen_workers == judge_lane.QWEN_WORKERS_DEFAULT == 1
+    assert parsed.qwen_min_interval_ms == judge_lane.QWEN_MIN_INTERVAL_MS_DEFAULT == 0
+    for bad in ({"qwen_workers": "0"}, {"qwen_min_interval_ms": "-1"}):
+        with pytest.raises(SystemExit):
+            judge_lane.parse_args({**base, **bad})
+
+
+def test_a_throttled_secondary_arm_is_stepped_down_before_it_is_written_off(
+    lane, tmp_path: Path
+) -> None:
+    """W6 end to end: the arm answers, then 429s in billing words at more than one worker.
+
+    The pass must not lose the arm to the wording — it walks the ladder, gives up its
+    parallelism, walks it again — and must still lose it in the end, because an account that
+    really is empty answers nothing else either. summary.json carries both: what the pacing
+    cost in seconds, and every narrowing it tried.
+    """
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_after={judge_lane.MODEL_GOLD_THIRD: 2}, error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1,
+                   qwen_workers=3, qwen_min_interval_ms=250)
+
+    arm = summary["pacing"]["qwen"]
+    assert summary["qwen_workers"] == 3 and summary["qwen_min_interval_ms"] == 250
+    assert arm["workers"] == 3 and arm["workers_now"] == 1
+    assert [step.get("to_workers") for step in arm["step_downs"]][0] == 1
+    assert arm["successes"] == 2
+    assert arm["retries"] == len(judge_lane.RETRY_BACKOFF_S) * (
+        judge_lane.MAX_STEP_DOWNS + 1
+    ) + judge_lane.MAX_STEP_DOWNS
+    assert arm["backoff_s"] > 0 and summary["pacing_backoff_s"] >= arm["backoff_s"]
+    assert summary["pacing_step_downs"] == judge_lane.MAX_STEP_DOWNS
+    # The step-down bought time, not immunity: the arm still goes down, on the unindulged
+    # reading of the same error, and the pass still finishes with its weaker third vote.
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("quota:")
+    assert summary["qwen_arm_disabled_at_pair"] == 2
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["fatal"] is None
+    # The primary model was answering throughout and is not paced for the other arm's sake.
+    assert summary["pacing"]["primary"]["step_downs"] == []
+    assert summary["pacing"]["primary"]["retries"] == 0
+
+
+def test_the_first_call_of_a_run_is_still_taken_at_its_word(lane, tmp_path: Path) -> None:
+    """The half of the rule that must not move: with no success behind it, the billing wording
+    is an exhausted account, the arm goes down on the FIRST call, and nothing is retried."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,), error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1,
+                   qwen_workers=4)
+    qwen_calls = [call for call in lane.calls
+                  if call["model"] == judge_lane.MODEL_GOLD_THIRD]
+    assert len(qwen_calls) == 1
+    assert lane.state["sleeps"] == []
+    assert summary["pacing"]["qwen"]["step_downs"] == []
+    assert summary["pacing"]["qwen"]["retries"] == 0
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_at_pair"] == 0
+    assert summary["done"] == 3 * summary["drawn"]

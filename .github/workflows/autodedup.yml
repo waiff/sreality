@@ -49,9 +49,99 @@ name: "AUTODEDUP: engine lane"
 #             >= 5 distinct listings); that divergence is open and needs a ruling line in
 #             PROGRAM.md section 14 before W1 closes.
 #
+#   judge   - THE ONE PAID MODE. Downloads a finished `export` run's cohort artifact
+#             (`gh run download <export_run> -n autodedup-export-<export_run>`, which is why
+#             this job asks for `actions: read` and the step is handed GH_TOKEN), runs `harness
+#             run` over it in-process (the lane's own run_pass, SW1), draws a DETERMINISTIC
+#             stratified sample of pairs - zone x deciding layer (certificate or model) x cohort block x same/cross
+#             portal, with the catalogue-only pairs pulled out whole - and puts each pair to
+#             the LLM judge for a four-way verdict (same_property / different_property /
+#             same_building_different_unit / insufficient_evidence) through one forced tool.
+#             `tier` picks what is asked: smoke = 10 text + 10 vision calls, the first-live
+#             verification of paths this repo has never run; text = gpt-5.6-luna on the whole
+#             sample; vision = gpt-5-mini with 4+4 images at 768px; gold = three deep votes
+#             (two gpt-5-mini with different image selections, one qwen3-vl-30b-a3b-instruct
+#             for genuine model-family independence) aggregated into one label. NO personal
+#             data crosses the wire: only same_broker / same_firm booleans, and descriptions
+#             are re-scrubbed of Czech contact patterns and truncated before they are sent.
+#             `max_usd` is REQUIRED and the lane refuses to start without it; it must sit
+#             between one pair of the chosen tier and D2's $25 hard per-run cap, so neither a
+#             budget too small to launch a single call nor a fat-fingered extra zero starts a
+#             pass. The budget binds in the worker BEFORE each call (per CALL, not per pair)
+#             and HOLDS its estimate until that call settles, so the cap cannot be overshot by
+#             the calls already in flight. The summary reports done / failed / skipped_budget
+#             / skipped_fatal / billed_unparsed / persist_failed / spent_usd - a run that drew
+#             a sample and read nothing back, hit a dead key, or stored none of what it paid
+#             for EXITS NON-ZERO rather than looking green. A gold pair writes a row only when
+#             all three votes land (short plans count `gold_incomplete`; pairs a budget stop
+#             never reached count `gold_unstarted`, which is not money lost).
+#             MIND `n`: the per-stratum floor of 8 is honoured before the target, so a wide
+#             cohort DRAWS MORE than `n` - the first real pass turned n=30 into 354 pairs over
+#             47 strata. `sample_inflated_by_floor`, `est_cost_usd_for_draw` and
+#             `budget_covers_draw` say so at the top of the summary, before a call is made.
+#             `dry_run=1` builds every prompt,
+#             counts the tokens and images, prints the estimate and calls nothing. Verdicts
+#             land in `autodedup.judgements` and in out/judgements.jsonl; the sample, the
+#             engine run and the spend summary land beside them.
+#             `tier=oss` is the SAME question put to an open-source vision model this program
+#             RENTS BY THE HOUR instead of buying by the token - the vision prompt to the
+#             character, the same 4+4 images, the same deterministic draw at the same seed, so
+#             the paid verdicts pay for themselves twice: once as the programme's labels and
+#             once as the yardstick the free arm is measured against. The lane launches a
+#             RunPod GPU pod (`oss_model`, default Qwen/Qwen2.5-VL-7B-Instruct; `oss_gpu` pins
+#             an ordered list of GPU types and `oss_cloud` the clouds to walk, otherwise the
+#             pod module picks community boxes at its own default cap), waits for it to serve, smokes it,
+#             judges with `workers` in parallel and TERMINATES IT IN A FINALLY - on a clean
+#             pass, a budget stop, a dead provider or a crash alike - then VERIFIES the pod is
+#             gone with a second (idempotent) delete, so a teardown that failed reaches the
+#             summary as `pod_terminate_failed` instead of one ERROR line in this log. The one
+#             path a `finally` cannot cover is the job being killed from OUTSIDE - a cancel or
+#             the `timeout-minutes` cap - which leaves the pod billing until someone terminates
+#             it in the RunPod console (it is named `autodedup-oss-judge`). That is what the
+#             `if: always()` reap step is for: the lane writes out/pod.json the instant a pod
+#             exists and deletes it once the pod is CONFIRMED gone, so the step has something
+#             to terminate exactly when a `finally` did not run. `always()` covers a cancel, so
+#             the console is now the second line of defence, not the first. Needs migrations 530 (the tier vocabulary) and 531 (the
+#             `llm_calls` provider vocabulary - without it every oss call 23514s at the
+#             RECORDING step, after the GPU time is already paid for), plus RUNPOD_API_KEY; a
+#             GATED `oss_model` (meta-llama/...) additionally needs HF_TOKEN, which is passed
+#             through when set and is otherwise unused. The money is different in kind: a pod bills
+#             by WALL CLOCK, so `max_usd` caps the POD's bill (checked before every call, with
+#             one pair's margin, against the clock rather than a token estimate), each verdict
+#             is stored with a NULL cost while the pod runs - unknown, not free - and the bill
+#             is divided over what the pod actually produced once it is gone (`pod_cost_usd`,
+#             `cost_per_pair_usd`, `pod_hours`, `pod_wall_s_per_pair`, `usd_per_hr`, `pod_id`, `gpu` in
+#             the summary; `spent_usd_source` reads `pod`, never `llm_calls`, which records $0
+#             for a pod call because there is no per-token price to record).
+#             `pairs_from=gold` restricts the draw to pairs a gold pass has ALREADY ruled on,
+#             which is what makes the comparison set maximal per dollar - a pair with no gold
+#             row can be judged for nothing and compared against nothing. The gold rows are
+#             read at this run's own `judge_version` unless `gold_version=` names another:
+#             a NEW presentation (j2) is measured against the labels an OLD one produced,
+#             because the label belongs to the pair and not to the prompt.
+#             `pairs_file=<name>` narrows the draw to an EXPLICIT list committed under
+#             autodedup/pairs/<name>.json (a JSON list of `[lo, hi]`, or of
+#             `{"lo", "hi", "stratum"}` objects) - how a targeted pass buys labels for one
+#             starved cell, which a stratified draw spends everywhere but. A listed `stratum`
+#             replaces the zone grid for that pair: the draw, the `strata` filter, sample.json
+#             and judgements.jsonl all carry it, so a contested list reports per set.
+#             It narrows the POPULATION, not the sample: `n` is still the cost dial. Pairs the
+#             engine did not store are reported by id in `pairs_file_missing` rather than
+#             quietly shrinking the pass - unless `score_unstored=1`, which scores each one
+#             through `harness.decide_explicit` (below the floor, or never paired by blocking)
+#             and reports it in `pairs_file_scored_unstored` instead.
+#             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
+#             judge_version, tier) and not on the model, so a second `oss_model` at the same
+#             version is skipped as cached (no pod rented, an EMPTY judgements.jsonl, exit 0)
+#             or, with `refresh=1`, OVERWRITES the first model's rows. To compare two open
+#             models, give the second its own version: `judge_version=<v>-<model-slug>`.
+#             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
+#             model under autodedup/models/ so the draw reflects that engine's zones (absent =
+#             defaults + hand prior); `judge_version=` keys the per-pair cache.
+#
 #   score   - READS the artifact, WRITES the engine's own schema. Downloads a finished
-#             `export` run's cohort artifact (`gh run download`, which is why the job asks
-#             for `actions: read`), runs `harness run` over it in-process - the real-time
+#             `export` run's cohort artifact (same `gh run download` path as judge, which is
+#             why the job asks for `actions: read`), runs `harness run` over it in-process - the real-time
 #             lane's own run_pass over an in-memory store, the whole cohort claimed as the
 #             scope (SW1) - and PERSISTS what it decided into schema autodedup - nothing in public.* is
 #             touched and nothing is merged (ruling D4, clusters land with status `proposed`
@@ -79,7 +169,7 @@ name: "AUTODEDUP: engine lane"
 #             verdict in autodedup.verdicts plus every member pair of a group whose latest
 #             cluster-grain verdict is `same` (an explicit verdict on a pair always wins over
 #             the group that implies it) as out/operator_labels.jsonl, one row per pair with
-#             the verdict, the relation, the operator's note and
+#             the verdict, the relation in the judge's own vocabulary, the operator's note and
 #             reason chips verbatim, who decided it and when, and the engine's view of that
 #             pair at read time (score, zone, decision, cluster key) or null where the engine
 #             never stored it - SCOPED TO THE GENERATION asked for, since autodedup.pairs
@@ -260,7 +350,35 @@ name: "AUTODEDUP: engine lane"
 # record accepts wave, title, status, approach, tools, notes, cost_usd and run_id, or
 # id=<n> plus any of title, status, approach, tools, cost_usd and notes to correct that row
 # (`tools` is a SEMICOLON or SLASH list - the comma already separates k=v pairs and this
-# workflow's charset check rejects `;`, so a dispatched entry writes `a/b/c`);
+# workflow's charset check rejects `;`, so a dispatched entry writes `a/b/c`); judge
+# accepts export_run, tier, n, max_usd (required), seed, workers, qwen_workers (the
+# SECONDARY DashScope arm's own parallelism, default 1 - `workers` is the primary model's
+# and it was never the arm being throttled; W6 lost that arm at six and at three workers
+# and finished the pass at one), qwen_min_interval_ms (the gap between two calls of that
+# arm, default 0), strata (SPACE-separated
+# stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
+# download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row),
+# pairs_file (an explicit `[lo, hi]` or `{lo, hi, stratum}` list under autodedup/pairs/),
+# score_unstored (with pairs_file: score the listed pairs the pass did not store) and,
+# for `tier=oss`, oss_model (the served model id, default Qwen/Qwen2.5-VL-7B-Instruct),
+# oss_gpu (SPACE-separated RunPod GPU types in preference order, e.g. `H100_80GB A100_80GB
+# L40S A6000 A40`, treated as a PIN - a pass fails rather than silently renting a 6x dearer
+# box - and matched against both the catalog id and the display name with `_` read as a
+# space), oss_cloud (SPACE-separated cloud types walked in order, `secure community`;
+# default community only, which is where the cheap cards are and where the 80 GB ones are
+# not), oss_max_usd_hr (lifts the $1.00/hr default cap, without which no 80 GB card is even
+# eligible), oss_min_gpu_gb (raises the 24 GB floor, so a pattern that also matches a
+# smaller variant of the same card cannot rent one too small for the weights),
+# oss_image (the vLLM image tag - a model architecture newer than the image is a
+# rental that boots into a failure), oss_disk_gb (container disk; the weights AND the image
+# land on it, so re-do the sum for a bigger model), oss_max_model_len, oss_dtype (`auto` for
+# a pre-quantized FP8/AWQ repo, which carries its own compute dtype - forcing bfloat16
+# there is a 25-minute rental spent on a refusal), oss_tool_parser (vLLM
+# `--tool-call-parser`; the forced tool call is how a verdict comes back at all) and
+# oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
+# estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT
+# from `pod_wall_s_per_pair`, which is the rental divided by the pairs and is about a
+# `workers`th of it);
 # score accepts export_run, cohort, settings, model, generation and store_floor;
 # labels accepts generation (which generation's clusters imply pair labels, default g4), max_members (the cap on a confirmed group's size before
 # its pairs are skipped rather than flooding the label set, default 12),
@@ -279,19 +397,20 @@ name: "AUTODEDUP: engine lane"
 # when that writer is dead (its job ended, its worker restarted) this ends ITS lease first -
 # only that holder's; any other is refused.
 #
-# Every mode costs nothing but GitHub minutes and database time. out/ is uploaded on every
-# outcome; out/summary.json is written even when the run fails.
+# Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
+# real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
+# is written even when the run fails.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; rt_equivalence = the live store against a harness run; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass (training labels, no merge authority); rt_equivalence = the live store against a harness run; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
         required: true
         default: "census"
         type: string
       args:
-        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12 or export_run=123,settings=w31,model=w6_gold,generation=g16. A record correction is id=12,cost_usd=3.10,status=done."
+        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,settings=w31,model=w6_gold,generation=g16 or export_run=123,tier=text,n=400,max_usd=5. A record correction is id=12,cost_usd=3.10,status=done."
         required: false
         default: ""
         type: string
@@ -306,7 +425,7 @@ jobs:
     timeout-minutes: 300
     permissions:
       contents: read
-      # `score` and `rt_equivalence` download a previous run's artifact with `gh run download`.
+      # `judge`, `score` and `rt_equivalence` download a previous run's artifact with `gh run download`.
       actions: read
     steps:
       - uses: actions/checkout@v6
@@ -343,6 +462,14 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode }}
           ARGS: ${{ inputs.args }}
@@ -350,6 +477,12 @@ jobs:
           set -euo pipefail
           mkdir -p out
           python -m autodedup.lane --mode "${MODE:-census}" --args "${ARGS:-}" --out out/
+
+      - name: Reap a pod a killed job left behind
+        if: always()
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: python -m autodedup.oss_pod --reap out/pod.json
 
       - name: Upload report
         if: always()

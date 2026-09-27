@@ -169,8 +169,13 @@ def test_530_admits_the_oss_tier_on_both_tables() -> None:
     for table in _TIER_TABLES:
         assert f"alter table autodedup.{table}" in body
     assert body.count("check (tier in ('text', 'vision', 'gold', 'oss'))") == len(_TIER_TABLES)
-    # The four tiers the judge lane wrote while it existed (SW1 deleted it; W8 drops the table).
-    for tier in ("text", "vision", "gold", "oss"):
+    # The lane's tiers and the store's tiers are ONE vocabulary: a tier the lane can draw and
+    # the table rejects is a paid pass that stores nothing.
+    from autodedup import judge_lane
+
+    for tier in judge_lane.TIERS:
+        if tier == "smoke":       # two tiers in one pass; it stores under each, never as itself
+            continue
         assert f"'{tier}'" in body
 
 

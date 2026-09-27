@@ -28,8 +28,8 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 LANE_WRITERS: tuple[str, ...] = (
     "apply.py", "apply_sql.py",
     "census.py", "evaluate.py", "export.py", "export_sql.py",
-    "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py",
-    "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
+    "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
+    "judge_lane.py", "judge_prompts.py", "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
     "legacy_retire.py",
     "progress_sql.py", "reconcile.py", "refit_substrate.py", "rt_equivalence.py",
     "rt_lease.py", "score_lane.py",

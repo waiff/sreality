@@ -3,7 +3,7 @@
     python3 -m autodedup.lane --mode census --args "min_n=800,top=60" --out out/
     python3 -m autodedup.lane --mode probes --args "source=remax" --out out/
     python3 -m autodedup.lane --mode export --args "blocks=town:563510 quarter:490245" --out out/
-    python3 -m autodedup.lane --mode score --args "export_run=123,settings=w31,model=w6_gold"
+    python3 -m autodedup.lane --mode judge --args "export_run=123,tier=text,n=400,max_usd=5"
     python3 -m autodedup.lane --mode labels --args "generation=g4" --out out/
     python3 -m autodedup.lane --mode record --args "wave=W0,title=Region census,cost_usd=0"
     python3 -m autodedup.lane --mode record --args "id=12,cost_usd=3.10,status=done"
@@ -52,6 +52,7 @@ from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
 from autodedup.incremental_lane import run_rt_seed
 from autodedup.iterations import run_record
+from autodedup.judge_lane import run_judge
 from autodedup.labels_lane import run_labels
 from autodedup.rt_equivalence import run_equivalence
 from autodedup.score_lane import run_score
@@ -62,6 +63,7 @@ MODES: dict[str, Mode] = {
     "census": run_census,
     "probes": run_probes,
     "export": run_export,
+    "judge": run_judge,
     "score": run_score,
     "rt_seed": run_rt_seed,
     "rt_equivalence": run_equivalence,
@@ -100,6 +102,20 @@ ITERATION_META: dict[str, dict[str, Any]] = {
             "posture — paid for once rather than once per censused block."
         ),
         "tools": ["autodedup.census", "autodedup.lane", "GitHub Actions"],
+    },
+    "judge": {
+        "wave": "W3",
+        "title": "LLM judge",
+        "approach": (
+            "A deterministic stratified sample of one engine pass, put to the four-way judge "
+            "under a pre-flight --max-usd that binds before each call — text, vision or three "
+            "deep votes — so the uncertain band gets an arbiter and the programme gets ground "
+            "truth built fresh inside autodedup.*."
+        ),
+        "tools": [
+            "autodedup.judge", "autodedup.judge_lane", "autodedup.lane", "api.llm_client",
+            "Cloudflare R2", "GitHub Actions",
+        ],
     },
     "score": {
         "wave": "W5",
@@ -244,7 +260,7 @@ def _metrics(result: Any) -> dict[str, Any] | None:
         return None
     picked = {
         key: result[key]
-        for key in ("counts", "timings", "bytes", "drawn", "done")
+        for key in ("counts", "timings", "bytes", "drawn", "done", "spent_usd")
         if key in result
     }
     return picked or None
@@ -286,6 +302,14 @@ def _ledger_open(
         return None, None
 
 
+def _spent_usd(result: Any) -> float | None:
+    """PROGRAM.md: measured spend, read from `llm_calls` by the lane — never a forecast."""
+    if not isinstance(result, dict):
+        return None
+    value = result.get("spent_usd")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 def _ledger_close(
     conn: Any, iteration_id: int | None, summary: dict[str, Any], *, status: str
 ) -> None:
@@ -296,6 +320,9 @@ def _ledger_close(
             status=status,
             sample_stats=summary.get("result"),
             metrics=_metrics(summary.get("result")),
+            # W3 is the first PAID mode: without this the progress page shows $0 for a run
+            # that was billed. None on the free modes keeps the column's existing value.
+            cost_usd=_spent_usd(summary.get("result")),
             artifacts=_artifacts(),
             notes=summary.get("error"),
         )
@@ -363,9 +390,11 @@ def run(
                 pass
     summary["finished_at"] = _now()
     if summary["result"] is None:
-        # A mode that failed may ALREADY have written this file with what it had done before
-        # it raised; writing over it would leave the operator an exception string and nothing
-        # else. So what it wrote is carried, never dropped.
+        # A mode that failed may ALREADY have written this file with everything that prices the
+        # failure — which GPU was rented, how long it booted, what the run had spent. Writing
+        # over it leaves the operator an exception string and nothing else, which is the exact
+        # shape `judge_lane`'s boot-failure path exists to prevent (it writes the artifact
+        # first, then raises). So what it wrote is carried, never dropped.
         partial = _read_json(out_path)
         if partial is not None:
             summary["partial_result"] = partial
