@@ -293,3 +293,143 @@ def test_the_termination_log_prices_the_decision(caplog):
                 break
     assert "case=bootstrap-deadline" in caplog.text
     assert "spent≈$0.07" in caplog.text and "rtx3090" in caplog.text
+
+
+# --- fake pods over a fake clock (2026-09-27, pod udlpld675b3zwp) ------------------------
+# The G1 payload was OOM-killed every ~18 min; each restart heartbeated, so the marker
+# always moved, and two exits were never within the 15-min stall window. The pod billed the
+# whole 15,613 s window (~$2.17). These replay that shape against the rails that end it.
+
+from scripts import pod_report  # noqa: E402
+
+BOOT_S = 62.0
+PASS_S = 1100.0          # one pass: bootstrap, image check, DINOv3 up to the kill
+
+
+class _CrashLoopingPod:
+    """A pod whose payload dies every PASS_S; `gives_up` = the new bootstrap (at the first
+    exit 137); `units` = the G1 marker (durable work) instead of a heartbeat timestamp.
+    The step history is the reporter's own bounded, trimmed history."""
+
+    def __init__(self, *, gives_up: bool, units: bool) -> None:
+        self.gives_up = gives_up
+        self.units = units
+        self.now = 0.0
+
+    def records(self) -> list[dict]:
+        out: list[dict] = []
+        k = 1
+        while BOOT_S + (k - 1) * PASS_S <= self.now:
+            out.append({"ts": k, "msg": f"pass={k} step=payload starting"})
+            if self.now < BOOT_S + k * PASS_S - 5:
+                break
+            if self.gives_up:
+                out.append({"ts": k, "msg": f"pass={k} payload gave-up code=137 failures=1 "
+                                            "step=payload", "tail": "Killed"})
+                out.append({"ts": k, "msg": f"pass={k} step=gave-up idle"})
+                break
+            out.append({"ts": k, "msg": f"pass={k} exit=137 step=payload", "tail": "Killed"})
+            k += 1
+        return pod_report.trim(out)
+
+    def __call__(self) -> Progress:
+        steps = tuple(json.dumps(r) for r in self.records())
+        idle = self.gives_up and any("gave-up" in s for s in steps)
+        if self.units:
+            # Two shards landed in the first pass; no restart ever finishes another.
+            marker = f"0|units={min(2, int(self.now // 400))}"
+        else:
+            marker = "0|frozen" if idle else f"0|{int(self.now)}"   # a heartbeat a poll
+        return Progress(booted=self.now >= BOOT_S, marker=marker, steps=steps,
+                        step=steps[-1] if steps else "")
+
+
+def _replay(pod, watchdog, until_s: float = 15_600.0):
+    now = 0.0
+    while now < until_s:
+        now += 30.0                                      # run_job's own 30 s poll
+        pod.now = now
+        stop = watchdog(now)
+        if stop:
+            return stop, now
+    return None, None
+
+
+def test_the_replayed_crash_loop_is_ended_by_the_pass_number_not_the_window():
+    # The old bootstrap (no give-up) and the heartbeat marker: exactly 2026-09-27.
+    pod = _CrashLoopingPod(gives_up=False, units=False)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _replay(pod, watchdog)
+    assert watchdog.verdict == "crash-loop"
+    assert at <= BOOT_S + 3 * PASS_S + 60                # pass 4 appears; 15,613 s before
+    assert "pass 4" in stop and "exit=137" in stop       # the first failure is named
+
+
+def test_a_bootstrap_that_gives_up_is_torn_down_within_a_minute():
+    pod = _CrashLoopingPod(gives_up=True, units=False)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _replay(pod, watchdog)
+    assert watchdog.verdict == "payload-failed"
+    assert BOOT_S + PASS_S - 5 <= at <= BOOT_S + PASS_S + 60
+    assert "code=137" in stop
+
+
+def test_restarts_that_finish_nothing_are_a_stall_when_progress_is_units():
+    # Even with no give-up and no pass rail, a units marker ignores the heartbeats: the
+    # last shard landed at 800 s, so the stall deadline ends it 15 min later.
+    pod = _CrashLoopingPod(gives_up=False, units=True)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60, max_passes=99)
+    stop, at = _replay(pod, watchdog)
+    assert watchdog.verdict == "stall-deadline"
+    assert 800 + 900 <= at <= 800 + 900 + 60
+    assert "units=2" in stop
+
+
+class _SlowPod:
+    """A healthy pod that is merely slow: one shard every 14 min (inside the 15-min stall
+    window), a heartbeat every poll, one pass, all arms terminal after four hours."""
+
+    def __init__(self, *, restart_at: float | None = None) -> None:
+        self.now = 0.0
+        self.restart_at = restart_at
+
+    def __call__(self) -> Progress:
+        recs = [{"ts": 1, "msg": "pass=1 step=payload starting"}]
+        if self.restart_at is not None and self.now >= self.restart_at:
+            recs += [{"ts": 2, "msg": "pass=1 exit=1 step=payload", "tail": "ConnectionError"},
+                     {"ts": 3, "msg": "pass=2 step=payload starting"}]
+        steps = tuple(json.dumps(r) for r in recs)
+        return Progress(booted=self.now >= BOOT_S,
+                        marker=f"0|units={int(self.now // 840)}", steps=steps,
+                        terminal=self.now >= 14_400, step=steps[-1])
+
+
+def test_a_slow_but_progressing_pod_runs_to_the_end():
+    pod = _SlowPod()
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _replay(pod, watchdog)
+    assert watchdog.verdict == "all-terminal" and at >= 14_400
+
+
+def test_one_transient_payload_failure_and_a_resumed_pass_is_not_a_crash_loop():
+    pod = _SlowPod(restart_at=3_000)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _replay(pod, watchdog)
+    assert watchdog.verdict == "all-terminal"
+
+
+def test_a_fourth_pass_is_a_crash_loop_even_without_an_exit_record_in_view():
+    # The bounded history can drop exit records before a poll sees them (8 records, and a
+    # pass writes 8 steps); the pass number cannot be dropped.
+    steps = tuple(_rec(f"pass=4 step={s} ok") for s in ("fetch", "uv", "venv", "torch"))
+    poller = _Poller([Progress(booted=True, marker="0|t1", steps=steps, step=steps[-1])])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _run(watchdog, [60])
+    assert watchdog.verdict == "crash-loop" and at == 60
+    assert "pass 4" in stop

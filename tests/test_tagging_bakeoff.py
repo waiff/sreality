@@ -676,6 +676,37 @@ def test_the_marker_moves_with_a_heartbeat_even_when_no_vector_is_written():
                                               baseline_vectors=0).marker)
 
 
+def _g1_reading(run_note, arm_note="2026-09-08T12:30:00+00:00 dinov3 4096/98578", units=True):
+    conn = _progress_conn(arms=[("g1:embed", "running", arm_note, 0)], run_note=run_note)
+    return dispatch.read_bakeoff_progress(conn, run_id=2, only=[], launched_at=LAUNCHED,
+                                          baseline_vectors=0, units=units)
+
+
+def test_with_units_a_heartbeat_that_finished_nothing_is_not_progress():
+    # 2026-09-27: the G1 payload was OOM-killed and restarted ten times, and every
+    # restart's heartbeats moved the marker, so the stall deadline never fired.
+    a = _g1_reading("pod alive 2026-09-08T12:10:00+00:00 embed dinov3 2336/98578 units=7 rss=3.1GB",
+                    arm_note="2026-09-08T12:10:00+00:00 dinov3 2336/98578")
+    b = _g1_reading("pod alive 2026-09-08T12:11:00+00:00 embed dinov3 5216/98578 units=7 rss=9.4GB",
+                    arm_note="2026-09-08T12:11:00+00:00 dinov3 5216/98578")
+    c = _g1_reading("pod alive 2026-09-08T12:12:00+00:00 embed dinov3 8032/98578 units=8 rss=3.2GB")
+    assert a.marker == b.marker == "0|units=7"
+    assert c.marker == "0|units=8" and "units 8" in c.detail
+
+
+def test_units_of_a_previous_dispatch_do_not_count_and_the_heartbeat_rules_until_ours():
+    # Before this dispatch's payload reports, the bootstrap's steps are the only life sign.
+    stale = _g1_reading("pod alive 2026-09-07T12:10:00+00:00 done units=40 rss=1.0GB")
+    assert "units" not in stale.marker and stale.marker.startswith("0|2026-09-08T12:30:00")
+    assert _g1_reading(None).marker == "0|2026-09-08T12:30:00+00:00"
+
+
+def test_the_tagging_lane_marker_is_unchanged_by_units():
+    reading = _g1_reading("pod alive 2026-09-08T12:10:00+00:00 caching 250/10800 units=3",
+                          units=False)
+    assert reading.marker == "0|2026-09-08T12:30:00+00:00"
+
+
 def test_terminal_means_every_arm_this_dispatch_asked_for():
     arms = [("a", "ok", None, 5400), ("b", "failed", None, 0),
             (arms_mod.STORED_CLIP_ARM, "pending", None, 0)]

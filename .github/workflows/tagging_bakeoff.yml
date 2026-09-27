@@ -45,7 +45,13 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #      checkpoint). `arms` doubles as the pod phase list for this stage. The card is the
 #      first rung with capacity of `gpu_allowlist` (in order) x `cloud_type` (ANY: community,
 #      then secure), under the $1.00/h cap; no capacity anywhere rents nothing, and a
-#      `resume` on the minted run_id then retries without repeating the export.
+#      `resume` on the minted run_id then retries without repeating the export. Every arm
+#      is written in shards as it runs (a restart or a resume continues after the last
+#      one); a payload that fails is restarted at most twice and never after an OOM kill
+#      (exit 137) — the bootstrap then uploads what exists and the watchdog tears the pod
+#      down; the stall deadline counts finished shards, not heartbeats (run 2, 2026-09-27:
+#      ten OOM restarts billed the whole 4 h 20 min window). `collect` evaluates whatever
+#      arms finished into g1_out/eval.json + eval.md, saying PARTIAL RUN when any did not.
 #
 # START WITH dry_run (the default). The manifest stage's dry run reports which heads the
 # operator has marked ready on /new-dedup/training-set and how many distinct images the run

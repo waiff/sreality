@@ -554,11 +554,36 @@ def _read_text(path: str) -> str | None:
         return None
 
 
-def pod_memory(meminfo: str = "/proc/meminfo",
-               cgroup_root: str = "/sys/fs/cgroup") -> dict[str, int | None]:
+def _cgroup_memory_limit(cgroup_root: str, proc_cgroup: str) -> int | None:
+    """The tightest memory limit over this process's cgroup and its ancestors (v2
+    `memory.max`, read along the path /proc/self/cgroup names: `/` inside a container with
+    its own cgroup namespace), else the v1 `memory.limit_in_bytes`; None when unlimited."""
+    def limit(path: str) -> int | None:
+        raw = _read_text(path)
+        return int(raw) if raw and raw.isdigit() and 0 < int(raw) < UNLIMITED else None
+
+    rel = next((ln[3:].strip() for ln in (_read_text(proc_cgroup) or "").splitlines()
+                if ln.startswith("0::")), "/")
+    found = []
+    while True:
+        value = limit(os.path.join(cgroup_root, rel.strip("/"), "memory.max"))
+        if value:
+            found.append(value)
+        if rel in ("", "/"):
+            break
+        rel = os.path.dirname(rel.rstrip("/"))
+    if not found:
+        value = limit(os.path.join(cgroup_root, "memory", "memory.limit_in_bytes"))
+        if value:
+            found.append(value)
+    return min(found) if found else None
+
+
+def pod_memory(meminfo: str = "/proc/meminfo", cgroup_root: str = "/sys/fs/cgroup",
+               proc_cgroup: str = "/proc/self/cgroup") -> dict[str, int | None]:
     """The RAM this payload may use: MemTotal (the HOST's, inside a container) and the
-    container's cgroup limit (v2 `memory.max`, else v1 `memory.limit_in_bytes`); `limit`
-    is the smaller. The OOM killer answers to the cgroup, not to MemTotal."""
+    container's cgroup limit; `limit` is the smaller. The OOM killer answers to the
+    cgroup, not to MemTotal."""
     total = None
     for line in (_read_text(meminfo) or "").splitlines():
         if line.startswith("MemTotal:"):
@@ -567,12 +592,7 @@ def pod_memory(meminfo: str = "/proc/meminfo",
             except (IndexError, ValueError):
                 pass
             break
-    cgroup = None
-    for rel in ("memory.max", os.path.join("memory", "memory.limit_in_bytes")):
-        raw = _read_text(os.path.join(cgroup_root, rel))
-        if raw and raw.isdigit() and 0 < int(raw) < UNLIMITED:
-            cgroup = int(raw)
-            break
+    cgroup = _cgroup_memory_limit(cgroup_root, proc_cgroup)
     known = [v for v in (total, cgroup) if v]
     return {"mem_total": total, "cgroup_limit": cgroup, "limit": min(known) if known else None}
 

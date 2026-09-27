@@ -593,3 +593,397 @@ def test_stop_when_the_pooled_private_bar_fails_even_if_the_rooms_pass():
     assert v["B2_same_room"]["pass"] is False
     assert v["decision"].startswith("STOP")
     assert "M1 +2" in v["engine_adoption_bar"]
+
+
+# --- the 2026-09-27 OOM: bounded decode, shards, resume, partial results -----------------
+# Run 2 (pod udlpld675b3zwp, $2.17) was OOM-killed at DINOv3 image 34,848 and restarted ten
+# times: every decoded batch stayed alive for the whole arm, the arm was written only at its
+# end, and nothing bounded the restarts.
+
+
+class _Decoded:
+    """A stand-in for a decoded image; weakref-able, so the test can count the live ones."""
+
+    def __init__(self, key) -> None:
+        self.key = key
+
+
+class _Vec:
+    def __init__(self, a) -> None:
+        self.a = a
+
+    def numpy(self):
+        return self.a
+
+
+class _Encoder:
+    """The encoder interface embed_arm calls: a batch in, one row per image out."""
+
+    def __init__(self) -> None:
+        self.seen: list = []
+
+    def embed(self, imgs, batch_size=32):
+        self.seen.extend(i.key for i in imgs)
+        return _Vec(np.array([[float(i.key), 1.0] for i in imgs], np.float32))
+
+
+def test_decoded_batches_keeps_only_the_batches_in_flight_alive():
+    # The leak: a finished future holds its result, and the old list held every future.
+    import weakref
+
+    live: weakref.WeakSet = weakref.WeakSet()
+    peak = 0
+
+    def loader(src):
+        img = _Decoded(src)
+        live.add(img)
+        return img
+
+    items = [(i, i) for i in range(400)]
+    got = 0
+    for ids, imgs in pod.decoded_batches(items, batch=8, workers=4, loader=loader, prefetch=3):
+        got += len(ids)
+        del imgs
+        peak = max(peak, len(live))
+    assert got == 400
+    # the batch being consumed + at most `prefetch` decoded ahead (+1 racing its submit)
+    assert peak <= 8 * (3 + 2), peak
+
+
+def test_decoded_batches_blocks_the_decoder_while_the_consumer_is_behind():
+    calls = []
+    items = [(i, i) for i in range(1000)]
+    stream = pod.decoded_batches(items, batch=10, workers=8,
+                                 loader=lambda s: calls.append(s) or _Decoded(s), prefetch=2)
+    next(stream)
+    import time as _t
+
+    _t.sleep(0.3)
+    # 1000 images are waiting; backpressure means only the next `prefetch` batches decode.
+    assert len(calls) <= 10 * (1 + 2 + 1)
+    stream.close()
+
+
+def test_plan_decode_sizes_the_queue_from_the_pods_memory():
+    gb = 2**30
+    # a 3090 pod (~60 GB cgroup limit), DINOv3 @768: the full batch, one batch per worker
+    assert pod.plan_decode(60 * gb, 16, 32, 768 * 768 * 4) == (32, 16)
+    # a 2 GB box, SSCD @320: the batch holds, the prefetch shrinks to what 10 % of RAM holds
+    batch, prefetch = pod.plan_decode(2 * gb, 16, 64, 320 * 320 * 4)
+    assert batch == 64 and 1 <= prefetch < 16
+    assert (prefetch + 1) * batch * 320 * 320 * 4 <= 0.1 * 2 * gb
+    # so little RAM that two batches would not fit: the batch shrinks, never below one
+    assert pod.plan_decode(64 * 2**20, 8, 64, 768 * 768 * 4) == (1, 1)
+
+
+def test_pod_memory_reads_meminfo_and_the_cgroup_limit(tmp_path):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       263842516 kB\nMemFree:  1 kB\n")
+    own = tmp_path / "self_cgroup"
+    own.write_text("0::/\n")                       # a container with its own namespace
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "memory.max").write_text(f"{62 * 2**30}\n")
+    got = pod.pod_memory(str(meminfo), str(v2), str(own))
+    assert got["mem_total"] == 263842516 * 1024
+    assert got["cgroup_limit"] == 62 * 2**30 and got["limit"] == 62 * 2**30
+    (v2 / "memory.max").write_text("max\n")
+    assert pod.pod_memory(str(meminfo), str(v2), str(own))["limit"] == 263842516 * 1024
+    # A process in a nested cgroup (a systemd scope, a host-namespace container): the
+    # tightest limit along its path wins.
+    own.write_text("0::/user.slice/run-1.scope\n")
+    (v2 / "user.slice" / "run-1.scope").mkdir(parents=True)
+    (v2 / "user.slice" / "memory.max").write_text(f"{8 * 2**30}\n")
+    (v2 / "user.slice" / "run-1.scope" / "memory.max").write_text(f"{3 * 2**30}\n")
+    assert pod.pod_memory(str(meminfo), str(v2), str(own))["cgroup_limit"] == 3 * 2**30
+    v1 = tmp_path / "v1"
+    (v1 / "memory").mkdir(parents=True)
+    (v1 / "memory" / "memory.limit_in_bytes").write_text("9223372036854771712\n")   # unlimited
+    assert pod.pod_memory(str(meminfo), str(v1), str(tmp_path / "none"))["cgroup_limit"] is None
+    (v1 / "memory" / "memory.limit_in_bytes").write_text(f"{16 * 2**30}\n")
+    assert pod.pod_memory(str(meminfo), str(v1), str(tmp_path / "none"))["limit"] == 16 * 2**30
+
+
+def test_fs_type_names_the_filesystem_under_the_cache(tmp_path):
+    mounts = tmp_path / "mounts"
+    mounts.write_text("overlay / overlay rw 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n"
+                      "/dev/sda1 /opt/podboot ext4 rw 0 0\n")
+    assert pod.fs_type("/opt/podboot/img", str(mounts)) == "ext4"
+    assert pod.fs_type("/dev/shm/cache", str(mounts)) == "tmpfs"
+    assert pod.fs_type("/root", str(mounts)) == "overlay"
+
+
+def test_embed_arm_writes_shards_and_a_restart_resumes_after_the_last_one(tmp_path):
+    import os as _os
+    import time as _t
+
+    out = str(tmp_path / "emb_x.npz")
+    sdir = pod.shard_dir(out)
+    items = [(i, i) for i in range(1, 11)]
+    shards: list = []
+
+    def loader(src):
+        if src == 7:
+            raise OSError("bytes that will never decode")
+        return _Decoded(src)
+
+    # A kill (here: a deadline already past) after the first batch leaves one shard and no
+    # arm file — the state a pass dies in.
+    killed = _Encoder()
+    cut = pod.embed_arm("x", killed, items, batch=2, workers=2, loader=loader, out_path=out,
+                        beat=lambda m: None, deadline=_t.monotonic() - 1, prefetch=1,
+                        shard_size=2, on_shard=shards.append)
+    assert cut["partial"] is True and not _os.path.exists(out)
+    assert len(pod.shard_files(sdir)) == 1 and killed.seen == [1, 2]
+    # The next pass embeds only what no shard holds, then assembles the arm.
+    resumed = _Encoder()
+    done = pod.embed_arm("x", resumed, items, batch=2, workers=2, loader=loader, out_path=out,
+                         beat=lambda m: None, deadline=None, prefetch=1, shard_size=2,
+                         on_shard=shards.append)
+    assert resumed.seen == [3, 4, 5, 6, 8, 9, 10]      # 1-2 came from the shard, 7 is bad
+    assert done["n"] == 9 and done["resumed"] == 2
+    keys, vecs = pod.load_vecs(out)
+    assert sorted(keys.tolist()) == [1, 2, 3, 4, 5, 6, 8, 9, 10]
+    assert vecs.shape == (9, 2) and not _os.path.exists(sdir)   # no shards left behind
+    assert shards and all(s.startswith("x shard") for s in shards)
+    # A finished arm is never embedded again.
+    assert pod.embed_arm("x", _Encoder(), items, batch=2, workers=2, loader=loader,
+                         out_path=out, beat=lambda m: None, deadline=None) == {
+        "arm": "x", "skipped": "exists"}
+
+
+def test_an_undecodable_image_is_recorded_and_never_retried(tmp_path):
+    out = str(tmp_path / "emb_y.npz")
+    items = [(i, i) for i in range(1, 5)]
+    tries: list = []
+
+    def loader(src):
+        tries.append(src)
+        if src == 2:
+            raise OSError("truncated")
+        return _Decoded(src)
+
+    pod.embed_arm("y", _Encoder(), items, batch=4, workers=1, loader=loader, out_path=out,
+                  beat=lambda m: None, deadline=0.0000001, prefetch=1, shard_size=100)
+    done, bad = pod.embed_shard_keys(pod.shard_dir(out))
+    assert done == {1, 3, 4} and bad == {2}
+    tries.clear()
+    pod.embed_arm("y", _Encoder(), items, batch=4, workers=1, loader=loader, out_path=out,
+                  beat=lambda m: None, deadline=None, prefetch=1, shard_size=100)
+    assert tries == []                              # nothing left to try, 2 included
+
+
+def test_synthetic_string_keys_survive_the_shard_round_trip(tmp_path):
+    out = str(tmp_path / "syn_z.npz")
+    items = [(f"{i}:crop10", i) for i in range(1, 6)]
+
+    class _Enc(_Encoder):
+        def embed(self, imgs, batch_size=32):
+            self.seen.extend(i.key for i in imgs)
+            return _Vec(np.ones((len(imgs), 3), np.float32))
+
+    import time as _t
+
+    pod.embed_arm("z", _Enc(), items, batch=2, workers=1, loader=_Decoded, out_path=out,
+                  beat=lambda m: None, deadline=_t.monotonic() - 1, prefetch=1, shard_size=2)
+    rest = _Enc()
+    pod.embed_arm("z", rest, items, batch=2, workers=1, loader=_Decoded, out_path=out,
+                  beat=lambda m: None, deadline=None, prefetch=1, shard_size=2)
+    assert rest.seen == [3, 4, 5]                   # the sources of 3..5:crop10 only
+    keys, _ = pod.load_vecs(out)
+    assert sorted(keys.tolist()) == [f"{i}:crop10" for i in range(1, 6)]
+
+
+def test_restorable_takes_results_and_shards_and_nothing_that_climbs_out():
+    assert pod.restorable("emb_sscd.npz") and pod.restorable("synthetic.json")
+    assert pod.restorable("emb_dinov3.shards/000012.npz")
+    assert pod.restorable("lg_disk.shards/legacy.npz")
+    for bad in ("report.json", "../x.npz", "a/b/c.npz", "emb_dinov3.shards/../x.npz",
+                "notshards/000001.npz", "emb_x.shards/000001.npz.tmp.npz", "x.txt"):
+        assert not pod.restorable(bad), bad
+
+
+def test_restore_brings_back_shards_of_an_unfinished_arm(tmp_path, monkeypatch):
+    import io as _io
+    import tarfile as _tar
+
+    src = tmp_path / "src"
+    (src / "emb_dinov3.shards").mkdir(parents=True)
+    np.savez(src / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
+    np.savez(src / "emb_dinov3.shards" / "000000.npz", key=np.array([1]),
+             vec=np.ones((1, 2), np.float16), bad=np.array([]))
+    (src / "report.json").write_text("{}")
+    blob = _io.BytesIO()
+    with _tar.open(fileobj=blob, mode="w") as tar:
+        tar.add(src, arcname="g1_results")
+
+    class _R2:
+        def object_size(self, key):
+            return len(blob.getvalue())
+
+        def download_file(self, key, path):
+            with open(path, "wb") as fh:
+                fh.write(blob.getvalue())
+
+    from scraper import image_storage
+
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **kw: _R2()))
+    out = tmp_path / "run-2"
+    out.mkdir()
+    restored = pod.restore_checkpoint(str(out), 2)
+    assert sorted(restored) == ["emb_dinov3.shards/000000.npz", "emb_sscd.npz"]
+    assert pod.embed_shard_keys(pod.shard_dir(str(out / "emb_dinov3.npz")))[0] == {1}
+    assert not (tmp_path / "run-2.restore.tar").exists()      # streamed, then removed
+
+
+def test_durable_units_move_only_when_work_lands(tmp_path):
+    out = tmp_path / "run"
+    (out / "emb_dinov3.shards").mkdir(parents=True)
+    (out / "report.json").write_text("{}")
+    assert pod.durable_units(str(out)) == 0          # a report rewrite is not progress
+    (out / "emb_sscd.npz").write_bytes(b"x")
+    (out / "emb_dinov3.shards" / "000000.npz").write_bytes(b"x")
+    (out / "emb_dinov3.shards" / "000001.npz.tmp.npz").write_bytes(b"x")
+    assert pod.durable_units(str(out)) == 2
+
+
+def test_reporter_alive_lines_carry_units_and_rss(caplog):
+    rep = pod.Reporter(None, 2, units_fn=lambda: 17)
+    with caplog.at_level("INFO"):
+        rep.run_note(alive="embed dinov3 4096/98578")
+    assert "units=17" in caplog.text and "rss=" in caplog.text
+
+
+def test_finalize_ships_what_is_on_disk_and_closes_every_open_arm(tmp_path):
+    out = tmp_path / "run-2"
+    (out / "emb_dinov3.shards").mkdir(parents=True)
+    np.savez(out / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2), np.float16))
+    (out / "emb_dinov3.shards" / "000000.npz").write_bytes(b"x")
+    log: list = []
+    rep = pod.Reporter(_Conn(log), 2, units_fn=lambda: 2)
+    assert pod.finalize(str(out), 2, rep, "code=137 failures=1 pass=1", local_only=True) == 0
+    import json as _json
+    import tarfile as _tar
+
+    with _tar.open(str(out) + ".tar") as tar:
+        names = tar.getnames()
+    assert "g1_results/emb_sscd.npz" in names
+    assert "g1_results/emb_dinov3.shards/000000.npz" in names
+    assert _json.loads((out / "report.json").read_text())["gave_up"]["reason"].startswith("code=137")
+    closed = [p for s, p in log if s.startswith("UPDATE dedup_sim.tag_head_bakeoff_arms")]
+    assert closed and "payload gave up (code=137" in closed[0]["note"]
+    assert {"run_id": 2, "status": "failed"} in [p for _s, p in log]
+
+
+# --- the evaluator reads finished arms only, and says PARTIAL -------------------------
+
+
+def test_arm_status_counts_an_arm_finished_only_by_its_own_file(tmp_path):
+    np.savez(tmp_path / "emb_sscd.npz", key=np.array([1]), vec=np.ones((1, 2)))
+    np.savez(tmp_path / "emb_dinov2.npz", key=np.array([1]), vec=np.ones((1, 2)))
+    (tmp_path / "emb_dinov3.shards").mkdir()
+    for i in range(3):
+        (tmp_path / "emb_dinov3.shards" / f"{i:06d}.npz").write_bytes(b"x")
+    finished, unfinished = ev.arm_status(str(tmp_path))
+    assert finished == ["sscd", "dinov2"]
+    assert unfinished["dinov3"] == "3 shards on disk"
+    assert unfinished["lg_aliked"] == "not started" and "lg_superpoint" not in unfinished
+    assert unfinished["synthetic"].startswith("0/6 files")
+
+
+def test_lightglue_shards_are_read_only_on_request(tmp_path):
+    (tmp_path / "lg_disk.shards").mkdir()
+    pod.save_match_rows(str(tmp_path / "lg_disk.shards" / "000000.npz"),
+                        [(1, 2, 100, 90, 40, 20, 0.5, 30, 25)])
+    assert ev.load_lg(str(tmp_path)) == {}
+    assert ev.load_lg(str(tmp_path), include_partial=True)["disk"][(1, 2)] == (40, 30, 25)
+
+
+def test_a_partial_run_reports_bars_on_finished_arms_only_and_never_stops():
+    # The pooled private bar FAILS on the finished arm; with DINOv3 and LightGlue unfinished
+    # that is a readout, not a STOP.
+    report = {"arms_new": ["sscd"], "arms_finished": ["sscd"],
+              "arms_unfinished": {"dinov3": "3 shards on disk", "lg_aliked": "not started"},
+              "rooms": {f"{a}@hc:{r}": {"recall@labFMR0.05": v, "n_pos": 100}
+                        for r in ("kitchen", "bathroom", "private")
+                        for a, v in (("clip", 0.63), ("sscd", 0.60), ("dinov3", 0.95))}}
+    report["rooms"].update({f"clip@clip:{r}": {"recall@labFMR0.05": 0.63, "n_pos": 100}
+                            for r in ("kitchen", "bathroom", "private")})
+    v = ev.verdict(report)
+    assert v["decision"].startswith("PARTIAL RUN") and v["partial"] is True
+    assert "dinov3 (3 shards on disk)" in v["decision"]
+    assert v["B2_same_room"]["private"]["best"].startswith("sscd")   # dinov3 is not read
+    assert v["B2_same_room"]["arms_read"] == ["sscd"]
+    assert v["B3_geometry"]["pass"] is None and "no finished arm" in v["B3_geometry"]["not_reported"]
+    assert v["B1_copy"]["not_reported"]
+
+
+def test_a_complete_run_is_not_partial():
+    report = {"arms_new": ["dinov3"], "arms_finished": list(ev.EXPECTED_ARMS),
+              "arms_unfinished": {}, "rooms": _rooms((0.717, 0.83), (0.538, 0.65), (0.631, 0.70))}
+    v = ev.verdict(report)
+    assert v["partial"] is False and v["decision"].startswith("STOP")
+
+
+# --- the dispatcher wires the give-up call and the units marker ------------------------
+
+
+def test_the_g1_pod_is_launched_with_a_finalize_and_a_units_watchdog(monkeypatch):
+    seen = {}
+
+    def fake_run_pod(plan, args, select=None, units=False):
+        seen.update(start=plan.start_cmd[-1], units=units)
+        return 0
+
+    monkeypatch.setattr(tb, "_run_pod", fake_run_pod)
+    monkeypatch.setattr(tb, "_log_arm_reset", tb._log_arm_reset)
+    assert g1d.main(["--stage", "pod", "--run-id", "2", "--ref", "main", "--dry-run"]) == 0
+    assert seen["units"] is True
+    assert "python -m scripts.g1_image_stack_pod --run-id=2" in seen["start"]
+    assert "--finalize" in seen["start"] and "payload gave-up" in seen["start"]
+
+
+def test_collect_evaluates_whatever_arms_finished(tmp_path, monkeypatch):
+    import gzip as _gzip
+    import io as _io
+    import json as _json
+    import tarfile as _tar
+
+    src = tmp_path / "pod"
+    src.mkdir()
+    np.savez(src / "emb_sscd.npz", key=np.array([1, 2]), vec=np.eye(2, dtype=np.float16))
+    (src / "emb_dinov3.shards").mkdir()
+    np.savez(src / "emb_dinov3.shards" / "000000.npz", key=np.array([1]),
+             vec=np.ones((1, 2), np.float16), bad=np.array([]))
+    blob = _io.BytesIO()
+    with _tar.open(fileobj=blob, mode="w") as tar:
+        tar.add(src, arcname="g1_results")
+    manifest = {"images": [{"image_id": 1, "listing_id": 10, "seq": 0, "phash": 0, "tag": "kitchen"},
+                           {"image_id": 2, "listing_id": 11, "seq": 0, "phash": 7, "tag": "kitchen"}],
+                "pairs": [{"a": 10, "b": 11, "classes": ["pos_rule"], "stratum": "h0",
+                           "n_tight": 0, "n_tight_all": 0}],
+                "frame_pairs": [], "neighbours": {}}
+    mbuf = _io.BytesIO()
+    with _gzip.GzipFile(fileobj=mbuf, mode="wb") as fh:
+        fh.write(_json.dumps(manifest).encode())
+    store = {"bakeoff/g1-image-stack/2/results.tar": blob.getvalue(),
+             "bakeoff/g1-image-stack/2/manifest.json.gz": mbuf.getvalue()}
+
+    class _R2:
+        def object_size(self, key):
+            return len(store[key]) if key in store else None
+
+        def download_file(self, key, path):
+            with open(path, "wb") as fh:
+                fh.write(store[key])
+
+    from scraper import image_storage
+
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **kw: _R2()))
+    out = tmp_path / "g1_out"
+    assert g1d.main(["--stage", "collect", "--run-id", "2", "--out", str(out)]) == 0
+    report = _json.loads((out / "eval.json").read_text())
+    assert report["arms_finished"] == ["sscd"] and report["partial"] is True
+    assert report["verdict"]["decision"].startswith("PARTIAL RUN")
+    assert (out / "eval.md").read_text().startswith("**PARTIAL RUN**")
+    assert not (out / "results.tar").exists()
