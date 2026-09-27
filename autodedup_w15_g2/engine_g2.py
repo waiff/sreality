@@ -11,7 +11,7 @@ clustering groups. Nothing else decides.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -24,6 +24,9 @@ class EngineCfg:
     t_band: float
     t_neg: float | None = None
     facts: FactCfg = field(default_factory=FactCfg)
+    # a costly text comparator (the unit designator a body states), read LAZILY: only on a would-be
+    # edge and on the cross pairs of a would-be union
+    lazy_fact: Callable[[int, int], str | None] | None = None
 
 
 @dataclass
@@ -60,10 +63,16 @@ def run_engine(keys: list[tuple[int, int]], p: np.ndarray, recs: dict[int, Rec],
             parent[x], x = root, parent[x]
         return root
 
+    lazy_memo: dict[tuple[int, int], str | None] = {}
+
     def fact_of(x: int, y: int) -> str | None:
         k = (x, y) if x < y else (y, x)
         if k not in fact_memo:
             fact_memo[k] = first_fact(recs[k[0]], recs[k[1]], cfg.facts)
+        if fact_memo[k] is None and cfg.lazy_fact is not None:
+            if k not in lazy_memo:
+                lazy_memo[k] = cfg.lazy_fact(k[0], k[1])
+            return lazy_memo[k]
         return fact_memo[k]
 
     def union(x: int, y: int) -> None:
@@ -82,8 +91,12 @@ def run_engine(keys: list[tuple[int, int]], p: np.ndarray, recs: dict[int, Rec],
     order = [i for i in np.argsort(-p, kind="stable")
              if p[i] >= cfg.t_merge and pair_facts[i] is None]
     refused_fact = refused_neg = edges = 0
+    lazy_refused = 0
     for i in order:
         a, b = keys[i]
+        if cfg.lazy_fact is not None and fact_of(a, b) is not None:
+            lazy_refused += 1
+            continue
         ra, rb = find(a), find(b)
         if ra == rb:
             edges += 1
@@ -112,4 +125,8 @@ def run_engine(keys: list[tuple[int, int]], p: np.ndarray, recs: dict[int, Rec],
     groups = {r: sorted(m) for r, m in members.items() if len(m) > 1}
     band = int(sum(1 for i in range(len(keys))
                    if pair_facts[i] is None and cfg.t_band <= p[i] < cfg.t_merge))
+    if cfg.lazy_fact is not None:
+        fact_count["lazy_edges_refused"] = lazy_refused
+        fact_count["lazy_pairs_read"] = len(lazy_memo)
+        fact_count["lazy_pairs_fired"] = sum(1 for v in lazy_memo.values() if v is not None)
     return EngineRun(groups, edges, band, refused_fact, refused_neg, fact_count)

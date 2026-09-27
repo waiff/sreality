@@ -37,6 +37,7 @@ from autodedup.store_score import storable
 from autodedup_w15_g2.paths import C2_CACHE, CACHE, COHORTS
 
 REPO = Path(__file__).resolve().parents[1]
+ADV_CACHE = Path("/home/hejtm/autodedup-artifacts/w15/census/adversary/runs")
 SETTINGS = REPO / "autodedup/settings/w31.json"
 MODEL = REPO / "autodedup/models/w6_gold.json"
 F = len(FEATURE_ORDER)
@@ -109,9 +110,18 @@ class Engine:
             probes = [frozenset(pairs[k]) for k in keys]
             V = np.zeros((len(keys), F), dtype=np.float64)
             P = np.zeros((len(keys), F), dtype=bool)
+            # the adversary's C1-replica cache (same code base afd121ae): {(lo, hi): features}
+            adv_path = ADV_CACHE / f"cache_cohort{name[1:]}.pkl"
+            adv: dict = {}
+            if name.startswith("c") and adv_path.is_file():
+                with open(adv_path, "rb") as handle:
+                    adv = pickle.load(handle)
+                print(f"[{name}] adversary feature cache {adv_path} ({len(adv)} pairs)", flush=True)
             for i, (lo, hi) in enumerate(keys):
-                feats = pair_features(fps[lo], fps[hi], ds.listings[lo], ds.listings[hi],
-                                      ds.images(lo), ds.images(hi), ctx, settings)
+                feats = adv.get((lo, hi))
+                if feats is None:
+                    feats = pair_features(fps[lo], fps[hi], ds.listings[lo], ds.listings[hi],
+                                          ds.images(lo), ds.images(hi), ctx, settings)
                 for j, fname in enumerate(FEATURE_ORDER):
                     value, present = feats.get(fname, ABSENT)
                     V[i, j] = float(value)

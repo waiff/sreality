@@ -38,6 +38,11 @@ class FactCfg:
                                     # per year, total), not two amounts: incomparable, no fact
     street: bool = True             # both at street grain and the streets differ
     unit: bool = True               # E61's predicate: one designator each, differ, one address
+    # two adverts LIVE TOGETHER ON ONE PORTAL state their columns in one convention, so there a
+    # smaller difference is already a stated one (C7's fused shape; None = off)
+    colive_floor_delta: int | None = None
+    colive_price_tol: float | None = None
+    colive_area_tol: float | None = None
 
     def dials(self) -> dict:
         return {k: getattr(self, k) for k in self.__slots__}
@@ -117,8 +122,13 @@ def facts(a: Rec, b: Rec, cfg: FactCfg = FactCfg(), first: bool = False) -> list
         return out
     if not category_main_compatible(a.cmain, b.cmain) and hit("kind"):
         return out
+    one_portal = (a.source is not None and a.source == b.source
+                  and (colive_days(a, b) or 0.0) >= cfg.price_colive_days)
+    area_tol = cfg.area_tol
+    if one_portal and cfg.colive_area_tol is not None:
+        area_tol = cfg.colive_area_tol
     area_apart = (a.area and b.area and a.area > 0 and b.area > 0
-                  and _rel(a.area, b.area) > cfg.area_tol)
+                  and _rel(a.area, b.area) > area_tol)
     plot_apart = ({a.cmain, b.cmain} <= PLOT_OBJECTS and a.plot and b.plot and a.plot > 0
                   and b.plot > 0 and _rel(a.plot, b.plot) > cfg.plot_tol)
     if (area_apart or plot_apart) and hit("area"):
@@ -126,13 +136,18 @@ def facts(a: Rec, b: Rec, cfg: FactCfg = FactCfg(), first: bool = False) -> list
     if (LAND not in (a.cmain, b.cmain) and a.dispo and b.dispo and a.dispo != b.dispo
             and hit("disposition")):
         return out
-    if (a.cmain == FLAT and b.cmain == FLAT and a.floor is not None and b.floor is not None
-            and abs(a.floor - b.floor) >= cfg.floor_delta and hit("floor")):
-        return out
-    if (a.prices and b.prices and not _paths_meet(a, b, cfg.price_tol)
-            and _comparable(a.prices, b.prices, cfg.price_units)):
+    if a.cmain == FLAT and b.cmain == FLAT and a.floor is not None and b.floor is not None:
+        delta = abs(a.floor - b.floor)
+        if (delta >= cfg.floor_delta or (one_portal and cfg.colive_floor_delta is not None
+                                         and delta >= cfg.colive_floor_delta)) and hit("floor"):
+            return out
+    if a.prices and b.prices and _comparable(a.prices, b.prices, cfg.price_units):
         together = colive_days(a, b)
-        if together is not None and together >= cfg.price_colive_days and hit("price"):
+        loose = (not _paths_meet(a, b, cfg.price_tol) and together is not None
+                 and together >= cfg.price_colive_days)
+        strict = (one_portal and cfg.colive_price_tol is not None
+                  and not _paths_meet(a, b, cfg.colive_price_tol))
+        if (loose or strict) and hit("price"):
             return out
     street_apart = cfg.street and a.street and b.street and a.street != b.street
     unit_apart = (cfg.unit and len(a.units) == 1 and len(b.units) == 1 and a.units != b.units
