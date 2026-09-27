@@ -290,9 +290,9 @@ def _boot_at(run_note: str | None) -> datetime | None:
     return None
 
 
-def _alive_units(run_note: str | None, since: datetime) -> int | None:
-    """The payload's durable-work count (`units=N` on its `pod alive` line), when a payload
-    of THIS dispatch wrote it (the line's stamp is after `since`); None otherwise."""
+def _alive_units(run_note: str | None, since: datetime) -> tuple[int, str] | None:
+    """(durable-work count, the alive line's text) from the payload's `pod alive` line
+    (`units=N`), when a payload of THIS dispatch wrote it (stamped after `since`)."""
     for line in (run_note or "").splitlines():
         if not line.startswith(ALIVE_PREFIX):
             continue
@@ -303,7 +303,9 @@ def _alive_units(run_note: str | None, since: datetime) -> int | None:
             when = datetime.fromisoformat(stamp.group(0).replace("Z", "+00:00"))
         except ValueError:
             return None
-        return int(units.group(1)) if when >= since else None
+        if when < since:
+            return None
+        return int(units.group(1)), line[len(ALIVE_PREFIX):][:240]
     return None
 
 
@@ -344,16 +346,19 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to
     # look exactly like a dead pod from here.
     steps = _steps(run_note)
-    done_units = (_alive_units(run_note, launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
-                  if units else None)
+    alive = (_alive_units(run_note, launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
+             if units else None)
     return Progress(
         booted=fresh_boot or vectors > baseline_vectors,
-        marker=(f"{vectors}|{heartbeat}" if done_units is None
-                else f"{vectors}|units={done_units}"),
+        marker=(f"{vectors}|{heartbeat}" if alive is None
+                else f"{vectors}|units={alive[0]}"),
         terminal=terminal,
+        # The alive line (phase, count, units, rss) goes into the Actions log with every
+        # progress line, so the pod's memory is watchable without a database read.
         detail=(f"{vectors} vectors, arms {done}/{len(considered)} terminal, "
-                + ("" if done_units is None else f"units {done_units}, ")
-                + f"heartbeat {heartbeat or 'none'}"),
+                + ("" if alive is None else f"units {alive[0]}, ")
+                + f"heartbeat {heartbeat or 'none'}"
+                + ("" if alive is None else f"; alive: {alive[1]}")),
         step=(steps[-1] if steps else "")[:1500],
         steps=tuple(record[:2000] for record in steps),
     )

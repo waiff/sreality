@@ -692,6 +692,7 @@ def test_with_units_a_heartbeat_that_finished_nothing_is_not_progress():
     c = _g1_reading("pod alive 2026-09-08T12:12:00+00:00 embed dinov3 8032/98578 units=8 rss=3.2GB")
     assert a.marker == b.marker == "0|units=7"
     assert c.marker == "0|units=8" and "units 8" in c.detail
+    assert "rss=3.2GB" in c.detail        # the pod's memory, readable in the Actions log
 
 
 def test_units_of_a_previous_dispatch_do_not_count_and_the_heartbeat_rules_until_ours():
