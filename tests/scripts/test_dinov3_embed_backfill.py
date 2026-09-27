@@ -62,8 +62,18 @@ class _FakeCursor:
             self._rows = [(len(self._conn.matching_embeddings(norm, params)),)]
         elif norm.startswith("SELECT count(*) FROM images i"):
             self._rows = [(len(self._conn.pending(norm, params)),)]
+        elif norm.startswith("SELECT i.id, i.storage_path") and "= any(%(keys)s" in norm:
+            self._rows = self._conn.by_key(norm, params)
         elif norm.startswith("SELECT i.id, i.storage_path"):
             self._rows = self._conn.pending(norm, params)
+        elif norm.startswith("SELECT e.image_id FROM image_dinov3_embeddings"):
+            keys = set(params["keys"])
+            self._rows = [(e["image_id"],) for e in self._conn.matching_embeddings(norm, params)
+                          if e["image_id"] in keys]
+        elif norm.startswith("SELECT t.image_id FROM image_tag_scores"):
+            self._rows = [(i,) for i in self._conn.scored]
+        elif norm.startswith("SELECT s.listing_id FROM autodedup.rt_scope_ids"):
+            self._rows = [(lid,) for lid in self._conn.rt_listings]
         else:  # pragma: no cover - an unrecognised statement is a test bug, not a pass
             raise AssertionError(f"fake conn saw unexpected SQL: {norm[:120]}")
 
@@ -91,9 +101,14 @@ class _FakeConn:
     every one of the six identity facts — so the fake cannot drift into agreeing with
     a query that silently dropped one."""
 
-    def __init__(self, images: list[tuple[int, str | None]], embeddings: list[dict]) -> None:
+    def __init__(self, images: list[tuple[int, str | None]], embeddings: list[dict],
+                 *, scored: list[int] = (), rt_listings: list[int] = (),
+                 listing_of: dict[int, int] | None = None) -> None:
         self.images = images
         self.embeddings = embeddings
+        self.scored = list(scored)
+        self.rt_listings = list(rt_listings)
+        self.listing_of = listing_of or {}
         self.executed: list[tuple[str, dict | None]] = []
         self.written: list[tuple] = []
 
@@ -123,6 +138,13 @@ class _FakeConn:
             e for e in self.embeddings
             if all(e[f] == params[f] for f in IDENTITY_FIELDS)
         ]
+
+    def by_key(self, sql: str, params: dict) -> list[tuple[int, str]]:
+        keys, by_id, shards = set(params["keys"]), "i.id = any" in sql, params["shards"]
+        return [(i, path) for i, path in self.images
+                if path is not None
+                and (i if by_id else self.listing_of.get(i, i)) in keys
+                and (shards == 1 or i % shards == params["shard"])]
 
     def pending(self, sql: str, params: dict) -> list[tuple[int, str]]:
         if "NOT EXISTS" in sql:
@@ -819,3 +841,69 @@ def test_scope_sql_is_the_anti_join_without_the_anti_join():
         assert "NOT EXISTS" not in sql and "image_dinov3_embeddings" not in sql
         assert " ".join(bf.SCOPES[scope].split()) in sql
         assert "ORDER BY i.id LIMIT %(batch)s" in sql
+
+
+# --- bounded scopes are resolved from their keys, never by an ordered images walk ---------
+
+
+def _ordered_scans(conn) -> int:
+    return sum(1 for sql, _p in conn.executed if "ORDER BY i.id LIMIT" in sql)
+
+
+def test_the_population_gate_scope_resolves_from_the_scored_ids(monkeypatch):
+    # 20 scored images among 1,000; 6 already carry a vector under this identity.
+    images = _images(1000)
+    scored = list(range(50, 1000, 50))
+    conn = _FakeConn(images=images, embeddings=[_emb(i) for i in scored[:6]], scored=scored)
+    monkeypatch.setattr(bf, "_KEY_BATCH", 7)
+    _live(monkeypatch, conn, _FakeR2(), ["--max-write-mb-per-hour", "200", "--scope", "scored",
+                                         "--select-page", "12000", "--limit", "12000",
+                                         "--chunk", "5", "--device", "cpu"])
+    assert _ordered_scans(conn) == 0                  # no ORDER BY id LIMIT over images at all
+    assert [row[0] for row in conn.written] == scored[6:]
+    keyed = [p for sql, p in conn.executed if "i.id = any(%(keys)s" in sql]
+    assert [len(p["keys"]) for p in keyed] == [7, 7, 5]
+
+
+def test_the_measurement_scope_resolves_by_listing_for_its_own_shard_into_r2(monkeypatch,
+                                                                               tmp_path):
+    from toolkit import vector_shards as vs
+
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("1\n2\n3\n")
+    listing_of = {i: (i - 1) // 10 + 1 for i in range(1, 51)}      # 10 images a listing
+    conn = _FakeConn(images=_images(50), embeddings=[_emb(2)], listing_of=listing_of)
+    r2 = _FakeR2()
+    _live(monkeypatch, conn, r2, _r2_argv("--scope", "ids", "--listing-ids-file", str(ids_file),
+                                          "--shard", "1", "--shards", "2"), scorer_log=[])
+    assert _ordered_scans(conn) == 0
+    stored = sorted(vs.load_manifest(r2, vs.default_prefix(IDENTITY)))
+    # Listings 1-3 are images 1-30; shard 1 of 2 is the odd ones; R2 mode ignores the
+    # Postgres vector of image 2 (the manifest is its checkpoint).
+    assert stored == list(range(1, 31, 2))
+    assert not any(sql.startswith("SELECT e.image_id") for sql, _p in conn.executed)
+
+
+def test_the_rt_scope_resolves_from_its_snapshot(monkeypatch):
+    listing_of = {i: 100 + i % 3 for i in range(1, 13)}
+    conn = _FakeConn(images=_images(12), embeddings=[], rt_listings=[100, 101],
+                     listing_of=listing_of)
+    _live(monkeypatch, conn, _FakeR2(), ["--max-write-mb-per-hour", "20", "--scope", "rt",
+                                         "--select-page", "5000", "--chunk", "4",
+                                         "--device", "cpu"])
+    assert [row[0] for row in conn.written] == [i for i in range(1, 13) if i % 3 != 2]
+    assert _ordered_scans(conn) == 0
+
+
+def test_without_a_select_page_the_rt_step_keeps_its_per_chunk_anti_join(monkeypatch):
+    # The hourly live step (clip_tag.yml) passes no --select-page: nothing about it changes.
+    conn = _FakeConn(images=_images(6), embeddings=[], rt_listings=[1])
+    _live(monkeypatch, conn, _FakeR2(), ["--max-write-mb-per-hour", "20", "--scope", "rt",
+                                         "--chunk", "4", "--device", "cpu"])
+    assert _ordered_scans(conn) >= 1
+    assert not any("= any(%(keys)s" in sql for sql, _p in conn.executed)
+
+
+def test_the_corpus_is_not_a_bounded_scope():
+    with pytest.raises(ValueError):
+        bf.resolve_scope_pending(object(), scope="all", shard=0, shards=1)

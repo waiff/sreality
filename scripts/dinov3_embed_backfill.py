@@ -25,10 +25,13 @@ default, so the flag is required and the operator must look before dispatching. 
 budget counts MEASURED on-disk bytes per image (VECTOR_ROW_BYTES, SCORE_ROW_BYTES), so
 "200 MB/h" means 200 MB/h of table + index growth.
 
-ONE PENDING SCAN PER PAGE, NOT PER CHUNK (2026-09-27). The pending query is a cross-table
-anti-join over ~12.5 M images; run once per 256-image chunk it cost ~220 s of every ~250 s
-chunk in run 36334588774 (1 image/s on a 4090). `--select-page` fetches many chunks' worth
-at once; the pod lane passes min(limit, 200,000), so a pass pays the scan once.
+SELECTION ONCE, NOT PER CHUNK (2026-09-27). The pending query is a cross-table anti-join
+over ~12.5 M images with ORDER BY id LIMIT; run once per 256-image chunk it cost ~220 s of
+every ~250 s chunk in run 36334588774 (1 image/s on a 4090). With `--select-page N` (the pod
+lane passes min(limit, 200,000)) a BOUNDED scope (ids, blocks, rt, scored) is resolved once
+from its own keys (resolve_scope_pending: no ordered walk of `images` at all) and the corpus
+(`all`) pays its anti-join once per N images. Without it (the hourly live step) nothing
+changes: one anti-join per chunk.
 
 VECTORS IN POSTGRES OR IN R2. `--vectors-to postgres` (the default, and what the hourly
 live step uses) writes image_dinov3_embeddings. `--vectors-to r2` writes float16 shard files
@@ -359,6 +362,80 @@ def select_scope(conn, *, batch: int, shard: int, shards: int, after_id: int,
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
+# BOUNDED SCOPES ARE RESOLVED FROM THEIR SMALL SIDE (the paged mode, 2026-09-27). `ORDER BY
+# i.id LIMIT n` over `images` with a selective scope filter invites the planner to walk the
+# 12.5 M-row primary key until n rows match: cheap when matches are dense, a whole-table walk
+# when they are sparse (9,514 scored images) or when n exceeds what is left. So the scope's
+# keys are read first (a listing-id file, the rt snapshot, the scored ids), their images are
+# fetched by key through images_listing_id_sequence_key / images_pkey in batches (the dump's
+# own pattern), and what this identity already stored is subtracted by image-id probes.
+_KEY_BATCH = 2000
+
+_SCOPE_KEYS_SQL = {
+    "scored": ("SELECT t.image_id FROM image_tag_scores t JOIN tag_head_models m "
+               "ON m.id = t.model_id AND m.status = 'active'"),
+    "rt": "SELECT s.listing_id FROM autodedup.rt_scope_ids s WHERE s.generation = 'rt'",
+}
+
+_IMAGES_BY_KEY_SQL = """
+    SELECT i.id, i.storage_path
+    FROM images i
+    WHERE i.{column} = any(%(keys)s::bigint[])
+      AND i.storage_path IS NOT NULL
+      AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
+"""
+
+_STORED_IDS_SQL = """
+    SELECT e.image_id
+    FROM image_dinov3_embeddings e
+    WHERE e.image_id = any(%(keys)s::bigint[])
+      AND e.model = %(model)s
+      AND e.revision = %(revision)s
+      AND e.library = %(library)s
+      AND e.pooling = %(pooling)s
+      AND e.resolution = %(resolution)s
+      AND e.preprocessing = %(preprocessing)s
+      AND e.dtype = %(dtype)s
+"""
+
+
+def _batched(conn, sql: str, keys: list[int], params: dict[str, Any]) -> list[tuple]:
+    out: list[tuple] = []
+    for i in range(0, len(keys), _KEY_BATCH):
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
+            cur.execute(sql, {**params, "keys": keys[i:i + _KEY_BATCH]})
+            out.extend(cur.fetchall())
+    return out
+
+
+def resolve_scope_pending(conn, *, scope: str, shard: int, shards: int,
+                          listing_ids: list[int] | None = None,
+                          identity: dict[str, Any] | None = None,
+                          done: set[int] | None = None) -> list[tuple[int, str]]:
+    """Every pending (image id, storage path) of a bounded scope's shard, in id order.
+    `identity` subtracts the vectors Postgres holds under it; `done` subtracts ids the
+    caller already has (R2 mode's manifest)."""
+    if scope == "all":
+        raise ValueError("the corpus is not a bounded scope; page it with select_pending")
+    if scope in _SCOPE_KEYS_SQL:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
+            cur.execute(_SCOPE_KEYS_SQL[scope])
+            keys = sorted({int(r[0]) for r in cur.fetchall()})
+    else:
+        keys = sorted({int(k) for k in listing_ids or []})
+    column = "id" if scope == "scored" else "listing_id"
+    rows = sorted({(int(r[0]), r[1]) for r in _batched(
+        conn, _IMAGES_BY_KEY_SQL.format(column=column), keys,
+        {"shard": shard, "shards": shards})})
+    skip = set(done or ())
+    if identity is not None and rows:
+        skip |= {int(r[0]) for r in _batched(conn, _STORED_IDS_SQL, [r[0] for r in rows],
+                                             dict(identity))}
+    return [r for r in rows if r[0] not in skip]
+
+
 class HeadScorer:
     """Scores the vectors a chunk just wrote with the ACTIVE tag model, in the same process, so
     `image_tag_scores` fills beside the vectors (one download, one job). Refuses unless the active
@@ -570,10 +647,10 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=16,
                    help="Parallel R2 downloads (+ decode + resize). 0 = 4 per vCPU, 8..48.")
     p.add_argument("--select-page", type=int, default=0,
-                   help="Images per pending SELECT. 0 = one chunk (one scan per chunk, the "
-                        "pre-09-27 behaviour). The scan is a full-table anti-join, so a big "
-                        "pass wants one page for the whole run (the pod lane passes "
-                        f"min(limit, {MAX_SELECT_PAGE:,})).")
+                   help="0 = one pending anti-join per chunk (the pre-09-27 behaviour, kept "
+                        "for the hourly step). >0 = a bounded scope is resolved ONCE from its "
+                        "keys and the corpus scope is paged N images per anti-join (the pod "
+                        f"lane passes min(limit, {MAX_SELECT_PAGE:,})).")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1, help="image_id %% shards == shard.")
     p.add_argument("--threads", type=int, default=0,
@@ -723,6 +800,16 @@ def main() -> int:
         page_exhausted = False
         chunk = min(chunk_ceiling, FIRST_CHUNK) if auto_chunk else chunk_ceiling
         stopped = "drained"
+        if args.select_page > 0 and args.scope != "all":
+            t_sel = time.monotonic()
+            page = resolve_scope_pending(
+                conn, scope=args.scope, shard=args.shard, shards=args.shards,
+                listing_ids=listing_ids, identity=None if r2_mode else identity,
+                done=done)[:args.limit]
+            page_exhausted = True
+            select_s = time.monotonic() - t_sel
+            LOG.info("DINOV3 scope=%s resolved from its keys: pending=%d shard=%d/%d in %.1fs",
+                     args.scope, len(page), args.shard, args.shards, select_s)
         last_pace = time.monotonic()
         while seen < args.limit:
             if deadline and time.monotonic() >= deadline:
