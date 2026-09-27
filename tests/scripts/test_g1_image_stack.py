@@ -696,7 +696,8 @@ def test_decoded_batches_blocks_the_decoder_while_the_consumer_is_behind():
 
 def test_plan_decode_sizes_the_queue_from_the_pods_memory():
     gb = 2**30
-    # a 3090 pod (~60 GB cgroup limit), DINOv3 @768: the full batch, one batch per worker
+    # a 60 GB limit, DINOv3 @768: the full batch, one batch per worker. (The 3090 pod's own
+    # limit was never measured — inferred 80-88 GB from run 2's kill; its alive line logs it.)
     assert pod.plan_decode(60 * gb, 16, 32, 768 * 768 * 4) == (32, 16)
     # a 2 GB box, SSCD @320: the batch holds, the prefetch shrinks to what 10 % of RAM holds
     # — counting the batch being embedded AND the encoder's own copy of it

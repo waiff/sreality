@@ -44,7 +44,10 @@ outside. This module turns that into three terminations, all cheaper than the wi
   (e) PAYLOAD GAVE UP — the bootstrap's own `payload gave-up` report (a lane's opt-in
       restart bound: `scripts/pod_bootstrap.py`). The bootstrap writes it only AFTER its
       finalize returned, so the pod has uploaded what it had and is idling; every further
-      second is rent. Its `step=finalize starting` record is not the token.
+      second is rent. Its `step=finalize starting` record is not the token — and while it
+      is the newest word, (c) waits up to `finalize_grace_s` for the token: the finalize
+      closes every arm (the all-terminal cue) a second before the bootstrap reports, and a
+      poll in that second would have read a give-up as a clean finish (a green dispatch).
 
 WHAT COUNTS AS PROGRESS IS THE CALLER'S QUESTION, not this module's: a poller returns a
 `Progress` whose `marker` is any string that CHANGES when the job advances (a vector
@@ -83,6 +86,10 @@ DEFAULT_POLL_INTERVAL_S = 60.0
 # lane passes it: an unbounded lane's restarts are its resume.
 DEFAULT_MAX_PASSES = 3
 GAVE_UP_TOKEN = "payload gave-up"
+FINALIZE_TOKEN = "step=finalize starting"
+# How long all-terminal waits for the give-up report once a finalize has begun; past it the
+# pod ends as all-terminal anyway (a reporter that cannot write must not buy it the window).
+DEFAULT_FINALIZE_GRACE_S = 300.0
 _PASS_RE = re.compile(r"\bpass=(\d+)\b")
 
 
@@ -123,10 +130,13 @@ class PodWatchdog:
         stall_deadline_s: float = DEFAULT_STALL_DEADLINE_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         max_passes: int | None = None,
+        finalize_grace_s: float = DEFAULT_FINALIZE_GRACE_S,
         log: logging.Logger | None = None,
     ) -> None:
         self._poll = poll
         self._max_passes = None if max_passes is None else int(max_passes)
+        self._finalize_grace_s = float(finalize_grace_s)
+        self._finalizing_at: float | None = None
         self._bootstrap_deadline_s = float(bootstrap_deadline_s)
         self._stall_deadline_s = float(stall_deadline_s)
         self._poll_interval_s = float(poll_interval_s)
@@ -185,6 +195,12 @@ class PodWatchdog:
                     self._progress_at = elapsed_s
                 self._marker = reading.marker
             if reading.terminal:
+                if (self._finalizing_at is not None
+                        and elapsed_s - self._finalizing_at < self._finalize_grace_s):
+                    self._log.info("WATCHDOG every arm terminal at %.0fs, but the bootstrap's "
+                                   "give-up is still finalizing: waiting for its report",
+                                   elapsed_s)
+                    return None
                 return self._terminate("all-terminal", elapsed_s, context,
                                        reading.detail or "every arm reached a terminal "
                                        "status; the rest of the window is waste")
@@ -232,6 +248,8 @@ class PodWatchdog:
             self._log.info("WATCHDOG step=%s at %.0fs", record[:400], elapsed_s)
             if GAVE_UP_TOKEN in record:
                 gave_up = record
+            elif FINALIZE_TOKEN in record:
+                self._finalizing_at = elapsed_s
             elif "exit=" in record:
                 self._exits.append((elapsed_s, record))
                 if not self.first_exit:

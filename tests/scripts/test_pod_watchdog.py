@@ -476,3 +476,70 @@ def test_a_lane_without_a_restart_bound_has_no_pass_rail():
                            stall_deadline_s=900, poll_interval_s=60)
     stop, _at = _run(watchdog, [60 * i for i in range(1, 110)])
     assert stop is None and watchdog.verdict is None
+
+
+class _FinalizingPod:
+    """The bounded bootstrap's give-up, as the G1 lane's poller reads it: the payload dies
+    at DIED, `step=finalize starting` goes out, the finalize uploads and then closes every
+    arm at DIED + close_s (the all-terminal cue), and the token follows at DIED + token_s
+    (None: the reporter never gets it written)."""
+
+    DIED = 1157.0
+
+    def __init__(self, close_s: float, token_s: float | None) -> None:
+        self.close_s, self.token_s, self.now = close_s, token_s, 0.0
+
+    def __call__(self) -> Progress:
+        recs = [{"ts": 1, "msg": "pass=1 step=payload starting failures=0"}]
+        if self.now >= self.DIED:
+            recs.append({"ts": 2, "msg": "pass=1 step=finalize starting code=137"})
+        if self.token_s is not None and self.now >= self.DIED + self.token_s:
+            recs.append({"ts": 3, "msg": "pass=1 payload gave-up code=137 failures=1 "
+                                         "finalize=ok step=payload"})
+        steps = tuple(json.dumps(r) for r in recs)
+        return Progress(booted=self.now >= BOOT_S, marker=f"0|units={min(9, int(self.now // 120))}",
+                        steps=steps, step=steps[-1],
+                        terminal=self.now >= self.DIED + self.close_s)
+
+
+def _replay_from(pod, watchdog, first_poll: float, until_s: float = 15_600.0):
+    now = first_poll - 1.0
+    while now < until_s:
+        now += 1.0
+        pod.now = now
+        stop = watchdog(now)
+        if stop:
+            return stop, now
+    return None, None
+
+
+def test_a_give_up_whose_arms_close_before_its_report_is_still_a_give_up():
+    # The finalize closes every arm (fail_open_arms) ~1 s before the bootstrap writes the
+    # token. A poll landing in that second read a clean all-terminal finish: a green
+    # dispatch for a payload the OOM killer ended. It now waits for the token.
+    pod = _FinalizingPod(close_s=44.0, token_s=45.0)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60, max_passes=3)
+    # Phase the polls so one lands at DIED + 44.5 s: arms closed, token not yet written.
+    stop, at = _replay_from(pod, watchdog, first_poll=(pod.DIED + 44.5) % 60.0)
+    assert watchdog.verdict == "payload-failed"
+    assert at == pod.DIED + 44.5 + 60                    # the next poll, which has the token
+    assert "finalize=ok" in stop
+
+
+def test_a_give_up_whose_report_never_lands_ends_as_all_terminal_after_the_grace():
+    pod = _FinalizingPod(close_s=20.0, token_s=None)
+    watchdog = PodWatchdog(pod, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60, max_passes=3, finalize_grace_s=300)
+    stop, at = _replay_from(pod, watchdog, first_poll=(pod.DIED + 30.0) % 60.0)
+    assert watchdog.verdict == "all-terminal"
+    assert pod.DIED + 300 <= at <= pod.DIED + 300 + 60
+
+
+def test_all_terminal_without_a_finalize_in_view_is_immediate():
+    # The ordinary clean finish is never delayed by the grace.
+    watchdog = PodWatchdog(lambda: Progress(booted=True, marker="0|units=3", terminal=True,
+                                            steps=(json.dumps({"msg": "pass=1 step=payload ok"}),)),
+                           bootstrap_deadline_s=1800, stall_deadline_s=900, poll_interval_s=60)
+    stop, at = _run(watchdog, [60, 120])
+    assert watchdog.verdict == "all-terminal" and at == 60
