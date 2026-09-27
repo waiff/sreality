@@ -9,7 +9,13 @@ each tree input reads), `fill` (vector index -> the value a MISSING entry reads 
 constant when present splits on its presence), `baseline` (the raw start), `trees` (one flat node
 list per tree: [input, threshold, missing_left, left, right, value, leaf]; a value at or below the
 threshold goes left, a missing one where `missing_left` says), `calibration` (the isotonic map: knots
-`x`, `y` and the clip range `lo`, `hi`; null = the raw probability) and `card` (what trained it)."""
+`x`, `y` and the clip range `lo`, `hi`; null = the raw probability) and `card` (what trained it).
+
+p is returned to DIGITS decimals. Its last bits are the machine's `exp`, not evidence: scikit-learn and
+this evaluation differ there on about one pair in ten, an isotonic plateau gives many pairs one p up
+to those bits, and the union takes edges in descending p with ties in candidate order, so an
+unrounded p let the last bit reorder tied edges (B0: 21-51 groups on c17 / c18, and whether c17's
+Znojmo fixture fuses). Rounded, both evaluations give the same groups."""
 
 from __future__ import annotations
 
@@ -20,13 +26,15 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 FORMAT: str = "autodedup-gbt/1"
+DIGITS: int = 12
 
 Scorer = Callable[[Sequence["float | None"]], float]
 
 
 def scorer(model: str | Path | Mapping[str, Any]) -> Scorer:
     """The model file (a path or its parsed JSON) as `p(x)`: `x` follows the file's
-    `feature_order`, None or NaN is missing; returns the calibrated probability of one property."""
+    `feature_order`, None or NaN is missing; returns the calibrated probability of one property,
+    to DIGITS decimals."""
     spec = model if isinstance(model, Mapping) else json.loads(Path(model).read_text("utf-8"))
     if spec.get("format") != FORMAT:
         raise ValueError(f"not a {FORMAT} model file: {spec.get('format')!r}")
@@ -61,7 +69,7 @@ def scorer(model: str | Path | Mapping[str, Any]) -> Scorer:
             prob = 1.0 / (1.0 + math.exp(-raw))
         except OverflowError:
             prob = 0.0
-        return _isotonic(prob, xs, ys, lo, hi) if knots else prob
+        return round(_isotonic(prob, xs, ys, lo, hi) if knots else prob, DIGITS)
 
     return p
 

@@ -47,6 +47,12 @@ def _file_sha(path: Path) -> str:
     return hashlib.sha1(path.read_bytes()).hexdigest()[:12]
 
 
+def challenger_code() -> str:
+    """The challenger's code (a memo written by another version is never read)."""
+    return hashlib.sha1(b"".join(_file_sha(path).encode() for path in
+                                 sorted(CHALLENGER_DIR.glob("*.py")))).hexdigest()[:12]
+
+
 # --- mf_score: the model files, one per town ------------------------------------------------------
 
 def model_paths(c: Cohort, template: str) -> dict[str, Path]:
@@ -83,7 +89,8 @@ def learned_scores(c: Cohort, template: str) -> tuple[np.ndarray, dict[str, Any]
         if list(spec["feature_order"][:len(FEATURE_ORDER)]) != list(FEATURE_ORDER):
             raise ValueError(f"{paths[town]}: its feature order is not this checkout's")
     shas = {town: _file_sha(path) for town, path in paths.items()}
-    digest = hashlib.sha1(json.dumps([c.version, shas], sort_keys=True).encode()).hexdigest()[:12]
+    digest = hashlib.sha1(json.dumps([c.version, shas, challenger_code()],
+                                     sort_keys=True).encode()).hexdigest()[:12]
     provenance = {"kind": "mf", "template": template, "digest": digest, "files": shas,
                   "cards": {town: spec.get("card", {}) for town, spec in specs.items()}}
     memo = c.path / "mf_scores" / f"{digest}.npy"
@@ -131,18 +138,12 @@ def mf_score_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 
 # --- facts: one fact function, memoised in the overlay ------------------------------------------
 
-def facts_code() -> str:
-    """The challenger's fact code (a memo written by another version is never read)."""
-    return hashlib.sha1(b"".join(_file_sha(path).encode() for path in
-                                 sorted(CHALLENGER_DIR.glob("*.py")))).hexdigest()[:12]
-
-
 def stated(c: Cohort, overrides: Mapping[str, Any] | None = None
            ) -> tuple[Callable[[int, int], str | None], dict[tuple[int, int], str | None]]:
     """`stated(lo, hi)` over the cohort, memoised under the fact code and the dials: a candidate
     pair is read with its own feature row, any other pair with none."""
     dials = dataclasses.replace(mf_facts.Dials(), **dict(overrides or {}))
-    tag = json.dumps({"code": facts_code(), "dials": dataclasses.asdict(dials)}, sort_keys=True)
+    tag = json.dumps({"code": challenger_code(), "dials": dataclasses.asdict(dials)}, sort_keys=True)
     memo = c.facts.setdefault(tag, {})
     fact = mf_facts.stated_difference(c.ds.listings, c.settings, dials)
     index = c.key_index()

@@ -144,15 +144,25 @@ def _stump() -> dict[str, Any]:
 def test_the_tree_walk_by_hand() -> None:
     p = scorer(_stump())
     expit = lambda z: 1.0 / (1.0 + math.exp(-z))  # noqa: E731
-    assert p([1.0, 1.0]) == expit(0.5 - 1.0 + 0.25)
-    assert p([2.0, None]) == expit(0.5 + 2.0 - 0.25)
-    assert p([None, float("nan")]) == expit(0.5 - 1.0 - 0.25)
+    assert p([1.0, 1.0]) == round(expit(0.5 - 1.0 + 0.25), 12)
+    assert p([2.0, None]) == round(expit(0.5 + 2.0 - 0.25), 12)
+    assert p([None, float("nan")]) == round(expit(0.5 - 1.0 - 0.25), 12)
     calibrated = _stump() | {"calibration": {"x": [0.1, 0.9], "y": [0.0, 1.0], "lo": 0.1, "hi": 0.9}}
     q = scorer(calibrated)
     low = expit(0.5 - 1.0 - 0.25)
-    assert q([2.0, None]) == 1.0 and q([None, None]) == (low - 0.1) / 0.8 * 1.0 + (0.9 - low) / 0.8 * 0.0
+    assert q([2.0, None]) == 1.0
+    assert q([None, None]) == round((low - 0.1) / 0.8 * 1.0 + (0.9 - low) / 0.8 * 0.0, 12)
     with pytest.raises(ValueError):
         scorer({"format": "other"})
+
+
+def test_the_last_bits_of_exp_never_reach_p() -> None:
+    """Two raw sums one ulp apart on an isotonic plateau read one p, so no tie is reordered."""
+    plateau = _stump() | {"trees": [], "calibration": {"x": [0.0, 0.5, 1.0], "y": [0.3, 0.3, 0.9],
+                                                       "lo": 0.0, "hi": 1.0}}
+    p = scorer(plateau | {"baseline": -0.3})
+    q = scorer(plateau | {"baseline": math.nextafter(-0.3, 0.0)})
+    assert p([None, None]) == q([None, None]) == 0.3
 
 
 def _vectors(n: int, width: int, seed: int) -> list[list[float | None]]:
