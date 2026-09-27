@@ -24,8 +24,20 @@ a GitHub artifact. IT WRITES NO PRODUCTION TABLE: progress heartbeats go into th
 `dedup_sim.tag_head_bakeoff_runs/arms` rows the dispatcher created for this run (the same
 rows the tagging lane's watchdog reads), nothing else. It decides no merge.
 
-Every phase is checkpointed by its output file, so a restarted payload redoes only what
-it had not finished, and `--max-seconds` stops at a batch boundary and still uploads.
+Every phase is checkpointed by its output file, and every arm IN PROGRESS by its shards
+(`<arm>.shards/NNNNNN.npz`, EMBED_SHARD vectors or MATCH_SHARD pairs each, written as they
+are produced), so a restarted payload resumes after the last shard; `--max-seconds` stops
+at a batch boundary and still uploads. The shards are also the watchdog's progress unit
+(`units=` on every heartbeat), never the heartbeat itself.
+
+THE OOM OF 2026-09-27 (run 2, pod udlpld675b3zwp, ~$2.17, nothing uploaded): the decode
+pipeline kept EVERY decoded batch alive for the whole arm (its futures list was never
+trimmed), so RSS grew by resolution^2 x 4 bytes per image (Pillow keeps RGB at 4 bytes a
+pixel) until the cgroup killed the payload (exit 137) at DINOv3 image 34,848 of 98,578;
+and because an arm was written only at its end, every restart began DINOv3 from zero and
+died again, ten passes in a row. Now the queue is bounded both ways (decoded_batches),
+the vectors go to disk per shard, the queue is sized from the pod's RAM (plan_decode) and
+the bootstrap gives a failing payload up after at most two restarts (pod_bootstrap).
 
 Usage (pod):   python -m scripts.g1_image_stack_pod --run-id 12 --device cuda
 Usage (local): python -m scripts.g1_image_stack_pod --no-db --local-manifest m.json.gz \\
@@ -42,11 +54,12 @@ import json
 import logging
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tarfile
 import time
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Sequence
@@ -83,6 +96,12 @@ SYNTH_N = 1500
 SYNTH_GALLERY = 10000
 SYNTH_TRANSFORMS = ("crop10", "down50_q60", "watermark", "letterbox", "combo", "tone_q75")
 SEED = 20260927
+EMBED_SHARD = 4096            # vectors per on-disk shard (~1.5 GPU-min of DINOv3 on a 3090)
+MATCH_SHARD = 1000            # LightGlue pairs per on-disk shard
+DECODE_RAM_SHARE = 0.10       # of the pod's memory limit, for decoded images awaiting the GPU
+PIL_RGB_BYTES = 4             # Pillow stores an RGB image at 4 bytes per pixel
+FULL_DECODE_BYTES = 2048 * 1536 * PIL_RGB_BYTES   # an un-resized photo (the CLIP loader)
+UNLIMITED = 1 << 60           # cgroup v1 writes "no limit" as a number near 2^63
 
 ROUTE_CLIP, ROUTE_HEAD, ROUTE_DINO, ROUTE_SSCD, ROUTE_DHASH, ROUTE_NB = 1, 2, 4, 8, 16, 32
 # LightGlue verifies same-room pairs only in the rooms that identify a unit; hallway,
@@ -136,6 +155,10 @@ _ARM_SQL = """
 _RUN_NOTE_SQL = "SELECT note FROM dedup_sim.tag_head_bakeoff_runs WHERE id = %(run_id)s"
 _WRITE_RUN_NOTE_SQL = "UPDATE dedup_sim.tag_head_bakeoff_runs SET note = %(note)s WHERE id = %(run_id)s"
 _FINISH_RUN_SQL = "UPDATE dedup_sim.tag_head_bakeoff_runs SET status = %(status)s WHERE id = %(run_id)s"
+_FAIL_OPEN_ARMS_SQL = """
+    UPDATE dedup_sim.tag_head_bakeoff_arms SET status = 'failed', note = %(note)s
+    WHERE run_id = %(run_id)s AND arm LIKE 'g1:%%' AND status NOT IN ('ok', 'failed', 'skipped')
+"""
 BOOT_PREFIX = "pod booted "
 ALIVE_PREFIX = "pod alive "
 
@@ -144,16 +167,43 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-class Reporter:
-    """Heartbeats into the dispatcher's rows; a no-op without a database (local runs)."""
+def rss_bytes(status: str = "/proc/self/status") -> int:
+    """This process's resident memory now (0 where /proc is absent)."""
+    try:
+        with open(status) as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
-    def __init__(self, conn: Any, run_id: int) -> None:
+
+class Reporter:
+    """Heartbeats into the dispatcher's rows; a no-op without a database (local runs).
+
+    Every `pod alive` line ends in `units=<n> rss=<GB>`: n is `units_fn()`, the durable work
+    on local disk (shards and result files), which is what the dispatcher's stall deadline
+    compares — a heartbeat that finished nothing is not progress (2026-09-27)."""
+
+    def __init__(self, conn: Any, run_id: int,
+                 units_fn: Callable[[], int] | None = None) -> None:
         self.conn = conn
         self.run_id = run_id
+        self.units_fn = units_fn
         self.last = 0.0
         self.terminal: set[str] = set()
 
+    def progress_tag(self) -> str:
+        try:
+            units = self.units_fn() if self.units_fn is not None else 0
+        except OSError:
+            units = 0
+        return f"units={units} rss={rss_bytes() / 2**30:.1f}GB"
+
     def run_note(self, *, boot: str | None = None, alive: str | None = None) -> None:
+        if alive is not None:
+            alive = f"{alive} {self.progress_tag()}"
         if self.conn is None:
             LOG.info("NOTE boot=%s alive=%s", boot, alive)
             return
@@ -192,6 +242,8 @@ class Reporter:
     def beat(self, phase: str, note: str, every_s: float = 60.0) -> None:
         if time.monotonic() - self.last >= every_s:
             self.phase(phase, "running", note)
+            # The run note carries the units the watchdog reads; the arm note alone would not.
+            self.run_note(alive=f"{phase} {note}")
 
     def finish_run(self, status: str) -> None:
         if self.conn is None:
@@ -201,6 +253,18 @@ class Reporter:
                 cur.execute(_FINISH_RUN_SQL, {"run_id": self.run_id, "status": status})
         except Exception as exc:  # noqa: BLE001
             LOG.warning("run status write failed: %s", exc)
+
+    def fail_open_arms(self, note: str) -> None:
+        """Every g1 arm not yet terminal becomes `failed` — the all-terminal cue."""
+        if self.conn is None:
+            LOG.info("ARMS failed: %s", note)
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(_FAIL_OPEN_ARMS_SQL, {"run_id": self.run_id,
+                                                  "note": f"{iso_now()} {note}"[:2000]})
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("arm close write failed: %s", exc)
 
 
 def runtime_versions() -> str:
@@ -244,8 +308,11 @@ def load_manifest(*, local: str | None, key: str | None) -> dict[str, Any]:
 
 
 def cache_images(images: Sequence[dict[str, Any]], *, cache_dir: str, image_dir: str | None,
-                 workers: int, beat: Callable[[str], None]) -> dict[int, str]:
-    """{image_id: local path}. Resumable: a file on disk is not fetched again."""
+                 workers: int, beat: Callable[[str], None],
+                 on_count: Callable[[int], None] | None = None) -> dict[int, str]:
+    """{image_id: local path}. Resumable: a file on disk is not fetched again, and a key
+    that failed all three attempts in an earlier pass on this disk (`failed.json`) is not
+    retried — on 2026-09-27 each restart re-paid 458 dead keys x 3 attempts x 6 s."""
     os.makedirs(cache_dir, exist_ok=True)
     if image_dir:
         out = {}
@@ -255,17 +322,25 @@ def cache_images(images: Sequence[dict[str, Any]], *, cache_dir: str, image_dir:
                 if os.path.exists(p):
                     out[int(r["image_id"])] = p
                     break
+        if on_count is not None:
+            on_count(len(out))
         return out
     from scraper import image_storage
 
     r2 = image_storage.R2Client.from_env(max_pool_connections=max(32, workers))
+    failed_path = os.path.join(cache_dir, "failed.json")
+    try:
+        with open(failed_path) as fh:
+            known_dead = {int(i) for i in json.load(fh)}
+    except (OSError, ValueError, TypeError):
+        known_dead = set()
 
     def one(r: dict[str, Any]) -> tuple[int, str | None]:
         iid = int(r["image_id"])
         path = os.path.join(cache_dir, f"{iid}.img")
         if os.path.exists(path) and os.path.getsize(path) > 0:
             return iid, path
-        if not r.get("key"):
+        if not r.get("key") or iid in known_dead:
             return iid, None
         for attempt in range(3):
             try:
@@ -280,16 +355,26 @@ def cache_images(images: Sequence[dict[str, Any]], *, cache_dir: str, image_dir:
         return iid, None
 
     out: dict[int, str] = {}
-    failed = 0
+    dead: list[int] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for n, (iid, path) in enumerate(pool.map(one, images), 1):
             if path:
                 out[iid] = path
             else:
-                failed += 1
+                dead.append(iid)
             if n % 2000 == 0:
-                beat(f"images {n}/{len(images)} failed={failed}")
-    LOG.info("CACHE images=%d failed=%d", len(out), failed)
+                if on_count is not None:
+                    on_count(len(out))
+                beat(f"images {n}/{len(images)} failed={len(dead)}")
+    try:
+        with open(failed_path + ".part", "w") as fh:
+            json.dump(sorted(dead), fh)
+        os.replace(failed_path + ".part", failed_path)
+    except OSError:
+        pass
+    if on_count is not None:
+        on_count(len(out))
+    LOG.info("CACHE images=%d failed=%d", len(out), len(dead))
     return out
 
 
@@ -314,8 +399,16 @@ def preprocessed_loader(preprocessing: str, resolution: int) -> Callable[[str], 
 
 
 def decoded_batches(items: Sequence[tuple[Any, Any]], batch: int, workers: int,
-                    loader: Callable[[Any], Any]) -> Iterator[tuple[list[Any], list[Any]]]:
-    """(ids, PIL images) in batches, decoded in a thread pool one batch ahead of the GPU."""
+                    loader: Callable[[Any], Any],
+                    prefetch: int = 2) -> Iterator[tuple[list[Any], list[Any]]]:
+    """(ids, PIL images) in batches, each decoded in one pool thread, at most `prefetch`
+    batches ahead of the consumer.
+
+    BOUNDED BOTH WAYS. A batch is submitted only when the consumer takes one (the decode
+    pool waits while the GPU is behind), and a batch the consumer has taken is dropped from
+    the queue. The 2026-09-27 version appended every future to a list it never trimmed, and
+    a finished future holds its result: the whole arm's decoded images stayed alive, about
+    82 GB at DINOv3@768 image 34,848, and the cgroup killed the payload."""
     def load(chunk):
         ids, imgs = [], []
         for key, src in chunk:
@@ -326,13 +419,18 @@ def decoded_batches(items: Sequence[tuple[Any, Any]], batch: int, workers: int,
                 LOG.debug("undecodable %s", key)
         return ids, imgs
 
-    chunks = [items[i:i + batch] for i in range(0, len(items), batch)]
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = [pool.submit(load, c) for c in chunks[:2]]
-        for i in range(len(chunks)):
-            if i + 2 < len(chunks):
-                futures.append(pool.submit(load, chunks[i + 2]))
-            yield futures[i].result()
+    chunks = (items[i:i + batch] for i in range(0, len(items), batch))
+    depth = max(1, prefetch)
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, depth))) as pool:
+        queue: deque[Any] = deque(pool.submit(load, c) for _, c in zip(range(depth), chunks))
+        while queue:
+            head = queue.popleft()
+            nxt = next(chunks, None)
+            if nxt is not None:
+                queue.append(pool.submit(load, nxt))
+            result = head.result()
+            del head
+            yield result
 
 
 # ---------------------------------------------------------------------------------------
@@ -448,32 +546,197 @@ def cpu_workers(requested: int, vcpus: int) -> int:
     return max(1, min(requested, vcpus) if requested > 0 else vcpus)
 
 
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def pod_memory(meminfo: str = "/proc/meminfo",
+               cgroup_root: str = "/sys/fs/cgroup") -> dict[str, int | None]:
+    """The RAM this payload may use: MemTotal (the HOST's, inside a container) and the
+    container's cgroup limit (v2 `memory.max`, else v1 `memory.limit_in_bytes`); `limit`
+    is the smaller. The OOM killer answers to the cgroup, not to MemTotal."""
+    total = None
+    for line in (_read_text(meminfo) or "").splitlines():
+        if line.startswith("MemTotal:"):
+            try:
+                total = int(line.split()[1]) * 1024
+            except (IndexError, ValueError):
+                pass
+            break
+    cgroup = None
+    for rel in ("memory.max", os.path.join("memory", "memory.limit_in_bytes")):
+        raw = _read_text(os.path.join(cgroup_root, rel))
+        if raw and raw.isdigit() and 0 < int(raw) < UNLIMITED:
+            cgroup = int(raw)
+            break
+    known = [v for v in (total, cgroup) if v]
+    return {"mem_total": total, "cgroup_limit": cgroup, "limit": min(known) if known else None}
+
+
+def fs_type(path: str, mounts: str = "/proc/mounts") -> str:
+    """The filesystem holding `path` (the longest mount prefix); 'tmpfs' means RAM."""
+    real = os.path.realpath(path)
+    best, kind = "", "unknown"
+    for line in (_read_text(mounts) or "").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt = parts[1]
+        inside = real == mnt or real.startswith(mnt.rstrip("/") + "/")
+        if inside and len(mnt) >= len(best):
+            best, kind = mnt, parts[2]
+    return kind
+
+
+def plan_decode(limit: int | None, workers: int, requested_batch: int,
+                image_bytes: int) -> tuple[int, int]:
+    """(batch, prefetch) for one embed arm, from the pod's memory limit.
+
+    A decoded image waiting for the GPU costs `image_bytes` (resolution^2 x 4 for the
+    square arms), and the queue — the batches decoded ahead plus the one being embedded —
+    may hold DECODE_RAM_SHARE of the limit. Within that, one batch in flight per decode
+    worker (each batch decodes in one thread), never fewer than one; the batch shrinks
+    only when two of them would not fit."""
+    budget = int((limit or 8 * 2**30) * DECODE_RAM_SHARE)
+    per = max(1, image_bytes)
+    batch = max(1, min(requested_batch, budget // (2 * per)))
+    prefetch = max(1, min(workers, budget // (batch * per) - 1))
+    return batch, prefetch
+
+
+def shard_dir(out_path: str) -> str:
+    return (out_path[:-len(".npz")] if out_path.endswith(".npz") else out_path) + ".shards"
+
+
+def shard_files(sdir: str) -> list[str]:
+    if not os.path.isdir(sdir):
+        return []
+    return sorted(os.path.join(sdir, f) for f in os.listdir(sdir)
+                  if f.endswith(".npz") and ".tmp." not in f)
+
+
+def _save_npz(path: str, **arrays: Any) -> None:
+    """Atomic: a kill mid-write leaves no half file for a resume to trust."""
+    import numpy as np
+
+    np.savez(path + ".tmp.npz", **arrays)
+    os.replace(path + ".tmp.npz", path)
+
+
+def embed_shard_keys(sdir: str) -> tuple[set[Any], set[Any]]:
+    """(keys embedded, keys that never decoded) across an unfinished arm's shards. A shard
+    that will not load is deleted, so its images are simply embedded again."""
+    import numpy as np
+
+    done: set[Any] = set()
+    bad: set[Any] = set()
+    for path in shard_files(sdir):
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                done.update(z["key"].tolist())
+                bad.update(z["bad"].tolist())
+        except Exception:  # noqa: BLE001 - redo it rather than trust it
+            LOG.warning("dropping unreadable shard %s", path)
+            os.remove(path)
+    return done, bad
+
+
+def durable_units(out_dir: str, synth_dir: str | None = None) -> int:
+    """Finished work on local disk: result files, the shards of unfinished arms and the
+    synthetic copies in hundreds. Compared by the dispatcher's watchdog, never read as a
+    quantity: it moves only when something lands, so a heartbeat alone is not progress."""
+    n = 0
+    if os.path.isdir(out_dir):
+        for entry in os.scandir(out_dir):
+            if entry.is_dir() and entry.name.endswith(".shards"):
+                n += len(shard_files(entry.path))
+            elif entry.name.endswith((".npz", ".json")) and entry.name != "report.json":
+                n += 1
+    if synth_dir and os.path.isdir(synth_dir):
+        n += sum(1 for _ in os.scandir(synth_dir)) // (100 * len(SYNTH_TRANSFORMS))
+    return n
+
+
 def embed_arm(name: str, encoder: Any, items: Sequence[tuple[Any, Any]], *, batch: int,
               workers: int, loader: Callable[[Any], Any], out_path: str,
-              beat: Callable[[str], None], deadline: float | None) -> dict[str, Any]:
+              beat: Callable[[str], None], deadline: float | None, prefetch: int = 2,
+              shard_size: int = EMBED_SHARD,
+              on_shard: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """One descriptor (a global vector per image, nothing else) over `items`, written as it
+    is produced: every `shard_size` vectors land atomically in `<arm>.shards/`, so RAM holds
+    one shard and a restarted pass resumes after the last one instead of from zero. The
+    arm's own file appears only once every item was tried; a deadline leaves the shards."""
     import numpy as np
 
     if os.path.exists(out_path):
         return {"arm": name, "skipped": "exists"}
+    sdir = shard_dir(out_path)
+    os.makedirs(sdir, exist_ok=True)
+    done, bad = embed_shard_keys(sdir)
+    todo = [it for it in items if it[0] not in done and it[0] not in bad]
+    seq = len(shard_files(sdir))
     ids: list[Any] = []
     vecs: list[Any] = []
+    bads: list[Any] = []
+    fresh = 0
+    cut = False
+
+    def flush() -> None:
+        nonlocal seq, ids, vecs, bads
+        if not ids and not bads:
+            return
+        mat = np.concatenate(vecs) if vecs else np.zeros((0, 1), np.float16)
+        _save_npz(os.path.join(sdir, f"{seq:06d}.npz"), key=np.array(ids), vec=mat,
+                  bad=np.array(bads))
+        seq += 1
+        ids, vecs, bads = [], [], []
+        if on_shard is not None:
+            on_shard(f"{name} shard {seq}")
+
     t0 = time.monotonic()
-    for bids, imgs in decoded_batches(items, batch, workers, loader):
+    cursor = 0
+    for bids, imgs in decoded_batches(todo, batch, workers, loader, prefetch=prefetch):
+        chunk = todo[cursor:cursor + batch]
+        cursor += batch
+        if len(bids) < len(chunk):
+            got = set(bids)
+            bads.extend(k for k, _src in chunk if k not in got)
         if imgs:
             v = encoder.embed(imgs, batch_size=batch) if not isinstance(encoder, SSCD) \
                 else encoder.embed(imgs)
             vecs.append(v.numpy().astype(np.float16))
             ids.extend(bids)
-        beat(f"{name} {len(ids)}/{len(items)}")
+            fresh += len(bids)
+        del imgs
+        if len(ids) >= shard_size:
+            flush()
+        beat(f"{name} {len(done) + fresh}/{len(items)}")
         if deadline and time.monotonic() > deadline:
-            LOG.warning("%s: deadline reached at %d/%d", name, len(ids), len(items))
+            LOG.warning("%s: deadline reached at %d/%d", name, len(done) + fresh, len(items))
+            cut = True
             break
-    mat = np.concatenate(vecs) if vecs else np.zeros((0, 1), np.float16)
-    np.savez(out_path + ".part.npz", key=np.array(ids), vec=mat)
-    os.replace(out_path + ".part.npz", out_path)
+    flush()
     dt = time.monotonic() - t0
-    return {"arm": name, "n": len(ids), "of": len(items), "seconds": round(dt, 1),
-            "img_per_s": round(len(ids) / dt, 2) if dt else None}
+    stats = {"arm": name, "of": len(items), "resumed": len(done), "fresh": fresh,
+             "seconds": round(dt, 1), "img_per_s": round(fresh / dt, 2) if dt else None,
+             "batch": batch, "prefetch": prefetch, "rss_gb": round(rss_bytes() / 2**30, 2)}
+    if cut:
+        return {**stats, "n": len(done) + fresh, "partial": True, "shards": seq}
+    keys: list[Any] = []
+    mats: list[Any] = []
+    for path in shard_files(sdir):
+        with np.load(path, allow_pickle=False) as z:
+            if len(z["key"]):
+                keys.extend(z["key"].tolist())
+                mats.append(z["vec"])
+    mat = np.concatenate(mats) if mats else np.zeros((0, 1), np.float16)
+    _save_npz(out_path, key=np.array(keys), vec=mat)
+    shutil.rmtree(sdir, ignore_errors=True)
+    return {**stats, "n": len(keys)}
 
 
 def load_vecs(path: str) -> tuple[Any, Any]:
@@ -718,7 +981,11 @@ def ransac_counts(p0: Any, p1: Any, scale: float) -> tuple[int, int]:
 def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: dict[int, str], *,
                 device: str, out_path: str, beat: Callable[[str], None],
                 deadline: float | None, workers: int,
-                checkpoint: Callable[[str], None] | None = None) -> dict[str, Any]:
+                on_shard: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """LightGlue over the planned frame pairs. It needs nothing from the embed arms but the
+    plan: it extracts its own keypoints from the cached JPEGs (FeatureCache, on the device)
+    and keeps only nine numbers per pair, written MATCH_SHARD pairs at a time to
+    `<phase>.shards/` so a restart resumes after the last shard."""
     import numpy as np
     import torch
     from lightglue import ALIKED, DISK, LightGlue, SuperPoint
@@ -740,12 +1007,30 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
         return {k: v for k, v in feats.items()}, size
 
     cache = FeatureCache(extract)
-    partial_path = partial_of(out_path)
-    rows = load_match_rows(partial_path) if os.path.exists(partial_path) else []
-    done = {(int(r[0]), int(r[1])) for r in rows}
-    resumed = len(rows)
+    sdir = shard_dir(out_path)
+    os.makedirs(sdir, exist_ok=True)
+    legacy = partial_of(out_path)
+    if os.path.exists(legacy):
+        # A partial file from a pod that predates the shards is simply one more shard.
+        os.replace(legacy, os.path.join(sdir, "legacy.npz"))
+    done = {(int(r[0]), int(r[1])) for path in shard_files(sdir) for r in load_match_rows(path)}
+    resumed = len(done)
+    seq = len(shard_files(sdir))
+    fresh: list[tuple[Any, ...]] = []
+    written = 0
+
+    def flush() -> None:
+        nonlocal seq, fresh, written
+        if not fresh:
+            return
+        save_match_rows(os.path.join(sdir, f"{seq:06d}.npz"), fresh)
+        seq += 1
+        written += len(fresh)
+        fresh = []
+        if on_shard is not None:
+            on_shard(f"{extractor_name} {resumed + written}/{len(pairs)}")
+
     t0 = time.monotonic()
-    last_ckpt = t0
     pool = ThreadPoolExecutor(max_workers=max(1, workers))
     pending = []
     cut = False
@@ -768,35 +1053,31 @@ def match_phase(extractor_name: str, pairs: Sequence[tuple[int, int]], paths: di
         except Exception as exc:  # noqa: BLE001 - one bad pair must not lose the phase
             LOG.debug("match failed %s-%s: %s", x, y, exc)
         if len(pending) >= 256:
-            rows.extend(meta + r.result() for meta, r in pending)
+            fresh.extend(meta + r.result() for meta, r in pending)
             pending = []
+        if len(fresh) >= MATCH_SHARD:
+            flush()
         if n % 500 == 0:
             beat(f"{extractor_name} {n}/{len(pairs)} cache_misses={cache.misses}")
-            if checkpoint is not None and time.monotonic() - last_ckpt >= CHECKPOINT_S:
-                rows.extend(meta + r.result() for meta, r in pending)
-                pending = []
-                save_match_rows(partial_path, rows)
-                checkpoint(f"{extractor_name} {len(rows)}/{len(pairs)}")
-                last_ckpt = time.monotonic()
             if deadline and time.monotonic() > deadline:
                 LOG.warning("%s: deadline at %d/%d", extractor_name, n, len(pairs))
                 cut = True
                 break
-    rows.extend(meta + r.result() for meta, r in pending)
+    fresh.extend(meta + r.result() for meta, r in pending)
     pool.shutdown()
-    if cut:
-        # A deadline leaves a PARTIAL file a re-dispatch of the same run continues.
-        save_match_rows(partial_path, rows)
-    else:
-        save_match_rows(out_path, rows)
-        if os.path.exists(partial_path):
-            os.remove(partial_path)
+    flush()
     dt = time.monotonic() - t0
-    fresh = len(rows) - resumed
-    return {"extractor": extractor_name, "pairs": len(rows), "of": len(pairs),
-            "resumed": resumed, "partial": cut, "seconds": round(dt, 1),
-            "pairs_per_s": round(fresh / dt, 2) if dt else None,
-            "feature_extractions": cache.misses}
+    stats = {"extractor": extractor_name, "of": len(pairs), "resumed": resumed,
+             "partial": cut, "seconds": round(dt, 1),
+             "pairs_per_s": round(written / dt, 2) if dt else None,
+             "feature_extractions": cache.misses}
+    if cut:
+        # A deadline leaves the shards; a re-dispatch of the same run continues them.
+        return {**stats, "pairs": resumed + written, "shards": seq}
+    rows = [r for path in shard_files(sdir) for r in load_match_rows(path)]
+    save_match_rows(out_path, rows)
+    shutil.rmtree(sdir, ignore_errors=True)
+    return {**stats, "pairs": len(rows)}
 
 
 MATCH_COLUMNS = ("a", "b", "kp_a", "kp_b", "matches", "matches_09", "mean_score", "f_inliers",
@@ -932,38 +1213,61 @@ def past(deadline: float | None) -> bool:
     return deadline is not None and time.monotonic() > deadline
 
 
+def restorable(name: str) -> bool:
+    """A result file (`x.npz`, `x.json`) or a shard of an unfinished arm
+    (`x.shards/NNNNNN.npz`); nothing else, and never a path that climbs out."""
+    parts = name.split("/")
+    if any(p in ("", ".", "..") for p in parts) or ".tmp." in name or name == "report.json":
+        return False
+    if len(parts) == 1:
+        return name.endswith((".npz", ".json"))
+    return len(parts) == 2 and parts[0].endswith(".shards") and parts[1].endswith(".npz")
+
+
 def restore_checkpoint(out_dir: str, run_id: int) -> list[str]:
     """A re-dispatch of the same run on a NEW pod starts from the last uploaded tar, so a
-    finished phase (its output file) is never paid for twice. Best effort."""
+    finished phase (its output file) is never paid for twice and an unfinished one resumes
+    after its last uploaded shard. The tar streams to disk, never into RAM. Best effort."""
     from scraper import image_storage
 
     key = f"{RESULTS_PREFIX}/{run_id}/results.tar"
     r2 = image_storage.R2Client.from_env()
     if r2.object_size(key) is None:
         return []
+    tar_path = out_dir.rstrip("/") + ".restore.tar"
+    r2.download_file(key, tar_path)
     restored = []
-    with tarfile.open(fileobj=io.BytesIO(r2.download_bytes(key))) as tar:
-        for member in tar.getmembers():
-            name = member.name.split("/", 1)[-1]
-            if not member.isfile() or "/" in name or not name.endswith((".npz", ".json")):
-                continue
-            target = os.path.join(out_dir, name)
-            if os.path.exists(target) or name == "report.json":
-                continue
-            src = tar.extractfile(member)
-            if src is None:
-                continue
-            with open(target + ".part", "wb") as fh:
-                fh.write(src.read())
-            os.replace(target + ".part", target)
-            restored.append(name)
+    try:
+        with tarfile.open(tar_path) as tar:
+            for member in tar.getmembers():
+                name = member.name.split("/", 1)[-1]
+                if not member.isfile() or not restorable(name):
+                    continue
+                target = os.path.join(out_dir, name)
+                finished = os.path.join(out_dir, name.split("/")[0][:-len(".shards")] + ".npz")
+                if os.path.exists(target) or ("/" in name and os.path.exists(finished)):
+                    continue
+                src = tar.extractfile(member)
+                if src is None:
+                    continue
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target + ".part", "wb") as fh:
+                    shutil.copyfileobj(src, fh)
+                os.replace(target + ".part", target)
+                restored.append(name)
+    finally:
+        os.remove(tar_path)
     return restored
 
 
 def upload_results(out_dir: str, run_id: int, local_only: bool) -> str:
     tar_path = out_dir.rstrip("/") + ".tar"
+
+    def settled(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        return None if ".tmp." in info.name or info.name.endswith(".part") else info
+
     with tarfile.open(tar_path, "w") as tar:
-        tar.add(out_dir, arcname="g1_results")
+        tar.add(out_dir, arcname="g1_results", filter=settled)
     if local_only:
         return tar_path
     from scraper import image_storage
@@ -971,6 +1275,35 @@ def upload_results(out_dir: str, run_id: int, local_only: bool) -> str:
     key = f"{RESULTS_PREFIX}/{run_id}/results.tar"
     image_storage.R2Client.from_env().upload_file(key, tar_path, content_type="application/x-tar")
     return key
+
+
+def finalize(out_dir: str, run_id: int, rep: Reporter, reason: str,
+             local_only: bool) -> int:
+    """The bootstrap's last call when it gives the payload up (an OOM kill, or a third
+    failure): ship what the passes left on disk — finished arms and the shards of the
+    unfinished ones, which a `resume` continues — and close every open arm, so the
+    dispatcher's watchdog ends the pod now instead of at the end of its window."""
+    uploaded = "nothing on disk"
+    if os.path.isdir(out_dir):
+        path = os.path.join(out_dir, "report.json")
+        try:
+            with open(path) as fh:
+                report = json.load(fh)
+        except (OSError, ValueError):
+            report = {"run_id": run_id}
+        report["gave_up"] = {"at": iso_now(), "reason": reason}
+        try:
+            with open(path, "w") as fh:
+                json.dump(report, fh, indent=1, default=str)
+            uploaded = upload_results(out_dir, run_id, local_only=local_only)
+        except Exception as exc:  # noqa: BLE001 - closing the arms matters more
+            LOG.exception("final upload failed")
+            uploaded = f"upload failed: {type(exc).__name__}: {exc}"
+    rep.run_note(alive=f"gave up ({reason}); uploaded {uploaded}")
+    rep.fail_open_arms(f"payload gave up ({reason}); partial results: {uploaded}")
+    rep.finish_run("failed")
+    LOG.info("FINALIZE %s -> %s", reason, uploaded)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -990,6 +1323,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--phases", default=",".join(PHASES))
     ap.add_argument("--lightglue-sha", default=LIGHTGLUE_SHA)
     ap.add_argument("--skip-deps", action="store_true")
+    ap.add_argument("--finalize", action="store_true",
+                    help="Upload whatever is on disk, close every open arm and exit: the "
+                         "bootstrap's give-up call (the reason travels in PODBOOT_GAVE_UP).")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -1004,7 +1340,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         conn = psycopg.connect(os.environ["SUPABASE_DB_URL"], autocommit=True,
                                prepare_threshold=None, connect_timeout=15)
-    rep = Reporter(conn, args.run_id)
+    cached = [0]
+    synth_dir = os.path.join(args.root, "synth")
+    rep = Reporter(conn, args.run_id,
+                   units_fn=lambda: durable_units(out_dir, synth_dir) + cached[0] // 1000)
+    if args.finalize:
+        return finalize(out_dir, args.run_id, rep,
+                        os.environ.get("PODBOOT_GAVE_UP") or "the bootstrap gave up",
+                        local_only=conn is None)
     rep.run_note(boot=f"g1 {sys.version.split()[0]}", alive="starting")
 
     if not args.skip_deps:
@@ -1057,9 +1400,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     vcpus = pod_vcpus()
     workers = cpu_workers(args.workers, vcpus)
     fetch_workers = args.workers or max(16, 2 * vcpus)
+    # And from the RAM it gave us: the decode queue of every embed arm is sized from the
+    # cgroup limit (plan_decode), and the image cache must be a disk, never tmpfs.
+    mem = pod_memory()
+    cache_dir = os.path.join(args.root, "img")
     report["cpu"] = {"vcpus": vcpus, "host_cpu_count": os.cpu_count(), "workers": workers,
                      "fetch_workers": fetch_workers}
-    rep.run_note(alive=f"vcpus={vcpus} workers={workers} fetch_workers={fetch_workers}")
+    report["resources"] = {**mem, "vcpus": vcpus, "workers": workers,
+                           "cache_dir": cache_dir, "cache_fs": fs_type(args.root)}
+    if report["resources"]["cache_fs"] == "tmpfs":
+        LOG.warning("the image cache %s is on tmpfs: every cached image costs RAM", cache_dir)
+
+    def gb(n: int | None) -> str:
+        return "?" if not n else f"{n / 2**30:.1f}GB"
+
+    rep.run_note(alive=f"vcpus={vcpus} workers={workers} fetch_workers={fetch_workers} "
+                       f"mem_limit={gb(mem['limit'])} mem_total={gb(mem['mem_total'])} "
+                       f"cgroup={gb(mem['cgroup_limit'])} cache_fs={report['resources']['cache_fs']}")
     try:
         import torch
 
@@ -1069,9 +1426,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rep.run_note(alive=f"caching {len(manifest['images'])} images")
     t0 = time.monotonic()
-    paths = cache_images(manifest["images"], cache_dir=os.path.join(args.root, "img"),
+    paths = cache_images(manifest["images"], cache_dir=cache_dir,
                          image_dir=args.image_dir or None, workers=fetch_workers,
-                         beat=lambda m: rep.run_note(alive=m))
+                         beat=lambda m: rep.run_note(alive=m),
+                         on_count=lambda n: cached.__setitem__(0, n))
     report["images"] = {"requested": len(manifest["images"]), "cached": len(paths),
                         "seconds": round(time.monotonic() - t0, 1)}
     json.dump(sorted(set(listing_of) - set(paths)), open(os.path.join(out_dir, "images_missing.json"), "w"))
@@ -1080,13 +1438,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     def beat_for(phase):
         return lambda m: rep.beat(phase, m)
 
-    def checkpoint(what: str) -> None:
+    last_upload = [time.monotonic()]
+
+    def checkpoint(what: str, force: bool = False) -> None:
+        """Local disk already holds the shard or arm; R2 gets the tar every CHECKPOINT_S."""
+        if not force and time.monotonic() - last_upload[0] < CHECKPOINT_S:
+            return
+        last_upload[0] = time.monotonic()
         try:
             json.dump(report, open(os.path.join(out_dir, "report.json"), "w"), indent=1, default=str)
             upload_results(out_dir, args.run_id, local_only=conn is None)
             rep.run_note(alive=f"checkpoint uploaded: {what}")
         except Exception as exc:  # noqa: BLE001 - the next checkpoint or the final upload retries
             LOG.warning("checkpoint upload failed: %s", exc)
+
+    def decode_plan(phase: str, requested_batch: int, image_bytes: int) -> tuple[int, int]:
+        batch, prefetch = plan_decode(mem["limit"], workers, requested_batch, image_bytes)
+        report.setdefault("decode_plan", {})[phase] = {
+            "batch": batch, "prefetch": prefetch, "image_mb": round(image_bytes / 2**20, 2),
+            "queue_gb": round((prefetch + 1) * batch * image_bytes / 2**30, 2)}
+        return batch, prefetch
 
     status = "ok"
     try:
@@ -1112,11 +1483,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report["identity"]["sscd"] = {"model": "sscd_disc_mixup", "revision": enc.revision,
                                               "resolution": SSCD_SIZE,
                                               "preprocessing": "square_squash"}
+                batch, prefetch = decode_plan("embed_sscd", 64, SSCD_SIZE**2 * PIL_RGB_BYTES)
                 report["phases"]["embed_sscd"] = embed_arm(
-                    "sscd", enc, items, batch=64, workers=workers, loader=sscd_loader,
+                    "sscd", enc, items, batch=batch, workers=workers, loader=sscd_loader,
                     out_path=os.path.join(out_dir, "emb_sscd.npz"), beat=beat_for("embed"),
-                    deadline=deadline)
+                    deadline=deadline, prefetch=prefetch, on_shard=checkpoint)
                 del enc
+                checkpoint("embed_sscd")
             # DINOv2 is the licence-clean comparison arm, read on the labelled pairs only;
             # DINOv3 also embeds the neighbourhood, because its heads route those frames.
             pair_items = [it for it in items if it[0] not in nb_images]
@@ -1128,21 +1501,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rep.phase("embed", "running", name)
                 enc, rev = load_hf_encoder(arm, arm.get("revision") or None, device, threads=vcpus)
                 report["identity"][name] = {**arm, "revision": rev}
+                batch, prefetch = decode_plan(f"embed_{name}", args.batch_size,
+                                              int(arm["resolution"])**2 * PIL_RGB_BYTES)
                 report["phases"][f"embed_{name}"] = embed_arm(
-                    name, enc, arm_items, batch=args.batch_size, workers=workers,
+                    name, enc, arm_items, batch=batch, workers=workers,
                     loader=preprocessed_loader(arm["preprocessing"], int(arm["resolution"])),
-                    out_path=out_path, beat=beat_for("embed"), deadline=deadline)
+                    out_path=out_path, beat=beat_for("embed"), deadline=deadline,
+                    prefetch=prefetch, on_shard=checkpoint)
                 del enc
+                checkpoint(f"embed_{name}")
             rep.phase("embed", "ok", json.dumps({k: v for k, v in report["phases"].items()
                                                  if k.startswith("embed")})[:1800])
             # A checkpoint upload: the descriptors alone answer half the question, and a
             # watchdog teardown later must not cost them.
-            try:
-                json.dump(report, open(os.path.join(out_dir, "report.json"), "w"), indent=1, default=str)
-                upload_results(out_dir, args.run_id, local_only=conn is None)
-                rep.run_note(alive="checkpoint uploaded after embed")
-            except Exception as exc:  # noqa: BLE001
-                LOG.warning("checkpoint upload failed: %s", exc)
+            checkpoint("after embed", force=True)
 
         import numpy as np
 
@@ -1203,10 +1575,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 q_items = [(r["synth_id"], r["path"]) for r in rows]
                 g_items = [(i, paths[i]) for i in plan["gallery"] if i in paths]
                 enc = SSCD(fetch_sscd(args.root), device)
+                batch, prefetch = decode_plan("synth_sscd", 64, SSCD_SIZE**2 * PIL_RGB_BYTES)
                 report["phases"]["synth_sscd"] = embed_arm(
-                    "synth_sscd", enc, q_items, batch=64, workers=workers, loader=sscd_loader,
+                    "synth_sscd", enc, q_items, batch=batch, workers=workers, loader=sscd_loader,
                     out_path=os.path.join(out_dir, "syn_sscd.npz"), beat=beat_for("synthetic"),
-                    deadline=None)
+                    deadline=None, prefetch=prefetch, on_shard=checkpoint)
                 del enc
                 for name, arm in (("dinov2", dino_arm), ("dinov3", v3_arm), ("clip", clip_arm)):
                     if name == "clip":
@@ -1216,21 +1589,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # CLIPVisionModelWithProjection from this checkpoint's CLIPConfig.
                         enc, rev = load_production_clip(threads=vcpus)
                         loader = decode
+                        image_bytes = FULL_DECODE_BYTES
                     else:
                         enc, rev = load_hf_encoder(arm, report["identity"].get(name, {}).get("revision")
                                                    or arm.get("revision") or None, device,
                                                    threads=vcpus)
                         loader = preprocessed_loader(arm["preprocessing"], int(arm["resolution"]))
+                        image_bytes = int(arm["resolution"])**2 * PIL_RGB_BYTES
                     report["identity"].setdefault(name, {**arm, "revision": rev})
+                    batch, prefetch = decode_plan(f"synth_{name}", args.batch_size, image_bytes)
                     report["phases"][f"synth_{name}"] = embed_arm(
-                        f"synth_{name}", enc, q_items, batch=args.batch_size, workers=workers,
+                        f"synth_{name}", enc, q_items, batch=batch, workers=workers,
                         loader=loader, out_path=os.path.join(out_dir, f"syn_{name}.npz"),
-                        beat=beat_for("synthetic"), deadline=None)
+                        beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
+                        on_shard=checkpoint)
                     if name == "clip":
                         report["phases"]["gallery_clip"] = embed_arm(
-                            "gallery_clip", enc, g_items, batch=args.batch_size, workers=workers,
+                            "gallery_clip", enc, g_items, batch=batch, workers=workers,
                             loader=loader, out_path=os.path.join(out_dir, "gal_clip.npz"),
-                            beat=beat_for("synthetic"), deadline=None)
+                            beat=beat_for("synthetic"), deadline=None, prefetch=prefetch,
+                            on_shard=checkpoint)
                     del enc
                 rep.phase("synthetic", "ok", f"{len(rows)} transformed copies")
             except Exception as exc:  # noqa: BLE001 - the matchers still run
@@ -1250,7 +1628,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report["phases"][phase] = match_phase(
                     ex, pairs, paths, device=device, out_path=os.path.join(out_dir, f"lg_{ex}.npz"),
                     beat=beat_for(phase), deadline=deadline, workers=min(8, workers),
-                    checkpoint=checkpoint)
+                    on_shard=checkpoint)
                 rep.phase(phase, "ok", json.dumps(report["phases"][phase]))
             except Exception as exc:  # noqa: BLE001 - one extractor must not lose the other
                 LOG.exception("%s failed", phase)

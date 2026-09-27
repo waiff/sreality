@@ -59,6 +59,19 @@ SIX BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
     torchvision built against a different CUDA than the torch beside it fails at import
     rather than at install.
 
+A FAILING PAYLOAD IS RESTARTED AT MOST TWICE (pod udlpld675b3zwp, 2026-09-27, 15,613 s,
+~$2.17, nothing uploaded). The G1 payload was OOM-killed (exit 137) at the same DINOv3
+image on every pass; each exit restarted the container, each restart re-ran the payload,
+and ten restarts later the wait window ended it. The payload's exits are now COUNTED on
+disk (`payload_failures`, beside `pass`), and a pass that died inside the payload without
+recording its code (`payload_state` still `running`) counts too. The third failure, or ANY
+exit 137 (the OOM killer: a restart repeats the same allocation), GIVES UP: the lane's
+`finalize_args` call (G1: `--finalize`, which uploads whatever results and shards exist
+and closes every open arm) runs once, the report `payload gave-up code=<c>` goes out — the
+watchdog tears the pod down on it — and the script idles instead of exiting, so RunPod has
+nothing to restart. Shared by every lane: the tagging and DINOv3 lanes get the same bound,
+without a finalize call.
+
 TORCH AND TORCHVISION COME FROM THE cu118 INDEX, in one command. The image is CUDA
 11.8-era and cu118 is the flavour with the widest cp312 coverage on the PyTorch index
 (cp312 through torch 2.7.1 / torchvision 0.22.1; cu121 stops at 2.5.1). One command
@@ -102,7 +115,13 @@ TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu118"
 BEAT_INTERVAL_S = 300
 # The steps, in order. The names are the vocabulary of every heartbeat and of the exit
 # report, so they are short and stable.
-STEPS = ("deps", "fetch", "uv", "venv", "disk", "torch", "repo", "payload", "idle")
+STEPS = ("deps", "fetch", "uv", "venv", "disk", "torch", "repo", "payload", "idle", "gave-up")
+# Payload failures before the bootstrap gives up: the first run plus two restarts.
+MAX_PAYLOAD_FAILURES = 3
+# The OOM killer's SIGKILL. The same pass would allocate the same memory again.
+OOM_EXIT_CODE = 137
+# The token the watchdog tears a pod down on (`scripts/pod_watchdog.py`).
+GAVE_UP_TOKEN = "payload gave-up"
 
 _REPORTER_SOURCE = (Path(__file__).with_name("pod_report.py")).read_text(encoding="utf-8")
 _HEREDOC = "PODBOOT_REPORT_EOF"
@@ -116,14 +135,18 @@ _ARG_RE = re.compile(r"[A-Za-z0-9._=/@,:-]+")
 
 
 def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str],
-                           extra: str = "clip") -> str:
-    """The pod's whole shell script, as one `bash -c` string."""
+                           extra: str = "clip", finalize_args: Sequence[str] = (),
+                           max_payload_failures: int = MAX_PAYLOAD_FAILURES) -> str:
+    """The pod's whole shell script, as one `bash -c` string. `finalize_args`, when given,
+    are appended to the payload's argv for its one give-up call (see the header)."""
     if not _REF_RE.match(ref):
         raise ValueError(
             f"refusing to interpolate an unsafe git ref into a shell command: {ref!r}")
-    for arg in payload_args:
+    for arg in list(payload_args) + list(finalize_args):
         if not _ARG_RE.fullmatch(arg):
             raise ValueError(f"refusing to interpolate an unsafe payload arg: {arg!r}")
+    if int(max_payload_failures) < 1:
+        raise ValueError("max_payload_failures must be at least 1")
     if not re.fullmatch(r"[A-Za-z0-9_.]+", module):
         raise ValueError(f"refusing to interpolate an unsafe module name: {module!r}")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", extra):
@@ -174,7 +197,7 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         # whole file exists for: a step that is slow and silent.
         '    if [ -n "${PODBOOT_DRY_SLEEP:-}" ]; then sleep "$PODBOOT_DRY_SLEEP"; fi',
         '    if [ "${PODBOOT_DRY_FAIL:-}" = "$PODBOOT_STEP" ]; then',
-        '      echo "PODBOOT_DRY: failing step=$PODBOOT_STEP: $*"; return 1',
+        '      echo "PODBOOT_DRY: failing step=$PODBOOT_STEP: $*"; return "${PODBOOT_DRY_CODE:-1}"',
         "    fi",
         '    echo "PODBOOT_DRY: skipping $*"; return 0',
         "  fi",
@@ -245,11 +268,52 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         f"x uv pip install -e '.[{extra}]'",
         'report "step=repo ok"',
         "step payload",
-        'report "step=payload starting"',
+        # THE RESTART BOUND (see the header). Both counters are files, like `pass`, because
+        # the restart they bound is exactly what erases a shell variable.
+        'PODBOOT_FAILS="$(cat "$PODBOOT_ROOT/payload_failures" 2>/dev/null || echo 0)"',
+        'PODBOOT_RC=earlier',
+        # `running` left behind = the previous pass died inside the payload before it
+        # could record a code (the whole container killed): that is a failure too.
+        'if [ "$(cat "$PODBOOT_ROOT/payload_state" 2>/dev/null || true)" = "running" ]; then',
+        '  PODBOOT_FAILS="$(( PODBOOT_FAILS + 1 ))"; PODBOOT_RC=lost',
+        '  echo "$PODBOOT_FAILS" > "$PODBOOT_ROOT/payload_failures"',
+        "fi",
+        "give_up() {",
+        '  kill "${PODBOOT_BEAT:-0}" 2>/dev/null || true',
+        "  step gave-up",
+        '  echo gave-up > "$PODBOOT_ROOT/payload_state"',
+        '  export PODBOOT_GAVE_UP="code=$1 failures=$PODBOOT_FAILS pass=$PODBOOT_PASS"',
+        f'  report "{GAVE_UP_TOKEN} code=$1 failures=$PODBOOT_FAILS step=payload" '
+        '--tail-file "$PODBOOT_LOG"',
+        (f"  x python -m {module} {' '.join(list(payload_args) + list(finalize_args))} "
+         "|| echo 'finalize FAILED'") if finalize_args else "  true",
+        '  report "step=gave-up idle"',
+        # Not an exit: RunPod would restart the container, and the loop would begin again.
+        "  trap - EXIT",
+        '  if [ "$PODBOOT_SLEEP_S" = "0" ]; then sleep infinity; '
+        'else sleep "$PODBOOT_SLEEP_S"; fi',
+        "  exit 0",
+        "}",
+        'if [ "$(cat "$PODBOOT_ROOT/payload_state" 2>/dev/null || true)" = "gave-up" ] '
+        f'|| [ "$PODBOOT_FAILS" -ge {int(max_payload_failures)} ]; then give_up "$PODBOOT_RC"; fi',
+        'report "step=payload starting" "failures=$PODBOOT_FAILS"',
         # The payload owns the heartbeat from here (it writes its own boot stamp and
         # per-arm progress), so the beat stops rather than racing its read-modify-write.
         'kill "$PODBOOT_BEAT" 2>/dev/null || true',
-        f"x python -m {module} {payload}".rstrip(),
+        'echo running > "$PODBOOT_ROOT/payload_state"',
+        "PODBOOT_RC=0",
+        f"x python -m {module} {payload} || PODBOOT_RC=$?".replace("  ", " "),
+        'if [ "$PODBOOT_RC" != "0" ]; then',
+        '  PODBOOT_FAILS="$(( PODBOOT_FAILS + 1 ))"',
+        '  echo "$PODBOOT_FAILS" > "$PODBOOT_ROOT/payload_failures"',
+        '  echo failed > "$PODBOOT_ROOT/payload_state"',
+        f'  if [ "$PODBOOT_RC" = "{OOM_EXIT_CODE}" ] '
+        f'|| [ "$PODBOOT_FAILS" -ge {int(max_payload_failures)} ]; then give_up "$PODBOOT_RC"; fi',
+        # Below the bound: exit, the trap reports `exit=<code> step=payload`, RunPod
+        # restarts the container and the next pass runs the payload again.
+        '  exit "$PODBOOT_RC"',
+        "fi",
+        'echo ok > "$PODBOOT_ROOT/payload_state"',
         'report "step=payload ok"',
         "step idle",
         # DO NOT EXIT. RunPod re-runs this start command whenever it ends, so returning
@@ -262,15 +326,16 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
 
 
 def build_start_cmd(*, ref: str, module: str, payload_args: Sequence[str],
-                    extra: str = "clip") -> list[str]:
+                    extra: str = "clip", finalize_args: Sequence[str] = ()) -> list[str]:
     """The pod's argv."""
     return ["bash", "-c", build_bootstrap_script(ref=ref, module=module,
-                                                 payload_args=payload_args, extra=extra)]
+                                                 payload_args=payload_args, extra=extra,
+                                                 finalize_args=finalize_args)]
 
 
 def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
             sleep_s: float = 0, root: str | None = None, idle_s: float = 0.2,
-            timeout_s: float = 120) -> subprocess.CompletedProcess[str]:
+            timeout_s: float = 120, fail_code: int = 1) -> subprocess.CompletedProcess[str]:
     """Execute the generated script locally with every real step stubbed out.
 
     Real bash, real trap, real reporter — only the commands that would cost money or
@@ -288,6 +353,7 @@ def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
         }
         if fail_step:
             env["PODBOOT_DRY_FAIL"] = fail_step
+            env["PODBOOT_DRY_CODE"] = str(fail_code)
         if sleep_s:
             env["PODBOOT_DRY_SLEEP"] = str(sleep_s)
         return subprocess.run(["bash", "-c", script], env=env, capture_output=True,
@@ -296,7 +362,8 @@ def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
 
 def preflight(script: str, *, timeout_s: float = 120) -> tuple[bool, list[str]]:
     """Run the generated script offline — clean, again over the SAME root (a restart),
-    then with `torch` forced to fail — and confirm the EXIT trap reported each outcome.
+    then with `torch` forced to fail, then with the payload OOM-killed (exit 137) — and
+    confirm the EXIT trap, or the give-up report, named each outcome.
 
     A syntax error in this script, a trap that does not fire, or a step that cannot
     survive RunPod re-running the start command is otherwise only discovered by renting
@@ -305,15 +372,17 @@ def preflight(script: str, *, timeout_s: float = 120) -> tuple[bool, list[str]]:
     ok = True
     with tempfile.TemporaryDirectory(prefix="podboot-preflight-") as shared:
         cases = (
-            ("clean", None, 0, "pass=1 exit=0 step=idle", shared),
+            ("clean", None, 1, 0, "pass=1 exit=0 step=idle", shared),
             # The 2026-09-08 (h) restart loop: the SAME root, a second time.
-            ("restart", None, 0, "pass=2 exit=0 step=idle", shared),
-            ("torch", "torch", 1, "exit=1 step=torch", None),
+            ("restart", None, 1, 0, "pass=2 exit=0 step=idle", shared),
+            ("torch", "torch", 1, 1, "exit=1 step=torch", None),
+            # The 2026-09-27 OOM loop: the first exit 137 gives up, idles, never exits.
+            ("oom", "payload", OOM_EXIT_CODE, 0, f"{GAVE_UP_TOKEN} code={OOM_EXIT_CODE}", None),
         )
-        for label, fail_step, want_code, want, root in cases:
+        for label, fail_step, fail_code, want_code, want, root in cases:
             try:
                 proc = run_dry(script, fail_step=fail_step, root=root,
-                               timeout_s=timeout_s)
+                               timeout_s=timeout_s, fail_code=fail_code)
             except OSError as exc:  # no bash here: report, do not fail the dry run
                 lines.append(f"preflight[{label}]: SKIPPED — cannot execute bash ({exc})")
                 continue

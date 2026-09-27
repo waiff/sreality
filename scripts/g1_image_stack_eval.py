@@ -11,6 +11,13 @@ neg_unit, neg_mnl, neg_fused, neg_sib_hard, neg_sib_rnd). An operator positive b
 or sibling negative; an operator positive against an operator negative is a conflict and
 is dropped (counted).
 
+PARTIAL RUNS (2026-09-27): an arm is read only when its own file exists — the pod writes it
+once every item was tried; a crash or a deadline leaves `<arm>.shards/` instead. The report
+lists `arms_finished` and `arms_unfinished`, every bar names the finished arms it read (or
+says it had none), and while any expected arm is unfinished the decision is PARTIAL RUN,
+never STOP or ADOPT. `--include-partial` also reads unfinished LightGlue shards, as a
+readout only.
+
 Usage:
     python -m scripts.g1_image_stack_eval --manifest manifest.json.gz \\
         --clip clip_b32_stored.npz [--results g1_results/] --out eval.json
@@ -242,19 +249,68 @@ def _one_to_one(pairs: set[tuple[int, int]]) -> int:
     return n
 
 
-def load_lg(results: str) -> dict[str, dict[tuple[int, int], tuple[int, int, int]]]:
+EXPECTED_ARMS = ("sscd", "dinov2", "dinov3", "synthetic", "lg_aliked", "lg_disk")
+SYNTH_FILES = ("synthetic.json", "syn_sscd.npz", "syn_dinov2.npz", "syn_dinov3.npz",
+               "syn_clip.npz", "gal_clip.npz")
+
+
+def _shard_files(results: str, stem: str) -> list[str]:
+    d = os.path.join(results, f"{stem}.shards")
+    if not os.path.isdir(d):
+        return []
+    return sorted(os.path.join(d, f) for f in os.listdir(d)
+                  if f.endswith(".npz") and ".tmp." not in f)
+
+
+def arm_status(results: str) -> tuple[list[str], dict[str, str]]:
+    """(finished arms, {unfinished arm: what is on disk}) in a pod's results directory.
+    FINISHED means the arm's own file exists; shards alone are unfinished work."""
+    finished: list[str] = []
+    unfinished: dict[str, str] = {}
+    for arm in EXPECTED_ARMS + ("lg_superpoint",):
+        if arm == "synthetic":
+            have = [f for f in SYNTH_FILES if os.path.exists(os.path.join(results, f))]
+            if len(have) == len(SYNTH_FILES):
+                finished.append(arm)
+            else:
+                shards = sum(len(_shard_files(results, f[:-4])) for f in SYNTH_FILES
+                             if f.endswith(".npz"))
+                unfinished[arm] = f"{len(have)}/{len(SYNTH_FILES)} files, {shards} shards"
+            continue
+        stem = arm if arm.startswith("lg_") else f"emb_{arm}"
+        if os.path.exists(os.path.join(results, f"{stem}.npz")):
+            finished.append(arm)
+            continue
+        shards = len(_shard_files(results, stem))
+        legacy = os.path.exists(os.path.join(results, f"{stem}.partial.npz"))
+        if arm == "lg_superpoint" and not shards and not legacy:
+            continue  # licence-gated, never a default phase: absent is not unfinished
+        unfinished[arm] = (f"{shards} shards on disk" if shards
+                           else "partial file" if legacy else "not started")
+    return finished, unfinished
+
+
+def load_lg(results: str, include_partial: bool = False,
+            ) -> dict[str, dict[tuple[int, int], tuple[int, int, int]]]:
+    """LightGlue tables of the FINISHED extractors; `include_partial` adds the shards (or a
+    pre-shard partial file) of an unfinished one, as a readout."""
     out = {}
     for ex in ("disk", "aliked", "superpoint"):
-        path = os.path.join(results, f"lg_{ex}.npz")
-        if not os.path.exists(path):
-            path = os.path.join(results, f"lg_{ex}.partial.npz")
-        if not os.path.exists(path):
+        paths = [os.path.join(results, f"lg_{ex}.npz")]
+        if not os.path.exists(paths[0]):
+            if not include_partial:
+                continue
+            paths = _shard_files(results, f"lg_{ex}") + [
+                p for p in [os.path.join(results, f"lg_{ex}.partial.npz")] if os.path.exists(p)]
+        if not paths:
             continue
-        z = np.load(path)
         table = {}
-        for a, b, m, fi, hi in zip(z["a"], z["b"], z["matches"], z["f_inliers"], z["h_inliers"]):
-            a, b = int(a), int(b)
-            table[(a, b) if a < b else (b, a)] = (int(m), int(fi), int(hi))
+        for path in paths:
+            z = np.load(path)
+            for a, b, m, fi, hi in zip(z["a"], z["b"], z["matches"], z["f_inliers"],
+                                       z["h_inliers"]):
+                a, b = int(a), int(b)
+                table[(a, b) if a < b else (b, a)] = (int(m), int(fi), int(hi))
         out[ex] = table
     return out
 
@@ -775,10 +831,18 @@ def _best(rooms: dict[str, Any], room: str, metric: str, prefixes: tuple[str, ..
 
 
 def verdict(report: dict[str, Any]) -> dict[str, Any]:
-    """The pre-registered bars (G1_image_stack.md section 6), scored mechanically."""
+    """The pre-registered bars (G1_image_stack.md section 6), scored mechanically, on the
+    FINISHED arms only when the report says which those are (`arms_finished`)."""
     rooms = report.get("rooms", {})
     out: dict[str, Any] = {}
+    finished = report.get("arms_finished")
+    gated = finished is not None
+    new_arms = tuple(a for a in NEW_ARMS if not gated or a in finished)
+    lg_arms = tuple(a for a in ("lg_aliked", "lg_disk") if a in new_arms)
+    desc_arms = tuple(a for a in ("dinov3", "dinov2", "sscd") if a in new_arms)
     syn = (report.get("synthetic") or {}).get("per_arm", {})
+    if gated and "synthetic" not in finished:
+        syn = {}
     s1 = (syn.get("sscd") or {}).get("recall@1_where_dhash_misses")
     c1 = (syn.get("clip") or {}).get("recall@1_where_dhash_misses")
     out["B1_copy"] = {"sscd": s1, "clip": c1,
@@ -789,7 +853,7 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
     # STOP on noise about half the time. STOP rests on the pooled private rooms (n ~ 430, +-0.045);
     # kitchen and bathroom are readouts with their interval, never the gate.
     for room, margin in (("kitchen", 0.10), ("bathroom", 0.10), ("private", 0.08)):
-        where, best = _best(rooms, room, "recall@labFMR0.05", NEW_ARMS)
+        where, best = _best(rooms, room, "recall@labFMR0.05", new_arms)
         base = (rooms.get(f"clip@clip:{room}") or {}).get("recall@labFMR0.05")
         n_pos = (rooms.get(where) or {}).get("n_pos") if where else None
         half = (1.96 * math.sqrt(best * (1 - best) / n_pos)
@@ -803,9 +867,9 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
                            "per_room_partial": [r for r in ("kitchen", "bathroom") if b2[r]["pass"] is False]
                            + ([] if kitchen_ok else ["kitchen_floor_0.75"]),
                            "pass": b2["private"]["pass"]}
-    lg_where, lg_auc = _best(rooms, "private", "auc_vs_hard", ("lg_aliked", "lg_disk"))
-    _, lg_rec = _best(rooms, "private", "recall@hardFMR0.01", ("lg_aliked", "lg_disk"))
-    _, d_rec = _best(rooms, "private", "recall@hardFMR0.01", ("dinov3", "dinov2", "sscd"))
+    lg_where, lg_auc = _best(rooms, "private", "auc_vs_hard", lg_arms)
+    _, lg_rec = _best(rooms, "private", "recall@hardFMR0.01", lg_arms)
+    _, d_rec = _best(rooms, "private", "recall@hardFMR0.01", desc_arms)
     out["B3_geometry"] = {"lg": lg_where, "auc_vs_hard": lg_auc, "lg_recall": lg_rec,
                           "descriptor_recall": d_rec,
                           "pass": None if lg_auc is None or lg_rec is None or d_rec is None
@@ -844,7 +908,7 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
                                 and (kx.get("recall") or 0) >= 0.5 * (k_only.get("recall") or 0))}
     ret = report.get("retrieval", {})
     best_r, best_k = None, None
-    for arm in NEW_ARMS:
+    for arm in new_arms:
         row = ret.get(f"{arm}:kitchen:interesting")
         if row and (best_r is None or row["R@5"] > best_r["R@5"]):
             best_r, best_k = row, arm
@@ -855,9 +919,26 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
                            "pass": None if not best_r or not base_r else bool(
                                best_r["R@5"] >= base_r["R@5"] + 0.10
                                and (best_r.get("neg_above") or 0) <= 0.10)}
+    if gated:
+        # Each bar names the finished arms it could read; one that had none says so
+        # instead of reporting a reading it never made.
+        needs = {"B1_copy": ("synthetic",), "B3_geometry": ("lg_aliked", "lg_disk")}
+        for bar, row in out.items():
+            want = needs.get(bar, NEW_ARMS)
+            read = [a for a in want if a in finished]
+            row["arms_read"] = read
+            if not read:
+                row["pass"] = None
+                row["not_reported"] = f"no finished arm among {', '.join(want)}"
     b = {k: v.get("pass") for k, v in out.items()}
-    if not report.get("arms_new"):
+    unfinished = report.get("arms_unfinished") or {}
+    if not report.get("arms_new") and not unfinished:
         decision = "NO NEW ARM: incumbent reading only (the bars need the pod's results)"
+    elif unfinished:
+        decision = (f"PARTIAL RUN: bars read on the finished arms only "
+                    f"({', '.join(finished or []) or 'none'}); unfinished: "
+                    + "; ".join(f"{k} ({v})" for k, v in sorted(unfinished.items()))
+                    + ". No STOP or ADOPT until a resume finishes them")
     elif b["B2_same_room"] is False:
         decision = "STOP: the stack does not find the room dHash cannot; keep dHash/CLIP evidence"
     elif b["B2_same_room"] and b["B4_catalogue"] and b["B5_layered"]:
@@ -866,6 +947,7 @@ def verdict(report: dict[str, Any]) -> dict[str, Any]:
     else:
         decision = "PARTIAL: read the failing bars; no engine arm until they are understood"
     out["decision"] = decision
+    out["partial"] = bool(unfinished)
     # A pixel verdict is never an engine adoption: the lab arm MF+G1 vs MF must also gain.
     out["engine_adoption_bar"] = ("M1 +2 on c17 AND c18, or >= 10 % of MF's lost band co-pairs recovered, "
                                   "at 0 fused on the strict read; features admissible only if the lane "
@@ -999,6 +1081,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--engine-stock", action="store_true",
                     help="Drop E9 stock frames (pop >= 8) as the engine does; default keeps them.")
+    ap.add_argument("--include-partial", action="store_true",
+                    help="Also read unfinished LightGlue shards (a readout: the verdict stays PARTIAL).")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     with gzip.open(args.manifest, "rt") as fh:
@@ -1011,7 +1095,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     routers: dict[str, dict[int, str]] = {
         "clip": {int(r["image_id"]): r["tag"] for r in manifest["images"] if r.get("tag")}}
     lg: dict[str, Any] = {}
+    status: tuple[list[str], dict[str, str]] | None = None
     if args.results:
+        status = arm_status(args.results)
         for name in ("sscd", "dinov2", "dinov3"):
             a = load_arm(name, os.path.join(args.results, f"emb_{name}.npz"))
             if a:
@@ -1021,7 +1107,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             routers["head"] = head
             # The pod's own routing: the head winner where one clears the floor, else CLIP.
             routers["hc"] = {**routers["clip"], **head}
-        lg = load_lg(args.results)
+        lg = load_lg(args.results, include_partial=args.include_partial)
     copy_t = {"clip": 0.97, "sscd": 0.75, "dinov2": 0.9, "dinov3": 0.9}
     report = evaluate(manifest, arms, routers, lg, copy_t, include_stock=not args.engine_stock)
     report["include_stock"] = not args.engine_stock
@@ -1051,6 +1137,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         for k, v in retrieval_eval(manifest, {"clip": arms["clip"]}, routers["clip"]).items():
             report["retrieval"][f"{k}@clip-router"] = v
     report["arms_new"] = sorted(set(arms) - {"clip"}) + [f"lg_{e}" for e in sorted(lg)]
+    if status is not None:
+        report["arms_finished"], report["arms_unfinished"] = status
+        report["partial"] = bool(status[1])
     report["verdict"] = verdict(report)
     with open(args.out, "w") as fh:
         json.dump(report, fh, indent=1, default=str)
@@ -1064,6 +1153,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     for ex in sorted(lg):
         picks += [f"lg_{ex}:max_f", f"lg_{ex}:n_verified30", f"lg_{ex}:private_max_f"]
     md = markdown(report, picks) + "\n\n" + rooms_markdown(report["rooms"]) + extra_markdown(report)
+    if report.get("partial"):
+        md = (f"**PARTIAL RUN** — finished: {', '.join(report['arms_finished']) or 'none'}; "
+              "unfinished: " + "; ".join(f"{k} ({v})" for k, v in
+                                         sorted(report["arms_unfinished"].items()))
+              + ". Bars below read the finished arms only.\n\n" + md)
     with open(os.path.splitext(args.out)[0] + ".md", "w") as fh:
         fh.write(md + "\n")
     print(md)

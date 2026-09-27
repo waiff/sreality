@@ -195,6 +195,8 @@ STEPS_PREFIX = "pod steps "
 STEP_PREFIX = "pod step "
 
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?")
+_UNITS_RE = re.compile(r"\bunits=(\d+)\b")
+ALIVE_PREFIX = "pod alive "
 
 
 @dataclass(frozen=True)
@@ -288,8 +290,26 @@ def _boot_at(run_note: str | None) -> datetime | None:
     return None
 
 
+def _alive_units(run_note: str | None, since: datetime) -> int | None:
+    """The payload's durable-work count (`units=N` on its `pod alive` line), when a payload
+    of THIS dispatch wrote it (the line's stamp is after `since`); None otherwise."""
+    for line in (run_note or "").splitlines():
+        if not line.startswith(ALIVE_PREFIX):
+            continue
+        stamp, units = _ISO_RE.search(line), _UNITS_RE.search(line)
+        if stamp is None or units is None:
+            return None
+        try:
+            when = datetime.fromisoformat(stamp.group(0).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return int(units.group(1)) if when >= since else None
+    return None
+
+
 def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
-                          launched_at: datetime, baseline_vectors: int) -> Progress:
+                          launched_at: datetime, baseline_vectors: int,
+                          units: bool = False) -> Progress:
     """One watchdog reading, out of the rows the payload writes anyway.
 
     BOOTED is the payload's own boot stamp, dated AFTER this dispatch launched — a stale
@@ -298,7 +318,10 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
 
     The MARKER folds the vector count together with the newest heartbeat timestamp, so
     the phases that write no vectors (fetching the manifest, filling the image cache,
-    downloading weights) still count as progress.
+    downloading weights) still count as progress. With `units` (the G1 lane, whose payload
+    writes no vector row) the heartbeat counts only until this dispatch's payload reports
+    its durable-work count; from then on the marker is that count alone, so a payload that
+    restarts and heartbeats without finishing a shard is a stall (2026-09-27).
     """
     wanted = {a.strip() for a in only if a.strip()}
     with conn.cursor() as cur:
@@ -321,12 +344,16 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to
     # look exactly like a dead pod from here.
     steps = _steps(run_note)
+    done_units = (_alive_units(run_note, launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
+                  if units else None)
     return Progress(
         booted=fresh_boot or vectors > baseline_vectors,
-        marker=f"{vectors}|{heartbeat}",
+        marker=(f"{vectors}|{heartbeat}" if done_units is None
+                else f"{vectors}|units={done_units}"),
         terminal=terminal,
         detail=(f"{vectors} vectors, arms {done}/{len(considered)} terminal, "
-                f"heartbeat {heartbeat or 'none'}"),
+                + ("" if done_units is None else f"units {done_units}, ")
+                + f"heartbeat {heartbeat or 'none'}"),
         step=(steps[-1] if steps else "")[:1500],
         steps=tuple(record[:2000] for record in steps),
     )
@@ -403,9 +430,11 @@ def _log_arm_reset(args: argparse.Namespace, only: Sequence[str]) -> None:
              ", ".join(f"{arm} (was {status})" for arm, status in reset))
 
 
-def make_watchdog(args: argparse.Namespace, *, only: Sequence[str]) -> PodWatchdog | None:
+def make_watchdog(args: argparse.Namespace, *, only: Sequence[str],
+                  units: bool = False) -> PodWatchdog | None:
     """The watchdog for this dispatch, or None when the runner cannot read the database
-    (in which case the wait window is the only protection there is, loudly)."""
+    (in which case the wait window is the only protection there is, loudly). `units`: see
+    `read_bakeoff_progress`."""
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         LOG.warning("SUPABASE_DB_URL is not set on the RUNNER — no watchdog, so a pod "
@@ -426,7 +455,7 @@ def make_watchdog(args: argparse.Namespace, *, only: Sequence[str]) -> PodWatchd
         with _connect(db_url) as conn:
             return read_bakeoff_progress(conn, run_id=args.run_id, only=only,
                                          launched_at=launched_at,
-                                         baseline_vectors=baseline)
+                                         baseline_vectors=baseline, units=units)
 
     LOG.info("watchdog: bootstrap_deadline=%.0fs stall_deadline=%.0fs poll=%.0fs "
              "baseline_vectors=%d", args.bootstrap_deadline_s, args.stall_deadline_s,
@@ -491,9 +520,11 @@ def plan_stage(args: argparse.Namespace) -> Plan:
 
 
 def _run_pod(plan: Plan, args: argparse.Namespace,
-             select: Callable[[RunPodClient], list[GpuOption]] | None = None) -> int:
+             select: Callable[[RunPodClient], list[GpuOption]] | None = None,
+             units: bool = False) -> int:
     """`select` builds the launch ladder for a lane with its own GPU policy (G1: an
-    ordered allowlist walked in both clouds); the default is this lane's `select_gpus`."""
+    ordered allowlist walked in both clouds); the default is this lane's `select_gpus`.
+    `units` measures the stall deadline in the payload's finished work (G1)."""
     env = pod_env(args.run_id)
     missing = [k for k in POD_ENV_KEYS if k not in env]
     allowlist = tuple(s.strip().lower() for s in args.gpu_allowlist.split(",")
@@ -545,7 +576,7 @@ def _run_pod(plan: Plan, args: argparse.Namespace,
     LOG.info("%d candidate GPU(s), in launch order: %s", len(gpus),
              ", ".join(f"{g.id} [{g.cloud_type}] (${g.price_per_hr():.3f}/hr)" for g in gpus))
 
-    watchdog = make_watchdog(args, only=only)
+    watchdog = make_watchdog(args, only=only, units=units)
     try:
         result = client.run_job_with_fallback(
             name=f"tagging-bakeoff-{args.run_id}",

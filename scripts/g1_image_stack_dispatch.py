@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import io
 import json
 import logging
 import math
@@ -245,8 +244,10 @@ def pod(args: Namespace) -> int:
                f"--max-seconds={max(600, int(args.job_max_seconds) - PAYLOAD_MARGIN_S)}"]
     if args.phases:
         payload.append(f"--phases={args.phases}")
+    # The bootstrap gives a failing payload up after two restarts, or at once on an OOM
+    # kill, and then runs `--finalize`: upload what exists, close every open arm.
     start_cmd = pod_bootstrap.build_start_cmd(ref=args.ref, module=MODULE, payload_args=payload,
-                                              extra="clip")
+                                              extra="clip", finalize_args=["--finalize"])
     plan = tb.Plan(stage="embed", where="pod", payload_args=payload, start_cmd=start_cmd,
                    max_wait_s=args.job_max_seconds + STARTUP_GRACE_S, execute=not args.dry_run)
     if not args.dry_run:
@@ -264,28 +265,57 @@ def pod(args: Namespace) -> int:
                      bootstrap_deadline_s=args.bootstrap_deadline_s,
                      stall_deadline_s=args.stall_deadline_s)
     tb._log_arm_reset = lambda *a, **k: None  # the g1 reset above is the new attempt
-    return tb._run_pod(plan, shim, select=lambda client: gpu_ladder(client, allowlist, clouds))
+    # units=True: once the payload is up, the stall deadline counts finished shards and
+    # arms, never heartbeats (2026-09-27: ten restarts heartbeated through a 4 h 20 min window).
+    return tb._run_pod(plan, shim, select=lambda client: gpu_ladder(client, allowlist, clouds),
+                       units=True)
 
 
 def collect(args: Namespace) -> int:
+    """Download whatever the pod uploaded — every finished arm, and the shards of the
+    unfinished ones — plus the evaluator's side files, then evaluate the finished arms
+    (`eval.json` / `eval.md`: bars only for arms that finished, PARTIAL when any did not).
+    Red only when there is no results tar at all."""
     from scraper import image_storage
 
     key = f"{PREFIX}/{args.run_id}/results.tar"
     r2 = image_storage.R2Client.from_env()
-    if r2.object_size(key) is None:
-        LOG.error("no results at %s", key)
-        return 1
     os.makedirs(args.out, exist_ok=True)
-    data = r2.download_bytes(key)
-    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-        tar.extractall(args.out, filter="data")
-    LOG.info("collected %s (%d bytes) into %s", key, len(data), args.out)
     for name, _ctype in SIDE_FILES:
         target = os.path.join(args.out, name)
         side = f"{PREFIX}/{args.run_id}/{name}"
         if not os.path.exists(target) and r2.object_size(side) is not None:
-            with open(target, "wb") as fh:
-                fh.write(r2.download_bytes(side))
+            r2.download_file(side, target)
+    if r2.object_size(key) is None:
+        LOG.error("no results at %s", key)
+        return 1
+    tar_path = os.path.join(args.out, "results.tar")
+    r2.download_file(key, tar_path)
+    with tarfile.open(tar_path) as tar:
+        tar.extractall(args.out, filter="data")
+    LOG.info("collected %s (%d bytes) into %s", key, os.path.getsize(tar_path), args.out)
+    os.remove(tar_path)
+    return evaluate_collected(args.out)
+
+
+def evaluate_collected(out: str) -> int:
+    """The offline evaluator over what was collected. Best effort: a failed evaluation
+    never loses the artifact, it only means the coordinator runs it by hand."""
+    from scripts import g1_image_stack_eval as ev
+
+    manifest = os.path.join(out, "manifest.json.gz")
+    results = os.path.join(out, "g1_results")
+    if not (os.path.exists(manifest) and os.path.isdir(results)):
+        LOG.warning("evaluation skipped: no manifest or no g1_results in %s", out)
+        return 0
+    argv = ["--manifest", manifest, "--results", results, "--out", os.path.join(out, "eval.json")]
+    clip = os.path.join(out, "clip_b32_stored.npz")
+    if os.path.exists(clip):
+        argv += ["--clip", clip]
+    try:
+        ev.main(argv)
+    except Exception:  # noqa: BLE001 - the artifact is the deliverable, the read is a bonus
+        LOG.exception("evaluation failed; the collected results are still in %s", out)
     return 0
 
 

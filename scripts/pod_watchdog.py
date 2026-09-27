@@ -30,16 +30,26 @@ outside. This module turns that into three terminations, all cheaper than the wi
       AGAIN during this run is genuinely terminal and this case fires on it correctly.
       Without that reset, attempt 5 of run 1 read 10/10 terminal two seconds in
       (2026-09-08 (j)).
-  (d) CRASH LOOP — two or more `exit=` reports from the pod's own bootstrap. RunPod
-      re-runs the docker start command whenever it exits, so a bootstrap that dies keeps
-      dying, on the clock, and the stall rail only catches it a quarter of an hour later
-      (2026-09-08 (h): ~33 min, ~$0.12). The teardown prints the FIRST exit report — the
-      original cause — because every later one is a symptom of the restart.
+  (d) CRASH LOOP — two or more `exit=` reports from the pod's own bootstrap within the
+      stall window, OR any report from a pass beyond `max_passes`. RunPod re-runs the
+      docker start command whenever it exits, so a bootstrap that dies keeps dying, on the
+      clock, and the stall rail only catches it a quarter of an hour later (2026-09-08 (h):
+      ~33 min, ~$0.12). A SLOW loop never tripped the first half: on 2026-09-27 the G1
+      payload was OOM-killed every ~18 min for ten passes (exits never 15 min apart, and the
+      bounded history dropped most of them before a poll), so the pass NUMBER is the rail
+      that cannot be missed. The teardown prints the FIRST exit report — the original
+      cause — because every later one is a symptom of the restart.
+  (e) PAYLOAD GAVE UP — the bootstrap's own `payload gave-up` report (at most two payload
+      restarts, and none after an exit 137: `scripts/pod_bootstrap.py`). The pod has
+      uploaded what it had and is idling; every further second is rent.
 
 WHAT COUNTS AS PROGRESS IS THE CALLER'S QUESTION, not this module's: a poller returns a
 `Progress` whose `marker` is any string that CHANGES when the job advances (a vector
 count, a heartbeat timestamp, both). This module only compares markers to the last one
-it saw.
+it saw. A marker built on a heartbeat timestamp keeps a crash-looping payload alive for
+the whole window (2026-09-27: every restart's heartbeats read as progress), so a lane that
+can count finished work — shards, vectors — should put only that in its marker once the
+payload is up (the G1 lane: `units=` on the payload's alive line).
 
 TIME IS THE `elapsed_s` THE CALLER PASSES IN — never a clock this module reads. That is
 what makes every case above testable with a fake clock and a fake poller, offline, for
@@ -53,6 +63,7 @@ against the last CONFIRMED progress, so a broken read cannot buy the pod unlimit
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -64,6 +75,11 @@ LOG = logging.getLogger("pod_watchdog")
 DEFAULT_BOOTSTRAP_DEADLINE_S = 30 * 60.0
 DEFAULT_STALL_DEADLINE_S = 15 * 60.0
 DEFAULT_POLL_INTERVAL_S = 60.0
+# The bootstrap runs a failing payload at most three times (pod_bootstrap), so a fourth
+# pass means something outside that bound is restarting the container.
+DEFAULT_MAX_PASSES = 3
+GAVE_UP_TOKEN = "payload gave-up"
+_PASS_RE = re.compile(r"\bpass=(\d+)\b")
 
 
 @dataclass(frozen=True)
@@ -102,9 +118,11 @@ class PodWatchdog:
         bootstrap_deadline_s: float = DEFAULT_BOOTSTRAP_DEADLINE_S,
         stall_deadline_s: float = DEFAULT_STALL_DEADLINE_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        max_passes: int = DEFAULT_MAX_PASSES,
         log: logging.Logger | None = None,
     ) -> None:
         self._poll = poll
+        self._max_passes = int(max_passes)
         self._bootstrap_deadline_s = float(bootstrap_deadline_s)
         self._stall_deadline_s = float(stall_deadline_s)
         self._poll_interval_s = float(poll_interval_s)
@@ -141,7 +159,7 @@ class PodWatchdog:
             self.last_detail = reading.detail
             crash = self._absorb_steps(reading, elapsed_s)
             if crash is not None:
-                return self._terminate("crash-loop", elapsed_s, context, crash)
+                return self._terminate(crash[0], elapsed_s, context, crash[1])
             if reading.step:
                 self.last_step = reading.step
             if not reading.steps and reading.step and reading.step != self._step:
@@ -188,35 +206,55 @@ class PodWatchdog:
 
         return None
 
-    def _absorb_steps(self, reading: Progress, elapsed_s: float) -> str | None:
+    def _absorb_steps(self, reading: Progress, elapsed_s: float) -> tuple[str, str] | None:
         """Log every heartbeat record this poll brought that we had not seen, and answer
-        the crash-loop question. Returns the teardown reason, or None.
+        the crash-loop and gave-up questions. Returns (case, teardown reason), or None.
 
         The records are opaque strings — this module compares them, it does not parse
-        them; `exit=` is the one token it has to recognise, because that is the pod's own
-        EXIT trap saying its bootstrap died."""
+        them, except for three tokens the bootstrap writes for exactly this: `exit=` (its
+        EXIT trap: the bootstrap died), `pass=N` (which container run this is) and
+        `payload gave-up` (its restart bound was reached)."""
+        gave_up = ""
+        top_pass = 0
         for record in reading.steps:
+            match = _PASS_RE.search(record)
+            if match:
+                top_pass = max(top_pass, int(match.group(1)))
             if record in self._seen:
                 continue
             self._seen.add(record)
             # Trimmed: a record carries up to ~3000 chars of log tail, and the whole of
             # it belongs in the teardown line, not once per routine heartbeat.
             self._log.info("WATCHDOG step=%s at %.0fs", record[:400], elapsed_s)
-            if "exit=" in record:
+            if GAVE_UP_TOKEN in record:
+                gave_up = record
+            elif "exit=" in record:
                 self._exits.append((elapsed_s, record))
                 if not self.first_exit:
                     self.first_exit = record
         if reading.steps:
             self._step = reading.step
+        cause = (f"THE FIRST FAILURE (the cause; the rest are its restarts): "
+                 f"{self.first_exit[:2000]}" if self.first_exit else "")
+        if gave_up:
+            return ("payload-failed",
+                    "the bootstrap gave the payload up (an exit 137, or a third failure) "
+                    "and uploaded what it had; nothing on this pod will move again: "
+                    f"{gave_up[:2000]}" + (f" — {cause}" if cause else ""))
+        if top_pass > self._max_passes:
+            return ("crash-loop",
+                    f"the pod's start command is on pass {top_pass} (limit "
+                    f"{self._max_passes}): the container keeps restarting, however slowly. "
+                    + cause)
         if len(self._exits) < 2:
             return None
         span = self._exits[-1][0] - self._exits[0][0]
         if span > self._stall_deadline_s:
             return None
-        return (f"the pod's bootstrap exited {len(self._exits)} times in {span:.0f}s — "
+        return ("crash-loop",
+                f"the pod's bootstrap exited {len(self._exits)} times in {span:.0f}s — "
                 "RunPod re-runs the start command whenever it exits, so this pod is "
-                "restarting on the clock and will never boot. THE FIRST FAILURE (the "
-                f"cause; the rest are its restarts): {self.first_exit[:2000]}")
+                "restarting on the clock and will never boot. " + cause)
 
     def _terminate(self, case: str, elapsed_s: float, context: Any, why: str) -> str:
         self.verdict = case

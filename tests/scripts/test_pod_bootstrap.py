@@ -242,7 +242,8 @@ def test_a_clean_payload_ends_in_a_sleep_rather_than_an_exit():
     # only finishes because PODBOOT_SLEEP_S bounds it.
     script = _script()
     assert 'if [ "$PODBOOT_SLEEP_S" = "0" ]; then sleep infinity;' in script
-    assert script.index("python -m scripts.tagging_bakeoff_embed") < script.index(
+    # The LAST sleep: the give-up path (defined before the payload runs) idles too.
+    assert script.index("python -m scripts.tagging_bakeoff_embed") < script.rindex(
         "sleep infinity")
     proc = pod_bootstrap.run_dry(script, idle_s=1.5, timeout_s=60)
     assert proc.returncode == 0
