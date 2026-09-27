@@ -9,27 +9,18 @@ the pair in the SAME component.
 from __future__ import annotations
 
 from autodedup import revocation
-from autodedup.labels import (
-    OPERATOR_TIER,
-    OperatorLabelRow,
-    SOURCE_EXPLICIT,
-    operator_label_pairs,
-)
 
 
 def rows(*pairs: tuple[int, int], certificate: str = "K-B") -> list[dict[str, object]]:
     return [{"lo": lo, "hi": hi, "certificate": certificate} for lo, hi in pairs]
 
 
-def ruled(pair: tuple[int, int], verdict: str) -> OperatorLabelRow:
-    return OperatorLabelRow(
-        lo=pair[0], hi=pair[1], verdict=verdict, source=SOURCE_EXPLICIT,
-        relation="same_property" if verdict == "same" else None,
-    )
+def ruled(pair: tuple[int, int], verdict: str) -> tuple[tuple[int, int], str]:
+    return pair, verdict
 
 
-def operator(*labelled: OperatorLabelRow) -> dict[tuple[int, int], object]:
-    return operator_label_pairs(list(labelled))
+def operator(*labelled: tuple[tuple[int, int], str]) -> dict[tuple[int, int], str]:
+    return dict(labelled)
 
 
 def test_a_family_is_a_component_of_the_certified_pairs() -> None:
@@ -52,13 +43,6 @@ def test_an_operator_negative_inside_a_family_revokes_e95() -> None:
     assert report.operator_labelled_inside == 1
     assert "E110 IS REVOKED" in report.line() and "1 x 3" in report.line()
     assert report.to_json()["revoked"] is True
-
-
-def test_a_must_not_link_is_a_negative_however_it_is_spelled() -> None:
-    report = revocation.check_rows(
-        rows((1, 2)), operator(ruled((1, 2), "same_building_different_unit"))
-    )
-    assert report.revoked and report.negatives == ((1, 2),)
 
 
 def test_an_operator_negative_ACROSS_two_families_does_not_revoke_it() -> None:
@@ -92,17 +76,3 @@ def test_an_operator_POSITIVE_inside_a_family_is_counted_and_holds() -> None:
         "families": 1, "members": 3, "operator_labelled_inside": 2,
         "negatives": [], "revoked": False,
     }
-
-
-def test_an_unsure_ruling_is_no_ruling() -> None:
-    report = revocation.check_rows(rows((1, 2)), operator(ruled((1, 2), "unsure")))
-    assert not report.revoked and report.operator_labelled_inside == 0
-
-
-def test_the_implied_tier_counts_too_because_a_cluster_ruling_is_a_ruling() -> None:
-    implied = OperatorLabelRow(
-        lo=1, hi=2, verdict="different", source="implied", cluster_key=5
-    )
-    report = revocation.check_rows(rows((1, 2)), operator_label_pairs([implied]))
-    assert report.revoked
-    assert next(iter(operator_label_pairs([implied]).values())).tier == OPERATOR_TIER

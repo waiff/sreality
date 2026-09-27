@@ -148,38 +148,6 @@ def test_fit_takes_a_committed_seal_where_it_takes_a_path(tmp_path: Path) -> Non
     assert "is NOT committed" in first_text
 
 
-def test_evaluate_finds_the_committed_map_for_the_model_s_own_seal(tmp_path: Path) -> None:
-    """A model whose seal IS committed needs no --split-map: the alternative is the warning
-    path, where the holdout is silently re-derived from the run being evaluated."""
-    from autodedup import harness
-
-    rows, labels = planted_rows(n=120)
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    _fit(tmp_path, "fit")
-    model_path = tmp_path / "fit" / harness.MODEL_FILE
-    model = json.loads(model_path.read_text(encoding="utf-8"))
-    seal = model["provenance"]["seal"]["sha256"]
-    splits = tmp_path / "splits"
-    splits.mkdir()
-    seals.write_map(splits / f"{seal}.json", seals.read_map(tmp_path / "fit" / "split_map.json"))
-    original, seals.SPLITS_DIR = seals.SPLITS_DIR, splits
-    out = io.StringIO()
-    try:
-        code = harness.main(
-            ["evaluate", str(run_dir), "--judgements", str(judgements),
-             "--model", str(model_path), "--out", str(tmp_path / "eval")], out=out
-        )
-    finally:
-        seals.SPLITS_DIR = original
-    assert code == 0
-    assert f"using the committed split map for seal {seal[:12]}" in out.getvalue()
-    report = json.loads((tmp_path / "eval" / "eval.json").read_text(encoding="utf-8"))
-    holdout = report["holdout"]
-    assert holdout["seal"]["sha256"] == seal == holdout["expect_seal"]
-    assert holdout["split_map_source"] == "fit"
-
-
 def test_an_unusable_split_map_is_a_refusal_not_a_traceback(tmp_path: Path) -> None:
     from autodedup import harness
 
@@ -189,10 +157,6 @@ def test_an_unusable_split_map_is_a_refusal_not_a_traceback(tmp_path: Path) -> N
     assert harness.main(
         ["fit", str(run_dir), "--judgements", str(judgements), "--split-map", "nope",
          "--out", str(tmp_path / "fit")], out=io.StringIO()
-    ) == 1
-    assert harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgements), "--split-map", "nope",
-         "--out", str(tmp_path / "eval")], out=io.StringIO()
     ) == 1
 
 

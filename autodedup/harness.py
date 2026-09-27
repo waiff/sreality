@@ -47,16 +47,14 @@ from autodedup.development import holds as development_holds
 from autodedup.family import refusals as family_guard_refusals
 from autodedup.hazard_context import ContextIndex
 from autodedup.guards import UNIT_DESIGNATOR_VETO
+from autodedup import evaluate as evaluation
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
     FIT_MAX_ITER,
     FIT_METHODS,
     L2_GRID,
-    components_spanning_split,
-    evaluate,
     fit_model,
     pooled_sample,
-    rescore_rows,
     split_groups,
     write_report,
 )
@@ -68,7 +66,19 @@ from autodedup.features import (
     FeatureContext,
     pair_features,
 )
-from autodedup.fingerprint import Fingerprint, build_all
+from autodedup.fingerprint import Fingerprint, build_all, build_fingerprint
+from autodedup.incremental import (
+    EVIDENCE_HOLD_REASON,
+    Calibration,
+    EvidenceHold,
+    Keyer,
+    Limits,
+    PairRow,
+    PassResult,
+    context_for,
+    run_pass_bounded,
+)
+from autodedup.incremental_store import CohortFacts, MemoryStore, Schedule
 from autodedup import revocation
 from autodedup.labels import (
     OPERATOR_TIER,
@@ -742,37 +752,215 @@ def score_pairs(
     return rows
 
 
+# --- `harness run`: the lane's own pass over the cohort (SW1, ADD06) -------------------------
+#
+# The withheld-photos arm's clock (E92/E93). Nothing here is a wall clock: the first decision is
+# INSIDE the horizon (so the hold fires) and the last one is outside it (so it expires).
+WITHHELD_T0: float = 1_780_000_000.0
+WITHHELD_HORIZON_S: float = 48 * 3600.0
+
+
+def _drain(store: MemoryStore, facts: CohortFacts, work: Schedule, settings: Settings,
+           model: LogisticModel, calibration: Calibration, limits: Limits,
+           hold: EvidenceHold | None) -> list[PassResult]:
+    passes: list[PassResult] = []
+    while not work.exhausted():
+        before = work.cursor
+        passes.append(run_pass_bounded(store, facts, work, settings, model, calibration,
+                                       limits=limits, hold=hold))
+        if work.cursor == before:
+            raise SystemExit(f"pair budget refused {passes[-1].wanted_pairs} pairs at "
+                             f"max_pairs={limits.max_pairs}")
+    return passes
+
+
+def calibrated(dataset: Dataset, settings: Settings
+               ) -> tuple[dict[int, Fingerprint], Calibration]:
+    """The lane's calibration core (`cut_calibration`: fingerprints off the facts, then
+    `Calibration.build`) over the whole cohort."""
+    fps = {i: build_fingerprint(listing, images, settings)
+           for i, (listing, images) in CohortFacts(dataset).facts(sorted(dataset.listings)).items()}
+    return fps, Calibration.build(fps, dataset.listings, settings)
+
+
+def run(
+    dataset: Dataset,
+    settings: Settings,
+    model: LogisticModel,
+    out_dir: Path,
+    must_not_link: frozenset[tuple[int, int]] = frozenset(),
+    must_link: frozenset[tuple[int, int]] = frozenset(),
+    withhold_photos: bool = False,
+) -> dict[str, Any]:
+    """`run_pass` over a MemoryStore, the whole cohort claimed as the scope, written as the three
+    run artifacts. The lane's path: its calibration core over the cohort, its claim order
+    (`RT_SCOPE_ENTRANTS_SQL`: ascending id) and its pass limits. `must_link` / `must_not_link`
+    are the operator's rulings, bound as the lane binds them; left empty the run is blind.
+
+    `withhold_photos` is the E92/E93 arm: every listing is first decided with its photographs
+    unprocessed under the evidence hold, then the producers land and the sweep re-decides, then
+    the horizon passes. The final state must be the plain run's; `withheld_photos` says what the
+    hold held on the way."""
+    clock = time.perf_counter()
+    fps, calibration = calibrated(dataset, settings)
+    facts = CohortFacts(dataset)
+    store = MemoryStore(now=WITHHELD_T0 if withhold_photos else None)
+    store.mnl, store.ml = set(must_not_link), set(must_link)
+    order = sorted(dataset.listings)
+    hold = EvidenceHold(WITHHELD_T0, WITHHELD_HORIZON_S) if withhold_photos else None
+    facts.withheld = frozenset(order if withhold_photos else ())
+    passes = _drain(store, facts, Schedule(order), settings, model, calibration, Limits(), hold)
+    withheld: dict[str, Any] = {}
+    if withhold_photos:
+        withheld["held_on_first_decision"] = sum(p.held for p in passes)
+        facts.withheld = frozenset()
+        passes += _drain(store, facts, Schedule(order, redecide=True), settings, model,
+                         calibration, Limits(), hold)
+        late = EvidenceHold(WITHHELD_T0 + WITHHELD_HORIZON_S + 3600.0, WITHHELD_HORIZON_S)
+        passes += _drain(store, facts, Schedule(order, redecide=True), settings, model,
+                         calibration, Limits(), late)
+        withheld.update({"held_total": sum(p.held for p in passes),
+                         "released_total": sum(p.released for p in passes),
+                         "still_held": sum(1 for row in store.pairs.values()
+                                           if row.reason == EVIDENCE_HOLD_REASON)})
+    decide_s = time.perf_counter() - clock
+    summary = write_run(store, dataset, fps, Keyer(settings, calibration), settings, out_dir)
+    summary.update({
+        "model_version": model.version,
+        "model_fit": dict(model.fit_report),
+        "calibration_digest": calibration.digest(),
+        "claim": Limits().max_listings,
+        "passes": len(passes),
+        "decisions": sum(p.pairs_scored for p in passes),
+        "must_not_link": {**summary["must_not_link"], "loaded": len(must_not_link)},
+        "must_link": {**summary["must_link"], "loaded": len(must_link)},
+        "timings": {"decide_s": decide_s, "write_s": time.perf_counter() - clock - decide_s},
+        **({"withheld_photos": withheld} if withhold_photos else {}),
+    })
+    return summary
+
+
+def _pair_line(row: PairRow, fps: Mapping[int, Fingerprint], dataset: Dataset,
+               exploded: Callable[[int], set[str]]) -> str:
+    lo, hi = row.lo, row.hi
+    fa, fb = fps[lo], fps[hi]
+    line = row.decision().to_json()
+    line.update({
+        "context": row.context,
+        "block": pair_block(dataset.listings[lo], dataset.listings[hi]),
+        "block_key": pair_block_key(fa, fb),
+        "source_pair": source_pair(fa, fb),
+        "cross_source": fa.source != fb.source,
+        "probes": sorted(row.probes),
+        "exploded": sorted(exploded(lo) | exploded(hi)),
+        "feats": {name: [value, present] for name, (value, present) in (row.feats or {}).items()},
+    })
+    return json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def write_run(store: MemoryStore, dataset: Dataset, fps: Mapping[int, Fingerprint],
+              keyer: Keyer, settings: Settings, out_dir: Path) -> dict[str, Any]:
+    """The store's final state as `pairs.jsonl.gz` (the stored rows, key order), `clusters.json`
+    and the summary `run.json` carries — every count read off the decided rows, none rebuilt."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache: dict[int, set[str]] = {}
+
+    def exploded(listing_id: int) -> set[str]:
+        if listing_id not in cache:
+            cache[listing_id] = keyer.exploded_probes(fps[listing_id])
+        return cache[listing_id]
+
+    zones = _zone_counter()
+    certificates = {name: 0 for name in CERTIFICATES}
+    reasons: dict[str, int] = {}
+    families: dict[str, int] = {}
+    stored = 0
+    with gzip.open(out_dir / PAIRS_FILE, "wt", encoding="utf-8") as handle:
+        for key in sorted(store.pairs):
+            row = store.pairs[key]
+            zones[row.zone] += 1
+            reasons[row.reason] = reasons.get(row.reason, 0) + 1
+            if row.certificate:
+                certificates[row.certificate] += 1
+            for name in row.families:
+                families[name] = families.get(name, 0) + 1
+            if storable({"zone": row.zone, "score": row.score, "evidence": row.evidence},
+                        settings.store_floor):
+                stored += 1
+                handle.write(_pair_line(row, fps, dataset, exploded))
+    clusters = {key: sorted(members) for key, members in sorted(store.clusters.items())}
+    conflicts = [{k: v for k, v in c.items() if k not in ("kind", "generation", "_anchor")}
+                 for c in store.conflicts if c.get("kind") == "invariant"]
+    bridges = [{k: v for k, v in c.items() if k not in ("kind", "generation", "_anchor")}
+               for c in store.conflicts if c.get("kind") == "bridge"]
+    of = {i: key for key, members in clusters.items() for i in members}
+    together = lambda pairs: sum(1 for lo, hi in pairs  # noqa: E731
+                                 if of.get(lo) is not None and of.get(lo) == of.get(hi))
+    sizes = [len(members) for members in clusters.values()]
+    stats = {
+        "n_merge_edges": zones["merge"],
+        "n_edges_refused": len(conflicts),
+        "n_bridges_refused": len(bridges),
+        "n_clusters": len(clusters),
+        "n_clustered_listings": sum(sizes),
+        "size_histogram": {str(size): sizes.count(size) for size in sorted(set(sizes))},
+        "max_size": max(sizes) if sizes else 0,
+        "mean_size": (sum(sizes) / len(sizes)) if sizes else 0.0,
+        "conflicts_by_invariant": dict(sorted(
+            (name, sum(1 for c in conflicts if c.get("invariant") == name))
+            for name in {str(c.get("invariant")) for c in conflicts})),
+    }
+    (out_dir / CLUSTERS_FILE).write_text(json.dumps({
+        "clusters": {str(key): members for key, members in clusters.items()},
+        "rows": [store.cluster_row[key] for key in clusters],
+        "conflicts": conflicts, "bridges": bridges, "stats": stats,
+    }, indent=2, sort_keys=True), encoding="utf-8")
+    scored = len(store.pairs)
+    vetoed = {key for key, row in store.pairs.items() if row.veto == UNIT_DESIGNATOR_VETO}
+    return {
+        "n_listings": len(dataset.listings),
+        "n_images": sum(len(bucket) for bucket in dataset.images_by_listing.values()),
+        "settings": settings.to_dict(),
+        "feature_order": list(FEATURE_ORDER),
+        "pairs_scored": scored,
+        "pairs_stored": stored,
+        "zones": zones,
+        "band_width": (zones["band"] / scored) if scored else 0.0,
+        "certificates": certificates,
+        "reasons": dict(sorted(reasons.items())),
+        "evidence_families": dict(sorted(families.items())),
+        "clusters": stats,
+        "must_not_link": {"together": together(store.mnl), "unit_designator_veto": len(vetoed)},
+        "must_link": {"not_together": len(store.ml) - together(store.ml)},
+    }
+
+
 def cmd_run(args: argparse.Namespace, out: Any) -> int:
-    settings = load_settings(args.settings)
-    model = load_model(args.model)
+    settings = named_settings(args.settings)
+    model = named_model(args.model)
     clock = time.perf_counter()
     dataset = load(args.artifact)
     load_seconds = time.perf_counter() - clock
     out_dir = Path(args.out)
-    must_not_link = load_must_not_link(getattr(args, "must_not_link", None))
-    must_link = load_must_not_link(getattr(args, "must_link", None))
-    summary = run_engine(dataset, settings, model, out_dir, must_not_link, must_link)
+    summary = run(dataset, settings, model, out_dir,
+                  load_must_not_link(args.must_not_link), load_must_not_link(args.must_link),
+                  withhold_photos=args.withhold_photos)
     summary["artifact"] = str(args.artifact)
     summary["timings"]["load_s"] = load_seconds
-    summary["timings"]["total_s"] = load_seconds + sum(
-        value for key, value in summary["timings"].items() if key != "load_s"
-    )
-    (out_dir / RUN_FILE).write_text(
-        json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    (out_dir / RUN_FILE).write_text(json.dumps(summary, indent=2, sort_keys=True),
+                                    encoding="utf-8")
     zones = summary["zones"]
-    print(f"run {args.artifact} -> {out_dir}", file=out)
+    print(f"run {args.artifact} -> {out_dir}  calibration {summary['calibration_digest']}",
+          file=out)
     print(f"  listings {summary['n_listings']}  pairs {summary['pairs_scored']}"
-          f"  stored {summary['pairs_stored']}", file=out)
+          f"  stored {summary['pairs_stored']}  passes {summary['passes']}", file=out)
     print(f"  merge {zones['merge']}  band {zones['band']}  reject {zones['reject']}"
-          f"  guarded {summary['blocking'].get('n_guarded_pairs', 0)}", file=out)
-    print(f"  band width {summary['band_width']:.4f}"
-          f"  certificates {summary['certificates']}", file=out)
+          f"  veto {zones['veto']}  certificates {summary['certificates']}", file=out)
     print(f"  clusters {summary['clusters']['n_clusters']}"
-          f"  refused unions {summary['clusters']['n_edges_refused']}"
-          f"  bridges {summary['clusters']['n_bridges_refused']}"
-          f" (applied {summary['clusters'].get('n_bridges_applied', 0)})"
-          f"  must-not-link {summary['clusters']['n_must_not_link']}", file=out)
+          f"  refused unions {summary['clusters']['n_edges_refused']}", file=out)
+    if "withheld_photos" in summary:
+        print(f"  withheld photos {json.dumps(summary['withheld_photos'], sort_keys=True)}",
+              file=out)
     print(f"  timings {json.dumps({k: round(v, 2) for k, v in summary['timings'].items()})}",
           file=out)
     return 0
@@ -800,26 +988,24 @@ def _side(fp: Fingerprint, listing: Listing) -> list[tuple[str, str]]:
 
 
 def cmd_pair(args: argparse.Namespace, out: Any) -> int:
-    settings = load_settings(args.settings)
-    model = load_model(args.model)
+    settings = named_settings(args.settings)
+    model = named_model(args.model)
     dataset = load(args.artifact)
     missing = [listing_id for listing_id in (args.lo, args.hi) if listing_id not in dataset.listings]
     if missing:
         print(f"unknown listing id(s): {missing}", file=sys.stderr)
         return 1
-    fps = build_all(dataset, settings)
-    ctx = FeatureContext.build(fps, settings, dataset)
-    ctx.index_attrs(fps, dataset.listings)
     lo, hi = sorted((args.lo, args.hi))
-    fa, fb = fps[lo], fps[hi]
-    la, lb = dataset.listings[lo], dataset.listings[hi]
-    pairs, _ = generate_pairs(fps, settings)
-    probes = sorted(pairs.get((lo, hi), set()))
-    feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
-    decision = decide_pair(
-        fa, fb, la, lb, feats, probes, model, settings,
-        ContextIndex.build(dataset.listings, dataset.images_by_listing),
-    )
+    fps, calibration = calibrated(dataset, settings)
+    row = decide_explicit(dataset, settings, model, [(lo, hi)], (fps, calibration))[(lo, hi)]
+    decision = Decision(lo, hi, row["zone"], row["score"], set(row["families"]),
+                        row["certificate"], row["veto"], row["reason"])
+    feats = {name: (value, present) for name, (value, present) in row["feats"].items()}
+    fa, fb, la, lb = fps[lo], fps[hi], dataset.listings[lo], dataset.listings[hi]
+    keyer = Keyer(settings, calibration)
+    probes = sorted({probe for x, y in ((fa, fb), (fb, fa))
+                     for probe, token in set(keyer.probe_keys(x)) & set(keyer.index_keys(y))
+                     if not keyer.is_exploded(probe, token)})
 
     left = _side(fa, la)
     right = _side(fb, lb)
@@ -1143,103 +1329,72 @@ def load_labels(
     )
 
 
+def decide_explicit(
+    dataset: Dataset, settings: Settings, model: LogisticModel, keys: Iterable[tuple[int, int]],
+    cohort: tuple[dict[int, Fingerprint], Calibration] | None = None,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """Pairs decided as an explicit input set — the ruled pairs a run never stored, or one pair
+    asked about by id (ADD07) — through the lane's calibration and `decide_pair`, and never added
+    to a group. The census is the whole cohort's, which is the run's final one."""
+    wanted = sorted({(min(lo, hi), max(lo, hi)) for lo, hi in keys
+                     if lo != hi and lo in dataset.listings and hi in dataset.listings})
+    if not wanted:
+        return {}
+    fps, calibration = cohort or calibrated(dataset, settings)
+    ctx = context_for(calibration, settings, fps, dataset.listings)
+    census = ContextIndex.build(dataset.listings, dataset.images_by_listing)
+    out: dict[tuple[int, int], dict[str, Any]] = {}
+    for lo, hi in wanted:
+        fa, fb, la, lb = fps[lo], fps[hi], dataset.listings[lo], dataset.listings[hi]
+        feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx,
+                              settings)
+        decision = decide_pair(fa, fb, la, lb, feats, (), model, settings, census)
+        out[(lo, hi)] = {**decision.to_json(),
+                         "feats": {name: [v, p] for name, (v, p) in feats.items()}}
+    return out
+
+
 def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
+    """M1-M5 of one run against one rulings file, and with `--base` the D83 read lists."""
     run_dir = Path(args.run_dir)
-    if not (run_dir / PAIRS_FILE).is_file():
-        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
+    summary = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    artifact = args.artifact or summary.get("artifact")
+    if not artifact or not Path(artifact).is_file():
+        print(f"no cohort artifact {artifact!r}: pass --artifact", file=sys.stderr)
         return 1
-    paths = judgement_paths(args)
-    if paths is None:
-        return 1
-    operator = operator_tier(args)
-    judgements, labels, per_tier = load_labels(paths, args.precedence, operator)
-    if not labels:
-        print("no usable labels in the judgements given", file=sys.stderr)
-        return 1
-    try:
-        sample, sample_note = resolve_sample(paths, args.sample)
-    except ValueError as exc:
-        print(f"unusable --sample: {exc}", file=sys.stderr)
-        return 1
-    if sample is None and judgements:
-        sample = sample_from_judgements(judgements)
-    settings = run_settings(run_dir, args.settings)
-    rows = read_pairs(run_dir)
-    model_note = "run's own scores"
-    expect_seal: str | None = None
-    if args.model:
-        path = Path(args.model)
-        if not path.is_file():
-            print(f"no such model: {path}", file=sys.stderr)
-            return 1
-        try:
-            challenger = LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
-        except ValueError as exc:
-            print(f"unusable --model: {exc}", file=sys.stderr)
-            return 1
-        rows = rescore_rows(rows, challenger, settings)
-        model_note = f"re-decided with {path} ({challenger.version})"
-        expect_seal = ((challenger.provenance.get("seal") or {}).get("sha256") or None)
-    # The split the model was FITTED on, not one re-derived from the merge edges of the run being
-    # evaluated: those edges move with the model, so without this the "sealed" rows are a
-    # different set here than they were at fit time and part of the holdout is training data.
-    split_map = None
-    if args.split_map:
-        try:
-            split_map = seals.read_map(seals.resolve(args.split_map))
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"unusable --split-map: {exc}", file=sys.stderr)
-            return 1
-    elif expect_seal and seals.committed(expect_seal):
-        # The map the model names is IN THE REPOSITORY, so the holdout needs no argument.
-        split_map = seals.load(expect_seal)
-        print(f"using the committed split map for seal {expect_seal[:12]}", file=out)
-    elif expect_seal:
-        lost = seals.LOST_SEALS.get(expect_seal)
-        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given "
-              f"and no map is committed for it"
-              + (f" ({lost})" if lost else "")
-              + "; the holdout below is re-derived from this run's own merge edges",
-              file=sys.stderr)
-        expect_seal = None
-    seed = split_seed_from_map(args.split_map, args.seed, out)
-    if seed == args.seed and expect_seal and split_map is not None and not args.split_map:
-        recorded = seals.seed_for(expect_seal)
-        if recorded is not None and args.seed == SAMPLE_SEED:
-            seed = recorded
-            print(f"the committed map records seed {recorded}; using it", file=out)
-    if expect_seal and seals.spent(expect_seal):
-        print(f"note: seal {expect_seal[:12]} is SPENT — {seals.spent(expect_seal)}", file=out)
-    if split_map is not None:
-        # E69: a map is cut from the components that existed when it was sealed, so a CHALLENGER
-        # merging pairs the incumbent banded can put one cluster on both sides of the holdout.
-        held = components_spanning_split(rows, split_map, seed)
-        if not held["contained"]:
-            print(
-                f"warning: {held['n_spanning']} of this run's merge components span the holdout "
-                f"({held['listings_in_spanning']} listings, {held['listings_absent_from_map']} "
-                "of them absent from the map): the seal cannot adjudicate a cluster-grain claim "
-                "about a run it does not contain (E69)",
-                file=sys.stderr,
-            )
-    try:
-        report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
-                          precedence=args.precedence, seed=seed,
-                          split_map=split_map, expect_seal=expect_seal)
-    except ValueError as exc:
-        print(f"evaluate failed: {exc}", file=sys.stderr)
-        return 1
-    json_path, markdown_path = write_report(report, Path(args.out) / EVAL_STEM)
-    print(f"evaluate {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
-    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
-    print(f"  model {model_note}", file=out)
-    # E111: E110 names the event that revokes it, so every evaluation COUNTS that event rather
-    # than leaving it to be remembered. The check reports; it never decides.
-    print("  " + revocation.check_rows(rows, per_tier.get(OPERATOR_TIER, {})).line(), file=out)
-    print("", file=out)
-    for line in report.headline():
-        print(line, file=out)
-    print(f"\nwrote {json_path} and {markdown_path}", file=out)
+    dataset = load(artifact)
+    run_view = evaluation.read_run(run_dir)
+    rulings = evaluation.read_rulings(args.rulings)
+    ids = set(dataset.listings)
+    unstored = [key for key in rulings
+                if key[0] in ids and key[1] in ids and key not in run_view.rows]
+    explicit = decide_explicit(dataset, Settings.from_dict(summary["settings"]),
+                               model_of_version(summary.get("model_version")), unstored)
+    report: dict[str, Any] = {
+        "run": str(run_dir), "rulings": str(args.rulings), "artifact": str(artifact),
+        "explicit_pairs": len(explicit),
+        "metrics": evaluation.measure(run_view, rulings, ids, explicit),
+        # E111: E110 names the event that revokes it, so every evaluation COUNTS it.
+        "revocation": revocation.check_rows(run_view.rows.values(), rulings).to_json(),
+    }
+    if args.base:
+        report["d83"] = evaluation.read_lists(
+            evaluation.read_run(args.base), run_view, rulings,
+            evaluation.read_reference(args.reference))
+        report["base"] = str(args.base)
+    target = Path(args.out or run_dir) / "evaluate.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+    metrics = report["metrics"]
+    print(f"evaluate {run_dir}  rulings {args.rulings}  ({metrics['M5_coverage']['verdict']})",
+          file=out)
+    for name in ("M1_precision", "M2_recall", "M3_purity", "M5_coverage"):
+        print(f"  {name:<14}{json.dumps(metrics[name], sort_keys=True)}", file=out)
+    print("  " + revocation.check_rows(run_view.rows.values(), rulings).line(), file=out)
+    if "d83" in report:
+        counts = {k: v for k, v in report["d83"]["counts"].items() if not isinstance(v, dict)}
+        print(f"  D83 vs {args.base}  {json.dumps(counts, sort_keys=True)}", file=out)
+    print(f"wrote {target}", file=out)
     return 0
 
 
@@ -1372,24 +1527,25 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--n", type=int, default=5, help="how many listings to print")
     sample.set_defaults(func=cmd_sample)
 
-    run = sub.add_parser("run", help="blocking + features + decisions + clusters over a cohort")
+    run = sub.add_parser("run", help="the lane's run_pass over the cohort, in a MemoryStore")
     run.add_argument("artifact", help="path to cohort.jsonl.gz")
     run.add_argument("--out", required=True, help="directory for run.json / pairs.jsonl.gz / clusters.json")
-    run.add_argument("--settings", default=None, help="Settings JSON (a sweep file)")
-    run.add_argument("--model", default=None, help="model JSON; default is the hand priors")
+    run.add_argument("--settings", default=None, help="a settings row by name (w31)")
+    run.add_argument("--model", default=None, help="a model by name (w6_gold); default the prior")
     run.add_argument("--must-not-link", default=None,
-                     help="JSON list of [lo, hi] pairs the clustering must never join (E27)")
+                     help="the operator's `different` rulings (must_not_link.jsonl or [lo, hi])")
     run.add_argument("--must-link", default=None,
-                     help="the labels lane's must_link.jsonl: the operator's `same` rulings, "
-                          "which the clustering must join (E910)")
+                     help="the operator's `same` rulings (must_link.jsonl or [lo, hi])")
+    run.add_argument("--withhold-photos", action="store_true",
+                     help="decide first with every photograph unprocessed, under the hold (E93)")
     run.set_defaults(func=cmd_run)
 
     pair = sub.add_parser("pair", help="side-by-side evidence for one pair")
     pair.add_argument("artifact", help="path to cohort.jsonl.gz")
     pair.add_argument("lo", type=int, help="listing id")
     pair.add_argument("hi", type=int, help="listing id")
-    pair.add_argument("--settings", default=None, help="Settings JSON")
-    pair.add_argument("--model", default=None, help="model JSON; default is the hand priors")
+    pair.add_argument("--settings", default=None, help="a settings row by name (w31)")
+    pair.add_argument("--model", default=None, help="a model by name (w6_gold); default the prior")
     pair.set_defaults(func=cmd_pair)
 
     judge = sub.add_parser("judge-sample", help="stratified pair sample from a run directory (W3)")
@@ -1402,8 +1558,20 @@ def build_parser() -> argparse.ArgumentParser:
                             " (D3's precision sample is `--zone merge --n 400`)")
     judge.set_defaults(func=cmd_judge_sample)
 
+    evaluate_parser = sub.add_parser(
+        "evaluate", help="M1-M5 of a run against the rulings, and the D83 lists vs --base")
+    evaluate_parser.add_argument("run_dir", help="a directory written by `run`")
+    evaluate_parser.add_argument("rulings", help="the labels lane's export directory")
+    evaluate_parser.add_argument("--base", default=None,
+                                 help="the reference run directory the D83 lists read against")
+    evaluate_parser.add_argument("--reference", default=None,
+                                 help="truth16's CD/CN directory, a triage input (K40)")
+    evaluate_parser.add_argument("--artifact", default=None,
+                                 help="the cohort.jsonl.gz (default: the run.json's own)")
+    evaluate_parser.add_argument("--out", default=None, help="directory for evaluate.json")
+    evaluate_parser.set_defaults(func=cmd_evaluate)
+
     for name, helptext, handler in (
-        ("evaluate", "score a run against judge labels (PROGRAM.md §9)", cmd_evaluate),
         ("fit", "fit and calibrate a model from judge labels (PROGRAM.md §6)", cmd_fit),
     ):
         command = sub.add_parser(name, help=helptext)
@@ -1453,21 +1621,6 @@ def build_parser() -> argparse.ArgumentParser:
                           " sealed split")
     fit.add_argument("--require-convergence", action="store_true",
                      help="exit 1 when the fit hits its iteration ceiling short of tolerance")
-    evaluate_parser = sub.choices["evaluate"]
-    evaluate_parser.add_argument("--model", default=None,
-                                 help="re-decide the stored pairs with this model JSON before "
-                                      "evaluating (the hand prior's own scores are used without "
-                                      "it)")
-    evaluate_parser.add_argument(
-        "--split-map", default=None,
-        help="the split_map.json written beside the model being evaluated, or a committed "
-             "seal under autodedup/splits, so the sealed split is the one the fit held out "
-             "rather than one re-derived from this run's merge edges (a model whose seal IS "
-             "committed needs no flag)",
-    )
-    evaluate_parser.add_argument("--settings", default=None,
-                                 help="Settings JSON; default: the settings on run.json")
-
     # --- W4b: `errors` (autodedup/errors.py) -------------------------------------------
     errors_parser = sub.add_parser(
         "errors", help="false merges, false rejects and band composition, feature by feature"

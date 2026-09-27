@@ -12,11 +12,9 @@ edges or off zones moves under its own verdict (E85). What the check adds is onl
 which operator-labelled pairs sit inside one of those components, and how many of them are
 negatives.
 
-Only the OPERATOR tier counts. Gold saying `different` inside a K-B family is exactly the
-reading E110 overturned (D31 vii: gold contradicts the operator on 5 of 10 same-family
-positives), so a gold negative here is evidence about the judge, not about the engine. A
-`must_not_link` is a negative whatever else it carries — it is the operator's strongest form
-of "these are two things".
+Only the operator's rulings count (`evaluate.read_rulings`: the newest ruling per pair, a
+must-not-link included). Gold saying `different` inside a K-B family is exactly the reading
+E110 overturned (D31 vii), so no machine label is read here.
 
 A revocation is a settings change, not a code change: put a number back in
 `certificate_b_min_images` and the W9 arm returns exactly. So this reports; it never decides.
@@ -28,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from autodedup.family import kb_families
-from autodedup.labels import Label, PairKey, pair_key
+from autodedup.labels import PairKey, pair_key
 
 CERTIFICATE: str = "K-B"
 
@@ -97,18 +95,18 @@ def family_index(families: Mapping[int, list[int]]) -> dict[int, int]:
 
 def check(
     families: Mapping[int, list[int]],
-    operator_labels: Mapping[PairKey, Label],
+    rulings: Mapping[PairKey, str],
 ) -> Revocation:
     index = family_index(families)
     inside = 0
     negatives: list[PairKey] = []
-    for key, label in operator_labels.items():
+    for key, verdict in rulings.items():
         lo, hi = pair_key(*key)
         home = index.get(lo)
         if home is None or index.get(hi) != home:
             continue
         inside += 1
-        if label.must_not_link or label.y == 0:
+        if verdict == "different":
             negatives.append((lo, hi))
     return Revocation(
         families=len(families),
@@ -120,6 +118,6 @@ def check(
 
 def check_rows(
     rows: Iterable[Mapping[str, Any]],
-    operator_labels: Mapping[PairKey, Label],
+    rulings: Mapping[PairKey, str],
 ) -> Revocation:
-    return check(families_from_rows(rows), operator_labels)
+    return check(families_from_rows(rows), rulings)

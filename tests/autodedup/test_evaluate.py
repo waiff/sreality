@@ -484,28 +484,6 @@ def test_write_report_writes_both_files_and_never_doubles_a_suffix(tmp_path: Pat
     assert markdown_path.read_text(encoding="utf-8") == "# hi"
 
 
-def test_evaluate_command_writes_the_report_and_prints_the_headline(tmp_path: Path) -> None:
-    rows, labels = planted_rows(n=60)
-    for row in rows:
-        row["zone"] = "merge"
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    out = io.StringIO()
-    code = harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgements),
-         "--out", str(tmp_path / "eval")], out=out
-    )
-    assert code == 0
-    payload = json.loads((tmp_path / "eval" / "eval.json").read_text(encoding="utf-8"))
-    assert set(payload) >= {
-        "title", "counts", "settings", "sample", "zones", "merge_precision",
-        "band_composition", "reject_zone", "agreement", "cohort", "tiers", "fidelity",
-        "thresholds",
-    }
-    assert (tmp_path / "eval" / "eval.md").is_file()
-    assert "merge-zone precision" in out.getvalue()
-
-
 def test_fit_command_writes_an_activatable_model(tmp_path: Path) -> None:
     rows, labels = planted_rows(n=120)
     run_dir = write_run(tmp_path, rows)
@@ -523,34 +501,6 @@ def test_fit_command_writes_an_activatable_model(tmp_path: Path) -> None:
     fit_json = json.loads((tmp_path / "fit" / "fit.json").read_text(encoding="utf-8"))
     assert set(fit_json) >= {"split", "test_metrics", "weights", "calibration", "convergence"}
     assert (tmp_path / "fit" / "fit.md").is_file()
-
-
-def test_the_commands_exit_one_on_a_missing_run_or_missing_judgements(tmp_path: Path) -> None:
-    rows, labels = planted_rows(n=10)
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    assert harness.main(["evaluate", str(tmp_path / "nope"), "--judgements", str(judgements),
-                         "--out", str(tmp_path / "e1")], out=io.StringIO()) == 1
-    assert harness.main(["evaluate", str(run_dir), "--judgements", str(tmp_path / "nope.jsonl"),
-                         "--out", str(tmp_path / "e2")], out=io.StringIO()) == 1
-    empty = tmp_path / "empty.jsonl"
-    empty.write_text("", encoding="utf-8")
-    assert harness.main(["evaluate", str(run_dir), "--judgements", str(empty),
-                         "--out", str(tmp_path / "e3")], out=io.StringIO()) == 1
-    assert harness.main(["fit", str(run_dir), "--judgements", str(empty),
-                         "--out", str(tmp_path / "f1")], out=io.StringIO()) == 1
-
-
-def test_the_precedence_flag_reaches_the_label_store(tmp_path: Path) -> None:
-    rows, labels = planted_rows(n=20)
-    run_dir = write_run(tmp_path, rows)
-    text = write_judgements(tmp_path / "text.jsonl", labels, tier="text")
-    out = io.StringIO()
-    code = harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(text), "--precedence", "text",
-         "--out", str(tmp_path / "eval")], out=out
-    )
-    assert code == 0
 
 
 @pytest.mark.skipif(
@@ -1077,29 +1027,6 @@ def test_the_fit_cli_can_loosen_the_convergence_certificate(tmp_path: Path) -> N
     assert loose["convergence"]["iterations"] <= strict["convergence"]["iterations"]
 
 
-def test_a_mismatched_neighbouring_sample_is_dropped_with_a_warning_not_used(
-    tmp_path: Path, capsys: Any
-) -> None:
-    rows, labels = planted_rows(n=40)
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    (tmp_path / harness.SAMPLE_FILE).write_text(
-        json.dumps({"strata": {"invented|key": {"population": 400, "selected": 2}},
-                    "pairs": [{"lo": 1, "hi": 2, "zone": "merge", "block": "praha",
-                               "cross_source": True, "feats": {}}]}),
-        encoding="utf-8",
-    )
-    out = io.StringIO()
-    code = harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgements),
-         "--out", str(tmp_path / "eval")], out=out
-    )
-    assert code == 0
-    assert "ignoring" in capsys.readouterr().err
-    payload = json.loads((tmp_path / "eval" / "eval.json").read_text(encoding="utf-8"))
-    assert payload["counts"]["weighted"] is False
-
-
 def test_the_weighted_precision_at_the_cut_is_reported_beside_the_counted_one() -> None:
     # D3 counts pairs; the cohort weights them. When the two disagree the report must say so
     # rather than publish the count-based gate as if it were the cohort number.
@@ -1111,27 +1038,6 @@ def test_the_weighted_precision_at_the_cut_is_reported_beside_the_counted_one() 
     assert report.weighted_precision_at_t_hi < 0.5  # the cohort it stands for does not
     assert report.weighted_precision_gate_ok is False
     assert report.bootstrap_at_t_hi["lb"] is not None
-
-
-def test_an_explicit_sample_that_does_not_match_its_judgements_is_fatal(tmp_path: Path) -> None:
-    rows, labels = planted_rows(n=20)
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    bad = tmp_path / "other-sample.json"
-    bad.write_text(
-        json.dumps({"strata": {"invented|key": {"population": 400, "selected": 2}},
-                    "pairs": [{"lo": 1, "hi": 2, "zone": "merge", "block": "praha",
-                               "cross_source": True, "feats": {}}]}),
-        encoding="utf-8",
-    )
-    assert harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgements), "--sample", str(bad),
-         "--out", str(tmp_path / "eval")], out=io.StringIO()
-    ) == 1
-    assert harness.main(
-        ["fit", str(run_dir), "--judgements", str(judgements), "--sample", str(bad),
-         "--out", str(tmp_path / "fit")], out=io.StringIO()
-    ) == 1
 
 
 # --- W4c: the l2 sweep, the calibration bake-off, and per-stratum thresholds -------------------
@@ -1507,31 +1413,6 @@ def test_a_foreign_seal_fails_loudly_instead_of_scoring_a_different_holdout() ->
     with pytest.raises(ValueError, match="split seal mismatch"):
         ev.evaluate(rows, labels, None, Settings(), draws=20,
                     split_map=ev.split_groups(rows, labels), expect_seal="deadbeefdead")
-
-
-def test_the_evaluate_command_takes_the_split_map_the_fit_wrote(tmp_path: Path) -> None:
-    rows: list[dict[str, Any]] = []
-    labels: dict[Any, Label] = {}
-    for index in range(60):
-        lo, hi = 2 * index + 1, 2 * index + 2
-        rows.append(pair_row(lo, hi, zone="merge", score=0.99))
-        labels[(lo, hi)] = label(lo, hi, 1 if index % 3 else 0)
-    run_dir = write_run(tmp_path, rows)
-    judgement_path = write_judgements(tmp_path / "j.jsonl", labels)
-    fit_map = ev.split_groups(rows, labels)
-    map_path = tmp_path / "split_map.json"
-    map_path.write_text(
-        json.dumps({str(key): value for key, value in fit_map.items()}), encoding="utf-8"
-    )
-    buffer = io.StringIO()
-    code = harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgement_path),
-         "--split-map", str(map_path), "--out", str(tmp_path / "out")],
-        out=buffer,
-    )
-    assert code == 0
-    body = json.loads((tmp_path / "out" / "eval.json").read_text(encoding="utf-8"))
-    assert body["holdout"]["split_map_source"] == "fit"
 
 
 # --- a cut has to be read off enough rows, and never off the rows it is measured on ----------
@@ -1947,33 +1828,71 @@ def test_a_seal_reports_the_components_of_a_challenger_it_does_not_contain() -> 
     assert spanning["sample"][0] == [1, 2, 900001]
 
 
-def test_the_evaluate_command_warns_when_the_seal_cannot_contain_the_run(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """E69. The map is cut from the INCUMBENT's components; the run being evaluated merges one
-    pair more, and that pair's listings the map has never seen."""
-    rows: list[dict[str, Any]] = []
-    labels: dict[Any, Label] = {}
-    for index in range(60):
-        lo, hi = 2 * index + 1, 2 * index + 2
-        rows.append(pair_row(lo, hi, zone="merge", score=0.99))
-        labels[(lo, hi)] = label(lo, hi, 1 if index % 3 else 0)
-    fit_map = ev.split_groups(rows, labels)
-    # 900003 is absent from the map, so it hashes into a split of its own — and under
-    # the default seed that split is not group 1's.
-    challenger = rows + [pair_row(1, 900003, zone="merge", score=0.999)]
-    run_dir = write_run(tmp_path, challenger)
-    judgement_path = write_judgements(tmp_path / "j.jsonl", labels)
-    map_path = tmp_path / "split_map.json"
-    map_path.write_text(
-        json.dumps({str(key): value for key, value in fit_map.items()}), encoding="utf-8"
-    )
-    code = harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgement_path),
-         "--split-map", str(map_path), "--out", str(tmp_path / "out")],
-        out=io.StringIO(),
-    )
-    assert code == 0
-    warning = capsys.readouterr().err
-    assert "span the holdout" in warning and "E69" in warning
-    assert "1 of them absent from the map" in warning
+# --- SW1: one run against one rulings file (M1-M5, the D83 read lists) --------------------------
+
+
+def _write_rulings(root: Path, labels: Sequence[dict[str, Any]] = (),
+                   merges: Sequence[dict[str, Any]] = (),
+                   negatives: Sequence[dict[str, Any]] = ()) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for name, rows in zip(ev.RULINGS_FILES, (labels, merges, negatives)):
+        (root / name).write_text("".join(json.dumps(row) + "\n" for row in rows),
+                                 encoding="utf-8")
+    return root
+
+
+def _run(rows: Sequence[dict[str, Any]], groups: dict[int, Sequence[int]]) -> ev.RunView:
+    return ev.RunView({(row["lo"], row["hi"]): row for row in rows},
+                      {key: tuple(sorted(members)) for key, members in groups.items()})
+
+
+def test_the_newest_ruling_wins_across_the_three_files(tmp_path: Path) -> None:
+    rulings = ev.read_rulings(_write_rulings(
+        tmp_path,
+        labels=[{"listing_lo": 2, "listing_hi": 1, "verdict": "same", "decided_at": "2026-09-01"},
+                {"listing_lo": 3, "listing_hi": 4, "verdict": "same_building_different_unit",
+                 "decided_at": "2026-09-01"},
+                {"listing_lo": 5, "listing_hi": 6, "verdict": "unsure", "decided_at": "2026-09-01"}],
+        merges=[{"merged_at": "2026-09-02", "members": [{"listing_id": 3}, {"listing_id": 4},
+                                                         {"listing_id": 7}]}],
+        negatives=[{"listing_lo": 1, "listing_hi": 2, "created_at": "2026-09-03"}]))
+    assert rulings == {(1, 2): "different", (3, 4): "same", (3, 7): "same", (4, 7): "same"}
+
+
+def test_m1_to_m5_read_the_groups_against_the_rulings() -> None:
+    run = _run([{"lo": 1, "hi": 2, "zone": "merge", "certificate": "K-C", "families": ["IMG"]},
+                {"lo": 2, "hi": 3, "zone": "merge", "families": ["TXT", "IMG"]},
+                {"lo": 5, "hi": 6, "zone": "band", "families": []}],
+               {1: (1, 2, 3), 7: (7, 8)})
+    rulings = {(1, 2): "same", (1, 3): "different", (5, 6): "same", (8, 9): "same",
+               (7, 99): "different"}
+    explicit = {(8, 9): {"zone": "reject", "veto": "area", "families": []}}
+    out = ev.measure(run, rulings, set(range(1, 10)), explicit)
+    assert out["M1_precision"]["co_clustered_ruled"] == 2
+    assert out["M1_precision"]["ruled_different_together"] == 1
+    assert out["M1_precision"]["precision"] == 0.5
+    assert out["M1_precision"]["wilson_lower"] is None, "4 rulings are not a measurement"
+    assert out["M2_recall"] == {"ruled_same": 3, "together": 1, "recall": 1 / 3}
+    assert out["M3_purity"] == {"groups": 2, "with_a_ruled_different_pair": 1, "purity": 0.5}
+    assert out["M5_coverage"]["ruled"] == 4 and not out["M5_coverage"]["measurable"]
+    table = out["M4_attribution"]
+    assert table["co_clustered"]["merge|proof:K-C"] == {"n": 1, "IMG": 1}
+    assert table["co_clustered"]["none|not_decided"]["n"] == 2, "1 x 3 and 7 x 8: no stored row"
+    assert table["ruled"]["same"]["reject|veto:area"] == {"n": 1, "NONE": 1}
+    assert table["ruled"]["same"]["band|score"] == {"n": 1, "NONE": 1}
+
+
+def test_the_d83_lists_name_every_gain_and_loss_with_its_ruling() -> None:
+    base = _run([{"lo": 1, "hi": 2, "zone": "merge"}, {"lo": 3, "hi": 4, "zone": "band"}],
+                {1: (1, 2)})
+    arm = _run([{"lo": 1, "hi": 2, "zone": "band"}, {"lo": 3, "hi": 4, "zone": "merge"},
+                {"lo": 5, "hi": 6, "zone": "reject"}], {3: (3, 4)})
+    out = ev.read_lists(base, arm, {(3, 4): "different"}, {(1, 2): "CD"})
+    lists, counts = out["lists"], out["counts"]
+    assert lists["copairs_gained"] == [[3, 4, "different", None]]
+    assert lists["copairs_lost"] == [[1, 2, "unruled", "CD"]]
+    assert lists["merge_gained"] == [[3, 4]] and lists["merge_lost"] == [[1, 2]]
+    assert lists["pairs_new"] == [[5, 6]] and lists["pairs_lost"] == []
+    assert counts["zone_moves"] == {"band->merge": 1, "merge->band": 1}
+    assert lists["groups_arm_only"] == [[3, 4]] and lists["groups_base_only"] == [[1, 2]]
+    assert counts["copairs_gained_by_ruling"] == {"different": 1}

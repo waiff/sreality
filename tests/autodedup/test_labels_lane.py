@@ -352,7 +352,7 @@ def _artifact(path: Path) -> Path:
     return path
 
 
-@pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])
+@pytest.mark.parametrize("command", ["fit", "errors"])
 def test_every_labelled_command_takes_the_operator_flags(command: str, tmp_path: Path) -> None:
     from autodedup import harness
 
@@ -434,7 +434,7 @@ def test_the_engine_view_is_scoped_to_the_generation(lane, tmp_path: Path) -> No
     assert "autodedup.clusters" not in ENGINE_PAIRS_SQL
 
 
-@pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])
+@pytest.mark.parametrize("command", ["fit", "errors"])
 def test_the_operator_tier_alone_is_a_usable_label_source(command: str, tmp_path: Path) -> None:
     """The operator outranks gold, so requiring a judgements file to measure against the
     operator's own testimony made the top tier unusable on its own."""
@@ -448,7 +448,7 @@ def test_the_operator_tier_alone_is_a_usable_label_source(command: str, tmp_path
     assert set(harness.operator_tier(args)) == {(11, 12), (21, 22)}
 
 
-@pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])
+@pytest.mark.parametrize("command", ["fit", "errors"])
 def test_naming_no_label_source_at_all_is_refused(command: str, tmp_path: Path) -> None:
     from autodedup import harness
 

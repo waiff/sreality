@@ -33,6 +33,7 @@ multiple of the median, with the realised design effect reported); the threshold
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import inspect
 import json
@@ -159,6 +160,205 @@ def wilson_interval(k: int, n: int, z: float = Z_95) -> tuple[float, float]:
 
 def wilson_lower(k: int, n: int, z: float = Z_95) -> float:
     return wilson_interval(k, n, z)[0]
+
+
+# --- one run against one rulings file: M1-M5 and the D83 read lists (SW1, ADD07) -----------------
+#
+# A run is decided blind; the rulings are the test set. Withholding is by input, never by flag.
+
+RULINGS_FILES: tuple[str, ...] = ("operator_labels.jsonl", "operator_merges.jsonl",
+                                  "must_not_link.jsonl")
+SAME: str = "same"
+DIFFERENT: str = "different"
+UNRULED: str = "unruled"
+# D3: below this many held-out ruled pairs no precision bound clears 0.99, so none is printed.
+MEASURABLE_N: int = 380
+
+
+def _jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def read_rulings(path: str | Path) -> dict[PairKey, str]:
+    """The NEWEST ruling per pair, `same` or `different`, off the labels lane's export directory:
+    a pair verdict, every member pair of a Browse merge, and a must-not-link. `unsure` is no
+    statement at all."""
+    root = Path(path)
+    events: list[tuple[str, PairKey, str]] = []
+    for row in _jsonl(root / RULINGS_FILES[0]):
+        verdict = str(row.get("verdict") or "")
+        if verdict and verdict != "unsure":
+            events.append((str(row.get("decided_at") or ""),
+                           pair_key(row["listing_lo"], row["listing_hi"]),
+                           SAME if verdict == SAME else DIFFERENT))
+    for row in _jsonl(root / RULINGS_FILES[1]):
+        members = sorted({int(member["listing_id"]) for member in row.get("members") or ()})
+        stamp = str(row.get("merged_at") or "")
+        events += [(stamp, (a, b), SAME)
+                   for i, a in enumerate(members) for b in members[i + 1:]]
+    for row in _jsonl(root / RULINGS_FILES[2]):
+        events.append((str(row.get("created_at") or ""),
+                       pair_key(row["listing_lo"], row["listing_hi"]), DIFFERENT))
+    rulings: dict[PairKey, str] = {}
+    for _stamp, key, verdict in sorted(events):
+        rulings[key] = verdict
+    return rulings
+
+
+def read_reference(path: str | Path | None) -> dict[PairKey, str]:
+    """truth16's label-free reference, a TRIAGE input (K40): `CD` certain duplicates, `CN`
+    structural negatives. Never a bar."""
+    if not path:
+        return {}
+    root = Path(path)
+    out = {pair_key(row["lo"], row["hi"]): "CD"
+           for row in _jsonl(root / "certain_duplicates.jsonl")}
+    out.update({pair_key(row["lo"], row["hi"]): "CN"
+                for row in _jsonl(root / "structural_labels.jsonl")
+                if row.get("label") == DIFFERENT})
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class RunView:
+    """What `harness run` wrote: the stored rows by pair, and the groups."""
+
+    rows: dict[PairKey, dict[str, Any]]
+    groups: dict[int, tuple[int, ...]]
+
+    @property
+    def group_of(self) -> dict[int, int]:
+        return {i: key for key, members in self.groups.items() for i in members}
+
+    def co_pairs(self) -> set[PairKey]:
+        return {(a, b) for members in self.groups.values()
+                for i, a in enumerate(members) for b in members[i + 1:]}
+
+
+def read_run(run_dir: str | Path) -> RunView:
+    root = Path(run_dir)
+    rows: dict[PairKey, dict[str, Any]] = {}
+    with gzip.open(root / "pairs.jsonl.gz", "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                row = json.loads(line)
+                rows[pair_key(row["lo"], row["hi"])] = row
+    clusters = json.loads((root / "clusters.json").read_text(encoding="utf-8"))["clusters"]
+    return RunView(rows, {int(key): tuple(sorted(int(i) for i in members))
+                          for key, members in clusters.items()})
+
+
+def deciding_layer(row: Mapping[str, Any] | None) -> str:
+    """Which layer decided a row, off its columns alone (no reason string is parsed): the wall
+    or veto that refused it, the proof that certified it, or the score. SW5a's `rung` replaces it."""
+    if row is None:
+        return "not_decided"
+    if row.get("veto"):
+        return f"veto:{row['veto']}"
+    if row.get("certificate"):
+        return f"proof:{row['certificate']}"
+    return "score"
+
+
+def attribution(rows: Iterable[Mapping[str, Any] | None]) -> dict[str, dict[str, int]]:
+    """M4: `zone|layer` x evidence family, one count per row and family (`NONE` when a row
+    carries no family). The one attribution function: it reads decisions, never re-makes one."""
+    table: dict[str, dict[str, int]] = {}
+    for row in rows:
+        zone = str(row.get("zone")) if row is not None else "none"
+        cells = table.setdefault(f"{zone}|{deciding_layer(row)}", {"n": 0})
+        cells["n"] += 1
+        for family in (row or {}).get("families") or ["NONE"]:
+            cells[family] = cells.get(family, 0) + 1
+    return dict(sorted(table.items()))
+
+
+def measure(run: RunView, rulings: Mapping[PairKey, str], ids: set[int],
+            explicit: Mapping[PairKey, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """M1 pair precision (Wilson lower bound), M2 recall, M3 group purity, M4 attribution over
+    every co-clustered and every ruled pair, M5 coverage. `explicit` holds the ruled pairs the
+    run never stored, decided as an explicit input set (never grouped)."""
+    ruled = {key: verdict for key, verdict in rulings.items()
+             if key[0] in ids and key[1] in ids}
+    co = run.co_pairs()
+    together = {key: verdict for key, verdict in ruled.items() if key in co}
+    k_diff = sum(1 for verdict in together.values() if verdict == DIFFERENT)
+    n_same = sum(1 for verdict in ruled.values() if verdict == SAME)
+    n_diff = len(ruled) - n_same
+    group_of = run.group_of
+    impure = {group_of[key[0]] for key, verdict in ruled.items()
+              if verdict == DIFFERENT and key in co}
+    lookup = {**(explicit or {}), **run.rows}
+    measurable = len(ruled) >= MEASURABLE_N
+    return {
+        "M1_precision": {
+            "co_clustered_ruled": len(together), "ruled_different_together": k_diff,
+            "precision": (1 - k_diff / len(together)) if together else None,
+            "wilson_lower": (wilson_lower(len(together) - k_diff, len(together))
+                             if together and measurable else None)},
+        "M2_recall": {"ruled_same": n_same,
+                      "together": len(together) - k_diff,
+                      "recall": ((len(together) - k_diff) / n_same) if n_same else None},
+        "M3_purity": {"groups": len(run.groups), "with_a_ruled_different_pair": len(impure),
+                      "purity": (1 - len(impure) / len(run.groups)) if run.groups else None},
+        "M4_attribution": {
+            "co_clustered": attribution(run.rows.get(key) for key in sorted(co)),
+            "ruled": {verdict: attribution(lookup.get(key) for key, v in sorted(ruled.items())
+                                           if v == verdict) for verdict in (SAME, DIFFERENT)}},
+        "M5_coverage": {"ruled": len(ruled), "same": n_same, "different": n_diff,
+                        "measurable": measurable,
+                        "verdict": "measurable" if measurable else
+                        f"not measurable (n={len(ruled)} < {MEASURABLE_N})"},
+    }
+
+
+def read_lists(base: RunView, arm: RunView, rulings: Mapping[PairKey, str],
+               reference: Mapping[PairKey, str] | None = None) -> dict[str, Any]:
+    """The D83 read lists: every pair, merge edge, co-pair and group the arm gains or loses
+    against the base, each co-pair tagged with its ruling and its truth16 triage class."""
+    reference = reference or {}
+
+    def tagged(keys: Iterable[PairKey]) -> list[list[Any]]:
+        return [[lo, hi, rulings.get((lo, hi), UNRULED), reference.get((lo, hi))]
+                for lo, hi in sorted(keys)]
+
+    merges = lambda view: {k for k, r in view.rows.items() if r.get("zone") == "merge"}  # noqa: E731
+    changed = sorted(k for k in set(base.rows) & set(arm.rows)
+                     if base.rows[k].get("zone") != arm.rows[k].get("zone"))
+    moves: dict[str, int] = {}
+    for key in changed:
+        move = f"{base.rows[key].get('zone')}->{arm.rows[key].get('zone')}"
+        moves[move] = moves.get(move, 0) + 1
+    co_base, co_arm = base.co_pairs(), arm.co_pairs()
+    groups_base, groups_arm = set(base.groups.values()), set(arm.groups.values())
+    lists = {
+        "pairs_new": [list(k) for k in sorted(set(arm.rows) - set(base.rows))],
+        "pairs_lost": [list(k) for k in sorted(set(base.rows) - set(arm.rows))],
+        "zone_changed": [[lo, hi, base.rows[(lo, hi)].get("zone"), arm.rows[(lo, hi)].get("zone")]
+                         for lo, hi in changed],
+        "merge_gained": [list(k) for k in sorted(merges(arm) - merges(base))],
+        "merge_lost": [list(k) for k in sorted(merges(base) - merges(arm))],
+        "copairs_gained": tagged(co_arm - co_base),
+        "copairs_lost": tagged(co_base - co_arm),
+        "groups_arm_only": [list(g) for g in sorted(groups_arm - groups_base)],
+        "groups_base_only": [list(g) for g in sorted(groups_base - groups_arm)],
+    }
+    counts = {name: len(items) for name, items in lists.items()}
+    counts["zone_moves"] = dict(sorted(moves.items()))
+    for name in ("copairs_gained", "copairs_lost"):
+        counts[f"{name}_by_ruling"] = _count(row[2] for row in lists[name])
+        counts[f"{name}_by_reference"] = _count(row[3] or "-" for row in lists[name])
+    return {"counts": counts, "lists": lists}
+
+
+def _count(values: Iterable[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for value in values:
+        out[value] = out.get(value, 0) + 1
+    return dict(sorted(out.items()))
 
 
 def _log_beta(a: float, b: float) -> float:
