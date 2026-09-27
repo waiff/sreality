@@ -6,6 +6,7 @@ pre-registered keep and cut rules.
         --evidence --evidence-workers 4                  # the cache: once per export and code
     python3 -m autodedup.lab verify trial --rungs 3000   # no number counts before this passes
     python3 -m autodedup.lab fit --train trial --cohort c17 --cohort c18 --out MODELS
+    python3 -m autodedup.lab mf-fit --ground trial=G.npz ... --score trial --source all --out MF
     python3 -m autodedup.lab run autodedup/lab/experiments/*.json --cohort trial --why
     python3 -m autodedup.lab board --out LEADERBOARD.md
     python3 -m autodedup.lab keep ARM --incumbent w31_reference [--alias c18=c18_w31r1]
@@ -245,6 +246,20 @@ def cmd_fit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mf_fit(args: argparse.Namespace) -> int:
+    from autodedup.lab import mf_fit
+
+    grounds = []
+    for item in args.ground:
+        name, _, path = item.partition("=")
+        if not name or not path:
+            raise SystemExit(f"--ground wants NAME=PATH, got {item!r}")
+        grounds.append(mf_fit.load_ground(name, path))
+    report = mf_fit.sealed(grounds, args.score, args.source, args.calibration, Path(args.out))
+    print(json.dumps(report, indent=1))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autodedup.lab")
     parser.add_argument("--cohorts", help="cohort registry JSON (or AUTODEDUP_LAB_COHORTS)")
@@ -265,6 +280,14 @@ def build_parser() -> argparse.ArgumentParser:
     learn.add_argument("--cohort", action="append", help="a cohort to score (repeat)")
     learn.add_argument("--out", required=True, help="directory for gbm_<cohort>.npz")
     learn.set_defaults(fn=cmd_fit)
+    mf = sub.add_parser("mf-fit", help="the challenger's model files, sealed by town")
+    mf.add_argument("--ground", action="append", required=True,
+                    help="NAME=PATH of a ground (repeat; the order is the training row order)")
+    mf.add_argument("--score", action="append", required=True, help="a cohort to write models for")
+    mf.add_argument("--source", choices=("all", "judge"), default="all")
+    mf.add_argument("--calibration", choices=("trial", "pooled"), default="trial")
+    mf.add_argument("--out", required=True, help="directory for <source>/<cohort>/<town>.json")
+    mf.set_defaults(fn=cmd_mf_fit)
     run = sub.add_parser("run")
     run.add_argument("configs", nargs="+")
     run.add_argument("--cohort", action="append", required=True)

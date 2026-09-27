@@ -107,10 +107,17 @@ class Cohort:
     workers: int = 1
     export_digest: str = ""
     tagged: dict[str, dict[str, dict[str, np.ndarray]]] = field(default_factory=dict)
+    facts: dict[str, dict[tuple[int, int], str | None]] = field(default_factory=dict)
+    _index: dict[tuple[int, int], int] | None = None
 
     @property
     def n(self) -> int:
         return len(self.keys)
+
+    def key_index(self) -> dict[tuple[int, int], int]:
+        if self._index is None:
+            self._index = {key: i for i, key in enumerate(self.keys)}
+        return self._index
 
     @property
     def lo(self) -> np.ndarray:
@@ -192,14 +199,14 @@ class Cohort:
         return len(order)
 
     def save(self) -> None:
-        """The overlay: lazy fills (per override tag) and the relation memo (the artefact itself
-        is never written)."""
+        """The overlay: lazy fills (per override tag), the relation memo and the challenger's
+        fact memo (the artefact itself is never written)."""
         if not self.dirty:
             return
         names = [name for names in LAZY_SIGNALS.values() for name in names]
         payload = {"schema": OVERLAY_SCHEMA, "version": self.version,
                    "sig": {name: self.sig[name] for name in names}, "done": self.done,
-                   "relation": self.relation, "tagged": self.tagged}
+                   "relation": self.relation, "tagged": self.tagged, "facts": self.facts}
         self.path.mkdir(parents=True, exist_ok=True)
         tmp = self.path / "overlay.pkl.tmp"
         with open(tmp, "wb") as handle:
@@ -303,5 +310,6 @@ def open_cohort(name: str, registry_path: str | Path | None = None, workers: int
             cohort.done.update(saved["done"])
             cohort.relation = saved.get("relation", {})
             cohort.tagged = saved.get("tagged", {})
+            cohort.facts = saved.get("facts", {})
     cohort.timings["load_s"] = sum(cohort.timings.values())
     return cohort
