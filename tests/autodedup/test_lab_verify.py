@@ -385,3 +385,33 @@ def test_the_lab_cli_runs_boards_keeps_and_cuts_on_the_fixture(
     out = json.loads(capsys.readouterr().out)
     assert out["cut"] == 0.9 and out["keep"]["verdict"] == "KEEP", out
     assert all(v != "no row" for v in out["sweep"].values())
+
+
+def test_lab_fit_writes_a_scorer_keyed_on_the_artefact_and_recorded(
+        cohort: cache.Cohort, export: Path, tmp_path: Path) -> None:
+    """The challenger refitted on the one path: trained on the artefact's own V/P, one file per
+    cohort keyed on exactly its pairs and naming its version, recorded in fits.jsonl; a row under
+    it is verified, a row under any other file is 'scorer external'."""
+    pytest.importorskip("sklearn")
+    from autodedup.lab import fit, metrics, score
+    from autodedup.lab.__main__ import verified_state
+
+    same = [(1001, 1002), (1101, 1102), (1901, 1902), (1951, 1952), (1401, 1402), (1501, 1502)]
+    different = [k for k in cohort.keys if k not in same]
+    judged = {**{k: "same" for k in same}, **{k: "different" for k in different}}
+    labels = metrics.Labels({(1401, 1402): "same"}, {"gold": judged})
+    other = cache.from_evidence("c18", {"run": str(cohort.run.dir)},
+                                evidence.read(cohort.run.dir), cohort.ds, tmp_path / "c18")
+    report = fit.fit(cohort, [other], labels, tmp_path / "models", tmp_path / "root")
+    assert set(report["files"]) == {"fx", "c18"}
+    assert report["c18"]["ruled_pairs_held_out"] == 1
+    p, provenance = score.external_scores(tmp_path / "models" / "gbm_fx.npz", cohort)
+    assert len(p) == cohort.n and provenance["cache"] == cohort.version
+    assert provenance["fit"] == "lab fit" and provenance["train"]["cohort"] == "fx"
+    fits = fit.recorded(tmp_path / "root")
+    outcome = board.run(cohort, {"model": {"npz": str(tmp_path / "models" / "gbm_fx.npz")},
+                                 "group": {"step": "relation"}})
+    assert outcome.scorer["sha"] in fits
+    assert verified_state(True, outcome, cohort.version, fits) is True
+    assert verified_state(True, outcome, cohort.version, {}) == "cache verified, scorer external"
+    assert verified_state(False, outcome, cohort.version, fits) is False

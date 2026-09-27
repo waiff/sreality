@@ -35,6 +35,17 @@ def matrix(c: Cohort) -> np.ndarray:
     return np.where(c.P, c.V, np.nan).astype(np.float32)
 
 
+def trainable(X: np.ndarray) -> np.ndarray:
+    """The training rows with a column no row states set to 0.0: the learner's binning refuses an
+    all-missing column, and a constant one is never split on, so the fitted model is the same."""
+    empty = np.isnan(X).all(axis=0)
+    if not empty.any():
+        return X
+    out = X.copy()
+    out[:, empty] = 0.0
+    return out
+
+
 def training_rows(keys: list[tuple[int, int]], labels: Labels,
                   exclude: frozenset[tuple[int, int]] = frozenset()
                   ) -> list[tuple[int, int, tuple[int, int]]]:
@@ -96,11 +107,11 @@ def fit(train: Cohort, others: Iterable[Cohort], labels: Labels, out: Path,
     idx = np.array([r[0] for r in rows], dtype=np.int64)
     y = np.array([r[1] for r in rows], dtype=np.int64)
     groups = np.array(components(r[2] for r in rows))
-    full = model().fit(X[idx], y)
+    full = model().fit(trainable(X[idx]), y)
     p = full.predict_proba(X)[:, 1]
     oof = np.zeros(len(idx))
     for tr, te in GroupKFold(n_splits=FOLDS).split(idx, y, groups):
-        oof[te] = model().fit(X[idx[tr]], y[tr]).predict_proba(X[idx[te]])[:, 1]
+        oof[te] = model().fit(trainable(X[idx[tr]]), y[tr]).predict_proba(X[idx[te]])[:, 1]
     p[idx] = oof
     base = {"fit": "lab fit", "learner": "sklearn.HistGradientBoostingClassifier",
             "params": LEARNER, "sklearn": sklearn.__version__}
@@ -114,11 +125,13 @@ def fit(train: Cohort, others: Iterable[Cohort], labels: Labels, out: Path,
     for c in others:
         held = frozenset(k for k in labels.rulings if k in set(c.keys))
         kept = training_rows(train.keys, labels, held)
+        if not kept:
+            raise ValueError(f"no training label is left once {c.name}'s own rulings are held out")
         if len(kept) == len(rows):
             learner = full
         else:
             ix = np.array([r[0] for r in kept], dtype=np.int64)
-            learner = model().fit(X[ix], np.array([r[1] for r in kept], dtype=np.int64))
+            learner = model().fit(trainable(X[ix]), np.array([r[1] for r in kept], dtype=np.int64))
         meta = {**base, "train": {**train_meta, "labelled": len(kept), "labels": _digest(kept),
                                   "held_out": len(held)}}
         written.append((c, write_npz(out / f"gbm_{c.name}.npz", c,
