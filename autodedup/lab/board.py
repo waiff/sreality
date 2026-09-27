@@ -394,11 +394,17 @@ class _RelationMemo:
         self.c.dirty = True
 
 
-@group_step("relation")
-def relation_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
-    """The engine's own `cluster_pairs` with the D43 relation over the stored feature slots.
-    `settings` overrides the group step's own dials for this arm only, e.g.
-    `{"d43_cluster_image_facts": false}`: the relation then stops reading tag-derived facts."""
+@dataclass
+class RelationParts:
+    settings: Any
+    slots: dict[tuple[int, int], Any]
+    vetoed: frozenset[tuple[int, int]]
+    relation: Any
+
+
+def relation_parts(c: Cohort, d: Decisions, p: dict[str, Any]) -> RelationParts:
+    """The group step's inputs: its settings (the row plus the arm's `settings` overrides), the
+    stored feature slots, E61's machine vetoes and the memoised D43 relation."""
     overrides = p.get("settings") or {}
     settings = dataclasses.replace(c.settings, **overrides) if overrides else c.settings
     tag = json.dumps(overrides, sort_keys=True) if overrides else ""
@@ -412,9 +418,19 @@ def relation_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
     relation = relation_for(settings, c.ds.listings, slots, kc)
     if relation is not None and p.get("memo", True):
         relation._memo = _RelationMemo(c, slots, kc, tag)  # type: ignore[assignment]
-    result = cluster_pairs(merge_edges(c, d), c.ds.listings, c.fps, settings,
-                           frozenset(p.get("must_not_link", ())), relation,
-                           must_link=frozenset(p.get("must_link", ())), machine_vetoes=vetoed)
+    return RelationParts(settings, slots, vetoed, relation)
+
+
+@group_step("relation")
+def relation_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
+    """The engine's own `cluster_pairs` with the D43 relation over the stored feature slots.
+    `settings` overrides the group step's own dials for this arm only, e.g.
+    `{"d43_cluster_image_facts": false}`: the relation then stops reading tag-derived facts."""
+    parts = relation_parts(c, d, p)
+    result = cluster_pairs(merge_edges(c, d), c.ds.listings, c.fps, parts.settings,
+                           frozenset(p.get("must_not_link", ())), parts.relation,
+                           must_link=frozenset(p.get("must_link", ())),
+                           machine_vetoes=parts.vetoed)
     return Groups({int(k): tuple(sorted(int(m) for m in v)) for k, v in result.clusters.items()},
                   dict(result.stats))
 
