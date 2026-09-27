@@ -20,7 +20,7 @@ from tests.autodedup.test_evaluate import planted_rows, write_judgements, write_
 
 from autodedup import seals
 from autodedup.evaluate import split_seal
-from autodedup.score_lane import MODELS_DIR
+from autodedup.harness import MODELS_DIR
 
 W6_SEAL = "37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc"
 

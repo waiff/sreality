@@ -39,7 +39,7 @@ from autodedup.fingerprint import Fingerprint, build_all, build_fingerprint
 from autodedup.incremental import Keyer, guard_row, retrieve
 from autodedup.indistinguishable import CLUSTER, GATE, PROMOTE, distinguishing_facts
 from autodedup.model import hand_initialised
-from autodedup.replay import arrival_order, batch_state
+from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.settings import Settings
 from tests.autodedup.test_incremental import _calibration, _drain
 from tests.autodedup.test_s14_facts import EARLIER_DIGESTS as S14_PINS
@@ -231,7 +231,7 @@ def test_E300_the_real_time_lane_retrieves_exactly_what_the_cohort_pass_does() -
 def test_E300_the_real_time_lane_reaches_the_cohort_pass_state_in_any_order() -> None:
     ds = _cross_grain_dataset()
     calibration = _calibration(ds, S15)
-    reference, clusters, _timings = batch_state(ds, S15, hand_initialised())
+    reference, clusters = cohort_pass(ds, S15, hand_initialised())
     forward, _a = _drain(ds, S15, calibration, arrival_order(ds))
     backward, _b = _drain(ds, S15, calibration, list(reversed(arrival_order(ds))), batch=3)
     assert set(forward.pairs) == set(reference) == set(backward.pairs)
@@ -469,17 +469,19 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
 
 @pytest.mark.skipif(not (S14_TRIAL_RUN / "clusters.json").is_file() or not TRIAL.is_file(),
                     reason="the W14 offline data pack is not on this machine")
-def test_w29_replays_byte_identical_on_the_trial_cohort(tmp_path: Path) -> None:
+def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
+    """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). Every
+    stored row decides identically and the groups are the same member sets under the same keys."""
     from autodedup.dataset import load
-    from autodedup.harness import load_model, load_must_not_link, run_engine
+    from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
     ds = load(TRIAL)
     ids = set(ds.listings)
     mnl = frozenset(p for p in load_must_not_link(str(MNL)) if p[0] in ids and p[1] in ids)
-    model = load_model(str(HERE.parents[1] / "autodedup/models/w6_gold.json"))
-    run_engine(ds, S14, model, tmp_path, mnl if S14.operator_must_not_link else frozenset())
-    assert (tmp_path / "clusters.json").read_bytes() == (
-        S14_TRIAL_RUN / "clusters.json").read_bytes()
-    with gzip.open(tmp_path / "pairs.jsonl.gz") as got, \
-            gzip.open(S14_TRIAL_RUN / "pairs.jsonl.gz") as stored:
-        assert got.read() == stored.read()
+    run(ds, S14, named_model("w6_gold"), tmp_path,
+        mnl if S14.operator_must_not_link else frozenset())
+    decided = lambda rows: {(r["lo"], r["hi"]): (r["zone"], r["reason"], r["certificate"],  # noqa: E731
+                                                 r["veto"], round(r["score"], 9)) for r in rows}
+    assert decided(read_pairs(tmp_path)) == decided(read_pairs(S14_TRIAL_RUN))
+    groups = lambda d: json.loads((d / "clusters.json").read_text())["clusters"]  # noqa: E731
+    assert groups(tmp_path) == groups(S14_TRIAL_RUN)

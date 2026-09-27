@@ -406,8 +406,7 @@ def developer_colive(feats: Feats, settings: Settings) -> bool:
 def stratum_key(feats: Feats, certificate: str | None) -> str:
     """The stratum D3's per-stratum floor is read on: deciding layer x source side (E48).
 
-    Spelled exactly as `evaluate.decide_stratum` spells it, so the table an evaluation writes is
-    the table the engine reads — `K-C|same`, `model|cross`. Side is read off `same_source`, and an
+    `K-C|same`, `model|cross` — the keys of `t_hi_by_stratum`. Side is read off `same_source`, and an
     ABSENT `same_source` reads as `cross`: two listings the row cannot prove came from one portal
     are the harder regime, and a gate must fail towards the stricter cell, not the laxer one."""
     return f"{certificate or 'model'}|" + (

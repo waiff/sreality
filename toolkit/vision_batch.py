@@ -6,9 +6,7 @@ identical loop — worker threads, per-worker connections, a pre-call budget und
 and named for the only sink that existed then, an image. W7's post-publication text lane is
 the third kind of sink and the first with no image in it, so the loop is `run_batch` and
 `run_vision_batch` is the image adapter over it. One engine, several sinks; a copied loop
-would be the kind of drift where one copy learns a lesson and the other repeats it. The
-module keeps the narrower name only because `autodedup/judge_lane.py` imports `is_fatal`
-from it and R12 forbids this program editing that tree.
+would be the kind of drift where one copy learns a lesson and the other repeats it.
 
 The invariants this engine owns, all measured the hard way in the screen lane:
 

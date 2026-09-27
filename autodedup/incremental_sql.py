@@ -1314,23 +1314,6 @@ select p.listing_lo, p.listing_hi, p.features
        )
 """
 
-# What the BATCH generation was scored under. `autodedup.runs` is the authoritative map from a
-# generation to its pass (migration 538's own convention), and a score run records its whole
-# settings blob — so the instrument can say whether the two sides ran the same clock rather
-# than assuming it (E120). The newest successful pass wins: a generation re-scored under new
-# settings IS the newer pass. `export_run` names the export the pass was scored on, which is
-# how the instrument finds the cohort's cut (E918).
-RT_EQUIV_BATCH_SETTINGS_SQL = """
-select r.params -> 'settings' as settings, r.params ->> 'model_version' as model_version,
-       r.finished_at, r.params ->> 'export_run' as export_run
-  from autodedup.runs r
- where r.mode = 'score'
-   and r.status = 'success'
-   and r.params ->> 'generation' = %(generation)s::text
- order by r.id desc
- limit 1
-"""
-
 # The declared type of the column `cluster.edge_rank` RANKS on. A store that cannot carry the
 # number the engine decides in reorders a component's edges (E114/E115), and that is a defect
 # the instrument must name rather than report as a cluster disagreement.
@@ -1395,14 +1378,3 @@ select p.listing_lo, p.listing_hi,
  order by p.listing_lo, p.listing_hi
 """
 
-# The export the batch generation was scored on, as the export's own lane run recorded it: the
-# `export` mode writes one `autodedup.iterations` row keyed by its GitHub run id and stamped by
-# the server when the mode started and when it finished, and the batch's score run names that
-# run id in `params.export_run`. So the cohort's cut is READ rather than typed on a command line.
-RT_EQUIV_EXPORT_WINDOW_SQL = """
-select i.started_at, i.finished_at
-  from autodedup.iterations i
- where i.run_id = %(run_id)s::bigint
- order by i.id desc
- limit 1
-"""

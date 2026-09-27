@@ -28,7 +28,8 @@ from autodedup.incremental import (
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.replay import DatasetFacts, ScheduleWork, arrival_order, batch_state
+from autodedup.incremental_store import CohortFacts, Schedule
+from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.settings import Settings
 
 
@@ -74,8 +75,8 @@ def _calibration(ds: Dataset, settings: Settings) -> Calibration:
 def _drain(ds: Dataset, settings: Settings, calibration: Calibration,
            order: Iterable[int], batch: int = 5) -> tuple[MemoryStore, list]:
     store = MemoryStore()
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(list(order))
+    facts = CohortFacts(ds)
+    work = Schedule(list(order))
     model = hand_initialised()
     passes = []
     limits = Limits(max_listings=batch, max_pairs=10 ** 9, max_component=400)
@@ -136,8 +137,8 @@ def test_an_unchanged_listing_costs_nothing() -> None:
     store, first = _drain(ds, settings, calibration, arrival_order(ds))
     before = {key: (row.zone, row.score) for key, row in store.pairs.items()}
 
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(arrival_order(ds))
+    facts = CohortFacts(ds)
+    work = Schedule(arrival_order(ds))
     model = hand_initialised()
     again = []
     while not work.exhausted():
@@ -149,15 +150,15 @@ def test_an_unchanged_listing_costs_nothing() -> None:
 
 
 def test_the_watermark_only_advances_over_what_it_claimed() -> None:
-    work = ScheduleWork([1, 2, 3, 4, 5])
+    work = Schedule([1, 2, 3, 4, 5])
     first = work.claim(2)
     assert [item.listing_id for item in first] == [1, 2]
-    assert work.commit(first)["arrivals_done"] == 2
+    assert work.commit(first)["done"] == 2
     second = work.claim(2)
     assert [item.listing_id for item in second] == [3, 4]
     # A CLAIM moves nothing: only the items a pass actually decided advance the cursor.
     assert work.cursor == 2
-    assert work.commit(second)["arrivals_done"] == 4
+    assert work.commit(second)["done"] == 4
     assert not work.exhausted()
     third = work.claim(2)
     assert [item.listing_id for item in third] == [5]
@@ -167,7 +168,7 @@ def test_the_watermark_only_advances_over_what_it_claimed() -> None:
 
 def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
     """E75: an aborted pass commits nothing, so the same arrivals come back next time."""
-    work = ScheduleWork([1, 2, 3])
+    work = Schedule([1, 2, 3])
     claimed = work.claim(3)
     work.commit([])
     assert work.cursor == 0
@@ -182,7 +183,7 @@ def test_the_incremental_final_state_equals_the_cohort_pass() -> None:
     ds = _dataset(24)
     settings = _settings()
     calibration = _calibration(ds, settings)
-    reference, batch_clusters, _timings = batch_state(ds, settings, hand_initialised())
+    reference, batch_clusters = cohort_pass(ds, settings, hand_initialised())
     store, _passes = _drain(ds, settings, calibration, arrival_order(ds))
     assert set(store.pairs) == set(reference)
     for key, row in store.pairs.items():

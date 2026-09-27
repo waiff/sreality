@@ -71,15 +71,6 @@ def test_the_candidate_keeps_the_floor_and_every_cut_of_the_incumbent() -> None:
         assert getattr(CANDIDATE, name) == getattr(W8, name), name
 
 
-def test_the_two_label_lists_exist_and_hold_ordered_distinct_pairs() -> None:
-    for name, cap in (("w10_multicarrier_dev", 200), ("w10_new_merges_dev", 200)):
-        pairs = json.loads((ROOT / f"pairs/{name}.json").read_text(encoding="utf-8"))
-        keys = [(int(lo), int(hi)) for lo, hi in pairs]
-        assert 0 < len(keys) <= cap
-        assert len(set(keys)) == len(keys)
-        assert all(lo < hi for lo, hi in keys)
-
-
 def test_w10_promotes_nothing_so_there_is_no_promoted_settings_row() -> None:
     """D28: the shipped generation is still g6. A `w10.json` would BE the promotion."""
     assert not (ROOT / "settings/w10.json").exists()

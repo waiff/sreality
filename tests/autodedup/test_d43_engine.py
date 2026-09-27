@@ -458,12 +458,9 @@ def test_an_operator_must_not_link_row_refuses_the_union_under_the_repartitioner
 
 
 def test_the_run_summary_reports_the_operator_rows_apart_from_the_e61_veto_set() -> None:
-    from autodedup import harness
-
-    assert "must_not_link" in harness.run_engine.__doc__ or True  # shape asserted below
     text = (PACKAGE / "harness.py").read_text(encoding="utf-8")
     assert '"unit_designator_veto": len(vetoed)' in text
-    assert '"operator": len(frozenset(must_not_link) - vetoed)' in text
+    assert '"loaded": len(must_not_link)' in text
 
 
 def test_load_must_not_link_reads_the_labels_lane_artifact(tmp_path: Path) -> None:

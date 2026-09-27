@@ -1,39 +1,30 @@
-"""Local CLI over the W1 cohort artifact — read it, summarise it, run the whole engine on it.
+"""Local CLI over the cohort artifact: read it, run the lane's own pass on it, evaluate a run.
 
     python3 -m autodedup.harness stats out/cohort.jsonl.gz [--json out/summary.json]
-    python3 -m autodedup.harness stats out/cohort.jsonl.gz --catalog-df 5
     python3 -m autodedup.harness sample out/cohort.jsonl.gz --block turnov --n 5
-    python3 -m autodedup.harness run out/cohort.jsonl.gz --out runs/r1 [--settings s.json]
-    python3 -m autodedup.harness pair out/cohort.jsonl.gz 101 102
-    python3 -m autodedup.harness judge-sample runs/r1 --zone merge --n 400
-    python3 -m autodedup.harness evaluate runs/r1 --judgements j.jsonl --out runs/r1/eval
-    python3 -m autodedup.harness fit runs/r1 --judgements j.jsonl --out runs/r1/fit
-    python3 -m autodedup.harness errors runs/r1 --judgements j.jsonl --top 5
-    python3 -m autodedup.harness yardstick out/cohort.jsonl.gz runs/r1 --groups operator_merges.jsonl
+    python3 -m autodedup.harness run out/cohort.jsonl.gz --out runs/r1 --settings w31 --model w6_gold
+    python3 -m autodedup.harness pair out/cohort.jsonl.gz 101 102 --settings w31 --model w6_gold
+    python3 -m autodedup.harness evaluate runs/r1 labels/ [--base runs/r0] [--reference truth16/]
+    python3 -m autodedup.harness fit runs/r1 --operator-labels operator_labels.jsonl --out runs/r1/fit
 
-No database, no network, no secrets: the artifact is the whole input. The artifact carries no
-PII by contract (PROGRAM.md E28), so everything here is safe to print and to paste into a PR.
-
-`stats` is also the artifact's only pre-W2 validator: it reconciles the per-block listing
-counts against the cohort total and prints an integrity block, so a malformed payload or a
-dropped record surfaces here rather than deep inside a feature pass.
+No database, no network, no secrets: the artifact is the whole input, and it carries no PII by
+contract (PROGRAM.md E28). `run` is `run_pass` over a MemoryStore (SW1): one decision path for the
+lane, the harness and every report. `evaluate` reads a run against the rulings; it never decides
+anything but the ruled pairs a run never stored.
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
-import hashlib
 import json
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from autodedup.blocking import build_index, generate_pairs
-from autodedup.cluster import cluster_pairs, cluster_rows
-from autodedup.d43 import relation_for
-from autodedup.indistinguishable import FEATURE_SLOTS as D43_FEATURE_SLOTS
+from autodedup import evaluate as evaluation
+from autodedup import revocation, seals
 from autodedup.dataset import (
     CATALOG_POP_MIN,
     UNASSIGNED_BLOCK,
@@ -43,30 +34,19 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
-from autodedup.development import holds as development_holds
-from autodedup.family import refusals as family_guard_refusals
-from autodedup.hazard_context import ContextIndex
-from autodedup.guards import UNIT_DESIGNATOR_VETO
-from autodedup import evaluate as evaluation
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
     FIT_MAX_ITER,
     FIT_METHODS,
     L2_GRID,
     fit_model,
-    pooled_sample,
     split_groups,
     write_report,
 )
-from autodedup import seals
-from autodedup.features import (
-    MIN_RARE_BLOCK_DOCS,
-    RARE_TOKEN_CAP,
-    FEATURE_ORDER,
-    FeatureContext,
-    pair_features,
-)
-from autodedup.fingerprint import Fingerprint, build_all, build_fingerprint
+from autodedup.features import FEATURE_ORDER, pair_features
+from autodedup.fingerprint import Fingerprint, build_fingerprint
+from autodedup.guards import UNIT_DESIGNATOR_VETO
+from autodedup.hazard_context import ContextIndex
 from autodedup.incremental import (
     EVIDENCE_HOLD_REASON,
     Calibration,
@@ -79,45 +59,26 @@ from autodedup.incremental import (
     run_pass_bounded,
 )
 from autodedup.incremental_store import CohortFacts, MemoryStore, Schedule
-from autodedup import revocation
 from autodedup.labels import (
-    OPERATOR_TIER,
     TIER_PRECEDENCE,
     WEIGHT_OPERATOR,
-    Sample,
     all_labels_by_tier,
     label_pairs,
     load_all_judgements,
     load_all_operator_labels,
-    load_sample,
     operator_label_pairs,
-    sample_from_judgements,
 )
 from autodedup.model import CALIBRATION_METHODS, LogisticModel, hand_initialised
 from autodedup.settings import Settings
 from autodedup.store_score import storable
-from autodedup.errors import DEFAULT_TOP, ERRORS_STEM, analyse
-from autodedup.labels import SOURCE_BROWSE_MERGE
-from autodedup.yardstick import DEFAULT_TOP as DEFAULT_YARDSTICK_TOP
-from autodedup.yardstick import load_operator_pairs
-from autodedup.yardstick import measure as measure_yardstick
-from autodedup.yardstick import render_lines as render_yardstick
-from autodedup.yardstick import write_report as write_yardstick
 
 PAIRS_FILE: str = "pairs.jsonl.gz"
 RUN_FILE: str = "run.json"
 CLUSTERS_FILE: str = "clusters.json"
-SAMPLE_FILE: str = "sample.json"
 MODEL_FILE: str = "model.json"
 SPLIT_MAP_FILE: str = "split_map.json"
-EVAL_STEM: str = "eval"
 FIT_STEM: str = "fit"
 SAMPLE_SEED: int = 20260916
-STRATUM_FLOOR: int = 5
-JUDGE_STRATUM_FLOOR: int = 8
-CATALOG_ONLY_STRATUM: str = "catalog-only"
-CATALOG_ONLY_MIN: float = 0.90
-SCORE_BUCKETS: int = 20
 
 SHARE_ROWS: tuple[tuple[str, str], ...] = (
     ("active_share", "active"),
@@ -278,19 +239,6 @@ def cmd_sample(args: argparse.Namespace, out: Any) -> int:
     return 0
 
 
-# --- the engine ----------------------------------------------------------------------
-
-
-def load_settings(path: str | None) -> Settings:
-    return Settings.from_json(path) if path else Settings()
-
-
-def load_model(path: str | None) -> LogisticModel:
-    if not path:
-        return hand_initialised()
-    return LogisticModel.from_json(json.loads(Path(path).read_text(encoding="utf-8")))
-
-
 # --- naming a settings row or a model, the way every lane names them --------------------
 #
 # `--args settings=w8` resolves inside the repo, never off the wire: a lane input is an
@@ -390,20 +338,6 @@ def _zone_counter() -> dict[str, int]:
     return {zone: 0 for zone in ZONES}
 
 
-def _bump(table: dict[str, dict[str, Any]], key: str, decision: Decision) -> None:
-    row = table.setdefault(key, {"n": 0, **_zone_counter()})
-    row["n"] += 1
-    row[decision.zone] += 1
-
-
-def _score_histogram(scores: Iterable[float]) -> dict[str, int]:
-    buckets = [0] * SCORE_BUCKETS
-    for score in scores:
-        slot = min(SCORE_BUCKETS - 1, max(0, int(score * SCORE_BUCKETS)))
-        buckets[slot] += 1
-    return {f"{index / SCORE_BUCKETS:.2f}": count for index, count in enumerate(buckets)}
-
-
 def load_must_not_link(path: str | None) -> frozenset[tuple[int, int]]:
     """E27's permanent negatives — or E910's must-links, in the same two shapes — lo<hi.
 
@@ -425,331 +359,6 @@ def load_must_not_link(path: str | None) -> frozenset[tuple[int, int]]:
         (int(min(lo, hi)), int(max(lo, hi)))
         for lo, hi in (tuple(row) for row in json.loads(text))
     )
-
-
-def _merge_pairs_file(
-    part: Path,
-    written: Sequence[tuple[int, int]],
-    held: Sequence[tuple[tuple[int, int], str]],
-    target: Path,
-) -> None:
-    """Merge the rows held back by E85 into the key order the artifact is read in.
-
-    Both inputs are already sorted — the part file in the order the run decided pairs, the held
-    rows by key — so one linear pass restores `pairs.jsonl.gz` to exactly the order a run
-    without the guard writes. The part file never survives the run."""
-    keys = list(held)
-    keys.sort(key=lambda row: row[0])
-    index = 0
-    with gzip.open(part, "rt", encoding="utf-8") as source, \
-            gzip.open(target, "wt", encoding="utf-8") as out:
-        for key, line in zip(written, source, strict=True):
-            while index < len(keys) and keys[index][0] < key:
-                out.write(keys[index][1])
-                index += 1
-            out.write(line)
-        for key, line in keys[index:]:
-            out.write(line)
-    part.unlink()
-
-
-def run_engine(
-    dataset: Dataset,
-    settings: Settings,
-    model: LogisticModel,
-    out_dir: Path,
-    must_not_link: frozenset[tuple[int, int]] = frozenset(),
-    must_link: frozenset[tuple[int, int]] = frozenset(),
-) -> dict[str, Any]:
-    """Fingerprint -> block -> feature -> decide -> cluster, writing the three run artifacts.
-
-    `must_link` is the operator's `same` rulings (Decision 8, E910): they bind the clustering
-    exactly as the real-time lane binds it."""
-    timings: dict[str, float] = {}
-    clock = time.perf_counter()
-    fps = build_all(dataset, settings)
-    timings["fingerprints_s"] = time.perf_counter() - clock
-
-    clock = time.perf_counter()
-    pairs, blocking = generate_pairs(fps, settings)
-    index = build_index(fps.values(), settings)
-    exploded = {listing_id: sorted(index.exploded_probes(fp)) for listing_id, fp in fps.items()}
-    blocking["listings_in_exploded_key"] = sum(1 for probes in exploded.values() if probes)
-    timings["blocking_s"] = time.perf_counter() - clock
-
-    clock = time.perf_counter()
-    ctx = FeatureContext.build(fps, settings, dataset)
-    ctx.index_attrs(fps, dataset.listings)
-    # E63's refusing direction reads a census of the whole cohort, so it is built once here
-    # beside the feature context rather than per pair.
-    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
-    timings["context_s"] = time.perf_counter() - clock
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    decisions: list[Decision] = []
-    zones = _zone_counter()
-    certificates = {name: 0 for name in CERTIFICATES}
-    reasons: dict[str, int] = {}
-    family_counts: dict[str, int] = {}
-    per_block: dict[str, dict[str, Any]] = {}
-    per_source_pair: dict[str, dict[str, Any]] = {}
-    scores: list[float] = []
-    vetoed: set[tuple[int, int]] = set()
-    # E132 reads three feature slots per pair and nothing else, so the cluster relation carries
-    # those rather than the whole vector — 16k thin rows instead of 49k feature dictionaries.
-    pair_slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
-    stored = 0
-
-    clock = time.perf_counter()
-    # E85: a family is a property of the PAIR SET, so a K-B pair cannot be finished until every
-    # pair has been decided. Only the K-B rows are held back (1,600 of 49,000 on the g6 cohort),
-    # and each carries the features its re-decision needs — the alternative, a second feature
-    # pass, would double the only expensive phase of the run.
-    deferred: list[dict[str, Any]] = []
-    # ...and holding them back must not reorder anything downstream (W11 verification): the run
-    # writes `pairs.jsonl.gz` in key order and clusters in edge order, so a deferred row is
-    # merged back into its place rather than appended. `held` carries the finished K-B lines and
-    # `written` the keys already on the part file, which is what makes the merge O(n) without a
-    # second parse of every row.
-    held: list[tuple[tuple[int, int], str]] = []
-    written: list[tuple[int, int]] = []
-
-    def finish(item: dict[str, Any], sink: Any) -> None:
-        nonlocal stored
-        decision, feats = item["decision"], item["feats"]
-        lo, hi = item["lo"], item["hi"]
-        decisions.append(decision)
-        zones[decision.zone] += 1
-        reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-        if decision.certificate:
-            certificates[decision.certificate] += 1
-        for name in decision.families:
-            family_counts[name] = family_counts.get(name, 0) + 1
-        scores.append(decision.score)
-        _bump(per_block, item["block"], decision)
-        _bump(per_source_pair, item["source_pair"], decision)
-        if decision.veto == UNIT_DESIGNATOR_VETO:
-            vetoed.add((lo, hi))
-        # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
-        # the only way to adjudicate that refusal later is to read them off the row.
-        if storable({"zone": decision.zone, "score": decision.score,
-                     "evidence": decision.evidence}, settings.store_floor):
-            stored += 1
-            pair_slots[(lo, hi)] = {
-                name: feats[name] for name in D43_FEATURE_SLOTS if name in feats
-            }
-            row = decision.to_json()
-            if decision.certificate == "K-R":
-                row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
-            row.update({
-                # E63's census travels with the row so a re-simulation replays the census
-                # the decision was taken under, never today's.
-                "context": item["context"],
-                "block": item["block"],
-                "block_key": item["block_key"],
-                "source_pair": item["source_pair"],
-                "cross_source": item["cross_source"],
-                "probes": sorted(item["probes"]),
-                "exploded": sorted(set(exploded[lo]) | set(exploded[hi])),
-                "feats": {
-                    name: [value, present] for name, (value, present) in feats.items()
-                },
-            })
-            sink((lo, hi), json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-    # E85 and E88 both decide a K-B row only once the whole pair set is known, so either one
-    # sends the K-B rows down the deferred path. E86's ordering rail covers both.
-    guard_on = settings.family_guard_mode != "off" or settings.development_hold_mode != "off"
-    part_path = out_dir / (PAIRS_FILE + ".part" if guard_on else PAIRS_FILE)
-    with gzip.open(part_path, "wt", encoding="utf-8") as handle:
-        def to_file(key: tuple[int, int], line: str) -> None:
-            written.append(key)
-            handle.write(line)
-
-        def to_memory(key: tuple[int, int], line: str) -> None:
-            held.append((key, line))
-
-        for (lo, hi) in sorted(pairs):
-            probes = pairs[(lo, hi)]
-            fa, fb = fps[lo], fps[hi]
-            la, lb = dataset.listings[lo], dataset.listings[hi]
-            feats = pair_features(
-                fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings
-            )
-            decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
-            item = {
-                "lo": lo, "hi": hi, "decision": decision, "feats": feats, "probes": probes,
-                "fa": fa, "fb": fb, "la": la, "lb": lb,
-                "block": pair_block(la, lb), "block_key": pair_block_key(fa, fb),
-                "source_pair": source_pair(fa, fb), "cross_source": fa.source != fb.source,
-                "context": hazard.pair_context(la, lb).to_json(),
-            }
-            if guard_on and decision.certificate == "K-B":
-                deferred.append(item)
-                continue
-            finish(item, to_file)
-
-        family_report: dict[str, Any] = {"mode": settings.family_guard_mode}
-        hold_report: dict[str, Any] = {"mode": settings.development_hold_mode}
-        if deferred:
-            kb_decisions = [item["decision"] for item in deferred]
-            refused, family_report = family_guard_refusals(
-                kb_decisions, dataset.listings, settings
-            )
-            # E88: the hold reads the SAME pre-guard certificate set as E85 — both are
-            # properties of the pair set, and reading one off the other's verdict would make
-            # the family a function of the rule it is judging.
-            dev_held, hold_report = development_holds(
-                kb_decisions, dataset.listings, settings
-            )
-            for item in deferred:
-                key = (item["lo"], item["hi"])
-                clause, marker = refused.get(key), dev_held.get(key)
-                if clause is not None or marker is not None:
-                    item["decision"] = decide_pair(
-                        item["fa"], item["fb"], item["la"], item["lb"], item["feats"],
-                        item["probes"], model, settings, hazard, kb_refused=True,
-                    )
-                    if clause is not None:
-                        item["decision"].reason = f"{item['decision'].reason}:kb_family:{clause}"
-                        item["decision"].evidence["kb_family"] = clause
-                    if marker is not None:
-                        item["decision"].reason = (
-                            f"{item['decision'].reason}:dev_hold:{marker}"
-                        )
-                        item["decision"].evidence["development_hold"] = marker
-                finish(item, to_memory)
-
-    if guard_on:
-        _merge_pairs_file(part_path, written, held, out_dir / PAIRS_FILE)
-    # The cohort pass decides in key order and the guard does not change what a pair is worth,
-    # only when it is finished — so the edge order the clusterer sees stays the key order.
-    decisions.sort(key=lambda decision: (decision.lo, decision.hi))
-    timings["features_decide_s"] = time.perf_counter() - clock
-
-    clock = time.perf_counter()
-    # E61 refuses a UNION, not only an edge: two units of one building must not be joined
-    # transitively through a third advert either, so the veto joins the must-not-link set.
-    # E303 (prepared) reads which pairs the engine certified K-C; the map exists only when asked.
-    kc_pairs = ({(d.lo, d.hi): d.certificate for d in decisions if d.certificate == "K-C"}
-                if settings.d43_cluster_price_kc_house_number else None)
-    clusters = cluster_pairs(
-        decisions, dataset.listings, fps, settings, frozenset(must_not_link),
-        relation_for(settings, dataset.listings, pair_slots, kc_pairs),
-        must_link=frozenset(must_link), machine_vetoes=frozenset(vetoed),
-    )
-    rows = cluster_rows(clusters, decisions, fps)
-    timings["cluster_s"] = time.perf_counter() - clock
-
-    (out_dir / CLUSTERS_FILE).write_text(
-        json.dumps(
-            {
-                "clusters": {str(key): members for key, members in clusters.clusters.items()},
-                "rows": rows,
-                "conflicts": clusters.conflicts,
-                "bridges": clusters.bridges,
-                "stats": clusters.stats,
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-
-    scored = len(decisions)
-    summary: dict[str, Any] = {
-        "n_listings": len(dataset.listings),
-        "n_images": sum(len(bucket) for bucket in dataset.images_by_listing.values()),
-        "settings": settings.to_dict(),
-        "model_version": model.version,
-        "model_fit": dict(model.fit_report),
-        "feature_order": list(FEATURE_ORDER),
-        # The feature-module caps are not all settings fields, and a run artifact that cannot say
-        # which caps produced it cannot be compared with the next one.
-        "feature_params": {
-            "clip_sample": int(settings.clip_sample),
-            "phash_sample": int(settings.phash_sample),
-            "min_rare_block_docs": MIN_RARE_BLOCK_DOCS,
-            "rare_token_cap": RARE_TOKEN_CAP,
-        },
-        "blocking": blocking,
-        "pairs_scored": scored,
-        "pairs_stored": stored,
-        "zones": zones,
-        "guarded_at_blocking": blocking.get("guarded_pairs", {}),
-        # E25: the band width IS the budget dial, so it is a headline number of every run.
-        "band_width": (zones["band"] / scored) if scored else 0.0,
-        "certificates": certificates,
-        "reasons": dict(sorted(reasons.items())),
-        "evidence_families": dict(sorted(family_counts.items())),
-        "score_histogram": _score_histogram(scores),
-        "per_block": {key: per_block[key] for key in sorted(per_block)},
-        "per_source_pair": {key: per_source_pair[key] for key in sorted(per_source_pair)},
-        "clusters": clusters.stats,
-        # N4: g7 shipped `n_must_not_link = 45` and that was the E61 designator veto set alone —
-        # the operator's own permanent negatives never reached the batch build, and the single
-        # total could not say so. The split is now on the record of every run.
-        "must_not_link": {
-            "operator": len(frozenset(must_not_link) - vetoed),
-            "unit_designator_veto": len(vetoed),
-            "total": len(frozenset(must_not_link) | vetoed),
-            "loaded": bool(must_not_link),
-        },
-        "must_link": {"loaded": len(must_link)},
-        "family_guard": family_report,
-        "development_hold": hold_report,
-        "timings": timings,
-    }
-    return summary
-
-
-def score_pairs(
-    dataset: Dataset,
-    settings: Settings,
-    model: LogisticModel,
-    keys: Iterable[tuple[int, int]],
-) -> list[dict[str, Any]]:
-    """The engine's row for pairs a run did NOT store, in `run_engine`'s row shape plus
-    `stored: false` — the same fingerprints, features and decision `cmd_pair` prints.
-
-    A named judge list asks about pairs by id, and the pairs most worth asking about are often
-    ones the run never kept: below `store_floor`, or never paired at all because blocking keyed
-    the two adverts to different grains. `probes` is what blocking found the pair by, empty when
-    it never did. The K-B family guard and the development hold are properties of a whole pair
-    set and are NOT re-run, so a K-B row here is the pre-guard decision."""
-    wanted = sorted({
-        (min(lo, hi), max(lo, hi)) for lo, hi in keys
-        if lo != hi and lo in dataset.listings and hi in dataset.listings
-    })
-    if not wanted:
-        return []
-    fps = build_all(dataset, settings)
-    generated, _ = generate_pairs(fps, settings)
-    ctx = FeatureContext.build(fps, settings, dataset)
-    ctx.index_attrs(fps, dataset.listings)
-    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
-    rows: list[dict[str, Any]] = []
-    for lo, hi in wanted:
-        fa, fb = fps[lo], fps[hi]
-        la, lb = dataset.listings[lo], dataset.listings[hi]
-        probes = sorted(generated.get((lo, hi), ()))
-        feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
-        decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
-        row = decision.to_json()
-        if decision.certificate == "K-R":
-            row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
-        row.update({
-            "context": hazard.pair_context(la, lb).to_json(),
-            "block": pair_block(la, lb),
-            "block_key": pair_block_key(fa, fb),
-            "source_pair": source_pair(fa, fb),
-            "cross_source": fa.source != fb.source,
-            "probes": probes,
-            "feats": {name: [value, present] for name, (value, present) in feats.items()},
-            "stored": False,
-        })
-        rows.append(row)
-    return rows
 
 
 # --- `harness run`: the lane's own pass over the cohort (SW1, ADD06) -------------------------
@@ -1031,20 +640,7 @@ def cmd_pair(args: argparse.Namespace, out: Any) -> int:
     return 0
 
 
-def _stratum(row: dict[str, Any]) -> str:
-    side = "cross" if row.get("cross_source") else "same"
-    return f"{row.get('zone')}|{side}|{row.get('block') or '(none)'}"
-
-
-def _certificate_class(row: dict[str, Any]) -> str:
-    """Which layer decided the pair: a named certificate (E24), the model, or neither."""
-    certificate = row.get("certificate")
-    if certificate:
-        return str(certificate)
-    return "model" if row.get("zone") in ("merge", "band") else "none"
-
-
-def _feat(row: dict[str, Any], name: str) -> float | None:
+def feature_value(row: dict[str, Any], name: str) -> float | None:
     """One `[value, present]` feature off a stored pair row — absent reads as None (E12)."""
     entry = (row.get("feats") or {}).get(name)
     if not isinstance(entry, (list, tuple)) or len(entry) < 2 or not entry[1]:
@@ -1053,106 +649,6 @@ def _feat(row: dict[str, Any], name: str) -> float | None:
         return float(entry[0])
     except (TypeError, ValueError):
         return None
-
-
-def judge_stratum(row: dict[str, Any]) -> str:
-    """W3's judge strata: zone x deciding layer x cohort block x same/cross source.
-
-    Pairs whose image evidence is almost entirely catalogue stock are pulled out WHOLE rather
-    than split across that grid: they are the developer-project class the judge exists to
-    separate (PROGRAM.md §2), and proportional allocation over a four-way key would scatter
-    them too thin for the resulting agreement number to mean anything."""
-    ratio = _feat(row, "catalog_ratio_max")
-    if ratio is not None and ratio >= CATALOG_ONLY_MIN:
-        return CATALOG_ONLY_STRATUM
-    side = "cross" if row.get("cross_source") else "same"
-    return (f"{row.get('zone')}|{_certificate_class(row)}"
-            f"|{row.get('block') or '(none)'}|{side}")
-
-
-def drawn_stratum(row: dict[str, Any]) -> str:
-    """The stratum a judge draw files a pair under: the one a named pair list STAMPED on the row
-    (which contested set it was listed for, and why), else W3's `judge_stratum` grid.
-
-    `sample.json` carries the stamp on each drawn pair, which `labels.load_sample` reads as-is,
-    so a stamped draw needs no key function to be recomputed."""
-    stamped = row.get("stratum")
-    return str(stamped) if stamped else judge_stratum(row)
-
-
-def _shuffle_key(seed: int, row: dict[str, Any]) -> str:
-    payload = f"{seed}:{row.get('lo')}:{row.get('hi')}".encode("utf-8")
-    return hashlib.blake2b(payload, digest_size=8).hexdigest()
-
-
-def stratified_sample(
-    rows: Sequence[dict[str, Any]],
-    n: int,
-    seed: int = SAMPLE_SEED,
-    *,
-    key_fn: Callable[[dict[str, Any]], str] = _stratum,
-    floor: int = STRATUM_FLOOR,
-) -> dict[str, Any]:
-    """Proportional allocation with a floor of `floor` per stratum, deterministic order.
-
-    The floor is honoured first — a stratum too small to judge is exactly the one W3 must see —
-    so the selection can exceed `n` only when the floors alone already do."""
-    strata: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        strata.setdefault(key_fn(row), []).append(row)
-    quotas: dict[str, int] = {
-        name: min(floor, len(members)) for name, members in strata.items()
-    }
-    remaining = max(0, n - sum(quotas.values()))
-    headroom = {key: len(members) - quotas[key] for key, members in strata.items()}
-    total_headroom = sum(headroom.values())
-    if remaining and total_headroom:
-        shares = {
-            key: remaining * space / total_headroom for key, space in headroom.items()
-        }
-        for key, share in shares.items():
-            quotas[key] += min(headroom[key], int(share))
-        leftovers = sorted(
-            ((shares[key] - int(shares[key]), key) for key in shares), reverse=True
-        )
-        spare = remaining - sum(min(headroom[key], int(shares[key])) for key in shares)
-        for _, key in leftovers:
-            if spare <= 0:
-                break
-            if quotas[key] < len(strata[key]):
-                quotas[key] += 1
-                spare -= 1
-
-    selected: list[dict[str, Any]] = []
-    report: dict[str, dict[str, int]] = {}
-    for key in sorted(strata):
-        members = sorted(strata[key], key=lambda row: _shuffle_key(seed, row))
-        take = members[: quotas[key]]
-        selected.extend(take)
-        report[key] = {"population": len(members), "selected": len(take)}
-    selected.sort(key=lambda row: (row.get("lo", 0), row.get("hi", 0)))
-    return {
-        "seed": seed,
-        "n_requested": n,
-        "n_selected": len(selected),
-        "n_strata": len(strata),
-        "stratum_floor": floor,
-        "strata": report,
-        "pairs": selected,
-    }
-
-
-def sample_pairs(
-    rows: Sequence[dict[str, Any]], n: int, seed: int = SAMPLE_SEED
-) -> dict[str, Any]:
-    """The judge lane's sample (PROGRAM.md §9): `drawn_stratum` at a floor of 8.
-
-    A pure function of (rows, n, seed), so the text and vision tiers of one seed judge the SAME
-    pairs — which is the only way tier-vs-tier agreement (metric 8) measures the tiers rather
-    than two different draws."""
-    return stratified_sample(
-        rows, n, seed, key_fn=drawn_stratum, floor=JUDGE_STRATUM_FLOOR
-    )
 
 
 def read_pairs(run_dir: Path) -> list[dict[str, Any]]:
@@ -1166,101 +662,11 @@ def read_pairs(run_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def cmd_judge_sample(args: argparse.Namespace, out: Any) -> int:
-    run_dir = Path(args.run_dir)
-    if not (run_dir / PAIRS_FILE).is_file():
-        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
-        return 1
-    rows = read_pairs(run_dir)
-    zones = tuple(args.zone or ())
-    if zones:
-        rows = [row for row in rows if row.get("zone") in zones]
-    sample = stratified_sample(rows, args.n, args.seed)
-    sample["run_dir"] = str(run_dir)
-    sample["zones"] = list(zones)
-    target = Path(args.out) if args.out else run_dir / "sample.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(sample, indent=2, sort_keys=True), encoding="utf-8")
-    print(f"sampled {sample['n_selected']} pairs over {sample['n_strata']} strata"
-          f" -> {target}", file=out)
-    for key in sorted(sample["strata"]):
-        row = sample["strata"][key]
-        print(f"  {key:<44}{row['selected']:>5} of {row['population']}", file=out)
-    return 0
-
-
 # --- W3: labels in, evaluation and a fitted model out ---------------------------------
 
 
-def run_settings(run_dir: Path, override: str | None) -> Settings:
-    """The settings the pairs were SCORED under, unless a sweep file overrides them.
-
-    Reading t_hi/t_lo off `run.json` matters: an evaluation run against today's defaults would
-    silently re-zone yesterday's pairs and report a precision for a decision nobody made."""
-    if override:
-        return Settings.from_json(override)
-    path = run_dir / RUN_FILE
-    if path.is_file():
-        payload = json.loads(path.read_text(encoding="utf-8")).get("settings")
-        if isinstance(payload, dict):
-            return Settings.from_dict(payload)
-    return Settings()
-
-
-def resolve_sample(
-    paths: Sequence[str], explicit: Sequence[str] | str | None
-) -> tuple[Sample | None, str]:
-    """ONE DRAW PER JUDGEMENTS FILE — `--sample` repeated in the same order, else the
-    `sample.json` the lane wrote beside each file — pooled into one design.
-
-    Several judgement files are several draws, and a stratum's sampling rate belongs to the draw
-    rather than to its name (`merge|K-C|jablonec|cross` was drawn 87 of 1,178 in the seed-1
-    vision sample and 47 of 1,175 in the seed-2 one). Weighting them all by whichever file was
-    passed first inflates every pair the other draws contributed, so the draws are pooled by
-    `evaluate.pooled_sample`. A single `--sample` still covers every file — the pre-W4f
-    behaviour — and passing several requires one per `--judgements`.
-
-    Without any there are no per-stratum populations, so no number is cohort-level — the caller
-    prints the reason rather than quietly reporting sample rates as cohort rates. An EXPLICIT
-    sample that does not match its judgements is fatal; an auto-found one that does not match is
-    dropped with a warning, because picking the neighbouring file was this function's guess."""
-    given = [explicit] if isinstance(explicit, str) else list(explicit or ())
-    if given and len(given) not in (1, len(paths)):
-        raise ValueError(
-            f"--sample given {len(given)} times for {len(paths)} --judgements: pass one per "
-            f"judgements file, or exactly one for all of them"
-        )
-    overrides = (given * len(paths)) if len(given) == 1 else (given or [None] * len(paths))
-    draws: list[Sample] = []
-    notes: list[str] = []
-    seen: set[str] = set()
-    for path, override in zip(paths, overrides):
-        candidate = Path(override) if override else Path(path).parent / SAMPLE_FILE
-        if str(candidate) in seen:
-            continue
-        if not candidate.is_file():
-            if override:
-                raise ValueError(f"no such sample: {candidate}")
-            continue
-        try:
-            draws.append(load_sample(candidate))
-        except ValueError as exc:
-            if override:
-                raise
-            print(f"ignoring {candidate}: {exc}", file=sys.stderr)
-            continue
-        seen.add(str(candidate))
-        notes.append(str(candidate))
-    if not draws:
-        return None, "(none: HT weights fall back to 1.0)"
-    if len(draws) == 1:
-        return draws[0], notes[0]
-    pooled = pooled_sample(draws)
-    return pooled, f"{len(draws)} draws pooled [{pooled.stratum_fn}]: " + "; ".join(notes)
-
-
 def _add_operator_label_args(command: argparse.ArgumentParser) -> None:
-    """The operator tier's three flags, shared by `evaluate`, `fit` and `errors`."""
+    """The operator tier's flags, read by `fit`."""
     command.add_argument("--operator-labels", action="append", default=None,
                          help="operator_labels.jsonl from the `labels` lane; repeatable."
                               " The operator is the TOP tier — it outranks gold")
@@ -1445,14 +851,7 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, _ = load_labels(paths, args.precedence, operator)
-    try:
-        sample, sample_note = resolve_sample(paths, args.sample)
-    except ValueError as exc:
-        print(f"unusable --sample: {exc}", file=sys.stderr)
-        return 1
-    if sample is None and judgements:
-        sample = sample_from_judgements(judgements)
+    _judgements, labels, _ = load_labels(paths, args.precedence, operator)
     rows = read_pairs(run_dir)
     if args.split_map:
         try:
@@ -1465,7 +864,7 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     seed = split_seed_from_map(args.split_map, args.seed, out)
     try:
         model, report = fit_model(
-            rows, labels, sample=sample, seed=seed, version=args.version,
+            rows, labels, seed=seed, version=args.version,
             epochs=args.epochs, method=args.method, max_iter=args.max_iter,
             tol=args.tol, l2=args.l2, l2_grid=parse_l2_grid(args.l2_grid),
             calibration=args.calibration,
@@ -1486,7 +885,7 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     fit_seal = str(report.sections.get("split", {}).get("seal", {}).get("sha256") or "")
     json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
     print(f"fit {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
-    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
+    print(f"  labels {len(labels)} over {len(rows)} stored pairs", file=out)
     print("", file=out)
     for line in report.headline():
         print(line, file=out)
@@ -1548,16 +947,6 @@ def build_parser() -> argparse.ArgumentParser:
     pair.add_argument("--model", default=None, help="a model by name (w6_gold); default the prior")
     pair.set_defaults(func=cmd_pair)
 
-    judge = sub.add_parser("judge-sample", help="stratified pair sample from a run directory (W3)")
-    judge.add_argument("run_dir", help="a directory written by `run`")
-    judge.add_argument("--n", type=int, default=400, help="target sample size")
-    judge.add_argument("--out", default=None, help="where to write the sample JSON")
-    judge.add_argument("--seed", type=int, default=SAMPLE_SEED, help="deterministic sample seed")
-    judge.add_argument("--zone", action="append", choices=list(ZONES), default=None,
-                       help="restrict the sample to this zone; repeatable"
-                            " (D3's precision sample is `--zone merge --n 400`)")
-    judge.set_defaults(func=cmd_judge_sample)
-
     evaluate_parser = sub.add_parser(
         "evaluate", help="M1-M5 of a run against the rulings, and the D83 lists vs --base")
     evaluate_parser.add_argument("run_dir", help="a directory written by `run`")
@@ -1571,30 +960,19 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--out", default=None, help="directory for evaluate.json")
     evaluate_parser.set_defaults(func=cmd_evaluate)
 
-    for name, helptext, handler in (
-        ("fit", "fit and calibrate a model from judge labels (PROGRAM.md §6)", cmd_fit),
-    ):
-        command = sub.add_parser(name, help=helptext)
-        command.add_argument("run_dir", help="a directory written by `run`")
-        command.add_argument("--judgements", action="append", default=None,
-                             help="judgements.jsonl from the judge lane; repeatable"
-                                  " (tiers are merged by --precedence). Optional when"
-                                  " --operator-labels is given")
-        command.add_argument("--sample", action="append", default=None,
-                             help="sample.json carrying the per-stratum populations the"
-                                  " Horvitz-Thompson weights need; repeatable, ONE PER"
-                                  " --judgements in the same order (several files are several"
-                                  " draws at different rates); one covers them all; default:"
-                                  " the sample.json beside each --judgements")
-        command.add_argument("--out", required=True, help="directory for the report files")
-        command.add_argument("--precedence", action="append", default=None,
-                             help="tier precedence, highest first; repeatable"
-                                  " (default: operator, gold, vision, text)")
-        _add_operator_label_args(command)
-        command.set_defaults(func=handler, precedence_default=TIER_PRECEDENCE)
-        command.add_argument("--seed", type=int, default=SAMPLE_SEED,
-                             help="deterministic 60/20/20 cluster-split seed")
-    fit = sub.choices["fit"]
+    fit = sub.add_parser("fit", help="fit and calibrate a model from labels (PROGRAM.md §6)")
+    fit.add_argument("run_dir", help="a directory written by `run`")
+    fit.add_argument("--judgements", action="append", default=None,
+                     help="judgements.jsonl files; repeatable (tiers merged by --precedence)."
+                          " Optional when --operator-labels is given")
+    fit.add_argument("--out", required=True, help="directory for the report files")
+    fit.add_argument("--precedence", action="append", default=None,
+                     help="tier precedence, highest first; repeatable"
+                          " (default: operator, gold, vision, text)")
+    _add_operator_label_args(fit)
+    fit.set_defaults(func=cmd_fit, precedence_default=TIER_PRECEDENCE)
+    fit.add_argument("--seed", type=int, default=SAMPLE_SEED,
+                     help="deterministic 60/20/20 cluster-split seed")
     fit.add_argument("--version", default=None, help="model version string to stamp")
     fit.add_argument("--method", choices=list(FIT_METHODS), default=FIT_METHODS[0],
                      help="optimiser: irls (Newton, the default) or gd (gradient descent)")
@@ -1621,169 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
                           " sealed split")
     fit.add_argument("--require-convergence", action="store_true",
                      help="exit 1 when the fit hits its iteration ceiling short of tolerance")
-    # --- W4b: `errors` (autodedup/errors.py) -------------------------------------------
-    errors_parser = sub.add_parser(
-        "errors", help="false merges, false rejects and band composition, feature by feature"
-    )
-    errors_parser.add_argument("run_dir", help="a directory written by `run`")
-    errors_parser.add_argument("--judgements", action="append", default=None,
-                               help="judgements.jsonl from the judge lane; repeatable"
-                                    " (tiers are merged by --precedence). Optional when"
-                                    " --operator-labels is given")
-    errors_parser.add_argument("--sample", action="append", default=None,
-                               help="sample.json carrying the per-stratum populations the"
-                                    " Horvitz-Thompson weights need; repeatable, one per"
-                                    " --judgements in the same order; default: beside"
-                                    " --judgements")
-    errors_parser.add_argument("--out", default=None,
-                               help="directory for errors.json / errors.md (default: run_dir)")
-    errors_parser.add_argument("--top", type=int, default=DEFAULT_TOP,
-                               help="how many example pairs to list per error group")
-    errors_parser.add_argument("--precedence", action="append", default=None,
-                               help="tier precedence, highest first; repeatable"
-                                    " (default: operator, gold, vision, text)")
-    _add_operator_label_args(errors_parser)
-    errors_parser.add_argument("--threshold", action="append", type=float, default=None,
-                               help="score cut for the model-merge tables; repeatable"
-                                    " (default: the run's own t_hi and the rungs above it)")
-    errors_parser.set_defaults(func=cmd_errors, precedence_default=TIER_PRECEDENCE)
-
-    # --- E299: `yardstick` (autodedup/yardstick.py) -------------------------------------
-    yard = sub.add_parser(
-        "yardstick",
-        help="one generation measured against the operator's own Browse merges (E299)",
-    )
-    yard.add_argument("artifact", help="the cohort.jsonl.gz the generation was scored on")
-    yard.add_argument("run", help="the generation: a run directory (pairs.jsonl.gz, clusters.json,"
-                                  " run.json) or its pairs.jsonl.gz with --clusters")
-    yard.add_argument("--groups", action="append", required=True,
-                      help="operator_merges.jsonl from the labels lane, a JSON dump of"
-                           " autodedup.operator_merges, or operator_labels.jsonl (its"
-                           " browse_merge rows); repeatable")
-    yard.add_argument("--clusters", default=None,
-                      help="clusters.json (default: beside the pairs file)")
-    yard.add_argument("--settings", default=None,
-                      help="settings name (w29) or JSON path (default: the run.json's own)")
-    yard.add_argument("--model", default=None,
-                      help="model name (w6_gold) or JSON path (default: the run.json's"
-                           " model_version)")
-    yard.add_argument("--label-source", action="append", default=None,
-                      help="operator_labels.jsonl sources to measure (default: browse_merge);"
-                           " repeatable")
-    yard.add_argument("--include-not-live", action="store_true",
-                      help="also measure groups whose status is undone or withdrawn")
-    yard.add_argument("--out", default=None,
-                      help="directory for yardstick.json / yardstick.md (default: the run's)")
-    yard.add_argument("--top", type=int, default=DEFAULT_YARDSTICK_TOP,
-                      help="how many misses the printed list shows (the JSON holds all)")
-    yard.set_defaults(func=cmd_yardstick)
-
     return parser
-
-
-def _settings_arg(raw: str) -> Settings:
-    """A path to a Settings JSON, else a name under autodedup/settings."""
-    return Settings.from_json(raw) if Path(raw).is_file() else named_settings(raw)
-
-
-def _model_arg(raw: str) -> LogisticModel:
-    """A path to a model JSON, else a name under autodedup/models."""
-    return load_model(raw) if Path(raw).is_file() else named_model(raw)
-
-
-def cmd_yardstick(args: argparse.Namespace, out: Any) -> int:
-    run = Path(args.run)
-    run_dir = run if run.is_dir() else run.parent
-    pairs_path = run / PAIRS_FILE if run.is_dir() else run
-    clusters_path = Path(args.clusters) if args.clusters else run_dir / CLUSTERS_FILE
-    for path in (pairs_path, clusters_path):
-        if not path.is_file():
-            print(f"no such file: {path}", file=sys.stderr)
-            return 1
-    missing = [path for path in args.groups if not Path(path).is_file()]
-    if missing:
-        print(f"no such operator-groups file(s): {missing}", file=sys.stderr)
-        return 1
-    run_json: dict[str, Any] = {}
-    if (run_dir / RUN_FILE).is_file():
-        run_json = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
-    settings = (_settings_arg(args.settings) if args.settings
-                else run_settings(run_dir, None))
-    model = (_model_arg(args.model) if args.model
-             else model_of_version(run_json.get("model_version")))
-    try:
-        operator = load_operator_pairs(
-            args.groups, label_sources=tuple(args.label_source or (SOURCE_BROWSE_MERGE,)),
-            include_not_live=args.include_not_live,
-        )
-    except (ValueError, KeyError) as exc:
-        print(f"unreadable operator groups: {exc}", file=sys.stderr)
-        return 1
-    clock = time.perf_counter()
-    dataset = load(args.artifact)
-    report = measure_yardstick(
-        dataset, settings, model,
-        pairs_path=pairs_path,
-        clusters_payload=json.loads(clusters_path.read_text(encoding="utf-8")),
-        operator=operator,
-        inputs={
-            "cohort": str(args.artifact), "pairs": str(pairs_path),
-            "clusters": str(clusters_path), "groups": list(args.groups),
-            "generation": run_json.get("generation"),
-            "model_version": model.version,
-            "settings": args.settings or "run.json",
-        },
-    )
-    report["inputs"]["seconds"] = round(time.perf_counter() - clock, 1)
-    json_path, text_path = write_yardstick(
-        report, Path(args.out) if args.out else run_dir, args.top)
-    for line in render_yardstick(report, args.top):
-        print(line, file=out)
-    print(f"\nwrote {json_path} and {text_path}", file=out)
-    return 0
-
-
-# --- W4b: the `errors` command (analysis lives in autodedup/errors.py) ---------------------
-
-
-def cmd_errors(args: argparse.Namespace, out: Any) -> int:
-    run_dir = Path(args.run_dir)
-    if not (run_dir / PAIRS_FILE).is_file():
-        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
-        return 1
-    paths = judgement_paths(args)
-    if paths is None:
-        return 1
-    operator = operator_tier(args)
-    judgements, labels, _ = load_labels(paths, args.precedence, operator)
-    if not labels:
-        print("no usable labels in the judgements given", file=sys.stderr)
-        return 1
-    try:
-        sample, sample_note = resolve_sample(paths, args.sample)
-    except ValueError as exc:
-        print(f"unusable --sample: {exc}", file=sys.stderr)
-        return 1
-    if sample is None and judgements:
-        sample = sample_from_judgements(judgements)
-    rows = read_pairs(run_dir)
-    # The score ladder is anchored on the cut the pairs were ZONED under, so no rung is a
-    # silent duplicate of the live merge set (see errors.threshold_ladder).
-    t_hi = run_settings(run_dir, None).t_hi
-    report = analyse(
-        rows, labels, judgements, sample,
-        top=args.top, t_hi=t_hi, thresholds=args.threshold,
-    )
-    out_dir = Path(args.out) if args.out else run_dir
-    json_path, markdown_path = write_report(report, out_dir / ERRORS_STEM)
-    print(f"errors {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
-    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}",
-          file=out)
-    print("", file=out)
-    for line in report.headline():
-        print(line, file=out)
-    print(f"\nwrote {json_path} and {markdown_path}", file=out)
-    return 0
 
 
 def main(argv: Sequence[str] | None = None, out: Any = None) -> int:

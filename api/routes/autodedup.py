@@ -18,10 +18,8 @@ inside schema `autodedup`: shadow mode (D4) is untouched, no production table is
 `listings` / `images` are read for display only.
 
 PII (E28): no broker column is selected anywhere (autodedup/ui_sql.py), and every advert text
-— description or title — reaches a response only through the judge's own scrubber
-(`autodedup.judge.listing_digest` / `scrubbed_text`, the same regexes either way). The two
-OPERATOR surfaces (the group dialog, the pair page) are shown the WHOLE scrubbed text rather
-than the judge's token-capped slice: reading costs no tokens, and the sentence that tells two
+— description or title — reaches a response only through one scrubber
+(`autodedup.export.listing_digest` / `scrubbed_text`), whole: the sentence that tells two
 developer units apart is as often in the last paragraph as the first.
 """
 
@@ -47,7 +45,7 @@ from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
 from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
-from autodedup.judge import listing_digest, scrubbed_text
+from autodedup.export import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
 from toolkit.property_identity import record_ruling
 from toolkit.property_split import (
@@ -767,8 +765,6 @@ def _member_texts(conn: Any, ids: list[int]) -> dict[int, dict[str, Any]]:
         out[int(row["listing_id"])] = {
             "title": scrubbed_text(row["title"]),
             "description": description,
-            # The operator's copy is never cut; the key stays so one client component can render
-            # this text and the judge digest, which IS cut on the paid path.
             "description_truncated": False,
             "description_chars": len(description or ""),
         }
@@ -852,9 +848,8 @@ def _pair_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _digest(row: dict[str, Any]) -> dict[str, Any]:
-    """`autodedup.judge.listing_digest` over a DB row — the judge's own PII-free record, so
-    the operator reads what the model was shown (and never a broker field). One deliberate
-    difference: the description is NOT cut here. The cap is the paid lane's token budget."""
+    """`autodedup.export.listing_digest` over a DB row — the PII-free record (never a broker
+    field), the whole scrubbed description included."""
     attrs = {
         key: row[key]
         for key in (
@@ -886,8 +881,7 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         inactive_at=_stamp(row["inactive_at"]),
         is_active=bool(row["is_active"]),
     )
-    # The operator reads the WHOLE scrubbed advert; the judge's own digest stays capped.
-    digest = listing_digest(listing, truncate=False)
+    digest = listing_digest(listing)
     return {
         "listing_id": digest.listing_id,
         "portal": digest.portal,
@@ -899,10 +893,8 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         "floor": digest.floor,
         "total_floors": digest.total_floors,
         "price": digest.price,
-        # Portal provenance the OPERATOR reads, not part of the judge digest any more:
-        # W4 dropped `price_unit` from `ListingDigest` (the "celkem" / "za nemovitost"
-        # suffix is one fact in two vocabularies and cost gold votes). The pair page still
-        # renders the raw row value, so the wire keeps the key and sources it here.
+        # Portal provenance, not part of `ListingDigest` (the "celkem" / "za nemovitost"
+        # suffix is one fact in two vocabularies); the pair page renders the raw row value.
         "price_unit": listing.attrs.get("price_unit"),
         "attributes": digest.attributes,
         "first_seen": digest.first_seen,

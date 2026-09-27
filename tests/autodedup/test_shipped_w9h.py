@@ -19,6 +19,7 @@ fixed:
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -49,13 +50,9 @@ from autodedup.incremental_lane import (
 from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.replay import (
-    DatasetFacts,
-    ScheduleWork,
-    arrival_order,
-    batch_state,
-    withheld_state,
-)
+from autodedup import harness
+from autodedup.incremental_store import CohortFacts, Schedule
+from tests.autodedup.cohort_pass import arrival_order, cohort_pass
 from autodedup.export import encode_clip
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
@@ -118,7 +115,7 @@ def test_a_listing_decided_before_its_photographs_carries_no_phash_posting() -> 
     facts = _LateFacts(ds)
     order = arrival_order(ds)
 
-    work = ScheduleWork(order)
+    work = Schedule(order)
     while not work.exhausted():
         run_pass(store, facts, work, settings, hand_initialised(), calibration,
                  limits=Limits(max_listings=50))
@@ -139,16 +136,14 @@ def test_the_evidence_sweep_re_claims_the_listing_and_its_postings_gain_the_band
     store = MemoryStore(now=1_000.0)
     facts = _LateFacts(ds)
     order = arrival_order(ds)
-    work = ScheduleWork(order)
+    work = Schedule(order)
     while not work.exhausted():
         run_pass(store, facts, work, settings, hand_initialised(), calibration,
                  limits=Limits(max_listings=50))
     stamped = store.fp[order[0]].first_decided_at
 
     facts.delivered = set(order)
-    from autodedup.replay import RedecideWork
-
-    sweep = RedecideWork(order)
+    sweep = Schedule(order, redecide=True)
     scored = 0
     while not sweep.exhausted():
         result = run_pass(store, facts, sweep, settings, hand_initialised(), calibration,
@@ -266,7 +261,7 @@ def _decide_blind(hold: EvidenceHold | None, deliver: bool = False) -> MemorySto
     if deliver:
         facts.delivered = set(ds.listings)
     order = arrival_order(ds)
-    work = ScheduleWork(order)
+    work = Schedule(order)
     while not work.exhausted():
         run_pass(store, facts, work, settings, hand_initialised(), calibration,
                  limits=Limits(max_listings=50), hold=hold)
@@ -321,22 +316,20 @@ def test_the_hold_expires_with_the_horizon_even_though_no_fact_moved() -> None:
     """The half that needs a feed of its own: when the horizon passes with the photographs
     still absent, nothing about the listing has changed — no digest, no snapshot, no flag — so
     only an explicit re-decision can reopen the pair."""
-    from autodedup.replay import RedecideWork
-
     ds = _evidence_cohort()
     settings = _settings()
     calibration = _calibrated(ds, settings)
     store = MemoryStore(now=1_000.0)
     facts = _LateFacts(ds)
     order = arrival_order(ds)
-    work = ScheduleWork(order)
+    work = Schedule(order)
     while not work.exhausted():
         run_pass(store, facts, work, settings, hand_initialised(), calibration,
                  limits=Limits(max_listings=50),
                  hold=EvidenceHold(now=1_000.0, horizon_s=48 * 3600.0))
     assert store.pairs[(101, 202)].reason == EVIDENCE_HOLD_REASON
 
-    expiry = RedecideWork(order)
+    expiry = Schedule(order, redecide=True)
     late = EvidenceHold(now=1_000.0 + 49 * 3600.0, horizon_s=48 * 3600.0)
     while not expiry.exhausted():
         result = run_pass(store, facts, expiry, settings, hand_initialised(), calibration,
@@ -400,11 +393,11 @@ def test_the_plain_replay_is_untouched_by_the_hold() -> None:
     settings = _settings()
     calibration = _calibrated(ds, settings)
     model = hand_initialised()
-    reference, batch_clusters, _t = batch_state(ds, settings, model)
+    reference, batch_clusters = cohort_pass(ds, settings, model)
 
     store = MemoryStore()
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(arrival_order(ds))
+    facts = CohortFacts(ds)
+    work = Schedule(arrival_order(ds))
     while not work.exhausted():
         run_pass(store, facts, work, settings, model, calibration,
                  limits=Limits(max_listings=50))
@@ -415,27 +408,29 @@ def test_the_plain_replay_is_untouched_by_the_hold() -> None:
         tuple(sorted(v)) for v in batch_clusters.values()}
 
 
-def test_withholding_the_photographs_and_delivering_them_reaches_the_batch_state() -> None:
-    """E92/E93's own proof: every listing decided blind, every photo-dependent merge held,
-    the producers delivered, the horizon passed — and the FINAL state is the batch engine's,
-    pair for pair and cluster for cluster."""
+def test_withholding_the_photographs_and_delivering_them_reaches_the_batch_state(
+        tmp_path) -> None:
+    """E92/E93's own proof, as `harness run --withhold-photos` runs it: every listing decided
+    blind, every photo-dependent merge held, the producers delivered, the horizon passed — and
+    the FINAL state is the cohort pass's, pair for pair and cluster for cluster."""
     ds = _evidence_cohort()
     settings = _settings()
-    calibration = _calibrated(ds, settings)
     model = hand_initialised()
-    reference, batch_clusters, _t = batch_state(ds, settings, model)
+    reference, batch_clusters = cohort_pass(ds, settings, model)
 
-    pairs, clusters, stats = withheld_state(
-        ds, settings, model, calibration, arrival_order(ds), 50,
-        Limits(max_listings=50))
+    stats = harness.run(ds, settings, model, tmp_path, withhold_photos=True)
+    pairs = {(row["lo"], row["hi"]): row for row in harness.read_pairs(tmp_path)}
+    clusters = json.loads((tmp_path / harness.CLUSTERS_FILE).read_text())["clusters"]
 
-    assert stats["held_on_first_decision"] > 0, "the hold actually fired"
-    assert stats["still_held"] == 0, "and nothing is waiting at the end"
-    assert set(pairs) == set(reference)
+    assert stats["withheld_photos"]["held_on_first_decision"] > 0, "the hold actually fired"
+    assert stats["withheld_photos"]["still_held"] == 0, "and nothing is waiting at the end"
+    stored = {key: row for key, row in reference.items()
+              if key in pairs or row["zone"] in ("merge", "band")}
+    assert set(pairs) <= set(reference) and set(stored) <= set(pairs)
     assert {key: row["zone"] for key, row in pairs.items()} == {
-        key: row["zone"] for key, row in reference.items()}
+        key: reference[key]["zone"] for key in pairs}
     assert {key: row["reason"] for key, row in pairs.items()} == {
-        key: row["reason"] for key, row in reference.items()}
+        key: reference[key]["reason"] for key in pairs}
     assert {tuple(sorted(v)) for v in clusters.values()} == {
         tuple(sorted(v)) for v in batch_clusters.values()}
 
@@ -566,7 +561,7 @@ def test_a_merge_waits_while_the_photographs_are_hashed_but_not_embedded() -> No
     store = MemoryStore(now=1_000.0)
     facts = _LateFacts(ds)
     facts.delivered = set(ds.listings)
-    work = ScheduleWork(arrival_order(ds))
+    work = Schedule(arrival_order(ds))
     while not work.exhausted():
         run_pass(store, facts, work, settings, hand_initialised(), _calibrated(ds, settings),
                  limits=Limits(max_listings=50),
