@@ -9,6 +9,7 @@ import gzip
 import json
 import subprocess
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -16,8 +17,11 @@ from typing import Any, Iterable
 import numpy as np
 
 from autodedup.evaluate import DIFFERENT, SAME, read_rulings, wilson_lower
+from autodedup.guards import cluster_invariants_ok
+from autodedup.indistinguishable import CLUSTER, distinguishing_facts
 from autodedup.labels import pair_key
-from autodedup.lab.board import BAND, MERGE, REJECT, VETO, Groups, Outcome, config_id
+from autodedup.lab.board import (BAND, MERGE, REJECT, VETO, Groups, Outcome, config_id,
+                                 relation_parts)
 from autodedup.lab.cache import REPO, Cohort
 
 JUDGE_SAME: frozenset[str] = frozenset({"same_property"})
@@ -191,6 +195,57 @@ def where_lost(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, i
                         where = f"{zone_names[d.zone[i]]} by {d.rung[i]}"
                 counts[where] = counts.get(where, 0) + 1
             out[f"{source}:{verdict}"] = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+    return out
+
+
+def why_refused(c: Cohort, arm: Outcome, labels: Labels) -> dict[str, dict[str, Any]]:
+    """Each labelled pair that is a merge edge the relation group step left apart: the invariant
+    that refuses the pair alone and the union of its two groups, and every fact that separates a
+    cross pair of that union (`price_limb` when only E157's price read does). The read that traces
+    the group step's losses to the facts that cause them."""
+    group = arm.config.get("group", {"step": "relation"})
+    parts = relation_parts(c, arm.decisions, group)
+    vetoed = parts.vetoed | frozenset(tuple(x) for x in group.get("must_not_link", ()))
+    index = {key: i for i, key in enumerate(c.keys)}
+    d, member_of, clusters = arm.decisions, arm.groups.member_of, arm.groups.clusters
+
+    def members(x: int) -> list[int]:
+        g = member_of.get(x)
+        return list(clusters[g]) if g is not None else [x]
+
+    def invariant(ids: list[int]) -> str:
+        fps = [c.fps[i] for i in ids if i in c.fps]
+        return cluster_invariants_ok(fps, parts.settings, vetoed, parts.relation, None) or "ok"
+
+    out: dict[str, dict[str, Any]] = {}
+    for source, pairs in [("operator", labels.rulings)] + list(labels.judges.items()):
+        for verdict in (SAME, DIFFERENT):
+            where: Counter[str] = Counter()
+            facts: Counter[str] = Counter()
+            for (a, b), value in pairs.items():
+                if value != verdict or a not in c.ds.listings or b not in c.ds.listings:
+                    continue
+                i = index.get((a, b))
+                if i is None or d.zone[i] != MERGE:
+                    continue
+                if a in member_of and member_of[a] == member_of.get(b):
+                    continue
+                left, right = members(a), members(b)
+                union = sorted(set(left) | set(right))
+                where[f"pair:{invariant([a, b])} group:{invariant(union)}"] += 1
+                seen: set[str] = set()
+                for x in left if parts.relation is not None else ():
+                    for y in right:
+                        lo, hi = min(x, y), max(x, y)
+                        if parts.relation.ok(lo, hi):
+                            continue
+                        found = distinguishing_facts(c.ds.listings[lo], c.ds.listings[hi],
+                                                     parts.slots.get((lo, hi)), parts.settings,
+                                                     CLUSTER)
+                        seen |= {f.name for f in found} or {"price_limb"}
+                facts.update(seen)
+            out[f"{source}:{verdict}"] = {"where": dict(where.most_common()),
+                                          "separating_facts": dict(facts.most_common())}
     return out
 
 
