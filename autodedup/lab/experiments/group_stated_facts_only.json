@@ -1,0 +1,38 @@
+{
+ "name": "group_stated_facts_only",
+ "note": "the group relation reads stated facts only: no tag-derived facts, no price limb",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation",
+  "settings": {
+   "d43_cluster_image_facts": false,
+   "demonstrate_cluster_price": false
+  }
+ }
+}

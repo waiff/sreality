@@ -10,6 +10,7 @@ reason strings included, which `verify` checks against a stored generation."""
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import itertools
 import json
@@ -374,14 +375,16 @@ def merge_edges(c: Cohort, d: Decisions) -> list[Decision]:
 
 class _RelationMemo:
     """The D43 relation's per-pair answers, kept across arms: an answer is reused only when the
-    pair's stored feature slots and its K-C certificate are what they were when it was read."""
+    pair's stored feature slots, its K-C certificate and the group step's settings overrides are
+    what they were when it was read."""
 
     def __init__(self, c: Cohort, slots: dict[tuple[int, int], Any],
-                 kc: dict[tuple[int, int], str] | None) -> None:
-        self.c, self.slots, self.kc = c, slots, kc or {}
+                 kc: dict[tuple[int, int], str] | None, tag: str = "") -> None:
+        self.c, self.slots, self.kc, self.tag = c, slots, kc or {}, tag
 
-    def _key(self, key: tuple[int, int]) -> tuple[tuple[int, int], bool, bool]:
-        return (key, key in self.slots, key in self.kc)
+    def _key(self, key: tuple[int, int]) -> tuple[Any, ...]:
+        base = (key, key in self.slots, key in self.kc)
+        return base + (self.tag,) if self.tag else base
 
     def get(self, key: tuple[int, int]) -> bool | None:
         return self.c.relation.get(self._key(key))
@@ -393,18 +396,23 @@ class _RelationMemo:
 
 @group_step("relation")
 def relation_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
-    """The engine's own `cluster_pairs` with the D43 relation over the stored feature slots."""
+    """The engine's own `cluster_pairs` with the D43 relation over the stored feature slots.
+    `settings` overrides the group step's own dials for this arm only, e.g.
+    `{"d43_cluster_image_facts": false}`: the relation then stops reading tag-derived facts."""
+    overrides = p.get("settings") or {}
+    settings = dataclasses.replace(c.settings, **overrides) if overrides else c.settings
+    tag = json.dumps(overrides, sort_keys=True) if overrides else ""
     slot_idx = [FIDX[s] for s in FEATURE_SLOTS]
     slots = {c.keys[i]: {s: ((float(c.V[i, j]), True) if c.P[i, j] else (0.0, False))
                          for s, j in zip(FEATURE_SLOTS, slot_idx)}
              for i in np.flatnonzero(storable(c, d))}
     kc = ({c.keys[i]: "K-C" for i in np.flatnonzero(d.cert == "K-C")}
-          if c.settings.d43_cluster_price_kc_house_number else None)
+          if settings.d43_cluster_price_kc_house_number else None)
     vetoed = frozenset(c.keys[i] for i in np.flatnonzero(c.sig["veto"] == UNIT_DESIGNATOR_VETO))
-    relation = relation_for(c.settings, c.ds.listings, slots, kc)
+    relation = relation_for(settings, c.ds.listings, slots, kc)
     if relation is not None and p.get("memo", True):
-        relation._memo = _RelationMemo(c, slots, kc)  # type: ignore[assignment]
-    result = cluster_pairs(merge_edges(c, d), c.ds.listings, c.fps, c.settings,
+        relation._memo = _RelationMemo(c, slots, kc, tag)  # type: ignore[assignment]
+    result = cluster_pairs(merge_edges(c, d), c.ds.listings, c.fps, settings,
                            frozenset(p.get("must_not_link", ())), relation,
                            must_link=frozenset(p.get("must_link", ())), machine_vetoes=vetoed)
     return Groups({int(k): tuple(sorted(int(m) for m in v)) for k, v in result.clusters.items()},
