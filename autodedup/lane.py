@@ -214,8 +214,8 @@ def parse_kv_args(raw: str | None) -> dict[str, str]:
 
 SECRET_ENV_VARS: tuple[str, ...] = (
     "SUPABASE_DB_URL", "SUPABASE_DB_SESSION_URL", "OPENAI_API_KEY", "QWEN_API_KEY",
-    "RUNPOD_API_KEY", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
-    "R2_BUCKET_NAME",
+    "RUNPOD_API_KEY", "HF_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET_NAME", "GH_TOKEN",
 )
 
 # A malformed DSN is echoed back verbatim by psycopg (`invalid dsn: ...`), so the value-based

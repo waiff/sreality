@@ -779,11 +779,24 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     ids = set(dataset.listings)
     unstored = [key for key in rulings
                 if key[0] in ids and key[1] in ids and key not in run_view.rows]
-    explicit = decide_explicit(dataset, Settings.from_dict(summary["settings"]),
-                               model_of_version(summary.get("model_version")), unstored)
+    # Only the ruled pairs the run never stored are DECIDED here, and only under the run's own
+    # engine: a run.json this checkout cannot parse (an arm's branch-only dials) or a model it
+    # does not carry skips them, counted and named — never decided with this checkout's rule.
+    # Everything else (M1-M3, M5, the D83 lists) reads the stored rows and never the settings.
+    explicit: dict[tuple[int, int], dict[str, Any]] = {}
+    skipped: dict[str, Any] | None = None
+    try:
+        engine = (Settings.from_dict(summary["settings"]),
+                  model_of_version(summary.get("model_version")))
+    except (ValueError, SystemExit) as exc:
+        skipped = {"pairs": len(unstored), "reason": str(exc),
+                   "to_decide": "run `harness evaluate` from the arm's own checkout"}
+    else:
+        explicit = decide_explicit(dataset, *engine, unstored)
     report: dict[str, Any] = {
         "run": str(run_dir), "rulings": str(args.rulings), "artifact": str(artifact),
         "explicit_pairs": len(explicit),
+        **({"explicit_skipped": skipped} if skipped else {}),
         "metrics": evaluation.measure(run_view, rulings, ids, explicit),
         # E111: E110 names the event that revokes it, so every evaluation COUNTS it.
         "revocation": revocation.check_rows(run_view.rows.values(), rulings).to_json(),
@@ -802,6 +815,9 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     for name in ("M1_precision", "M2_recall", "M3_purity", "M5_coverage"):
         print(f"  {name:<14}{json.dumps(metrics[name], sort_keys=True)}", file=out)
     print("  " + revocation.check_rows(run_view.rows.values(), rulings).line(), file=out)
+    if skipped:
+        print(f"  explicit: skipped {skipped['pairs']} ruled pair(s): {skipped['reason']}",
+              file=out)
     if "d83" in report:
         counts = {k: v for k, v in report["d83"]["counts"].items() if not isinstance(v, dict)}
         print(f"  D83 vs {args.base}  {json.dumps(counts, sort_keys=True)}", file=out)

@@ -169,16 +169,12 @@ class MemoryStore:
             key = int(row["cluster_key"])
             self.clusters[key] = list(row["members"])
             self.cluster_row[key] = dict(row)
-        # A conflict belongs to the component that refused it, and a re-clustered component
-        # writes all of its own again: one naming a listing just clustered or re-refused, or
-        # resting on an edge that is no longer a merge, is replaced, never accumulated.
+        # `RT_CONFLICT_DROP_SQL`, exactly: a conflict goes only when BOTH its ends are members
+        # of a re-written cluster row. One with a singleton end is re-inserted beside itself on
+        # the next re-cluster — the live defect the twin must show, not hide (SW1 review).
         touched = {int(i) for row in rows for i in row["members"]}
-        touched |= {int(c[side]) for c in conflicts for side in ("lo", "hi")}
-        self.conflicts = [
-            c for c in self.conflicts
-            if int(c["lo"]) not in touched and int(c["hi"]) not in touched
-            and getattr(self.pairs.get((min(int(c["lo"]), int(c["hi"])),
-                                        max(int(c["lo"]), int(c["hi"])))), "zone", None) == "merge"]
+        self.conflicts = [c for c in self.conflicts
+                          if not (int(c["lo"]) in touched and int(c["hi"]) in touched)]
         self.conflicts.extend(dict(conflict) for conflict in conflicts)
 
     def must_not_link(self) -> set[tuple[int, int]]:

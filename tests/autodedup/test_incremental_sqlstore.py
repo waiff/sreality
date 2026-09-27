@@ -134,6 +134,19 @@ def _sql_state(conn: FakePg):
     return pairs, {key: sorted(ids) for key, ids in clusters.items()}
 
 
+def _sql_conflicts(conn: FakePg) -> list[tuple[int, int, str, str | None]]:
+    """The refused unions and bridges as a MULTISET: a duplicate row is a difference."""
+    return sorted((int(row["listing_lo"]), int(row["listing_hi"]), str(row["kind"]),
+                   row["invariant"]) for row in conn.cluster_conflicts
+                  if (row["detail"] or {}).get("generation") == GEN)
+
+
+def _memory_conflicts(store: MemoryStore) -> list[tuple[int, int, str, str | None]]:
+    return sorted((min(int(c["lo"]), int(c["hi"])), max(int(c["lo"]), int(c["hi"])),
+                   str(c.get("kind") or "invariant"), str(c.get("invariant") or "") or None)
+                  for c in store.conflicts)
+
+
 def _memory_state(store: MemoryStore):
     pairs = {key: {
         "zone": row.zone,
@@ -163,6 +176,7 @@ def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(co
 
     assert sql_pairs == mem_pairs
     assert sql_clusters == mem_clusters
+    assert _sql_conflicts(conn) == _memory_conflicts(memory)
 
     reference, batch_clusters = cohort_pass(ds, settings, hand_initialised())
     assert set(sql_pairs) == set(reference)
@@ -172,6 +186,37 @@ def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(co
         assert row["families"] == reference[key]["families"], key
     assert sorted(sorted(v) for v in sql_clusters.values()) == \
         sorted(sorted(v) for v in batch_clusters.values())
+
+
+def test_the_twin_keeps_and_drops_conflicts_exactly_as_the_sql_store_does() -> None:
+    """`RT_CONFLICT_DROP_SQL` drops a conflict only when BOTH ends are members of a re-written
+    cluster row. So a refused union with a singleton end survives a re-cluster and is inserted
+    again beside itself — the live duplicate the SW1 review found (11862489x12031365 on the
+    trial). The twin must hold the same multiset, duplicate included, or every harness count of
+    refused unions reads a different store from the one the lane writes."""
+    def cluster(key: int, members: list[int]) -> dict:
+        return {"cluster_key": key, "members": members, "size": len(members)}
+
+    refused = {"lo": 2, "hi": 9, "kind": "invariant", "invariant": "d43_distinguishable",
+               "members": [1, 2]}
+    inside = {"lo": 1, "hi": 2, "kind": "invariant", "invariant": "d43_distinguishable",
+              "members": [1, 2]}
+    steps = [([], [cluster(1, [1, 2])], [refused, inside]),
+             ([1], [cluster(1, [1, 2])], [refused, inside]),
+             ([1], [cluster(1, [1, 2, 9])], [])]
+    conn = FakePg()
+    sql, memory = SqlStore(conn, GEN, store_floor=0.0), MemoryStore()
+    seen = []
+    for drop, rows, conflicts in steps:
+        sql.write_clusters(drop, rows, conflicts)
+        memory.write_clusters(drop, rows, conflicts)
+        assert _sql_conflicts(conn) == _memory_conflicts(memory)
+        seen.append(_memory_conflicts(memory))
+    duplicate = (2, 9, "invariant", "d43_distinguishable")
+    assert seen[1].count(duplicate) == 2, "a singleton end is never dropped: re-inserted"
+    assert (1, 2, "invariant", "d43_distinguishable") in seen[1] and seen[1].count(
+        (1, 2, "invariant", "d43_distinguishable")) == 1, "both ends clustered: replaced"
+    assert seen[2] == [], "both ends now members of the re-written row: every copy dropped"
 
 
 # ---------------------------------------------------------------------- F1: the fp row

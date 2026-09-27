@@ -752,8 +752,15 @@ def test_harness_evaluate_reads_a_run_against_the_rulings(cohort: Path, tmp_path
         {"listing_lo": DUP_A, "listing_hi": REPOST_A, "verdict": "different",
          "decided_at": "t1"},
     )), encoding="utf-8")
+    # A base that DIFFERS: the same cohort with the duplicate held apart by a must-not-link, so
+    # every D83 list the arm moves against it is non-trivial.
+    mnl = tmp_path / "mnl.json"
+    mnl.write_text(json.dumps([[DUP_A, DUP_B]]), encoding="utf-8")
+    base_dir = tmp_path / "base"
+    assert harness.main(["run", str(cohort), "--out", str(base_dir), "--must-not-link",
+                         str(mnl)], out=io.StringIO()) == 0
     stream = io.StringIO()
-    assert harness.main(["evaluate", str(run_dir), str(rulings), "--base", str(run_dir)],
+    assert harness.main(["evaluate", str(run_dir), str(rulings), "--base", str(base_dir)],
                         out=stream) == 0
     report = json.loads((run_dir / "evaluate.json").read_text(encoding="utf-8"))
     metrics = report["metrics"]
@@ -761,8 +768,42 @@ def test_harness_evaluate_reads_a_run_against_the_rulings(cohort: Path, tmp_path
     assert metrics["M1_precision"]["ruled_different_together"] == 0
     assert metrics["M5_coverage"]["verdict"].startswith("not measurable")
     assert report["explicit_pairs"] == 1, "the different-ruled pair was never stored"
-    assert report["d83"]["counts"]["copairs_gained"] == 0
+    assert "explicit_skipped" not in report
+    lists = report["d83"]["lists"]
+    assert lists["copairs_gained"] == [[DUP_A, DUP_B, "same", None]]
+    assert lists["copairs_lost"] == [] and lists["merge_gained"] == [], (
+        "a must-not-link holds a pair apart; it never re-zones it")
+    assert [DUP_A, DUP_B] in lists["groups_arm_only"]
     assert report["revocation"]["revoked"] is False
+
+
+def test_harness_evaluate_reads_an_arm_whose_settings_this_checkout_does_not_know(
+        cohort: Path, tmp_path: Path) -> None:
+    """An arm run on a branch carries dials this checkout lacks (C7's photo_override_*): the
+    metrics and the D83 lists still read, and the unstored ruled pairs are SKIPPED, counted and
+    named — never decided by this checkout's rule (SW1 review)."""
+    run_dir = tmp_path / "run"
+    assert harness.main(["run", str(cohort), "--out", str(run_dir)], out=io.StringIO()) == 0
+    summary = json.loads((run_dir / harness.RUN_FILE).read_text(encoding="utf-8"))
+    summary["settings"]["photo_override_min_pairs"] = 3
+    (run_dir / harness.RUN_FILE).write_text(json.dumps(summary), encoding="utf-8")
+    rulings = tmp_path / "rulings"
+    rulings.mkdir()
+    (rulings / "operator_labels.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+        {"listing_lo": DUP_A, "listing_hi": DUP_B, "verdict": "same", "decided_at": "t1"},
+        {"listing_lo": DUP_A, "listing_hi": REPOST_A, "verdict": "different",
+         "decided_at": "t1"},
+    )), encoding="utf-8")
+    stream = io.StringIO()
+    assert harness.main(["evaluate", str(run_dir), str(rulings), "--base", str(run_dir)],
+                        out=stream) == 0
+    report = json.loads((run_dir / "evaluate.json").read_text(encoding="utf-8"))
+    assert report["metrics"]["M2_recall"]["together"] == 1
+    assert report["explicit_pairs"] == 0
+    assert report["explicit_skipped"]["pairs"] == 1
+    assert "photo_override_min_pairs" in report["explicit_skipped"]["reason"]
+    assert report["d83"]["counts"]["pairs_new"] == 0
+    assert "explicit: skipped 1" in stream.getvalue()
 
 
 def test_harness_pair_prints_side_by_side(cohort: Path) -> None:

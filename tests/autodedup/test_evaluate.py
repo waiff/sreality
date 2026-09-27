@@ -99,9 +99,6 @@ def test_wilson_known_values_and_degenerate_cases() -> None:
         ev.wilson_interval(11, 10)
 
 
-# --- evaluate ------------------------------------------------------------------------------
-
-
 # --- the cluster split ---------------------------------------------------------------------
 
 
@@ -293,12 +290,6 @@ def test_design_effect_reports_the_effective_sample_size() -> None:
     assert body["design_effect"] == pytest.approx(1.0)
     skewed = ev.design_effect([100.0] + [1.0] * 9)
     assert skewed["n_effective"] < 2.0
-
-
-# --- thresholds: the zone rule, the ties, the weights, the holdout ---------------------------
-
-
-# --- the honesty flags -------------------------------------------------------------------------
 
 
 # --- the fit: weights, seal, calibration honesty ------------------------------------------------
@@ -629,9 +620,6 @@ def test_the_bake_off_reports_the_ceiling_a_threshold_cannot_reach() -> None:
     capped = ev._mapped(probs, ys, [0.999999], "isotonic", 10)
     uncapped = ev._mapped(probs, ys, [0.999999], "platt", 10)
     assert capped[0] < 0.97 < uncapped[0]
-
-
-# --- the reconstruction must agree with the engine ------------------------------------------
 
 
 # --- SW1: one run against one rulings file (M1-M5, the D83 read lists) --------------------------

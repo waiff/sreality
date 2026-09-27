@@ -314,27 +314,12 @@ def design_effect(weights: Sequence[float]) -> dict[str, Any]:
     }
 
 
-# --- counting ------------------------------------------------------------------------------
-
-
-# --- several draws, one design ---------------------------------------------------------------
-
-
 def _feats(row: Mapping[str, Any]) -> dict[str, tuple[float, bool]]:
     out: dict[str, tuple[float, bool]] = {}
     for name, entry in (row.get("feats") or {}).items():
         if isinstance(entry, (list, tuple)) and len(entry) >= 2:
             out[str(name)] = (float(entry[0]), bool(entry[1]))
     return out
-
-
-# --- re-deciding a stored run through the LIVE rule ----------------------------------------
-
-
-# --- thresholds ----------------------------------------------------------------------------
-
-
-# --- the evaluation ------------------------------------------------------------------------
 
 
 def _pct(value: float | None, digits: int = 2) -> str:
