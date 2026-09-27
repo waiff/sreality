@@ -48,6 +48,14 @@ def components(edges: list[tuple[int, int]]) -> list[list[int]]:
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    if len(sys.argv) > 2:
+        # One process per cohort: the readers' module-level memos (indistinguishable._SHINGLE_MEMO,
+        # text_facts lru caches) grow across cohorts and would not be returned to the OS.
+        import subprocess
+        for cohort in sys.argv[1:]:
+            if not (OUT / f"{cohort}.json").is_file():
+                subprocess.run([sys.executable, __file__, cohort], check=False)
+        return
     settings = Settings.from_json(c2lib.SETTINGS)
     for cohort in sys.argv[1:]:
         path = OUT / f"{cohort}.json"
