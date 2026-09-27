@@ -32,7 +32,13 @@ docs/design/new-dedup/ENCODER-DECISION.md §5.3/§5.5 or a live RunPod run:
     when they never start, or stop.
 
 Completion is NOT read from the pod: it self-reports into Postgres, because the rows it
-writes ARE the progress record (count for this config / count of stored images).
+writes ARE the progress record (count for this config / count of stored images). With
+--vectors-to r2 the record is the R2 manifest instead, and the watchdog counts this shard's
+committed parts from a listing.
+
+SIZING HAPPENS ON THE POD (2026-09-27): chunk, workers and batch default to 0, which the
+payload resolves from the vCPUs and RAM it actually got, and the pending scan is paged at
+min(limit, 200,000) so a pass pays it once.
 
 Usage:  python -m scripts.dinov3_embed_dispatch --max-write-mb-per-hour 500 --dry-run
 Required: RUNPOD_API_KEY (+ SUPABASE_DB_URL, R2_*, HF_TOKEN to hand to the pod).
@@ -50,6 +56,7 @@ from typing import Any, Sequence
 
 from scraper.dinov3_config import IDENTITY_FIELDS, encoder_identity
 from scripts import pod_bootstrap
+from scripts.dinov3_embed_backfill import MAX_SELECT_PAGE
 from scripts.pod_watchdog import (
     DEFAULT_BOOTSTRAP_DEADLINE_S,
     DEFAULT_POLL_INTERVAL_S,
@@ -195,9 +202,53 @@ def read_backfill_progress(conn: Any, *, identity: dict[str, Any],
                     detail=f"{count} vectors under this identity (baseline {baseline})")
 
 
+def read_r2_progress(store: Any, *, prefix: str, shard: int, shards: int,
+                     baseline: int) -> Progress:
+    """R2 mode's reading: THIS shard's committed parts under the prefix, from a listing.
+    Per shard on purpose: eight pods share one prefix, and a count over all of them would
+    let seven working pods hide a stalled eighth."""
+    from toolkit.vector_shards import count_parts
+
+    count = count_parts(store, prefix, shard=shard, shards=shards)
+    return Progress(booted=count > baseline, marker=str(count), terminal=False,
+                    detail=f"{count} committed part(s) of shard {shard}/{shards} under "
+                           f"{prefix} (baseline {baseline})")
+
+
+def _r2_watchdog(args: argparse.Namespace, identity: dict[str, Any]) -> PodWatchdog | None:
+    from scraper import image_storage
+    from toolkit.vector_shards import default_prefix
+
+    if not image_storage.is_configured():
+        LOG.warning("R2_* is not set on the RUNNER — no watchdog for an R2-mode pass, so a "
+                    "pod that dies on boot bills the whole window")
+        return None
+    store = image_storage.R2Client.from_env()
+    prefix = args.r2_prefix.strip("/") or default_prefix(identity)
+    try:
+        baseline = int(read_r2_progress(store, prefix=prefix, shard=args.shard,
+                                        shards=args.shards, baseline=-1).marker)
+    except Exception as exc:  # noqa: BLE001 - a baseline we cannot read is 0
+        LOG.warning("could not read the R2 part baseline (assuming 0): %s", exc)
+        baseline = 0
+
+    def poll() -> Progress:
+        return read_r2_progress(store, prefix=prefix, shard=args.shard, shards=args.shards,
+                                baseline=baseline)
+
+    LOG.info("watchdog (r2 %s shard %d/%d): bootstrap_deadline=%.0fs stall_deadline=%.0fs "
+             "poll=%.0fs baseline_parts=%d", prefix, args.shard, args.shards,
+             args.bootstrap_deadline_s, args.stall_deadline_s, DEFAULT_POLL_INTERVAL_S, baseline)
+    return PodWatchdog(poll, bootstrap_deadline_s=args.bootstrap_deadline_s,
+                       stall_deadline_s=args.stall_deadline_s,
+                       poll_interval_s=DEFAULT_POLL_INTERVAL_S)
+
+
 def make_watchdog(args: argparse.Namespace, identity: dict[str, Any]) -> PodWatchdog | None:
-    """The watchdog for this dispatch, or None when the runner cannot read the database
-    (in which case the wait window is the only protection there is, loudly)."""
+    """The watchdog for this dispatch, or None when the runner cannot read the progress
+    record (in which case the wait window is the only protection there is, loudly)."""
+    if getattr(args, "vectors_to", "postgres") == "r2":
+        return _r2_watchdog(args, identity)
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         LOG.warning("SUPABASE_DB_URL is not set on the RUNNER — no watchdog, so a pod "
@@ -280,9 +331,20 @@ def main() -> int:
                         "quota exhausted, taking the scrapers, the API's writes, the SPA "
                         "and the pipeline down with it. Disk cannot shrink. Look first.")
     p.add_argument("--limit", type=int, default=200_000, help="Max images this pass.")
-    p.add_argument("--chunk", type=int, default=256)
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--chunk", type=int, default=0,
+                   help="0 (default) = the pod sizes it from its RAM and a ~180 s work target.")
+    p.add_argument("--batch-size", type=int, default=0, help="0 (default) = the pod's (32).")
+    p.add_argument("--workers", type=int, default=0,
+                   help="0 (default) = the pod sizes it from its vCPUs (4 each, 8..48).")
+    p.add_argument("--select-page", type=int, default=0,
+                   help="Images per pending scan. 0 (default) = min(limit, "
+                        f"{MAX_SELECT_PAGE:,}): the pass pays the full-table scan once, not "
+                        "once per chunk (run 36334588774 paid it every 256 images).")
+    p.add_argument("--vectors-to", choices=("postgres", "r2"), default="postgres",
+                   help="Passed to the payload. r2 = float16 shards + manifest in R2, head "
+                        "scores only in Postgres; the watchdog then counts R2 parts.")
+    p.add_argument("--r2-prefix", default="",
+                   help="With --vectors-to r2: empty = one prefix per encoder identity.")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--scope", choices=("all", "rt", "ids", "blocks", "scored"), default="all",
@@ -343,6 +405,7 @@ def main() -> int:
         f"--chunk={args.chunk}",
         f"--batch-size={args.batch_size}",
         f"--workers={args.workers}",
+        f"--select-page={args.select_page or min(args.limit, MAX_SELECT_PAGE)}",
         f"--shard={args.shard}",
         f"--shards={args.shards}",
         f"--max-seconds={args.job_max_seconds}",
@@ -350,7 +413,10 @@ def main() -> int:
         # rented GPU pod, so anything but cuda there is a fault worth a loud fallback.
         "--device=cuda",
         f"--scope={args.scope}",
+        f"--vectors-to={args.vectors_to}",
     ]
+    if args.r2_prefix:
+        backfill_args.append(f"--r2-prefix={args.r2_prefix.strip('/')}")
     if args.listing_ids_file:
         backfill_args.append(f"--listing-ids-file={args.listing_ids_file}")
     if args.blocks:

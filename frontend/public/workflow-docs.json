@@ -1621,7 +1621,7 @@
       "inputs": [
         {
           "name": "max_write_mb_per_hour",
-          "description": "REQUIRED. Vector-write ceiling in MB/hour. No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only.",
+          "description": "REQUIRED. Per-pod ceiling on Postgres growth in MB/hour, charged at measured bytes (vector row 2,412 B, head-score row 563 B; 09-27). No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only.",
           "required": true,
           "type": "string",
           "default": null,
@@ -1653,10 +1653,10 @@
         },
         {
           "name": "workers",
-          "description": "Parallel R2 downloads inside the pod (JPEG decode is CPU-side).",
+          "description": "Parallel R2 download + decode + resize threads inside the pod. 0 = sized from the pod's vCPUs (4 each, 8..48); chunk and batch are always sized on the pod from its RAM.",
           "required": false,
           "type": "string",
-          "default": "16",
+          "default": "0",
           "options": null
         },
         {
@@ -1731,6 +1731,25 @@
             "false",
             "true"
           ]
+        },
+        {
+          "name": "vectors_to",
+          "description": "postgres = image_dinov3_embeddings (2,412 B a row, measured 09-27). r2 = float16 shard files + a manifest (image_id, shard, row) in R2 under one prefix per encoder identity; only the head scores (563 B a row) reach Postgres, the engine reads only those, and tag_model score --source r2:<prefix> re-scores a later head version without re-embedding.",
+          "required": false,
+          "type": "choice",
+          "default": "postgres",
+          "options": [
+            "postgres",
+            "r2"
+          ]
+        },
+        {
+          "name": "r2_prefix",
+          "description": "vectors_to=r2 only: the store's R2 prefix. Empty = dinov3-vectors/<model>/<identity>, shared by every scope and dispatch of this encoder, so a re-dispatch resumes.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
         },
         {
           "name": "gpu_allowlist",

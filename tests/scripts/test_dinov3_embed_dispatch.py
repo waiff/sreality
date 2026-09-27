@@ -513,3 +513,106 @@ def _provisional(monkeypatch):
     path = _Path(tempfile.mkdtemp()) / "dinov3_config.json"
     path.write_text(_json.dumps(raw))
     monkeypatch.setattr(dinov3_config, "_CONFIG_PATH", path)
+
+
+# --- sizing on the pod, the paged scan, and the R2 mode (2026-09-27) ---------------------
+
+
+def _plan(monkeypatch, caplog, *args) -> str:
+    monkeypatch.setattr(sys, "argv", ["dinov3_embed_dispatch", "--max-write-mb-per-hour", "100",
+                                      "--dry-run", *args])
+    monkeypatch.setattr(dispatch, "encoder_identity", lambda *a, **k: dict(IDENTITY))
+    with caplog.at_level("INFO"):
+        assert dispatch.main() == 0
+    return caplog.text
+
+
+def test_the_pod_sizes_itself_and_pays_the_pending_scan_once(monkeypatch, caplog):
+    text = _plan(monkeypatch, caplog, "--limit", "12000")
+    for arg in ("--chunk=0", "--batch-size=0", "--workers=0", "--select-page=12000",
+                "--vectors-to=postgres"):
+        assert arg in text
+    assert "--r2-prefix" not in text
+
+
+def test_the_scan_page_is_capped(monkeypatch, caplog):
+    assert f"--select-page={dispatch.MAX_SELECT_PAGE}" in _plan(monkeypatch, caplog,
+                                                               "--limit", "900000")
+
+
+def test_r2_mode_and_its_prefix_reach_the_payload(monkeypatch, caplog):
+    text = _plan(monkeypatch, caplog, "--vectors-to", "r2", "--r2-prefix", "runs/g4/",
+                 "--score-heads", "--scope", "ids",
+                 "--listing-ids-file", "data/g4/cohort_listing_ids.txt.gz")
+    assert "--vectors-to=r2" in text and "--r2-prefix=runs/g4" in text
+
+
+class _Store:
+    def __init__(self, keys):
+        self.keys = keys
+
+    def list_keys(self, prefix):
+        return sorted(k for k in self.keys if k.startswith(prefix))
+
+
+def test_r2_progress_counts_only_this_shards_committed_parts():
+    store = _Store(["p/manifest/s1of8/a.csv", "p/manifest/s1of8/b.csv",
+                    "p/manifest/s2of8/c.csv", "p/parts/s1of8/a.npz", "p/identity.json"])
+    reading = dispatch.read_r2_progress(store, prefix="p", shard=1, shards=8, baseline=0)
+    assert (reading.booted, reading.marker, reading.terminal) == (True, "2", False)
+    assert dispatch.read_r2_progress(store, prefix="p", shard=3, shards=8,
+                                     baseline=0).booted is False
+
+
+def test_an_r2_pass_is_watched_through_r2_not_postgres(monkeypatch):
+    import argparse
+
+    from scraper import image_storage
+    from toolkit.vector_shards import default_prefix
+
+    prefix = default_prefix(IDENTITY)
+    store = _Store([f"{prefix}/manifest/s0of1/a.csv"])
+    monkeypatch.setattr(image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **k: store))
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://must-not-be-read")
+    monkeypatch.setattr(dispatch, "_connect",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("postgres read")))
+    args = argparse.Namespace(vectors_to="r2", r2_prefix="", shard=0, shards=1,
+                              bootstrap_deadline_s=1800, stall_deadline_s=900)
+    watchdog = dispatch.make_watchdog(args, dict(IDENTITY))
+    assert watchdog is not None
+    store.keys.append(f"{prefix}/manifest/s0of1/b.csv")
+    assert watchdog._poll().marker == "2"
+
+
+def test_an_r2_pass_without_r2_on_the_runner_has_no_watchdog_loudly(monkeypatch, caplog):
+    import argparse
+
+    from scraper import image_storage
+
+    monkeypatch.setattr(image_storage, "is_configured", lambda: False)
+    args = argparse.Namespace(vectors_to="r2", r2_prefix="", shard=0, shards=1,
+                              bootstrap_deadline_s=1800, stall_deadline_s=900)
+    with caplog.at_level("WARNING"):
+        assert dispatch.make_watchdog(args, dict(IDENTITY)) is None
+    assert "no watchdog" in caplog.text
+
+
+def test_the_workflow_offers_r2_mode_and_sizes_workers_on_the_pod():
+    import pathlib
+
+    import yaml
+
+    wf = yaml.safe_load((pathlib.Path(__file__).resolve().parents[2]
+                         / ".github/workflows/dinov3_embed_backfill.yml").read_text())
+    inputs = (wf.get("on") or wf[True])["workflow_dispatch"]["inputs"]
+    assert inputs["vectors_to"]["default"] == "postgres"
+    assert inputs["vectors_to"]["options"] == ["postgres", "r2"]
+    assert inputs["r2_prefix"]["default"] == ""
+    assert inputs["workers"]["default"] == "0"
+    assert len(inputs) <= 25                       # GitHub's workflow_dispatch input limit
+    step = next(s for s in wf["jobs"]["embed"]["steps"]
+                if s.get("name") == "Dispatch DINOv3 embedding pass")
+    assert step["env"]["VECTORS_TO"] == "${{ inputs.vectors_to }}"
+    assert 'ARGS+=(--vectors-to "${VECTORS_TO:-postgres}")' in step["run"]
+    assert 'ARGS+=(--r2-prefix "${R2_PREFIX}")' in step["run"]

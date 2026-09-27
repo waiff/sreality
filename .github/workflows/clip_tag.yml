@@ -120,7 +120,8 @@ jobs:
         if: ${{ inputs.dry_run != 'true' }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        # 20 MB/h: ~1.7 kB a vector, so ~12k vectors an hour, 100x what CPU can embed here.
+        # 20 MB/h: ~3.0 kB an image (vector row 2,412 B + head-score row 563 B, measured
+        # 2026-09-27), so ~7k images an hour, far above the ~40 a shard embeds here per run.
         # --chunk 8: the time budget is checked between chunks, and one bf16 CPU image is ~37 s, so a
         # chunk overshoots the 1,500 s budget by at most ~5 min, inside the job's 55.
         run: |
