@@ -16,6 +16,13 @@ from typing import Any, Mapping, Sequence
 
 HEAD_FLOOR: float = 0.5
 HEAD_MARGIN: float = 0.0
+# A sub-floor photo whose winning head is an INTERIOR room (kitchen, bathroom, living room) is still
+# almost surely an interior photo — v1 has no bedroom or hallway head, so those land here. With this set
+# to `hallway` such a photo keeps its family through the engine's existing interior catch-all (excluded
+# from the private rooms, `features.PRIVATE_ROOM_TAGS`), so `interior_match_ratio` and the anchor order
+# still see it; None leaves it untagged. Chosen on day 2 by the real-head arms (G4 section 3).
+SUBFLOOR_CATCH_ALL: str | None = None
+INTERIOR_HEAD_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom", "living_room"})
 
 # Normalised operator taxonomy label (prefix `interier - ` / `exterier - ` / `podklad - ` dropped,
 # lower case) -> the engine's room. 3d plan is NOT floor_plan: a 3D view against a 2D drawing of
@@ -71,15 +78,26 @@ def _runner_up(scores: Any) -> float:
     return ranked[1] if len(ranked) > 1 else 0.0
 
 
+def route(room: str, winner: float, runner_up: float, *, floor: float = HEAD_FLOOR,
+          margin: float = HEAD_MARGIN, catch_all: str | None = SUBFLOOR_CATCH_ALL) -> str | None:
+    """THE routing rule, shared by the live lane and the harness: the room a photo is compared under,
+    or None (untagged)."""
+    if winner >= floor and winner - runner_up >= margin:
+        return room
+    if catch_all is not None and room in INTERIOR_HEAD_ROOMS:
+        return catch_all
+    return None
+
+
 def head_tag_pairs(rows: Sequence[Mapping[str, Any]], *, floor: float = HEAD_FLOOR,
-                   margin: float = HEAD_MARGIN) -> list[list[Any]]:
+                   margin: float = HEAD_MARGIN,
+                   catch_all: str | None = SUBFLOOR_CATCH_ALL) -> list[list[Any]]:
     """`image_tag_scores` rows of one image -> `[[room, winner_score]]`, or `[]` (untagged)."""
     for row in rows:
         score = float(row["winner_score"])
-        room = head_room(str(row["label"]))
-        if score < floor or score - _runner_up(row.get("scores")) < margin:
-            return []
-        return [[room, round(score, 6)]]
+        room = route(head_room(str(row["label"])), score, _runner_up(row.get("scores")),
+                     floor=floor, margin=margin, catch_all=catch_all)
+        return [] if room is None else [[room, round(score, 6)]]
     return []
 
 
@@ -90,7 +108,8 @@ def head_record(row: Mapping[str, Any]) -> list[Any]:
     return [head_room(str(row["label"])), round(winner, 6), round(_runner_up(row.get("scores")), 6)]
 
 
-def apply_head_tags(images: Any, *, floor: float = HEAD_FLOOR, margin: float = HEAD_MARGIN) -> dict[str, int]:
+def apply_head_tags(images: Any, *, floor: float = HEAD_FLOOR, margin: float = HEAD_MARGIN,
+                    catch_all: str | None = SUBFLOOR_CATCH_ALL) -> dict[str, int]:
     """Harness arm H: replace each image's CLIP tags by its exported head winner under the rule.
     An image exported without a head score becomes untagged; returns the counts."""
     counts = {"tagged": 0, "untagged": 0, "unscored": 0}
@@ -99,12 +118,15 @@ def apply_head_tags(images: Any, *, floor: float = HEAD_FLOOR, margin: float = H
         if not head:
             image.tags = []
             counts["unscored"] += 1
-        elif float(head[1]) >= floor and float(head[1]) - float(head[2]) >= margin:
-            image.tags = [(str(head[0]), float(head[1]))]
-            counts["tagged"] += 1
-        else:
+            continue
+        room = route(str(head[0]), float(head[1]), float(head[2]), floor=floor, margin=margin,
+                     catch_all=catch_all)
+        if room is None:
             image.tags = []
             counts["untagged"] += 1
+        else:
+            image.tags = [(room, float(head[1]))]
+            counts["tagged"] += 1
     return counts
 
 

@@ -153,3 +153,13 @@ def test_the_lane_reads_head_winners_under_heads(monkeypatch):
     assert gallery[1].tags == [("kitchen", 0.9)] and gallery[1].head == ["kitchen", 0.9, 0.1]
     assert gallery[2].tags == [] and gallery[2].head == ["bathroom", 0.4, 0.3]
     assert gallery[3].tags == [] and gallery[3].head is None
+
+
+def test_the_catch_all_keeps_a_subfloor_interior_photo_in_its_family():
+    assert ht.route("kitchen", 0.8, 0.1) == "kitchen"
+    assert ht.route("kitchen", 0.4, 0.3, catch_all=None) is None
+    assert ht.route("kitchen", 0.4, 0.3, catch_all="hallway") == "hallway"
+    assert ht.route("exterior_facade", 0.4, 0.3, catch_all="hallway") is None
+    image = Image(listing_id=1, image_id=1, tags=[], head=["bathroom", 0.35, 0.3])
+    assert ht.apply_head_tags([image], catch_all="hallway") == {"tagged": 1, "untagged": 0, "unscored": 0}
+    assert image.tags == [("hallway", 0.35)]
