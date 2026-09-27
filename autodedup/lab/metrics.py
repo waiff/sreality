@@ -26,6 +26,7 @@ from autodedup.lab.cache import REPO, Cohort
 
 JUDGE_SAME: frozenset[str] = frozenset({"same_property"})
 JUDGE_DIFFERENT: frozenset[str] = frozenset({"different_property", "same_building_different_unit"})
+KEEP_APART = Path(__file__).with_name("keep_apart.json")
 
 
 @dataclass
@@ -81,6 +82,24 @@ def _read(groups: Groups, labels: dict[tuple[int, int], str], ids: set[int]) -> 
                                        if same_t + diff_t else None)}
 
 
+def load_fixtures(path: Path = KEEP_APART) -> dict[str, list[tuple[int, int, str]]]:
+    """The keep-apart fixtures (hard bar M3 / A3) by cohort, as (lo, hi, case)."""
+    out: dict[str, list[tuple[int, int, str]]] = {}
+    for row in json.loads(path.read_text(encoding="utf-8"))["fixtures"]:
+        out.setdefault(row["cohort"], []).append((row["ids"][0], row["ids"][1], row["case"]))
+    return out
+
+
+def fixtures_apart(groups: Groups, fixtures: Iterable[tuple[int, int, str]],
+                   ids: set[int]) -> dict[str, Any]:
+    """M3: of the fixture pairs whose two adverts are in the cohort, how many the arm keeps apart."""
+    member_of = groups.member_of
+    present = [(a, b, case) for a, b, case in fixtures if a in ids and b in ids]
+    together = [f"{case} ({a} x {b})" for a, b, case in present
+                if a in member_of and member_of[a] == member_of.get(b)]
+    return {"n": len(present), "apart": len(present) - len(together), "together": together}
+
+
 def _count(values: Iterable[str]) -> dict[str, int]:
     out: dict[str, int] = {}
     for value in values:
@@ -113,6 +132,7 @@ def row(c: Cohort, arm: Outcome, base: Outcome | None, labels: Labels) -> dict[s
         "groups": len(g.clusters), "grouped": sum(len(v) for v in g.clusters.values()),
         "copairs": len(co),
         "rulings": _read(g, labels.rulings, ids),
+        "fixtures": fixtures_apart(g, load_fixtures().get(c.name, ()), ids),
         "judges": {name: _read(g, pairs, ids) for name, pairs in labels.judges.items()},
         "timings": {k: round(v, 2) for k, v in arm.timings.items()},
         "walls_forced": arm.walls_forced,
@@ -294,9 +314,9 @@ def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
             latest[(entry["cohort"], entry["experiment"], entry["config_id"])] = entry
     wanted = list(cohorts) if cohorts else sorted({k[0] for k in latest})
     lines = ["| cohort | experiment | merge | band | groups | co-pairs | Δco +/− | adverts moved "
-             "| op same together | op diff together | op prec. LB | judge(vision) same | "
+             "| op same together | op diff together | fixtures apart | op prec. LB | judge(vision) same | "
              "judge(vision) diff | judge(gold) diff | decide s | group s |",
-             "|" + "---|" * 16]
+             "|" + "---|" * 17]
     for cohort in wanted:
         rows = sorted((e for k, e in latest.items() if k[0] == cohort),
                       key=lambda e: (e["rulings"]["diff_together"],
@@ -306,12 +326,14 @@ def render(board: Path, cohorts: Iterable[str] | None = None) -> str:
             r = e["rulings"]
             jv = e["judges"].get("vision", {})
             jg = e["judges"].get("gold", {})
+            fx = e.get("fixtures")
             lines.append("| " + " | ".join(_fmt(x) for x in (
                 cohort, e["experiment"], e["zones"]["merge"], e["zones"]["band"], e["groups"],
                 e["copairs"],
                 f"+{vs.get('copairs_gained', 0)}/−{vs.get('copairs_lost', 0)}" if vs else None,
                 vs.get("adverts_moved") if vs else None,
                 f"{r['same_together']}/{r['same_n']}", f"{r['diff_together']}/{r['diff_n']}",
+                f"{fx['apart']}/{fx['n']}" if fx else None,
                 r["precision_wilson_lower"],
                 f"{jv.get('same_together')}/{jv.get('same_n')}" if jv else None,
                 f"{jv.get('diff_together')}/{jv.get('diff_n')}" if jv else None,
