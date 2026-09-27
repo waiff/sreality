@@ -38,6 +38,26 @@ def _categories(listed: str) -> frozenset[str]:
     return frozenset(c.strip().strip("'") for c in listed.split(","))
 
 
+# The per-room floor reads the resolver's `prose` arm alone (PR #1637), and the one portal
+# that feeds it is the one whose area_m2 cell is `text`: so A1's `source = 'bazos'` is
+# that arm, and a second text-area portal would have to join the predicate.
+_PROSE_SOURCE = "bazos"
+
+
+def test_the_a1_source_is_the_one_portal_whose_area_is_prose():
+    text_area = {portal for portal, cells in CONTRACT.items()
+                 if "area_m2" in cells and cells["area_m2"].producer == "text"}
+    assert text_area == {_PROSE_SOURCE}
+    from scraper.bazos_parser import areas_from_text
+
+    # bazos's parser reaches the prose arm: a 3+1 whose first figure is 23 m² is declined,
+    # the same figure in a structured cell or title is a room rental and kept.
+    prose = areas_from_text("Byt 3+1, 23 m²", category_main="byt", disposition="3+1")
+    assert (prose.area_m2, prose.area_basis) == (None, None)
+    assert area.derive_headline_area(category_main="byt", usable=23.0) == (23.0, "usable")
+    assert area.derive_headline_area(category_main="byt", fallback=23.0) == (23.0, "unknown")
+
+
 def test_the_file_has_one_hit_predicate_per_column():
     assert len(_hit_predicates()) == 3
 
@@ -85,12 +105,13 @@ def test_the_area_band_literals_are_the_resolvers_constants():
     assert float(m[2]) == area.MIN_AREA_M2
 
     m = re.search(
-        r"l\.category_main in \(([^)]*)\)\s+and l\.area_m2 < (\d+) \* "
+        r"l\.source = '(\w+)' and l\.category_main in \(([^)]*)\)\s+and l\.area_m2 < (\d+) \* "
         r"\(case when l\.disposition ~ '([^']*)'\s+then left\(l\.disposition, 1\)::int end\)",
         _BODY)
     assert m
-    assert _categories(m[1]) == area.ROOMED_CATEGORIES
-    assert float(m[2]) == area.MIN_AREA_PER_ROOM_M2
+    assert m[1] == _PROSE_SOURCE
+    assert _categories(m[2]) == area.ROOMED_CATEGORIES
+    assert float(m[3]) == area.MIN_AREA_PER_ROOM_M2
 
     m = re.search(r"l\.category_main = '(\w+)' and l\.area_m2 >= (\d+)", _BODY)
     assert m and float(m[2]) == area.MAX_FLAT_AREA_M2
@@ -119,27 +140,37 @@ def test_the_sql_room_regex_reads_the_same_rooms_as_the_resolver():
 
 
 def test_the_band_declines_exactly_what_the_predicate_hits():
-    """The area predicate, evaluated in Python over a grid, against the resolver on a
-    LABELLED measure (573 cannot see the basis a stored headline came from)."""
+    """The area predicate, evaluated in Python over a grid, against the resolver: on bazos
+    the stored headline is the PROSE figure; on a structured portal it is a LABELLED
+    measure (573 cannot see which cell a stored structured headline came from, and every
+    structured arm ignores the disposition)."""
     rooms_re = re.compile(re.search(r"l\.disposition ~ '([^']*)'", _BODY)[1])
 
-    def hit(category: str, disposition: str | None, value: float) -> bool:
+    def hit(source: str, category: str, disposition: str | None, value: float) -> bool:
         if category in ("byt", "dum", "komercni") and value < 5:
             return True
-        if category in ("byt", "dum") and disposition and rooms_re.match(disposition):
+        if (source == _PROSE_SOURCE and category in ("byt", "dum")
+                and disposition and rooms_re.match(disposition)):
             if value < 8 * int(disposition[:1]):
                 return True
         return category == "byt" and value >= 1000
 
-    for category in ("byt", "dum", "komercni", "pozemek", "ostatni", None):
-        for disposition in (None, "atypicky", "1+kk", "3+1", "4+kk", "9+1", "3+2"):
-            for value in (0.5, 4.9, 5.0, 7.9, 8.0, 23.9, 24.0, 71.9, 72.0, 999.9, 1000.0,
-                          1800.0):
-                declined = area.derive_headline_area(
-                    category_main=category, usable=value, disposition=disposition,
-                ) == (None, None)
-                assert declined == hit(category, disposition, value), (
-                    category, disposition, value)
+    for source in (_PROSE_SOURCE, "ceskereality", "idnes"):
+        for category in ("byt", "dum", "komercni", "pozemek", "ostatni", None):
+            for disposition in (None, "atypicky", "1+kk", "3+1", "4+kk", "5+1", "9+1", "3+2"):
+                for value in (0.5, 4.9, 5.0, 7.9, 8.0, 12.0, 14.0, 23.9, 24.0, 71.9, 72.0,
+                              999.9, 1000.0, 1800.0):
+                    arm = "prose" if source == _PROSE_SOURCE else "usable"
+                    declined = area.derive_headline_area(
+                        category_main=category, disposition=disposition, **{arm: value},
+                    ) == (None, None)
+                    if source == _PROSE_SOURCE and category == "dum" and value >= 1000:
+                        # The house ceiling on an UNLABELLED figure: declined at ingest,
+                        # NOT cleared by this file (the named residual in its header).
+                        assert declined and not hit(source, category, disposition, value)
+                        continue
+                    assert declined == hit(source, category, disposition, value), (
+                        source, category, disposition, value)
 
 
 def test_the_pre_apply_count_query_uses_the_files_own_predicates():

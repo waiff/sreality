@@ -54,10 +54,19 @@ _ROWS: tuple[tuple[Any, ...], ...] = (
     ("a0 miss parcel", "bazos", "area_m2", 2.0, "pozemek", None, "plot", None, None),
     ("a0 miss ostatni", "bazos", "area_m2", 3.0, "ostatni", None, "unknown", None, None),
     ("a1 room", "bazos", "area_m2", 23.9, "byt", "3+1", "unknown", None, "A1"),
+    ("a1 balcony", "bazos", "area_m2", 8.0, "byt", "3+1", "unknown", None, "A1"),
     ("a1 house", "bazos", "area_m2", 7.9, "dum", "1+kk", "unknown", None, "A1"),
     ("a1 miss on band", "bazos", "area_m2", 24.0, "byt", "3+1", "unknown", None, None),
     ("a1 miss atypical", "bazos", "area_m2", 6.0, "byt", "atypicky", "unknown", None, None),
     ("a1 miss hall", "bazos", "area_m2", 6.0, "komercni", "3+1", "unknown", None, None),
+    # Room rentals under the whole flat's disposition (production 2026-09-27): a structured
+    # cell or title figure is the room's real size, never held to the per-room floor.
+    ("a1 miss room rental cell", "ceskereality", "area_m2", 14.0, "byt", "5+1", "usable",
+     None, None),
+    ("a1 miss room rental idnes", "idnes", "area_m2", 12.0, "byt", "5+kk", "usable", None, None),
+    ("a1 miss room rental title", "realitymix", "area_m2", 12.0, "byt", "4+1", "unknown",
+     None, None),
+    ("a1 miss house cell", "sreality", "area_m2", 7.9, "dum", "1+kk", "usable", None, None),
     ("a2 site", "sreality", "area_m2", 1000.0, "byt", "2+kk", "usable", None, "A2"),
     ("a2 miss flat", "sreality", "area_m2", 999.9, "byt", "2+kk", "usable", None, None),
     ("a2 miss house", "idnes", "area_m2", 1800.0, "dum", "5+1", "usable", None, None),
@@ -106,16 +115,19 @@ def _seed(cur: Any, row: tuple[Any, ...]) -> tuple[int, int]:
 
 
 def _python_declines(row: tuple[Any, ...]) -> bool:
-    """The parser rail's verdict on the same stored value — the equivalence 573 claims."""
-    _, source, column, value, category, disposition, _, podlazi, _ = row
+    """The parser rail's verdict on the same stored value — the equivalence 573 claims.
+    bazos's headline is its prose figure; a structured one is a labelled cell ('usable')
+    or the title figure ('unknown')."""
+    _, source, column, value, category, disposition, basis, podlazi, _ = row
     if column == "floor":
         if source == "idnes":
             return value == 20 and source_value("idnes", "floor", {"podlaží": podlazi}) is None
         return floor_from_portal("ground0", str(value)) is None
     if column == "total_floors":
         return total_floors_from_portal(value) is None
-    return derive_headline_area(category_main=category, usable=value,
-                                disposition=disposition) == (None, None)
+    arm = "prose" if source == "bazos" else "fallback" if basis == "unknown" else "usable"
+    return derive_headline_area(category_main=category, disposition=disposition,
+                                **{arm: value}) == (None, None)
 
 
 def _read(cur: Any, listing_id: int, column: str) -> tuple[Any, Any]:
