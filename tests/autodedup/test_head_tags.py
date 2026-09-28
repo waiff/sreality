@@ -28,6 +28,16 @@ def test_every_v1_head_has_a_room(label, room):
     assert ht.head_room(label) == room
 
 
+def test_every_head_room_has_the_family_clip_gives_its_photographs():
+    from autodedup.fingerprint import dominant_family
+    from toolkit.room_taxonomy import ROOM_FAMILIES
+
+    assert set(ht.HEAD_ROOMS.values()) <= set(ROOM_FAMILIES)
+    families = {room: dominant_family(Image(listing_id=1, image_id=1, tags=[(room, 0.9)]))
+                for room in ("garage", "technical", "plan_3d")}
+    assert families == {"garage": "interior", "technical": "interior", "plan_3d": "plan"}
+
+
 def test_an_unknown_head_is_refused_not_guessed():
     with pytest.raises(ht.UnknownHeadLabel):
         ht.head_room("interier - ložnice")
