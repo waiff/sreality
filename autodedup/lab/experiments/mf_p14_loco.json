@@ -1,6 +1,6 @@
 {
  "name": "mf_p14_loco",
- "note": "MF-P14, the compliant row (GLOBAL_SEARCH 1.4 / 2.1): the models of mf_p14 (ALL label sources, sealed by town on every ground), each scored cohort's isotonic map fitted on the OTHER grounds' out-of-town rows only. `lab mf-fit --source all --calibration loco --out $AUTODEDUP_LAB_MODELS/loco`. The cut by rule 6.1(a) over the sweep.",
+ "note": "MF-P14, the compliant row (GLOBAL_SEARCH 1.4 / 2.1): the models of mf_p14 (ALL label sources, sealed by town set on every ground), each scored cohort's isotonic map fitted on the OTHER grounds' rows only, each scored off its own town set. `lab mf-fit --source all --calibration loco --out $AUTODEDUP_LAB_MODELS/loco`. The cut by rule 6.1(a) over the sweep.",
  "model": {"const": 0.0},
  "ladder": [
   {"rung": "veto"},
