@@ -18,6 +18,13 @@ says it had none), and while any expected arm is unfinished the decision is PART
 never STOP or ADOPT. `--include-partial` also reads unfinished LightGlue shards, as a
 readout only.
 
+ONE SET OF FRAMES FOR EVERY ARM (2026-09-28, after run 3 crashed in `retrieval_eval`): each
+arm has its OWN key list (a frame the pod could not fetch or decode; DINOv2 embeds pair
+frames only, never the catalogue neighbourhood). Pair-grain reads keep the pair frames every
+arm covers plus the neighbourhood frames every neighbourhood-embedding arm covers
+(`pair_grain_frames`; `--own-frames` restores the old per-arm reading); retrieval and the
+synthetic copies compare the arms on the frames all of them cover, and say how many.
+
 Usage:
     python -m scripts.g1_image_stack_eval --manifest manifest.json.gz \\
         --clip clip_b32_stored.npz [--results g1_results/] --out eval.json
@@ -26,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import gzip
 import json
 import math
@@ -134,6 +142,44 @@ class Arm:
         if not ia or not ib:
             return ia, ib, np.zeros((len(ia), len(ib)), np.float32)
         return ia, ib, self.vecs[[self.pos[i] for i in ia]] @ self.vecs[[self.pos[i] for i in ib]].T
+
+    def subset(self, keep: set[int]) -> "Arm":
+        """The same vectors, answering only for `keep` (the frames every compared arm has)."""
+        out = copy.copy(self)
+        out.pos = {i: k for i, k in self.pos.items() if i in keep}
+        return out
+
+
+def arm_keys(arm: Any) -> set[int]:
+    """The frames an arm has a vector (or a hash) for: its OWN key list, which is not the
+    manifest's (a frame the pod could not fetch or decode, an arm run on pair frames only)."""
+    return set(arm.pos)
+
+
+def common_frames(arms: dict[str, Any], ids: Iterable[int]) -> set[int]:
+    """The frames of `ids` that EVERY arm in `arms` covers."""
+    keep = {int(i) for i in ids}
+    for arm in arms.values():
+        keep &= arm_keys(arm)
+    return keep
+
+
+def pair_grain_frames(manifest: dict[str, Any], arms: dict[str, Any]) -> tuple[set[int], dict[str, Any]]:
+    """The frames every pair-grain read keeps, so no arm scores a frame another could not:
+    the PAIR frames every arm covers, plus the NEIGHBOURHOOD frames every arm that embedded
+    the neighbourhood covers (DINOv2 embeds pair frames only, by design; it never shrinks
+    the witnesses the other arms read)."""
+    ids = {int(r["image_id"]) for r in manifest["images"]}
+    nb = {int(r["image_id"]) for r in manifest["images"] if r.get("nb")}
+    pair = ids - nb
+    pair_keep = common_frames(arms, pair)
+    nb_arms = {n: a for n, a in arms.items() if nb and len(arm_keys(a) & nb) >= 0.5 * len(nb)}
+    nb_keep = common_frames(nb_arms, nb) if nb_arms else set()
+    info = {"manifest_frames": len(ids), "pair_frames": len(pair), "nb_frames": len(nb),
+            "per_arm": {n: {"pair": len(arm_keys(a) & pair), "nb": len(arm_keys(a) & nb)}
+                        for n, a in arms.items()},
+            "pair_common": len(pair_keep), "nb_common": len(nb_keep), "nb_arms": sorted(nb_arms)}
+    return pair_keep | nb_keep, info
 
 
 def load_arm(name: str, path: str) -> Arm | None:
@@ -512,6 +558,11 @@ class DhashArm:
         x = self.bits[[self.pos[i] for i in ia]][:, None] ^ self.bits[[self.pos[i] for i in ib]][None, :]
         return ia, ib, (64 - np.bitwise_count(x)).astype(np.float32)
 
+    def subset(self, keep: set[int]) -> "DhashArm":
+        out = copy.copy(self)
+        out.pos = {i: k for i, k in self.pos.items() if i in keep}
+        return out
+
 
 def positive_links(manifest: dict[str, Any]) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     """Listing -> listings known to be the same unit / known to be a different one."""
@@ -533,8 +584,32 @@ def _no_identical(ga: list[int], gb: list[int], ph: dict[int, int]) -> bool:
     return not any(hamming64(ph[x], ph[y]) <= 6 for x in ga for y in gb if x in ph and y in ph)
 
 
+def _query_blocks(arm: Any, queries: list[tuple[int, list[int], set[int]]], gallery: list[int],
+                  listing_of: dict[int, int], block: int = 1024,
+                  ) -> Iterable[tuple[int, list[int], set[int], np.ndarray, np.ndarray]]:
+    """(a, qa, rel, the listing of each gallery frame the arm RETURNED, A's rows of the
+    similarity) per query; the gallery is gathered once per block of query frames."""
+    i = 0
+    while i < len(queries):
+        chunk, n = [], 0
+        while i < len(queries) and (not chunk or n + len(queries[i][1]) <= block):
+            chunk.append(queries[i])
+            n += len(queries[i][1])
+            i += 1
+        ic, ig, sims = arm.sims([f for _, qa, _ in chunk for f in qa], gallery)
+        if not ic or not ig:
+            continue
+        row_of = {f: r for r, f in enumerate(ic)}
+        g_lid = np.array([listing_of[f] for f in ig])
+        for a, qa, rel_l in chunk:
+            rows = [row_of[f] for f in qa if f in row_of]
+            if rows:
+                yield a, qa, rel_l, g_lid, sims[rows]
+
+
 def retrieval_eval(manifest: dict[str, Any], arms: dict[str, Any], router: dict[int, str],
-                   rooms: Iterable[str] = UNIT_ROOMS, ks: tuple[int, ...] = (1, 5, 10)) -> dict[str, Any]:
+                   rooms: Iterable[str] = UNIT_ROOMS, ks: tuple[int, ...] = (1, 5, 10),
+                   frames_in: set[int] | None = None) -> dict[str, Any]:
     """Frame-level retrieval, advert grain. A query is (A, room): A's frames of that room
     against EVERY frame of that room in the manifest (the labelled pairs' adverts AND the
     catalogue neighbourhood, i.e. the stated-different siblings, as distractors), A's own
@@ -543,15 +618,31 @@ def retrieval_eval(manifest: dict[str, Any], arms: dict[str, Any], router: dict[
     bits) between A and any relevant advert: the population dHash cannot serve.
     R@k = the first relevant frame ranks <= k; P@k = share of the top k frames that are
     relevant; neg_above = a labelled different-unit advert's frame outranks every
-    relevant one."""
+    relevant one.
+
+    ONE GALLERY FOR EVERY ARM (fixed 2026-09-28, run 3's crash): each arm covers its OWN key
+    list (a frame the pod could not fetch or decode has no vector; DINOv2 embeds pair frames
+    only, never the neighbourhood). Queries and gallery are therefore both cut to
+    `frames_in` (default: the frames every arm in `arms` covers), and the similarity matrix
+    is read against the gallery ids the arm returned, never the list it was asked about.
+    Each row states `gallery` (the common gallery) beside `gallery_manifest` (the room's
+    frames before the cut)."""
     pos_links, neg_links = positive_links(manifest)
     ph = {int(r["image_id"]): int(r["phash"]) for r in manifest["images"] if r.get("phash") is not None}
     listing_of = {int(r["image_id"]): int(r["listing_id"]) for r in manifest["images"]}
+    common = common_frames(arms, listing_of) if frames_in is None else set(frames_in)
     frames: dict[str, dict[int, list[int]]] = {r: defaultdict(list) for r in rooms}
+    # dHash is stored for every frame whether or not an arm embedded it, so `interesting`
+    # (no identical frame in the room) reads the room's frames BEFORE the common cut.
+    frames_all: dict[str, dict[int, list[int]]] = {r: defaultdict(list) for r in rooms}
+    manifest_n: Counter = Counter()
     for r in sorted(manifest["images"], key=lambda r: (r.get("seq") or 0, r["image_id"])):
         room = router.get(int(r["image_id"]))
         if room in frames:
-            frames[room][int(r["listing_id"])].append(int(r["image_id"]))
+            manifest_n[room] += 1
+            frames_all[room][int(r["listing_id"])].append(int(r["image_id"]))
+            if int(r["image_id"]) in common:
+                frames[room][int(r["listing_id"])].append(int(r["image_id"]))
     out: dict[str, Any] = {}
     for name, arm in arms.items():
         for room in rooms:
@@ -559,18 +650,18 @@ def retrieval_eval(manifest: dict[str, Any], arms: dict[str, Any], router: dict[
             gallery = [i for lst in by_listing.values() for i in lst]
             if not gallery:
                 continue
-            g_lid = np.array([listing_of[i] for i in gallery])
             stats = {pop: defaultdict(list) for pop in ("all", "interesting")}
+            queries = []
             for a in sorted(pos_links):
                 qa = by_listing.get(a, [])
                 rel_l = {b for b in pos_links[a] if by_listing.get(b)}
-                if not qa or not rel_l:
-                    continue
-                ia, ig, s = arm.sims(qa, gallery)
-                if not ia:
-                    continue
+                if qa and rel_l:
+                    queries.append((a, qa, rel_l))
+            for a, qa, rel_l, g_lid, s in _query_blocks(arm, queries, gallery, listing_of):
                 own = g_lid == a
-                s = np.where(own[None, :], -np.inf, s)
+                # Literal copies tie at cosine 1.0 up to float noise that depends on how the
+                # product was blocked; rounded, a tie is a tie and the gallery order breaks it.
+                s = np.where(own[None, :], -np.inf, np.round(s, 5))
                 best = s.max(axis=0)          # advert-grain: the best of A's frames per gallery frame
                 order = np.argsort(-best, kind="stable")
                 rel_mask = np.isin(g_lid, list(rel_l))
@@ -579,8 +670,9 @@ def retrieval_eval(manifest: dict[str, Any], arms: dict[str, Any], router: dict[
                 first = int(np.argmax(rel_mask[order])) + 1
                 neg_mask = np.isin(g_lid, list(neg_links.get(a, ())))
                 neg_above = bool(neg_mask.any() and best[neg_mask].max() > best[rel_mask].max())
-                rel_frames = [i for b in rel_l for i in by_listing[b]]
-                pops = ["all"] + (["interesting"] if _no_identical(qa, rel_frames, ph) else [])
+                rel_frames = [i for b in rel_l for i in frames_all[room][b]]
+                pops = ["all"] + (["interesting"] if _no_identical(frames_all[room][a], rel_frames, ph)
+                                  else [])
                 for pop in pops:
                     st = stats[pop]
                     st["rank"].append(first)
@@ -593,6 +685,7 @@ def retrieval_eval(manifest: dict[str, Any], arms: dict[str, Any], router: dict[
                 if not st["rank"]:
                     continue
                 row = {"n": len(st["rank"]), "gallery": len(gallery),
+                       "gallery_manifest": manifest_n[room], "frames_common": len(common),
                        "MRR": float(np.mean([1.0 / r for r in st["rank"]]))}
                 for k in ks:
                     row[f"R@{k}"] = float(np.mean(st[f"R@{k}"]))
@@ -972,21 +1065,35 @@ def synthetic_eval(results: str, phash: dict[int, int] | None = None) -> dict[st
     for r in rows:
         by_t[r["transform"]].append(r["dhash_hamming"] <= 6)
     out["dhash_hit_by_transform"] = {t: float(np.mean(v)) for t, v in by_t.items()}
+    # ONE gallery and ONE query set for every arm (2026-09-28): each arm's files carry its
+    # own key lists (a copy or an original that did not decode in one arm is absent there),
+    # so every arm is read on the gallery frames and the copies ALL of them embedded.
+    loaded: dict[str, tuple[Any, Any]] = {}
     for arm, gal_file in (("sscd", "emb_sscd.npz"), ("dinov2", "emb_dinov2.npz"),
                           ("dinov3", "emb_dinov3.npz"), ("clip", "gal_clip.npz")):
         q = os.path.join(results, f"syn_{arm}.npz")
         g = os.path.join(results, gal_file)
-        if not (os.path.exists(q) and os.path.exists(g)):
-            continue
-        qz, gz = np.load(q), np.load(g)
+        if os.path.exists(q) and os.path.exists(g):
+            loaded[arm] = (np.load(q), np.load(g))
+    gal_common = {int(i) for i in gallery}
+    q_common = {r["synth_id"] for r in rows}
+    for qz, gz in loaded.values():
+        gal_common &= {int(k) for k in gz["key"]}
+        q_common &= {str(k) for k in qz["key"]}
+    target_of = {r["synth_id"]: int(r["image_id"]) for r in rows}
+    q_common = {s for s in q_common if target_of[s] in gal_common}
+    out["gallery_common"] = len(gal_common)
+    out["n_queries_common"] = len(q_common)
+    for arm, (qz, gz) in loaded.items():
         gpos = {int(k): i for i, k in enumerate(gz["key"])}
-        keep = [gpos[i] for i in gallery if i in gpos]
+        keep = [gpos[i] for i in gallery if i in gal_common and i in gpos]
         gids = np.array([int(gz["key"][i]) for i in keep])
         gv = gz["vec"][keep].astype(np.float32)
         gv /= np.linalg.norm(gv, axis=1, keepdims=True) + 1e-9
-        qv = qz["vec"].astype(np.float32)
+        qsel = [i for i, k in enumerate(qz["key"]) if str(k) in q_common]
+        qv = qz["vec"][qsel].astype(np.float32)
         qv /= np.linalg.norm(qv, axis=1, keepdims=True) + 1e-9
-        qids = [str(k) for k in qz["key"]]
+        qids = [str(qz["key"][i]) for i in qsel]
         src = {r["synth_id"]: r for r in rows}
         sims = qv @ gv.T
         top = np.argsort(-sims, axis=1)[:, :5]
@@ -1031,8 +1138,17 @@ def extra_markdown(report: dict[str, Any]) -> str:
     def fmt(x):
         return "-" if x is None else (f"{x:.3f}" if isinstance(x, float) else str(x))
 
-    lines = ["", "frame-level retrieval, advert grain (gallery = every same-room frame, siblings "
-             "included; interesting = no dHash-identical frame in the room):", "",
+    rf = report.get("retrieval_frames") or {}
+    fr = report.get("frames") or {}
+    lines = ["", f"frames read at pair grain: {fr.get('pair_common')} of {fr.get('pair_frames')} pair frames "
+             f"and {fr.get('nb_common')} of {fr.get('nb_frames')} neighbourhood frames (every arm's common "
+             f"cover; restricted={fr.get('restricted')}); per arm {json.dumps(fr.get('per_arm'))}",
+             "", "frame-level retrieval, advert grain (gallery = the same-room frames ALL compared arms "
+             f"{', '.join(rf.get('arms') or [])} cover: {rf.get('common_frames')} of "
+             f"{rf.get('manifest_frames')} manifest frames; `@nb-gallery` rows = the arms that embedded the "
+             f"neighbourhood ({', '.join(rf.get('nb_gallery_arms') or []) or '-'}) on their common "
+             f"{rf.get('nb_gallery_frames')} frames, siblings included; interesting = no dHash-identical "
+             "frame in the room):", "",
              "| arm:room:population | n | gallery | R@1 | R@5 | R@10 | P@5 | MRR | neg above pos |",
              "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for k, v in sorted(report.get("retrieval", {}).items()):
@@ -1083,6 +1199,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                     help="Drop E9 stock frames (pop >= 8) as the engine does; default keeps them.")
     ap.add_argument("--include-partial", action="store_true",
                     help="Also read unfinished LightGlue shards (a readout: the verdict stays PARTIAL).")
+    ap.add_argument("--own-frames", action="store_true",
+                    help="Pair-grain reads take every arm on its OWN frames (the pre-2026-09-28 "
+                         "reading); default: the frames every arm covers. Retrieval always compares "
+                         "on the common gallery.")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     with gzip.open(args.manifest, "rt") as fh:
@@ -1108,8 +1228,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             # The pod's own routing: the head winner where one clears the floor, else CLIP.
             routers["hc"] = {**routers["clip"], **head}
         lg = load_lg(args.results, include_partial=args.include_partial)
+    phash = {int(r["image_id"]): int(r["phash"]) for r in manifest["images"]
+             if r.get("phash") is not None}
+    dhash = DhashArm(phash)
+    keep, frames_info = pair_grain_frames(manifest, arms)
+    frames_info["restricted"] = not args.own_frames
+    if not args.own_frames:
+        arms = {name: a.subset(keep) for name, a in arms.items()}
+        dhash = dhash.subset(keep)
+        lg = {ex: {k: v for k, v in t.items() if k[0] in keep and k[1] in keep} for ex, t in lg.items()}
     copy_t = {"clip": 0.97, "sscd": 0.75, "dinov2": 0.9, "dinov3": 0.9}
     report = evaluate(manifest, arms, routers, lg, copy_t, include_stock=not args.engine_stock)
+    report["frames"] = frames_info
     report["include_stock"] = not args.engine_stock
     report["arms"] = sorted(arms)
     report["routers"] = sorted(routers)
@@ -1118,10 +1248,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         report["synthetic"] = synthetic_eval(
             args.results, {int(r["image_id"]): int(r["phash"]) for r in manifest["images"]
                            if r.get("phash") is not None})
-    phash = {int(r["image_id"]): int(r["phash"]) for r in manifest["images"]
-             if r.get("phash") is not None}
     unit_router = "hc" if "hc" in routers else "clip"
-    scorers = room_scorers({**arms, "dhash": DhashArm(phash)}, lg)
+    scorers = room_scorers({**arms, "dhash": dhash}, lg)
     scores = {f"{name}@{unit_router}:{room}": pair_room_scores(manifest, fn, routers[unit_router], room)
               for name, fn in scorers.items() for room in UNIT_ROOMS}
     if unit_router != "clip" and "clip" in arms:
@@ -1131,11 +1259,28 @@ def main(argv: Iterable[str] | None = None) -> int:
                                                            routers["clip"], room)
     report["catalogue"] = catalogue_eval(manifest, scores)
     report["layered"] = layered_proof(manifest, scores, unit_router)
-    report["retrieval"] = retrieval_eval(manifest, {**arms, "dhash": DhashArm(phash)},
-                                         routers[unit_router])
+    # Retrieval compares every arm on ONE gallery: the frames all of them cover. DINOv2
+    # embeds pair frames only, so that gallery has no neighbourhood; the arms that did embed
+    # the neighbourhood are ALSO read on their own common gallery, siblings included.
+    retr_arms = {**arms, "dhash": dhash}
+    all_ids = [int(r["image_id"]) for r in manifest["images"]]
+    nb_ids = {int(r["image_id"]) for r in manifest["images"] if r.get("nb")}
+    common = common_frames(retr_arms, all_ids)
+    report["retrieval"] = retrieval_eval(manifest, retr_arms, routers[unit_router], frames_in=common)
     if unit_router != "clip" and "clip" in arms:
-        for k, v in retrieval_eval(manifest, {"clip": arms["clip"]}, routers["clip"]).items():
+        for k, v in retrieval_eval(manifest, {"clip": arms["clip"]}, routers["clip"],
+                                   frames_in=common).items():
             report["retrieval"][f"{k}@clip-router"] = v
+    nb_arms = {n: a for n, a in retr_arms.items() if nb_ids and len(arm_keys(a) & nb_ids) >= 0.5 * len(nb_ids)}
+    nb_common = common_frames(nb_arms, all_ids) if nb_arms else set()
+    if nb_arms and set(nb_arms) != set(retr_arms):
+        for k, v in retrieval_eval(manifest, nb_arms, routers[unit_router], frames_in=nb_common).items():
+            report["retrieval"][f"{k}@nb-gallery"] = v
+    report["retrieval_frames"] = {
+        "arms": sorted(retr_arms), "manifest_frames": len(all_ids), "common_frames": len(common),
+        "per_arm_frames": {n: len(arm_keys(a) & set(all_ids)) for n, a in retr_arms.items()},
+        "nb_gallery_arms": sorted(nb_arms) if set(nb_arms) != set(retr_arms) else [],
+        "nb_gallery_frames": len(nb_common) if set(nb_arms) != set(retr_arms) else None}
     report["arms_new"] = sorted(set(arms) - {"clip"}) + [f"lg_{e}" for e in sorted(lg)]
     if status is not None:
         report["arms_finished"], report["arms_unfinished"] = status

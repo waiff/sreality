@@ -263,6 +263,108 @@ def test_retrieval_finds_the_planted_partner_among_siblings():
     assert out["x:kitchen:interesting"]["n"] == 2   # no identical frame: both directions count
 
 
+def _retrieval_fixture():
+    # A (10) and its partner B (11) share a kitchen; C (12) is a labelled different unit;
+    # frame 5 is a catalogue neighbour's (nb); frame 6 never decoded on the pod.
+    manifest = {
+        "images": [{"image_id": 1, "listing_id": 10, "seq": 0, "phash": 0},
+                   {"image_id": 2, "listing_id": 11, "seq": 0, "phash": 2 ** 40 - 1},
+                   {"image_id": 3, "listing_id": 10, "seq": 1, "phash": 2 ** 30 - 1},
+                   {"image_id": 4, "listing_id": 12, "seq": 0, "phash": 2 ** 50 - 1},
+                   {"image_id": 5, "listing_id": 13, "seq": 0, "phash": 2 ** 20 - 1, "nb": True},
+                   {"image_id": 6, "listing_id": 11, "seq": 1, "phash": 2 ** 60 - 1}],
+        "pairs": [{"a": 10, "b": 11, "classes": ["pos_rule"]},
+                  {"a": 10, "b": 12, "classes": ["neg_rule"]}],
+    }
+    router = {i: "kitchen" for i in range(1, 7)}
+    vec = {1: [1, 0.1, 0], 2: [1, 0.12, 0], 3: [0.9, 0.2, 0.1], 4: [0.2, 1, 0], 5: [0.95, 0.1, 0.05],
+           6: [0, 0, 1]}
+    full = ev.Arm("full", np.array(list(vec)), np.array(list(vec.values()), np.float32))
+    # The DINOv2 shape: pair frames only (no 5), and 6 failed to decode. Its OWN key list,
+    # in its own order, with a frame (99) the manifest does not know.
+    own = [4, 2, 99, 1, 3]
+    pairs_only = ev.Arm("pairs_only", np.array(own),
+                        np.array([vec.get(i, [0, 1, 1]) for i in own], np.float32))
+    return manifest, router, full, pairs_only
+
+
+def test_retrieval_reads_every_arm_on_the_frames_all_arms_share():
+    # Run 3 (GitHub 36354297171) crashed here: the gallery was the manifest's 17,574 kitchen
+    # frames, DINOv2 returned similarities for the 9,807 it had, and the own-advert mask
+    # (built on the manifest's list) could not broadcast against them.
+    manifest, router, full, pairs_only = _retrieval_fixture()
+    out = ev.retrieval_eval(manifest, {"full": full, "pairs_only": pairs_only}, router, rooms=("kitchen",))
+    for arm in ("full", "pairs_only"):
+        row = out[f"{arm}:kitchen:all"]
+        assert row["gallery"] == 4 and row["gallery_manifest"] == 6 and row["frames_common"] == 4
+    # On the common gallery the neighbour frame (5) is out for BOTH arms, so they agree.
+    assert out["full:kitchen:all"]["R@1"] == out["pairs_only:kitchen:all"]["R@1"] == 1.0
+
+
+def test_retrieval_aligns_an_arm_to_the_gallery_ids_it_returned():
+    # Asked about frames it lacks, an arm answers for its own keys only; ranks and the
+    # own-advert mask must follow the ids it returned, never the list it was asked about.
+    manifest, router, full, pairs_only = _retrieval_fixture()
+    everything = {r["image_id"] for r in manifest["images"]}
+    out = ev.retrieval_eval(manifest, {"pairs_only": pairs_only}, router, rooms=("kitchen",),
+                            frames_in=everything)
+    row = out["pairs_only:kitchen:all"]
+    assert row["gallery"] == 6 and row["R@1"] == 1.0
+    assert out["pairs_only:kitchen:all"]["n"] == 2        # A finds B, and B finds A
+    wide = ev.retrieval_eval(manifest, {"full": full}, router, rooms=("kitchen",), frames_in=everything)
+    assert wide["full:kitchen:all"]["gallery"] == 6 and wide["full:kitchen:all"]["R@5"] == 1.0
+
+
+def test_retrieval_does_not_depend_on_how_the_queries_are_blocked(monkeypatch):
+    import functools
+
+    rng = np.random.default_rng(7)
+    images, pairs = [], []
+    base = rng.normal(size=(30, 64)).astype(np.float32)
+    for lid in range(30):
+        images.append({"image_id": lid, "listing_id": 100 + lid, "seq": 0, "phash": int(rng.integers(2 ** 62))})
+    for lid in range(0, 30, 2):
+        pairs.append({"a": 100 + lid, "b": 101 + lid, "classes": ["pos_rule"]})
+        base[lid + 1] = base[lid] + rng.normal(scale=0.3, size=64)
+    base[5] = base[3] = base[1]            # literal copies: exact ties at cosine 1.0
+    manifest = {"images": images, "pairs": pairs}
+    arm = ev.Arm("x", np.arange(30), base)
+    router = {i: "kitchen" for i in range(30)}
+    blocked = ev.retrieval_eval(manifest, {"x": arm}, router, rooms=("kitchen",))
+    monkeypatch.setattr(ev, "_query_blocks", functools.partial(ev._query_blocks, block=1))
+    assert ev.retrieval_eval(manifest, {"x": arm}, router, rooms=("kitchen",)) == blocked
+
+
+def test_pair_grain_frames_drop_what_one_arm_lacks_but_not_the_neighbourhood_for_dinov2():
+    manifest, _router, full, pairs_only = _retrieval_fixture()
+    keep, info = ev.pair_grain_frames(manifest, {"full": full, "pairs_only": pairs_only})
+    assert keep == {1, 2, 3, 4, 5}     # 6 never decoded for one arm; nb frame 5 stays for `full`
+    assert info["pair_common"] == 4 and info["nb_common"] == 1 and info["nb_arms"] == ["full"]
+    sub = full.subset(keep)
+    ia, ib, s = sub.sims([1, 6], [2, 6])
+    assert ia == [1] and ib == [2] and s.shape == (1, 1)
+    dh = ev.DhashArm({1: 0, 2: 1, 6: 3}).subset(keep)
+    assert dh.sims([1, 6], [2, 6])[2].shape == (1, 1)
+
+
+def test_synthetic_copies_are_read_on_the_gallery_and_queries_every_arm_embedded(tmp_path):
+    import json as _json
+
+    rows = [{"synth_id": f"{i}:crop", "image_id": i, "transform": "crop", "dhash_hamming": 20}
+            for i in (1, 2, 3)]
+    (tmp_path / "synthetic.json").write_text(_json.dumps({"rows": rows, "plan": {"gallery": [1, 2, 3, 4]}}))
+    eye = np.eye(4, dtype=np.float32)
+    # SSCD has every original and copy; CLIP's gallery lacks original 3 (never decoded).
+    np.savez(tmp_path / "emb_sscd.npz", key=np.array([1, 2, 3, 4]), vec=eye)
+    np.savez(tmp_path / "syn_sscd.npz", key=np.array(["1:crop", "2:crop", "3:crop"]), vec=eye[:3])
+    np.savez(tmp_path / "gal_clip.npz", key=np.array([4, 2, 1]), vec=eye[[3, 1, 0]])
+    np.savez(tmp_path / "syn_clip.npz", key=np.array(["2:crop", "1:crop", "3:crop"]), vec=eye[[1, 0, 2]])
+    out = ev.synthetic_eval(str(tmp_path))
+    assert out["gallery_common"] == 3 and out["n_queries_common"] == 2
+    for arm in ("sscd", "clip"):
+        assert out["per_arm"][arm]["recall@1"] == 1.0 and out["per_arm"][arm]["n_dhash_misses"] == 2
+
+
 def test_public_pairs_doc_cuts_case_notes_to_cohort_and_reason():
     doc = {"pairs": [{"a": 1, "b": 2, "classes": ["neg_fused"],
                       "notes": ["c17:floor:Ruska 137/47: FOUR sreality adverts", "a5:showflat floors 2 vs 5",
