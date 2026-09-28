@@ -1,0 +1,34 @@
+{
+ "name": "facts_last",
+ "note": "facts read after every merging rung (LA1's cap applied to promotions too)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

@@ -1,0 +1,48 @@
+{
+ "name": "learned_plus_room",
+ "note": "learned_only plus the room proof (kitchen/bathroom-to-kitchen/bathroom via CLIP tags as evidence) under the stated-fact veto (no tag veto: tags are never facts)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9788
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  },
+  {
+   "rung": "column_proof",
+   "name": "room",
+   "from": [
+    "band"
+   ],
+   "all": [
+    [
+     "tag_room_clip_min2",
+     ">=",
+     0.97
+    ],
+    [
+     "tag_rooms_private",
+     ">=",
+     2
+    ]
+   ],
+   "veto": [],
+   "fact_veto": true
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

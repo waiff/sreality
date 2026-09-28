@@ -1,0 +1,35 @@
+{
+ "name": "off_demonstrate",
+ "note": "D43 promotion + D50 off: no band pair is promoted",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score"
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate",
+   "on": false
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ }
+}

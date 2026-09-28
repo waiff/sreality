@@ -3,6 +3,7 @@
     python3 -m autodedup.harness stats out/cohort.jsonl.gz [--json out/summary.json]
     python3 -m autodedup.harness sample out/cohort.jsonl.gz --block turnov --n 5
     python3 -m autodedup.harness run out/cohort.jsonl.gz --out runs/r1 --settings w31 --model w6_gold
+        [--evidence --evidence-workers 4]     # + evidence.pkl, the lab's only input
     python3 -m autodedup.harness pair out/cohort.jsonl.gz 101 102 --settings w31 --model w6_gold
     python3 -m autodedup.harness evaluate runs/r1 labels/ [--base runs/r0] [--reference truth16/]
     python3 -m autodedup.harness fit runs/r1 --operator-labels operator_labels.jsonl --out runs/r1/fit
@@ -20,10 +21,12 @@ import gzip
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import evaluate as evaluation
+from autodedup import evidence as pair_evidence
 from autodedup import revocation, seals
 from autodedup.dataset import (
     CATALOG_POP_MIN,
@@ -55,6 +58,7 @@ from autodedup.incremental import (
     Limits,
     PairRow,
     PassResult,
+    _census,
     context_for,
     run_pass_bounded,
 )
@@ -383,12 +387,17 @@ def _drain(store: MemoryStore, facts: CohortFacts, work: Schedule, settings: Set
     return passes
 
 
+def fingerprints(dataset: Dataset, settings: Settings) -> dict[int, Fingerprint]:
+    """Every listing's fingerprint off the facts, as the lane builds it (the lab reads these)."""
+    return {i: build_fingerprint(listing, images, settings)
+            for i, (listing, images) in CohortFacts(dataset).facts(sorted(dataset.listings)).items()}
+
+
 def calibrated(dataset: Dataset, settings: Settings
                ) -> tuple[dict[int, Fingerprint], Calibration]:
     """The lane's calibration core (`cut_calibration`: fingerprints off the facts, then
     `Calibration.build`) over the whole cohort."""
-    fps = {i: build_fingerprint(listing, images, settings)
-           for i, (listing, images) in CohortFacts(dataset).facts(sorted(dataset.listings)).items()}
+    fps = fingerprints(dataset, settings)
     return fps, Calibration.build(fps, dataset.listings, settings)
 
 
@@ -400,6 +409,7 @@ def run(
     must_not_link: frozenset[tuple[int, int]] = frozenset(),
     must_link: frozenset[tuple[int, int]] = frozenset(),
     withhold_photos: bool = False,
+    evidence: pair_evidence.Request | None = None,
 ) -> dict[str, Any]:
     """`run_pass` over a MemoryStore, the whole cohort claimed as the scope, written as the three
     run artifacts. The lane's path: its calibration core over the cohort, its claim order
@@ -409,8 +419,16 @@ def run(
     `withhold_photos` is the E92/E93 arm: every listing is first decided with its photographs
     unprocessed under the evidence hold, then the producers land and the sweep re-decides, then
     the horizon passes. The final state must be the plain run's; `withheld_photos` says what the
-    hold held on the way."""
+    hold held on the way.
+
+    `evidence` also writes every decided pair's features, decision and rung signals (the lab's
+    only input, `autodedup.evidence`), off the final store and the lane's final census; its
+    version carries the rulings bound here."""
     clock = time.perf_counter()
+    if evidence is not None:
+        evidence = replace(evidence, code_digest=evidence.code_digest or pair_evidence.code_digest(),
+                           rulings=pair_evidence.rulings_digest(must_not_link, must_link,
+                                                                withhold_photos))
     fps, calibration = calibrated(dataset, settings)
     facts = CohortFacts(dataset)
     store = MemoryStore(now=WITHHELD_T0 if withhold_photos else None)
@@ -446,6 +464,14 @@ def run(
         "timings": {"decide_s": decide_s, "write_s": time.perf_counter() - clock - decide_s},
         **({"withheld_photos": withheld} if withhold_photos else {}),
     })
+    if evidence is not None:
+        clock = time.perf_counter()
+        known = facts.facts(order)
+        census = _census(store, {i: listing for i, (listing, _) in known.items()},
+                         {i: images for i, (_, images) in known.items()})
+        summary["evidence"] = pair_evidence.write(out_dir, store.pairs, dataset, fps, census,
+                                                  settings, model, evidence)
+        summary["timings"]["evidence_s"] = time.perf_counter() - clock
     return summary
 
 
@@ -547,13 +573,17 @@ def write_run(store: MemoryStore, dataset: Dataset, fps: Mapping[int, Fingerprin
 def cmd_run(args: argparse.Namespace, out: Any) -> int:
     settings = named_settings(args.settings)
     model = named_model(args.model)
+    if args.evidence:
+        pair_evidence.check_seal(args.artifact, freeze=args.freeze)
     clock = time.perf_counter()
     dataset = load(args.artifact)
     load_seconds = time.perf_counter() - clock
     out_dir = Path(args.out)
+    request = (pair_evidence.Request(pair_evidence.file_digest(args.artifact),
+                                     args.evidence_workers) if args.evidence else None)
     summary = run(dataset, settings, model, out_dir,
                   load_must_not_link(args.must_not_link), load_must_not_link(args.must_link),
-                  withhold_photos=args.withhold_photos)
+                  withhold_photos=args.withhold_photos, evidence=request)
     summary["artifact"] = str(args.artifact)
     summary["timings"]["load_s"] = load_seconds
     (out_dir / RUN_FILE).write_text(json.dumps(summary, indent=2, sort_keys=True),
@@ -958,6 +988,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the operator's `same` rulings (must_link.jsonl or [lo, hi])")
     run.add_argument("--withhold-photos", action="store_true",
                      help="decide first with every photograph unprocessed, under the hold (E93)")
+    run.add_argument("--evidence", action="store_true",
+                     help="also write evidence.pkl: every decided pair's features, decision and "
+                          "rung signals, the lab's only input (autodedup/evidence.py)")
+    run.add_argument("--evidence-workers", type=int, default=1,
+                     help="forked workers for the evidence signals")
+    run.add_argument("--freeze", action="store_true",
+                     help="write evidence off an export a preregistration seals (only at its freeze)")
     run.set_defaults(func=cmd_run)
 
     pair = sub.add_parser("pair", help="side-by-side evidence for one pair")

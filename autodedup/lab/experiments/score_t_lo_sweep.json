@@ -1,0 +1,43 @@
+{
+ "name": "score_t_lo_sweep",
+ "note": "the band floor, swept (what reaches demonstration)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score",
+   "t_lo": 0.1823495333100157
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ },
+ "sweep": {
+  "ladder.3.t_lo": [
+   0.05,
+   0.1,
+   0.3,
+   0.5
+  ]
+ }
+}

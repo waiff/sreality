@@ -1,0 +1,53 @@
+{
+ "name": "score_t_hi_sweep",
+ "note": "the score's merge cut, swept (both model strata)",
+ "model": "ref",
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "proof"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": 0.0,
+    "model|cross": 0.9788,
+    "model|same": 0.9788
+   }
+  },
+  {
+   "rung": "context"
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "demonstrate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation"
+ },
+ "sweep": {
+  "ladder.3.t_hi_by_stratum.model|same": [
+   0.95,
+   0.99,
+   0.999
+  ],
+  "ladder.3.t_hi_by_stratum.model|cross": [
+   0.95,
+   0.99,
+   0.999
+  ]
+ }
+}

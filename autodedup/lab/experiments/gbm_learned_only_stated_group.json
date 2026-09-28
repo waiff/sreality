@@ -1,0 +1,33 @@
+{
+ "name": "gbm_learned_only_stated_group",
+ "note": "the challenger: walls + pair-grain facts + ONE gradient-boosted cut at 0.9 + the stated-fact gate + policy, grouped by the relation on stated facts only",
+ "model": {
+  "npz": "$AUTODEDUP_LAB_MODELS/gbm_{cohort}.npz"
+ },
+ "ladder": [
+  {
+   "rung": "veto"
+  },
+  {
+   "rung": "auto_reject"
+  },
+  {
+   "rung": "score",
+   "t_hi_by_stratum": {},
+   "t_hi": 0.9
+  },
+  {
+   "rung": "gate"
+  },
+  {
+   "rung": "policy"
+  }
+ ],
+ "group": {
+  "step": "relation",
+  "settings": {
+   "d43_cluster_image_facts": false,
+   "demonstrate_cluster_price": false
+  }
+ }
+}
