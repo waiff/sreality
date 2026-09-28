@@ -13,8 +13,9 @@ from the code R2 would ship and from no second implementation.
 fitted sealed by town scores only its own town's pairs. The p column is computed once per set of
 model files and cohort cache (pure Python, forked) and kept beside the overlay. `facts` reads the
 pairs an arm left in the merge or band zone (place it after the score), and `mf_union` reads every
-cross pair with the same fact function; their answers are kept in the overlay, keyed by the fact
-module's code and the dials."""
+cross pair with the same fact function; their answers are kept in the overlay. Both memos key on
+`challenger_code()`, which covers this adapter as well as the package, so an edit to either is never
+served a stale p column or fact."""
 
 from __future__ import annotations
 
@@ -31,12 +32,14 @@ import numpy as np
 from autodedup.challenger import facts as mf_facts
 from autodedup.challenger.score import scorer
 from autodedup.challenger.union import constrained_union
+from autodedup.evaluate import SAME, read_rulings
 from autodedup.features import FEATURE_ORDER
 from autodedup.lab.board import (BAND, FACT_FAMILY, MERGE, REJECT, U, VETO, Decisions, Groups, _cat,
                                  group_step, rung)
 from autodedup.lab.cache import Cohort
 
 CHALLENGER_DIR: Path = Path(mf_facts.__file__).resolve().parent
+ADAPTER: Path = Path(__file__).resolve()
 TYPED_FAMILY: dict[str, str] = {"deal": "ATTR", "kind": "ATTR", "area": "ATTR", "disposition": "ATTR",
                                 "floor": "ATTR", "price": "PRICE", "unit": "TXT",
                                 "body_align": "TXT"}
@@ -48,9 +51,9 @@ def _file_sha(path: Path) -> str:
 
 
 def challenger_code() -> str:
-    """The challenger's code (a memo written by another version is never read)."""
-    return hashlib.sha1(b"".join(_file_sha(path).encode() for path in
-                                 sorted(CHALLENGER_DIR.glob("*.py")))).hexdigest()[:12]
+    """The challenger's code and this adapter (a memo written by another version is never read)."""
+    paths = [*sorted(CHALLENGER_DIR.glob("*.py")), ADAPTER]
+    return hashlib.sha1(b"".join(_file_sha(path).encode() for path in paths)).hexdigest()[:12]
 
 
 # --- mf_score: the model files, one per town ------------------------------------------------------
@@ -140,19 +143,17 @@ def mf_score_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 
 def stated(c: Cohort, overrides: Mapping[str, Any] | None = None
            ) -> tuple[Callable[[int, int], str | None], dict[tuple[int, int], str | None]]:
-    """`stated(lo, hi)` over the cohort, memoised under the fact code and the dials: a candidate
-    pair is read with its own feature row, any other pair with none."""
+    """`stated(lo, hi)` over the cohort, memoised under the fact code and the dials; a pair reads
+    the same whether it was a candidate or not."""
     dials = dataclasses.replace(mf_facts.Dials(), **dict(overrides or {}))
     tag = json.dumps({"code": challenger_code(), "dials": dataclasses.asdict(dials)}, sort_keys=True)
     memo = c.facts.setdefault(tag, {})
     fact = mf_facts.stated_difference(c.ds.listings, c.settings, dials)
-    index = c.key_index()
 
     def read(lo: int, hi: int) -> str | None:
         key = (lo, hi)
         if key not in memo:
-            i = index.get(key)
-            memo[key] = fact(lo, hi, c.feats(i) if i is not None else None)
+            memo[key] = fact(lo, hi)
             c.dirty = True
         return memo[key]
 
@@ -212,13 +213,27 @@ def facts_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 @group_step("mf_union")
 def mf_union_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
     """The merge edges joined by `challenger.union` (`t_neg`, `must_link`, `must_not_link`), every
-    cross pair read by the facts rung's own function (`dials`)."""
+    cross pair read by the facts rung's own function (`dials`). `rulings` (a labels directory,
+    `$VARS` expanded) binds the operator's rulings on the cohort's adverts: `same` as must-links,
+    `different` and must-not-links as must-not-links."""
     read, _ = stated(c, p.get("dials"))
     learned = d.columns.get(P_COLUMN, d.score)
     merges = np.flatnonzero(d.zone == MERGE)
     edges = [(c.keys[i][0], c.keys[i][1], float(learned[i])) for i in merges]
     scored = dict(zip(c.keys, learned.tolist()))
-    groups = constrained_union(edges, read, scored, float(p.get("t_neg", 0.2)),
-                               [tuple(x) for x in p.get("must_link", ())],
-                               [tuple(x) for x in p.get("must_not_link", ())])
-    return Groups({g[0]: g for g in groups}, {"edges": len(edges)})
+    must_link = [tuple(x) for x in p.get("must_link", ())]
+    must_not_link = [tuple(x) for x in p.get("must_not_link", ())]
+    if p.get("rulings"):
+        ids = set(c.ds.listings)
+        for key, verdict in read_rulings(os.path.expandvars(p["rulings"])).items():
+            if key[0] in ids and key[1] in ids:
+                (must_link if verdict == SAME else must_not_link).append(key)
+    groups = constrained_union(edges, read, scored, float(p.get("t_neg", 0.2)), must_link,
+                               must_not_link)
+    together = {(a, b) for g in groups for i, a in enumerate(g) for b in g[i + 1:]}
+    apart = [k for k in must_link if (min(k), max(k)) not in together]
+    return Groups({g[0]: g for g in groups},
+                  {"edges": len(edges), "must_link": len(must_link),
+                   "must_not_link": len(must_not_link), "must_link_apart": len(apart),
+                   "must_link_apart_rule_15": sum(read(min(k), max(k)) in mf_facts.RULE_15
+                                                  for k in apart)})

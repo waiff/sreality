@@ -1,0 +1,12 @@
+{
+ "name": "mf_p14_judge_loco",
+ "note": "MF-P14 judge-only, the compliant row: judge labels only in training AND calibration, each scored cohort's isotonic map fitted on the OTHER grounds' judge rows only (c18's map: the trial's judge rows; the trial's: c18's w6 rows). `lab mf-fit --source judge --calibration loco --out $AUTODEDUP_LAB_MODELS/loco`.",
+ "model": {"const": 0.0},
+ "ladder": [
+  {"rung": "veto"},
+  {"rung": "mf_score", "model": "$AUTODEDUP_LAB_MODELS/loco/judge/{cohort}/{block}.json", "t_merge": 0.8, "t_band": 0.2},
+  {"rung": "facts"}
+ ],
+ "group": {"step": "mf_union", "t_neg": 0.2},
+ "sweep": {"ladder.1.t_merge": [0.7, 0.75, 0.8, 0.85, 0.9]}
+}

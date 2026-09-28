@@ -1,0 +1,11 @@
+{
+ "name": "mf_p14_loco_rulings",
+ "note": "mf_p14_loco at t_merge 0.8 with the operator's rulings bound in the union (an operator `same` is a must-link that dissolves only on rule 15 or a must-not-link; `different` and must-not-links are must-not-links): the rulings path on real rulings. M1 / M2 are then no test of the engine, only of the binding.",
+ "model": {"const": 0.0},
+ "ladder": [
+  {"rung": "veto"},
+  {"rung": "mf_score", "model": "$AUTODEDUP_LAB_MODELS/loco/all/{cohort}/{block}.json", "t_merge": 0.8, "t_band": 0.2},
+  {"rung": "facts"}
+ ],
+ "group": {"step": "mf_union", "t_neg": 0.2, "rulings": "$AUTODEDUP_LAB_LABELS"}
+}

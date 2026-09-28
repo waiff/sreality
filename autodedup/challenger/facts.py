@@ -4,14 +4,16 @@ A fact reads BOTH sides or nothing (E12). Seven typed facts compare two stated v
 `Dials`: deal and kind (rule 15; dům <-> komerční is compatible), area (or the plot of a house or a
 parcel), disposition, floor, price (two price paths that never name one amount within `price` while
 co-live, or within `colive_price` while co-live on one portal; paths `price_units` apart are two
-units of measure and say nothing), and the unit: one designator each at one address (E61's
-predicate) or a token the two bodies align on and differ in. The street limb is dropped (D5): street
-keys are score evidence. Two adverts co-live on ONE portal state their columns in one convention, so
-there a smaller gap already is a stated one (`colive_*`).
+units of measure and say nothing), and the unit: E61 itself (`guards.unit_designator_conflict`) or a
+token the two bodies align on and differ in. The street limb is dropped (D5): street keys are score
+evidence. Two adverts co-live on ONE portal state their columns in one convention, so there a
+smaller gap already is a stated one (`colive_*`).
 
 Then the fourteen case readers the ladder owns, read by `distinguishing_facts` itself and kept by
-name (six body-stated readers and the K10 case readers; `obec_prose` is both). Tags are never facts,
-in any mode: no tag feature reaches a reader, and neither image fact is among the names kept."""
+name (six body-stated readers and the K10 case readers; `obec_prose` is both). A fact reads the two
+adverts and nothing else: no feature row reaches a reader, so no photograph excuses a stated fact
+(K-P; E305r's tight frames are never read) and tags are facts in no mode. A pair reads the same
+whether anybody scored it or not."""
 
 from __future__ import annotations
 
@@ -21,7 +23,8 @@ from typing import Callable, Mapping
 
 from autodedup.body_align import aligned_difference
 from autodedup.dataset import Listing
-from autodedup.features import TAG_FEATURE_NAMES, Feats, plot_area, rel_diff
+from autodedup.features import plot_area, rel_diff
+from autodedup.guards import unit_designator_conflict
 from autodedup.indistinguishable import (
     CLUSTER,
     _price_points,
@@ -31,7 +34,6 @@ from autodedup.indistinguishable import (
     price_paths_agree,
 )
 from autodedup.settings import Settings
-from autodedup.text_facts import address_block_key, unit_designators
 from toolkit.room_taxonomy import category_main_compatible
 
 RULE_15: frozenset[str] = frozenset({"deal", "kind"})
@@ -63,36 +65,26 @@ class Dials:
     body_align: float = 0.6
 
 
-Fact = Callable[[int, int, "Feats | None"], "str | None"]
+Fact = Callable[[int, int], "str | None"]
 
 
 def stated_difference(listings: Mapping[int, Listing], settings: Settings,
                       dials: Dials = Dials()) -> Fact:
-    """The one fact function over `listings`, at pair and group grain alike: `fact(a, b, feats)`
-    names the first fact the two adverts state differently (TYPED, then READERS order), or None.
-    `feats` is the pair's own feature row when it was scored (E305r reads its tight frames), else
-    None. The settings row governs the readers only; the typed facts read the dials."""
+    """The one fact function over `listings`, at pair and group grain alike: `fact(a, b)` names
+    the first fact the two adverts state differently (TYPED, then READERS order), or None. The
+    settings row governs the readers only; the typed facts read the dials."""
     readers_row = dataclasses.replace(settings, d43_body_align=False, d43_body_align_heal=False)
-    units: dict[int, tuple[frozenset[str], str]] = {}
 
-    def unit_of(x: int) -> tuple[frozenset[str], str]:
-        if x not in units:
-            listing = listings[x]
-            units[x] = (frozenset(unit_designators(listing.description)),
-                        address_block_key(listing))
-        return units[x]
-
-    def fact(x: int, y: int, feats: Feats | None = None) -> str | None:
+    def fact(x: int, y: int) -> str | None:
         a, b = listings[x], listings[y]
         typed = _typed(a, b, settings, dials)
         if typed is not None:
             return typed
-        (units_a, addr_a), (units_b, addr_b) = unit_of(x), unit_of(y)
-        if len(units_a) == 1 and len(units_b) == 1 and units_a != units_b and addr_a == addr_b:
+        if unit_designator_conflict(a, b) is not None:
             return "unit"
         if aligned_difference(a.description, b.description, dials.body_align, True) is not None:
             return "body_align"
-        return _reader(a, b, feats, readers_row)
+        return _reader(a, b, readers_row)
 
     return fact
 
@@ -132,9 +124,7 @@ def _typed(a: Listing, b: Listing, settings: Settings, d: Dials) -> str | None:
     return None
 
 
-def _reader(a: Listing, b: Listing, feats: Feats | None, row: Settings) -> str | None:
-    """The first of READERS that `distinguishing_facts` fires, the tag features withheld."""
-    clean = None if feats is None else {k: v for k, v in feats.items()
-                                        if k not in TAG_FEATURE_NAMES}
-    fired = {f.name for f in distinguishing_facts(a, b, clean, row, CLUSTER)}
+def _reader(a: Listing, b: Listing, row: Settings) -> str | None:
+    """The first of READERS that `distinguishing_facts` fires on the two adverts alone."""
+    fired = {f.name for f in distinguishing_facts(a, b, None, row, CLUSTER)}
     return next((name for name in READERS if name in fired), None)

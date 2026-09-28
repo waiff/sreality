@@ -11,7 +11,8 @@ alias, off one export and one engine); a missing row makes the verdict INCOMPLET
 
 Cut: the highest t_merge in {0.70, 0.75, 0.80, 0.85, 0.90} whose c18 M1 is not lower than the
 incumbent's c18 M1, then checked by the c17 M4 read. Never tuned on the trial: the rule reads no
-trial row.
+trial row. The rule's incumbent is R1; until R1 has rows, another arm (R0, `w31_reference`) stands
+for it, and `keep` / `cut` print which.
 
 Readers, 6.1 (b), for a challenger arm: at most two readers or tolerances added back over MF-P14;
 each fixture case only the arm joins needs one of its own."""
@@ -23,6 +24,7 @@ from typing import Any, Iterable, Mapping
 CUTS: tuple[float, ...] = (0.70, 0.75, 0.80, 0.85, 0.90)
 VALIDATE: str = "c18"
 READ: str = "c17"
+RULE_INCUMBENT: str = "R1"
 M2_COHORTS: tuple[str, ...] = ("trial", "c18")
 
 Rows = Mapping[str, Mapping[str, Any]]

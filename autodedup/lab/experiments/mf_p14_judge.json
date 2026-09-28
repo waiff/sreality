@@ -1,6 +1,6 @@
 {
  "name": "mf_p14_judge",
- "note": "MF-P14 beside its headline with NO operator ruling in training or calibration: boosting sealed by town on the judge labels only (judge_trial + w6), isotonic map on the judge rows of every cohort pooled (G2 s5 hgb-judge); `lab mf-fit --source judge --calibration pooled`.",
+ "note": "MF-P14 beside its headline with NO operator ruling in training or calibration, G2-compatible row: boosting sealed by town on the judge labels only (judge_trial + w6), isotonic map on the judge rows of every cohort pooled (G2 s5 hgb-judge), so the map read the scored cohort's own judge rows; the compliant row is mf_p14_judge_loco. `lab mf-fit --source judge --calibration pooled`.",
  "model": {"const": 0.0},
  "ladder": [
   {"rung": "veto"},

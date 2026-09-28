@@ -108,16 +108,10 @@ class Cohort:
     export_digest: str = ""
     tagged: dict[str, dict[str, dict[str, np.ndarray]]] = field(default_factory=dict)
     facts: dict[str, dict[tuple[int, int], str | None]] = field(default_factory=dict)
-    _index: dict[tuple[int, int], int] | None = None
 
     @property
     def n(self) -> int:
         return len(self.keys)
-
-    def key_index(self) -> dict[tuple[int, int], int]:
-        if self._index is None:
-            self._index = {key: i for i, key in enumerate(self.keys)}
-        return self._index
 
     @property
     def lo(self) -> np.ndarray:

@@ -1,0 +1,12 @@
+{
+ "name": "mf_p14_loco",
+ "note": "MF-P14, the compliant row (GLOBAL_SEARCH 1.4 / 2.1): the models of mf_p14 (ALL label sources, sealed by town on every ground), each scored cohort's isotonic map fitted on the OTHER grounds' out-of-town rows only. `lab mf-fit --source all --calibration loco --out $AUTODEDUP_LAB_MODELS/loco`. The cut by rule 6.1(a) over the sweep.",
+ "model": {"const": 0.0},
+ "ladder": [
+  {"rung": "veto"},
+  {"rung": "mf_score", "model": "$AUTODEDUP_LAB_MODELS/loco/all/{cohort}/{block}.json", "t_merge": 0.8, "t_band": 0.2},
+  {"rung": "facts"}
+ ],
+ "group": {"step": "mf_union", "t_neg": 0.2},
+ "sweep": {"ladder.1.t_merge": [0.7, 0.75, 0.8, 0.85, 0.9]}
+}

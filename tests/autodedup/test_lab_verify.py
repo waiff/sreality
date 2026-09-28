@@ -23,6 +23,7 @@ import pytest
 from autodedup import dataset as ds
 from autodedup import evidence, harness
 from autodedup.decide import decide_pair
+from autodedup.features import FEATURE_ORDER
 from autodedup.lab import board, cache, verify
 from autodedup.lab.__main__ import main as lab_main
 from tests.autodedup import lab_fixture
@@ -415,3 +416,65 @@ def test_lab_fit_writes_a_scorer_keyed_on_the_artefact_and_recorded(
     assert verified_state(True, outcome, cohort.version, fits) is True
     assert verified_state(True, outcome, cohort.version, {}) == "cache verified, scorer external"
     assert verified_state(False, outcome, cohort.version, fits) is False
+
+
+def test_lab_ground_reads_the_cache_and_featurises_the_rest_through_the_lane(
+        cohort: cache.Cohort, export: Path, w31_run: Path, tmp_path: Path) -> None:
+    """The challenger's training rows (B-b): G2's precedence over the engine's label store, a
+    candidate's row from the cache, any other labelled pair's from the lane's explicit-pair call
+    (`harness.decide_explicit`), which on a candidate returns the cache's row; `lab mf-fit` reads
+    the file back only as written."""
+    from autodedup.lab import ground, mf_fit
+
+    keys = set(cohort.keys)
+    candidate, judged = cohort.keys[0], cohort.keys[1]
+    ids = sorted(cohort.ds.listings)
+    strangers = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:] if (a, b) not in keys]
+    stranger, read_one = strangers[0], strangers[1]
+    merged = sorted({x for pair in strangers[2:6] for x in pair})[:3]
+    labels, c7 = tmp_path / "labels", tmp_path / "c7"
+    labels.mkdir()
+    c7.mkdir()
+
+    def lines(path: Path, rows: list[dict[str, Any]]) -> None:
+        path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    lines(labels / "operator_labels.jsonl", [
+        {"listing_lo": candidate[0], "listing_hi": candidate[1], "verdict": "same"},
+        {"listing_lo": stranger[0], "listing_hi": stranger[1], "verdict": "different"}])
+    lines(labels / "must_not_link.jsonl", [{"listing_lo": merged[0], "listing_hi": merged[1]}])
+    lines(labels / "operator_merges.jsonl",
+          [{"members": [{"listing_id": x} for x in merged]}])
+    judge = tmp_path / "vision.jsonl"
+    lines(judge, [{"lo": lo, "hi": hi, "tier": "vision", "verdict": {"verdict": verdict}}
+                  for (lo, hi), verdict in ((candidate, "different_property"),
+                                            (judged, "same_property"))])
+    (c7 / "fx.json").write_text(json.dumps({f"{read_one[0]},{read_one[1]}": ["one"]}))
+    reg = {"labels": str(labels), "train": {"judges": {"w6": [str(judge)]}, "c7": str(c7)},
+           "cohorts": {"fx": {"export": str(export), "run": str(w31_run)}}}
+    built = ground.build(reg, "fx", cohort)
+    rows = [tuple(k) for k in built["keys"].tolist()]
+    got = {k: (int(built["y"][i]), float(built["w"][i]), str(built["src"][i]),
+               str(built["origin"][i])) for i, k in enumerate(rows)}
+    assert got[candidate] == (1, 1.0, "op_explicit", "operator")
+    assert got[stranger] == (0, 1.0, "op_explicit", "operator")
+    assert got[judged] == (1, 0.6, "vision", "w6")
+    assert got[read_one] == (1, 0.8, "c7_one", "c7")
+    assert got[(merged[0], merged[1])] == (0, 1.0, "mnl", "operator")
+    assert got[(merged[0], merged[2])] == (1, 1.0, "op_merge_member", "operator")
+    at = rows.index(candidate)
+    j = cohort.keys.index(candidate)
+    assert (built["V"][at] == cohort.V[j]).all() and (built["P"][at] == cohort.P[j]).all()
+    feats = harness.decide_explicit(cohort.ds, cohort.settings, cohort.model,
+                                    [stranger])[stranger]["feats"]
+    at = rows.index(stranger)
+    assert [bool(p) for p in built["P"][at]] == [bool(feats[n][1]) for n in FEATURE_ORDER]
+    assert all(built["V"][at][j] == feats[n][0] for j, n in enumerate(FEATURE_ORDER)
+               if feats[n][1])
+    meta = json.loads(str(built["meta"]))
+    assert meta["cache"] == cohort.version and meta["featurised"] == len(rows) - meta["candidates"]
+    bare = ground.build(reg, "fx", None)
+    assert json.loads(str(bare["meta"]))["featurised"] == len(rows)
+    assert (bare["P"] == built["P"]).all() and (bare["V"][bare["P"]] == built["V"][built["P"]]).all()
+    ground.write(tmp_path / "fx.npz", built)
+    assert mf_fit.load_ground("fx", tmp_path / "fx.npz").meta["digest"] == meta["digest"]

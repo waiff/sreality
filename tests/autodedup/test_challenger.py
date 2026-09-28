@@ -13,14 +13,13 @@ from typing import Any
 
 import pytest
 
-from autodedup import evidence
+from autodedup import evidence, guards
 from autodedup.challenger import facts as mf_facts
 from autodedup.challenger.facts import READERS, Dials, stated_difference
-from autodedup.challenger.score import FORMAT, scorer
+from autodedup.challenger.score import FORMAT, _isotonic, scorer
 from autodedup.challenger.union import constrained_union
 from autodedup.dataset import Listing, Location
-from autodedup.features import TAG_FEATURE_NAMES
-from autodedup.indistinguishable import Fact
+from autodedup.indistinguishable import Fact, cellar_area_conflict
 from autodedup.settings import Settings
 
 REPO = Path(__file__).resolve().parents[2]
@@ -100,9 +99,10 @@ def test_the_street_limb_is_dropped_and_the_unit_is_read() -> None:
     c = _listing(1, location=one, description="Prodej bytu, byt c. 3 ve druhem podlazi.")
     d = _listing(2, location=one, description="Prodej bytu, byt c. 7 ve druhem podlazi.")
     assert _fact(c, d)(1, 2) == "unit"
+    assert mf_facts.unit_designator_conflict is guards.unit_designator_conflict
 
 
-def test_the_readers_are_the_ladders_own_and_tags_are_never_facts(monkeypatch: Any) -> None:
+def test_the_readers_are_the_ladders_own_and_no_feature_reaches_them(monkeypatch: Any) -> None:
     seen: list[Any] = []
 
     def fake(a: Listing, b: Listing, feats: Any, settings: Settings, mode: str) -> list[Fact]:
@@ -111,15 +111,28 @@ def test_the_readers_are_the_ladders_own_and_tags_are_never_facts(monkeypatch: A
                 Fact(names.pop(), "x", "y")]
 
     monkeypatch.setattr(mf_facts, "distinguishing_facts", fake)
-    feats = {name: (0.0, True) for name in TAG_FEATURE_NAMES} | {"phash_tight_matches": (5.0, True)}
     fact = _fact(_listing(1), _listing(2))
     names = ["cellar_area"]
-    assert fact(1, 2, feats) == "cellar_area"
-    assert seen[-1][0] == {"phash_tight_matches": (5.0, True)}
-    assert seen[-1][1:] == (False, "cluster")
+    assert fact(1, 2) == "cellar_area"
+    assert seen[-1] == (None, False, "cluster")
     names = ["agency_code"]
-    assert fact(1, 2, feats) is None
+    assert fact(1, 2) is None
     assert len(READERS) == 14 and not set(READERS) & {"interior", "floorplan", "street"}
+
+
+def test_a_photograph_never_excuses_a_stated_fact() -> None:
+    """E305r lets four tight frames excuse a cellar two bodies state differently (the w31 row keeps
+    it on); the challenger reads the two adverts alone, so the stated cellar keeps them apart (K-P).
+    The trial's 13799553 x 18580359: one rental, 4 vs 3.3 m2."""
+    body = "Pronajem bytu 1+kk o vymere 32 m2 v Jablonci, k bytu patri sklepni koje {} m2."
+    a = _listing(1, category_type="pronajem", price=22_000.0, description=body.format("4"))
+    b = _listing(2, category_type="pronajem", price=22_000.0, source="idnes",
+                 description=body.format("3,3"))
+    frames = {"phash_tight_matches": (5.0, True)}
+    assert W31.d43_cellar_area_photo_yield
+    assert cellar_area_conflict(a, b, W31, None) is not None
+    assert cellar_area_conflict(a, b, W31, frames) is None
+    assert _fact(a, b, dials=Dials(body_align=1.0))(1, 2) == "cellar_area"
 
 
 def test_a_real_reader_fires_through_distinguishing_facts() -> None:
@@ -144,25 +157,30 @@ def _stump() -> dict[str, Any]:
 def test_the_tree_walk_by_hand() -> None:
     p = scorer(_stump())
     expit = lambda z: 1.0 / (1.0 + math.exp(-z))  # noqa: E731
-    assert p([1.0, 1.0]) == round(expit(0.5 - 1.0 + 0.25), 12)
-    assert p([2.0, None]) == round(expit(0.5 + 2.0 - 0.25), 12)
-    assert p([None, float("nan")]) == round(expit(0.5 - 1.0 - 0.25), 12)
+    assert p([1.0, 1.0]) == expit(0.5 - 1.0 + 0.25)
+    assert p([2.0, None]) == expit(0.5 + 2.0 - 0.25)
+    assert p([None, float("nan")]) == expit(0.5 - 1.0 - 0.25)
     calibrated = _stump() | {"calibration": {"x": [0.1, 0.9], "y": [0.0, 1.0], "lo": 0.1, "hi": 0.9}}
     q = scorer(calibrated)
     low = expit(0.5 - 1.0 - 0.25)
     assert q([2.0, None]) == 1.0
-    assert q([None, None]) == round((low - 0.1) / 0.8 * 1.0 + (0.9 - low) / 0.8 * 0.0, 12)
+    assert q([None, None]) == (1.0 - 0.0) / (0.9 - 0.1) * (low - 0.1) + 0.0
     with pytest.raises(ValueError):
         scorer({"format": "other"})
 
 
-def test_the_last_bits_of_exp_never_reach_p() -> None:
-    """Two raw sums one ulp apart on an isotonic plateau read one p, so no tie is reordered."""
+def test_a_plateau_reads_its_knot_value_exactly() -> None:
+    """numpy.interp's form: two raw sums one ulp apart on an isotonic plateau read the knot value
+    itself, so they tie exactly and no tie is reordered by the last bits of exp; a knot reads its
+    own value."""
     plateau = _stump() | {"trees": [], "calibration": {"x": [0.0, 0.5, 1.0], "y": [0.3, 0.3, 0.9],
                                                        "lo": 0.0, "hi": 1.0}}
     p = scorer(plateau | {"baseline": -0.3})
     q = scorer(plateau | {"baseline": math.nextafter(-0.3, 0.0)})
     assert p([None, None]) == q([None, None]) == 0.3
+    xs, ys = [0.1, 0.35, 0.7, 0.9], [0.0, 0.2 / 3.0, 0.61, 1.0]
+    assert [_isotonic(x, xs, ys, 0.1, 0.9) for x in xs] == ys
+    assert _isotonic(0.05, xs, ys, 0.1, 0.9) == 0.0 and _isotonic(0.95, xs, ys, 0.1, 0.9) == 1.0
 
 
 def _vectors(n: int, width: int, seed: int) -> list[list[float | None]]:
@@ -171,13 +189,13 @@ def _vectors(n: int, width: int, seed: int) -> list[list[float | None]]:
             for _ in range(n)]
 
 
-def test_the_committed_model_file_equals_scikit_learn_within_1e_9() -> None:
+def test_the_committed_model_file_equals_scikit_learn_bit_for_bit() -> None:
     """CI (no scikit-learn): a model exported from a fitted HistGradientBoostingClassifier and
     isotonic map, and scikit-learn's own predictions on 1,000 vectors, both committed."""
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     p = scorer(fixture["model"])
-    gaps = [abs(p(x) - want) for x, want in zip(fixture["vectors"], fixture["sklearn_p"])]
-    assert len(gaps) == 1000 and max(gaps) <= 1e-9
+    got = [p(x) for x in fixture["vectors"]]
+    assert len(got) == 1000 and got == fixture["sklearn_p"]
     assert fixture["model"]["calibration"] and fixture["model"]["fill"]
 
 
@@ -206,11 +224,11 @@ def _fit_fixture(seed: int = 20260928) -> tuple[dict[str, Any], list[list[float 
 
 
 def test_pure_python_equals_scikit_learn_on_1000_vectors() -> None:
-    """Local (training extra): fit, export, evaluate; calibration and a presence-only column in."""
+    """Local (training extra): fit, export, evaluate, bit for bit; calibration and a presence-only
+    column in."""
     model, vectors, want = _fit_fixture()
     p = scorer(model)
-    gaps = [abs(p(x) - w) for x, w in zip(vectors, want)]
-    assert len(gaps) == 1000 and max(gaps) <= 1e-9
+    assert [p(x) for x in vectors] == want
     assert model["fill"] == {"5": 0.0} and 7 not in model["inputs"]
 
 
@@ -283,6 +301,112 @@ def test_the_rungs_and_the_union_on_the_board(tmp_path: Path) -> None:
     assert out.groups.clusters == {1: (1, 2), 4: (4, 5)}
     assert out.scorer["kind"] == "mf" and out.scorer["cards"] == {"town1": {"toy": True}}
     assert (tmp_path / "mf_scores").is_dir()
+
+
+def test_the_rulings_bind_in_the_union_and_rule_15_still_holds(tmp_path: Path) -> None:
+    from autodedup.lab import board
+
+    c = _lab_cohort(tmp_path)
+    c.ds.listings[7].category_type = "pronajem"
+    labels = tmp_path / "labels"
+    labels.mkdir()
+    rows = [{"listing_lo": 5, "listing_hi": 6, "verdict": "same", "decided_at": STAMP},
+            {"listing_lo": 6, "listing_hi": 7, "verdict": "same", "decided_at": STAMP},
+            {"listing_lo": 1, "listing_hi": 2, "verdict": "different", "decided_at": STAMP}]
+    (labels / "operator_labels.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    config = {"model": {"const": 0.0},
+              "ladder": [{"rung": "veto"},
+                         {"rung": "mf_score", "model": str(tmp_path / "models" / "{block}.json")},
+                         {"rung": "facts"}],
+              "group": {"step": "mf_union", "t_neg": 0.2, "rulings": str(labels)}}
+    out = board.run(c, config)
+    assert out.groups.clusters == {2: (2, 3), 5: (5, 6)}
+    assert out.groups.stats == {"edges": 3, "must_link": 2, "must_not_link": 1,
+                                "must_link_apart": 1, "must_link_apart_rule_15": 1}
+
+
+def test_the_memos_key_on_the_adapter_too(monkeypatch: Any, tmp_path: Path) -> None:
+    from autodedup.lab import challenger as lab_challenger
+
+    before = lab_challenger.challenger_code()
+    edited = tmp_path / "challenger.py"
+    edited.write_bytes(lab_challenger.ADAPTER.read_bytes() + b"\n# edited\n")
+    monkeypatch.setattr(lab_challenger, "ADAPTER", edited)
+    assert lab_challenger.challenger_code() != before
+
+
+# --- mf-fit: the town seal, the map off the scored cohort, the seals, lab grounds only ---------
+
+def _ground_file(path: Path, name: str, towns: list[str], n: int, seed: int,
+                 settings: str = "s1") -> Path:
+    np = pytest.importorskip("numpy")
+    from autodedup.lab import ground as lab_ground
+
+    rng = np.random.default_rng(seed)
+    V = rng.normal(size=(n, 3))
+    y = (V[:, 0] + rng.normal(scale=0.5, size=n) > 0).astype(np.int64)
+    lo = [towns[i % len(towns)] for i in range(n)]
+    hi = [towns[(i // len(towns)) % len(towns)] for i in range(n)]
+    arrays = {"keys": np.array([(seed * 10_000 + 2 * i, seed * 10_000 + 2 * i + 1)
+                                for i in range(n)], dtype=np.int64),
+              "V": V, "P": np.ones((n, 3), dtype=bool), "y": y, "w": np.ones(n),
+              "origin": np.array(["operator" if i % 2 else "w6" for i in range(n)]),
+              "src": np.array(["op_explicit"] * n), "blocks": np.array(list(zip(lo, hi))),
+              "towns": np.array(sorted(towns)), "feature_order": np.array(["f0", "f1", "f2"])}
+    meta = {"builder": lab_ground.BUILDER, "cohort": name, "digest": lab_ground.digest(arrays),
+            "settings": settings}
+    np.savez(path, **arrays, meta=np.array(json.dumps(meta)))
+    return path
+
+
+def test_a_town_is_sealed_in_every_ground_and_the_loco_map_reads_no_scored_row(
+        tmp_path: Path) -> None:
+    pytest.importorskip("sklearn")
+    from autodedup.lab import mf_fit
+
+    a = mf_fit.load_ground("a", _ground_file(tmp_path / "a.npz", "a", ["town1", "town2"], 160, 1))
+    b = mf_fit.load_ground("b", _ground_file(tmp_path / "b.npz", "b", ["town1", "town3"], 160, 2))
+    report = mf_fit.sealed([a, b], ["a"], "all", "loco", tmp_path / "models")
+    shared = report["cohorts"]["a"]["town1"]["trained_on"]
+    touch_a = int(((a.blocks[:, 0] == "town1") | (a.blocks[:, 1] == "town1")).sum())
+    touch_b = int(((b.blocks[:, 0] == "town1") | (b.blocks[:, 1] == "town1")).sum())
+    assert touch_b > 0 and shared["excluded"] == {"a": touch_a, "b": touch_b}
+    assert shared["rows"] == 320 - touch_a - touch_b
+    assert report["maps"]["a"]["cohorts"] == ["b"]
+    assert not report["maps"]["a"]["reads_the_scored_cohort"]
+    model = json.loads((tmp_path / "models" / "all" / "a" / "town1.json").read_text())
+    assert model["card"]["calibration"]["mode"] == "loco"
+    assert model["card"]["grounds"] == {"a": a.meta["digest"], "b": b.meta["digest"]}
+    pooled = mf_fit.sealed([a, b], ["a"], "all", "pooled", tmp_path / "pooled")
+    assert pooled["maps"]["a"]["reads_the_scored_cohort"]
+
+
+def test_mf_fit_trains_only_on_lab_grounds_off_no_sealed_block(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    from autodedup import evidence
+    from autodedup.lab import mf_fit
+
+    path = _ground_file(tmp_path / "g.npz", "g", ["town586021", "town2"], 40, 3)
+    g = mf_fit.load_ground("g", path)
+    with pytest.raises(mf_fit.NotALabGround):
+        mf_fit.load_ground("other", path)
+    data = dict(np.load(path))
+    data["y"] = 1 - data["y"]
+    np.savez(tmp_path / "edited.npz", **data)
+    with pytest.raises(mf_fit.NotALabGround):
+        mf_fit.load_ground("g", tmp_path / "edited.npz")
+    del data["meta"]
+    np.savez(tmp_path / "bare.npz", **data)
+    with pytest.raises(mf_fit.NotALabGround):
+        mf_fit.load_ground("g", tmp_path / "bare.npz")
+    seal = tmp_path / "preregistration_cohort99.json"
+    seal.write_text(json.dumps({"blocks": {"spelling": "town:586021"}}))
+    with pytest.raises(evidence.SealedExport, match="town:586021"):
+        mf_fit.check_seals([g], {"seals": [str(seal)]})
+    mf_fit.check_seals([g], {"seals": [str(seal)], "cohorts": {"g": {"freeze": "addendum"}}})
+    other = mf_fit.load_ground("h", _ground_file(tmp_path / "h.npz", "h", ["town3"], 40, 4, "s2"))
+    with pytest.raises(ValueError, match="settings rows"):
+        mf_fit.check_seals([g, other], {})
 
 
 # --- lab-only ---------------------------------------------------------------------------------

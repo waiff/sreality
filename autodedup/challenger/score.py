@@ -2,7 +2,7 @@
 file and evaluated in pure Python, because the worker image has no numpy and no scikit-learn (rule
 7). The lab's exporter writes the file from a fitted HistGradientBoostingClassifier (the training
 extra); `tests/autodedup/test_challenger.py` holds this evaluation to scikit-learn's predict_proba
-within 1e-9, calibration included.
+bit for bit, calibration included.
 
 The file (`format` FORMAT): `feature_order` (the vector a caller passes), `inputs` (the vector index
 each tree input reads), `fill` (vector index -> the value a MISSING entry reads as: a column that is
@@ -11,30 +11,27 @@ list per tree: [input, threshold, missing_left, left, right, value, leaf]; a val
 threshold goes left, a missing one where `missing_left` says), `calibration` (the isotonic map: knots
 `x`, `y` and the clip range `lo`, `hi`; null = the raw probability) and `card` (what trained it).
 
-p is returned to DIGITS decimals. Its last bits are the machine's `exp`, not evidence: scikit-learn and
-this evaluation differ there on about one pair in ten, an isotonic plateau gives many pairs one p up
-to those bits, and the union takes edges in descending p with ties in candidate order, so an
-unrounded p let the last bit reorder tied edges (B0: 21-51 groups on c17 / c18, and whether c17's
-Znojmo fixture fuses). Rounded, both evaluations give the same groups."""
+The isotonic map is read as `numpy.interp` reads it (scipy's linear interp1d delegates there): a
+knot reads its own value and a segment `slope * (t - x0) + y0`, so a plateau returns its knot value
+exactly. p equals scikit-learn's bit for bit (the committed fixture holds 1,000 vectors to that),
+and two pairs on one plateau tie exactly whatever the last bits of `exp`."""
 
 from __future__ import annotations
 
 import json
 import math
-from bisect import bisect_left
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 FORMAT: str = "autodedup-gbt/1"
-DIGITS: int = 12
 
 Scorer = Callable[[Sequence["float | None"]], float]
 
 
 def scorer(model: str | Path | Mapping[str, Any]) -> Scorer:
     """The model file (a path or its parsed JSON) as `p(x)`: `x` follows the file's
-    `feature_order`, None or NaN is missing; returns the calibrated probability of one property,
-    to DIGITS decimals."""
+    `feature_order`, None or NaN is missing; returns the calibrated probability of one property."""
     spec = model if isinstance(model, Mapping) else json.loads(Path(model).read_text("utf-8"))
     if spec.get("format") != FORMAT:
         raise ValueError(f"not a {FORMAT} model file: {spec.get('format')!r}")
@@ -69,16 +66,21 @@ def scorer(model: str | Path | Mapping[str, Any]) -> Scorer:
             prob = 1.0 / (1.0 + math.exp(-raw))
         except OverflowError:
             prob = 0.0
-        return round(_isotonic(prob, xs, ys, lo, hi) if knots else prob, DIGITS)
+        return _isotonic(prob, xs, ys, lo, hi) if knots else prob
 
     return p
 
 
 def _isotonic(t: float, xs: list[float], ys: list[float], lo: float, hi: float) -> float:
-    """scikit-learn's IsotonicRegression.predict (clip, then scipy's linear interp1d) on one value."""
-    if len(ys) == 1:
-        return ys[0]
+    """scikit-learn's IsotonicRegression.predict on one value: clip, then `numpy.interp` (which
+    scipy's linear interp1d delegates to) step for step: a knot reads its own value, a segment
+    `slope * (t - x0) + y0`."""
     t = min(max(t, lo), hi)
-    k = min(max(bisect_left(xs, t), 1), len(xs) - 1)
-    x0, x1, y0, y1 = xs[k - 1], xs[k], ys[k - 1], ys[k]
-    return (t - x0) / (x1 - x0) * y1 + (x1 - t) / (x1 - x0) * y0
+    j = bisect_right(xs, t) - 1
+    if j < 0:
+        return ys[0]
+    if j >= len(xs) - 1:
+        return ys[-1]
+    if xs[j] == t:
+        return ys[j]
+    return (ys[j + 1] - ys[j]) / (xs[j + 1] - xs[j]) * (t - xs[j]) + ys[j]
