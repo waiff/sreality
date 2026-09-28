@@ -1,0 +1,12 @@
+{
+ "name": "mf_p14",
+ "note": "the model-first challenger MF-P14 (GLOBAL_SEARCH 1.4), G2-compatible row: the learned score decides at t_merge, 7 typed facts (street limb off, D5) + the 14 case readers veto, one constrained union with learned negatives below t_neg. Models: boosting sealed by town set (a cross-town pair's model saw no label on either town) on ALL label sources (operator rulings of other towns included), isotonic map on the trial's labelled rows, each scored off its own town set (G2 s6's rows), so on the trial the map read the trial's own rulings: SEARCH only; the compliant row is mf_p14_loco. `lab mf-fit --source all --calibration trial`. The cut by rule 6.1(a) over the sweep.",
+ "model": {"const": 0.0},
+ "ladder": [
+  {"rung": "veto"},
+  {"rung": "mf_score", "model": "$AUTODEDUP_LAB_MODELS/all/{cohort}/{block}.json", "t_merge": 0.8, "t_band": 0.2},
+  {"rung": "facts"}
+ ],
+ "group": {"step": "mf_union", "t_neg": 0.2},
+ "sweep": {"ladder.1.t_merge": [0.7, 0.75, 0.8, 0.85, 0.9]}
+}

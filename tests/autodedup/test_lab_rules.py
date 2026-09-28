@@ -190,3 +190,33 @@ def test_a_verify_certifies_the_engine_artefact_and_the_lab_code(tmp_path: Path,
     assert verify.verified(tmp_path) == {old}
     verify.record(tmp_path, cohort, rungs, True)
     assert verify.verified(tmp_path) == {old, verify.stamp("v1")}
+
+
+def test_rule_b_counts_one_reader_per_case_only_the_arm_joins() -> None:
+    kept = {"checks": {"M3": {"arm_only": ["trial: Anenske nam. 2+kk (33553 x 519077)",
+                                           "c17: Decin gardens (285210 x 18624526)",
+                                           "c17: Decin gardens (162157 x 18624521)"]}}}
+    assert rules.readers(kept, 0) == {"verdict": "KEEP", "added": 0, "needed": 2, "max": 2,
+                                      "cases_needing_a_reader": ["Anenske nam. 2+kk",
+                                                                 "Decin gardens"]}
+    assert rules.readers(kept, 1)["verdict"] == "DROP"
+    assert rules.readers({"checks": {}}, 2)["verdict"] == "KEEP"
+
+
+def test_stop_rules_combine_a_and_b_as_lab_keep_prints_them() -> None:
+    """`lab keep --readers-added`: a DROP by either rule drops the arm; otherwise (a)'s verdict,
+    so an INCOMPLETE (a) never becomes a KEEP."""
+    table = {(a, b): rules.stop_rules(a, b) for a in ("KEEP", "INCOMPLETE", "DROP")
+             for b in ("KEEP", "DROP")}
+    assert table == {("KEEP", "KEEP"): "KEEP", ("KEEP", "DROP"): "DROP",
+                     ("INCOMPLETE", "KEEP"): "INCOMPLETE", ("INCOMPLETE", "DROP"): "DROP",
+                     ("DROP", "KEEP"): "DROP", ("DROP", "DROP"): "DROP"}
+    arm = {"trial": _row("trial", 480, 2), "c17": _row("c17", 47), "c18": _row("c18", 46)}
+    kept = _keep(arm)
+    assert rules.stop_rules(kept["verdict"], rules.readers(kept, 2)["verdict"]) == "KEEP"
+    assert rules.stop_rules(kept["verdict"], rules.readers(kept, 3)["verdict"]) == "DROP"
+    partial = _keep({"c18": _row("c18", 47)})
+    assert rules.readers(partial, 0)["needed"] == 0
+    assert rules.stop_rules(partial["verdict"], rules.readers(partial, 0)["verdict"]) == "INCOMPLETE"
+    joined = _keep({**arm, "c17": _row("c17", 47, together=["Na Zertvach (624 x 18356370)"])})
+    assert rules.stop_rules(joined["verdict"], rules.readers(joined, 0)["verdict"]) == "DROP"

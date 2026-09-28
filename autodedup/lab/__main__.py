@@ -6,6 +6,8 @@ pre-registered keep and cut rules.
         --evidence --evidence-workers 4                  # the cache: once per export and code
     python3 -m autodedup.lab verify trial --rungs 3000   # no number counts before this passes
     python3 -m autodedup.lab fit --train trial --cohort c17 --cohort c18 --out MODELS
+    python3 -m autodedup.lab ground trial --out GROUNDS/trial.npz  # the challenger's training rows
+    python3 -m autodedup.lab mf-fit --ground trial=GROUNDS/trial.npz ... --score trial --out MF
     python3 -m autodedup.lab run autodedup/lab/experiments/*.json --cohort trial --why
     python3 -m autodedup.lab board --out LEADERBOARD.md
     python3 -m autodedup.lab keep ARM --incumbent w31_reference [--alias c18=c18_w31r1]
@@ -211,8 +213,13 @@ def cmd_keep(args: argparse.Namespace) -> int:
     result = rules.keep(arm, incumbent, verify.verified(_root(reg)), args.validate,
                         accepted=args.accept or (), fixtures=metrics.load_fixtures(),
                         aliased=aliases)
+    if args.readers_added is not None:
+        result["rule_b"] = rules.readers(result, args.readers_added)
+        result["stop_rules"] = rules.stop_rules(result["verdict"], result["rule_b"]["verdict"])
     print(json.dumps({"arm": args.arm, "incumbent": args.incumbent, "aliases": aliases,
-                      **result}, indent=1))
+                      "rule_names": rules.RULE_INCUMBENT,
+                      "stands_for_it": args.incumbent != rules.RULE_INCUMBENT, **result},
+                     indent=1))
     return 0
 
 
@@ -230,7 +237,9 @@ def cmd_cut(args: argparse.Namespace) -> int:
                                     args.validate, accepted=args.accept or (),
                                     fixtures=metrics.load_fixtures())
     print(json.dumps({"arm": args.arm, "param": args.param, "incumbent": args.incumbent,
-                      **result}, indent=1))
+                      "rule_names": rules.RULE_INCUMBENT,
+                      "stands_for_it": args.incumbent != rules.RULE_INCUMBENT, **result},
+                     indent=1))
     return 0
 
 
@@ -241,6 +250,34 @@ def cmd_fit(args: argparse.Namespace) -> int:
     others = (open_cohort(name, args.cohorts, workers=args.workers)
               for name in args.cohort or () if name != args.train)
     report = fit.fit(train, others, labels, Path(args.out), _root(reg))
+    print(json.dumps(report, indent=1))
+    return 0
+
+
+def cmd_ground(args: argparse.Namespace) -> int:
+    from autodedup.lab import ground
+
+    reg = registry(args.cohorts)
+    cache = (open_cohort(args.cohort, args.cohorts, workers=args.workers)
+             if reg["cohorts"][args.cohort].get("run") else None)
+    built = ground.build(reg, args.cohort, cache, args.settings, args.model)
+    ground.write(args.out, built)
+    print(str(built["meta"]))
+    return 0
+
+
+def cmd_mf_fit(args: argparse.Namespace) -> int:
+    from autodedup.lab import mf_fit
+
+    reg = registry(args.cohorts)
+    grounds = []
+    for item in args.ground:
+        name, _, path = item.partition("=")
+        if not name or not path:
+            raise SystemExit(f"--ground wants NAME=PATH, got {item!r}")
+        grounds.append(mf_fit.load_ground(name, path))
+    mf_fit.check_seals(grounds, reg)
+    report = mf_fit.sealed(grounds, args.score, args.source, args.calibration, Path(args.out))
     print(json.dumps(report, indent=1))
     return 0
 
@@ -265,6 +302,24 @@ def build_parser() -> argparse.ArgumentParser:
     learn.add_argument("--cohort", action="append", help="a cohort to score (repeat)")
     learn.add_argument("--out", required=True, help="directory for gbm_<cohort>.npz")
     learn.set_defaults(fn=cmd_fit)
+    gr = sub.add_parser("ground", help="one cohort's labelled pairs as the challenger's training rows")
+    gr.add_argument("cohort")
+    gr.add_argument("--out", required=True, help="the ground file (.npz)")
+    gr.add_argument("--settings", default="w31",
+                    help="the settings row of a cohort with no cache (a cached one uses its own)")
+    gr.add_argument("--model", default="w6_gold", help="likewise, the model row")
+    gr.set_defaults(fn=cmd_ground)
+    mf = sub.add_parser("mf-fit", help="the challenger's model files, sealed by town")
+    mf.add_argument("--ground", action="append", required=True,
+                    help="NAME=PATH of a `lab ground` file (repeat; the order is the training row "
+                         "order)")
+    mf.add_argument("--score", action="append", required=True, help="a cohort to write models for")
+    mf.add_argument("--source", choices=("all", "judge"), default="all")
+    mf.add_argument("--calibration", choices=("loco", "trial", "pooled"), default="loco",
+                    help="loco: a map per scored cohort off the other grounds (default); trial / "
+                         "pooled: G2's s6 / s5 maps, which read the scored cohort's labels")
+    mf.add_argument("--out", required=True, help="directory for <source>/<cohort>/<town>.json")
+    mf.set_defaults(fn=cmd_mf_fit)
     run = sub.add_parser("run")
     run.add_argument("configs", nargs="+")
     run.add_argument("--cohort", action="append", required=True)
@@ -305,6 +360,9 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--alias", action="append",
                              help="COHORT=SIBLING: the arm's rows on a sibling artefact of "
                                   "COHORT's export (another settings row) stand for COHORT's")
+            cmd.add_argument("--readers-added", type=int,
+                             help="rule 6.1 (b) for a challenger arm: readers or tolerances "
+                                  "it adds back over MF-P14")
         if name == "cut":
             cmd.add_argument("--param", default="t_merge")
             cmd.add_argument("--read", default=rules.READ)

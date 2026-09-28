@@ -40,14 +40,17 @@ from autodedup.lab.cache import ZONE_CODE, Cohort
 SCORE_TOL: float = 1e-6
 VERIFIED_FILE: str = "verified.jsonl"
 LAB_DIR: Path = Path(__file__).resolve().parent
-DECIDING: tuple[str, ...] = ("board.py", "cache.py", "score.py", "verify.py")
+DECIDING: tuple[str, ...] = ("board.py", "cache.py", "challenger.py", "score.py", "verify.py")
+CHALLENGER_DIR: Path = LAB_DIR.parent / "challenger"
 
 
 def lab_digest() -> str:
-    """The lab code that decides (not part of the artefact's version)."""
+    """The lab code that decides (not part of the artefact's version): the lab's deciding modules
+    and the challenger package its rungs call."""
     digest = hashlib.sha1()
-    for name in DECIDING:
-        path = LAB_DIR / name
+    paths = [(name, LAB_DIR / name) for name in DECIDING] + [
+        (f"challenger/{path.name}", path) for path in sorted(CHALLENGER_DIR.glob("*.py"))]
+    for name, path in paths:
         digest.update(name.encode() + b"\0" + (path.read_bytes() if path.is_file() else b"") + b"\0")
     return digest.hexdigest()[:12]
 

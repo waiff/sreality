@@ -80,6 +80,8 @@ class Decisions:
     reason: np.ndarray
     cert: np.ndarray
     score: np.ndarray
+    columns: dict[str, np.ndarray] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def blank(cls, n: int, score: np.ndarray) -> "Decisions":
@@ -577,6 +579,9 @@ def decide(c: Cohort, config: dict[str, Any], finish: bool = True,
     for step in ladder:
         d = RUNGS[step["rung"]](c, d, step)
     d = RUNGS["veto"](c, d, {})
+    if scorer is not None and d.provenance:
+        scorer.clear()
+        scorer.update(d.provenance)
     if not finish:
         return d, walls_forced
     rest = d.zone == U
@@ -633,3 +638,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config = json.loads(Path(path).read_text(encoding="utf-8"))
     config.setdefault("name", Path(path).stem)
     return config
+
+
+# The challenger's rungs (`mf_score`, `facts`) and group step (`mf_union`) register on import.
+from autodedup.lab import challenger as _challenger  # noqa: E402,F401
