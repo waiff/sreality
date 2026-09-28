@@ -11,8 +11,10 @@ merge is a positive unless an operator label or must-not-link holds the pair.
 A pair's feature row is the one path's: a candidate's row is the cache's (`harness run --evidence`),
 and a labelled pair retrieval never produced is featurised by the lane's own explicit-pair call
 (`harness.decide_explicit`). A cohort with no cache (an origin-fixture cohort) has every labelled
-pair featurised that way off its export. The file carries its digest, its settings row's and the
-cache's, and `lab mf-fit` trains on no other file.
+pair featurised that way off its export. The file also names the town sets the cohort's candidates
+span (`spans`, `challenger.town_set`), so `lab mf-fit` writes one sealed model per set. It carries
+its digest (of the rows; `towns` and `spans` are the cohort's), its settings row's and the cache's,
+and `lab mf-fit` trains on no other file.
 
 The registry's `train` block names the label files: `{"judges": {origin: [paths]}, "c7": dir}`;
 the operator's files are the registry's `labels`."""
@@ -33,6 +35,7 @@ from autodedup.dataset import Dataset, Listing, load
 from autodedup.features import FEATURE_ORDER
 from autodedup.incremental import Calibration
 from autodedup.indistinguishable import _price_points, honest_overlap_days, price_paths_agree
+from autodedup.lab.challenger import town_set
 from autodedup.labels import (label_pairs, load_all_judgements, load_operator_labels,
                               operator_label_pairs, pair_key)
 from autodedup.model import LogisticModel
@@ -193,11 +196,14 @@ def build(reg: Mapping[str, Any], name: str, cache: Any | None = None,
               "blocks": np.array([(L[a].block, L[b].block) for a, b in keys], dtype=str
                                  ).reshape(-1, 2),
               "towns": np.array(sorted({x.block for x in L.values()}), dtype=str),
+              "spans": np.array(sorted({town_set(L[a].block, L[b].block) for a, b in index}),
+                                dtype=str),
               "feature_order": np.array(FEATURE_ORDER, dtype=str)}
     meta = {"builder": BUILDER, "cohort": name, "digest": digest(arrays), "cache": version,
             "export": spec["export"], "settings": hashlib.sha1(
                 evidence.settings_bytes(settings)).hexdigest()[:12],
             "rows": len(keys), "candidates": len(keys) - len(extra), "featurised": len(extra),
+            "spans": len(arrays["spans"]),
             "label_files": _label_files(reg, name)}
     return {**arrays, "meta": np.array(json.dumps(meta, sort_keys=True))}
 

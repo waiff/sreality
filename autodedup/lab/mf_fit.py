@@ -2,10 +2,11 @@
 
 The training data is one GROUND per cohort, built by `lab ground` (`autodedup/lab/ground.py`; any
 other file is refused): its labelled pairs, each with its feature row, label, weight, origin and the
-towns of its two adverts. A town's model trains on every kept label of every ground that touches no
-advert of that town, whichever ground holds it, and scores only the pairs whose lo advert sits in it.
-Each ground's labelled rows are scored by their own town's model, and those out-of-town raw scores
-fit the isotonic map: `loco` fits one map per scored cohort on every OTHER ground's kept rows
+towns of its two adverts, and the town sets its candidates span. A model belongs to a TOWN SET (one
+town, or the two towns of a cross-town pair, `challenger.town_set`): it trains on every kept label
+of every ground that touches no advert of any town in the set, whichever ground holds it, and scores
+only the pairs that span exactly that set. Each ground's labelled rows are scored by their own set's
+model, and those out-of-set raw scores fit the isotonic map: `loco` fits one map per scored cohort on every OTHER ground's kept rows
 (GLOBAL_SEARCH 1.4 / 2.1: never on the cohort it scores); `trial` fits one on the trial's rows (G2's
 s6) and `pooled` one on every ground's kept rows (G2's s5), both kept for the G2-compatible rows and
 both reading the scored cohort's own labels. Each model is written as the JSON file
@@ -30,6 +31,7 @@ import numpy as np
 from autodedup import evidence
 from autodedup.challenger.score import FORMAT, scorer
 from autodedup.lab import ground as lab_ground
+from autodedup.lab.challenger import town_set
 
 PARAMS: dict[str, Any] = {"max_iter": 400, "learning_rate": 0.05, "max_leaf_nodes": 31,
                           "min_samples_leaf": 20, "l2_regularization": 1.0,
@@ -57,8 +59,14 @@ class Ground:
     origin: np.ndarray
     blocks: np.ndarray
     towns: list[str]
+    spans: list[str]
     feature_order: list[str]
     meta: dict[str, Any]
+
+    @property
+    def sets(self) -> np.ndarray:
+        """Each labelled row's town set."""
+        return np.array([town_set(a, b) for a, b in self.blocks.tolist()], dtype=object)
 
 
 class NotALabGround(ValueError):
@@ -73,10 +81,13 @@ def load_ground(name: str, path: str | Path) -> Ground:
         raise NotALabGround(f"{path}: not a `lab ground` file of cohort {name} ({meta or 'no meta'})")
     if lab_ground.digest({k: data[k] for k in data.files}) != meta.get("digest"):
         raise NotALabGround(f"{path}: its rows are not the ones `lab ground` wrote")
+    if "spans" not in data.files:
+        raise NotALabGround(f"{path}: written before grounds carried their town sets; rebuild it")
     return Ground(name, data["keys"].astype(np.int64), data["V"].astype(np.float64),
                   data["P"].astype(bool), data["y"].astype(np.int64), data["w"].astype(np.float64),
                   data["origin"].astype(str), data["blocks"].astype(str),
-                  [str(t) for t in data["towns"]], [str(f) for f in data["feature_order"]], meta)
+                  [str(t) for t in data["towns"]], [str(t) for t in data["spans"]],
+                  [str(f) for f in data["feature_order"]], meta)
 
 
 def check_seals(grounds: Sequence[Ground], reg: Mapping[str, Any]) -> None:
@@ -180,6 +191,8 @@ def export(fitted: Fitted, feature_order: Sequence[str], iso: Any | None,
 def equivalence(model: Mapping[str, Any], fitted: Fitted, iso: Any | None, X: np.ndarray
                 ) -> float:
     """The largest |p| difference between the pure-Python evaluation and scikit-learn."""
+    if not len(X):
+        return 0.0
     want = fitted.raw(X)
     if iso is not None:
         want = iso.predict(want)
@@ -194,15 +207,16 @@ def _digest(g: Sequence[Ground], masks: Sequence[np.ndarray]) -> str:
     return hashlib.sha1(json.dumps(body).encode()).hexdigest()[:12]
 
 
-def _touching(g: Ground, town: str) -> np.ndarray:
-    return (g.blocks[:, 0] == town) | (g.blocks[:, 1] == town)
+def _touching(g: Ground, key: str) -> np.ndarray:
+    towns = key.split("+")
+    return np.isin(g.blocks[:, 0], towns) | np.isin(g.blocks[:, 1], towns)
 
 
 def sealed(grounds: Sequence[Ground], scored: Sequence[str], source: str, calibration: str,
            out: Path) -> dict[str, Any]:
-    """Every town of every `scored` cohort gets a model file under `out/<source>/<cohort>/`; the
-    report says what each one trained on, which map it carries and how far its evaluation is
-    from scikit-learn."""
+    """Every town and every town set a candidate or a label spans, of every `scored` cohort, gets a
+    model file under `out/<source>/<cohort>/`; the report says what each one trained on, which map
+    it carries and how far its evaluation is from scikit-learn."""
     import sklearn
 
     if calibration not in CALIBRATIONS:
@@ -213,9 +227,9 @@ def sealed(grounds: Sequence[Ground], scored: Sequence[str], source: str, calibr
     by_name = {g.name: g for g in grounds}
     fitted: dict[tuple[Any, ...], tuple[Fitted, dict[str, Any]]] = {}
 
-    def model_for(town: str) -> tuple[Any, ...]:
-        """The town's model: every kept row of every ground that touches the town is out."""
-        out_rows = [masks[h.name] & _touching(h, town) for h in grounds]
+    def model_for(key: str) -> tuple[Any, ...]:
+        """The town set's model: every kept row of every ground that touches a town of it is out."""
+        out_rows = [masks[h.name] & _touching(h, key) for h in grounds]
         key = tuple((h.name, tuple(np.flatnonzero(m).tolist()))
                     for h, m in zip(grounds, out_rows) if m.any())
         if key not in fitted:
@@ -235,18 +249,20 @@ def sealed(grounds: Sequence[Ground], scored: Sequence[str], source: str, calibr
     raw: dict[str, np.ndarray] = {}
 
     def raw_of(g: Ground) -> np.ndarray:
-        """Every labelled row of `g` scored by its own lo town's sealed model."""
+        """Every labelled row of `g` scored by its own town set's sealed model."""
         if g.name not in raw:
             column = np.full(len(g.y), np.nan)
-            for town in sorted(set(g.blocks[:, 0].tolist())):
-                rows = g.blocks[:, 0] == town
-                column[rows] = fitted[model_for(town)][0].raw(design(g.V[rows], g.P[rows]))
+            sets = g.sets
+            for key in sorted(set(sets.tolist())):
+                rows = sets == key
+                column[rows] = fitted[model_for(key)][0].raw(design(g.V[rows], g.P[rows]))
             raw[g.name] = column
         return raw[g.name]
 
-    towns_of = {name: [(town, model_for(town)) for town in
-                       sorted(set(by_name[name].towns) | set(by_name[name].blocks[:, 0].tolist()))]
-                for name in scored}
+    sets_of = {name: [(key, model_for(key)) for key in
+                      sorted(set(by_name[name].towns) | set(by_name[name].spans)
+                             | set(by_name[name].sets.tolist()))]
+               for name in scored}
     maps: dict[str, tuple[Any, dict[str, Any]]] = {}
     for name in scored:
         if calibration == "trial":
@@ -265,12 +281,12 @@ def sealed(grounds: Sequence[Ground], scored: Sequence[str], source: str, calibr
             "neg": int((ys == 0).sum()), "cohorts": [g.name for g, _ in base],
             "labels": "all" if calibration == "trial" else source,
             "reads_the_scored_cohort": any(g.name == name for g, _ in base),
-            "note": {"loco": "every other ground's kept rows, each scored by its own town's sealed "
-                             "model; no row of the scored cohort",
-                     "trial": "the trial's labelled rows, each scored by its own town's sealed "
-                              "model (G2 s6)",
-                     "pooled": "every ground's kept rows, each scored by its own town's sealed "
-                               "model (G2 s5 pooled)"}[calibration]})
+            "note": {"loco": "every other ground's kept rows, each scored by its own town set's "
+                             "sealed model; no row of the scored cohort",
+                     "trial": "the trial's labelled rows, each scored by its own town set's sealed "
+                              "model (G2 s6's rows)",
+                     "pooled": "every ground's kept rows, each scored by its own town set's sealed "
+                               "model (G2 s5's rows)"}[calibration]})
     report: dict[str, Any] = {"source": source, "calibration": calibration,
                               "grounds": {g.name: g.meta for g in grounds}, "maps": {},
                               "cohorts": {}}
@@ -278,29 +294,33 @@ def sealed(grounds: Sequence[Ground], scored: Sequence[str], source: str, calibr
         g = by_name[name]
         iso, fitted_on = maps[name]
         report["maps"][name] = fitted_on
-        for town, key in towns_of[name]:
+        sets = g.sets
+        for tset, key in sets_of[name]:
             model, trained = fitted[key]
-            card = {"source": source, "cohort": name, "town": town,
-                    "sealed": f"no label touching an advert of {town}, in any ground, trains it",
+            card = {"source": source, "cohort": name, "town_set": tset,
+                    "sealed": f"no label touching an advert of {' or '.join(tset.split('+'))}, "
+                              "in any ground, trains it",
                     "trained_on": trained, "learner": "sklearn.HistGradientBoostingClassifier",
                     "params": PARAMS, "sklearn": sklearn.__version__,
                     "sample_weight": "the label's weight, class mass equalised",
                     "grounds": {h.name: h.meta.get("digest") for h in grounds},
                     "calibration": fitted_on, "exporter": FORMAT}
             spec = export(model, g.feature_order, iso, card)
-            rows = g.blocks[:, 0] == town
+            rows = sets == tset
+            on = tset if rows.any() else f"every labelled row of {name} (none spans {tset})"
+            rows = rows if rows.any() else np.ones(len(sets), dtype=bool)
             X = design(g.V[rows], g.P[rows])
             gap = equivalence(spec, model, iso, X)
             if gap > TOLERANCE:
-                raise AssertionError(f"{name}/{town}: pure Python differs from scikit-learn by {gap}")
-            spec["card"]["equivalence"] = {"rows": int(rows.sum()), "max_abs_dp": gap,
-                                           "tolerance": TOLERANCE}
-            path = out / source / name / f"{town}.json"
+                raise AssertionError(f"{name}/{tset}: pure Python differs from scikit-learn by {gap}")
+            spec["card"]["equivalence"] = {"rows": int(rows.sum()), "rows_of": on,
+                                           "max_abs_dp": gap, "tolerance": TOLERANCE}
+            path = out / source / name / f"{tset}.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(spec, separators=(",", ":")), encoding="utf-8")
             tmp.replace(path)
-            report["cohorts"].setdefault(name, {})[town] = {
+            report["cohorts"].setdefault(name, {})[tset] = {
                 "file": str(path), "trained_on": trained, "equivalence_rows": int(rows.sum()),
                 "max_abs_dp": gap}
     report["models_fitted"] = len(fitted)

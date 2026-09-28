@@ -9,11 +9,15 @@ from the code R2 would ship and from no second implementation.
                 {"rung": "facts"}],
      "group": {"step": "mf_union", "t_neg": 0.2}}
 
-`mf_score` reads one model file per pair: `{block}` is the pair's lo advert's town, so a model
-fitted sealed by town scores only its own town's pairs. The p column is computed once per set of
-model files and cohort cache (pure Python, forked) and kept beside the overlay. `facts` reads the
-pairs an arm left in the merge or band zone (place it after the score), and `mf_union` reads every
-cross pair with the same fact function; their answers are kept in the overlay. Both memos key on
+`mf_score` reads one model file per pair: `{block}` is the pair's TOWN SET (`town_set`: its town,
+or its two towns joined by `+`), so a model fitted sealed off every town of its set scores only the
+pairs spanning exactly that set, and a cross-town pair is never scored by a model that saw a label
+on either of its towns. A model file whose `feature_order` is not the cohort's vector
+(FEATURE_ORDER) is refused. The p column is computed once per set of model files and cohort cache
+(pure Python, forked) and kept beside the overlay. `facts` reads the pairs an arm left in the merge
+or band zone (place it after the score), and `mf_union` reads every cross pair with the same fact
+function: the facts rung's `dials` are the only fact dials, recorded in the provenance for the
+group step (which refuses its own). Their answers are kept in the overlay. Both memos key on
 `challenger_code()`, which covers this adapter as well as the package, so an edit to either is never
 served a stale p column or fact."""
 
@@ -44,6 +48,7 @@ TYPED_FAMILY: dict[str, str] = {"deal": "ATTR", "kind": "ATTR", "area": "ATTR", 
                                 "floor": "ATTR", "price": "PRICE", "unit": "TXT",
                                 "body_align": "TXT"}
 P_COLUMN: str = "mf_p"
+FACT_DIALS: str = "fact_dials"
 
 
 def _file_sha(path: Path) -> str:
@@ -56,17 +61,26 @@ def challenger_code() -> str:
     return hashlib.sha1(b"".join(_file_sha(path).encode() for path in paths)).hexdigest()[:12]
 
 
-# --- mf_score: the model files, one per town ------------------------------------------------------
+# --- mf_score: the model files, one per town set --------------------------------------------------
+
+def town_set(a: str, b: str) -> str:
+    """A pair's `{block}`: its one town, or its two towns sorted and joined by `+`."""
+    return a if a == b else "+".join(sorted((a, b)))
+
+
+def _sets(c: Cohort) -> list[str]:
+    L = c.ds.listings
+    return [town_set(L[lo].block, L[hi].block) for lo, hi in c.keys]
+
 
 def model_paths(c: Cohort, template: str) -> dict[str, Path]:
-    """The model file of every town a pair's lo advert sits in (`{block}`), `{cohort}` and `$VARS`
-    expanded; a town with no file is refused, never scored by another town's model."""
-    towns = sorted({c.ds.listings[lo].block for lo, _ in c.keys})
+    """The model file of every town set a pair spans (`{block}`), `{cohort}` and `$VARS` expanded;
+    a set with no file is refused, never scored by another set's model."""
     base = os.path.expandvars(template)
-    out = {town: Path(base.format(cohort=c.name, block=town)) for town in towns}
-    missing = sorted(town for town, path in out.items() if not path.is_file())
+    out = {key: Path(base.format(cohort=c.name, block=key)) for key in sorted(set(_sets(c)))}
+    missing = sorted(key for key, path in out.items() if not path.is_file())
     if missing:
-        raise FileNotFoundError(f"{c.name}: no model file for towns {missing} ({template})")
+        raise FileNotFoundError(f"{c.name}: no model file for town sets {missing} ({template})")
     return out
 
 
@@ -75,35 +89,35 @@ _SCORE_JOB: dict[str, Any] = {}
 
 def _score_chunk(idx: list[int]) -> list[float]:
     job = _SCORE_JOB
-    V, P, town, fns, width = job["V"], job["P"], job["town"], job["fns"], job["width"]
+    V, P, which, fns = job["V"], job["P"], job["which"], job["fns"]
     out = []
     for i in idx:
         x = [float(v) if present else None for v, present in zip(V[i].tolist(), P[i].tolist())]
-        x += [None] * (width - len(x))
-        out.append(fns[town[i]](x))
+        out.append(fns[which[i]](x))
     return out
 
 
 def learned_scores(c: Cohort, template: str) -> tuple[np.ndarray, dict[str, Any]]:
-    """The challenger's p for every pair and its provenance (each town's model file and card)."""
+    """The challenger's p for every pair and its provenance (each town set's model file and
+    card)."""
     paths = model_paths(c, template)
-    specs = {town: json.loads(path.read_text("utf-8")) for town, path in paths.items()}
-    for town, spec in specs.items():
-        if list(spec["feature_order"][:len(FEATURE_ORDER)]) != list(FEATURE_ORDER):
-            raise ValueError(f"{paths[town]}: its feature order is not this checkout's")
-    shas = {town: _file_sha(path) for town, path in paths.items()}
+    specs = {key: json.loads(path.read_text("utf-8")) for key, path in paths.items()}
+    for key, spec in specs.items():
+        if list(spec["feature_order"]) != list(FEATURE_ORDER):
+            raise ValueError(f"{paths[key]}: its {len(spec['feature_order'])} features are not the "
+                             f"{len(FEATURE_ORDER)} this cohort supplies (FEATURE_ORDER)")
+    shas = {key: _file_sha(path) for key, path in paths.items()}
     digest = hashlib.sha1(json.dumps([c.version, shas, challenger_code()],
                                      sort_keys=True).encode()).hexdigest()[:12]
     provenance = {"kind": "mf", "template": template, "digest": digest, "files": shas,
-                  "cards": {town: spec.get("card", {}) for town, spec in specs.items()}}
+                  "cards": {key: spec.get("card", {}) for key, spec in specs.items()}}
     memo = c.path / "mf_scores" / f"{digest}.npy"
     if memo.is_file():
         return np.load(memo), provenance
     names = sorted(specs)
-    town_of = {town: k for k, town in enumerate(names)}
-    _SCORE_JOB.update(V=c.V, P=c.P, fns=[scorer(specs[t]) for t in names],
-                      town=np.array([town_of[c.ds.listings[lo].block] for lo, _ in c.keys]),
-                      width=max(len(spec["feature_order"]) for spec in specs.values()))
+    index = {key: k for k, key in enumerate(names)}
+    _SCORE_JOB.update(V=c.V, P=c.P, fns=[scorer(specs[key]) for key in names],
+                      which=np.array([index[key] for key in _sets(c)]))
     chunks = [list(range(k, min(k + 2000, c.n))) for k in range(0, c.n, 2000)]
     try:
         if c.workers <= 1 or len(chunks) <= 1:
@@ -130,7 +144,7 @@ def mf_score_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     t_merge, t_band = float(p.get("t_merge", 0.8)), float(p.get("t_band", 0.2))
     d.score[:] = column
     d.columns[P_COLUMN] = column
-    d.provenance = {**provenance, "t_merge": t_merge, "t_band": t_band}
+    d.provenance = {**d.provenance, **provenance, "t_merge": t_merge, "t_band": t_band}
     m = d.zone == U
     d.settle(m & (column >= t_merge), MERGE, "mf_score", "cut", "NONE", "mf_score")
     d.settle(m & (column >= t_band) & (column < t_merge), BAND, "mf_score", "band", "NONE",
@@ -191,9 +205,12 @@ def read_pairs(c: Cohort, read: Callable[[int, int], str | None],
 @rung("facts")
 def facts_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
     """A stated difference (`challenger.facts`) vetoes every pair not yet settled below the band:
-    it never merges and no group joins across it. `dials` overrides the fact dials."""
+    it never merges and no group joins across it. `dials` overrides the fact dials, for this rung
+    and (through the provenance) for `mf_union`."""
     d = d.copy()
     read, memo = stated(c, p.get("dials"))
+    if p.get("dials"):
+        d.provenance = {**d.provenance, FACT_DIALS: dict(p["dials"])}
     idx = np.flatnonzero(np.isin(d.zone, (U, MERGE, BAND)) & ~d.final)
     read_pairs(c, read, memo, [c.keys[i] for i in idx])
     names = np.empty(c.n, dtype=object)
@@ -213,10 +230,13 @@ def facts_rung(c: Cohort, d: Decisions, p: dict[str, Any]) -> Decisions:
 @group_step("mf_union")
 def mf_union_group(c: Cohort, d: Decisions, p: dict[str, Any]) -> Groups:
     """The merge edges joined by `challenger.union` (`t_neg`, `must_link`, `must_not_link`), every
-    cross pair read by the facts rung's own function (`dials`). `rulings` (a labels directory,
+    cross pair read by the facts rung's own function under the facts rung's dials (a `dials` key
+    here is refused: one fact function at pair and group grain). `rulings` (a labels directory,
     `$VARS` expanded) binds the operator's rulings on the cohort's adverts: `same` as must-links,
     `different` and must-not-links as must-not-links."""
-    read, _ = stated(c, p.get("dials"))
+    if "dials" in p:
+        raise ValueError("mf_union reads the facts rung's dials; set `dials` on the facts rung")
+    read, _ = stated(c, d.provenance.get(FACT_DIALS))
     learned = d.columns.get(P_COLUMN, d.score)
     merges = np.flatnonzero(d.zone == MERGE)
     edges = [(c.keys[i][0], c.keys[i][1], float(learned[i])) for i in merges]

@@ -4,6 +4,7 @@ the proof that the live lane cannot import it while it is lab-only."""
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import math
 import random
@@ -140,6 +141,20 @@ def test_a_real_reader_fires_through_distinguishing_facts() -> None:
     b = _listing(2, description="Byt 2+kk o vymere 45 m2 se nachazi v prizemi cihloveho domu.")
     assert _fact(a, b)(1, 2) in {"printed_area", "body_align"}
     assert _fact(a, b, dials=Dials(body_align=1.0))(1, 2) == "printed_area"
+
+
+def test_the_two_fixed_inputs_outside_the_dials() -> None:
+    """The dial census: besides the ten Dials, the area fact reads the settings row's
+    `d43_block_plot_area` (a parcel's printed plot fills its empty area) and body_align always
+    heals."""
+    a = _listing(1, category_main="pozemek", description="Prodej pozemku, celková plocha (m2): 312")
+    b = _listing(2, category_main="pozemek", description="Prodej pozemku, celková plocha (m2): 500")
+    off = dataclasses.replace(W31, d43_block_plot_area=False)
+    assert W31.d43_block_plot_area and W31.d43_body_align_heal
+    assert mf_facts._typed(a, b, W31, Dials()) == "area"
+    assert mf_facts._typed(a, b, off, Dials()) is None
+    assert mf_facts.BODY_ALIGN_HEAL is True
+    assert len(dataclasses.fields(Dials)) == 10
 
 
 # --- score ----------------------------------------------------------------------------------------
@@ -325,6 +340,63 @@ def test_the_rulings_bind_in_the_union_and_rule_15_still_holds(tmp_path: Path) -
                                 "must_link_apart": 1, "must_link_apart_rule_15": 1}
 
 
+def _config(tmp_path: Path, facts: dict[str, Any] | None = None,
+            group: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"model": {"const": 0.0},
+            "ladder": [{"rung": "veto"},
+                       {"rung": "mf_score", "model": str(tmp_path / "models" / "{block}.json")},
+                       {"rung": "facts", **(facts or {})}],
+            "group": {"step": "mf_union", "t_neg": 0.2, **(group or {})}}
+
+
+def test_a_cross_town_pair_is_scored_by_its_town_sets_model(tmp_path: Path) -> None:
+    """`{block}` is the pair's town set: a pair spanning two towns needs the model sealed off both
+    (`town1+town2.json`), never the lo advert's town's."""
+    from autodedup.lab import board
+    from autodedup.lab.challenger import town_set
+
+    c = _lab_cohort(tmp_path)
+    c.ds.listings[7].block = "town2"
+    assert town_set("town2", "town1") == town_set("town1", "town2") == "town1+town2"
+    with pytest.raises(FileNotFoundError, match=r"town1\+town2"):
+        board.run(c, _config(tmp_path))
+    model = json.loads((tmp_path / "models" / "town1.json").read_text())
+    model["card"] = {"set": "town1+town2"}
+    (tmp_path / "models" / "town1+town2.json").write_text(json.dumps(model))
+    out = board.run(c, _config(tmp_path))
+    assert set(out.scorer["files"]) == {"town1", "town1+town2"}
+    assert out.scorer["cards"]["town1+town2"] == {"set": "town1+town2"}
+
+
+def test_a_model_is_refused_unless_it_reads_the_cohorts_vector(tmp_path: Path) -> None:
+    """A model trained with inputs the cohort does not supply is refused, never scored with them
+    missing."""
+    from autodedup.lab import board
+
+    c = _lab_cohort(tmp_path)
+    path = tmp_path / "models" / "town1.json"
+    model = json.loads(path.read_text())
+    for order in (model["feature_order"] + ["head_room_kitchen"], model["feature_order"][:-1]):
+        path.write_text(json.dumps(model | {"feature_order": order}))
+        with pytest.raises(ValueError, match="features are not the"):
+            board.run(c, _config(tmp_path))
+
+
+def test_the_fact_dials_are_set_once_for_pair_and_group_grain(tmp_path: Path) -> None:
+    """The facts rung's dials are the union's too; the union refuses dials of its own."""
+    from autodedup.lab import board
+
+    c = _lab_cohort(tmp_path)
+    wide = {"dials": {"area": 0.7, "colive_area": 0.7}}
+    out = board.run(c, _config(tmp_path, facts=wide))
+    assert [board.ZONE_NAMES[z] for z in out.decisions.zone][3:] == ["merge", "merge", "merge"]
+    assert out.groups.clusters == {1: (1, 2), 4: (4, 5, 6, 7)}
+    assert out.scorer["fact_dials"] == wide["dials"]
+    assert board.run(c, _config(tmp_path)).groups.clusters == {1: (1, 2), 4: (4, 5)}
+    with pytest.raises(ValueError, match="facts rung's dials"):
+        board.run(c, _config(tmp_path, facts=wide, group=wide))
+
+
 def test_the_memos_key_on_the_adapter_too(monkeypatch: Any, tmp_path: Path) -> None:
     from autodedup.lab import challenger as lab_challenger
 
@@ -338,7 +410,7 @@ def test_the_memos_key_on_the_adapter_too(monkeypatch: Any, tmp_path: Path) -> N
 # --- mf-fit: the town seal, the map off the scored cohort, the seals, lab grounds only ---------
 
 def _ground_file(path: Path, name: str, towns: list[str], n: int, seed: int,
-                 settings: str = "s1") -> Path:
+                 settings: str = "s1", spans: list[str] | None = None) -> Path:
     np = pytest.importorskip("numpy")
     from autodedup.lab import ground as lab_ground
 
@@ -352,7 +424,8 @@ def _ground_file(path: Path, name: str, towns: list[str], n: int, seed: int,
               "V": V, "P": np.ones((n, 3), dtype=bool), "y": y, "w": np.ones(n),
               "origin": np.array(["operator" if i % 2 else "w6" for i in range(n)]),
               "src": np.array(["op_explicit"] * n), "blocks": np.array(list(zip(lo, hi))),
-              "towns": np.array(sorted(towns)), "feature_order": np.array(["f0", "f1", "f2"])}
+              "towns": np.array(sorted(towns)), "spans": np.array(sorted(spans or [])),
+              "feature_order": np.array(["f0", "f1", "f2"])}
     meta = {"builder": lab_ground.BUILDER, "cohort": name, "digest": lab_ground.digest(arrays),
             "settings": settings}
     np.savez(path, **arrays, meta=np.array(json.dumps(meta)))
@@ -381,6 +454,60 @@ def test_a_town_is_sealed_in_every_ground_and_the_loco_map_reads_no_scored_row(
     assert pooled["maps"]["a"]["reads_the_scored_cohort"]
 
 
+def test_no_labelled_row_is_scored_by_a_model_that_saw_a_label_on_either_of_its_towns(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """The review's cross-town leak: a pair spanning town1 and town2 was scored by town1's model,
+    which trained on labels touching town2. Every raw score the maps read now comes from a model
+    that saw no label on either town of the row, and every set a candidate spans (`spans`) gets its
+    own file (one no label spans is checked against scikit-learn on the ground's rows)."""
+    pytest.importorskip("sklearn")
+    from autodedup.lab import mf_fit
+
+    a = mf_fit.load_ground("a", _ground_file(tmp_path / "a.npz", "a", ["town1", "town2"], 160, 1,
+                                             spans=["town1", "town1+town2", "town2"]))
+    b = mf_fit.load_ground("b", _ground_file(tmp_path / "b.npz", "b", ["town1", "town3"], 160, 2,
+                                             spans=["town1+town3", "town4+town9"]))
+    towns_of = {g.V[r].tobytes(): set(g.blocks[r].tolist()) for g in (a, b) for r in range(len(g.y))}
+    fit, raw, check = mf_fit.fit_model, mf_fit.Fitted.raw, mf_fit.equivalence
+    scored: list[int] = []
+    checking: list[bool] = []
+
+    def spy_fit(X: Any, y: Any, w: Any, params: Any = mf_fit.PARAMS) -> Any:
+        fitted = fit(X, y, w, params)
+        fitted.saw = set().union(*(towns_of[row.tobytes()] for row in X))
+        return fitted
+
+    def spy_raw(self: Any, X: Any) -> Any:
+        if not checking:
+            for row in X:
+                assert not towns_of[row.tobytes()] & self.saw
+            scored.append(len(X))
+        return raw(self, X)
+
+    def spy_check(*args: Any) -> float:
+        checking.append(True)
+        try:
+            return check(*args)
+        finally:
+            checking.pop()
+
+    monkeypatch.setattr(mf_fit, "fit_model", spy_fit)
+    monkeypatch.setattr(mf_fit.Fitted, "raw", spy_raw)
+    monkeypatch.setattr(mf_fit, "equivalence", spy_check)
+    report = mf_fit.sealed([a, b], ["a", "b"], "all", "loco", tmp_path / "models")
+    assert sum(scored) == 320
+    assert sorted(report["cohorts"]["a"]) == ["town1", "town1+town2", "town2"]
+    assert sorted(report["cohorts"]["b"]) == ["town1", "town1+town3", "town3", "town4+town9"]
+    cross = report["cohorts"]["a"]["town1+town2"]
+    assert cross["trained_on"]["excluded"] == {"a": 160, "b": int((b.blocks == "town1").any(1).sum())}
+    assert cross["equivalence_rows"] == int((a.sets == "town1+town2").sum()) > 0
+    card = json.loads((tmp_path / "models" / "all" / "a" / "town1+town2.json").read_text())["card"]
+    assert card["town_set"] == "town1+town2" and "town1 or town2" in card["sealed"]
+    assert card["equivalence"]["rows_of"] == "town1+town2"
+    empty = json.loads((tmp_path / "models" / "all" / "b" / "town4+town9.json").read_text())["card"]
+    assert empty["equivalence"]["rows"] == 160 and empty["equivalence"]["max_abs_dp"] <= 1e-9
+
+
 def test_mf_fit_trains_only_on_lab_grounds_off_no_sealed_block(tmp_path: Path) -> None:
     np = pytest.importorskip("numpy")
     from autodedup import evidence
@@ -395,6 +522,11 @@ def test_mf_fit_trains_only_on_lab_grounds_off_no_sealed_block(tmp_path: Path) -
     np.savez(tmp_path / "edited.npz", **data)
     with pytest.raises(mf_fit.NotALabGround):
         mf_fit.load_ground("g", tmp_path / "edited.npz")
+    data = dict(np.load(path))
+    del data["spans"]
+    np.savez(tmp_path / "old.npz", **data)
+    with pytest.raises(mf_fit.NotALabGround, match="town sets"):
+        mf_fit.load_ground("g", tmp_path / "old.npz")
     del data["meta"]
     np.savez(tmp_path / "bare.npz", **data)
     with pytest.raises(mf_fit.NotALabGround):
@@ -438,9 +570,10 @@ def _closure(roots: tuple[str, ...]) -> set[str]:
 
 def test_the_live_lane_imports_nothing_from_the_challenger() -> None:
     lane = _closure(("autodedup/incremental_lane.py", "autodedup/reconcile.py",
-                     "autodedup/harness.py", "autodedup/evidence.py"))
-    assert "autodedup/incremental.py" in lane
-    assert not any(m.startswith("autodedup/challenger/") for m in lane)
+                     "autodedup/harness.py", "autodedup/evidence.py", "api/main.py",
+                     "scraper/realtime_worker.py"))
+    assert {"autodedup/incremental.py", "api/main.py", "scraper/realtime_worker.py"} <= lane
+    assert not any(m.startswith(("autodedup/challenger/", "autodedup/lab/")) for m in lane)
     assert not any(m.startswith("autodedup/challenger/") for m in evidence.engine_modules())
 
 

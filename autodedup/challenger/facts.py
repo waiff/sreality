@@ -13,7 +13,12 @@ Then the fourteen case readers the ladder owns, read by `distinguishing_facts` i
 name (six body-stated readers and the K10 case readers; `obec_prose` is both). A fact reads the two
 adverts and nothing else: no feature row reaches a reader, so no photograph excuses a stated fact
 (K-P; E305r's tight frames are never read) and tags are facts in no mode. A pair reads the same
-whether anybody scored it or not."""
+whether anybody scored it or not.
+
+The typed facts read the `Dials` and two fixed inputs that are not dials (the dial census): the area
+fact fills a parcel's empty area from its printed plot when the settings row's `d43_block_plot_area`
+says so (E293, `effective_area`; on in w31), and body_align always heals the two bodies
+(BODY_ALIGN_HEAL, w31's `d43_body_align_heal`)."""
 
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ READERS: tuple[str, ...] = (
 LAND: str = "pozemek"
 FLAT: str = "byt"
 PLOT_OBJECTS: frozenset[str] = frozenset({"dum", LAND})
+BODY_ALIGN_HEAL: bool = True
 
 
 @dataclass(frozen=True)
@@ -72,7 +78,8 @@ def stated_difference(listings: Mapping[int, Listing], settings: Settings,
                       dials: Dials = Dials()) -> Fact:
     """The one fact function over `listings`, at pair and group grain alike: `fact(a, b)` names
     the first fact the two adverts state differently (TYPED, then READERS order), or None. The
-    settings row governs the readers only; the typed facts read the dials."""
+    settings row governs the readers and `d43_block_plot_area`; the rest of the typed facts read
+    the dials."""
     readers_row = dataclasses.replace(settings, d43_body_align=False, d43_body_align_heal=False)
 
     def fact(x: int, y: int) -> str | None:
@@ -82,7 +89,8 @@ def stated_difference(listings: Mapping[int, Listing], settings: Settings,
             return typed
         if unit_designator_conflict(a, b) is not None:
             return "unit"
-        if aligned_difference(a.description, b.description, dials.body_align, True) is not None:
+        if aligned_difference(a.description, b.description, dials.body_align,
+                              BODY_ALIGN_HEAL) is not None:
             return "body_align"
         return _reader(a, b, readers_row)
 

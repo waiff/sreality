@@ -201,3 +201,22 @@ def test_rule_b_counts_one_reader_per_case_only_the_arm_joins() -> None:
                                                                  "Decin gardens"]}
     assert rules.readers(kept, 1)["verdict"] == "DROP"
     assert rules.readers({"checks": {}}, 2)["verdict"] == "KEEP"
+
+
+def test_stop_rules_combine_a_and_b_as_lab_keep_prints_them() -> None:
+    """`lab keep --readers-added`: a DROP by either rule drops the arm; otherwise (a)'s verdict,
+    so an INCOMPLETE (a) never becomes a KEEP."""
+    table = {(a, b): rules.stop_rules(a, b) for a in ("KEEP", "INCOMPLETE", "DROP")
+             for b in ("KEEP", "DROP")}
+    assert table == {("KEEP", "KEEP"): "KEEP", ("KEEP", "DROP"): "DROP",
+                     ("INCOMPLETE", "KEEP"): "INCOMPLETE", ("INCOMPLETE", "DROP"): "DROP",
+                     ("DROP", "KEEP"): "DROP", ("DROP", "DROP"): "DROP"}
+    arm = {"trial": _row("trial", 480, 2), "c17": _row("c17", 47), "c18": _row("c18", 46)}
+    kept = _keep(arm)
+    assert rules.stop_rules(kept["verdict"], rules.readers(kept, 2)["verdict"]) == "KEEP"
+    assert rules.stop_rules(kept["verdict"], rules.readers(kept, 3)["verdict"]) == "DROP"
+    partial = _keep({"c18": _row("c18", 47)})
+    assert rules.readers(partial, 0)["needed"] == 0
+    assert rules.stop_rules(partial["verdict"], rules.readers(partial, 0)["verdict"]) == "INCOMPLETE"
+    joined = _keep({**arm, "c17": _row("c17", 47, together=["Na Zertvach (624 x 18356370)"])})
+    assert rules.stop_rules(joined["verdict"], rules.readers(joined, 0)["verdict"]) == "DROP"

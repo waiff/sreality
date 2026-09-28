@@ -143,6 +143,13 @@ def readers(kept: Mapping[str, Any], added: int) -> dict[str, Any]:
             "cases_needing_a_reader": cases, "needed": needed, "max": READERS_MAX}
 
 
+def stop_rules(kept: str, rule_b: str) -> str:
+    """Rules 6.1 (a) and (b) together: a DROP by either drops the arm, otherwise (a)'s KEEP or
+    INCOMPLETE. (a) is INCOMPLETE only when the arm joins no fixture, so a (b) DROP beside it comes
+    from the readers added alone and no missing row can lift it."""
+    return "DROP" if "DROP" in (kept, rule_b) else kept
+
+
 def cut(sweep: Mapping[float, Rows], incumbent: Rows, verified: set[str],
         validate: str = VALIDATE, read: str = READ, cuts: Iterable[float] = CUTS
         ) -> dict[str, Any]:

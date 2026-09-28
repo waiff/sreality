@@ -215,10 +215,7 @@ def cmd_keep(args: argparse.Namespace) -> int:
                         aliased=aliases)
     if args.readers_added is not None:
         result["rule_b"] = rules.readers(result, args.readers_added)
-        result["stop_rules"] = ("KEEP" if result["verdict"] == "KEEP"
-                                and result["rule_b"]["verdict"] == "KEEP" else
-                                "INCOMPLETE" if result["verdict"] == "INCOMPLETE"
-                                and result["rule_b"]["verdict"] == "KEEP" else "DROP")
+        result["stop_rules"] = rules.stop_rules(result["verdict"], result["rule_b"]["verdict"])
     print(json.dumps({"arm": args.arm, "incumbent": args.incumbent, "aliases": aliases,
                       "rule_names": rules.RULE_INCUMBENT,
                       "stands_for_it": args.incumbent != rules.RULE_INCUMBENT, **result},

@@ -425,6 +425,7 @@ def test_lab_ground_reads_the_cache_and_featurises_the_rest_through_the_lane(
     (`harness.decide_explicit`), which on a candidate returns the cache's row; `lab mf-fit` reads
     the file back only as written."""
     from autodedup.lab import ground, mf_fit
+    from autodedup.lab.challenger import town_set
 
     keys = set(cohort.keys)
     candidate, judged = cohort.keys[0], cohort.keys[1]
@@ -476,5 +477,10 @@ def test_lab_ground_reads_the_cache_and_featurises_the_rest_through_the_lane(
     bare = ground.build(reg, "fx", None)
     assert json.loads(str(bare["meta"]))["featurised"] == len(rows)
     assert (bare["P"] == built["P"]).all() and (bare["V"][bare["P"]] == built["V"][built["P"]]).all()
+    L = cohort.ds.listings
+    spans = sorted({town_set(L[a].block, L[b].block) for a, b in cohort.keys})
+    assert built["spans"].tolist() == spans and meta["spans"] == len(spans)
+    assert bare["spans"].tolist() == []
     ground.write(tmp_path / "fx.npz", built)
-    assert mf_fit.load_ground("fx", tmp_path / "fx.npz").meta["digest"] == meta["digest"]
+    back = mf_fit.load_ground("fx", tmp_path / "fx.npz")
+    assert back.meta["digest"] == meta["digest"] and back.spans == spans
