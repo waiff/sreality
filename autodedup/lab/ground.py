@@ -140,23 +140,15 @@ def labels(reg: Mapping[str, Any], cohort: str, listings: Mapping[int, Listing]
     return out
 
 
-def _features(ds: Dataset, settings: Settings, model: LogisticModel, fps: Mapping[int, Any] | None,
-              pairs: list[tuple[int, int]]) -> tuple[np.ndarray, np.ndarray]:
-    """The lane's explicit-pair features (`harness.decide_explicit`) as V / P rows."""
-    V = np.zeros((len(pairs), len(FEATURE_ORDER)))
-    P = np.zeros((len(pairs), len(FEATURE_ORDER)), dtype=bool)
+def _explicit(ds: Dataset, settings: Settings, model: LogisticModel,
+              fps: Mapping[int, Any] | None, pairs: list[tuple[int, int]]) -> dict[Any, Any]:
+    """The lane's explicit-pair features (`harness.decide_explicit`), per pair."""
     if not pairs:
-        return V, P
-    cohort = None
-    if fps is not None:
-        cohort = (dict(fps), Calibration.build(dict(fps), ds.listings, settings))
-    rows = harness.decide_explicit(ds, settings, model, pairs, cohort)
-    for i, k in enumerate(pairs):
-        feats = rows[k]["feats"]
-        for j, name in enumerate(FEATURE_ORDER):
-            value, present = feats.get(name, (0.0, False))
-            V[i, j], P[i, j] = float(value), bool(present)
-    return V, P
+        return {}
+    cohort = None if fps is None else (dict(fps), Calibration.build(dict(fps), ds.listings,
+                                                                    settings))
+    return {k: row["feats"] for k, row in
+            harness.decide_explicit(ds, settings, model, pairs, cohort).items()}
 
 
 def digest(arrays: Mapping[str, np.ndarray]) -> str:
@@ -183,15 +175,15 @@ def build(reg: Mapping[str, Any], name: str, cache: Any | None = None,
     found = labels(reg, name, ds.listings)
     keys = list(found)
     extra = [k for k in keys if k not in index]
-    Vx, Px = _features(ds, settings, model, fps, extra)
-    at = {k: i for i, k in enumerate(extra)}
-    width = len(FEATURE_ORDER)
-    V, P = np.zeros((len(keys), width)), np.zeros((len(keys), width), dtype=bool)
+    explicit = _explicit(ds, settings, model, fps, extra)
+    V = np.zeros((len(keys), len(FEATURE_ORDER)))
+    P = np.zeros((len(keys), len(FEATURE_ORDER)), dtype=bool)
     for r, k in enumerate(keys):
         if k in index:
             V[r], P[r] = cache.V[index[k]], cache.P[index[k]]
-        else:
-            V[r], P[r] = Vx[at[k]], Px[at[k]]
+            continue
+        for j, feature in enumerate(FEATURE_ORDER):
+            V[r, j], P[r, j] = explicit[k].get(feature, (0.0, False))
     L = ds.listings
     arrays = {"keys": np.array(keys, dtype=np.int64).reshape(-1, 2), "V": V, "P": P,
               "y": np.array([found[k].y for k in keys], dtype=np.int64),
