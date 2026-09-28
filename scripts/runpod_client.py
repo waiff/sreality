@@ -69,16 +69,23 @@ class GpuOption:
     secure_price_per_hr: float = 0.0
     community_cloud: bool = True
     secure_cloud: bool = False
+    # The cloud this option was listed (and priced) for by `eligible_gpus`, and therefore the
+    # one `run_job_with_fallback` launches it in: one card in two clouds is two rungs.
+    cloud_type: str = "COMMUNITY"
 
-    def price_per_hr(self, cloud_type: str = "COMMUNITY") -> float:
+    def price_per_hr(self, cloud_type: str | None = None) -> float:
         return (
             self.secure_price_per_hr
-            if cloud_type.upper() == "SECURE"
+            if (cloud_type or self.cloud_type).upper() == "SECURE"
             else self.community_price_per_hr
         )
 
-    def offered_in(self, cloud_type: str = "COMMUNITY") -> bool:
-        return self.secure_cloud if cloud_type.upper() == "SECURE" else self.community_cloud
+    def offered_in(self, cloud_type: str | None = None) -> bool:
+        return (
+            self.secure_cloud
+            if (cloud_type or self.cloud_type).upper() == "SECURE"
+            else self.community_cloud
+        )
 
 
 @dataclass(frozen=True)
@@ -145,6 +152,7 @@ class RunPodClient:
                 secure_price_per_hr=g.get("securePrice") or 0.0,
                 community_cloud=bool(g.get("communityCloud", True)),
                 secure_cloud=bool(g.get("secureCloud", False)),
+                cloud_type=cloud,
             )
             for g in body["data"]["gpuTypes"]
             if (g.get(price_key) or 0) > 0
@@ -325,6 +333,7 @@ class RunPodClient:
         volume_gb: int = 0,
         env: dict[str, str] | None = None,
         progress: Callable[[float, PodContext | None], str | None] | None = None,
+        cloud_type: str = "COMMUNITY",
     ) -> JobResult:
         """Launch → wait → collect logs → ALWAYS terminate, even if a step above
         raises. This is the one entry point every wave's RunPod usage should go
@@ -342,11 +351,13 @@ class RunPodClient:
             start_cmd=start_cmd,
             container_disk_gb=container_disk_gb,
             volume_gb=volume_gb,
+            cloud_type=cloud_type,
             env=env,
         )
         pod_id = pod["id"]
         cost_per_hr = pod.get("costPerHr")
-        LOG.info("launched pod %s (%s, $%s/hr)", pod_id, gpu_type_id, cost_per_hr)
+        LOG.info("launched pod %s (%s, %s, $%s/hr)", pod_id, gpu_type_id, cloud_type,
+                 cost_per_hr)
         try:
             status, timed_out, stop_reason = self.wait_for_exit(
                 pod_id,
@@ -389,7 +400,11 @@ class RunPodClient:
         one actually has capacity. Only `NoCapacityError` moves on to the next
         option — any other failure (bad image, auth, quota) is real and not
         GPU-specific, so it propagates immediately rather than burning through
-        the whole list for something retrying won't fix."""
+        the whole list for something retrying won't fix.
+
+        Each option launches in its own `cloud_type` (the cloud `eligible_gpus` listed
+        it for), so a list that holds a card once per cloud walks community and secure
+        supply in the order the caller built it."""
         if not gpu_options:
             raise RunPodError("no GPU options to try")
         last_error: NoCapacityError | None = None
@@ -406,9 +421,11 @@ class RunPodClient:
                     volume_gb=volume_gb,
                     env=env,
                     progress=progress,
+                    cloud_type=gpu.cloud_type,
                 )
             except NoCapacityError as exc:
-                LOG.warning("no capacity for %s, trying next option: %s", gpu.id, exc)
+                LOG.warning("no capacity for %s (%s), trying next option: %s",
+                            gpu.id, gpu.cloud_type, exc)
                 last_error = exc
                 continue
         assert last_error is not None

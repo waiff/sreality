@@ -19,6 +19,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from toolkit.room_taxonomy import ROOM_FAMILIES
+
 _TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "data" / "clip_taxonomy.json"
 
 
@@ -26,7 +28,9 @@ _TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "data" / "clip_taxonom
 # vs a 3D kitchen render). For DRAWINGS / DOCUMENTS (floor plans, site/situation/cadastral
 # plans, property documents) it's noise — the anchors are about interiors, so a flat drawing
 # scores arbitrarily (empirically a flat 0..1 spread). We leave their render_score NULL.
-_DRAWING_LOGICAL_TAGS: frozenset[str] = frozenset({"floor_plan", "site_plan", "property_document"})
+_DRAWING_LOGICAL_TAGS: frozenset[str] = frozenset(
+    tag for tag, family in ROOM_FAMILIES.items() if family == "plan"
+)
 
 
 @dataclass(frozen=True)

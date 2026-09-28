@@ -189,6 +189,105 @@ def _do_activate(conn, args: argparse.Namespace) -> int:
     return 0
 
 
+_DUMP_LISTING_SQL = """
+    SELECT i.id, i.listing_id, i.phash, s.winner_score, s.scores, t.label
+    FROM images i
+    JOIN image_tag_scores s ON s.image_id = i.id AND s.model_id = %(model_id)s
+    JOIN tag_taxonomy t ON t.id = s.winner_tag_id
+    WHERE i.listing_id = any(%(ids)s::bigint[])
+"""
+
+_DUMP_ALL_SQL = """
+    SELECT i.id, i.listing_id, i.phash, s.winner_score, s.scores, t.label
+    FROM image_tag_scores s
+    JOIN images i ON i.id = s.image_id
+    JOIN tag_taxonomy t ON t.id = s.winner_tag_id
+    WHERE s.model_id = %(model_id)s AND s.image_id > %(after)s
+    ORDER BY s.image_id
+    LIMIT 20000
+"""
+
+_PROBES = {
+    "models": "SELECT id, version, status, model, revision, library, pooling, resolution, "
+              "preprocessing, dtype, mode, source_run_id, source_arm, heads FROM tag_head_models "
+              "ORDER BY id",
+    "active_heads": "SELECT h.tag_id, t.label FROM tag_head_model_heads h JOIN tag_head_models m "
+                    "ON m.id = h.model_id AND m.status = 'active' JOIN tag_taxonomy t "
+                    "ON t.id = h.tag_id ORDER BY 1",
+    "rt_scope_listings": "SELECT count(*) FROM autodedup.rt_scope_ids WHERE generation = 'rt'",
+    "dinov3_rows": "SELECT model, revision, resolution, preprocessing, dtype, count(*) "
+                   "FROM image_dinov3_embeddings GROUP BY 1, 2, 3, 4, 5",
+    "scored_by_model": "SELECT model_id, count(*) FROM image_tag_scores GROUP BY 1",
+    "db_size": "SELECT pg_size_pretty(pg_database_size(current_database()))",
+}
+
+
+def _do_dump(conn, args: argparse.Namespace) -> int:
+    """READ-ONLY: the active (or named) model's winners as JSONL for offline arms, plus the
+    registry / scope probes. `--listing-ids-file` dumps those listings' images; without it,
+    every image the model has scored."""
+    import gzip
+    import json
+    from pathlib import Path
+
+    from autodedup.head_tags import UnknownHeadLabel, head_room
+
+    model = tm.get_model(conn, version=args.version) if args.version else tm.active_model(conn)
+    if model is None:
+        LOG.error("TAGMODEL dump: no such model")
+        return 1
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    probes: dict = {"model": model.as_dict()}
+    for name, sql in _PROBES.items():
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                probes[name] = [list(map(str, row)) for row in cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001 - a probe is advisory
+            probes[name] = f"error: {exc}"
+            conn.rollback()
+    (out / "probe.json").write_text(json.dumps(probes, indent=1, default=str))
+
+    def rows_iter():
+        if args.listing_ids_file:
+            from scripts.dinov3_embed_backfill import read_listing_ids
+
+            ids = read_listing_ids(args.listing_ids_file)
+            for i in range(0, len(ids), 2000):
+                with conn.cursor() as cur:
+                    cur.execute(_DUMP_LISTING_SQL, {"model_id": model.id, "ids": ids[i:i + 2000]})
+                    yield from cur.fetchall()
+            return
+        after = 0
+        while True:
+            with conn.cursor() as cur:
+                cur.execute(_DUMP_ALL_SQL, {"model_id": model.id, "after": after})
+                batch = cur.fetchall()
+            if not batch:
+                return
+            after = int(batch[-1][0])
+            yield from batch
+
+    n = 0
+    with gzip.open(out / "tag_dump.jsonl.gz", "wt") as handle:
+        for image_id, listing_id, phash, winner, scores, label in rows_iter():
+            raw = json.loads(scores) if isinstance(scores, str) else (scores or {})
+            ranked = sorted((float(v) for v in raw.values()), reverse=True)
+            try:
+                room = head_room(str(label))
+            except UnknownHeadLabel:
+                room = None
+            handle.write(json.dumps({
+                "image_id": int(image_id), "listing_id": int(listing_id),
+                "phash": None if phash is None else int(phash), "label": label, "room": room,
+                "winner": float(winner), "runner_up": ranked[1] if len(ranked) > 1 else 0.0,
+                "scores": raw}) + "\n")
+            n += 1
+    LOG.info("TAGMODEL dump version=%s rows=%d out=%s", model.version, n, out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -229,15 +328,21 @@ def build_parser() -> argparse.ArgumentParser:
     sc = sub.add_parser("score", help="Score images under one version.")
     sc.add_argument("--version", required=True)
     sc.add_argument("--source", default=tm.SOURCE_BAKEOFF_PREFIX,
-                    help="'bakeoff' (the model's own run), 'bakeoff:<run_id>', or "
+                    help="'bakeoff' (the model's own run), 'bakeoff:<run_id>', "
                          "'production' (image_dinov3_embeddings under the model's "
-                         "seven identity facts).")
+                         "seven identity facts), or 'r2:<prefix>' (float16 shard files the "
+                         "embed pass wrote with --vectors-to r2; needs R2_*).")
     sc.add_argument("--batch", type=int, default=tm.DEFAULT_BATCH)
     sc.add_argument("--limit", type=int, default=None,
                     help="Stop after this many images considered.")
     sc.add_argument("--force", action="store_true",
                     help="Re-score images this version already scored.")
     sc.add_argument("--dry-run", action="store_true")
+
+    dump = sub.add_parser("dump", help="READ-ONLY: winners as JSONL + registry probes.")
+    dump.add_argument("--version", default=None, help="Default: the active model.")
+    dump.add_argument("--listing-ids-file", default="")
+    dump.add_argument("--out", default="tag_dump")
 
     act = sub.add_parser("activate", help="Make one version the active one.")
     act.add_argument("--version", required=True)
@@ -254,6 +359,7 @@ _HANDLERS = {
     "promote": _do_promote,
     "score": _do_score,
     "activate": _do_activate,
+    "dump": _do_dump,
 }
 
 

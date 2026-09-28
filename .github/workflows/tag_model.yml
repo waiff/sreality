@@ -3,7 +3,7 @@ name: "NEW DEDUP: tag model (promote / score / activate)"
 # Runs the tag model lane: turn one cell of a finished tagging bake-off into a versioned,
 # permanent model, score images with it, and then — as a separate, explicit step — make that
 # version the one the product reads. Manual dispatch only; one stage per run; CPU only, no
-# GPU, no R2, no money.
+# GPU, no money (R2 is read only by `score --source r2:<prefix>`).
 #
 # WHY FOUR STAGES AND NOT ONE. A tag model is a frozen decision (this encoder, this training
 # mode, this set of heads, these weights) with a version string as its name, and the product's
@@ -30,10 +30,12 @@ name: "NEW DEDUP: tag model (promote / score / activate)"
 # Sources for `score`: `bakeoff` reads the model's own bake-off arm vectors (the labelled set
 # plus the sealed exam — the cheap iteration loop), `production` reads
 # `image_dinov3_embeddings` under the model's seven encoder identity facts (the future corpus
-# pass; it works and returns nothing until that table is populated for this configuration).
+# pass; it works and returns nothing until that table is populated for this configuration),
+# and `r2:<prefix>` reads the float16 shard files the embed pass keeps in R2 with
+# vectors_to=r2 (a later head version re-scores the measurement set without re-embedding).
 #
 # Requires migration 490's tag_head_models / tag_head_model_heads / image_tag_scores to have
-# been applied. Secrets: SUPABASE_DB_URL only.
+# been applied. Secrets: SUPABASE_DB_URL (+ R2_* for score with source r2:<prefix>).
 
 on:
   workflow_dispatch:
@@ -43,7 +45,7 @@ on:
         required: true
         default: "status"
         type: choice
-        options: ["status", "promote", "score", "activate"]
+        options: ["status", "promote", "score", "activate", "dump"]
       version:
         description: "Model version string, e.g. v1. Required for promote/score/activate; optional detail filter for status."
         required: false
@@ -81,7 +83,7 @@ on:
         default: ""
         type: string
       source:
-        description: "score only: bakeoff (the model's own run), bakeoff:<run_id>, or production (image_dinov3_embeddings)."
+        description: "score only: bakeoff (the model's own run), bakeoff:<run_id>, production (image_dinov3_embeddings), or r2:<prefix> (the embed pass's R2 float16 shards, e.g. r2:dinov3-vectors/dinov3-vitb16-pretrain-lvd1689m/5931719e67bb-768-letterbox_pad-cls-bf16-transformers)."
         required: false
         default: "bakeoff"
         type: string
@@ -101,6 +103,11 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      listing_ids_file:
+        description: "dump only: a repo path of listing ids (one per line, .gz allowed); empty = every image the model scored."
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: "Report the plan and exit. promote trains nothing, score writes nothing, activate flips nothing."
         required: false
@@ -163,9 +170,9 @@ jobs:
             *[!A-Za-z0-9@/._-]*) echo "::error::arm must be an arm name"; exit 1 ;;
           esac
           case "${SOURCE:-bakeoff}" in
-            *[!A-Za-z0-9:_-]*) echo "::error::source must be bakeoff, bakeoff:<run_id> or production"; exit 1 ;;
+            *[!A-Za-z0-9:_./-]*) echo "::error::source must be bakeoff, bakeoff:<run_id>, production or r2:<prefix>"; exit 1 ;;
           esac
-          if [ "${STAGE}" != "status" ] && [ -z "${VERSION:-}" ]; then
+          if [ "${STAGE}" != "status" ] && [ "${STAGE}" != "dump" ] && [ -z "${VERSION:-}" ]; then
             echo "::error::stage=${STAGE} needs a version"; exit 1
           fi
           if [ "${STAGE}" = "promote" ]; then
@@ -222,6 +229,11 @@ jobs:
         if: inputs.stage == 'score'
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # Read only by source=r2:<prefix>; the other sources never touch R2.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           VERSION: ${{ inputs.version }}
           SOURCE: ${{ inputs.source }}
           LIMIT: ${{ inputs.limit }}
@@ -236,6 +248,30 @@ jobs:
           if [ "${FORCE:-false}" = "true" ]; then ARGS+=(--force); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Dump the winners (read-only)
+        if: inputs.stage == 'dump'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+          LISTING_IDS_FILE: ${{ inputs.listing_ids_file }}
+        run: |
+          set -euo pipefail
+          case "${LISTING_IDS_FILE:-}" in
+            *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;
+          esac
+          ARGS=(dump --out tag_dump)
+          if [ -n "${VERSION:-}" ]; then ARGS+=(--version "${VERSION}"); fi
+          if [ -n "${LISTING_IDS_FILE:-}" ]; then ARGS+=(--listing-ids-file "${LISTING_IDS_FILE}"); fi
+          python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Upload the dump
+        if: inputs.stage == 'dump'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tag-dump-${{ github.run_id }}
+          path: tag_dump/
+          retention-days: 14
 
       - name: Activate one version
         if: inputs.stage == 'activate'

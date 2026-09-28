@@ -44,12 +44,11 @@ def _write(tmp_path, config: dict):
 # --- the shipped file --------------------------------------------------------
 
 
-def test_shipped_config_locks_the_model_and_leaves_the_measured_facts_null():
-    # The operator's 2026-09-05 ruling locked the model. The revision was pinned on
-    # 2026-09-08, after the operator's Hugging Face licence acceptance, to the sha the
-    # public model-metadata endpoint reports — a real commit, not a guess. Resolution,
-    # preprocessing and dtype are gated on the bake-off (§3.2) and must NOT be filled
-    # in with plausible-looking guesses.
+def test_shipped_config_is_the_active_tag_models_population():
+    # The operator's 2026-09-05 ruling locked the model; the revision was pinned 2026-09-08.
+    # Resolution, preprocessing and dtype are v1's own arm (bake-off run 1,
+    # dinov3-b16@768/bf16, letterbox_pad): the corpus is embedded in the population the
+    # active heads were trained on, never a plausible-looking guess (G4, 2026-09-27).
     config = load_dinov3_config()
     assert config["model"] == "facebook/dinov3-vitb16-pretrain-lvd1689m"
     assert config["library"] == "transformers"
@@ -57,16 +56,13 @@ def test_shipped_config_locks_the_model_and_leaves_the_measured_facts_null():
     assert re.fullmatch(r"[0-9a-f]{40}", config["revision"]), (
         "revision must be a full HF commit sha, never a branch name like 'main'"
     )
-    for gated in ("resolution", "preprocessing", "dtype"):
-        assert config[gated] is None, f"{gated} was filled in without the bake-off"
+    assert (config["resolution"], config["preprocessing"], config["dtype"]) == (
+        768, "letterbox_pad", "bf16")
 
 
-def test_shipped_config_refuses_to_load_while_provisional():
-    # The refusal is the feature. If this test ever starts failing because the config
-    # was completed, that is the bake-off landing — not a bug to paper over.
-    with pytest.raises(RuntimeError) as exc:
-        encoder_identity()
-    assert "ENCODER-DECISION" in str(exc.value)
+def test_shipped_config_loads_all_seven_facts():
+    identity = encoder_identity()
+    assert set(identity) == set(IDENTITY_FIELDS)
 
 
 def test_shipped_config_documents_every_identity_field():

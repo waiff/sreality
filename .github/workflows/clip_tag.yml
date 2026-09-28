@@ -12,7 +12,17 @@ name: Dedup — CLIP image tagging (sharded)
 # (transformers); the production CLIP could move to int8-ONNX later as an
 # optimization. NOT a portal ingest job (untagged, portal: null).
 #
-# Required secrets: SUPABASE_DB_URL + the R2_* set (same as compute_image_phash.yml).
+# G4 (2026-09-27): each shard then gives the live autodedup lane's scope (autodedup.rt_scope_ids)
+# its DINOv3 v1 head tags — the vector under v1's own identity (dinov3-b16@768, letterbox_pad, bf16:
+# bf16 on CPU, so the population is the heads' own) and the active tag model's winner in
+# image_tag_scores, which `image_tags = heads` reads and the F3 hold waits for. Scoped, not global:
+# the trial scope takes in ~400-950 images a day (~20-40 an hour) and one shard embeds ~40 in its
+# 1,500 s budget (bf16 on a CPU without native bf16: ~37 s an image on 4 threads, measured on an
+# i7-1260P; unmeasured on the runner), so the four shards carry ~160 an hour; the corpus and any
+# scope growth are backfilled on a GPU (dinov3_embed_backfill.yml, scope rt / all).
+#
+# Required secrets: SUPABASE_DB_URL + the R2_* set (same as compute_image_phash.yml), HF_TOKEN
+# (the DINOv3 weights are licence-gated).
 
 on:
   schedule:
@@ -85,11 +95,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-clip-vit-base-patch32-v1
+          key: hf-clip-vit-base-patch32-dinov3-vitb16-v1
 
-      - name: Install (CPU torch + clip extra)
+      - name: Install (CPU torch + torchvision + clip extra)
+        # torchvision: the DINOv3 checkpoints resolve to a fast image processor that needs it
+        # (pod_bootstrap.py, rule 8), from the SAME index as torch.
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[clip]"
 
       - name: Tag images
@@ -103,3 +115,17 @@ jobs:
           fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m scripts.clip_tag_backfill $ARGS
+
+      - name: Head tags for the live lane's scope (DINOv3 v1, CPU)
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # 20 MB/h: ~3.0 kB an image (vector row 2,412 B + head-score row 563 B, measured
+        # 2026-09-27), so ~7k images an hour, far above the ~40 a shard embeds here per run.
+        # --chunk 8: the time budget is checked between chunks, and one bf16 CPU image is ~37 s, so a
+        # chunk overshoots the 1,500 s budget by at most ~5 min, inside the job's 55.
+        run: |
+          python -m scripts.dinov3_embed_backfill --scope rt --score-heads --device cpu \
+            --threads 4 --workers 4 --batch-size 4 --chunk 8 --limit 2000 \
+            --shard ${{ matrix.shard }} --shards 4 --max-seconds 1500 \
+            --max-write-mb-per-hour 20

@@ -271,6 +271,12 @@ class Settings:
     # in the pass, so both belong in the swept row rather than in a module constant.
     clip_sample: int = 8
     phash_sample: int = 30
+    # G4: which tagger names each photo's room. `clip` = the zero-shot CLIP tags
+    # (`image_clip_tags`); `heads` = the ACTIVE tag model's winner (`image_tag_scores`,
+    # migration 490) read through `autodedup.head_tags` (floor and margin, else untagged). A
+    # transition switch: once `heads` ships, the CLIP tag path and this field are deleted
+    # together (IM01-IM09).
+    image_tags: str = "clip"
 
     # ---------------------------------------------------------------- D43 (W14, 2026-09-21)
     #
@@ -359,6 +365,11 @@ class Settings:
     # labelled duplicates and builds 4 groups holding a pair a judge called different on
     # exactly that evidence — the one trade this wave refuses.
     d43_cluster_image_facts: bool = True
+    # B-n (R1): the image block in EVERY mode. The two limbs above leave PROMOTE reading
+    # `floorplan` and `interior`, so `promotion_warrant` and E193's strict relation still
+    # refused on a tag-derived similarity. Off = no image fact in gate, cluster or promote:
+    # tags route photographs and are never facts (the operator's ruling, 2026-09-27).
+    d43_image_facts: bool = True
     d43_street_min_distance_m: float | None = None
     d43_gate_total_floors_slack: bool = False
     # E190: `total_floors` read through the camp table on its own. `joint_convention_shift`
@@ -1276,6 +1287,8 @@ class Settings:
             raise ValueError("corroboration needs demonstrate_identity")
         if self.demonstrate_cluster_price and not self.demonstrate_identity:
             raise ValueError("demonstrate_cluster_price needs demonstrate_identity")
+        if self.image_tags not in ("clip", "heads"):
+            raise ValueError(f"image_tags must be clip or heads: {self.image_tags}")
         if self.development_context_mode not in ("off", "vocab", "narrow", "template"):
             raise ValueError(
                 "development_context_mode must be off/vocab/narrow/template: "

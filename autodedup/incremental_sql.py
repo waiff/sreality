@@ -793,6 +793,24 @@ select i.listing_id                as listing_id,
  group by i.listing_id
 """
 
+# The same probe under `image_tags = heads` (G4): the room comes from the ACTIVE tag model, so
+# a photograph is complete once its CLIP vector is stamped AND the active model has scored it (a
+# score under the floor is still an answer). One primary-key lookup per image on
+# `image_tag_scores (image_id, model_id)`.
+RT_EVIDENCE_PROBE_HEADS_SQL = """
+select i.listing_id                as listing_id,
+       count(*)                    as n_images,
+       count(i.phash)              as n_phash,
+       count(i.clip_tagged_at)     as n_clip,
+       count(s.image_id)           as n_tagged
+  from public.images i
+  left join public.image_tag_scores s
+    on s.image_id = i.id
+   and s.model_id = (select m.id from public.tag_head_models m where m.status = 'active')
+ where i.listing_id = any(%(ids)s::bigint[])
+ group by i.listing_id
+"""
+
 # Arm two: a merge HELD in the band for want of photographs (E93) whose hold is over — neither
 # side is still INCOMPLETE inside the horizon (F3, E908). Nothing about such a pair has moved, so no digest
 # and no feed could ever find it again; it is asked for by reason. The horizon is evaluated by

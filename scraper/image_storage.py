@@ -293,6 +293,14 @@ class R2Client:
         """Stream an object to disk — the registry resume restores 253 MB artefacts."""
         self._client.download_file(self.bucket, key, path)
 
+    def list_keys(self, prefix: str) -> list[str]:
+        """Every key under `prefix`, in key order (S3 lists 1,000 a page)."""
+        keys: list[str] = []
+        for page in self._client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=prefix):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        return keys
+
     def object_size(self, key: str) -> int | None:
         """Size in bytes, or None ONLY when the object does not exist."""
         from botocore.exceptions import ClientError

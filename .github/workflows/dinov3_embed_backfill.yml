@@ -19,9 +19,19 @@ name: "NEW DEDUP: DINOv3 corpus embedding (RunPod)"
 # the pending count and the pod plan, and launches nothing), and run a small limit once
 # before a large one.
 #
+# The card is the first rung with capacity of `gpu_allowlist` (in order) x `cloud_type`
+# (ANY: community, then secure), under the $1.00/h cap and >=16 GB: G1's ladder, since
+# community-only 3090/A5000 found no capacity on 2026-09-27 (run 36316992243). No capacity
+# anywhere rents nothing and fails the run; the pod sizes torch's threads from its vCPUs.
+#
 # Resume is free and needs no state: the target table IS the checkpoint (pending = a
 # stored image with no row under this exact config), so a pod dying mid-pass costs
-# minutes. Completion is NOT read from the pod — on-demand Pods never flip
+# minutes. With vectors_to=r2 the vectors go to R2 as float16 shard files and the R2
+# manifest is the checkpoint; only the head scores are written to Postgres.
+#
+# The pending scan is paged (min(limit, 200,000) a scan): run 36334588774 re-ran that
+# full-table anti-join for every 256 images and managed ~1 image/s on a 4090. The write
+# budget counts measured bytes: 2,412 B a vector row, 563 B a head-score row (09-27). Completion is NOT read from the pod — on-demand Pods never flip
 # desiredStatus, so run_job always times out and tears the pod down in its `finally`.
 # Progress is a SQL question: count(rows for this config) / count(stored images).
 #
@@ -47,7 +57,7 @@ on:
   workflow_dispatch:
     inputs:
       max_write_mb_per_hour:
-        description: "REQUIRED. Vector-write ceiling in MB/hour. No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only."
+        description: "REQUIRED. Per-pod ceiling on Postgres growth in MB/hour, charged at measured bytes (vector row 2,412 B, head-score row 563 B; 09-27). No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only."
         required: true
         type: string
       limit:
@@ -66,9 +76,9 @@ on:
         default: "1"
         type: string
       workers:
-        description: "Parallel R2 downloads inside the pod (JPEG decode is CPU-side)."
+        description: "Parallel R2 download + decode + resize threads inside the pod. 0 = sized from the pod's vCPUs (4 each, 8..48); chunk and batch are always sized on the pod from its RAM."
         required: false
-        default: "16"
+        default: "0"
         type: string
       job_max_seconds:
         description: "The payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch."
@@ -90,6 +100,50 @@ on:
         required: false
         default: "60"
         type: string
+      scope:
+        description: "all = the corpus; rt = the live lane's scope snapshot (autodedup.rt_scope_ids); ids = listing_ids_file; blocks = an export block spec (blocks input); scored = the images the active tag model already scored (the population gate)."
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "rt", "ids", "blocks", "scored"]
+      listing_ids_file:
+        description: "scope=ids only: a repo path of listing ids (one per line, .gz allowed) at the dispatched ref."
+        required: false
+        default: ""
+        type: string
+      blocks:
+        description: "scope=blocks only: export block specs joined by commas, e.g. town:563510,town:577626,quarter:490245."
+        required: false
+        default: ""
+        type: string
+      score_heads:
+        description: "Also score every written vector with the ACTIVE tag model into image_tag_scores in the same pass."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      vectors_to:
+        description: "postgres = image_dinov3_embeddings (2,412 B a row, measured 09-27). r2 = float16 shard files + a manifest (image_id, shard, row) in R2 under one prefix per encoder identity; only the head scores (563 B a row) reach Postgres, the engine reads only those, and tag_model score --source r2:<prefix> re-scores a later head version without re-embedding."
+        required: false
+        default: "postgres"
+        type: choice
+        options: ["postgres", "r2"]
+      r2_prefix:
+        description: "vectors_to=r2 only: the store's R2 prefix. Empty = dinov3-vectors/<model>/<identity>, shared by every scope and dispatch of this encoder, so a re-dispatch resumes."
+        required: false
+        default: ""
+        type: string
+      gpu_allowlist:
+        description: "Comma-separated RunPod GPU ids or whole-word names (e.g. NVIDIA RTX A4000 or 3090), tried in this order. Empty = the default ladder (nineteen 16 GB+ Ampere/Ada cards, 3090/A5000/3090 Ti first: dinov3_embed_dispatch.DEFAULT_GPU_ALLOWLIST, the same ladder as G1's)."
+        required: false
+        default: ""
+        type: string
+      cloud_type:
+        description: "Where to look for each card. ANY = the community cloud, then the secure one, before moving to the next card. Always under the lane's $1.00/h cap; no capacity anywhere rents nothing and fails the run."
+        required: false
+        default: "ANY"
+        type: choice
+        options: ["ANY", "COMMUNITY", "SECURE"]
       dry_run:
         description: "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing."
         required: false
@@ -97,14 +151,16 @@ on:
         type: choice
         options: ["true", "false"]
 
+# One group PER SHARD: shards are disjoint (image_id % shards), so N shards are N pods in
+# parallel; a second dispatch of the SAME shard queues behind the first instead of racing it.
 concurrency:
-  group: dinov3-embed-backfill
+  group: dinov3-embed-backfill-${{ inputs.shards }}-${{ inputs.shard }}
   cancel-in-progress: false
 
 jobs:
   embed:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
@@ -141,10 +197,26 @@ jobs:
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
           CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
           DRY_RUN: ${{ inputs.dry_run }}
+          SCOPE: ${{ inputs.scope }}
+          LISTING_IDS_FILE: ${{ inputs.listing_ids_file }}
+          BLOCKS: ${{ inputs.blocks }}
+          SCORE_HEADS: ${{ inputs.score_heads }}
+          VECTORS_TO: ${{ inputs.vectors_to }}
+          R2_PREFIX: ${{ inputs.r2_prefix }}
+          GPU_ALLOWLIST: ${{ inputs.gpu_allowlist }}
+          CLOUD_TYPE: ${{ inputs.cloud_type }}
         # Inputs travel via env and are case-validated before use, never interpolated
-        # into the shell by ${{ }}.
+        # into the shell by ${{ }}. ARGS is an array: RunPod GPU ids carry spaces.
         run: |
           set -euo pipefail
+          # RunPod ids carry spaces (NVIDIA GeForce RTX 3090); nothing else beyond these.
+          case "${GPU_ALLOWLIST:-}" in
+            *[!A-Za-z0-9\ ,._-]*) echo "::error::gpu_allowlist must be comma-separated GPU names"; exit 1 ;;
+          esac
+          case "${CLOUD_TYPE:-ANY}" in
+            ANY|COMMUNITY|SECURE) ;;
+            *) echo "::error::cloud_type must be ANY, COMMUNITY or SECURE"; exit 1 ;;
+          esac
           case "${MAX_WRITE_MB_PER_HOUR}" in
             ''|*[!0-9.]*) echo "::error::max_write_mb_per_hour must be a number — and it must be chosen against the Supabase dashboard's live disk utilisation"; exit 1 ;;
           esac
@@ -157,7 +229,7 @@ jobs:
           case "${SHARDS:-1}" in
             ''|*[!0-9]*) echo "::error::shards must be a number"; exit 1 ;;
           esac
-          case "${WORKERS:-16}" in
+          case "${WORKERS:-0}" in
             ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
           esac
           case "${JOB_MAX_SECONDS:-3600}" in
@@ -172,15 +244,40 @@ jobs:
           case "${CONTAINER_DISK_GB:-60}" in
             ''|*[!0-9]*) echo "::error::container_disk_gb must be a number"; exit 1 ;;
           esac
-          ARGS="--max-write-mb-per-hour ${MAX_WRITE_MB_PER_HOUR} --limit ${LIMIT:-20000}"
-          ARGS="${ARGS} --shard ${SHARD:-0} --shards ${SHARDS:-1} --workers ${WORKERS:-16}"
-          ARGS="${ARGS} --job-max-seconds ${JOB_MAX_SECONDS:-3600}"
-          ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1800}"
-          ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
-          ARGS="${ARGS} --container-disk-gb ${CONTAINER_DISK_GB:-60}"
-          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
-          echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"
-          python -m scripts.dinov3_embed_dispatch ${ARGS}
+          ARGS=(--max-write-mb-per-hour "${MAX_WRITE_MB_PER_HOUR}" --limit "${LIMIT:-20000}")
+          ARGS+=(--shard "${SHARD:-0}" --shards "${SHARDS:-1}" --workers "${WORKERS:-0}")
+          ARGS+=(--job-max-seconds "${JOB_MAX_SECONDS:-3600}")
+          ARGS+=(--bootstrap-deadline-s "${BOOTSTRAP_DEADLINE_SECONDS:-1800}")
+          ARGS+=(--stall-deadline-s "${STALL_DEADLINE_SECONDS:-900}")
+          ARGS+=(--container-disk-gb "${CONTAINER_DISK_GB:-60}")
+          ARGS+=(--cloud-type "${CLOUD_TYPE:-ANY}")
+          if [ -n "${GPU_ALLOWLIST:-}" ]; then ARGS+=(--gpu-allowlist "${GPU_ALLOWLIST}"); fi
+          case "${SCOPE:-all}" in
+            all|rt|ids|blocks|scored) ;;
+            *) echo "::error::scope must be all, rt, ids, blocks or scored"; exit 1 ;;
+          esac
+          case "${LISTING_IDS_FILE:-}" in
+            *[!A-Za-z0-9._/-]*) echo "::error::listing_ids_file must be a plain repo path"; exit 1 ;;
+          esac
+          case "${BLOCKS:-}" in
+            *[!a-z0-9:,]*) echo "::error::blocks must be like town:563510,quarter:490245"; exit 1 ;;
+          esac
+          ARGS+=(--scope "${SCOPE:-all}")
+          if [ -n "${BLOCKS:-}" ]; then ARGS+=(--blocks "${BLOCKS}"); fi
+          if [ -n "${LISTING_IDS_FILE:-}" ]; then ARGS+=(--listing-ids-file "${LISTING_IDS_FILE}"); fi
+          if [ "${SCORE_HEADS:-false}" = "true" ]; then ARGS+=(--score-heads); fi
+          case "${VECTORS_TO:-postgres}" in
+            postgres|r2) ;;
+            *) echo "::error::vectors_to must be postgres or r2"; exit 1 ;;
+          esac
+          case "${R2_PREFIX:-}" in
+            *[!A-Za-z0-9._/-]*) echo "::error::r2_prefix must be a plain key prefix"; exit 1 ;;
+          esac
+          ARGS+=(--vectors-to "${VECTORS_TO:-postgres}")
+          if [ -n "${R2_PREFIX:-}" ]; then ARGS+=(--r2-prefix "${R2_PREFIX}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          echo "python -m scripts.dinov3_embed_dispatch ${ARGS[*]}"
+          python -m scripts.dinov3_embed_dispatch "${ARGS[@]}"
 
       # The dispatcher never touches the database; this is the operator-facing progress
       # readout, and it is the same SQL anyone can run at any time to answer "how far
@@ -192,4 +289,15 @@ jobs:
       - name: Pending readout (advisory)
         if: always()
         continue-on-error: true
-        run: python -m scripts.dinov3_embed_backfill --max-write-mb-per-hour 1 --dry-run
+        env:
+          VECTORS_TO: ${{ inputs.vectors_to }}
+          R2_PREFIX: ${{ inputs.r2_prefix }}
+        # R2 mode reads the manifest (vectors stored, identity match) instead of the
+        # Postgres anti-join count.
+        run: |
+          set -euo pipefail
+          case "${VECTORS_TO:-postgres}" in postgres|r2) ;; *) exit 1 ;; esac
+          case "${R2_PREFIX:-}" in *[!A-Za-z0-9._/-]*) exit 1 ;; esac
+          ARGS=(--max-write-mb-per-hour 1 --dry-run --vectors-to "${VECTORS_TO:-postgres}")
+          if [ -n "${R2_PREFIX:-}" ]; then ARGS+=(--r2-prefix "${R2_PREFIX}"); fi
+          python -m scripts.dinov3_embed_backfill "${ARGS[@]}"

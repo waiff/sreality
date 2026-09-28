@@ -43,6 +43,7 @@ from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
 
 from autodedup import reconcile, rt_lease
 from autodedup.dataset import Image, Listing
+from autodedup.head_tags import COHORT_HEAD_TAGS_SQL, head_record, head_tag_pairs
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
     build_image_record,
@@ -118,6 +119,7 @@ from autodedup.incremental_sql import (
     RT_FLIPPED_LISTINGS_SQL,
     RT_EVIDENCE_CANDIDATES_SQL,
     RT_EVIDENCE_HELD_COUNT_SQL,
+    RT_EVIDENCE_PROBE_HEADS_SQL,
     RT_EVIDENCE_PROBE_SQL,
     RT_EVIDENCE_RELEASE_SQL,
     RT_FP_COUNT_SQL,
@@ -906,9 +908,13 @@ class SqlFacts:
     it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
-                 population: Mapping[int, int] | None = None, clip: bool = True) -> None:
+                 population: Mapping[int, int] | None = None, clip: bool = True,
+                 image_tags: str = "clip") -> None:
         self.conn = conn
         self.clip_model = clip_model
+        # G4: `heads` reads each photo's room from the active tag model (`image_tag_scores`)
+        # instead of the CLIP zero-shot tags; the settings field of the same name picks it.
+        self.image_tags = image_tags
         # A population handed in INSTEAD of the table, for the one caller that is about to
         # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
         # builds the fingerprints it is cut from on exactly those counts. The pass never
@@ -969,9 +975,14 @@ class SqlFacts:
                                         {"ids": image_ids, "model": self.clip_model})
                  } if self.clip else {}
         tags: dict[int, list[dict[str, Any]]] = {}
-        for row in self._dicts(COHORT_CLIP_TAGS_SQL,
-                               {"ids": image_ids, "model": self.clip_model}):
-            tags.setdefault(int(row["image_id"]), []).append(row)
+        heads: dict[int, dict[str, Any]] = {}
+        if self.image_tags == "heads":
+            heads = {int(row["image_id"]): row
+                     for row in self._dicts(COHORT_HEAD_TAGS_SQL, {"ids": image_ids})}
+        else:
+            for row in self._dicts(COHORT_CLIP_TAGS_SQL,
+                                   {"ids": image_ids, "model": self.clip_model}):
+                tags.setdefault(int(row["image_id"]), []).append(row)
         # Frozen, never recounted (E70). Absent from the table is UNKNOWN, not zero (E91):
         # `public.images` carries no index on `phash` (checked: `images_phash_idx` is on
         # `sreality_id`), D8 forbids adding one, and there is no in-schema mirror to count
@@ -995,9 +1006,16 @@ class SqlFacts:
         out: dict[int, list[Image]] = {}
         for row in rows:
             image_id = int(row["image_id"])
-            record = build_image_record(row, clip=clips.get(image_id),
-                                        tags=tag_pairs(tags.get(image_id, [])),
-                                        pop=population)
+            if self.image_tags == "heads":
+                scored = heads.get(image_id)
+                record = build_image_record(
+                    row, clip=clips.get(image_id),
+                    tags=head_tag_pairs([scored]) if scored else [], pop=population,
+                    head=head_record(scored) if scored else None)
+            else:
+                record = build_image_record(row, clip=clips.get(image_id),
+                                            tags=tag_pairs(tags.get(image_id, [])),
+                                            pop=population)
             out.setdefault(int(row["listing_id"]), []).append(Image.from_json(record))
         return out
 
@@ -1035,9 +1053,11 @@ class SqlWork:
                  evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS,
                  bootstrap: bool = False,
                  pass_budget_s: float = PASS_BUDGET_S,
-                 rate_per_s: float = PASS_RATE_PER_S) -> None:
+                 rate_per_s: float = PASS_RATE_PER_S,
+                 image_tags: str = "clip") -> None:
         self.conn = conn
         self.scope = scope
+        self.image_tags = image_tags
         self.generation = generation
         self.lag = lag
         self.straggler_window = straggler_window
@@ -1249,21 +1269,25 @@ class SqlWork:
             "generation": self.generation, "after_id": int(after_id),
             "limit": self.evidence_slice, **horizon})
         recorded = {int(row[0]): (row[1], row[2], row[3], row[4]) for row in rows}
-        probed: dict[int, tuple[int, int, int]] = {}
+        probed: dict[int, tuple[int, ...]] = {}
+        probe_sql = (RT_EVIDENCE_PROBE_HEADS_SQL if self.image_tags == "heads"
+                     else RT_EVIDENCE_PROBE_SQL)
         if recorded:
-            probed = {int(row[0]): (int(row[1]), int(row[2]), int(row[3]))
-                      for row in self._query(RT_EVIDENCE_PROBE_SQL,
-                                             {"ids": sorted(recorded)})}
+            probed = {int(row[0]): tuple(int(x) for x in row[1:])
+                      for row in self._query(probe_sql, {"ids": sorted(recorded)})}
         moved: list[int] = []
         for listing_id, (images, phash, clip, tags) in sorted(recorded.items()):
             live = probed.get(listing_id, (0, 0, 0))
+            # The CLIP probe's third count is the CLIP job's one stamp (vector AND tags); the
+            # heads probe carries the head-score count apart as a fourth.
+            live_tags = live[3] if len(live) > 3 else live[2]
             # A NULL count is a row written before migration 540 — unmeasured, not zero, so
             # it is re-decided once and then carries real counts.
             if images is None or phash is None:
                 moved.append(listing_id)
                 continue
             if (live[0] != int(images) or live[1] != int(phash)
-                    or live[2] != int(clip or 0) or live[2] != int(tags or 0)):
+                    or live[2] != int(clip or 0) or live_tags != int(tags or 0)):
                 moved.append(listing_id)
         released: list[int] = []
         for row in self._query(RT_EVIDENCE_RELEASE_SQL, {
@@ -1901,7 +1925,7 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     _cut_bound(conn, deadline)
     population = ({int(row[0]): int(row[1]) for row in _rows(
         conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
-    facts = SqlFacts(conn, population=population, clip=False)
+    facts = SqlFacts(conn, population=population, clip=False, image_tags=settings.image_tags)
     listings: dict[int, Listing] = {}
     fps: dict[int, Any] = {}
     for start in range(0, len(ids), chunk):
@@ -2006,9 +2030,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
-        facts = SqlFacts(conn)
+        facts = SqlFacts(conn, image_tags=settings.image_tags)
         work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
-                       pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
+                       pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s,
+                       image_tags=settings.image_tags)
         result = None
         stopped = ""
         try:

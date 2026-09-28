@@ -191,7 +191,9 @@ def evidence_of(images: Sequence[Image]) -> Evidence:
         n_images=len(images),
         n_phash=sum(1 for img in images if img.phash is not None),
         n_clip=sum(1 for img in images if img.clip is not None),
-        n_tags=sum(1 for img in images if img.tags),
+        # Under `image_tags = heads` a photo the active model scored BELOW the floor is untagged but
+        # complete: the tagger has spoken, so its head record counts where its empty tags cannot.
+        n_tags=sum(1 for img in images if img.tags or img.head),
     )
 
 
