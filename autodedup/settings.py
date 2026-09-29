@@ -359,6 +359,12 @@ class Settings:
     # labelled duplicates and builds 4 groups holding a pair a judge called different on
     # exactly that evidence — the one trade this wave refuses.
     d43_cluster_image_facts: bool = True
+    # Release R1 (w31r1c): the image block in EVERY mode. The two limbs above leave PROMOTE
+    # reading `floorplan` and `interior`, so `promotion_warrant` and E193's strict relation
+    # still refused on a tag-derived similarity. Off = no image fact in gate, cluster or
+    # promote: tags route photographs and are never facts (the operator's ruling, 2026-09-27).
+    # Default on, so a seed stored before this field existed decides exactly as it did.
+    d43_image_facts: bool = True
     d43_street_min_distance_m: float | None = None
     d43_gate_total_floors_slack: bool = False
     # E190: `total_floors` read through the camp table on its own. `joint_convention_shift`
