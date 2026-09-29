@@ -1108,6 +1108,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
   `rent_map_cells` refreshes; modes boundaries/gazetteer/deltas, `vfr_delta`, four inputs, the
   bypass flags and three CLIs deleted; liveness arm on `location_town_coverage`. správní obvod left
   out: the pack has no such layer (STU_P/PRARES_P are offices). NEXT: dispatch the October vintage.
+- **W18-c — `m²` is not a foreign script** (2026-09-29): `street_token` refused every headline with a
+  superscript (18,118 of 50,248 live bazos). After merge: intake `mode=full source=bazos` → ≈ +3,175 streets.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
