@@ -350,8 +350,11 @@ def test_the_page_names_its_columns_as_the_payload_reads_them(cur):
 
 # A generation far larger than the population, as at the country-wide roll-out: the engine's view
 # must read it for the judged adverts only (the planner probes its indexes), never all of it.
+# Each table is large on its own: at 10,000 group members against 16 adverts the planner hashed
+# the members (one small scan beat the probes in its cost model; CI run 36570259886), which is
+# its choice to make while a table is small.
 BIG = "g-judge-scale"
-BIG_PAIRS, BIG_FPS, BIG_MEMBERS = 40_000, 20_000, 10_000
+BIG_PAIRS, BIG_FPS, BIG_MEMBERS = 100_000, 100_000, 100_000
 _GENERATION_TABLES = ("pairs", "rt_fp", "cluster_members")
 
 
@@ -378,8 +381,8 @@ def _engine_reference(cur: Any, ids: list[int]) -> dict[int, int | None]:
 
 
 def test_the_engine_view_reads_the_generation_for_the_judged_adverts_only(cur):
-    # The population is this test's alone (rolled back), so the planner sees a dozen adverts
-    # against a generation of 70,000 rows, as it would see thousands against millions.
+    # The population is this test's alone (rolled back), so the planner sees 16 adverts against
+    # a generation of 300,000 rows, as it would see thousands against millions.
     cur.execute("DELETE FROM autodedup.judgements")
     cur.execute("DELETE FROM autodedup.eval_samples")
     cur.execute("INSERT INTO autodedup.pairs (generation, listing_lo, listing_hi, probes)"
