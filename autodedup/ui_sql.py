@@ -2318,20 +2318,19 @@ WITH named AS (
 _JUDGED_POPULATION = """
 marks AS (
     SELECT DISTINCT ON (j.listing_lo, j.listing_hi, j.tier)
-           j.listing_lo, j.listing_hi, j.tier, j.verdict, j.confidence, j.stratum
+           j.listing_lo, j.listing_hi, j.tier, j.verdict, j.confidence
       FROM autodedup.judgements j
      WHERE j.tier IN ('gold', 'vision', 'text')
      ORDER BY j.listing_lo, j.listing_hi, j.tier, j.created_at DESC
 ), judged AS (
-    SELECT m.listing_lo, m.listing_hi, max(m.stratum) AS stratum,
+    SELECT m.listing_lo, m.listing_hi,
            max(m.verdict) FILTER (WHERE m.tier = 'text') AS text_verdict,
            max(m.verdict) FILTER (WHERE m.tier = 'vision') AS vision_verdict,
-           max(m.confidence) FILTER (WHERE m.tier = 'gold') AS gold_confidence,
-           bool_or(m.tier = 'gold') AS has_gold
+           max(m.confidence) FILTER (WHERE m.tier = 'gold') AS gold_confidence
       FROM marks m
      GROUP BY m.listing_lo, m.listing_hi
 ), sealed AS (
-    SELECT e.listing_lo, e.listing_hi, e.stratum,
+    SELECT e.listing_lo, e.listing_hi,
            row_number() OVER (
                PARTITION BY e.stratum
                ORDER BY md5(e.listing_lo::text || ':' || e.listing_hi::text || %(seed)s::text),
@@ -2339,8 +2338,7 @@ marks AS (
       FROM autodedup.eval_samples e
 ), population AS (
     SELECT coalesce(g.listing_lo, s.listing_lo) AS listing_lo,
-           coalesce(g.listing_hi, s.listing_hi) AS listing_hi,
-           coalesce(g.stratum, s.stratum) AS stratum, s.draw_rank
+           coalesce(g.listing_hi, s.listing_hi) AS listing_hi, s.draw_rank
       FROM judged g
       FULL JOIN sealed s ON s.listing_lo = g.listing_lo AND s.listing_hi = g.listing_hi
 )"""
@@ -2353,7 +2351,8 @@ marks AS (
 JIT_OFF = "SET LOCAL jit = off"
 
 # Binary words: the judge's (`none` = not read yet) and the operator's standing one (NULL = none,
-# or a withdrawal / "Nevím").
+# or a withdrawal / "Nevím"). The page's ONE "ruled" is that standing word: it sorts a row down,
+# counts under "Rozhodnuto" and lifts blindness, so a "Nevím" opens nothing (E55).
 _JUDGE_WORD = """CASE WHEN jb.verdict IS NULL THEN 'none'
                 WHEN jb.verdict = 'same_property' THEN 'same'
                 WHEN jb.verdict = 'insufficient_evidence' THEN 'abstain'
@@ -2365,14 +2364,19 @@ _OPERATOR_WORD = f"""CASE WHEN o.status = 'standing' AND o.verdict = 'same' THEN
 
 _BINARY = "('same', 'different')"
 
+# `unsure` is a SPLIT, never the tier alone: text against vision, a gold vote below unanimous
+# (`judge.aggregate_gold` stores 1.0 only for three of three), or a headline that abstains -- a
+# unanimous gold mark is the surest word the judge has, so it may carry the `engine` reason.
+# The operator's note and codes travel only from a ruling typed against the pair: a group's
+# implied word or a bare veto carries none of the pair's own, so a note saved here re-posts only
+# what the pair itself holds.
 _JUDGEMENTS_FROM = (
     _OPERATOR_WORDS
     + ", "
     + _JUDGED_POPULATION
     + """, joined AS (
-    SELECT r.listing_lo, r.listing_hi, r.stratum, r.draw_rank,
+    SELECT r.listing_lo, r.listing_hi, r.draw_rank,
            g.text_verdict, g.vision_verdict, g.gold_confidence,
-           coalesce(g.has_gold, false) AS has_gold,
            jb.tier AS judge_tier, jb.verdict AS judge_verdict,
            jb.confidence AS judge_confidence, jb.model AS judge_model,
            jb.key_evidence AS judge_key_evidence,
@@ -2380,9 +2384,9 @@ _JUDGEMENTS_FROM = (
            """
     + _JUDGE_WORD
     + """ AS judge_word,
-           o.listing_lo IS NOT NULL AS ruled,
            o.ruling_id AS operator_ruling_id, o.verdict AS operator_verdict,
-           o.source AS operator_source, o.note AS operator_note,
+           CASE WHEN o.ruling_kind = 'pair' THEN o.note END AS operator_note,
+           CASE WHEN o.ruling_kind = 'pair' THEN o.reasons END AS operator_reasons,
            o.decided_by AS operator_decided_by, o.decided_at AS operator_decided_at,
            """
     + _OPERATOR_WORD
@@ -2398,6 +2402,7 @@ _JUDGEMENTS_FROM = (
     SELECT j.*,"""
     + _ENGINE_VIEW
     + """,
+           j.operator_word IS NOT NULL AS ruled,
            md5(j.listing_lo::text || ':' || j.listing_hi::text || %(seed)s::text) AS sort_hash,
            coalesce(j.text_verdict <> 'insufficient_evidence'
                     AND j.vision_verdict <> 'insufficient_evidence'
@@ -2416,7 +2421,7 @@ _JUDGEMENTS_FROM = (
     + """ OR w.engine_view = 'unseen' THEN 'none'
                 WHEN (w.judge_word = 'same') = (w.engine_view = 'together') THEN 'agrees'
                 ELSE 'disagrees' END AS engine_agreement,
-           (w.tiers_split OR w.has_gold
+           (w.tiers_split OR coalesce(w.gold_confidence < 1, false)
             OR w.judge_word = 'abstain') AS raw_unsure,
            coalesce(w.draw_rank <= %(sample_size)s::int, false) AS is_sample
       FROM w
@@ -2445,9 +2450,6 @@ _JUDGEMENTS_FROM = (
 ), f AS (
     SELECT c.*,
            c.is_sample OR c.is_operator OR c.is_engine OR c.is_unsure AS is_suggested,
-           CASE WHEN c.is_sample THEN 'sample' WHEN c.is_operator THEN 'operator'
-                WHEN c.is_engine THEN 'engine' WHEN c.is_unsure THEN 'unsure'
-                END AS primary_reason,
            CASE WHEN c.is_sample THEN 0
                 WHEN c.is_operator OR c.is_engine OR c.is_unsure THEN 1
                 ELSE 2 END AS block,
@@ -2463,12 +2465,10 @@ _JUDGEMENTS_WHERE = """
 WHERE (%(reason)s::text = 'all'
        OR (%(reason)s::text = 'suggested' AND f.is_suggested)
        OR (%(reason)s::text = 'sample' AND f.is_sample)
-       OR (%(reason)s::text = 'operator' AND f.is_operator)
        OR (%(reason)s::text = 'engine' AND f.is_engine)
        OR (%(reason)s::text = 'unsure' AND f.is_unsure))
   AND (%(judge)s::text IS NULL OR f.judge_word = %(judge)s::text)
   AND (%(tier)s::text IS NULL OR f.tier_word = %(tier)s::text)
-  AND (%(stratum)s::text IS NULL OR f.stratum = %(stratum)s::text)
   AND (%(obec)s::bigint IS NULL OR f.obec_kod = %(obec)s::bigint)
   AND (%(cast_obce)s::bigint IS NULL OR f.cast_obce_kod = %(cast_obce)s::bigint)
   AND (%(ruled)s::boolean IS NULL OR f.ruled = %(ruled)s::boolean)
@@ -2479,12 +2479,11 @@ WHERE (%(reason)s::text = 'all'
 JUDGED_PAIR_COLUMNS: tuple[str, ...] = (
     "listing_lo",
     "listing_hi",
-    "stratum",
     "ruled",
     "operator_ruling_id",
     "operator_verdict",
-    "operator_source",
     "operator_note",
+    "operator_reasons",
     "operator_decided_by",
     "operator_decided_at",
     "judge_tier",
@@ -2493,19 +2492,12 @@ JUDGED_PAIR_COLUMNS: tuple[str, ...] = (
     "judge_model",
     "judge_key_evidence",
     "judge_contradicting_evidence",
-    "tiers_split",
     "is_sample",
     "is_operator",
     "is_engine",
     "is_unsure",
-    "primary_reason",
-    "operator_agreement",
-    "engine_agreement",
     "engine_view",
-    "together_now",
-    "obec_kod",
     "obec_name",
-    "cast_obce_kod",
     "cast_obce_name",
     "zone",
     "score",
@@ -2540,11 +2532,10 @@ JUDGEMENTS_FACETS_SQL = (
 SELECT x.facet, x.value, count(*) AS n
   FROM f
  CROSS JOIN LATERAL (VALUES
-       ('total', NULL), ('judge', f.judge_word), ('tier', f.tier_word), ('stratum', f.stratum),
+       ('total', NULL), ('judge', f.judge_word), ('tier', f.tier_word),
        ('ruled', f.ruled_word), ('operator', f.operator_agreement), ('engine', f.engine_agreement),
        ('reason', CASE WHEN f.is_suggested THEN 'suggested' END),
        ('reason', CASE WHEN f.is_sample THEN 'sample' END),
-       ('reason', CASE WHEN f.is_operator THEN 'operator' END),
        ('reason', CASE WHEN f.is_engine THEN 'engine' END),
        ('reason', CASE WHEN f.is_unsure THEN 'unsure' END)) AS x(facet, value)
 """
@@ -2565,7 +2556,8 @@ JUDGED_TOWNS_SQL = (
 )
 
 # The strip's two counters at PAIR grain: the first `sample_size` of each sealed draw, and the
-# whole population. Reviewed = any word of the operator's (`rulings`), as the page's "ruled".
+# whole population. Reviewed = any word of the operator's (`rulings`), as on every queue's strip;
+# the page's "ruled" is narrower (a standing binary word), so "Nevím" is reviewed, not ruled.
 def _judge_counts(where: str) -> str:
     return (
         _OPERATOR_WORDS

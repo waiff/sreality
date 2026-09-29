@@ -31,19 +31,16 @@ HASH = "0" * 31 + "a"
 
 def _judged(**over: Any) -> tuple[Any, ...]:
     values: dict[str, Any] = {
-        "listing_lo": 11, "listing_hi": 12, "stratum": "g2:s3_mf_band", "ruled": False,
-        "operator_ruling_id": None, "operator_verdict": None, "operator_source": None,
-        "operator_note": None, "operator_decided_by": None, "operator_decided_at": None,
+        "listing_lo": 11, "listing_hi": 12, "ruled": False,
+        "operator_ruling_id": None, "operator_verdict": None, "operator_note": None,
+        "operator_reasons": None, "operator_decided_by": None, "operator_decided_at": None,
         "judge_tier": "vision", "judge_verdict": "different_property", "judge_confidence": 0.93,
         "judge_model": "gpt-5-mini", "judge_key_evidence": ["jiné patro"],
-        "judge_contradicting_evidence": ["stejná adresa"], "tiers_split": False,
+        "judge_contradicting_evidence": ["stejná adresa"],
         "is_sample": True, "is_operator": False, "is_engine": True, "is_unsure": False,
-        "primary_reason": "sample", "operator_agreement": "none",
-        "engine_agreement": "disagrees", "engine_view": "together", "together_now": False,
-        "obec_kod": 563510, "obec_name": "Jablonec nad Nisou", "cast_obce_kod": None,
-        "cast_obce_name": None, "zone": "band", "score": 0.61,
-        "decision": "certificate:K-A:evidence_gate", "guard_veto": None, "block": 0,
-        "sort_hash": HASH,
+        "engine_view": "apart", "obec_name": "Jablonec nad Nisou", "cast_obce_name": None,
+        "zone": "band", "score": 0.61, "decision": "certificate:K-A:evidence_gate",
+        "guard_veto": None, "block": 0, "sort_hash": HASH,
     }
     values.update(over)
     unknown = sorted(set(values) - set(usql.JUDGED_PAIR_COLUMNS))
@@ -162,20 +159,24 @@ def client(conn: _Conn):
 @pytest.mark.parametrize("query", [
     {"sort": "random"},
     {"has_judgement": "1"},
+    {"stratum": "g2:s3_mf_band"},
     {"reason": "everything"},
+    {"reason": "operator"},
     {"judge": "same_property"},
+    {"judge": "none"},
     {"tier": "oss"},
     {"ruled": "2"},
     {"operator": "maybe"},
     {"engine": "together"},
     {"town": "563510"},
-    {"stratum": "g2:\x07bell"},
-    {"stratum": "x" * 201},
-    {"after": f"0|0|{HASH}|11"},
-    {"after": f"0|3|{HASH}|11|12"},
-    {"after": f"2|0|{HASH}|11|12"},
-    {"after": "0|0|not-a-hash|11|12"},
-    {"after": f"0|0|{HASH}|eleven|12"},
+    {"after": f"suggested|0|0|{HASH}|11"},
+    {"after": f"0|0|{HASH}|11|12"},
+    {"after": f"operator|0|0|{HASH}|11|12"},
+    {"after": f"suggested|0|3|{HASH}|11|12"},
+    {"after": f"suggested|2|0|{HASH}|11|12"},
+    {"after": "suggested|0|0|not-a-hash|11|12"},
+    {"after": f"suggested|0|0|{HASH}|eleven|12"},
+    {"after": f"sample|0|0|{HASH}|11|12", "reason": "engine"},
 ])
 def test_the_filter_registry_refuses_what_it_does_not_name(client, conn, query):
     assert client.get("/autodedup/judgements", params=query).status_code == 400
@@ -183,17 +184,15 @@ def test_the_filter_registry_refuses_what_it_does_not_name(client, conn, query):
 
 
 def test_every_filter_becomes_a_parameter_of_the_statements(client, conn):
-    conn.facets["operator"] = [("total", None, 1)]
+    conn.facets["unsure"] = [("total", None, 1)]
     client.get("/autodedup/judgements", params={
-        "reason": "operator", "judge": "different", "tier": "gold",
-        "stratum": "b:band_not_merged|band|model>=0.95|nofact", "town": "c:490245",
+        "reason": "unsure", "judge": "different", "tier": "gold", "town": "c:490245",
         "ruled": 1, "operator": "disagrees", "engine": "agrees", "generation": "g13"})
     params = conn.params(usql.JUDGEMENTS_SQL)
     assert {k: params[k] for k in (
-        "reason", "judge", "tier", "stratum", "obec", "cast_obce", "ruled", "operator",
-        "engine", "generation", "seed", "sample_size", "judge_sure")} == {
-        "reason": "operator", "judge": "different", "tier": "gold",
-        "stratum": "b:band_not_merged|band|model>=0.95|nofact", "obec": None,
+        "reason", "judge", "tier", "obec", "cast_obce", "ruled", "operator", "engine",
+        "generation", "seed", "sample_size", "judge_sure")} == {
+        "reason": "unsure", "judge": "different", "tier": "gold", "obec": None,
         "cast_obce": 490245, "ruled": True, "operator": "disagrees", "engine": "agrees",
         "generation": "g13", "seed": routes.DEFAULT_SEED,
         "sample_size": routes.VALIDATION_SAMPLE_SIZE, "judge_sure": routes.JUDGE_SURE}
@@ -203,9 +202,9 @@ def test_every_filter_becomes_a_parameter_of_the_statements(client, conn):
 
 
 def test_a_blank_filter_is_no_filter(client, conn):
-    client.get("/autodedup/judgements", params={"judge": "", "town": "", "stratum": ""})
+    client.get("/autodedup/judgements", params={"judge": "", "town": ""})
     params = conn.params(usql.JUDGEMENTS_SQL)
-    assert (params["judge"], params["obec"], params["stratum"]) == (None, None, None)
+    assert (params["judge"], params["obec"]) == (None, None)
     assert params["after_hash"] is None
 
 
@@ -242,25 +241,22 @@ def test_an_asked_reason_is_kept_even_when_it_is_empty(client, conn):
 def test_a_row_carries_the_judge_the_reasons_the_engine_and_the_town(client, conn):
     conn.facets["suggested"] = [
         ("total", None, 1), ("judge", "different", 1), ("tier", "vision", 1),
-        ("stratum", "g2:s3_mf_band", 1), ("stratum", None, 4), ("ruled", "0", 1),
-        ("operator", "none", 1), ("engine", "disagrees", 1),
+        ("ruled", "0", 1), ("operator", "none", 1), ("engine", "disagrees", 1),
         ("reason", "suggested", 1), ("reason", "sample", 1), ("reason", "engine", 1),
     ]
     data = client.get("/autodedup/judgements").json()["data"]
     assert data["generation"] == "g15"
     item = data["items"][0]
-    assert item["judgement"] == {
-        "tier": "vision", "verdict": "different_property", "confidence": 0.93,
-        "model": "gpt-5-mini", "key_evidence": ["jiné patro"],
-        "contradicting_evidence": ["stejná adresa"]}
-    assert item["reasons"] == ["sample", "engine"] and item["primary_reason"] == "sample"
-    assert item["ruled"] is False and item["verdict"] is None
-    assert item["stratum"] == "g2:s3_mf_band"
-    assert item["engine_view"] == "together" and item["engine_agreement"] == "disagrees"
-    assert item["certificate"] == "K-A"
-    assert "druhy důkazů" in item["why_not_merged"]
-    assert item["obec_name"] == "Jablonec nad Nisou"
-    assert data["facets"]["stratum"] == {"g2:s3_mf_band": 1}
+    assert item == {
+        "listing_lo": 11, "listing_hi": 12, "ruled": False, "verdict": None,
+        "judgement": {
+            "tier": "vision", "verdict": "different_property", "confidence": 0.93,
+            "model": "gpt-5-mini", "key_evidence": ["jiné patro"],
+            "contradicting_evidence": ["stejná adresa"]},
+        "reasons": ["sample", "engine"], "engine_view": "apart",
+        "obec_name": "Jablonec nad Nisou", "cast_obce_name": None, "zone": "band",
+        "score": 0.61, "guard_veto": None, "certificate": "K-A",
+        "why_not_merged": "drženo v pásmu kontroly: méně než dva nezávislé druhy důkazů"}
     assert data["facets"]["reason"] == {"suggested": 1, "sample": 1, "engine": 1}
     assert data["facets"]["ruled"] == {"0": 1}
     assert data["towns"] == [{"grain": "o", "code": 563510, "name": "Jablonec nad Nisou",
@@ -269,38 +265,77 @@ def test_a_row_carries_the_judge_the_reasons_the_engine_and_the_town(client, con
                                                   "limit": routes.RULING_TOWNS_LIMIT}
 
 
-def test_a_ruled_row_carries_the_operators_word_as_a_verdict_row(client, conn):
-    conn.pages = [_judged(ruled=True, operator_ruling_id=41, operator_verdict="same",
-                          operator_source="implied", operator_decided_by="op@example.com",
-                          operator_decided_at=AT, operator_agreement="disagrees")]
+@pytest.mark.parametrize("zone", ["merge", "band", "reject"])
+def test_a_pair_the_engine_holds_together_carries_no_reason_it_was_not_merged(
+        client, conn, zone):
+    """A merged pair was not "not merged": a merge-zone pair in one group, or a band pair joined
+    through a third advert, must not read "dvojice prošla, ale ..." or "skóre v pásmu ..."."""
+    conn.pages = [_judged(engine_view="together", zone=zone, decision=f"{zone}:score")]
     item = client.get("/autodedup/judgements").json()["data"]["items"][0]
-    assert item["ruled"] is True and item["operator_source"] == "implied"
-    assert item["verdict"]["verdict"] == "same" and item["verdict"]["id"] == 41
-    assert (item["verdict"]["listing_lo"], item["verdict"]["listing_hi"]) == (11, 12)
-    assert item["operator_agreement"] == "disagrees"
+    assert item["engine_view"] == "together" and item["zone"] == zone
+    assert item["why_not_merged"] is None
+
+
+def test_a_ruled_row_carries_the_operators_word_and_codes_as_a_verdict_row(client, conn):
+    conn.pages = [_judged(ruled=True, operator_ruling_id=41, operator_verdict="same",
+                          operator_note="stejná kuchyň", operator_reasons=["photos_same"],
+                          operator_decided_by="op@example.com", operator_decided_at=AT)]
+    item = client.get("/autodedup/judgements").json()["data"]["items"][0]
+    assert item["ruled"] is True
+    assert item["verdict"] == {
+        "id": 41, "kind": "pair", "cluster_key": None, "listing_lo": 11, "listing_hi": 12,
+        "verdict": "same", "note": "stejná kuchyň", "reasons": ["photos_same"],
+        "decided_by": "op@example.com", "decided_at": AT.isoformat()}
+
+
+def test_a_nevim_is_a_stored_word_but_not_a_ruling(client, conn):
+    """The buttons show the "Nevím" the operator gave, yet the pair stays unruled: it sorts with
+    the open ones and the judge stays hidden (E55)."""
+    conn.pages = [_judged(ruled=False, operator_ruling_id=42, operator_verdict="unsure",
+                          operator_decided_by="op@example.com", operator_decided_at=AT)]
+    item = client.get("/autodedup/judgements").json()["data"]["items"][0]
+    assert item["ruled"] is False
+    assert item["verdict"]["verdict"] == "unsure" and item["verdict"]["reasons"] == []
 
 
 def test_a_sampled_pair_the_judge_has_not_read_has_no_judgement_and_no_engine_row(client, conn):
     conn.pages = [_judged(judge_tier=None, judge_verdict=None, judge_confidence=None,
                           judge_model=None, judge_key_evidence=None,
                           judge_contradicting_evidence=None, is_engine=False,
-                          engine_agreement="none", engine_view="unseen", zone=None,
-                          score=None, decision=None, stratum="g2:control")]
+                          engine_view="unseen", zone=None, score=None, decision=None)]
     item = client.get("/autodedup/judgements").json()["data"]["items"][0]
     assert item["judgement"] is None
     assert item["reasons"] == ["sample"]
     assert item["why_not_merged"] is None and item["certificate"] is None
 
 
-def test_the_cursor_is_the_pages_own_order_key(client, conn):
+def test_the_cursor_is_the_pages_own_order_key_and_its_selection(client, conn):
     conn.pages = [_judged(), _judged(listing_lo=13, listing_hi=14, block=1, sort_hash="f" * 32)]
     data = client.get("/autodedup/judgements", params={"limit": 1}).json()["data"]
-    assert data["next_after"] == f"0|0|{HASH}|11|12"
+    assert data["next_after"] == f"suggested|0|0|{HASH}|11|12"
     client.get("/autodedup/judgements", params={"after": data["next_after"]})
     params = conn.params(usql.JUDGEMENTS_SQL)
-    assert (params["after_ruled"], params["after_block"], params["after_hash"],
-            params["after_lo"], params["after_hi"]) == (0, 0, HASH, 11, 12)
+    assert (params["reason"], params["after_ruled"], params["after_block"],
+            params["after_hash"], params["after_lo"], params["after_hi"]) == (
+        "suggested", 0, 0, HASH, 11, 12)
     assert params["limit"] == routes.JUDGEMENTS_PAGE_SIZE + 1
+
+
+def test_a_later_page_runs_the_page_statement_alone(client, conn):
+    """The counts and the town vocabulary are read once, with the first page: "Načíst další"
+    must not re-run the whole population three times over."""
+    conn.facets = {"suggested": [("total", None, 0)], "all": [("total", None, 3)]}
+    conn.pages = [_judged(), _judged(listing_lo=13, listing_hi=14, block=2)]
+    first = client.get("/autodedup/judgements", params={"limit": 1}).json()["data"]
+    assert first["reason"] == "all" and first["next_after"].startswith("all|")
+    conn.calls.clear()
+    later = client.get("/autodedup/judgements", params={"after": first["next_after"]}).json()
+    assert not conn.ran(usql.JUDGEMENTS_FACETS_SQL) and not conn.ran(usql.JUDGED_TOWNS_SQL)
+    # The selection the first page fell back to holds for the whole walk.
+    assert conn.params(usql.JUDGEMENTS_SQL)["reason"] == "all"
+    assert later["data"]["reason"] == "all"
+    assert (later["data"]["total"], later["data"]["facets"], later["data"]["towns"]) == (
+        None, None, None)
 
 
 def test_the_engine_view_is_the_live_stream_once_it_is_live(client, conn):
@@ -318,14 +353,22 @@ def test_an_unmigrated_store_renders_instead_of_failing(client, conn):
     assert client.get("/autodedup/judgements").json() == {"data": None, "store_ready": False}
 
 
-def test_a_store_without_the_stratum_column_reads_as_not_ready(client, conn):
-    """Migration 576 is applied before the code merges; if it is not, the page says the store
-    is behind rather than failing."""
+def test_a_store_behind_the_code_reads_as_not_ready(client, conn):
+    """A column the statements read and the store lacks: the page says the store is behind
+    rather than failing."""
     if not routes._UNDEFINED_COLUMN:
         pytest.skip("psycopg absent")
     conn.raises[usql.JUDGEMENTS_FACETS_SQL] = routes._UNDEFINED_COLUMN[0](
-        'column j.stratum does not exist')
+        'column e.stratum does not exist')
     assert client.get("/autodedup/judgements").json() == {"data": None, "store_ready": False}
+
+
+def test_the_page_never_reads_the_marks_list_stamp():
+    """Migration 576's `stratum` is the marks' training provenance, not a filter: no Judge
+    statement reads it off `autodedup.judgements` (the sealed draw's own name partitions it)."""
+    for sql in (usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL, usql.JUDGED_TOWNS_SQL):
+        flat = _flat(sql)
+        assert "j.stratum" not in flat and "m.stratum" not in flat and "g.stratum" not in flat
 
 
 # ------------------------------------------------------------------------- the progress strip

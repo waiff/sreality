@@ -2953,12 +2953,13 @@ def _facets(rows: list[tuple[Any, ...]],
 
 
 def _engine_reading(row: dict[str, Any]) -> dict[str, Any]:
-    """The stored pair's certificate and "why not merged", read off its decision (None when the
-    generation stored no row for the pair)."""
+    """The stored pair's certificate and "why not merged" off its decision: no reason without a
+    stored row, nor for two adverts in ONE group (a band pair joins one through a third advert)."""
     return {
         "certificate": _certificate(row["decision"]),
         "why_not_merged": (_why_not_merged(row["zone"], row["decision"], row["guard_veto"])
-                           if row["zone"] is not None else None),
+                           if row["zone"] is not None and row["engine_view"] != "together"
+                           else None),
     }
 
 
@@ -3104,37 +3105,28 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
 #
 # Read-only; the operator answers through `POST /autodedup/verdict`, as on every queue.
 
-JUDGEMENT_REASONS: tuple[str, ...] = ("suggested", "sample", "operator", "engine", "unsure", "all")
-# The order a row lists its reasons in (the SQL's primary reason follows it too).
+JUDGEMENT_REASONS: tuple[str, ...] = ("suggested", "sample", "engine", "unsure", "all")
+# The order a row lists its reasons in; `operator` is carried, not selected ("Soudce × vy" asks).
 REASON_ORDER: tuple[str, ...] = ("sample", "operator", "engine", "unsure")
-# `none` = the judge has not read the pair yet.
-JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain", "none")
+# An unread pair is tier `none` ("Kdo četl: Zatím nikdo"), asked once.
+JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain")
 JUDGE_TIERS: tuple[str, ...] = ("gold", "vision", "text", "none")
 JUDGEMENT_FILTER_KEYS: frozenset[str] = frozenset(
-    {
-        "reason", "judge", "tier", "stratum", "town", "ruled", "operator", "engine",
-        "generation", "after", "limit",
-    }
+    {"reason", "judge", "tier", "town", "ruled", "operator", "engine", "generation", "after",
+     "limit"}
 )
 JUDGEMENTS_PAGE_SIZE = 25
 # A headline at least this confident that contradicts the engine is worth the operator's look.
 JUDGE_SURE = 0.9
-# A stratum is DATA — the pair list names it — so the filter bounds it and bars control
-# characters rather than owning a vocabulary; it reaches SQL only as a parameter.
-STRATUM_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
-_JUDGEMENT_FACETS: tuple[str, ...] = (
-    "reason", "judge", "tier", "stratum", "ruled", "operator", "engine",
-)
+_JUDGEMENT_FACETS: tuple[str, ...] = ("reason", "judge", "tier", "ruled", "operator", "engine")
 
 
 def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
-    ruled = bool(row["ruled"])
     return {
         "listing_lo": row["listing_lo"],
         "listing_hi": row["listing_hi"],
-        "stratum": row["stratum"],
-        "ruled": ruled,
-        # The operator's word as the verdict row every queue's buttons read.
+        "ruled": bool(row["ruled"]),
+        # The operator's word as every queue's buttons and note read it, codes included.
         "verdict": {
             "id": row["operator_ruling_id"],
             "kind": "pair",
@@ -3143,10 +3135,10 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
             "listing_hi": row["listing_hi"],
             "verdict": row["operator_verdict"],
             "note": row["operator_note"],
+            "reasons": list(row["operator_reasons"] or []),
             "decided_by": row["operator_decided_by"],
             "decided_at": row["operator_decided_at"],
-        } if ruled else None,
-        "operator_source": row["operator_source"],
+        } if row["operator_verdict"] is not None else None,
         "judgement": {
             "tier": row["judge_tier"],
             "verdict": row["judge_verdict"],
@@ -3155,13 +3147,8 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
             "key_evidence": list(row["judge_key_evidence"] or []),
             "contradicting_evidence": list(row["judge_contradicting_evidence"] or []),
         } if row["judge_verdict"] is not None else None,
-        "tiers_split": bool(row["tiers_split"]),
         "reasons": [name for name in REASON_ORDER if row[f"is_{name}"]],
-        "primary_reason": row["primary_reason"],
-        "operator_agreement": row["operator_agreement"],
-        "engine_agreement": row["engine_agreement"],
         "engine_view": row["engine_view"],
-        "together_now": bool(row["together_now"]),
         "obec_name": row["obec_name"],
         "cast_obce_name": row["cast_obce_name"],
         "zone": row["zone"],
@@ -3172,16 +3159,17 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _judgement_cursor(raw: str | None) -> dict[str, Any]:
-    """`ruled|block|hash|lo|hi` — the page's own order key, each part validated (400)."""
-    parts = _split_cursor(raw, 5)
+    """`reason|ruled|block|hash|lo|hi` — the first page's selection, then the order key (400)."""
+    parts = _split_cursor(raw, 6)
     if parts is None:
-        return {"after_ruled": None, "after_block": None, "after_hash": None,
+        return {"reason": None, "after_ruled": None, "after_block": None, "after_hash": None,
                 "after_lo": None, "after_hi": None}
-    ruled, block = _as_int(parts[0]), _as_int(parts[1])
-    if ruled not in (0, 1) or block not in (0, 1, 2):
+    ruled, block = _as_int(parts[1]), _as_int(parts[2])
+    if parts[0] not in JUDGEMENT_REASONS or ruled not in (0, 1) or block not in (0, 1, 2):
         raise _bad("after is not a cursor from this endpoint")
-    return {"after_ruled": ruled, "after_block": block, "after_hash": _as_hash(parts[2]),
-            "after_lo": _as_int(parts[3]), "after_hi": _as_int(parts[4])}
+    return {"reason": parts[0], "after_ruled": ruled, "after_block": block,
+            "after_hash": _as_hash(parts[3]), "after_lo": _as_int(parts[4]),
+            "after_hi": _as_int(parts[5])}
 
 
 @router.get("/judgements")
@@ -3190,7 +3178,6 @@ def judgements(
     reason: str | None = Query(None),
     judge: str | None = Query(None),
     tier: str | None = Query(None),
-    stratum: str | None = Query(None),
     town: str | None = Query(None),
     ruled: int | None = Query(None),
     operator: str | None = Query(None),
@@ -3202,18 +3189,20 @@ def judgements(
 ) -> dict[str, Any]:
     """One page of the judge's pairs, unruled first, the random sample on top (keyset on the
     page's order). A missing `reason` means `suggested` while that set holds a pair under the
-    other filters, else `all`, and the answer says which it used. `facets` count the current
-    filter's rows per value; `towns` is the town filter's vocabulary."""
+    other filters, else `all`; the answer and the cursor say which. Only the FIRST page counts
+    (`total`, `facets` under the current filter) and names the towns; a later page runs the page
+    statement alone and sends those null."""
     _reject_unknown_filters(request, JUDGEMENT_FILTER_KEYS)
     obec, cast_obce = _town_codes(town)
-    if stratum and not STRATUM_RE.match(stratum):
-        raise _bad("stratum must be a pair list's name")
     asked = _one_of("reason", reason or None, JUDGEMENT_REASONS)
+    page_params = _judgement_cursor(after)
+    listed = page_params.pop("reason")
+    if listed is not None and asked not in (None, listed):
+        raise _bad("after is not a cursor from this list")
     params: dict[str, Any] = {
-        "reason": asked or "suggested",
+        "reason": listed or asked or "suggested",
         "judge": _one_of("judge", judge or None, JUDGE_WORDS),
         "tier": _one_of("tier", tier or None, JUDGE_TIERS),
-        "stratum": stratum or None,
         "obec": obec,
         "cast_obce": cast_obce,
         "ruled": _flag("ruled", ruled),
@@ -3223,24 +3212,26 @@ def judgements(
         "sample_size": VALIDATION_SAMPLE_SIZE,
         "judge_sure": JUDGE_SURE,
     }
-    page_params = _judgement_cursor(after)
     if not store_ready(conn):
         return _not_ready()
+    total, facets, towns = None, None, None
     try:
         generation = _resolve_generation(conn, generation)
         params["generation"] = generation
         with conn.transaction():
             _execute(conn, usql.JIT_OFF, {})
-            total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
-                                    _JUDGEMENT_FACETS)
-            if asked is None and total == 0:
-                params["reason"] = "all"
+            if listed is None:
                 total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
                                         _JUDGEMENT_FACETS)
+                if asked is None and total == 0:
+                    params["reason"] = "all"
+                    total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                            _JUDGEMENT_FACETS)
+                towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
+                    conn, usql.JUDGED_TOWNS_SQL,
+                    {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
             rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
                 conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
-            towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
-                conn, usql.JUDGED_TOWNS_SQL, {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
     except _STORE_BEHIND:
         return _not_ready()
 
@@ -3248,8 +3239,8 @@ def judgements(
     last = page[-1] if page else None
     next_after = None
     if len(rows) > limit and last is not None:
-        next_after = _cursor(int(bool(last["ruled"])), last["block"], last["sort_hash"],
-                             last["listing_lo"], last["listing_hi"])
+        next_after = _cursor(params["reason"], int(bool(last["ruled"])), last["block"],
+                             last["sort_hash"], last["listing_lo"], last["listing_hi"])
     return {
         "data": {
             "generation": generation,

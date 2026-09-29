@@ -3,7 +3,7 @@
 PREPARE proves the statements compile; only seeded rows show which pairs the population holds,
 which mark is a pair's headline, what each reason picks and where its cap cuts, and that the
 order and the cursor page through every row once. Also the judge lane's stratum writes
-(migration 576). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
+(migration 576: training provenance, which the page does not read). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
 The pairs are synthetic listing ids: every join the page makes to `listings` is a LEFT JOIN.
 """
 
@@ -36,8 +36,8 @@ _IDS = itertools.count(9_800_000_001, 2)
 
 _BASE: dict[str, Any] = {
     "generation": GEN, "seed": SEED, "sample_size": 100, "judge_sure": 0.9, "reason": "all",
-    "judge": None, "tier": None, "stratum": None, "obec": None, "cast_obce": None,
-    "ruled": None, "operator": None, "engine": None,
+    "judge": None, "tier": None, "obec": None, "cast_obce": None, "ruled": None,
+    "operator": None, "engine": None,
 }
 _NO_CURSOR: dict[str, Any] = {
     "after_ruled": None, "after_block": None, "after_hash": None, "after_lo": None,
@@ -80,9 +80,23 @@ def _mark(cur: Any, pair: tuple[int, int], tier: str, verdict: str, *,
     )
 
 
-def _rule(cur: Any, pair: tuple[int, int], verdict: str) -> None:
+def _rule(cur: Any, pair: tuple[int, int], verdict: str, *, note: str | None = None,
+          reasons: tuple[str, ...] = ()) -> None:
     cur.execute("INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict,"
-                " decided_by) VALUES ('pair', %s, %s, %s, %s)", (*pair, verdict, OP))
+                " decided_by, note, reasons) VALUES ('pair', %s, %s, %s, %s, %s, %s)",
+                (*pair, verdict, OP, note, list(reasons)))
+
+
+def _group(cur: Any, key: int, *listing_ids: int) -> None:
+    for listing_id in listing_ids:
+        cur.execute("INSERT INTO autodedup.cluster_members (generation, cluster_key,"
+                    " listing_id) VALUES (%s, %s, %s)", (GEN, key, listing_id))
+
+
+def _stored(cur: Any, pair: tuple[int, int], zone: str, score: float) -> None:
+    cur.execute("INSERT INTO autodedup.pairs (generation, listing_lo, listing_hi, probes, score,"
+                " zone, decision) VALUES (%s, %s, %s, ARRAY['ci'], %s, %s, %s)",
+                (GEN, *pair, score, zone, f"{zone}:score"))
 
 
 def _rows(cur: Any, **over: Any) -> list[dict[str, Any]]:
@@ -96,6 +110,12 @@ def _by_pair(cur: Any, **over: Any) -> dict[tuple[int, int], dict[str, Any]]:
 
 def _reasons(row: dict[str, Any]) -> set[str]:
     return {name for name in ("sample", "operator", "engine", "unsure") if row[f"is_{name}"]}
+
+
+def _only(rows: list[dict[str, Any]], pairs: list[tuple[int, int]]) -> list[dict[str, Any]]:
+    """This test's own pairs, in the statement's order (the replay may hold other draws)."""
+    mine = set(pairs)
+    return [r for r in rows if (r["listing_lo"], r["listing_hi"]) in mine]
 
 
 def test_the_headline_is_the_best_tier_and_oss_is_not_the_judge(cur):
@@ -114,41 +134,56 @@ def test_the_headline_is_the_best_tier_and_oss_is_not_the_judge(cur):
     # Newest within the best tier, whatever the version.
     assert (rows[agree]["judge_tier"], rows[agree]["judge_verdict"]) == ("vision",
                                                                          "same_property")
-    assert rows[agree]["tiers_split"] is False and _reasons(rows[agree]) == set()
-    assert rows[split]["tiers_split"] is True and _reasons(rows[split]) == {"unsure"}
+    assert _reasons(rows[agree]) == set() and rows[agree]["block"] == 2
+    assert _reasons(rows[split]) == {"unsure"}, "text and vision said different words"
     assert rows[gold]["judge_tier"] == "gold" and _reasons(rows[gold]) == {"unsure"}
+    assert rows[gold]["block"] == 1, "a split gold vote (2 of 3) is suggested"
     assert rows[abstain]["judge_verdict"] == "insufficient_evidence"
     assert _reasons(rows[abstain]) == {"unsure"}
-    # A split gold vote is the first unsure pair the cap keeps.
-    assert rows[gold]["primary_reason"] == "unsure" and rows[gold]["block"] == 1
-    assert rows[agree]["block"] == 2 and rows[agree]["primary_reason"] is None
+
+
+def test_a_unanimous_gold_vote_is_sure_and_may_contradict_the_engine(cur):
+    """Unsure is a SPLIT: three gold votes of three (1.0) are the surest word the judge has, so
+    they are never "Soudce si nebyl jistý" and may carry the engine reason."""
+    calm, merged = _pair(), _pair()
+    _mark(cur, calm, "gold", "same_property", confidence=1.0)
+    _mark(cur, merged, "gold", "different_property", confidence=1.0)
+    _group(cur, merged[0], *merged)
+    rows = _by_pair(cur)
+    assert _reasons(rows[calm]) == set() and rows[calm]["block"] == 2
+    assert rows[merged]["engine_view"] == "together"
+    assert _reasons(rows[merged]) == {"engine"}
+    assert merged in _by_pair(cur, reason="engine")
+    assert calm not in _by_pair(cur, reason="unsure")
 
 
 def test_the_operators_word_is_the_rulings_pages_own(cur):
     typed, implied, vetoed, unsure = (_pair() for _ in range(4))
     for pair in (typed, implied, vetoed, unsure):
         _mark(cur, pair, "vision", "same_property")
-    _rule(cur, typed, "different")
+    _rule(cur, typed, "different", note="jiné patro", reasons=("floor_differs",))
     cur.execute("INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, decided_by,"
-                " generation, member_ids) VALUES ('cluster', %s, 'same', %s, %s, %s)",
+                " generation, member_ids, note, reasons) VALUES ('cluster', %s, 'same', %s, %s,"
+                " %s, 'celá skupina', ARRAY['identical_photos'])",
                 (implied[0], OP, GEN, [implied[0], implied[1]]))
     cur.execute("INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason)"
                 " VALUES (%s, %s, 'operator', 'ci')", vetoed)
     _rule(cur, unsure, "unsure")
     rows = _by_pair(cur)
-    assert (rows[typed]["operator_source"], rows[typed]["operator_agreement"]) == (
-        "pair", "disagrees")
-    assert "operator" in _reasons(rows[typed])
-    assert (rows[implied]["operator_source"], rows[implied]["operator_agreement"]) == (
-        "implied", "agrees")
-    assert (rows[vetoed]["operator_verdict"], rows[vetoed]["operator_agreement"]) == (
-        "different", "disagrees")
-    # "Nevím" is a word on the pair (the row opens, it sorts with the ruled) but no verdict.
-    assert rows[unsure]["ruled"] is True and rows[unsure]["operator_agreement"] == "none"
-    assert all(rows[p]["ruled"] for p in (typed, implied, vetoed, unsure))
-    ruled = _rows(cur, ruled=True)
-    assert {(r["listing_lo"], r["listing_hi"]) for r in ruled} >= {typed, implied, vetoed,
-                                                                   unsure}
+    disagree, agree = _by_pair(cur, operator="disagrees"), _by_pair(cur, operator="agrees")
+    assert typed in disagree and "operator" in _reasons(rows[typed])
+    assert implied in agree and rows[implied]["operator_verdict"] == "same"
+    assert vetoed in disagree and rows[vetoed]["operator_verdict"] == "different"
+    # The pair's own note and codes travel with its word; a group's or a veto's never do.
+    assert (rows[typed]["operator_note"], rows[typed]["operator_reasons"]) == (
+        "jiné patro", ["floor_differs"])
+    for other in (implied, vetoed):
+        assert (rows[other]["operator_note"], rows[other]["operator_reasons"]) == (None, None)
+    # "Nevím" is a stored word (the buttons show it) but not a ruling: the pair stays open.
+    assert rows[unsure]["operator_verdict"] == "unsure" and rows[unsure]["ruled"] is False
+    assert unsure not in disagree and unsure not in agree
+    ruled = _by_pair(cur, ruled=True)
+    assert all(pair in ruled for pair in (typed, implied, vetoed)) and unsure not in ruled
 
 
 def test_the_engine_reason_is_a_sure_judge_against_the_live_grouping(cur):
@@ -158,18 +193,16 @@ def test_the_engine_reason_is_a_sure_judge_against_the_live_grouping(cur):
     _mark(cur, timid, "vision", "same_property", confidence=0.5)
     _mark(cur, torn, "text", "different_property")
     _mark(cur, torn, "vision", "same_property", confidence=0.99)
-    for listing_id in merged:
-        cur.execute("INSERT INTO autodedup.cluster_members (generation, cluster_key,"
-                    " listing_id) VALUES (%s, %s, %s)", (GEN, merged[0], listing_id))
+    _group(cur, merged[0], *merged)
     for listing_id in (*apart, *timid, *torn):
         cur.execute("INSERT INTO autodedup.rt_fp (generation, listing_id) VALUES (%s, %s)",
                     (GEN, listing_id))
     rows = _by_pair(cur)
-    assert (rows[merged]["engine_view"], rows[merged]["engine_agreement"]) == (
-        "together", "disagrees")
+    disagree = _by_pair(cur, engine="disagrees")
+    assert rows[merged]["engine_view"] == "together" and merged in disagree
     assert _reasons(rows[merged]) == {"engine"}
     assert (rows[apart]["engine_view"], _reasons(rows[apart])) == ("apart", {"engine"})
-    assert rows[timid]["engine_agreement"] == "disagrees" and _reasons(rows[timid]) == set()
+    assert timid in disagree and _reasons(rows[timid]) == set()
     assert _reasons(rows[torn]) == {"unsure"}, "an unsure pair is never the engine reason"
     # A suspected false merge comes first under the engine reason's cap.
     engine = [r for r in _rows(cur, reason="engine")
@@ -177,6 +210,26 @@ def test_the_engine_reason_is_a_sure_judge_against_the_live_grouping(cur):
     assert len(engine) == 2
     # Nothing else in another generation: unseen, no engine reason.
     assert _by_pair(cur, generation="g-other")[merged]["engine_view"] == "unseen"
+
+
+def test_a_pair_the_engine_holds_together_reads_no_reason_it_was_not_merged(cur):
+    """A merge-zone pair in one group, and a band pair joined into one group through a third
+    advert: both are merged, so neither carries "why the engine did not merge them"."""
+    routes = pytest.importorskip("api.routes.autodedup")
+    direct, bridged = _pair(), _pair()
+    third = bridged[1] + 1
+    for pair in (direct, bridged):
+        _mark(cur, pair, "vision", "different_property")
+    _stored(cur, direct, "merge", 0.97)
+    _stored(cur, bridged, "band", 0.61)
+    _stored(cur, (bridged[0], third), "merge", 0.95)
+    _stored(cur, (bridged[1], third), "merge", 0.96)
+    _group(cur, direct[0], *direct)
+    _group(cur, bridged[0], *bridged, third)
+    rows = _by_pair(cur)
+    for pair, zone in ((direct, "merge"), (bridged, "band")):
+        assert (rows[pair]["engine_view"], rows[pair]["zone"]) == ("together", zone)
+        assert routes._judged_pair(rows[pair])["why_not_merged"] is None
 
 
 def _seal(cur: Any, n: int) -> list[tuple[int, int]]:
@@ -194,19 +247,18 @@ def _seeded(pairs: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def test_the_sample_is_the_first_100_of_the_sealed_draw_in_the_seeded_order(cur):
     pairs = _seal(cur, 120)
-    _mark(cur, pairs[0], "vision", "same_property", stratum=None)
-    rows = _rows(cur, reason="sample", stratum=SAMPLE)
+    _mark(cur, pairs[0], "vision", "same_property", stratum="g2:s1_ladder_only_edge")
+    rows = _only(_rows(cur, reason="sample"), pairs)
     assert [(r["listing_lo"], r["listing_hi"]) for r in rows] == _seeded(pairs)[:100]
-    assert all(r["block"] == 0 and r["primary_reason"] == "sample" for r in rows)
+    assert all(r["block"] == 0 and _reasons(r) >= {"sample"} for r in rows)
     assert all(r["judge_verdict"] is None for r in rows
                if (r["listing_lo"], r["listing_hi"]) != pairs[0])
-    # The judged sample pair keeps the draw's name when its mark names no list.
-    whole = _by_pair(cur, stratum=SAMPLE)
-    assert len(whole) == 120 and whole[pairs[0]]["stratum"] == SAMPLE
+    # A mark requested under a pair list stays in its sealed draw's sample: the draw defines it.
+    assert len(_only(_rows(cur), pairs)) == 120
     # A ruled pair sinks to the bottom of the order and still counts in the sample.
     first = _seeded(pairs)[0]
     _rule(cur, first, "same")
-    rows = _rows(cur, reason="sample", stratum=SAMPLE)
+    rows = _only(_rows(cur, reason="sample"), pairs)
     assert (rows[-1]["listing_lo"], rows[-1]["listing_hi"]) == first
     cur.execute(usql.VALIDATION_JUDGE_SAMPLE_SQL, {"seed": SEED, "sample_size": 100})
     assert cur.fetchone() == (100, 1, 0)
@@ -220,14 +272,14 @@ def test_the_cursor_pages_through_every_row_once_in_order(cur):
     for i, pair in enumerate(pairs[:12]):
         _mark(cur, pair, "vision", "same_property" if i % 2 else "different_property")
     _rule(cur, pairs[3], "different")
-    everything = _rows(cur, stratum=SAMPLE)
+    everything = _rows(cur)
     keys = [(int(r["ruled"]), r["block"], r["sort_hash"], r["listing_lo"], r["listing_hi"])
             for r in everything]
-    assert keys == sorted(keys) and len(keys) == 30
+    assert keys == sorted(keys) and len(_only(everything, pairs)) == 30
     seen: list[tuple[int, ...]] = []
     cursor = dict(_NO_CURSOR)
     while True:
-        cur.execute(usql.JUDGEMENTS_SQL, {**_BASE, **cursor, "stratum": SAMPLE, "limit": 7})
+        cur.execute(usql.JUDGEMENTS_SQL, {**_BASE, **cursor, "limit": 7})
         page = [dict(zip(usql.JUDGED_PAIR_COLUMNS, row)) for row in cur.fetchall()]
         seen += [(int(r["ruled"]), r["block"], r["sort_hash"], r["listing_lo"],
                   r["listing_hi"]) for r in page]
@@ -249,8 +301,8 @@ def test_the_facets_count_the_current_filter_and_every_reason(cur):
     assert facets[("reason", "sample")] >= 5
     assert facets[("reason", "unsure")] >= 1
     assert facets[("reason", "suggested")] == facets[("total", None)]
-    assert facets[("stratum", "g2:s1_ladder_only_edge")] == 1
-    assert facets[("judge", "none")] >= 4 and facets[("tier", "none")] >= 4
+    assert ("reason", "operator") not in facets, "a reason a row carries, not a selection"
+    assert facets[("tier", "none")] >= 4
     cur.execute(usql.JUDGED_TOWNS_SQL, {"seed": SEED, "limit": 40})
     cur.fetchall()
 
