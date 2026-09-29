@@ -180,6 +180,17 @@ def test_a_seed_of_the_release_row_reads_the_field_back() -> None:
     assert settings == W31R1C and settings.d43_image_facts is False
 
 
+def test_the_rollback_reseed_onto_w31_reads_back_as_w31_on_this_build() -> None:
+    # Rollback is a re-seed onto w31. This build stores that row WITH the key (true), which a
+    # build without the field refuses as an unknown key, so a later revert needs its own re-seed.
+    stored = json.loads(json.dumps(W31.to_dict(), sort_keys=True))
+    assert stored["d43_image_facts"] is True
+    settings, _ = pass_config(stored, "w6_gold", "rt")
+    assert settings == W31
+    with pytest.raises(SystemExit, match="unknown settings keys: not_a_field"):
+        pass_config({**stored, "not_a_field": True}, "w6_gold", "rt")
+
+
 def test_rt_seed_finds_the_release_row_by_name() -> None:
     settings, _, name, model = named_config({"settings": "w31r1c", "model": "w6_gold"},
                                             what="rt_seed")
