@@ -2213,7 +2213,8 @@ def verdict(
                 usql.PAIR_EXISTS_SQL,
                 {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
             ):
-                raise HTTPException(status_code=404, detail="no such pair")
+                raise HTTPException(
+                    status_code=404, detail="one of the two adverts does not exist")
         try:
             with conn.transaction():
                 if body.supersedes is not None:

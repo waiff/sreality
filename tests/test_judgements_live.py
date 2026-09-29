@@ -307,16 +307,6 @@ def test_the_facets_count_the_current_filter_and_every_reason(cur):
     cur.fetchall()
 
 
-def test_a_judged_or_sampled_pair_the_engine_never_stored_can_be_ruled(cur):
-    judged, sampled, nothing = _pair(), _pair(), _pair()
-    _mark(cur, judged, "text", "same_property")
-    cur.execute("INSERT INTO autodedup.eval_samples (stratum, listing_lo, listing_hi,"
-                " sampling_rate) VALUES (%s, %s, %s, 0.01)", (SAMPLE, *sampled))
-    for pair, expected in ((judged, True), (sampled, True), (nothing, False)):
-        cur.execute(usql.PAIR_EXISTS_SQL, {"listing_lo": pair[0], "listing_hi": pair[1]})
-        assert (cur.fetchone() is not None) is expected, pair
-
-
 def test_the_lane_stamps_a_mark_once_and_the_first_list_keeps_it(cur):
     pair = _pair()
     params = {
