@@ -302,10 +302,10 @@ describe('<AutodedupJudge> the selection and the page around it', () => {
     const user = userEvent.setup();
     setup();
     const row = await rowOf('#21');
-    const note = within(row).getByLabelText('Poznámka');
+    const note = await within(row).findByLabelText('Poznámka');
     await user.clear(note);
     await user.type(note, 'stejná okna');
-    await user.click(within(row).getByRole('button', { name: 'Uložit poznámku' }));
+    await user.click(await within(row).findByRole('button', { name: 'Uložit poznámku' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair', listing_lo: 21, listing_hi: 22, verdict: 'same',
       reasons: ['identical_photos'], note: 'stejná okna',
