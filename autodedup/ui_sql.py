@@ -1590,27 +1590,15 @@ GENERATION_EXISTS_SQL = """
 SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 """
 
-# ANY generation: a pair verdict is about two adverts, not about the pass that proposed them
-# (E58), so a pair this engine scored under g4 is still a pair the operator may rule today. And
-# ANY earlier word about the pair: a Browse merge's or a detach's ruling, a group ruling whose set
-# holds both adverts (an implied pair), or a must-not-link, is about a pair the engine may never
-# have stored (Decision 7 keeps no machine reject), and the operator must be able to correct it
-# (the rulings page, E920).
+# A pair verdict is about TWO ADVERTS, not about anything the engine kept on them (E58, E924): the
+# pair page opens on any two adverts, so the operator may rule any two that exist. The engine
+# stores no machine reject (Decision 7) and nothing at all outside its scope, and a duplicate it
+# MISSED is exactly the pair with no row: a guard that asked for a stored row refused the ruling
+# the operator most needs to give.
 PAIR_EXISTS_SQL = """
 SELECT 1
-WHERE EXISTS (SELECT 1 FROM autodedup.verdicts x
-               WHERE x.kind = 'pair'
-                 AND x.listing_lo = %(listing_lo)s::bigint
-                 AND x.listing_hi = %(listing_hi)s::bigint)
-   OR EXISTS (SELECT 1 FROM autodedup.verdicts c
-               WHERE c.kind = 'cluster'
-                 AND c.member_ids @> ARRAY[%(listing_lo)s::bigint, %(listing_hi)s::bigint])
-   OR EXISTS (SELECT 1 FROM autodedup.must_not_link n
-               WHERE n.listing_lo = %(listing_lo)s::bigint
-                 AND n.listing_hi = %(listing_hi)s::bigint)
-   OR EXISTS (SELECT 1 FROM autodedup.pairs p
-               WHERE p.listing_lo = %(listing_lo)s::bigint
-                 AND p.listing_hi = %(listing_hi)s::bigint)
+WHERE (SELECT count(*) FROM public.listings l
+        WHERE l.id IN (%(listing_lo)s::bigint, %(listing_hi)s::bigint)) = 2
 """
 
 # ------------------------------------------------- the validation session (D6): how far in?
