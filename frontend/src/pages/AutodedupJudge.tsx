@@ -6,7 +6,10 @@
  * evidence, the reasons and filters that read it — shows before the operator
  * has said Stejné or Různé on that pair ("Nevím" opens nothing); then the row
  * opens in place, and the list never reorders under the answering hand (the
- * verdict overlay). */
+ * verdict overlay). On a row of the sealed random sample the engine's view
+ * (its line, score, zone, certificate and why it did not merge) waits too, on
+ * this page and on the pair page its link opens: the sample measures the judge
+ * AND the engine against the operator's blind word. */
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -289,6 +292,8 @@ export default function AutodedupJudge() {
           const key = pairKey(item);
           const stored = overlay[key] ?? item.verdict;
           const revealed = !blind || revealsJudge(stored);
+          const sample = item.reasons.includes('sample');
+          const engineShown = revealed || !sample;
           const town = [item.obec_name, item.cast_obce_name].filter(Boolean).join(' · ');
           return (
             <li key={key}>
@@ -300,25 +305,33 @@ export default function AutodedupJudge() {
                 ))}
                 {revealed && !item.judgement && <Chip>soudce zatím nečetl</Chip>}
                 {town && <span className="text-[0.7rem] text-[var(--color-ink-3)]">{town}</span>}
-                <span className="text-[0.7rem] text-[var(--color-ink-3)]">
-                  Engine: {ENGINE_VIEW[item.engine_view]}
-                </span>
+                {engineShown && (
+                  <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+                    Engine: {ENGINE_VIEW[item.engine_view]}
+                  </span>
+                )}
               </div>
               <PairCard
                 dense
                 lo={member(item.listing_lo)}
                 hi={member(item.listing_hi)}
-                score={item.score}
-                zone={item.zone}
-                certificate={item.certificate}
-                guardVeto={item.guard_veto}
-                whyNotMerged={item.why_not_merged}
+                score={engineShown ? item.score : null}
+                zone={engineShown ? item.zone : null}
+                certificate={engineShown ? item.certificate : null}
+                guardVeto={engineShown ? item.guard_veto : null}
+                whyNotMerged={engineShown ? item.why_not_merged : null}
                 judgement={revealed ? item.judgement : null}
                 blind={!revealed}
                 verdict={stored}
                 pending={pendingKey === key}
                 eager={i < 2}
-                evidenceHref={pairHref(item.listing_lo, item.listing_hi, generation ?? '', blind)}
+                evidenceHref={pairHref(
+                  item.listing_lo,
+                  item.listing_hi,
+                  generation ?? '',
+                  blind,
+                  sample,
+                )}
                 annotation={notes.annotationOf(key, stored)}
                 onAnnotationChange={(next) => notes.setAnnotation(key, next)}
                 annotationDirty={notes.isDirty(key, stored)}

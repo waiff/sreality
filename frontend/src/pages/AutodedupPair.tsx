@@ -22,7 +22,10 @@
  * click on exactly the pair being ruled on, and the verdict the operator was not
  * supposed to see yet is the largest section on the screen. Everything the
  * ENGINE knew stays visible: features, digests, photos, the score. The judge is
- * the only thing hidden, and only until the operator has answered.
+ * the only thing hidden, and only until the operator has answered — except on a
+ * pair of the sealed random sample (`?sample=1`, from the Judge page): the
+ * sample measures the engine too, so its zone, score, certificate, rule, probes
+ * and features wait for the same answer.
  */
 
 import { useState } from 'react';
@@ -81,6 +84,7 @@ export default function AutodedupPair() {
   /* Only the explicit '1' blinds: this page is reachable directly, and its own
    * default is the full record. */
   const blind = params.get('blind') === '1';
+  const sample = params.get('sample') === '1';
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
@@ -108,6 +112,8 @@ export default function AutodedupPair() {
   const storeReady = q.data?.store_ready ?? null;
   const key = `${lo}:${hi}`;
   const stored = overlay[key] ?? data?.verdicts?.[0] ?? null;
+  const judgeHidden = blind && !revealsJudge(stored);
+  const engineHidden = judgeHidden && sample;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -150,7 +156,7 @@ export default function AutodedupPair() {
       )}
       {q.error && <ErrorBanner message={(q.error as Error).message} />}
       {storeReady === false && <StoreNotReady />}
-      {storeReady === true && data && data.pair == null && (
+      {storeReady === true && data && data.pair == null && !engineHidden && (
         <p className={SECTION}>
           Engine tuto dvojici neohodnotil, nebo jí dal skóre pod hranicí ukládání — nemá o ní
           uložený řádek.
@@ -159,21 +165,30 @@ export default function AutodedupPair() {
 
       {data && (
         <>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <EvidenceChips
-              zone={data.pair?.zone}
-              score={data.pair?.score}
-              certificate={data.pair?.certificate}
-              families={data.family_names}
-              guardVeto={data.pair?.guard_veto}
-            />
-            {data.pair?.decision && <Chip title="The rule that decided it">{data.pair.decision}</Chip>}
-            {(data.pair?.probes ?? []).map((p) => (
-              <Chip key={p} title="A blocking probe that proposed this pair">
-                {p}
-              </Chip>
-            ))}
-          </div>
+          {engineHidden ? (
+            <p className="mt-4 text-[0.72rem] text-[var(--color-ink-3)]">
+              Náhodný vzorek: co o dvojici ví engine, je skryté, dokud neodpovíte Stejné nebo
+              Různé.
+            </p>
+          ) : (
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <EvidenceChips
+                zone={data.pair?.zone}
+                score={data.pair?.score}
+                certificate={data.pair?.certificate}
+                families={data.family_names}
+                guardVeto={data.pair?.guard_veto}
+              />
+              {data.pair?.decision && (
+                <Chip title="The rule that decided it">{data.pair.decision}</Chip>
+              )}
+              {(data.pair?.probes ?? []).map((p) => (
+                <Chip key={p} title="A blocking probe that proposed this pair">
+                  {p}
+                </Chip>
+              ))}
+            </div>
+          )}
 
           <div className="mt-3 space-y-2">
             <VerdictButtons
@@ -226,45 +241,47 @@ export default function AutodedupPair() {
             </section>
           )}
 
-          <section className={SECTION}>
-            <h2 className={EYEBROW}>Features</h2>
-            {data.features.length === 0 ? (
-              <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                No feature was stored for this pair.
-              </p>
-            ) : (
-              <div className="mt-2 overflow-x-auto">
-                <table className="w-full text-[0.72rem]">
-                  <thead>
-                    <tr className={EYEBROW}>
-                      <th className={TH}>Feature</th>
-                      <th className={TH}>Value</th>
-                      <th className={TH}>Present</th>
-                      <th className={TH}>Contribution</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.features.map((f) => (
-                      <tr key={f.name} className="border-t border-[var(--color-rule-soft)]">
-                        <td className={`${TD} font-mono text-[var(--color-ink-2)]`}>{f.name}</td>
-                        <td className={`${TD} font-mono tabular-nums`}>
-                          {f.present ? fmtScore(f.value) : '—'}
-                        </td>
-                        <td className={`${TD} ${f.present ? '' : 'text-[var(--color-ink-4)]'}`}>
-                          {f.present ? 'ano' : 'absent'}
-                        </td>
-                        <td className={`${TD} font-mono tabular-nums`}>
-                          {f.contribution == null
-                            ? '—'
-                            : `${f.contribution > 0 ? '+' : ''}${fmtScore(f.contribution)}`}
-                        </td>
+          {!engineHidden && (
+            <section className={SECTION}>
+              <h2 className={EYEBROW}>Features</h2>
+              {data.features.length === 0 ? (
+                <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
+                  No feature was stored for this pair.
+                </p>
+              ) : (
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-[0.72rem]">
+                    <thead>
+                      <tr className={EYEBROW}>
+                        <th className={TH}>Feature</th>
+                        <th className={TH}>Value</th>
+                        <th className={TH}>Present</th>
+                        <th className={TH}>Contribution</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+                    </thead>
+                    <tbody>
+                      {data.features.map((f) => (
+                        <tr key={f.name} className="border-t border-[var(--color-rule-soft)]">
+                          <td className={`${TD} font-mono text-[var(--color-ink-2)]`}>{f.name}</td>
+                          <td className={`${TD} font-mono tabular-nums`}>
+                            {f.present ? fmtScore(f.value) : '—'}
+                          </td>
+                          <td className={`${TD} ${f.present ? '' : 'text-[var(--color-ink-4)]'}`}>
+                            {f.present ? 'ano' : 'absent'}
+                          </td>
+                          <td className={`${TD} font-mono tabular-nums`}>
+                            {f.contribution == null
+                              ? '—'
+                              : `${f.contribution > 0 ? '+' : ''}${fmtScore(f.contribution)}`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Digests</h2>
@@ -288,7 +305,7 @@ export default function AutodedupPair() {
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Judgements</h2>
-            {blind && !revealsJudge(stored) ? (
+            {judgeHidden ? (
               /* Said in words, never rendered as an empty section: "hidden" and
                 * "nobody has judged this" are different facts, and printing the
                 * second for the first would teach the operator that a blind pair

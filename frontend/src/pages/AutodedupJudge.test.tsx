@@ -5,7 +5,9 @@
  *     answering Stejné or Různé opens a row in place (the verdict overlay),
  *     "Nevím" opens nothing;
  *   * the engine's view in words on every row, and no "why it was not merged"
- *     on a pair the engine holds together;
+ *     on a pair the engine holds together; an unruled row of the random sample
+ *     hides the engine's view too (line, zone, score, the reason), until ruled,
+ *     and its evidence link says so (`sample=1`);
  *   * a note saved on a ruled row re-posts its stored codes;
  *   * while blind, no control reads the judge ("Soudce řekl", "Kdo četl",
  *     "Soudce × engine" and two "Výběr" values), and a link naming them is
@@ -186,6 +188,50 @@ describe('<AutodedupJudge> blind by default', () => {
     expect(within(ruled).getByText('Náhodný vzorek')).toBeInTheDocument();
     expect(within(ruled).getByText('Soudce říká opak než vy')).toBeInTheDocument();
     expectNoNestedInteractive(unruled);
+  });
+
+  it("hides the engine's view on an unruled row of the random sample", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAutodedupJudgements).mockResolvedValue(
+      page([
+        pair({
+          listing_lo: 31,
+          listing_hi: 32,
+          reasons: ['sample'],
+          engine_view: 'apart',
+          why_not_merged: 'skóre v pásmu kontroly',
+        }),
+        RULED,
+      ]),
+    );
+    setup();
+    const sample = await rowOf('#31');
+    expect(within(sample).queryByText(/^Engine:/)).toBeNull();
+    expect(within(sample).queryByText('band')).toBeNull();
+    expect(within(sample).queryByText(/p 0[.,]61/)).toBeNull();
+    expect(within(sample).queryByText(/Proč to engine nesloučil/)).toBeNull();
+    expect(within(sample).getByRole('link', { name: 'Celý důkaz' })).toHaveAttribute(
+      'href',
+      '/autodedup/pair/31/32?generation=rt&blind=1&sample=1',
+    );
+    /* A ruled sample row shows it, as every other row does. */
+    const ruled = await rowOf('#21');
+    expect(within(ruled).getByText('Engine: odděleně')).toBeInTheDocument();
+    expect(within(ruled).getByText(/Proč to engine nesloučil/)).toBeInTheDocument();
+    /* The answer that opens the judge opens the engine's view with it. */
+    vi.mocked(api.postAutodedupVerdict).mockResolvedValue({
+      store_ready: true,
+      data: {
+        id: 11, kind: 'pair', listing_lo: 31, listing_hi: 32, verdict: 'same',
+        note: null, decided_by: 'operator@example.com', decided_at: AT,
+      },
+      must_not_link: false,
+    });
+    await user.click(within(sample).getByRole('button', { name: 'Stejné' }));
+    await waitFor(() =>
+      expect(within(sample).getByText('Engine: odděleně')).toBeInTheDocument(),
+    );
+    expect(within(sample).getByText(/Proč to engine nesloučil/)).toBeInTheDocument();
   });
 
   it('opens a row in place the moment the operator answers it', async () => {

@@ -10,6 +10,8 @@
  *   * each photo carries the best Hamming distance to the other side, and a
  *     photo with no match says so;
  *   * the judge's transcript shows both evidence lists;
+ *   * a blind pair of the random sample (`?blind=1&sample=1`) withholds the
+ *     engine's view too, until the answer that opens the judge;
  *   * a negative verdict still takes two clicks here;
  *   * no interactive control is nested inside another.
  */
@@ -237,6 +239,60 @@ describe('<AutodedupPair>', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/soudce: stejná nemovitost/)).toBeNull();
     expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
+  });
+
+  it("withholds the engine's view on a blind pair of the random sample until answered", async () => {
+    const user = userEvent.setup();
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1&sample=1`);
+    expect(await screen.findByText(/co o dvojici ví engine, je skryté/)).toBeInTheDocument();
+    expect(screen.queryByText('band')).toBeNull();
+    expect(screen.queryByText('evidence_gate')).toBeNull();
+    expect(screen.queryByText('k1')).toBeNull();
+    expect(screen.queryByText('area_rel_diff')).toBeNull();
+    expect(screen.getByText(/verdikt soudce je skrytý/)).toBeInTheDocument();
+    /* The adverts themselves stay: they are what the operator rules on. */
+    expect(screen.getByText('Digests')).toBeInTheDocument();
+    expect(screen.getByText('Photos')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Stejné' }));
+    await waitFor(() => expect(screen.getByText('area_rel_diff')).toBeInTheDocument());
+    expect(screen.getByText('band')).toBeInTheDocument();
+    expect(screen.getByText('evidence_gate')).toBeInTheDocument();
+    expect(screen.queryByText(/co o dvojici ví engine/)).toBeNull();
+  });
+
+  it('keeps the engine withheld on a stored "Nevím", and shows it outside the sample', async () => {
+    vi.mocked(api.getAutodedupPair).mockResolvedValue({
+      store_ready: true,
+      data: {
+        ...DETAIL,
+        pair: null,
+        verdicts: [
+          {
+            id: 8,
+            kind: 'pair',
+            cluster_key: null,
+            listing_lo: 101,
+            listing_hi: 202,
+            verdict: 'unsure',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-16T10:00:00Z',
+          },
+        ],
+      },
+    });
+    const { unmount } = renderPair(
+      `${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1&sample=1`,
+    );
+    expect(await screen.findByText(/co o dvojici ví engine, je skryté/)).toBeInTheDocument();
+    /* "Never scored" is the engine's view too: it tells which half of the draw
+     * a pair came from. */
+    expect(screen.queryByText(/Engine tuto dvojici neohodnotil/)).toBeNull();
+    unmount();
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
+    expect(await screen.findByText(/Engine tuto dvojici neohodnotil/)).toBeInTheDocument();
+    expect(screen.queryByText(/co o dvojici ví engine/)).toBeNull();
   });
 
   it('shows the judge with no blind parameter at all', async () => {

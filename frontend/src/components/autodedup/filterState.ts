@@ -91,10 +91,14 @@ export function pairHref(
    * the operator would read the verdict they were not supposed to see yet on
    * exactly the pair they were about to rule on. */
   blind = false,
+  /* A pair of the sealed random sample: blind, the pair page withholds the
+   * engine's view too, until the same answer opens the judge. */
+  sample = false,
 ): RoutePath {
   return withQuery(ROUTES.autodedupPair.build({ lo, hi }), {
     generation: generation || null,
     blind: blind ? '1' : null,
+    sample: blind && sample ? '1' : null,
   });
 }
 

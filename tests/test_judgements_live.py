@@ -246,6 +246,10 @@ def _seeded(pairs: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def test_the_sample_is_the_first_100_of_the_sealed_draw_in_the_seeded_order(cur):
+    # The replay may already hold other sealed draws (a data migration's control draw): the
+    # counter is read before and after, and this draw adds exactly its own first 100.
+    cur.execute(usql.VALIDATION_JUDGE_SAMPLE_SQL, {"seed": SEED, "sample_size": 100})
+    base_n, base_reviewed, base_not_same = cur.fetchone()
     pairs = _seal(cur, 120)
     _mark(cur, pairs[0], "vision", "same_property", stratum="g2:s1_ladder_only_edge")
     rows = _only(_rows(cur, reason="sample"), pairs)
@@ -261,7 +265,7 @@ def test_the_sample_is_the_first_100_of_the_sealed_draw_in_the_seeded_order(cur)
     rows = _only(_rows(cur, reason="sample"), pairs)
     assert (rows[-1]["listing_lo"], rows[-1]["listing_hi"]) == first
     cur.execute(usql.VALIDATION_JUDGE_SAMPLE_SQL, {"seed": SEED, "sample_size": 100})
-    assert cur.fetchone() == (100, 1, 0)
+    assert cur.fetchone() == (base_n + 100, base_reviewed + 1, base_not_same)
     cur.execute(usql.VALIDATION_JUDGE_TOTAL_SQL, {"seed": SEED, "sample_size": 100})
     n, n_reviewed, _ = cur.fetchone()
     assert n >= 120 and n_reviewed >= 1
