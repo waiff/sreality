@@ -947,7 +947,7 @@ def test_the_weakest_private_room_is_the_developer_unit_discriminator() -> None:
     bedroom, so `tag_room_clip_min` reads the rooms a unit OWNS — `hallway` is the tagger's
     catch-all (24% of the cohort's top tags) and is deliberately not one of them."""
     assert ft.PRIVATE_ROOM_TAGS == frozenset(
-        {"bathroom", "bedroom", "kitchen", "living_room", "toilet", "garage", "technical"}
+        {"bathroom", "bedroom", "kitchen", "living_room", "toilet"}
     )
     assert "hallway" not in ft.PRIVATE_ROOM_TAGS
     same = [tagged(1, 10, "kitchen", 0.1, 0), tagged(1, 11, "bedroom", 0.2, 3),

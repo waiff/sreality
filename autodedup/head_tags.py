@@ -15,20 +15,24 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from toolkit.room_taxonomy import ROOM_FAMILIES
+
 HEAD_FLOOR: float = 0.5
 HEAD_MARGIN: float = 0.0
-# A sub-floor photo whose winning head is an INTERIOR room (kitchen, bathroom, living room) is still
-# almost surely an interior photo — v1 has no bedroom or hallway head, so those land here. It keeps its
-# family through the engine's existing interior catch-all `hallway` (excluded from the private rooms,
-# `features.PRIVATE_ROOM_TAGS`), so `interior_match_ratio` and the anchor order still see it. Measured
-# (G4 section 3, CLIP-geometry emulation on trial / c17 / c18): with it, merge flips 0.16-0.34 % vs
-# 0.31-0.40 % without, and no trial operator positive lost (without: 1-3). None = untagged.
+# A sub-floor photo whose winning head is an INTERIOR room is still almost surely an interior photo —
+# v1 has no bedroom or hallway head, so those land here. It keeps its family through the engine's
+# existing interior catch-all `hallway` (excluded from the private rooms, `features.PRIVATE_ROOM_TAGS`),
+# so `interior_match_ratio` and the anchor order still see it. Measured (G4 section 3, CLIP-geometry
+# emulation on trial / c17 / c18): with it, merge flips 0.16-0.34 % vs 0.31-0.40 % without, and no
+# trial operator positive lost (without: 1-3). None = untagged.
 SUBFLOOR_CATCH_ALL: str | None = "hallway"
-INTERIOR_HEAD_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom", "living_room"})
 
 # Normalised operator taxonomy label (prefix `interier - ` / `exterier - ` / `podklad - ` dropped,
 # lower case) -> the engine's room. 3d plan is NOT floor_plan: a 3D view against a 2D drawing of
-# one unit cannot match by dHash and would fire `floorplan_conflict` falsely.
+# one unit cannot match by dHash and would fire `floorplan_conflict` falsely. The engine has no garage
+# or technical-room room: CLIP puts the same photographs in its interior catch-all (G4 day 3 on trial /
+# c17 / c18: garage winners 55.8 % `hallway` at or above the floor and 70.3 % below it, technical
+# 29.6 % and 56.3 %, each the largest room), which is not a room a unit owns.
 HEAD_ROOMS: dict[str, str] = {
     "kuchyně": "kitchen",
     "koupelna": "bathroom",
@@ -39,9 +43,12 @@ HEAD_ROOMS: dict[str, str] = {
     "katastrální mapa": "site_plan",
     "letecký snímek s ohraničením subjektu": "site_plan",
     "property list": "property_document",
-    "garáž": "garage",
-    "technické zařízení / místnost": "technical",
+    "garáž": "hallway",
+    "technické zařízení / místnost": "hallway",
 }
+INTERIOR_HEAD_ROOMS: frozenset[str] = frozenset(
+    room for room in HEAD_ROOMS.values() if ROOM_FAMILIES.get(room) == "interior"
+)
 
 _PREFIXES = ("interier - ", "exterier - ", "podklad - ")
 

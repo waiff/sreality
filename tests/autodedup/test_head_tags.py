@@ -21,21 +21,35 @@ from autodedup.export import build_image_record, parse_export_args
     ("podklad - katastrální mapa", "site_plan"),
     ("podklad - letecký snímek s ohraničením subjektu", "site_plan"),
     ("property list", "property_document"),
-    ("garáž", "garage"),
-    ("technické zařízení / místnost", "technical"),
+    ("garáž", "hallway"),
+    ("technické zařízení / místnost", "hallway"),
 ])
 def test_every_v1_head_has_a_room(label, room):
     assert ht.head_room(label) == room
 
 
-def test_every_head_room_has_the_family_clip_gives_its_photographs():
+def test_every_head_room_is_the_room_clip_gives_its_photographs():
+    from autodedup.features import PRIVATE_ROOM_TAGS
     from autodedup.fingerprint import dominant_family
     from toolkit.room_taxonomy import ROOM_FAMILIES
 
     assert set(ht.HEAD_ROOMS.values()) <= set(ROOM_FAMILIES)
-    families = {room: dominant_family(Image(listing_id=1, image_id=1, tags=[(room, 0.9)]))
-                for room in ("garage", "technical", "plan_3d")}
-    assert families == {"garage": "interior", "technical": "interior", "plan_3d": "plan"}
+    assert dominant_family(Image(listing_id=1, image_id=1, tags=[("plan_3d", 0.9)])) == "plan"
+    # garage / technical photographs are CLIP's interior catch-all, never a room a unit owns
+    for label in ("garáž", "technické zařízení / místnost"):
+        assert ht.head_room(label) == ht.SUBFLOOR_CATCH_ALL
+        assert ht.head_room(label) not in PRIVATE_ROOM_TAGS
+    assert ht.INTERIOR_HEAD_ROOMS == {"kitchen", "bathroom", "living_room", "hallway"}
+
+
+def test_a_sub_floor_garage_winner_keeps_the_interior_family():
+    """c18 219887 x 318445, a bazos shop re-posted with the same photographs: CLIP tags its interior
+    shots `hallway`; the heads' winners there are garage / technical below the floor."""
+    row = {"label": "garáž", "winner_score": 0.14, "scores": json.dumps({"1": 0.14, "2": 0.1})}
+    assert ht.head_tag_pairs([row]) == [["hallway", 0.14]]
+    technical = dict(row, label="technické zařízení / místnost", winner_score=0.28)
+    assert ht.head_tag_pairs([technical]) == [["hallway", 0.28]]
+    assert ht.head_tag_pairs([row], catch_all=None) == []
 
 
 def test_an_unknown_head_is_refused_not_guessed():

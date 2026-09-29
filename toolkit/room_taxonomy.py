@@ -31,10 +31,8 @@ ROOM_FAMILIES: dict[str, str] = {
     "floor_plan": "plan",
     "site_plan": "plan",
     "property_document": "plan",
-    # The DINOv3 tag heads' own rooms (autodedup.head_tags.HEAD_ROOMS), each in the family CLIP
-    # gives the same photographs: garage 74 % interior, technical 77 % interior, 3D plan 91 % plan.
-    "garage": "interior",
-    "technical": "interior",
+    # The DINOv3 tag heads' own room (autodedup.head_tags.HEAD_ROOMS): CLIP gives the same photographs
+    # the plan family (90.6 %; 88.0 % `floor_plan`).
     "plan_3d": "plan",
     "other": "other",
 }
