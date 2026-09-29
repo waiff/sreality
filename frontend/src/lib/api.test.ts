@@ -382,7 +382,6 @@ describe('autodedup wire conformance', () => {
           operator: {},
           engine: {},
         },
-        towns: [{ grain: 'o', code: 563510, name: 'Jablonec nad Nisou', n: 7 }],
       },
       store_ready: true,
     };

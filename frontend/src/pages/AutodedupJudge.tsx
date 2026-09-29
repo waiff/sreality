@@ -21,7 +21,6 @@ import {
   FilterSelect,
   ResetFilters,
   ResultCount,
-  TownSelect,
   type FilterOption,
 } from '@/components/autodedup/FilterBar';
 import LoadMore from '@/components/autodedup/LoadMore';
@@ -55,8 +54,8 @@ const NO_FALLBACK = { source: null, is_active: null };
 /* '' is no filter — and for `reason`, the server's choice (the suggested pairs
  * while there are any). `blind` is ON unless the link says '0'. */
 export const JUDGE_FILTER_DEFAULTS = {
-  reason: '', ruled: '', operator: '', judge: '', tier: '', engine: '', town: '',
-  generation: '', blind: '1',
+  reason: '', ruled: '', operator: '', judge: '', tier: '', engine: '', generation: '',
+  blind: '1',
 };
 export type JudgeFilterState = typeof JUDGE_FILTER_DEFAULTS;
 
@@ -95,7 +94,6 @@ const WHO_READ: ReadonlyArray<FilterOption> = [
   { value: 'none', label: 'Zatím nikdo' },
 ];
 const AGREEMENTS = ['agrees', 'disagrees'];
-const TOWN = /^[oc]:\d{1,12}$/;
 
 /* A value outside a vocabulary is no filter; while blind, nothing that reads
  * the judge travels, whatever a link said. */
@@ -113,7 +111,6 @@ export function sanitizeJudgeFilters(raw: JudgeFilterState): JudgeFilterState {
     judge: blind ? '' : pick(raw.judge, JUDGE_SAID.map((o) => o.value)),
     tier: blind ? '' : pick(raw.tier, WHO_READ.map((o) => o.value)),
     engine: blind ? '' : pick(raw.engine, AGREEMENTS),
-    town: TOWN.test(raw.town) ? raw.town : '',
   };
 }
 
@@ -259,11 +256,6 @@ export default function AutodedupJudge() {
               options={WHO_READ.map((o) => ({ ...o, count: facets?.tier?.[o.value] }))}
             />
           )}
-          <TownSelect
-            value={filters.town}
-            towns={page?.towns ?? []}
-            onChange={(town) => set({ town })}
-          />
           <ResetFilters
             onClick={() => setFilters({ ...JUDGE_FILTER_DEFAULTS, blind: filters.blind })}
           />

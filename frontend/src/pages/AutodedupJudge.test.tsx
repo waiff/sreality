@@ -111,7 +111,6 @@ function page(
         operator: { disagrees: 1 },
         engine: { disagrees: 1 },
       },
-      towns: [{ grain: 'o', code: 563510, name: 'Jablonec nad Nisou', n: 2 }],
       ...over,
     },
   };
@@ -355,8 +354,8 @@ describe('the Judge page helpers', () => {
     expect(sanitizeJudgeFilters({ ...raw, blind: '0' })).toMatchObject({
       reason: 'unsure', judge: 'same', tier: 'text', engine: 'disagrees',
     });
-    expect(sanitizeJudgeFilters({ ...raw, blind: '0', judge: 'maybe', town: 'x' }))
-      .toMatchObject({ judge: '', town: '' });
+    expect(sanitizeJudgeFilters({ ...raw, blind: '0', judge: 'maybe' }))
+      .toMatchObject({ judge: '' });
   });
 
   it('shows a blind row the sample chip at most', () => {

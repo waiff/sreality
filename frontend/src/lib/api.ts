@@ -4982,14 +4982,12 @@ export interface JudgementsPage {
     'reason' | 'judge' | 'tier' | 'ruled' | 'operator' | 'engine',
     Record<string, number>
   > | null;
-  towns: RulingTown[] | null;
 }
 
 export interface JudgementFilters {
   reason?: string | null;
   judge?: string | null;
   tier?: string | null;
-  town?: string | null;
   ruled?: string | null;
   operator?: string | null;
   engine?: string | null;
