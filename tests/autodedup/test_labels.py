@@ -142,71 +142,6 @@ def test_labels_by_tier_keeps_every_tier_apart_and_a_rejudge_wins() -> None:
     assert per_tier["vision"][(1, 2)].y == 1
 
 
-def test_load_sample_reads_stratum_populations_and_yields_ht_weights(tmp_path: Path) -> None:
-    payload = {
-        "seed": 7,
-        "tier": "text",
-        "judge_version": "j1",
-        "n_requested": 20,
-        "n_selected": 3,
-        "strata": {"thin": {"population": 100, "selected": 2},
-                   "fat": {"population": 1000, "selected": 1}},
-        "pairs": [
-            {"lo": 1, "hi": 2, "stratum": "thin"},
-            {"lo": 3, "hi": 4, "stratum": "thin"},
-            {"lo": 5, "hi": 6, "stratum": "fat"},
-        ],
-    }
-    path = tmp_path / "sample.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    sample = lb.load_sample(path)
-    assert sample.seed == 7 and sample.tier == "text" and sample.n_cohort == 1100
-    assert sample.weight_of((1, 2)) == 50.0
-    assert sample.weight_of((5, 6)) == 1000.0
-    assert sample.weight_of((99, 100)) == 1.0  # never sampled: counts once, never zero
-    assert sample.stratum_of((3, 4)) == "thin"
-
-
-def test_load_sample_recomputes_a_missing_stratum_with_the_samplers_own_key(
-    tmp_path: Path,
-) -> None:
-    payload = {
-        "strata": {"merge|K-A|praha|cross": {"population": 8, "selected": 2}},
-        "pairs": [{"lo": 1, "hi": 2, "zone": "merge", "certificate": "K-A",
-                   "block": "praha", "cross_source": True, "feats": {}}],
-    }
-    path = tmp_path / "sample.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    sample = lb.load_sample(path)
-    assert sample.stratum_of((1, 2)) == "merge|K-A|praha|cross"
-    assert sample.weight_of((1, 2)) == 4.0
-
-
-def test_load_sample_accepts_the_n_selected_spelling(tmp_path: Path) -> None:
-    path = tmp_path / "sample.json"
-    path.write_text(
-        json.dumps({"strata": {"a": {"n_total": 50, "n_selected": 5}},
-                    "pairs": [{"lo": 1, "hi": 2, "stratum": "a"}]}),
-        encoding="utf-8",
-    )
-    assert lb.load_sample(path).weight_of((1, 2)) == 10.0
-
-
-def test_sample_from_judgements_is_honestly_unweighted() -> None:
-    rows = [
-        lb.parse_judgement(judgement(1, 2, "same_property", stratum="merge|model|a|same")),
-        lb.parse_judgement(judgement(3, 4, "different_property", stratum="merge|model|a|same")),
-    ]
-    sample = lb.sample_from_judgements(rows)
-    assert sample.weight_of((1, 2)) == 1.0
-    assert sample.strata["merge|model|a|same"].n_total == 2
-
-
-def test_empty_sample_weights_everything_once() -> None:
-    assert lb.EMPTY_SAMPLE.weight_of((1, 2)) == 1.0
-    assert lb.EMPTY_SAMPLE.n_cohort == 0
-
-
 def test_load_all_judgements_concatenates_files(tmp_path: Path) -> None:
     a = write_jsonl(tmp_path / "a.jsonl", [judgement(1, 2, "same_property")])
     b = write_jsonl(tmp_path / "b.jsonl", [judgement(3, 4, "different_property", tier="vision")])
@@ -238,59 +173,6 @@ def cli_sample_payload() -> dict[str, Any]:
              "certificate": None, "feats": {}},
         ],
     }
-
-
-def test_load_sample_reads_the_cli_samplers_key_not_only_the_lanes(tmp_path: Path) -> None:
-    # The two samplers key differently (`zone|side|block` vs `zone|cert|block|side`); recomputing
-    # with the wrong one used to collapse every HT weight to 1.0 while still claiming weighting.
-    path = tmp_path / "sample.json"
-    path.write_text(json.dumps(cli_sample_payload()), encoding="utf-8")
-    sample = lb.load_sample(path)
-    assert sample.stratum_fn == "stratum"
-    assert sample.weight_of((1, 2)) == 200.0
-    assert sample.weight_of((3, 4)) == 200.0  # the CLI key ignores the certificate, as it must
-    assert sample.weight_of((5, 6)) == 40.0
-    assert sample.is_weighted is True
-
-
-def test_load_sample_refuses_strata_no_known_sampler_could_have_written(tmp_path: Path) -> None:
-    payload = cli_sample_payload()
-    payload["strata"] = {"invented|key": {"population": 400, "selected": 2}}
-    path = tmp_path / "sample.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="do not match any known sampler key"):
-        lb.load_sample(path)
-
-
-def test_a_sample_whose_strata_never_inflate_says_it_is_not_weighted(tmp_path: Path) -> None:
-    path = tmp_path / "sample.json"
-    path.write_text(
-        json.dumps({"strata": {"a": {"population": 4, "selected": 4}},
-                    "pairs": [{"lo": 1, "hi": 2, "stratum": "a"}]}),
-        encoding="utf-8",
-    )
-    sample = lb.load_sample(path)
-    assert sample.weight_of((1, 2)) == 1.0
-    assert sample.is_weighted is False
-    assert sample.to_json()["is_weighted"] is False
-    assert lb.EMPTY_SAMPLE.is_weighted is False
-
-
-def test_sample_from_judgements_is_never_weighted() -> None:
-    rows = [lb.parse_judgement(judgement(1, 2, "same_property", stratum="merge|model|a|same"))]
-    sample = lb.sample_from_judgements(rows)
-    assert sample.is_weighted is False and sample.stratum_fn == "stamped"
-
-
-def test_weight_for_prefers_the_stratum_the_judgement_row_carries(tmp_path: Path) -> None:
-    sample = lb.Sample(
-        strata={"thin": lb.Stratum("thin", 1, 100), "fat": lb.Stratum("fat", 1, 2)},
-        pair_stratum={(1, 2): "fat"},
-    )
-    assert sample.weight_for((1, 2), "thin") == 100.0  # the label's own stamp wins
-    assert sample.weight_for((1, 2)) == 2.0
-    assert sample.weight_for((9, 9), None) == 1.0
-    assert sample.inflates("thin") is True and sample.inflates("nope") is False
 
 
 def test_a_partial_precedence_keeps_vision_above_text() -> None:
@@ -461,7 +343,3 @@ def test_a_merge_pair_s_standing_decides_whether_it_is_still_same() -> None:
     assert not lb.MergePair(1, 2, standing=lb.STANDING_UNRULED, must_not_link=True).same
 
 
-def test_misaligned_member_arrays_are_refused() -> None:
-    with pytest.raises(ValueError):
-        lb.parse_operator_merge({"merge_group_id": "g", "member_ids": [1, 2],
-                                 "member_sides": [1]})

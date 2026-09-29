@@ -98,13 +98,13 @@ from autodedup.labels_sql import (
 LABELS_FILE: str = "operator_labels.jsonl"
 MUST_NOT_LINK_FILE: str = "must_not_link.jsonl"
 # E910: the pairs whose NEWEST pair ruling is `same` — the must-links the real-time lane reads
-# (`incremental_sql.RT_MUST_LINK_SQL`), for `harness run --must-link` and the replay.
+# (`incremental_sql.RT_MUST_LINK_SQL`), for `harness run --must-link`.
 MUST_LINK_FILE: str = "must_link.jsonl"
 # The labels file's own shape version. Version 2 appended `merge_group_id` and the third
 # `source` value `browse_merge` (E299); every version-1 field is unchanged.
 LABELS_FORMAT: int = 2
 # How many blocks the summary lists, ranked by the operator groups they would bring into a
-# cohort — the answer to "which export makes the yardstick cover the operator's merges".
+# cohort — the answer to "which export makes `harness evaluate` cover the operator's merges".
 TOP_BLOCKS: int = 40
 
 DEFAULT_GENERATION: str = "g4"

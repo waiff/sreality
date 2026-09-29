@@ -23,22 +23,24 @@ Three things this lane owns, each paid for elsewhere in this repo:
   * Nothing is applied (ruling D4). `clusters.status` is always `proposed`, `property_id` and
     `pairs.applied_merge_group` are never written, and no `public.*` relation is touched.
 
-The engine itself lives in `autodedup.harness`; this module is the plumbing around it — the
-artifact download (shared with the judge lane), the argument surface, and the writes.
+The decision is `harness.run` — the lane's own `run_pass` over a MemoryStore (SW1, K38), never
+`SqlStore`, which would write `rt_fp`, `fp_key` and calibration rows per generation. This module
+is the plumbing around it: the artifact download, the argument surface, and the one small writer.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from autodedup import features, harness
 from autodedup.dataset import load
-from autodedup.judge_lane import COHORT_FILE, download_cohort
-from autodedup.model import LogisticModel, hand_initialised
+from autodedup.model import LogisticModel
 from autodedup.score_sql import (
     CLUSTER_CONFLICT_INSERT_SQL,
     CLUSTER_CONFLICTS_DELETE_SQL,
@@ -66,6 +68,9 @@ from autodedup.store_score import storable
 
 RUN_FILE: str = "run.json"
 SUMMARY_FILE: str = "score.json"
+COHORT_FILE: str = "cohort.jsonl.gz"
+ARTIFACT_PREFIX: str = "autodedup-"
+GH_TIMEOUT_S: int = 900
 DEFAULT_GENERATION: str = "g1"
 CLUSTER_STATUS: str = "proposed"
 
@@ -79,13 +84,6 @@ FEATURE_VERSION: int = features.FEATURE_VERSION
 # PARAMETER BATCH a single execute carries (a 43k-pair cohort in one call is megabytes of
 # bound parameters), not the transaction — the writes still land together.
 CHUNK: int = 1_000
-
-# `--args settings=sweep_a` resolves inside the repo, never off the wire: a lane input is an
-# operator string and a bare path would make `settings=/etc/passwd` a readable file. The
-# resolution itself lives in `harness` since W9g, because the real-time lane needs the same
-# one — one definition, not two (E12).
-SETTINGS_DIR: Path = harness.SETTINGS_DIR
-MODELS_DIR: Path = harness.MODELS_DIR
 
 # `autodedup.pairs.families` is a bitmask, not an array: the UI filters on "has image evidence"
 # across millions of rows, and `families & 32 > 0` is an index-friendly predicate where
@@ -118,11 +116,7 @@ SHARED_PHOTO_RATIO: float = 0.80
 BLOCK_GRAINS: frozenset[str] = frozenset({"c", "o"})
 
 # The stored `[value, present]` reader is the harness's (E12) — one definition, not two.
-# `feature_value` is the public name it should have; the private one is the fallback until
-# the harness grows it, so a promotion there needs no change here.
-feature_value: Callable[[dict[str, Any], str], float | None] = getattr(
-    harness, "feature_value", harness._feat
-)
+feature_value: Callable[[dict[str, Any], str], float | None] = harness.feature_value
 
 
 # --- arguments -------------------------------------------------------------------------
@@ -146,8 +140,6 @@ ARG_KEYS: tuple[str, ...] = (
     "keep_generations",
 )
 
-
-repo_path = harness.repo_path
 
 
 def parse_args(args: dict[str, str]) -> ScoreArgs:
@@ -196,20 +188,27 @@ def parse_args(args: dict[str, str]) -> ScoreArgs:
     )
 
 
-def load_settings(parsed: ScoreArgs) -> Settings:
-    """The swept row, plus the one dial the lane may override. `replace` re-validates."""
-    settings = Settings.from_json(repo_path(parsed.settings, SETTINGS_DIR)) \
-        if parsed.settings else Settings()
-    if parsed.store_floor is None:
-        return settings
-    return replace(settings, store_floor=parsed.store_floor)
+def download_artifact(run_id: str, dest: Path, mode: str = "export") -> Path:
+    """`gh run download <id> -n autodedup-<mode>-<id>` into `dest`, which is returned: an
+    `export` dispatch's artifact is the cohort, a `score` dispatch's is a harness run."""
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        raise SystemExit(f"GH_TOKEN (or GITHUB_TOKEN) must be set to download a {mode} artifact")
+    dest.mkdir(parents=True, exist_ok=True)
+    name = f"{ARTIFACT_PREFIX}{mode}-{run_id}"
+    proc = subprocess.run(["gh", "run", "download", run_id, "-n", name, "--dir", str(dest)],
+                          capture_output=True, text=True, timeout=GH_TIMEOUT_S)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:400]
+        raise SystemExit(f"gh run download {run_id} ({name}) failed: {detail}")
+    return dest
 
 
-def load_model(parsed: ScoreArgs) -> LogisticModel:
-    if not parsed.model:
-        return hand_initialised()
-    path = repo_path(parsed.model, MODELS_DIR)
-    return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
+def download_cohort(export_run: str, dest: Path) -> Path:
+    """The export dispatch's cohort artifact — the score pass's whole input."""
+    found = sorted(download_artifact(export_run, dest).rglob(COHORT_FILE))
+    if not found:
+        raise SystemExit(f"the export artifact of run {export_run} carries no {COHORT_FILE}")
+    return found[0]
 
 
 def fingerprint_of(settings: Settings, model: LogisticModel, generation: str) -> str:
@@ -773,8 +772,10 @@ def run_score(
     parsed = parse_args(args)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    settings = load_settings(parsed)
-    model = load_model(parsed)
+    settings = harness.named_settings(parsed.settings)
+    if parsed.store_floor is not None:  # the one dial the lane may override; `replace` re-validates
+        settings = replace(settings, store_floor=parsed.store_floor)
+    model = harness.named_model(parsed.model)
 
     cohort_path = (
         Path(parsed.cohort)
@@ -825,8 +826,7 @@ def run_score(
 
         try:
             dataset = load(cohort_path)
-            engine = harness.run_engine(dataset, settings, model, out_dir, must_not_link,
-                                        must_link)
+            engine = harness.run(dataset, settings, model, out_dir, must_not_link, must_link)
             engine["artifact"] = str(cohort_path)
             engine["generation"] = parsed.generation
             (out_dir / RUN_FILE).write_text(

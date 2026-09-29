@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from autodedup.dataset import Dataset, Image, Listing
+from autodedup.dataset import Image, Listing
 from autodedup.normalize import (
     disposition_norm,
     fact_text_folded,
@@ -280,12 +280,3 @@ def build_fingerprint(
     )
 
 
-def build_all(ds: Dataset, settings: Settings) -> dict[int, Fingerprint]:
-    """Fingerprints for the whole cohort, in listing-id order so every pass is reproducible."""
-    stock = StockIndex.of_dataset(ds, settings)
-    return {
-        listing_id: build_fingerprint(
-            ds.listings[listing_id], ds.images(listing_id), settings, stock
-        )
-        for listing_id in sorted(ds.listings)
-    }

@@ -95,15 +95,9 @@ class FakePg:
         # `pg_total_relation_size` of each table a fresh seed empties (E916): what the seed's
         # projection apportions by the generation's share of the rows. Absent = 0 bytes.
         self.table_bytes: dict[str, int] = {}
-        # The declared type of `autodedup.pairs.score` (migration 541) and the settings each
-        # batch generation's score pass recorded — what `rt_equivalence` reads to say whether
-        # the store can carry the number the clustering ranks on, and whether the two sides
-        # ran the same clock.
+        # The declared type of `autodedup.pairs.score` (migration 541): what `rt_equivalence`
+        # reads to say whether the store can carry the number the clustering ranks on.
         self.score_column_type = "double precision"
-        self.score_runs: dict[str, dict[str, Any]] = {}
-        # `autodedup.iterations` rows by GitHub run id: the export run's own ledger row, which is
-        # where `rt_equivalence` reads the batch cohort's cut from (E918).
-        self.ledger_runs: dict[int, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ psycopg surface
     def cursor(self) -> "_Cursor":
@@ -677,9 +671,6 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                         None if held_certificate is None else str(held_certificate),
                         *_endpoint(lo), *_endpoint(hi)))
         return out
-    if sql == S.RT_EQUIV_EXPORT_WINDOW_SQL:
-        row = db.ledger_runs.get(int(p["run_id"]))
-        return [] if row is None else [(row.get("started_at"), row.get("finished_at"))]
     if sql == S.RT_EQUIV_CLOCK_FACTS_SQL:
         return [(int(i), row.get("first_seen_at"), row.get("last_seen_at"),
                  row.get("inactive_at"), bool(row.get("is_active", True)))
@@ -692,12 +683,6 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 if g == gen and (lo, hi) in wanted]
     if sql == S.RT_EQUIV_SCORE_TYPE_SQL:
         return [(db.score_column_type, 24 if db.score_column_type == "real" else 53)]
-    if sql == S.RT_EQUIV_BATCH_SETTINGS_SQL:
-        row = db.score_runs.get(gen)
-        return [] if row is None else [(_jsonb(row.get("settings")),
-                                        row.get("model_version"),
-                                        row.get("finished_at", db.now),
-                                        row.get("export_run"))]
 
     # ---------------------------------------------------------------- calibration
     if sql == S.RT_CALIBRATION_PRESENT_SQL:

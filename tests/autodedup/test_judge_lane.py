@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from autodedup import harness, judge, judge_lane, labels
+from autodedup import harness, judge, judge_lane, score_lane
 from autodedup.dataset import load
 from autodedup.model import hand_initialised
 from autodedup.settings import Settings
@@ -213,7 +213,7 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
     def fake_download(export_run: str, dest: Path) -> Path:
         state["downloads"].append((export_run, Path(dest)))
         Path(dest).mkdir(parents=True, exist_ok=True)
-        target = Path(dest) / judge_lane.COHORT_FILE
+        target = Path(dest) / score_lane.COHORT_FILE
         target.write_bytes(cohort.read_bytes())
         return target
 
@@ -450,7 +450,7 @@ def test_text_and_vision_tiers_judge_the_same_sample(lane, tmp_path: Path) -> No
 
 def test_the_strata_carry_the_catalogue_only_class(lane, tmp_path: Path) -> None:
     summary = lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5, dry_run=1)
-    assert harness.CATALOG_ONLY_STRATUM in summary["sample_strata"]
+    assert judge_lane.CATALOG_ONLY_STRATUM in summary["sample_strata"]
     assert any("|K-" in key for key in summary["sample_strata"])
 
 
@@ -1481,10 +1481,10 @@ def test_a_stamped_pairs_file_files_every_pair_under_its_own_stratum(
     assert {(row["lo"], row["hi"]): row["stratum"] for row in _judgements(out)} == {
         first: "a:refused_union|price", second: "e:merged_disagree|floor",
     }
-    # The stamp travels in sample.json, so the label side reads it without recomputing a key.
-    sample = labels.load_sample(out / judge_lane.SAMPLE_FILE)
-    assert sample.stratum_fn == "stamped"
-    assert sample.stratum_of(first) == "a:refused_union|price"
+    # The stamp travels in sample.json, so a reader takes it without recomputing a key.
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert {(row["lo"], row["hi"]): row["stratum"] for row in drawn}[first] == \
+        "a:refused_union|price"
 
 
 def test_a_strata_filter_reads_the_stamped_stratum(
@@ -1534,6 +1534,53 @@ def test_score_unstored_judges_a_listed_pair_the_engine_never_stored(
     assert [row["stored"] for row in drawn] == [False]
 
 
+def test_the_committed_trial_contested_list_loads_every_pair_under_its_own_stratum() -> None:
+    """autodedup/pairs/w30_trial_contested.json is the trial's contested list (1,145 pairs, the
+    same set as w14/judge_trial/pairs_trial_contested.jsonl): every entry is stamped, so a pass
+    over it reports per contested set, never per zone grid."""
+    pairs, strata = judge_lane.load_pair_set("w30_trial_contested")
+    assert len(pairs) == 1145 and set(strata) == set(pairs)
+    assert {name.split(":")[0] for name in strata.values()} == {"a", "b", "c", "d", "e"}
+
+
+def test_a_contested_list_runs_offline_up_to_the_model_call(
+    cohort: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge end to end with no database, no network and no provider: a contested list in the
+    committed object form (stored and unstored pairs, each stamped) is decided by `harness run`
+    and `harness.decide_explicit`, drawn, and put into built prompts — and nothing is called."""
+    def refuse(*_: Any) -> Any:
+        raise AssertionError("an offline dry run touched a connection or a provider")
+
+    monkeypatch.setattr(judge_lane, "llm_client", refuse)
+    monkeypatch.setattr(judge_lane, "download_cohort", refuse)
+    dataset = load(cohort)
+    engine = tmp_path / "engine"
+    harness.run(dataset, Settings(), hand_initialised(), engine)
+    stored = sorted((int(row["lo"]), int(row["hi"])) for row in harness.read_pairs(engine))
+    unstored = [pair for pair in combinations(sorted(dataset.listings), 2)
+                if pair not in set(stored)][:3]
+    listed = stored[:5] + unstored
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": lo, "hi": hi, "stratum": f"b:band_not_merged|contested|{index}"}
+        for index, (lo, hi) in enumerate(listed)
+    ])
+    out = tmp_path / "out"
+    summary = judge_lane.run_judge(refuse, {
+        "cohort": str(cohort), "tier": "vision", "n": "1200", "max_usd": "8", "dry_run": "1",
+        "pairs_file": name, "score_unstored": "1"}, out)
+    assert summary["dry_run"] is True and summary["spent_usd"] == 0.0
+    assert summary["pairs_file_requested"] == len(listed) == summary["drawn"]
+    assert summary["pairs_file_missing"] == []
+    assert summary["pairs_file_scored_unstored"] == [list(pair) for pair in unstored]
+    assert summary["pairs_file_stamped_strata"] == len(listed)
+    assert summary["estimate"]["calls"] == len(listed) and summary["estimate"]["prompt_chars"] > 0
+    drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
+    assert sorted((row["lo"], row["hi"]) for row in drawn) == sorted(listed)
+    assert all(row["stratum"].startswith("b:band_not_merged|contested|") for row in drawn)
+    assert not (out / judge_lane.JUDGEMENTS_FILE).exists()
+
+
 def test_score_unstored_without_a_pairs_file_is_refused(lane, tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         lane(tmp_path / "out", export_run="1", tier="text", n=4, max_usd=5, dry_run=1,
@@ -1544,22 +1591,27 @@ def test_score_unstored_without_a_pairs_file_is_refused(lane, tmp_path: Path) ->
 def test_drawn_stratum_prefers_the_stamp_over_the_zone_grid() -> None:
     row = {"zone": "merge", "certificate": "K-C", "block": "b1", "cross_source": True,
            "feats": {}}
-    assert harness.drawn_stratum(row) == harness.judge_stratum(row)
-    assert harness.drawn_stratum({**row, "stratum": "a:refused_union"}) == "a:refused_union"
+    assert judge_lane.drawn_stratum(row) == judge_lane.judge_stratum(row)
+    assert judge_lane.drawn_stratum({**row, "stratum": "a:refused_union"}) == "a:refused_union"
 
 
-def test_score_pairs_reproduces_the_run_row_of_a_stored_pair(cohort: Path, tmp_path: Path) -> None:
+def test_an_unstored_row_is_the_run_row_of_a_stored_pair(cohort: Path, tmp_path: Path) -> None:
+    """PA02 rewired: a listed pair the run did not store is decided by `harness.decide_explicit`
+    (the lane's calibration, `decide_pair`), so asked about a pair the run DID store it gives
+    that run's row back, field for field."""
     dataset = load(cohort)
     settings, model = Settings(), hand_initialised()
-    harness.run_engine(dataset, settings, model, tmp_path)
-    row = next(row for row in harness.read_pairs(tmp_path) if row.get("certificate") != "K-B")
-    [again] = harness.score_pairs(dataset, settings, model, [(row["hi"], row["lo"])])
-    assert again["stored"] is False
-    for key in ("lo", "hi", "zone", "score", "certificate", "reason", "families", "block",
-                "block_key", "source_pair", "cross_source", "probes", "feats", "context"):
-        assert again[key] == row[key], key
-    assert harness.score_pairs(
-        dataset, settings, model, [(row["lo"], 999_000_001), (row["lo"], row["lo"])]
+    harness.run(dataset, settings, model, tmp_path)
+    rows = harness.read_pairs(tmp_path)
+    assert rows
+    for row in rows:
+        [again] = judge_lane.unstored_rows(dataset, settings, model, [(row["hi"], row["lo"])])
+        assert again["stored"] is False
+        for key in ("lo", "hi", "zone", "score", "certificate", "veto", "reason", "families",
+                    "block", "block_key", "source_pair", "cross_source", "probes", "feats"):
+            assert again[key] == row[key], (key, row["lo"], row["hi"])
+    assert judge_lane.unstored_rows(
+        dataset, settings, model, [(rows[0]["lo"], 999_000_001), (rows[0]["lo"], rows[0]["lo"])]
     ) == []
 
 
@@ -1870,7 +1922,6 @@ def test_the_lane_takes_one_settings_row_for_the_engine_and_the_prompt() -> None
 
 def test_the_lane_scores_the_cohort_with_the_named_model(tmp_path, monkeypatch) -> None:
     """`--args model=` picks a fitted model under autodedup/models/; absent = the hand prior."""
-    from autodedup import score_lane
     from autodedup.model import hand_initialised
 
     parsed = judge_lane.parse_args(
@@ -1880,24 +1931,25 @@ def test_the_lane_scores_the_cohort_with_the_named_model(tmp_path, monkeypatch) 
     assert judge_lane.parse_args(
         {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5"}
     ).model is None
-    assert judge_lane.load_engine_model(None).feature_order == hand_initialised().feature_order
-    (tmp_path / "m.json").write_text(json.dumps(hand_initialised().to_json()), encoding="utf-8")
-    monkeypatch.setattr(score_lane, "MODELS_DIR", tmp_path)
-    loaded = judge_lane.load_engine_model("m")
+    assert harness.named_model(None).feature_order == hand_initialised().feature_order
+    (tmp_path / "m.json").write_text(
+        json.dumps({**hand_initialised().to_json(), "version": "m"}), encoding="utf-8")
+    monkeypatch.setattr(harness, "MODELS_DIR", tmp_path)
+    loaded = harness.named_model("m")
     assert loaded.feature_order == hand_initialised().feature_order
 
 
 def test_the_lane_resolves_a_settings_name_under_the_repo_settings_dir(tmp_path, monkeypatch) -> None:
     """`settings=w4` must find autodedup/settings/w4.json the way the score lane does (run 35145938264
     died on FileNotFoundError('w4') because the name went straight to the file loader)."""
-    from autodedup import score_lane
     from autodedup.settings import Settings
 
-    assert judge_lane.load_engine_settings(None) == Settings()
+    assert harness.named_settings(None) == Settings()
     (tmp_path / "w4.json").write_text(json.dumps(Settings(t_lo=0.2).to_dict()), encoding="utf-8")
-    monkeypatch.setattr(score_lane, "SETTINGS_DIR", tmp_path)
-    assert judge_lane.load_engine_settings("w4").t_lo == 0.2
-    assert judge_lane.load_engine_settings(str(tmp_path / "w4.json")).t_lo == 0.2
+    monkeypatch.setattr(harness, "SETTINGS_DIR", tmp_path)
+    assert harness.named_settings("w4").t_lo == 0.2
+    with pytest.raises(SystemExit):   # one loader, inside the repo: a path is not a name
+        harness.named_settings(str(tmp_path.parent / "elsewhere.json"))
 
 
 def test_reversed_halves_shuffles_inside_the_pairs_not_across_them() -> None:

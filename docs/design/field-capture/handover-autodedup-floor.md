@@ -160,9 +160,9 @@ Everything below is **yours to re-measure**. We list the mechanism, not a prescr
 * **`guards.cluster_invariants_ok` `floor_spread` (`:158-161`).** A cluster of one flat's adverts across
   a converted and an unconverted portal was spuriously spread by one. Those clusters become clean; new
   ones with a genuine spread become visible.
-* **`structural_truth.py:275-280` `pos_unit_in_project`.** `floors_agree` is an exact equality, so
-  every cross-convention positive was falling through to the area arm. Its `floor` evidence string
-  (`f"{a.floor}|{b.floor}"`) records the OLD numbers on anything already emitted.
+* **`structural_truth.py:275-280` `pos_unit_in_project`** (deleted in SW1, EV08). `floors_agree` was an
+  exact equality, so every cross-convention positive fell through to the area arm; its `floor` evidence
+  string (`f"{a.floor}|{b.floor}"`) records the OLD numbers on anything it emitted.
 * **Persisted pair state — `dedup_pair_candidates.floor_lo / floor_hi / floor_checked`**
   (`toolkit/dedup_candidates.py:347-351`, `toolkit/dedup_candidates_sql.py:126-130,149,167,182`).
   These are stored per pair and are stale the moment the heal runs. **Regenerate.**

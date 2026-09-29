@@ -18,10 +18,8 @@ inside schema `autodedup`: shadow mode (D4) is untouched, no production table is
 `listings` / `images` are read for display only.
 
 PII (E28): no broker column is selected anywhere (autodedup/ui_sql.py), and every advert text
-— description or title — reaches a response only through the judge's own scrubber
-(`autodedup.judge.listing_digest` / `scrubbed_text`, the same regexes either way). The two
-OPERATOR surfaces (the group dialog, the pair page) are shown the WHOLE scrubbed text rather
-than the judge's token-capped slice: reading costs no tokens, and the sentence that tells two
+— description or title — reaches a response only through one scrubber
+(`autodedup.export.listing_digest` / `scrubbed_text`), whole: the sentence that tells two
 developer units apart is as often in the last paragraph as the first.
 """
 
@@ -32,7 +30,6 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -47,8 +44,9 @@ from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
 from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
-from autodedup.judge import listing_digest, scrubbed_text
-from autodedup.model import LogisticModel, hand_initialised
+from autodedup.export import listing_digest, scrubbed_text
+from autodedup.harness import model_of_version
+from autodedup.model import hand_initialised
 from toolkit.property_identity import record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
@@ -380,7 +378,6 @@ AGREEMENT_MAX_CLUSTER_SIZE = 12
 # a key that arrived in a URL whether or not the cap listed it — so the cap costs no filter.
 BLOCKS_LIMIT = 200
 
-_MODELS_DIR = Path(__file__).resolve().parents[2] / "autodedup" / "models"
 _MODEL_CACHE: dict[str, Any] = {}
 
 
@@ -502,25 +499,19 @@ def _feats(raw: Any) -> dict[str, tuple[float, bool]]:
 
 
 def _load_model(version: Any) -> Any:
-    """The model a pair was scored by, for the legible contribution breakdown (E21).
+    """The model a pair was scored by, for the legible contribution breakdown (E21), through the
+    one loader every lane names models with (`harness.model_of_version`).
 
-    A version with no file on disk and no `hand` prefix yields None, and the caller falls back
-    to the highest present features — a breakdown attributed to the WRONG model would be worse
-    than no breakdown at all."""
-    key = str(version or "hand_v1")
+    A version with no file on disk yields None, and the caller falls back to the highest present
+    features — a breakdown attributed to the WRONG model would be worse than no breakdown."""
+    key = str(version or hand_initialised().version)
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         return cached
-    model: Any = None
-    if "/" not in key and ".." not in key:
-        path = _MODELS_DIR / f"{key}.json"
-        try:
-            if path.is_file():
-                model = LogisticModel.from_json(path.read_text(encoding="utf-8"))
-            elif key.startswith("hand"):
-                model = hand_initialised()
-        except Exception:  # noqa: BLE001 — a malformed model file must not 500 the page
-            model = None
+    try:
+        model = model_of_version(key)
+    except (SystemExit, OSError, ValueError):  # a missing or malformed file must not 500
+        model = None
     # Only a HIT is cached: a model file that lands in the image after boot (or a version the
     # lane writes before its file ships) would otherwise stay missing until the API restarts.
     if model is not None:
@@ -767,8 +758,6 @@ def _member_texts(conn: Any, ids: list[int]) -> dict[int, dict[str, Any]]:
         out[int(row["listing_id"])] = {
             "title": scrubbed_text(row["title"]),
             "description": description,
-            # The operator's copy is never cut; the key stays so one client component can render
-            # this text and the judge digest, which IS cut on the paid path.
             "description_truncated": False,
             "description_chars": len(description or ""),
         }
@@ -852,9 +841,8 @@ def _pair_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _digest(row: dict[str, Any]) -> dict[str, Any]:
-    """`autodedup.judge.listing_digest` over a DB row — the judge's own PII-free record, so
-    the operator reads what the model was shown (and never a broker field). One deliberate
-    difference: the description is NOT cut here. The cap is the paid lane's token budget."""
+    """`autodedup.export.listing_digest` over a DB row — the PII-free record (never a broker
+    field), the whole scrubbed description included."""
     attrs = {
         key: row[key]
         for key in (
@@ -886,8 +874,7 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         inactive_at=_stamp(row["inactive_at"]),
         is_active=bool(row["is_active"]),
     )
-    # The operator reads the WHOLE scrubbed advert; the judge's own digest stays capped.
-    digest = listing_digest(listing, truncate=False)
+    digest = listing_digest(listing)
     return {
         "listing_id": digest.listing_id,
         "portal": digest.portal,
@@ -899,10 +886,8 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         "floor": digest.floor,
         "total_floors": digest.total_floors,
         "price": digest.price,
-        # Portal provenance the OPERATOR reads, not part of the judge digest any more:
-        # W4 dropped `price_unit` from `ListingDigest` (the "celkem" / "za nemovitost"
-        # suffix is one fact in two vocabularies and cost gold votes). The pair page still
-        # renders the raw row value, so the wire keeps the key and sources it here.
+        # Portal provenance, not part of `ListingDigest` (the "celkem" / "za nemovitost"
+        # suffix is one fact in two vocabularies); the pair page renders the raw row value.
         "price_unit": listing.attrs.get("price_unit"),
         "attributes": digest.attributes,
         "first_seen": digest.first_seen,
@@ -1824,7 +1809,8 @@ def candidate_detail(
 
     The text is the reason this dialog exists, exactly as on the groups queue: a developer
     project's units share the photos and the attribute row and differ only in what the ad says.
-    It reaches the response through the judge's own scrubber and no other path (E28)."""
+    It reaches the response through `export.scrubbed_text`, the one scrubber, and no other
+    path (E28)."""
     _reject_unknown_filters(request, DETAIL_FILTER_KEYS)
     if not CANDIDATE_KEY_RE.match(candidate_key):
         raise _bad("candidate_key is not a key from this endpoint")

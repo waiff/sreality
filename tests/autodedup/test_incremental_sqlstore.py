@@ -40,7 +40,7 @@ from autodedup.hazard_context import ContextStamp
 from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.replay import DatasetFacts, ScheduleWork, arrival_order, batch_state
+from autodedup.incremental_store import CohortFacts, Schedule
 from autodedup.score_lane import FAMILY_BITS, families_bitmask, families_of_bitmask
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_incremental import (
@@ -49,6 +49,7 @@ from tests.autodedup.test_incremental import (
     _drain,
     _listing,
     _settings,
+    arrival_order,
 )
 
 GEN = "rt"
@@ -103,8 +104,8 @@ def _sql_drain(ds, settings, calibration, order, batch: int = 5, db: FakePg | No
     # and not about retention (E79, which has its own test): a store that dropped the sub-floor
     # rejects would make "the SQL store equals the twin" a weaker claim than it reads as.
     store = SqlStore(conn, GEN, store_floor=0.0)
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(list(order))
+    facts = CohortFacts(ds)
+    work = Schedule(list(order))
     model = hand_initialised()
     caps = limits or Limits(max_listings=batch, max_pairs=10 ** 9, max_component=400)
     passes = []
@@ -133,6 +134,19 @@ def _sql_state(conn: FakePg):
     return pairs, {key: sorted(ids) for key, ids in clusters.items()}
 
 
+def _sql_conflicts(conn: FakePg) -> list[tuple[int, int, str, str | None]]:
+    """The refused unions and bridges as a MULTISET: a duplicate row is a difference."""
+    return sorted((int(row["listing_lo"]), int(row["listing_hi"]), str(row["kind"]),
+                   row["invariant"]) for row in conn.cluster_conflicts
+                  if (row["detail"] or {}).get("generation") == GEN)
+
+
+def _memory_conflicts(store: MemoryStore) -> list[tuple[int, int, str, str | None]]:
+    return sorted((min(int(c["lo"]), int(c["hi"])), max(int(c["lo"]), int(c["hi"])),
+                   str(c.get("kind") or "invariant"), str(c.get("invariant") or "") or None)
+                  for c in store.conflicts)
+
+
 def _memory_state(store: MemoryStore):
     pairs = {key: {
         "zone": row.zone,
@@ -149,7 +163,7 @@ def _memory_state(store: MemoryStore):
 
 
 @pytest.mark.parametrize("cohort", ["near_duplicates", "twins"])
-def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(cohort) -> None:
+def test_the_sql_store_reaches_the_same_state_as_the_twin(cohort) -> None:
     ds = _dataset(24) if cohort == "near_duplicates" else _twins_dataset(4)
     settings = _settings()
     calibration = _calibration(ds, settings)
@@ -162,15 +176,39 @@ def test_the_sql_store_reaches_the_same_state_as_the_twin_and_the_cohort_pass(co
 
     assert sql_pairs == mem_pairs
     assert sql_clusters == mem_clusters
+    assert _sql_conflicts(conn) == _memory_conflicts(memory)
+    assert sql_pairs and (cohort == "near_duplicates" or sql_clusters)
 
-    reference, batch_clusters, _timings = batch_state(ds, settings, hand_initialised())
-    assert set(sql_pairs) == set(reference)
-    for key, row in sql_pairs.items():
-        assert row["zone"] == reference[key]["zone"], key
-        assert row["certificate"] == reference[key]["certificate"], key
-        assert row["families"] == reference[key]["families"], key
-    assert sorted(sorted(v) for v in sql_clusters.values()) == \
-        sorted(sorted(v) for v in batch_clusters.values())
+
+def test_the_twin_keeps_and_drops_conflicts_exactly_as_the_sql_store_does() -> None:
+    """`RT_CONFLICT_DROP_SQL` drops a conflict only when BOTH ends are members of a re-written
+    cluster row. So a refused union with a singleton end survives a re-cluster and is inserted
+    again beside itself — the live duplicate the SW1 review found (11862489x12031365 on the
+    trial). The twin must hold the same multiset, duplicate included, or every harness count of
+    refused unions reads a different store from the one the lane writes."""
+    def cluster(key: int, members: list[int]) -> dict:
+        return {"cluster_key": key, "members": members, "size": len(members)}
+
+    refused = {"lo": 2, "hi": 9, "kind": "invariant", "invariant": "d43_distinguishable",
+               "members": [1, 2]}
+    inside = {"lo": 1, "hi": 2, "kind": "invariant", "invariant": "d43_distinguishable",
+              "members": [1, 2]}
+    steps = [([], [cluster(1, [1, 2])], [refused, inside]),
+             ([1], [cluster(1, [1, 2])], [refused, inside]),
+             ([1], [cluster(1, [1, 2, 9])], [])]
+    conn = FakePg()
+    sql, memory = SqlStore(conn, GEN, store_floor=0.0), MemoryStore()
+    seen = []
+    for drop, rows, conflicts in steps:
+        sql.write_clusters(drop, rows, conflicts)
+        memory.write_clusters(drop, rows, conflicts)
+        assert _sql_conflicts(conn) == _memory_conflicts(memory)
+        seen.append(_memory_conflicts(memory))
+    duplicate = (2, 9, "invariant", "d43_distinguishable")
+    assert seen[1].count(duplicate) == 2, "a singleton end is never dropped: re-inserted"
+    assert (1, 2, "invariant", "d43_distinguishable") in seen[1] and seen[1].count(
+        (1, 2, "invariant", "d43_distinguishable")) == 1, "both ends clustered: replaced"
+    assert seen[2] == [], "both ends now members of the re-written row: every copy dropped"
 
 
 # ---------------------------------------------------------------------- F1: the fp row
@@ -251,10 +289,10 @@ def test_a_certified_merge_survives_the_round_trip_and_clusters() -> None:
     for lo, hi in certified:
         assert conn.pairs[(GEN, lo, hi)]["certificate"] == "K-R"
         assert store.pairs_within([lo, hi])[0].certificate == "K-R"
-    reference, batch_clusters, _timings = batch_state(ds, settings, hand_initialised())
-    assert _sql_state(conn)[1] and len(_sql_state(conn)[1]) == len(batch_clusters)
+    memory, _ = _drain(ds, settings, calibration, list(reversed(arrival_order(ds))), batch=1)
+    assert _sql_state(conn)[1] and len(_sql_state(conn)[1]) == len(memory.clusters)
     assert sorted(sorted(v) for v in _sql_state(conn)[1].values()) == \
-        sorted(sorted(v) for v in batch_clusters.values())
+        sorted(sorted(v) for v in memory.clusters.values())
     # And the cluster row says the edge was certified, which is what the UI counts.
     assert all(int(row["n_certificate_edges"]) >= 1 for row in conn.clusters.values())
 
@@ -398,8 +436,8 @@ def test_a_pass_that_cannot_fit_its_pair_set_writes_nothing() -> None:
     calibration = _calibration(ds, settings)
     conn = FakePg()
     store = SqlStore(conn, GEN)
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(arrival_order(ds))
+    facts = CohortFacts(ds)
+    work = Schedule(arrival_order(ds))
     result = run_pass(store, facts, work, settings, hand_initialised(), calibration,
                       limits=Limits(max_listings=16, max_pairs=1), generation=GEN)
     assert result.aborted == "pair_budget"
@@ -409,8 +447,8 @@ def test_a_pass_that_cannot_fit_its_pair_set_writes_nothing() -> None:
     assert work.cursor == 0, "a refused claim must not move the watermark"
 
 
-class _RecordingWork(ScheduleWork):
-    """A `ScheduleWork` that remembers what each attempt asked for."""
+class _RecordingWork(Schedule):
+    """A `Schedule` that remembers what each attempt asked for."""
 
     def __init__(self, order) -> None:
         super().__init__(order)
@@ -433,7 +471,7 @@ def test_the_bounded_runner_shrinks_the_claim_before_it_gives_up() -> None:
     conn = FakePg()
     store = SqlStore(conn, GEN)
     work = _RecordingWork(arrival_order(ds))
-    result = run_pass_bounded(store, DatasetFacts(ds), work, settings, hand_initialised(),
+    result = run_pass_bounded(store, CohortFacts(ds), work, settings, hand_initialised(),
                               calibration, limits=Limits(max_listings=16, max_pairs=1),
                               generation=GEN)
     assert work.asked == [16, 4, 1], "each refusal must re-claim a smaller slice"
@@ -468,8 +506,8 @@ def test_an_operator_must_not_link_added_after_the_merge_is_honoured() -> None:
     _key, members = grouped[0]
     conn.mnl.add((members[0], members[1]))
 
-    facts = DatasetFacts(ds)
-    work = ScheduleWork([])  # an IDLE pass: the operator row moves no pair
+    facts = CohortFacts(ds)
+    work = Schedule([])  # an IDLE pass: the operator row moves no pair
     result = run_pass(store, facts, work, settings, hand_initialised(), calibration,
                       limits=Limits(), generation=GEN)
     assert result.components >= 1
@@ -492,8 +530,8 @@ def test_a_listing_that_moves_unbumps_the_cell_it_left() -> None:
     moved = ds.listings[listing_id]
     moved.location = replace(moved.location, obec_kod=500000, cast_obce_kod=500001,
                              ruian_adm_kod=987654)
-    facts = DatasetFacts(ds)
-    work = ScheduleWork([listing_id])
+    facts = CohortFacts(ds)
+    work = Schedule([listing_id])
     run_pass(store, facts, work, settings, hand_initialised(), calibration,
              limits=Limits(), generation=GEN)
     store.flush()
@@ -523,8 +561,8 @@ def test_a_pass_is_bounded_in_statements() -> None:
     calibration = _calibration(ds, settings)
     conn = FakePg()
     store = SqlStore(conn, GEN)
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(arrival_order(ds))
+    facts = CohortFacts(ds)
+    work = Schedule(arrival_order(ds))
     run_pass(store, facts, work, settings, hand_initialised(), calibration,
              limits=Limits(max_listings=24, max_pairs=10 ** 9), generation=GEN)
     # One pass over the whole 24-listing cohort, every pair of it scored.

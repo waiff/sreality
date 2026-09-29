@@ -9,14 +9,15 @@ off unless the worker's interval says otherwise.
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
-from typing import Iterable
+from typing import Any, Iterable
 
 import pytest
 
-from autodedup.blocking import BlockIndex, generate_pairs
+from autodedup import harness
+from autodedup.blocking import BlockIndex
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
-from autodedup.fingerprint import build_all
 from autodedup.incremental import (
     Calibration,
     Keyer,
@@ -28,7 +29,7 @@ from autodedup.incremental import (
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.replay import DatasetFacts, ScheduleWork, arrival_order, batch_state
+from autodedup.incremental_store import CohortFacts, Schedule
 from autodedup.settings import Settings
 
 
@@ -68,14 +69,19 @@ def _settings() -> Settings:
 
 
 def _calibration(ds: Dataset, settings: Settings) -> Calibration:
-    return Calibration.build(build_all(ds, settings), ds.listings, settings)
+    return harness.calibrated(ds, settings)[1]
+
+
+def arrival_order(ds: Dataset) -> list[int]:
+    """Listing ids in `first_seen_at` order, ties on the id."""
+    return [i for _stamp, i in sorted((l.first_seen_at or "", l.id) for l in ds.listings.values())]
 
 
 def _drain(ds: Dataset, settings: Settings, calibration: Calibration,
            order: Iterable[int], batch: int = 5) -> tuple[MemoryStore, list]:
     store = MemoryStore()
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(list(order))
+    facts = CohortFacts(ds)
+    work = Schedule(list(order))
     model = hand_initialised()
     passes = []
     limits = Limits(max_listings=batch, max_pairs=10 ** 9, max_component=400)
@@ -85,6 +91,33 @@ def _drain(ds: Dataset, settings: Settings, calibration: Calibration,
     return store, passes
 
 
+def _state(store: MemoryStore) -> tuple[dict[tuple[int, int], tuple[Any, ...]], list[tuple[int, ...]]]:
+    """What a pass decides: every pair's zone, score, reason, certificate, families and probes,
+    and the groups by membership. The lane's own stamps (`context`, hold markers) are not a
+    decision and are left out."""
+    pairs = {key: (row.zone, round(float(row.score), 9), row.reason, row.certificate,
+                   tuple(sorted(row.families)), tuple(sorted(row.probes)))
+             for key, row in store.pairs.items()}
+    return pairs, sorted(tuple(sorted(members)) for members in store.clusters.values())
+
+
+def invariant_state(ds: Dataset, settings: Settings, calibration: Calibration,
+                    claims: tuple[int, ...] = (1, 5, 500)):
+    """E70-E72 as `run_pass` INVARIANCE, the only path there is (SW1): the cohort drained in id
+    order, arrival order, a shuffled and the reversed order, each in claims of 1, 5 and 500,
+    reaches ONE final state — pairs and groups. Returned so a caller can read it further."""
+    ids = sorted(ds.listings)
+    orders = {"id": ids, "arrival": arrival_order(ds),
+              "shuffled": random.Random(20260927).sample(ids, len(ids)),
+              "reversed": list(reversed(arrival_order(ds)))}
+    reference = _state(_drain(ds, settings, calibration, ids, batch=max(claims))[0])
+    for name, order in orders.items():
+        for claim in claims:
+            state = _state(_drain(ds, settings, calibration, order, batch=claim)[0])
+            assert state == reference, (name, claim)
+    return reference
+
+
 # --------------------------------------------------------------------------- E71 retrieval
 
 
@@ -92,8 +125,7 @@ def test_retrieval_matches_the_cohort_pass_exactly() -> None:
     """The one rail that stops the SQL restatement of `BlockIndex.candidates` from drifting."""
     ds = _dataset()
     settings = _settings()
-    fps = build_all(ds, settings)
-    calibration = _calibration(ds, settings)
+    fps, calibration = harness.calibrated(ds, settings)
     store, _passes = _drain(ds, settings, calibration, arrival_order(ds))
 
     index = BlockIndex(settings)
@@ -112,8 +144,7 @@ def test_retrieval_matches_the_cohort_pass_exactly() -> None:
 def test_index_keys_come_from_the_block_index_not_a_restatement() -> None:
     ds = _dataset(6)
     settings = _settings()
-    fps = build_all(ds, settings)
-    calibration = _calibration(ds, settings)
+    fps, calibration = harness.calibrated(ds, settings)
     keyer = Keyer(settings, calibration)
     index = BlockIndex(settings)
     for listing_id in sorted(fps):
@@ -136,8 +167,8 @@ def test_an_unchanged_listing_costs_nothing() -> None:
     store, first = _drain(ds, settings, calibration, arrival_order(ds))
     before = {key: (row.zone, row.score) for key, row in store.pairs.items()}
 
-    facts = DatasetFacts(ds)
-    work = ScheduleWork(arrival_order(ds))
+    facts = CohortFacts(ds)
+    work = Schedule(arrival_order(ds))
     model = hand_initialised()
     again = []
     while not work.exhausted():
@@ -149,15 +180,15 @@ def test_an_unchanged_listing_costs_nothing() -> None:
 
 
 def test_the_watermark_only_advances_over_what_it_claimed() -> None:
-    work = ScheduleWork([1, 2, 3, 4, 5])
+    work = Schedule([1, 2, 3, 4, 5])
     first = work.claim(2)
     assert [item.listing_id for item in first] == [1, 2]
-    assert work.commit(first)["arrivals_done"] == 2
+    assert work.commit(first)["done"] == 2
     second = work.claim(2)
     assert [item.listing_id for item in second] == [3, 4]
     # A CLAIM moves nothing: only the items a pass actually decided advance the cursor.
     assert work.cursor == 2
-    assert work.commit(second)["arrivals_done"] == 4
+    assert work.commit(second)["done"] == 4
     assert not work.exhausted()
     third = work.claim(2)
     assert [item.listing_id for item in third] == [5]
@@ -167,7 +198,7 @@ def test_the_watermark_only_advances_over_what_it_claimed() -> None:
 
 def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
     """E75: an aborted pass commits nothing, so the same arrivals come back next time."""
-    work = ScheduleWork([1, 2, 3])
+    work = Schedule([1, 2, 3])
     claimed = work.claim(3)
     work.commit([])
     assert work.cursor == 0
@@ -178,33 +209,13 @@ def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
 # --------------------------------------------------------------------- E72 and the replay
 
 
-def test_the_incremental_final_state_equals_the_cohort_pass() -> None:
+def test_the_final_state_is_one_whatever_the_order_and_the_claim() -> None:
+    """E70/E71/E72: the final state is a function of the corpus — not of the arrival order and
+    not of how the corpus was cut into claims."""
     ds = _dataset(24)
     settings = _settings()
-    calibration = _calibration(ds, settings)
-    reference, batch_clusters, _timings = batch_state(ds, settings, hand_initialised())
-    store, _passes = _drain(ds, settings, calibration, arrival_order(ds))
-    assert set(store.pairs) == set(reference)
-    for key, row in store.pairs.items():
-        assert (row.zone, row.reason) == (reference[key]["zone"], reference[key]["reason"]), key
-    assert {k: sorted(v) for k, v in store.clusters.items()} == {
-        k: sorted(v) for k, v in batch_clusters.items()
-    }
-
-
-def test_arrival_order_does_not_change_the_final_state() -> None:
-    """E71/E72 in one assertion: two orders, one state."""
-    ds = _dataset(24)
-    settings = _settings()
-    calibration = _calibration(ds, settings)
-    forward, _a = _drain(ds, settings, calibration, arrival_order(ds))
-    backward, _b = _drain(ds, settings, calibration, list(reversed(arrival_order(ds))), batch=3)
-    assert {k: (r.zone, round(r.score, 9)) for k, r in forward.pairs.items()} == {
-        k: (r.zone, round(r.score, 9)) for k, r in backward.pairs.items()
-    }
-    assert {k: sorted(v) for k, v in forward.clusters.items()} == {
-        k: sorted(v) for k, v in backward.clusters.items()
-    }
+    pairs, _groups = invariant_state(ds, settings, _calibration(ds, settings))
+    assert pairs and any(zone == "band" for zone, *_rest in pairs.values())
 
 
 # ------------------------------------------------------------------------------ E64 rail

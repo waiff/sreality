@@ -55,10 +55,10 @@ from autodedup.incremental_scope import (
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
-from autodedup.replay import DatasetFacts, arrival_order
+from autodedup.incremental_store import CohortFacts
 from autodedup.store_score import storable
 from tests.autodedup.fake_pg import FakePg
-from tests.autodedup.test_incremental import _calibration, _dataset, _drain, _settings
+from tests.autodedup.test_incremental import _calibration, _dataset, _drain, _settings, arrival_order
 
 GEN = "rt"
 SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))
@@ -367,7 +367,7 @@ def test_a_listing_that_leaves_the_scope_is_retired_not_left_half_indexed() -> N
         def commit(self, done) -> dict:
             return {}
 
-    result = run_pass(store, DatasetFacts(ds), _Retire(), settings, hand_initialised(),
+    result = run_pass(store, CohortFacts(ds), _Retire(), settings, hand_initialised(),
                       calibration, limits=Limits(max_listings=50, max_pairs=10 ** 9))
     assert result.retired == 1
     assert not store.keys.get(victim), "postings survived the retirement"
@@ -391,7 +391,7 @@ def test_a_retired_listing_is_never_also_refreshed() -> None:
         def commit(self, done) -> dict:
             return {}
 
-    result = run_pass(store, DatasetFacts(ds), _Both(), settings, hand_initialised(),
+    result = run_pass(store, CohortFacts(ds), _Both(), settings, hand_initialised(),
                       calibration, limits=Limits(max_listings=50, max_pairs=10 ** 9))
     assert result.claimed == []
     assert store.known([victim]) == set()

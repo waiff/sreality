@@ -1500,10 +1500,8 @@ def test_group_detail_members_carry_the_title_and_the_WHOLE_scrubbed_description
     assert by_id[11]["description"].startswith("Byt c. 12 ve 4. patre, orientace na jih, 68 m2.")
     assert "777 123 456" not in by_id[11]["description"]
     assert "jan.novak@example.cz" not in by_id[11]["description"]
-    # Longer than the judge's cap and NOT truncated — the reader pays no tokens.
-    from autodedup.judge import DESCRIPTION_MAX_CHARS
-
-    assert len(by_id[12]["description"]) > DESCRIPTION_MAX_CHARS
+    # A long advert is NOT truncated: the reader reads the whole scrubbed text.
+    assert len(by_id[12]["description"]) > 1200
     assert by_id[12]["description"].endswith("vlastni parkovani.")
     assert by_id[12]["description_truncated"] is False
     assert by_id[12]["description_chars"] == len(by_id[12]["description"])
@@ -1771,11 +1769,8 @@ def test_the_pair_view_carries_no_pii(client, conn):
         assert name not in usql.LISTING_DETAIL_COLUMNS
 
 
-def test_the_pair_digest_is_no_longer_cut_at_the_judges_token_cap(client, conn):
-    """The pair page is the deep-dive. The JUDGE keeps its capped digest (that cap is a token
-    budget); the operator reading the page pays no tokens and gets the whole scrubbed advert."""
-    from autodedup.judge import DESCRIPTION_MAX_CHARS
-
+def test_the_pair_digest_is_the_whole_scrubbed_advert(client, conn):
+    """The pair page is the deep-dive: the operator gets the whole scrubbed advert."""
     long_ad = "Byt c. 14 ve 2. patre. " + "Klidna lokalita, jizni orientace. " * 90
     _pair_evidence(conn)
     conn.canned["listing_detail"] = [
@@ -1783,18 +1778,18 @@ def test_the_pair_digest_is_no_longer_cut_at_the_judges_token_cap(client, conn):
         _listing_detail(12, source="bazos"),
     ]
     digest = client.get("/autodedup/pair/11/12").json()["data"]["digests"]["a"]
-    assert len(digest["description"]) > DESCRIPTION_MAX_CHARS
+    assert len(digest["description"]) > 1200
     assert digest["description"].endswith("tel. [telefon]")
     assert digest["description_truncated"] is False
     assert "777 123 456" not in digest["description"]
 
 
-def test_the_pair_view_keeps_the_price_unit_the_judge_digest_dropped(client, conn):
-    """Two behaviours meeting in one payload: W4 removed `price_unit` from `ListingDigest`
-    (the `celkem` / `za nemovitost` suffix is one fact in two portal vocabularies), while the
-    pair page still declares the key (`AutodedupDigest.price_unit`). The route therefore
-    sources it from the raw row, not from the digest."""
-    from autodedup.judge import ListingDigest
+def test_the_pair_view_keeps_the_price_unit_the_digest_leaves_out(client, conn):
+    """Two behaviours meeting in one payload: `ListingDigest` carries no `price_unit` (the
+    `celkem` / `za nemovitost` suffix is one fact in two portal vocabularies), while the pair
+    page still declares the key (`AutodedupDigest.price_unit`). The route therefore sources it
+    from the raw row, not from the digest."""
+    from autodedup.export import ListingDigest
 
     assert not hasattr(ListingDigest(listing_id=1), "price_unit")
     _pair_evidence(conn)

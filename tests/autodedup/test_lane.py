@@ -249,6 +249,22 @@ def test_scrub_ignores_short_or_missing_values() -> None:
     assert lane.scrub("abc", env={"QWEN_API_KEY": ""}) == "abc"
 
 
+def test_the_scrubbed_names_are_exactly_the_credentials_the_workflow_hands_the_lane() -> None:
+    """`scrub` redacts by NAME, so the list must be the lane step's own env: a secret the
+    workflow passes and the list omits is echoed verbatim by the first exception that quotes
+    it, and a name the workflow no longer passes is a stale promise (SW1 review)."""
+    import re
+    from pathlib import Path
+
+    workflow = (Path(lane.__file__).resolve().parents[1] / ".github" / "workflows"
+                / "autodedup.yml").read_text(encoding="utf-8")
+    call = workflow.index('python -m autodedup.lane --mode "${MODE')
+    step = workflow[workflow.rindex("      - name:", 0, call):call]
+    passed = set(re.findall(r"^\s+([A-Z0-9_]+): \$\{\{ (?:secrets\.[A-Z0-9_]+|github\.token) \}\}",
+                            step, re.MULTILINE))
+    assert passed and set(lane.SECRET_ENV_VARS) == passed
+
+
 # --- the record mode, from the lane's side ------------------------------------------------
 
 

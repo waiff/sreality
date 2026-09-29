@@ -33,11 +33,13 @@ import time
 import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from autodedup import cohort
 from autodedup.cohort import Block
+from autodedup.dataset import Listing, live_end_stamp
 from autodedup.export_sql import (
     ATTR_COLUMNS,
     COHORT_CLIP_COUNT_SQL,
@@ -175,6 +177,125 @@ def scrub_description(text: str | None) -> str | None:
     out = _TITLE_NAME_RE.sub(NAME_TOKEN, out)
     out = _MAKLER_NAME_RE.sub(NAME_TOKEN, out)
     return out
+
+
+# `scrub_description` catches ROLE-then-name. These two catch the other direction and the
+# imperative lead-ins, which is how a Czech advert actually signs off.
+_NAME_WORD = r"[A-ZÁ-Ž][a-zá-ž]+"
+_NAME_THEN_ROLE_RE = re.compile(
+    rf"\b{_NAME_WORD}\s+{_NAME_WORD}"
+    r"(?=\s*[,\-–—]?\s*(?:[Rr]ealitní\s+)?(?:[Mm]akléř|[Mm]aklér|[Ss]pecialist)(?:ka|a)?\b)"
+)
+_CONTACT_LEAD_RE = re.compile(
+    r"(?:Kontaktn[ií]\s+osoba|Kontaktujte|Kontakt|[Vv]olejte|[Zz]avolejte|[Dd]omlouvá"
+    r"|[Ii]nformace\s+(?:u|podá))"
+    rf"\s*[:\-–]?\s*({_NAME_WORD}\s+{_NAME_WORD})"
+)
+
+
+def scrub_for_reader(text: str | None) -> str | None:
+    """E28's second layer: `scrub_description`, then the name forms it does not cover."""
+    cleaned = scrub_description(text)
+    if not cleaned:
+        return cleaned
+    cleaned = _NAME_THEN_ROLE_RE.sub(NAME_TOKEN, cleaned)
+    return _CONTACT_LEAD_RE.sub(
+        lambda match: match.group(0).replace(match.group(1), NAME_TOKEN), cleaned)
+
+
+def scrubbed_text(text: str | None) -> str | None:
+    """What a HUMAN reader is shown: the whole scrubbed text, an all-whitespace one absent.
+    One scrubber for every surface — a second copy of the PII rules is how a leak ships."""
+    cleaned = scrub_for_reader(text)
+    return cleaned if (cleaned or "").strip() else None
+
+
+# The attributes a reader is shown, in order; `celkem` vs `za nemovitost` (`price_unit`) is one
+# fact in two vocabularies and is left out.
+DIGEST_ATTRS: tuple[tuple[str, str], ...] = (
+    ("usable_area", "usable area"), ("estate_area", "plot area"), ("garden_area", "garden area"),
+    ("has_balcony", "balcony"), ("terrace", "terrace"), ("cellar", "cellar"),
+    ("garage", "garage"), ("has_parking", "parking"), ("parking_lots", "parking spaces"),
+    ("has_lift", "lift"), ("furnished", "furnishing"), ("ownership", "ownership"),
+    ("condition", "condition"), ("energy_rating", "energy rating"),
+    ("building_type", "building type"), ("published_at", "published by the portal"),
+)
+DIGEST_PRICE_POINTS: int = 8
+
+
+@dataclass(slots=True)
+class ListingDigest:
+    listing_id: int
+    portal: str | None = None
+    deal: str | None = None
+    category: str | None = None
+    subtype: str | None = None
+    disposition: str | None = None
+    area_m2: float | None = None
+    floor: int | None = None
+    total_floors: int | None = None
+    price: float | None = None
+    price_history: list[tuple[str, float | None]] = field(default_factory=list)
+    attributes: dict[str, str | None] = field(default_factory=dict)
+    first_seen: str | None = None
+    last_seen: str | None = None
+    active: bool = True
+    description: str | None = None
+    description_truncated: bool = False
+    absent: list[str] = field(default_factory=list)
+
+
+def _clean(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None if value is None else ("yes" if value else "no")
+    text = str(value).strip()
+    return text or None
+
+
+def _digest_attr(key: str, raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if key == "published_at":
+        return (_clean(raw) or "")[:10] or None
+    if key in ("usable_area", "estate_area", "garden_area"):
+        try:
+            return f"{float(raw):g} m²"
+        except (TypeError, ValueError):
+            return _clean(raw)
+    return _clean(raw)
+
+
+def listing_digest(listing: Listing) -> ListingDigest:
+    """One advert, PII-free, for a human reader: no broker field of any kind reaches this
+    record, the description is the whole scrubbed text, and every unknown field is NAMED."""
+    attrs = listing.attrs or {}
+    attributes = {label: _digest_attr(key, attrs.get(key)) for key, label in DIGEST_ATTRS}
+    first_seen, last_seen = _clean(listing.first_seen_at), _clean(live_end_stamp(listing))
+    digest = ListingDigest(
+        listing_id=listing.id,
+        portal=_clean(listing.source),
+        deal=_clean(listing.category_type),
+        category=_clean(listing.category_main),
+        subtype=_clean(listing.subtype),
+        disposition=_clean(listing.disposition),
+        area_m2=listing.area_m2,
+        floor=listing.floor,
+        total_floors=listing.total_floors,
+        price=listing.price,
+        price_history=list(listing.price_history or [])[-DIGEST_PRICE_POINTS:],
+        attributes=attributes,
+        first_seen=first_seen[:10] if first_seen else None,
+        last_seen=last_seen[:10] if last_seen else None,
+        active=bool(listing.is_active),
+        description=scrub_for_reader(listing.description) or None,
+    )
+    digest.absent = [name for name, value in (
+        ("disposition", digest.disposition), ("area", digest.area_m2), ("floor", digest.floor),
+        ("total floors", digest.total_floors), ("price", digest.price),
+        ("description", digest.description), ("first seen", digest.first_seen),
+        ("last seen", digest.last_seen),
+    ) if value is None] + [label for label, value in attributes.items() if value is None]
+    return digest
 
 
 # --- derived fields ---------------------------------------------------------------------

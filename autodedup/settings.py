@@ -253,7 +253,7 @@ class Settings:
     # all of them; re-opening means back to the BAND, never an unmerge.
     context_rail_max_reopen_per_block: int = 8
     # E48: the per-stratum merge switch D3 asks for. A key is `<layer>|<side>` spelled exactly
-    # as `evaluate.decide_stratum` spells it (K-A/K-B/K-C/model x same/cross); the value is that
+    # as `decide.stratum_key` spells it (K-A/K-B/K-C/model x same/cross); the value is that
     # stratum's own `t_hi`, and NULL is not "missing" but PROPOSE-ONLY — the stratum could not
     # prove the bar, so nothing in it auto-merges however high it scores or whichever certificate
     # it earned. A stratum with no entry runs on the global `t_hi`. This is the only way to ship

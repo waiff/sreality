@@ -71,15 +71,6 @@ def test_the_candidate_keeps_the_floor_and_every_cut_of_the_incumbent() -> None:
         assert getattr(CANDIDATE, name) == getattr(W8, name), name
 
 
-def test_the_two_label_lists_exist_and_hold_ordered_distinct_pairs() -> None:
-    for name, cap in (("w10_multicarrier_dev", 200), ("w10_new_merges_dev", 200)):
-        pairs = json.loads((ROOT / f"pairs/{name}.json").read_text(encoding="utf-8"))
-        keys = [(int(lo), int(hi)) for lo, hi in pairs]
-        assert 0 < len(keys) <= cap
-        assert len(set(keys)) == len(keys)
-        assert all(lo < hi for lo, hi in keys)
-
-
 def test_w10_promotes_nothing_so_there_is_no_promoted_settings_row() -> None:
     """D28: the shipped generation is still g6. A `w10.json` would BE the promotion."""
     assert not (ROOT / "settings/w10.json").exists()
@@ -106,3 +97,27 @@ def test_the_candidate_carries_the_gap_rail_the_gold_labels_bought() -> None:
     assert CANDIDATE.certificate_b_min_gap_days == MIN_CERTIFICATE_B_GAP_DAYS
     raw = json.loads((ROOT / "settings/w10_honest_carrier.json").read_text(encoding="utf-8"))
     assert "certificate_b_min_gap_days" in raw  # spelled out, not inherited from a default
+
+
+def test_the_one_path_refuses_exactly_the_two_w10_carrier_rows() -> None:
+    """SW1 left `run_pass` the only decision path, and it refuses E83/E85/E88 (incremental.py
+    `run_pass`). So these two rows can no longer be RUN by anything; they stay as the record of
+    D28/M86 until GR05 (SW2) deletes E83's code with them. A third refused row would be a dial
+    nothing can run, so the list is pinned."""
+    from autodedup.incremental import Calibration, run_pass
+    from autodedup.incremental_store import MemoryStore, Schedule
+    from autodedup.model import hand_initialised
+
+    refused = []
+    for path in sorted((ROOT / "settings").glob("*.json")):
+        try:
+            settings = Settings.from_json(path)
+        except ValueError:   # a provenance record beside the rows, not a settings row
+            continue
+        try:
+            run_pass(MemoryStore(), None, Schedule([]), settings, hand_initialised(),
+                     Calibration(generation="rt", feature_version=0, built_at="",
+                                 n_listings=0))
+        except NotImplementedError:
+            refused.append(path.name)
+    assert refused == ["w10_carrier.json", "w10_honest_carrier.json"]

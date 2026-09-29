@@ -5,11 +5,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from autodedup.dataset import Dataset, Image, Listing, Location, Meta
+from autodedup.dataset import Image, Listing, Location
 from autodedup.fingerprint import (
     area_band_of,
     block_key_of,
-    build_all,
     build_fingerprint,
     cat_group_of,
     dominant_family,
@@ -224,15 +223,3 @@ def test_image_ids_are_split_by_tag_family() -> None:
     assert fp.exterior_image_ids == [11]
     assert fp.plan_image_ids == [12]
     assert fp.image_ids == [10, 11, 12, 13, 14]
-
-
-def test_build_all_covers_the_cohort_in_listing_id_order() -> None:
-    dataset = Dataset(
-        meta=Meta(),
-        listings={2: listing(2), 1: listing(1)},
-        images_by_listing={1: [image(5, listing_id=1, phash=7, pop=1)]},
-    )
-    fps = build_all(dataset, SETTINGS)
-    assert list(fps) == [1, 2]
-    assert fps[1].n_images == 1
-    assert fps[2].n_images == 0

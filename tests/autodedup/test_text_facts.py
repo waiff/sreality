@@ -6,12 +6,9 @@ import pytest
 
 from autodedup.dataset import Listing, Location, live_end_stamp
 from autodedup.text_facts import (
-    MAX_CODE_POPULATION,
     address_block_key,
-    code_population,
     mask_codes,
     orientations,
-    rare_codes,
     reference_codes,
     stated_areas,
     unit_designators,
@@ -51,13 +48,6 @@ def test_mask_codes_hides_the_code_in_the_original_text() -> None:
 )
 def test_unit_designators(text: str, expected: set[str]) -> None:
     assert unit_designators(text) == expected
-
-
-def test_code_population_and_the_rarity_cap() -> None:
-    population = code_population({i: "Ev. číslo: 03888" for i in range(MAX_CODE_POPULATION + 1)})
-    assert population == {"03888": MAX_CODE_POPULATION + 1}
-    assert rare_codes({"03888"}, population) == set()
-    assert rare_codes({"03888"}, {"03888": MAX_CODE_POPULATION}) == {"03888"}
 
 
 # --- stated areas -------------------------------------------------------------------------

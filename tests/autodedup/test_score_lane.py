@@ -21,6 +21,8 @@ from typing import Any, Iterator
 
 import pytest
 
+from autodedup import dataset as ds
+from autodedup import harness
 from autodedup import lane as lane_module
 from autodedup import score_lane
 from autodedup.score_sql import (
@@ -267,14 +269,14 @@ def test_the_run_row_is_open_before_the_engine_runs(
 ) -> None:
     """The engine is the long phase and the one that dies; a row opened after it would make
     exactly that failure invisible."""
-    real = score_lane.harness.run_engine
+    real = score_lane.harness.run
     seen: list[int] = []
 
     def spy(*args: Any, **kwargs: Any) -> Any:
         seen.append(len(lane.executed))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(score_lane.harness, "run_engine", spy)
+    monkeypatch.setattr(score_lane.harness, "run", spy)
     lane(tmp_path / "out", export_run="1")
     start = _index(lane.executed, RUN_START_SQL)
     assert start >= 0 and start < seen[0]
@@ -286,7 +288,7 @@ def test_an_engine_crash_still_leaves_a_failed_run_row(
     def boom(*args: Any, **kwargs: Any) -> Any:
         raise MemoryError("cohort does not fit")
 
-    monkeypatch.setattr(score_lane.harness, "run_engine", boom)
+    monkeypatch.setattr(score_lane.harness, "run", boom)
     with pytest.raises(MemoryError):
         lane(tmp_path / "out", export_run="1")
     finish = _params(lane.executed, RUN_FINISH_SQL)
@@ -741,6 +743,56 @@ def test_the_block_grain_is_stored_beside_the_code_not_dropped() -> None:
     )
 
 
+def test_the_g_rows_are_the_memorystore_pass_persisted(lane, tmp_path: Path, cohort: Path) -> None:
+    """PA07 / K38: the score lane decides with `run_pass` over a MemoryStore (`harness.run`)
+    and its one small writer persists exactly that pass — every pair row, cluster and member
+    the fake connection captured is the one a direct `harness.run` of the cohort yields."""
+    lane(tmp_path / "out", export_run="1", generation="gtest", settings="w31",
+         model="w6_gold")
+    direct = tmp_path / "direct"
+    harness.run(ds.load(cohort), harness.named_settings("w31"),
+                harness.named_model("w6_gold"), direct)
+    rows = harness.read_pairs(direct)
+    clusters = json.loads((direct / "clusters.json").read_text(encoding="utf-8"))
+    membership = score_lane.membership_of(clusters)
+    expected = [score_lane.pair_params(row, membership, "w6_gold", "gtest") for row in rows
+                if score_lane.storable(row, harness.named_settings("w31").store_floor)]
+    key = lambda row: json.dumps(row, sort_keys=True, default=str)  # noqa: E731
+    assert sorted(map(key, _rows(lane.executed, PAIR_UPSERT_SQL))) == sorted(map(key, expected))
+    assert sorted(row["cluster_key"] for row in _rows(lane.executed, CLUSTER_INSERT_SQL)) == \
+        sorted(int(k) for k in clusters["clusters"])
+    assert len(_rows(lane.executed, CLUSTER_MEMBER_INSERT_SQL)) == sum(
+        len(members) for members in clusters["clusters"].values())
+
+
+# The g* write parameters the ORIGIN/MAIN writer (afd121ae: `run_engine` + `persist`) bound over
+# this cohort under w31 + w6_gold with one must-not-link, as one digest — computed there by
+# w15/sw1/pa07_golden/g_digest.py, which runs unchanged at both heads. A change to what a g*
+# generation stores moves it, however the decision path is wired (SW1 review: the test above
+# compares the lane with the functions it calls, so it cannot see one).
+G_WRITE_GOLDEN: str = "1c85fa310ceef85a"
+G_WRITE_COUNTS: dict[str, int] = {"PAIR_UPSERT_SQL": 4, "CLUSTER_INSERT_SQL": 2,
+                                  "CLUSTER_MEMBER_INSERT_SQL": 4, "CLUSTER_CONFLICT_INSERT_SQL": 1}
+
+
+def test_the_g_rows_are_the_origin_main_writer_s_rows(lane, tmp_path: Path) -> None:
+    import hashlib
+
+    lane.state["must_not_link"] = [(DUP_A, DUP_B, "operator")]
+    lane(tmp_path / "out", export_run="1", generation="gtest", settings="w31",
+         model="w6_gold")
+    statements = {"PAIR_UPSERT_SQL": PAIR_UPSERT_SQL, "CLUSTER_INSERT_SQL": CLUSTER_INSERT_SQL,
+                  "CLUSTER_MEMBER_INSERT_SQL": CLUSTER_MEMBER_INSERT_SQL,
+                  "CLUSTER_CONFLICT_INSERT_SQL": CLUSTER_CONFLICT_INSERT_SQL}
+    canon = {name: sorted(json.dumps(row, sort_keys=True, default=str)
+                          for params in _params(lane.executed, sql)
+                          for row in (params if isinstance(params, list) else [params]))
+             for name, sql in statements.items()}
+    assert {name: len(rows) for name, rows in canon.items()} == G_WRITE_COUNTS
+    digest = hashlib.sha256(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
+    assert digest == G_WRITE_GOLDEN
+
+
 def test_the_feature_reader_is_the_harness_definition() -> None:
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, True]}}, "gap_days") == 3.0
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, False]}}, "gap_days") is None
@@ -752,11 +804,11 @@ def test_the_shipped_w5_row_loads_and_keeps_model_same_propose_only() -> None:
     `w5_strata.json` is EVIDENCE, not a settings row — it must not be loadable as one."""
     from autodedup.settings import Settings
 
-    row = Settings.from_json(score_lane.repo_path("w5", score_lane.SETTINGS_DIR))
+    row = Settings.from_json(harness.repo_path("w5", harness.SETTINGS_DIR))
     assert row.t_hi_by_stratum["model|cross"] == 0.9788
     assert row.t_hi_by_stratum["model|same"] is None
     assert row.t_hi_by_stratum["K-C|same"] is None
     assert row.store_floor == 0.02 and row.t_hi == 1.0
     assert 0.18 < row.t_lo < 0.19
     with pytest.raises(ValueError, match="unknown settings keys"):
-        Settings.from_json(score_lane.repo_path("w5_strata", score_lane.SETTINGS_DIR))
+        Settings.from_json(harness.repo_path("w5_strata", harness.SETTINGS_DIR))

@@ -56,7 +56,6 @@ from autodedup.judge_lane import run_judge
 from autodedup.labels_lane import run_labels
 from autodedup.rt_equivalence import run_equivalence
 from autodedup.score_lane import run_score
-from autodedup.town_probe import run_town
 
 Mode = Callable[[Callable[[], Any], dict[str, str], Path], dict[str, Any]]
 
@@ -70,14 +69,13 @@ MODES: dict[str, Mode] = {
     "rt_equivalence": run_equivalence,
     "labels": run_labels,
     "record": run_record,
-    "town": run_town,
     "apply": run_apply,
     "unapply": run_unapply,
 }
 
-# `rt_seed`, `rt_equivalence` and `town` are deliberately ABSENT below, so they run unwrapped
-# — and for the two read-only instruments that is a CONTRACT, not an economy: an `iterations`
-# row would be the one write each promises never to make. The real-time pass itself is not a
+# `rt_seed` and `rt_equivalence` are deliberately ABSENT below, so they run unwrapped — and
+# for the read-only instrument that is a CONTRACT, not an economy: an `iterations` row would
+# be the one write it promises never to make. The real-time pass itself is not a
 # mode at all: the worker's `autodedup` lane runs it (E914), and `autodedup.iterations` is the
 # operator's NARRATIVE of the program, not a machine log.
 #
@@ -216,8 +214,8 @@ def parse_kv_args(raw: str | None) -> dict[str, str]:
 
 SECRET_ENV_VARS: tuple[str, ...] = (
     "SUPABASE_DB_URL", "SUPABASE_DB_SESSION_URL", "OPENAI_API_KEY", "QWEN_API_KEY",
-    "RUNPOD_API_KEY", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
-    "R2_BUCKET_NAME",
+    "RUNPOD_API_KEY", "HF_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET_NAME", "GH_TOKEN",
 )
 
 # A malformed DSN is echoed back verbatim by psycopg (`invalid dsn: ...`), so the value-based

@@ -1,8 +1,10 @@
 """`mode=judge` — run the W3 LLM judge over a stratified sample of one engine pass.
 
 The whole pass in one sentence: download the W1 cohort artifact from a finished `export` run,
-re-run the engine over it in-process, draw a deterministic stratified sample of pairs, and ask
-the judge for a four-way verdict on each — text-only, with images, or three deep votes.
+run the lane's own pass over it in-process (`harness.run`: `run_pass` over a MemoryStore), draw
+a deterministic stratified sample of pairs, and ask the judge for a four-way verdict on each —
+text-only, with images, or three deep votes. The verdicts are labels for training (D19): the
+judge has no merge authority.
 
 Three invariants this lane owns, all of them paid for the hard way elsewhere in this repo:
 
@@ -30,12 +32,12 @@ while that module is still being built.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import random
 import re
-import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -58,8 +60,11 @@ from autodedup.judge_sql import (
     JUDGEMENT_POD_COST_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
-from autodedup.model import LogisticModel, hand_initialised
+from autodedup.incremental import Keyer
+from autodedup.model import LogisticModel
+from autodedup.score_lane import download_cohort
 from autodedup.settings import Settings
+from autodedup.text_facts import mask_codes as redact_codes
 from toolkit.vision_batch import is_fatal
 
 TIERS: tuple[str, ...] = ("smoke", "text", "vision", "gold", "oss")
@@ -165,10 +170,6 @@ CLOCK: Callable[[], float] = time.time
 JUDGE_BILLED: str = "judge_billed"
 
 DESCRIPTION_MAX: int = 1200
-ARTIFACT_PREFIX: str = "autodedup-export-"
-COHORT_FILE: str = "cohort.jsonl.gz"
-GH_TIMEOUT_S: int = 900
-
 SAMPLE_FILE: str = "sample.json"
 RUN_FILE: str = "run.json"
 JUDGEMENTS_FILE: str = "judgements.jsonl"
@@ -178,28 +179,106 @@ PAIRS_DIR: Path = Path(__file__).resolve().parent / "pairs"
 
 _JUDGE: Any = None
 
-def load_engine_settings(raw: str | None) -> Settings:
-    """`settings=<name>` under autodedup/settings/ (or an existing file path); absent = defaults."""
-    if not raw:
-        return Settings()
-    from pathlib import Path
+# --- the draw (PROGRAM.md section 9): the judge is the only caller ----------------------------
 
-    if Path(raw).is_file():
-        return Settings.from_json(raw)
-    from autodedup.score_lane import SETTINGS_DIR, repo_path
-
-    return Settings.from_json(str(repo_path(raw, SETTINGS_DIR)))
+SAMPLE_SEED: int = harness.SAMPLE_SEED
+STRATUM_FLOOR: int = 8
+CATALOG_ONLY_STRATUM: str = "catalog-only"
+CATALOG_ONLY_MIN: float = 0.90
 
 
-def load_engine_model(raw: str | None) -> LogisticModel:
-    """`model=<name>` under autodedup/models/ scores the cohort; absent = the hand prior."""
-    if not raw:
-        return hand_initialised()
-    from autodedup.score_lane import MODELS_DIR, repo_path
+def _certificate_class(row: dict[str, Any]) -> str:
+    """Which layer decided the pair: a named certificate (E24), the model, or neither."""
+    certificate = row.get("certificate")
+    if certificate:
+        return str(certificate)
+    return "model" if row.get("zone") in ("merge", "band") else "none"
 
-    path = repo_path(raw, MODELS_DIR)
-    return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
 
+def judge_stratum(row: dict[str, Any]) -> str:
+    """W3's judge strata: zone x deciding layer x cohort block x same/cross source.
+
+    Pairs whose image evidence is almost entirely catalogue stock are pulled out WHOLE rather
+    than split across that grid: they are the developer-project class the judge exists to
+    separate (PROGRAM.md section 2), and proportional allocation over a four-way key would
+    scatter them too thin for the resulting agreement number to mean anything."""
+    ratio = harness.feature_value(row, "catalog_ratio_max")
+    if ratio is not None and ratio >= CATALOG_ONLY_MIN:
+        return CATALOG_ONLY_STRATUM
+    side = "cross" if row.get("cross_source") else "same"
+    return (f"{row.get('zone')}|{_certificate_class(row)}"
+            f"|{row.get('block') or '(none)'}|{side}")
+
+
+def drawn_stratum(row: dict[str, Any]) -> str:
+    """The stratum a draw files a pair under: the one a named pair list STAMPED on the row
+    (which contested set it was listed for, and why), else `judge_stratum`."""
+    stamped = row.get("stratum")
+    return str(stamped) if stamped else judge_stratum(row)
+
+
+def _shuffle_key(seed: int, row: dict[str, Any]) -> str:
+    payload = f"{seed}:{row.get('lo')}:{row.get('hi')}".encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=8).hexdigest()
+
+
+def sample_pairs(rows: list[dict[str, Any]], n: int, seed: int = SAMPLE_SEED) -> dict[str, Any]:
+    """Proportional allocation over `drawn_stratum` with a floor of 8 per stratum, in a
+    deterministic order — a pure function of (rows, n, seed), so the text and vision tiers of
+    one seed judge the SAME pairs (metric 8 measures the tiers, not two draws). The floor is
+    honoured first, so the selection exceeds `n` only when the floors alone already do."""
+    strata: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        strata.setdefault(drawn_stratum(row), []).append(row)
+    quotas = {name: min(STRATUM_FLOOR, len(members)) for name, members in strata.items()}
+    remaining = max(0, n - sum(quotas.values()))
+    headroom = {key: len(members) - quotas[key] for key, members in strata.items()}
+    total_headroom = sum(headroom.values())
+    if remaining and total_headroom:
+        shares = {key: remaining * space / total_headroom for key, space in headroom.items()}
+        for key, share in shares.items():
+            quotas[key] += min(headroom[key], int(share))
+        spare = remaining - sum(min(headroom[key], int(shares[key])) for key in shares)
+        for _, key in sorted(((shares[k] - int(shares[k]), k) for k in shares), reverse=True):
+            if spare <= 0:
+                break
+            if quotas[key] < len(strata[key]):
+                quotas[key] += 1
+                spare -= 1
+    selected: list[dict[str, Any]] = []
+    report: dict[str, dict[str, int]] = {}
+    for key in sorted(strata):
+        take = sorted(strata[key], key=lambda row: _shuffle_key(seed, row))[: quotas[key]]
+        selected.extend(take)
+        report[key] = {"population": len(strata[key]), "selected": len(take)}
+    selected.sort(key=lambda row: (row.get("lo", 0), row.get("hi", 0)))
+    return {"seed": seed, "n_requested": n, "n_selected": len(selected),
+            "n_strata": len(strata), "stratum_floor": STRATUM_FLOOR, "strata": report,
+            "pairs": selected}
+
+
+def unstored_rows(dataset: Any, settings: Settings, model: LogisticModel,
+                  keys: list[tuple[int, int]]) -> list[dict[str, Any]]:
+    """The engine's row for listed pairs the run did NOT store (below `store_floor`, or never
+    retrieved), in the run's row shape plus `stored: false`: `harness.decide_explicit`, the
+    lane's calibration and `decide_pair` (PA02 rewired). `probes` names the blocking keys the
+    two share, empty when retrieval never pairs them."""
+    fps, calibration = harness.calibrated(dataset, settings)
+    keyer = Keyer(settings, calibration)
+    rows: list[dict[str, Any]] = []
+    decided = harness.decide_explicit(dataset, settings, model, keys, (fps, calibration))
+    for (lo, hi), row in sorted(decided.items()):
+        fa, fb = fps[lo], fps[hi]
+        row.update({
+            "block": harness.pair_block(dataset.listings[lo], dataset.listings[hi]),
+            "block_key": harness.pair_block_key(fa, fb),
+            "source_pair": harness.source_pair(fa, fb),
+            "cross_source": fa.source != fb.source,
+            "probes": harness.pair_probes(keyer, fa, fb),
+            "stored": False,
+        })
+        rows.append(row)
+    return rows
 
 
 PAIR_ENTRY_KEYS: frozenset[str] = frozenset({"lo", "hi", "stratum"})
@@ -212,9 +291,7 @@ def load_pair_set(
     `{"lo": .., "hi": .., "stratum": ..}`, order-free. The object form files its pair under the
     list's OWN stratum (which contested set it was listed for, and the engine's stated reason)
     instead of `judge_stratum`, so a targeted pass reports per set rather than per zone grid."""
-    from autodedup.score_lane import repo_path
-
-    path = repo_path(raw, PAIRS_DIR)
+    path = harness.repo_path(raw, PAIRS_DIR)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
@@ -437,7 +514,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         tier=tier,
         n=n,
         max_usd=max_usd,
-        seed=_int_arg(args, "seed", harness.SAMPLE_SEED),
+        seed=_int_arg(args, "seed", SAMPLE_SEED),
         workers=workers,
         qwen_workers=qwen_workers,
         qwen_min_interval_ms=qwen_min_interval_ms,
@@ -469,32 +546,6 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         mask_codes=_flag(args, "mask_codes"),
         score_unstored=score_unstored,
     )
-
-
-# --- the cohort artifact ---------------------------------------------------------------
-
-
-def download_cohort(export_run: str, dest: Path) -> Path:
-    """`gh run download <id> -n autodedup-export-<id>` — the artifact IS the whole input."""
-    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
-        raise SystemExit(
-            "GH_TOKEN (or GITHUB_TOKEN) must be set to download the export artifact"
-        )
-    dest.mkdir(parents=True, exist_ok=True)
-    name = f"{ARTIFACT_PREFIX}{export_run}"
-    proc = subprocess.run(
-        ["gh", "run", "download", export_run, "-n", name, "--dir", str(dest)],
-        capture_output=True,
-        text=True,
-        timeout=GH_TIMEOUT_S,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:400]
-        raise SystemExit(f"gh run download {export_run} ({name}) failed: {detail}")
-    found = sorted(dest.rglob(COHORT_FILE))
-    if not found:
-        raise SystemExit(f"artifact {name} carries no {COHORT_FILE}")
-    return found[0]
 
 
 # --- one pair's call plan --------------------------------------------------------------
@@ -641,9 +692,7 @@ def scrubbed(listing: Listing, mask_codes: bool = False) -> Listing:
 
     text = scrub_description(listing.description)
     if mask_codes:
-        from autodedup.structural_truth import mask_codes as redact
-
-        text = redact(text)
+        text = redact_codes(text)
     if text and len(text) > DESCRIPTION_MAX:
         text = text[:DESCRIPTION_MAX]
     return replace(listing, description=text)
@@ -1423,9 +1472,9 @@ def run_judge(
         raise SystemExit(f"no cohort artifact at {cohort_path}")
 
     dataset = load(cohort_path)
-    settings = load_engine_settings(parsed.settings)
-    engine_model = load_engine_model(parsed.model)
-    engine = harness.run_engine(dataset, settings, engine_model, out_dir)
+    settings = harness.named_settings(parsed.settings)
+    engine_model = harness.named_model(parsed.model)
+    engine = harness.run(dataset, settings, engine_model, out_dir)
     (out_dir / RUN_FILE).write_text(
         json.dumps(engine, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -1465,10 +1514,8 @@ def run_judge(
         pairs_file_requested = len(wanted)
         present = {(int(row["lo"]), int(row["hi"])) for row in rows}
         if parsed.score_unstored:
-            extra = harness.score_pairs(
-                dataset, settings, engine_model,
-                [pair for pair in wanted if pair not in present],
-            )
+            extra = unstored_rows(dataset, settings, engine_model,
+                                  [pair for pair in wanted if pair not in present])
             rows.extend(extra)
             pairs_file_scored = [[int(row["lo"]), int(row["hi"])] for row in extra]
             present.update((lo, hi) for lo, hi in pairs_file_scored)
@@ -1488,9 +1535,9 @@ def run_judge(
     if parsed.strata:
         rows = [
             row for row in rows
-            if any(harness.drawn_stratum(row).startswith(prefix) for prefix in parsed.strata)
+            if any(drawn_stratum(row).startswith(prefix) for prefix in parsed.strata)
         ]
-    sample = harness.sample_pairs(rows, parsed.n, parsed.seed)
+    sample = sample_pairs(rows, parsed.n, parsed.seed)
     sample["tier"] = parsed.tier
     sample["judge_version"] = judge_version
     sample["strata_filter"] = list(parsed.strata)
@@ -1514,7 +1561,7 @@ def run_judge(
             lo=int(row["lo"]),
             hi=int(row["hi"]),
             row=row,
-            stratum=harness.drawn_stratum(row),
+            stratum=drawn_stratum(row),
             votes=plan,
             index=index,
         )

@@ -276,11 +276,6 @@ def read_seed(path: Path) -> int | None:
     return None if value is None else int(value)  # type: ignore[arg-type]
 
 
-def seed_for(seal: str) -> int | None:
-    path = path_for(seal)
-    return read_seed(path) if path.is_file() else None
-
-
 def write_map(path: Path, groups: dict[int, int], seed: int | None = None) -> Path:
     """The map, and the seed that partitions it — a map without one names no holdout."""
     path = Path(path)

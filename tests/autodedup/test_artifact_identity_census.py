@@ -27,19 +27,14 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 # The modules that produce a file under `out/`, and the statements they run to fill it.
 LANE_WRITERS: tuple[str, ...] = (
     "apply.py", "apply_sql.py",
-    "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
+    "census.py", "evaluate.py", "export.py", "export_sql.py",
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
-    "judge_lane.py", "judge_prompts.py",
-    "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
+    "judge_lane.py", "judge_prompts.py", "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
     "legacy_retire.py",
-    "progress_sql.py", "reconcile.py", "refit_substrate.py", "replay.py", "rt_equivalence.py",
+    "progress_sql.py", "reconcile.py", "refit_substrate.py", "rt_equivalence.py",
     "rt_lease.py", "score_lane.py",
     "score_sql.py",
     "seals.py",
-    "structural_truth.py", "town_probe.py",
-    # E299: writes yardstick.json / yardstick.md; reads the group file, where the operator's
-    # identity is already a digest, and never names an identity column.
-    "yardstick.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
@@ -100,7 +95,6 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "__init__.py", "agreement.py", "blocking.py", "body_align.py", "candidates.py",
         "cluster.py",
         "cohort.py", "dataset.py", "decide.py", "demonstrate.py", "development.py",
-        "ensembles.py",
             "family.py", "features.py",
         "d43.py", "fingerprint.py", "floor_convention.py", "guards.py",
         "hazard_context.py", "incremental.py",

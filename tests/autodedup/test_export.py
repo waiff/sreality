@@ -555,3 +555,68 @@ def test_export_args_defaults() -> None:
     assert params["clip_model"] == export.DEFAULT_CLIP_MODEL
     assert params["batch"] == 1000
     assert params["negctl_max"] == cohort.NEGATIVE_CONTROL.max_listings
+
+
+# --- the reader digest and its scrub (moved from the judge, which SW1 deleted) ---------------
+
+
+def _reader_listing(**kwargs: object) -> Any:
+    from autodedup.dataset import Listing
+
+    base: dict[str, object] = {"id": 1, "block": "turnov"}
+    base.update(kwargs)
+    return Listing(**base)  # type: ignore[arg-type]
+
+
+def test_the_digest_names_every_absent_field() -> None:
+    digest = export.listing_digest(_reader_listing(id=77, source="bazos"))
+    assert {"disposition", "area", "ownership", "energy rating"} <= set(digest.absent)
+    full = export.listing_digest(_reader_listing(
+        disposition="2+kk", area_m2=51.0, floor=1, total_floors=4, price=4_100_000.0,
+        description="Byt 2+kk.", first_seen_at="2025-02-01", last_seen_at="2025-03-01",
+        attrs={key: "ano" for key, _ in export.DIGEST_ATTRS}))
+    assert full.absent == []
+
+
+def test_the_digest_keeps_the_last_eight_price_points_and_the_whole_description() -> None:
+    history = [(f"2025-{month:02d}-01", 1_000_000.0 + month) for month in range(1, 13)]
+    raw = "a" * 400 + " tel. +420 777 654 321 " + "b" * 2000
+    digest = export.listing_digest(_reader_listing(price_history=history, description=raw))
+    assert len(digest.price_history) == export.DIGEST_PRICE_POINTS
+    assert digest.price_history[-1][0].startswith("2025-12")
+    assert digest.description is not None and digest.description.endswith("b" * 20)
+    assert digest.description_truncated is False
+    assert "777 654 321" not in digest.description
+
+
+def test_the_digest_carries_no_broker_field_at_all() -> None:
+    digest = export.listing_digest(_reader_listing(
+        broker_key="c0ffee" * 10, broker_identity_id=4242, broker_firm_id=99,
+        source_url="https://www.sreality.cz/detail/1234"))
+    text = repr(digest)
+    assert "c0ffee" not in text and "4242" not in text and "sreality.cz/detail" not in text
+
+
+@pytest.mark.parametrize("raw, leaked", [
+    ("Kontakt: Ing. Jan Novák, tel. +420 777 654 321, e-mail makler@rkdomov.cz",
+     ("777 654 321", "Novák", "makler@")),
+    ("Jan Novák, realitní makléř. Tel: 777-123-456", ("Novák", "777")),
+    ("Volejte Jana Nováková, tel 606123456 nebo pište na j.novakova@remax-czech.cz",
+     ("Nováková", "606123456", "remax-czech.cz")),
+    ("Prohlídky domlouvá Petra Dvořáková na čísle 720 555 111, petra@dvorakova.eu",
+     ("Dvořáková", "720 555 111", "dvorakova.eu")),
+    ("Kontaktní osoba: Marie Nová, tel 601 202 303", ("Nová,", "601 202 303")),
+])
+def test_the_reader_scrub_removes_every_contact_form(raw: str, leaked: tuple[str, ...]) -> None:
+    whole = export.scrubbed_text(raw)
+    assert whole is not None and "[jmeno]" in whole
+    assert whole == export.listing_digest(_reader_listing(description=raw)).description
+    for secret in leaked:
+        assert secret not in whole
+
+
+def test_the_reader_scrub_leaves_prose_alone_and_blank_text_absent() -> None:
+    text = "Byt 2+kk v Novém Městě, Rezidence Vysočany, kolaudace 2025. Cena 4 500 000 Kč."
+    assert export.scrub_for_reader(text) == text
+    assert export.scrubbed_text(None) is None
+    assert export.scrubbed_text("   \n  ") is None

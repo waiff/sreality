@@ -20,7 +20,7 @@ from tests.autodedup.test_evaluate import planted_rows, write_judgements, write_
 
 from autodedup import seals
 from autodedup.evaluate import split_seal
-from autodedup.score_lane import MODELS_DIR
+from autodedup.harness import MODELS_DIR
 
 W6_SEAL = "37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc"
 
@@ -67,7 +67,7 @@ def test_a_committed_map_hashes_to_the_name_it_is_filed_under() -> None:
         groups = seals.load(seal)
         # A seal is named by its MAP, or — since W12, whose map reproduced W11's to the listing
         # — by its map AND the seed that partitions it. Either spelling, never a third.
-        names = {split_seal(groups)["sha256"], seals.seal_id(groups, seals.seed_for(seal))}
+        names = {split_seal(groups)["sha256"], seals.seal_id(groups, seals.read_seed(seals.path_for(seal)))}
         assert seal in names, f"{seal[:12]} is filed under the wrong name"
 
 
@@ -148,38 +148,6 @@ def test_fit_takes_a_committed_seal_where_it_takes_a_path(tmp_path: Path) -> Non
     assert "is NOT committed" in first_text
 
 
-def test_evaluate_finds_the_committed_map_for_the_model_s_own_seal(tmp_path: Path) -> None:
-    """A model whose seal IS committed needs no --split-map: the alternative is the warning
-    path, where the holdout is silently re-derived from the run being evaluated."""
-    from autodedup import harness
-
-    rows, labels = planted_rows(n=120)
-    run_dir = write_run(tmp_path, rows)
-    judgements = write_judgements(tmp_path / "j.jsonl", labels)
-    _fit(tmp_path, "fit")
-    model_path = tmp_path / "fit" / harness.MODEL_FILE
-    model = json.loads(model_path.read_text(encoding="utf-8"))
-    seal = model["provenance"]["seal"]["sha256"]
-    splits = tmp_path / "splits"
-    splits.mkdir()
-    seals.write_map(splits / f"{seal}.json", seals.read_map(tmp_path / "fit" / "split_map.json"))
-    original, seals.SPLITS_DIR = seals.SPLITS_DIR, splits
-    out = io.StringIO()
-    try:
-        code = harness.main(
-            ["evaluate", str(run_dir), "--judgements", str(judgements),
-             "--model", str(model_path), "--out", str(tmp_path / "eval")], out=out
-        )
-    finally:
-        seals.SPLITS_DIR = original
-    assert code == 0
-    assert f"using the committed split map for seal {seal[:12]}" in out.getvalue()
-    report = json.loads((tmp_path / "eval" / "eval.json").read_text(encoding="utf-8"))
-    holdout = report["holdout"]
-    assert holdout["seal"]["sha256"] == seal == holdout["expect_seal"]
-    assert holdout["split_map_source"] == "fit"
-
-
 def test_an_unusable_split_map_is_a_refusal_not_a_traceback(tmp_path: Path) -> None:
     from autodedup import harness
 
@@ -189,10 +157,6 @@ def test_an_unusable_split_map_is_a_refusal_not_a_traceback(tmp_path: Path) -> N
     assert harness.main(
         ["fit", str(run_dir), "--judgements", str(judgements), "--split-map", "nope",
          "--out", str(tmp_path / "fit")], out=io.StringIO()
-    ) == 1
-    assert harness.main(
-        ["evaluate", str(run_dir), "--judgements", str(judgements), "--split-map", "nope",
-         "--out", str(tmp_path / "eval")], out=io.StringIO()
     ) == 1
 
 
@@ -224,8 +188,8 @@ def test_every_spent_seal_names_what_spent_it_and_where_the_choice_moved() -> No
 def test_a_committed_map_records_the_seed_that_partitions_it(tmp_path: Path) -> None:
     """`split_of` hashes `<seed>:<group>`: one map under two seeds is two holdouts under one
     name, and `split_seal` hashes the map only — so the seed has to travel with the file."""
-    assert seals.seed_for(W9_SEAL) == 20260922
-    assert seals.seed_for(W6_SEAL) is None, "the legacy bare map predates the seed field"
+    assert seals.read_seed(seals.path_for(W9_SEAL)) == 20260922
+    assert seals.read_seed(seals.path_for(W6_SEAL)) is None, "the legacy bare map predates the seed field"
     local = tmp_path / "split_map.json"
     seals.write_map(local, {7: 1, 9: 2}, seed=123)
     assert seals.read_map(local) == {7: 1, 9: 2}

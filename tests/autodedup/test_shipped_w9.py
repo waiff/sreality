@@ -89,7 +89,7 @@ def test_w9_gold_names_the_fresh_seal_and_the_map_is_committed() -> None:
     provenance = model.provenance
     assert (provenance["seal"] or {})["sha256"] == W9_SEAL
     assert seals.committed(W9_SEAL)
-    assert seals.seed_for(W9_SEAL) == provenance["training"]["seed"] == 20260922
+    assert seals.read_seed(seals.path_for(W9_SEAL)) == provenance["training"]["seed"] == 20260922
     # The briefed map lost on validation and the model says which map it actually carries (M60).
     assert provenance["training"]["calibration"] == "platt"
     assert "isotonic_pav" in provenance["calibration_note"]

@@ -51,9 +51,9 @@ name: "AUTODEDUP: engine lane"
 #
 #   judge   - THE ONE PAID MODE. Downloads a finished `export` run's cohort artifact
 #             (`gh run download <export_run> -n autodedup-export-<export_run>`, which is why
-#             this job asks for `actions: read` and the step is handed GH_TOKEN), re-runs the
-#             whole engine over it in-process, draws a DETERMINISTIC stratified sample of
-#             pairs - zone x deciding layer (certificate or model) x cohort block x same/cross
+#             this job asks for `actions: read` and the step is handed GH_TOKEN), runs `harness
+#             run` over it in-process (the lane's own run_pass, SW1), draws a DETERMINISTIC
+#             stratified sample of pairs - zone x deciding layer (certificate or model) x cohort block x same/cross
 #             portal, with the catalogue-only pairs pulled out whole - and puts each pair to
 #             the LLM judge for a four-way verdict (same_property / different_property /
 #             same_building_different_unit / insufficient_evidence) through one forced tool.
@@ -128,29 +128,22 @@ name: "AUTODEDUP: engine lane"
 #             It narrows the POPULATION, not the sample: `n` is still the cost dial. Pairs the
 #             engine did not store are reported by id in `pairs_file_missing` rather than
 #             quietly shrinking the pass - unless `score_unstored=1`, which scores each one
-#             through the engine's own features (below the floor, or never paired by blocking)
+#             through `harness.decide_explicit` (below the floor, or never paired by blocking)
 #             and reports it in `pairs_file_scored_unstored` instead.
 #             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
 #             judge_version, tier) and not on the model, so a second `oss_model` at the same
-#             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
-#             model under autodedup/models/ so the draw reflects that engine's zones (absent =
-#             defaults + hand prior); `judge_version=` keys the per-pair cache.
 #             version is skipped as cached (no pod rented, an EMPTY judgements.jsonl, exit 0)
 #             or, with `refresh=1`, OVERWRITES the first model's rows. To compare two open
 #             models, give the second its own version: `judge_version=<v>-<model-slug>`.
-#             `python3 -m autodedup.compare --gold <gold judgements.jsonl> --arm
-#             name=<judgements.jsonl> [--arm ...] --out <dir>` then reports, over the pairs
-#             gold saw, each arm's four-way and binary same/not-same agreement with gold (both
-#             with Cohen's kappa; insufficient_evidence is EXCLUDED from the binary score and
-#             counted, so a timid arm cannot buy agreement by abstaining), the confusion
-#             matrix, per-stratum agreement, mean confidence, cost per pair and latency, plus
-#             the agreement between the arms themselves - as compare.md and compare.json. It
-#             reads files only and costs nothing.
+#             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
+#             model under autodedup/models/ so the draw reflects that engine's zones (absent =
+#             defaults + hand prior); `judge_version=` keys the per-pair cache.
 #
 #   score   - READS the artifact, WRITES the engine's own schema. Downloads a finished
 #             `export` run's cohort artifact (same `gh run download` path as judge, which is
-#             why the job asks for `actions: read`), runs the whole engine over it in-process
-#             and PERSISTS what it decided into schema autodedup - nothing in public.* is
+#             why the job asks for `actions: read`), runs `harness run` over it in-process - the real-time
+#             lane's own run_pass over an in-memory store, the whole cohort claimed as the
+#             scope (SW1) - and PERSISTS what it decided into schema autodedup - nothing in public.* is
 #             touched and nothing is merged (ruling D4, clusters land with status `proposed`
 #             and no property_id). One `autodedup.runs` row wraps the pass: `running` from
 #             BEFORE the engine starts - the long phase, and the one that dies - then
@@ -165,9 +158,9 @@ name: "AUTODEDUP: engine lane"
 #             today's clusters.
 #             Operator `must_not_link` rows are read back FIRST and bind this pass's
 #             clustering, so a "different" verdict sticks. args: export_run (the artifact run
-#             id), cohort (a local artifact path instead of a download), settings (a JSON
-#             file under autodedup/settings/), model (a model.json under autodedup/models/,
-#             default the hand prior), generation (the label the UI filters on, default g1)
+#             id), cohort (a local artifact path instead of a download), settings (a
+#             settings row by name, e.g. w31), model (a model by name, e.g. w6_gold, default
+#             the hand prior), generation (the label the UI filters on, default g1)
 #             and store_floor (override the settings dial). Writes out/run.json (the full
 #             engine summary), out/pairs.jsonl.gz, out/clusters.json and out/score.json.
 #             It costs nothing but GitHub minutes and database time.
@@ -185,65 +178,41 @@ name: "AUTODEDUP: engine lane"
 #             random order the validation UI serves, so the unbiased sample the precision
 #             numbers are measured on is reproducible from the file. out/must_not_link.jsonl carries the permanent operator
 #             negatives, which are an INPUT to the next generation's clustering. The operator
-#             is the TOP label tier - above gold - so `harness fit` and `harness evaluate`
-#             read these files with --operator-labels instead of an ad-hoc query nobody can
-#             re-run the same way twice. Since migration 564 (E299) a pair ruling a Browse
+#             is the TOP label tier - above gold - so `harness evaluate` reads this export
+#             directory as its rulings and `harness fit` reads it with --operator-labels,
+#             instead of an ad-hoc query nobody can re-run the same way twice. Since migration 564 (E299) a pair ruling a Browse
 #             merge wrote leaves as source `browse_merge` with its merge_group_id, and
 #             out/operator_merges.jsonl carries the operator's Browse merges at GROUP grain
 #             from autodedup.operator_merges (never property_merge_events): every member with
 #             its origin side, where it sits today and the export block it lives in, and every
-#             pair with its standing - the file `harness yardstick` measures a generation
-#             against. Empty until 564 is applied. out/must_link.jsonl carries the pairs
+#             pair with its standing. Empty until 564 is applied. out/must_link.jsonl carries the pairs
 #             whose NEWEST pair ruling is `same` (E910): the must-links every clustering
-#             obeys, for `harness run --must-link` and the replay. Every statement is a SELECT.
+#             obeys, for `harness run --must-link`. Every statement is a SELECT.
 #
 #   rt_equivalence - READS ONLY, and writes NOTHING - not a `public` row, not an `autodedup`
-#             row, not a ledger row. The check the replay-equivalence proof cannot give.
-#             Replay feeds the incremental path from an export ARTIFACT, in one process, from
-#             an EMPTY store: it proves the MECHANISM and has proved it four times (44,724 of
-#             44,724 pairs, 849 of 849 clusters). What it cannot see is what a real generation
-#             HOLDS - and both of this lane's shipped defects lived exactly there (a live pass
-#             that issued ZERO K-C against the batch generation's 1,771, and a re-seed that
-#             left 15,923 pairs of a superseded scorer where they were). So this mode reads
-#             BOTH stores. Given the live generation and `batch=<generation>` scored on the
-#             SAME export under the same settings and model, inside the live generation's own
-#             scope, it ATTRIBUTES every difference to a named cause (E119) and fails only on
-#             the ones nobody can name and on DEFECTS (E120).
-#             * Defects make the comparison itself lie, so each one fails on its own:
-#               `store_write_asymmetry` (a side whose `decision` strings name a certificate
-#               while `pairs.certificate` holds none - `score_lane` did not write the column
-#               until W9m, so 3,462 shared pairs read 'K-C' against NULL), `clock_anchor` (the
-#               two generations disagree about `live_window_from_sighting`, read from
-#               `rt_calibration` and from the batch pass's own `autodedup.runs` row) and
-#               `store_score_precision` (`pairs.score` cannot hold the number `edge_rank`
-#               ranks on - migration 541).
-#             * Shared pairs that differ are attributed by reading which FEATURES moved:
-#               `drifted_since_export` (the clock features moved AND the live value is the one
-#               that matches `public.listings` as it stands now, recomputed through the
-#               engine's own `features.clock_features`), `calibration_cohort` (the
-#               corpus-frequency features moved, which two differently-cut calibrations always
-#               do), `clock_anchor`, `store_write_asymmetry`, `evidence_hold` (E918: the live
-#               lane HOLDS the batch's own merge in the band for complete photo evidence,
-#               inside the 48 h cap - a hold, not a decision, so it does not fail; the
-#               verdict's notes say how many wait and for how long) - and `unexplained`.
-#             * One-sided pairs keep their causes - `scope` (the batch cohort is wider),
-#               `not_in_live_store` (a listing the build has not reached, which FAILS the
-#               verdict because a mid-build comparison reads as a disagreement),
-#               `arrival_after_export`, `store_floor`, `retention`, `unexplained` - now
-#               reported PER SIDE as well as summed. An arrival is read against the batch
-#               cohort ITSELF: the export artifact the batch pass names (params.export_run),
-#               fetched with `gh run download` into a temporary directory, and cut at the
-#               export's START from its own ledger row.
-#             * Clusters are compared by connected COMPONENT: `arrival` (every moved merge
-#               edge touches a listing the batch cohort never had), `evidence_hold` (the moved
-#               edges are arrivals or held batch merges), `upstream_pair` (any other moved
-#               edge, so the pair grain already accounted for it) or `unexplained`, which is a
-#               component both sides hold the same edges in and partition differently.
-#             The score tolerance is never finer than the store's own resolution (`tol`,
-#             default 1e-6, raised to 32 units in the score column's last place while that is
-#             coarser). `out/rt_equivalence.json` is the deliverable and it carries a verdict:
-#             ok only when there are no defects, nothing is unexplained at pair, one-sided or
-#             cluster-component grain, and the build is finished.
+#             row, not a ledger row (K35). `harness run` is the lane's own pass (SW1), so
+#             code-path identity holds by construction; what it cannot see is the STORE, where
+#             this lane's shipped defects lived (a live pass that issued ZERO K-C, a re-seed
+#             that left 15,923 pairs of a superseded scorer behind, a score column that could
+#             not carry the number clustering ranks on). So this mode diffs the live
+#             generation against a harness run of its export - `run=<directory>` or
+#             `score_run=<the GitHub run id of a score dispatch, whose artifact IS one>` - and
+#             ATTRIBUTES every difference to a named cause (E119), failing only on the ones
+#             nobody can name and on DEFECTS (E120: `store_write_asymmetry`, `clock_anchor`,
+#             `store_score_precision`).
+#             * Shared pairs that differ, by which FEATURES moved: `drifted_since_export`,
+#               `calibration_cohort` (the lane calibrates on rt_scope_ids, the harness on the
+#               export cohort), `clock_anchor`, `evidence_hold` (E918: the live lane HOLDS the
+#               run's own merge in the band for complete photo evidence, inside the 48 h cap)
+#               - and `unexplained`.
+#             * One-sided pairs, per side: `scope`, `not_in_live_store` (fails: the build is
+#               not finished), `arrival_after_export` (read against the run's cohort artifact
+#               and cut at its own exported_at), `store_floor`, `retention`, `unexplained`.
+#             * Clusters by connected COMPONENT: `arrival`, `evidence_hold`, `upstream_pair`
+#               or `unexplained` (the same edges partitioned differently).
+#             args: generation (default rt), run or score_run (exactly one), tol (default
+#             1e-6, never finer than the score column's own resolution).
+#             `out/rt_equivalence.json` is the deliverable and it carries the verdict.
 #
 #   rt_seed - READS `public`, WRITES schema `autodedup` only. (Re)builds THE real-time lane's
 #             generation (`rt`) from the database (A10, E912): walks every block of the scope
@@ -272,26 +241,6 @@ name: "AUTODEDUP: engine lane"
 #             runs it, decides, groups and RECONCILES production inside the scope row (A9),
 #             and its interval (0 = stop) is its only switch. The GitHub schedule and its
 #             repository variable are gone.
-#
-#   town    - READS ONLY, writes nothing (not even a ledger row). Asks whether ONE property
-#             is ever recorded under two different TOWNS, corpus-wide, because the trial
-#             cohort is SELECTED by `listing_location.obec_kod` and cannot answer it: when
-#             two portals disagree about the town, the second advert falls outside the scope
-#             and the pair does not exist for the engine. The probe pages the whole
-#             `listings` table (keyset, `id > after`) for bodies whose text may carry an
-#             agency order code, extracts the codes with `text_facts.reference_codes`
-#             UNCHANGED, keeps E60's population rail (a code on more than 8 listings is a
-#             sequence number, not an order key) and drops every pair the rule floor refuses
-#             for a non-location reason - so what is left is the population a broker's own
-#             statement of identity certifies as ONE unit. Over it, `obec_differ` IS the
-#             false-veto rate a different-town veto would pay, measured without a label, a
-#             judge or a model; `cast_obce`, `okres` and `kraj` are reported beside it so the
-#             KEYING question (which rung of the hierarchy a veto would read) is answered
-#             from the same pass. args: batch (5000), max_rows (0 = the whole table),
-#             timeout_s (300, per statement), sample (80 cross-town pairs written out for
-#             hand reading) and coverage (1 = also report, per portal, how much of the corpus
-#             carries a town at all - the denominator E12 needs, since a missing town is
-#             never a mismatch). Writes out/town.json. Costs GitHub minutes and one seq scan.
 #
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
@@ -393,8 +342,7 @@ name: "AUTODEDUP: engine lane"
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
 # without migration 528 costs the row, never the run.
 #
-# `args` is a free-form `k=v,k=v` string each mode parses for itself. town accepts batch,
-# max_rows, timeout_s, sample and coverage; census accepts
+# `args` is a free-form `k=v,k=v` string each mode parses for itself. census accepts
 # min_n, max_n, top, detail_top, timeout_s, pin_share_min, probes and hash_share_min;
 # probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
 # batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.
@@ -430,18 +378,15 @@ name: "AUTODEDUP: engine lane"
 # oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
 # estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT
 # from `pod_wall_s_per_pair`, which is the rental divided by the pairs and is about a
-# `workers`th of it); score accepts export_run, cohort, settings, model, generation
-# and store_floor; labels accepts generation (which generation's clusters imply
-# pair labels, default g4), max_members (the cap on a confirmed group's size before
+# `workers`th of it);
+# score accepts export_run, cohort, settings, model, generation and store_floor;
+# labels accepts generation (which generation's clusters imply pair labels, default g4), max_members (the cap on a confirmed group's size before
 # its pairs are skipped rather than flooding the label set, default 12),
 # sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
 # settings (required), model (required), rt_scope, fresh and release_lease; rt_equivalence accepts
-# generation (default rt), batch (REQUIRED - the batch generation to compare against),
-# exported_at (the batch cohort's export time, used only when the export named by the batch
-# pass left no ledger row; last resort the batch pass's finish, which fails closed), cohort
-# (a local export artifact, in place of downloading the one the batch pass names) and tol
-# (the score tolerance, default 1e-6); apply accepts generation (REQUIRED),
+# generation (default rt), run or score_run (exactly one) and tol (the score tolerance,
+# default 1e-6); apply accepts generation (REQUIRED),
 # dry_run (1, the default, or
 # 0), retire_legacy (0, the default, or 1) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=town:563510
 # quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -
@@ -460,12 +405,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass (training labels, no merge authority); rt_equivalence = the live store against a harness run; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
         required: true
         default: "census"
         type: string
       args:
-        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold. A record correction is id=12,cost_usd=3.10,status=done."
+        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,settings=w31,model=w6_gold,generation=g16 or export_run=123,tier=text,n=400,max_usd=5. A record correction is id=12,cost_usd=3.10,status=done."
         required: false
         default: ""
         type: string
@@ -480,7 +425,7 @@ jobs:
     timeout-minutes: 300
     permissions:
       contents: read
-      # `judge` downloads a previous run's cohort artifact with `gh run download`.
+      # `judge`, `score` and `rt_equivalence` download a previous run's artifact with `gh run download`.
       actions: read
     steps:
       - uses: actions/checkout@v6

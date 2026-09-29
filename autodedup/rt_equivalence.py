@@ -1,65 +1,35 @@
-"""`--mode rt_equivalence` — READ-ONLY. Is the LIVE store the batch engine's store? (E99)
+"""`--mode rt_equivalence` — READ-ONLY. The LIVE store against a `harness run` of its export (K35).
 
-The check the replay-equivalence proof cannot give. Replay feeds the incremental path from an
-export ARTIFACT and compares it with the batch engine run over that same artifact, in one
-process, from an EMPTY store: it proves the MECHANISM — same decisions, same clusters, same
-edge order — and it has proved it four times. It says nothing about the rows a real generation
-actually holds, and three times now that was exactly where the defect was: W9f's first live
-pass issued ZERO K-C against the batch generation's 1,771 (E90), the 2026-09-20 re-seed left
-15,923 pairs of a superseded scorer in place (E97), and W9l found that the store could not
-carry the number the clustering ranks on (E114).
-
-So this mode reads BOTH stores and diffs them. Given a live generation and a batch generation
-scored on the SAME export with the same settings and model, inside the live generation's own
-scope, it compares the pairs, the clusters and the store itself — and **attributes every
-difference to a named cause**, because a difference nobody can name is the only kind worth
+`harness run` is the lane's own `run_pass` over the exported cohort (SW1), so code-path identity
+holds by construction and is not what this asks. What it cannot see is the STORE — where three
+of this lane's defects lived: zero K-C issued live (E90), 15,923 pairs of a superseded scorer
+left behind (E97), a score column that could not carry the number clustering ranks on (E114).
+So this mode diffs the live generation's pairs and groups against a harness run's output
+(`run=<dir>`, or `score_run=<id>`: a `score` dispatch's artifact, which IS one) and **names a
+cause for every difference**, because a difference nobody can name is the only kind worth
 failing on (E119).
 
-  * **Defects** (E120) are asymmetries in the instrument or the store rather than in the
-    engine: a column one lane writes and the other never does, two generations built under
-    different clock rules, a score column that cannot hold the number `cluster.edge_rank`
-    ranks on. Each one makes the comparison lie, so each one fails the verdict by itself.
-  * **`score_not_from_vector`** (E121) is the defect at PAIR grain, and it is asked of every
-    row this mode reads a vector for, on BOTH sides, before anything is attributed:
-    `decide_pair` sets `score = model.predict_proba(feats)` in every branch but the veto, so
-    a stored score its own stored vector does not reproduce was not written by this engine and
-    NO cause may excuse it. Without it the attribution below reads green over a real decision
-    bug that happens to ride on a drifted listing — demonstrated, twice, on the shipped code.
-  * **Shared pairs** that differ are attributed by reading WHICH FEATURES moved:
-    `drifted_since_export` (the clock features moved and the live value is the one that
-    matches the facts as they stand now), `calibration_cohort` (the corpus-frequency features
-    moved, which two differently-cut calibrations always do), `clock_anchor` (the two
-    generations do not agree what the window's end is) — and `unexplained`.
-  * **`evidence_hold`** (E918) is a shared pair the live lane HOLDS in the band for complete
-    photo evidence (E908) — a hold, not a decision. It is named only while the lane's own
-    release rule still keeps it (inside the 48 h cap) and only when the decision it holds is
-    the batch's; the verdict does not fail on it and its notes say how many wait and how long.
-  * **One-sided pairs** keep their own causes, now reported PER SIDE: `scope`,
-    `not_in_live_store`, `arrival_after_export`, `retention`, `store_floor`, `unexplained`.
-    `arrival_after_export` (E918) is read against the batch cohort ITSELF — the export
-    artifact the batch pass names in `params.export_run` — and the cut is the export's START
-    from its own `autodedup.iterations` row, not the minute typed on the command line
-    (`arrival_of`, `_cohort_cut`).
-  * **Clusters** are compared component by component: a component whose moved merge edges all
-    touch an arrival is `arrival`, one whose moved edges are arrivals or held batch merges is
-    `evidence_hold`, one with any other moved edge is `upstream_pair` (the pair grain already
-    accounted for it), and one where both sides hold the SAME edges and partition them
-    differently is `unexplained` — which is the shape E114 wore, and the reason this
-    attribution exists at all.
+  * **Defects** (E120) make the comparison lie and fail the verdict by themselves: a column one
+    side writes and the other never does, two clock rules, a score column `cluster.edge_rank`
+    cannot rank on.
+  * **Shared pairs** that differ are attributed by WHICH FEATURES moved: `drifted_since_export`
+    (the clock features moved and the live value matches the facts as they stand now),
+    `calibration_cohort` (the corpus-frequency features moved: the lane calibrates on
+    `rt_scope_ids`, the harness on the export cohort), `clock_anchor` — else `unexplained`.
+  * **`evidence_hold`** (E918): the live side HOLDS the run's own decision in the band while
+    the photographs are incomplete, inside the 48 h cap.
+  * **One-sided pairs**, per side: `scope`, `not_in_live_store`, `arrival_after_export` (read
+    against the run's cohort artifact, cut at its `exported_at`), `retention`, `store_floor`.
+  * **Clusters**, component by component: `arrival`, `evidence_hold`, `upstream_pair`, or
+    `unexplained` — the same edges partitioned differently, the shape E114 wore.
 
-The verdict fails on `unexplained` and on defects. It does not fail on a difference that has
-been named and evidenced, because a check that cannot tell drift from a bug is a description.
-
-It writes NOTHING — not a `public` row, not an `autodedup` row, not an `iterations` row. Its
-deliverable is `out/rt_equivalence.json`; the export artifact it reads the cohort from is
-downloaded into a temporary directory and gone before that file is written.
+It writes NOTHING: its deliverable is `out/rt_equivalence.json`.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -73,9 +43,8 @@ from autodedup.features import (
     WindowRule,
     clock_features,
 )
-from autodedup.harness import model_of_version
+from autodedup.harness import CLUSTERS_FILE, RUN_FILE, read_pairs as read_run_pairs
 from autodedup.incremental import EVIDENCE_HOLD_REASON, GENERATION
-from autodedup.judge_lane import download_cohort
 from autodedup.incremental_lane import (
     EVIDENCE_HORIZON_HOURS,
     SCOPE_SETTING,
@@ -87,9 +56,7 @@ from autodedup.incremental_lane import (
 from autodedup.incremental_scope import ScopeError, resolve_scope
 from autodedup.incremental_sql import (
     RT_CALIBRATION_READ_SQL,
-    RT_EQUIV_BATCH_SETTINGS_SQL,
     RT_EQUIV_CLOCK_FACTS_SQL,
-    RT_EQUIV_EXPORT_WINDOW_SQL,
     RT_EQUIV_HOLDS_SQL,
     RT_EQUIV_MEMBERS_SQL,
     RT_EQUIV_PAIR_FEATURES_SQL,
@@ -99,7 +66,8 @@ from autodedup.incremental_sql import (
     RT_KNOWN_SQL,
     RT_SCOPE_BLOCK_SQL,
 )
-from autodedup.store_score import PAIR_SCORE_SQL_TYPE, is_lossless, narrow, store_eps
+from autodedup.score_lane import ZONE_OF, download_artifact, families_bitmask
+from autodedup.store_score import PAIR_SCORE_SQL_TYPE, is_lossless, store_eps
 
 EQUIVALENCE_FILE: str = "rt_equivalence.json"
 MAX_EXAMPLES: int = 8
@@ -132,25 +100,6 @@ DECISION_FIELDS: tuple[str, ...] = ("zone", "certificate", "guard_veto")
 # reason — which is why the string is the WITNESS that a column should have been written and
 # never the definition of what it should hold.
 CERTIFICATE_PREFIX: str = "certificate:"
-# E121. The one relation between a stored pair's own columns that holds BY CONSTRUCTION:
-# `decide._decide_layers` sets `score = model.predict_proba(feats)` in every branch but the two
-# vetoes, and `apply_context_rule` carries the score through untouched. So a stored score its
-# own stored vector does not reproduce is a defect of that ROW, whatever else moved on the
-# pair. Measured before it was shipped: 46,688 non-veto pairs of the export cohort re-scored
-# from their vectors, max gap 0.0 — exact, so this costs no false positives (M182).
-SCORE_DEFECT: str = "score_not_from_vector"
-# The rows a re-score cannot be ASKED of. Each one is counted and named in the report rather
-# than skipped, because an exemption nobody counts is the hole this rule exists to close:
-#   `guard_veto`        a veto writes 0.0 and never consults the model (`pair_veto`, E61)
-#   `no_feature_vector` the store kept no vector — the upsert coalesces, so a probe-only
-#                       update leaves the vector the decision was taken on, and a row that
-#                       was never scored under this build has none at all
-#   `no_model_version`  the row does not NAME the scorer it was decided by (the shape E97
-#                       wore: 15,923 rows with `model_version` NULL), and inventing one for it
-#                       would be the instrument deciding what the store failed to record
-#   `model_unavailable` the row names a model this build does not carry
-SCORE_EXEMPT: tuple[str, ...] = (
-    "guard_veto", "no_feature_vector", "no_model_version", "model_unavailable")
 # E918. The cause a shared pair carries when the live side is HELD for complete photo evidence
 # (E908) and the decision it holds IS the batch's: a hold, not a decision, and the safe way
 # round — the lane has decided exactly what the batch decided and is waiting to act on it.
@@ -163,7 +112,6 @@ HOLD_FIELDS: frozenset[str] = frozenset({"zone", "certificate"})
 # gallery was still incomplete — the one the release arm (`RT_EVIDENCE_RELEASE_SQL`) keeps it
 # for. A hold past it is one the lane should have released, and it is `unexplained` again.
 HOLD_CAP_S: float = EVIDENCE_HORIZON_HOURS * 3600.0
-_UNREAD: object = object()
 
 
 def _rows(conn: Any, sql: str, params: Mapping[str, Any] | None = None) -> list[tuple]:
@@ -356,33 +304,6 @@ def store_score_type(conn: Any) -> str:
     return str(rows[0][0]).strip().lower()
 
 
-def batch_settings(conn: Any,
-                   generation: str) -> tuple[dict[str, Any] | None, Any, str | None]:
-    """The settings the batch generation's newest successful score pass recorded, when that
-    pass finished, and the export run it was scored on."""
-    rows = _rows(conn, RT_EQUIV_BATCH_SETTINGS_SQL, {"generation": generation})
-    if not rows:
-        return None, None, None
-    row = rows[0]
-    export_run = None if len(row) < 4 or row[3] is None else str(row[3]).strip() or None
-    if row[0] is None:
-        return None, row[2], export_run
-    blob = row[0]
-    return (dict(blob) if isinstance(blob, Mapping) else json.loads(blob or "{}"),
-            row[2], export_run)
-
-
-def export_window(conn: Any, export_run: str | None) -> tuple[Any, Any] | None:
-    """`(started_at, finished_at)` of the export run's own ledger row, or None when the batch
-    pass names no export run or the export left no row (a ledger failure never fails a lane)."""
-    if not export_run or not export_run.isdigit():
-        return None
-    rows = _rows(conn, RT_EQUIV_EXPORT_WINDOW_SQL, {"run_id": int(export_run)})
-    if not rows or rows[0][0] is None:
-        return None
-    return rows[0][0], rows[0][1]
-
-
 @dataclass(frozen=True, slots=True)
 class Hold:
     """One live pair HELD for complete photo evidence (E908), as the store keeps it.
@@ -466,101 +387,6 @@ def moved_features(left: Pair, right: Pair, tol: float) -> list[str]:
     return moved
 
 
-def _as_feats(pair: Pair) -> dict[str, tuple[float, bool]]:
-    """The stored vector in the shape the model reads it.
-
-    An absent feature is `(0.0, False)` and a missing key is the same thing to
-    `LogisticModel.score`, so the store's present-only vector (`score_lane.present_features`)
-    reconstructs the model's input exactly — absent is unknown, never a zero (E12)."""
-    return {name: (0.0, False) if value is None else (float(value), True)
-            for name, value in (pair.features or {}).items()}
-
-
-def _narrowed(value: float, score_type: str) -> float:
-    """`value` as the score column would hand it back, or unchanged for a column this build
-    does not know how to narrow — the comparison must not invent a rounding it cannot name."""
-    try:
-        return narrow(float(value), score_type)
-    except ValueError:
-        return float(value)
-
-
-def score_from_vector(pair: Pair, *, score_type: str, tol: float,
-                      models: dict[str, Any]) -> tuple[str, float | None, float | None]:
-    """Does this row's stored score follow from its OWN stored vector? (E121)
-
-    `("ok" | one of SCORE_EXEMPT | SCORE_DEFECT, recomputed, gap)`. The row names its scorer
-    (`model_version`) and `model_of_version` resolves it the way every lane does — one
-    definition (E12) — and the recomputation is then narrowed through the store's own column,
-    so a `real` store is compared as a `real` store instead of being passed by a tolerance
-    wide enough to hide what `real` did to it (E115)."""
-    if pair.guard_veto is not None:
-        return "guard_veto", None, None
-    if pair.features is None:
-        return "no_feature_vector", None, None
-    if pair.model_version is None:
-        return "no_model_version", None, None
-    model = models.get(pair.model_version, _UNREAD)
-    if model is _UNREAD:
-        try:
-            model = model_of_version(pair.model_version)
-        except (SystemExit, OSError, ValueError):
-            model = None
-        models[pair.model_version] = model
-    if model is None:
-        return "model_unavailable", None, None
-    recomputed = _narrowed(model.predict_proba(_as_feats(pair)), score_type)
-    if pair.score is None:
-        return SCORE_DEFECT, recomputed, None
-    gap = abs(recomputed - _narrowed(pair.score, score_type))
-    # The "ok" branch is the one that has to be EARNED (`gap <= tol`) rather than the defect
-    # branch (`gap > tol`): a NaN compares False both ways, and a stored NaN reading "ok" is
-    # exactly the silent pass this rule exists to stop.
-    return ("ok" if gap <= tol else SCORE_DEFECT), recomputed, gap
-
-
-def score_self_consistency(keys: Sequence[tuple[int, int]], live: Mapping[Any, Pair],
-                           batch: Mapping[Any, Pair], *, score_type: str,
-                           tol: float) -> dict[str, Any]:
-    """E121 over every row the instrument reads a vector for, on BOTH sides.
-
-    That population is the shared pairs that DIFFER — the rows an attribution would otherwise
-    excuse — and the report says how many were checked and how many were exempt, because a
-    rule whose denominator nobody prints can be passing on nothing at all."""
-    models: dict[str, Any] = {}
-    exempt: dict[str, int] = {}
-    defects = {"live": 0, "batch": 0}
-    examples: list[dict[str, Any]] = []
-    checked = 0
-    max_gap = 0.0
-    for key in keys:
-        for side, store in (("live", live), ("batch", batch)):
-            pair = store.get(key)
-            if pair is None:
-                continue
-            status, recomputed, gap = score_from_vector(
-                pair, score_type=score_type, tol=tol, models=models)
-            if status in SCORE_EXEMPT:
-                exempt[status] = exempt.get(status, 0) + 1
-                continue
-            checked += 1
-            if gap is not None:
-                max_gap = max(max_gap, gap)
-            if status != SCORE_DEFECT:
-                continue
-            defects[side] += 1
-            if len(examples) < MAX_EXAMPLES:
-                examples.append({"side": side, "listing_lo": pair.lo, "listing_hi": pair.hi,
-                                 "model_version": pair.model_version, "stored": pair.score,
-                                 "recomputed": recomputed, "gap": gap})
-    return {"rows": 2 * len(keys), "checked": checked, "exempt": exempt,
-            "defects": defects, "defective": defects["live"] + defects["batch"],
-            "max_gap": max_gap, "tolerance": tol, "score_column": score_type,
-            "models_unavailable": sorted(name for name, model in models.items()
-                                         if model is None),
-            "examples": examples}
-
-
 def asymmetric_fields(live: Mapping[Any, Pair],
                       batch: Mapping[Any, Pair]) -> list[dict[str, Any]]:
     """Decision fields one store WRITES and the other never does (E120, M171).
@@ -614,13 +440,15 @@ def arrival_of(listing_id: int, *, cut: datetime | None, seen: Mapping[int, Any]
     return None
 
 
-def cohort_listing_ids(path: Path) -> set[int]:
-    """The listing ids an export artifact carries.
+def cohort_of(path: Path) -> tuple[set[int], datetime | None]:
+    """The listing ids an export artifact carries and the `exported_at` its meta record states.
 
     The artifact's order is a contract (`export.py`, pinned by `test_export.py`): `meta`, then
     every `listing`, then every `image` — so the read stops at the first image and never
-    decompresses the part of the file that is 90 % of its bytes."""
+    decompresses the part of the file that is 90 % of its bytes. `exported_at` is stamped after
+    the export read its block ids, so a cut read off it fails closed."""
     ids: set[int] = set()
+    cut: datetime | None = None
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -629,33 +457,45 @@ def cohort_listing_ids(path: Path) -> set[int]:
             kind = record.get("t")
             if kind == "image":
                 break
-            if kind == "listing":
+            if kind == "meta":
+                cut = _to_stamp(record.get("exported_at"))
+            elif kind == "listing":
                 ids.add(int(record["id"]))
-    return ids
+    return ids, cut
 
 
-def batch_cohort(
-    cohort_path: str | None, export_run: str | None,
-    fetch: Callable[[str, Path], Path] = download_cohort,
-) -> tuple[set[int] | None, str | None, str | None]:
-    """The batch cohort's listing set: `(ids, where it came from, why it could not be read)`.
+@dataclass(frozen=True, slots=True)
+class RunSide:
+    """What a `harness run` wrote, read as the side the live store is compared against."""
 
-    The batch pass stores its pairs and its clusters and NOT the listings it was handed, so the
-    set is read from the export artifact it was scored on — a local `cohort=<path>`, else the
-    `export_run` its own run row names, downloaded into a temporary directory that is gone
-    before the report is written (the lane uploads `out/`, and a 280 MB cohort is not a report).
-    A failure is reported and never raised: without the set the arrival cause falls back to
-    `first_seen_at`, which is the conservative side."""
-    try:
-        if cohort_path:
-            return cohort_listing_ids(Path(cohort_path)), "cohort", None
-        if not export_run or not export_run.isdigit():
-            return None, None, "the batch pass names no export run"
-        with tempfile.TemporaryDirectory(prefix="rt_equivalence_") as tmp:
-            return (cohort_listing_ids(fetch(export_run, Path(tmp))),
-                    f"export_run:{export_run}", None)
-    except (SystemExit, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
-        return None, None, f"{type(exc).__name__}: {exc}"[:400]
+    pairs: dict[tuple[int, int], Pair]
+    clusters: dict[int, frozenset[int]]
+    settings: dict[str, Any]
+    cohort: set[int] | None
+    cut: datetime | None
+
+
+def read_run(run_dir: Path) -> RunSide:
+    """A harness run directory: its stored rows as the store would hold them (`ZONE_OF`, the
+    families bitmask, the vector it decided on), its groups, its settings, and the cohort it
+    was run over — the listing set and the export's own `exported_at`, the arrival cut."""
+    summary = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    pairs: dict[tuple[int, int], Pair] = {}
+    for row in read_run_pairs(run_dir):
+        pair = Pair([row["lo"], row["hi"], row.get("score"),
+                     ZONE_OF.get(str(row.get("zone")), "reject"), row.get("certificate"),
+                     row.get("reason"), row.get("veto"),
+                     families_bitmask(row.get("families") or ()), summary.get("model_version")])
+        pair.features = _feature_vector(row.get("feats") or {})
+        pairs[pair.key] = pair
+    clusters = json.loads((run_dir / CLUSTERS_FILE).read_text(encoding="utf-8"))["clusters"]
+    artifact = next((path for path in (run_dir / "artifact" / "cohort.jsonl.gz",
+                                       Path(str(summary.get("artifact") or "")))
+                     if path.is_file()), None)
+    cohort, cut = cohort_of(artifact) if artifact is not None else (None, None)
+    return RunSide(pairs, {int(key): frozenset(int(i) for i in members)
+                           for key, members in clusters.items()},
+                   dict(summary.get("settings") or {}), cohort, cut)
 
 
 def cause_of(pair: Pair, *, side: str, in_scope: set[int], known: set[int],
@@ -773,20 +613,23 @@ def _drift_evidenced(live: Pair, batch: Pair, clock: Sequence[str],
 
 def run_equivalence(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path, *,
-    fetch_cohort: Callable[[str, Path], Path] = download_cohort,
+    fetch_run: Callable[[str, Path], Path] = download_artifact,
 ) -> dict[str, Any]:
-    """`--mode rt_equivalence`: the live store against a batch generation. Writes nothing."""
+    """`--mode rt_equivalence`: the live store against a harness run. Writes nothing."""
     generation = str(args.get("generation") or "").strip() or GENERATION
-    batch = str(args.get("batch") or "").strip()
-    if not batch:
+    run_arg = str(args.get("run") or "").strip()
+    score_run = str(args.get("score_run") or "").strip()
+    if bool(run_arg) == bool(score_run):
         raise SystemExit(
-            "batch=<generation> is required — this mode compares the LIVE store with a batch "
-            "generation scored on the same export under the same settings and model, and "
-            "there is no default that could be right")
-    if batch == generation:
-        raise SystemExit(f"batch and generation are both {batch!r} — a generation is trivially "
-                         "equivalent to itself")
+            "name the harness run to compare with: run=<directory> or score_run=<the GitHub "
+            "run id of a `score` dispatch, whose artifact is one> — exactly one of them")
+    if score_run and not score_run.isdigit():
+        raise SystemExit(f"score_run must be a GitHub run id, got {score_run!r}")
     asked_tol = float(str(args.get("tol") or SCORE_TOL))
+    with tempfile.TemporaryDirectory(prefix="rt_equivalence_") as tmp:
+        run = read_run(Path(run_arg) if run_arg
+                       else fetch_run(score_run, Path(tmp), "score"))
+    batch_pairs, batch_clusters = run.pairs, run.clusters
 
     conn = conn_factory()
     try:
@@ -807,13 +650,8 @@ def run_equivalence(
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         in_scope, resolved, scope_source = scope_listings(conn, generation, scope)
         score_type = store_score_type(conn)
-        batch_blob, batch_finished, export_run = batch_settings(conn, batch)
-        window = export_window(conn, export_run)
-        exported_raw = str(args.get("exported_at") or "").strip() or None
         live_pairs = read_pairs(conn, generation)
-        batch_pairs = read_pairs(conn, batch)
         live_clusters = read_clusters(conn, generation)
-        batch_clusters = read_clusters(conn, batch)
         holds = read_holds(conn, generation)
 
         # The effective tolerance is never finer than the store's own resolution (M178).
@@ -826,17 +664,14 @@ def run_equivalence(
         only_batch = sorted(set(batch_pairs) - set(live_pairs))
         both = sorted(set(live_pairs) & set(batch_pairs))
         # A held pair differs when its STORED row does, and also when the decision it holds
-        # does: a band row both sides agree on can be hiding a merge the batch never made.
+        # does: a band row both sides agree on can be hiding a merge the run never made.
         differing_keys = [key for key in both
                           if differences(live_pairs[key], batch_pairs[key], tol)
                           or _held_moved(live_pairs[key], batch_pairs[key], holds, tol)]
-        # The ten this mode always runs: the calibration, the control settings, the scope
-        # snapshot, the score column's type, the batch pass's settings, two pair reads, two
-        # membership reads and the live side's holds — plus the export's ledger row when the
-        # batch pass names its export. Everything after it is bounded by what actually differs.
-        statements = 10 + (1 if export_run and export_run.isdigit() else 0)
-        statements += read_features(conn, generation, differing_keys, live_pairs)
-        statements += read_features(conn, batch, differing_keys, batch_pairs)
+        # The seven this mode always runs: the calibration, the control settings, the scope
+        # snapshot, the score column's type, the pairs, the members and the holds. Everything
+        # after it is bounded by what actually differs.
+        statements = 7 + read_features(conn, generation, differing_keys, live_pairs)
 
         cluster_diff = _cluster_components(live_clusters, batch_clusters, in_scope,
                                            live_pairs, batch_pairs)
@@ -852,25 +687,18 @@ def run_equivalence(
         if callable(close):
             close()
 
-    cut, cut_source = _cohort_cut(window, exported_raw, batch_finished)
+    cut = run.cut
     batch_held = {i for key in batch_pairs for i in key}
     batch_held |= {i for members in batch_clusters.values() for i in members}
-    # The artifact is read only when some listing could be an arrival at all: a comparison
-    # that asks about nothing outside the batch store does not pull a 280 MB cohort to say so.
-    cohort_skipped = ("no cut to read arrivals against" if cut is None
-                      else None if set(endpoints) - batch_held
-                      else "every listing the comparison asks about is in the batch store")
-    cohort, cohort_source, cohort_error = (None, None, None) if cohort_skipped else batch_cohort(
-        str(args.get("cohort") or "").strip() or None, export_run, fetch_cohort)
     arrived: dict[int, str] = {}
     for listing_id in endpoints:
         clock = arrival_of(listing_id, cut=cut, seen=seen, resolved=resolved,
-                           batch_held=batch_held, cohort=cohort)
+                           batch_held=batch_held, cohort=run.cohort)
         if clock is not None:
             arrived[listing_id] = clock
 
     live_clock = live_settings.get("live_window_from_sighting")
-    batch_clock = (batch_blob or {}).get("live_window_from_sighting")
+    batch_clock = run.settings.get("live_window_from_sighting")
     one_clock = None if (live_clock is None or batch_clock is None) \
         else bool(live_clock) == bool(batch_clock)
     clock_settings = WindowRule(live_window_from_sighting=bool(live_clock))
@@ -940,10 +768,7 @@ def run_equivalence(
     held_edges = {entry["key"] for entry in held_shared if entry["cause"] == EVIDENCE_HOLD}
     clusters = _attribute_clusters(cluster_diff, arrived, known, held_edges)
     evidence_hold = _hold_report(held_shared, holds, only_live, live_pairs)
-    consistency = score_self_consistency(differing_keys, live_pairs, batch_pairs,
-                                         score_type=score_type, tol=tol)
     defects = _defects(asymmetry, one_clock, score_type, live_clock, batch_clock)
-    defects.extend(_score_defects(consistency))
     live_versions = sorted({p.model_version for p in live_pairs.values()
                             if p.model_version is not None})
     batch_versions = sorted({p.model_version for p in batch_pairs.values()
@@ -965,7 +790,7 @@ def run_equivalence(
             f"{evidence_hold['unexplained']} of the {evidence_hold['shared']} held shared pairs "
             "are not excused by their hold — past the "
             f"{EVIDENCE_HORIZON_HOURS:.0f} h evidence cap, not ageable, or holding a decision "
-            "the batch did not take")
+            "the run did not take")
     if one_sided.get("unexplained"):
         reasons.append(f"{one_sided['unexplained']} one-sided pairs have no cause")
     if clusters["component_causes"].get("unexplained"):
@@ -985,12 +810,12 @@ def run_equivalence(
             f"{'an unknown time' if oldest is None else f'{oldest:.1f} h'} of the "
             f"{EVIDENCE_HORIZON_HOURS:.0f} h cap")
     if arrived:
-        notes.append(f"{len(arrived)} listings reached the scope after the batch cohort's cut "
-                     f"({_stamp(cut)}, from {cut_source})")
+        notes.append(f"{len(arrived)} listings reached the scope after the run's cohort was "
+                     f"exported ({_stamp(cut)})")
 
     report: dict[str, Any] = {
         "generation": generation,
-        "batch": batch,
+        "run": run_arg or f"score_run:{score_run}",
         "scope": scope.as_json(),
         "scope_source": scope_source,
         "scope_listings": len(in_scope),
@@ -1000,24 +825,14 @@ def run_equivalence(
                             "store_eps": store_eps(score_type)
                             if score_type in ("real", "double precision") else None},
         "clock": {"live": live_clock, "batch": batch_clock, "one_definition": one_clock},
-        "exported_at": _stamp(exported_raw),
-        "export_window": {
-            "export_run": export_run,
-            "started_at": _stamp(window[0]) if window else None,
-            "finished_at": _stamp(window[1]) if window else None,
-            "cut": _stamp(cut),
-            "cut_source": cut_source,
-        },
         "arrivals": {
             **_arrival_report(arrived, seen, resolved),
+            "cut": _stamp(cut),
             "cohort": {
-                "source": cohort_source,
-                "listings": None if cohort is None else len(cohort),
-                # In the scope and NOT in the cohort the batch was scored on. Arrivals are a
-                # handful; hundreds here is a scope the export never covered.
-                "scope_absent": None if cohort is None else len(in_scope - cohort),
-                "error": cohort_error,
-                "skipped": cohort_skipped,
+                "listings": None if run.cohort is None else len(run.cohort),
+                # In the scope and NOT in the cohort the run was over. Arrivals are a handful;
+                # hundreds here is a scope the export never covered.
+                "scope_absent": None if run.cohort is None else len(in_scope - run.cohort),
             },
         },
         "model_version": {"calibration": live_model, "live_pairs": live_versions,
@@ -1034,7 +849,6 @@ def run_equivalence(
             "score_only_max": round(score_only_max, 6),
             "score_only_max_unattributed": round(unexplained_score_max, 6),
             "by_field": by_field,
-            "score_self_consistency": consistency,
             "shared_causes": shared_causes,
             "evidence_hold": evidence_hold,
             "shared_unexplained_examples": shared_unexplained,
@@ -1048,7 +862,6 @@ def run_equivalence(
         "clusters": clusters,
         "verdict": {"ok": not reasons, "reasons": reasons, "notes": notes},
         "statements": statements,
-        "spent_usd": 0.0,
     }
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     (Path(out_dir) / EQUIVALENCE_FILE).write_text(
@@ -1094,32 +907,6 @@ def _defects(asymmetry: Sequence[Mapping[str, Any]], one_clock: bool | None, sco
     return out
 
 
-def _score_defects(consistency: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The pair-grain defect, one entry per side (E121).
-
-    It is a DEFECT and not a shared cause on purpose: a cause answers "why do the two stores
-    disagree about this pair", and this answers "this ROW is not a decision this engine took"
-    — which is true of the row whether or not the other side holds anything at all, and which
-    no amount of drift or calibration attribution on that pair is allowed to carry."""
-    out: list[dict[str, Any]] = []
-    for side in ("live", "batch"):
-        rows = int(consistency["defects"][side])
-        if not rows:
-            continue
-        out.append({
-            "defect": SCORE_DEFECT, "side": side, "rows": rows,
-            "checked": consistency["checked"], "max_gap": consistency["max_gap"],
-            "reason": f"{rows} pair rows on the {side} side (of "
-                      f"{consistency['checked']} rows re-scored in all) carry a score "
-                      "their own stored feature vector does not reproduce (max gap "
-                      f"{consistency['max_gap']:.6g} against a tolerance of "
-                      f"{consistency['tolerance']:.6g}) — `decide_pair` sets the score from "
-                      "the vector in every branch but the veto, so such a row was not written "
-                      "by this engine and no cause attributed to that pair can excuse it",
-        })
-    return out
-
-
 def _to_stamp(raw: Any) -> datetime | None:
     """A timestamp from a column or from a command line, always timezone-aware.
 
@@ -1136,24 +923,6 @@ def _to_stamp(raw: Any) -> datetime | None:
         except ValueError:
             return None
     return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
-
-
-def _cohort_cut(window: tuple[Any, Any] | None, exported_raw: str | None,
-                batch_finished: Any) -> tuple[datetime | None, str | None]:
-    """The moment the batch cohort was cut, and where the instrument read it (E918).
-
-    The export's ledger row first: the export lane reads its block ids as the mode STARTS, so
-    the window's start is the cut — a listing first seen or first located after it cannot be in
-    the cohort. The dispatch's `exported_at` only when the batch pass names no export run or the
-    export left no row, and last the batch pass's own finish, which is LATER than the export and
-    so fails closed: an arrival between the two reads as unexplained rather than excused."""
-    if window is not None and _to_stamp(window[0]) is not None:
-        return _to_stamp(window[0]), "export_ledger"
-    if exported_raw and _to_stamp(exported_raw) is not None:
-        return _to_stamp(exported_raw), "exported_at"
-    if _to_stamp(batch_finished) is not None:
-        return _to_stamp(batch_finished), "batch_finished"
-    return None, None
 
 
 def _held_moved(live: Pair, batch: Pair, holds: Mapping[tuple[int, int], Hold],

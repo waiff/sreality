@@ -1,36 +1,24 @@
-"""W9j — `--mode rt_equivalence`: the LIVE store against the batch engine (E99).
+"""`--mode rt_equivalence`: the LIVE store against a `harness run` of its export (K35).
 
-The replay-equivalence proof runs the incremental path against the batch engine over one
-artifact, in one process, from an EMPTY store. It proves the MECHANISM and it has proved it
-four times. What it cannot see is what a real generation HOLDS — which is where both of this
-lane's shipped defects lived: a live pass that issued zero K-C against the batch generation's
-1,771 (E90), and a re-seed that left 15,923 pairs of a superseded scorer behind (E97).
-
-So this mode reads both stores and diffs them: the pairs both sides hold, the pairs one side
-holds with the cause it holds them by, and the clusters trimmed to the scope. A one-sided pair
-with no cause is `unexplained`, and `unexplained` fails the verdict — which is the difference
-between a check and a description.
+The fixtures spell the run side as generation `BATCH` in the fake store, and `_run` writes it
+out as the directory `harness run` writes — so every case reads as one store against one run.
+A one-sided pair with no cause is `unexplained`, and `unexplained` fails the verdict.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Iterable, Mapping
 
 import pytest
 
 from autodedup.harness import model_of_version
 from autodedup.incremental_lane import scope_setting_key
-from autodedup.rt_equivalence import (
-    EQUIVALENCE_FILE,
-    SCORE_DEFECT,
-    SCORE_ONLY_MAX,
-    Pair,
-    run_equivalence,
-    score_from_vector,
-)
-from autodedup.store_score import narrow
+from autodedup.rt_equivalence import EQUIVALENCE_FILE, SCORE_ONLY_MAX, run_equivalence
+from autodedup.score_lane import families_of_bitmask
 from tests.autodedup.fake_pg import FakePg
 
 LIVE = "rt"
@@ -98,9 +86,46 @@ def _db(ids: range = range(1, 5)) -> FakePg:
     return db
 
 
-def _run(db: FakePg, tmp_path, **args: str) -> dict:
-    return run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH,
-                                        "exported_at": EXPORTED.isoformat(), **args}, tmp_path)
+def write_run(db: FakePg, root: Path, *, settings: Mapping[str, Any] | None = None,
+              cohort: Iterable[int] | None = None, exported: datetime = EXPORTED) -> Path:
+    """Move the `BATCH` rows out of the fake store into a harness run directory, with the
+    cohort artifact (meta, listings, one image) when `cohort` names its listings."""
+    run = root / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    with gzip.open(run / "pairs.jsonl.gz", "wt", encoding="utf-8") as fh:
+        for (g, lo, hi), row in sorted(db.pairs.items()):
+            if g == BATCH:
+                fh.write(json.dumps({
+                    "lo": lo, "hi": hi, "zone": row["zone"], "score": row["score"],
+                    "certificate": row["certificate"], "veto": row["guard_veto"],
+                    "reason": row["decision"], "feats": row["features"],
+                    "families": families_of_bitmask(row["families"] or 0)}) + "\n")
+    groups: dict[int, list[int]] = {}
+    for g, key, listing_id in sorted(db.cluster_members):
+        if g == BATCH:
+            groups.setdefault(key, []).append(listing_id)
+    db.pairs = {key: row for key, row in db.pairs.items() if key[0] != BATCH}
+    db.cluster_members = {row for row in db.cluster_members if row[0] != BATCH}
+    (run / "clusters.json").write_text(json.dumps({"clusters": {
+        str(key): members for key, members in groups.items()}}), encoding="utf-8")
+    (run / "run.json").write_text(json.dumps({"settings": dict(settings or {}),
+                                              "model_version": MODEL}), encoding="utf-8")
+    if cohort is not None:
+        (run / "artifact").mkdir()
+        with gzip.open(run / "artifact" / "cohort.jsonl.gz", "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps({"t": "meta", "exported_at": exported.isoformat()}) + "\n")
+            for listing_id in sorted(cohort):
+                fh.write(json.dumps({"t": "listing", "id": listing_id}) + "\n")
+            fh.write(json.dumps({"t": "image", "image_id": 1, "listing_id": 1}) + "\n")
+    return run
+
+
+def _run(db: FakePg, tmp_path: Path, *, settings: Mapping[str, Any] | None = None,
+         cohort: Iterable[int] | None = None, exported: datetime = EXPORTED,
+         **args: str) -> dict:
+    run = write_run(db, tmp_path, settings=settings, cohort=cohort, exported=exported)
+    return run_equivalence(lambda: db, {"generation": LIVE, "run": str(run), **args},
+                           tmp_path / "out")
 
 
 # ------------------------------------------------------------------ the agreeing case
@@ -121,7 +146,7 @@ def test_two_stores_that_agree_pass(tmp_path) -> None:
     assert out["pairs"]["both"] == 2 and out["pairs"]["differing"] == 0
     assert out["clusters"]["member_sets_identical"] is True
     assert out["clusters"]["keys_identical"] is True
-    assert json.loads((tmp_path / EQUIVALENCE_FILE).read_text())["verdict"]["ok"] is True
+    assert json.loads((tmp_path / "out" / EQUIVALENCE_FILE).read_text())["verdict"]["ok"] is True
 
 
 def test_the_mode_writes_nothing(tmp_path) -> None:
@@ -177,10 +202,7 @@ def test_a_score_that_moved_on_a_corpus_frequency_feature_is_the_calibration_coh
 
 
 def test_a_score_that_moved_with_an_IDENTICAL_vector_is_unexplained(tmp_path) -> None:
-    """The sharpest finding the instrument can make: the same inputs reached two answers.
-
-    One vector cannot imply two scores, so E121 names the side that does not follow from it —
-    the two findings are the same defect read at two grains."""
+    """The sharpest finding the instrument can make: the same inputs reached two answers."""
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
     db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3, features=_feats(tfidf_cos=0.4))
@@ -188,14 +210,12 @@ def test_a_score_that_moved_with_an_IDENTICAL_vector_is_unexplained(tmp_path) ->
     out = _run(db, tmp_path)
 
     assert out["pairs"]["shared_causes"] == {"unexplained": 1}
-    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 0, "batch": 1}
     assert out["verdict"]["ok"] is False
     assert "differ with no cause" in " ".join(out["verdict"]["reasons"])
 
 
 def test_a_large_score_movement_fails_even_with_the_decision_unchanged(tmp_path) -> None:
-    """Two free-floating scores over one empty vector: unattributed at pair grain, and two
-    rows that do not follow from their own vectors at row grain (E121)."""
+    """Two free-floating scores over one empty vector: unattributed at pair grain."""
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(score=0.99)
     db.pairs[(BATCH, 1, 2)] = _pair(score=0.90)
@@ -240,9 +260,6 @@ def test_the_2026_09_20_defect_is_what_this_mode_reports(tmp_path) -> None:
     assert sorted(out["pairs"]["by_field"]) == ["certificate", "score", "zone"]
     assert out["model_version"]["live_pairs"] == []
     assert out["model_version"]["batch_pairs"] == [MODEL]
-    # A row that does not NAME its scorer cannot be re-scored, so E121 exempts it BY NAME
-    # rather than inventing a model for it — and the count is in the report.
-    assert out["pairs"]["score_self_consistency"]["exempt"] == {"no_model_version": 1}
     assert out["verdict"]["ok"] is False
 
 
@@ -281,6 +298,7 @@ def test_a_listing_the_build_has_not_reached_is_explained_and_fails_the_verdict(
 
 
 def test_a_pair_on_a_listing_that_arrived_after_the_export_is_explained(tmp_path) -> None:
+    """Absent from the run's cohort and first seen after its `exported_at`."""
     db = _db()
     db.scope_ids[(LIVE, "obec:563510", 9)] = {"resolved_at": NOW}
     db.rt_fp[(LIVE, 9)] = _fp_row()
@@ -289,7 +307,7 @@ def test_a_pair_on_a_listing_that_arrived_after_the_export_is_explained(tmp_path
     db.pairs[(LIVE, 1, 2)] = _pair()
     db.pairs[(BATCH, 1, 2)] = _pair()
 
-    out = _run(db, tmp_path)
+    out = _run(db, tmp_path, cohort=range(1, 5))
 
     assert out["pairs"]["causes"] == {"arrival_after_export": 1}
     assert out["verdict"]["ok"] is True
@@ -367,22 +385,41 @@ def test_a_cluster_key_that_moved_is_reported_without_failing_the_member_sets(tm
 # ------------------------------------------------------------------ arguments
 
 
-def test_the_batch_generation_is_required(tmp_path) -> None:
+def test_exactly_one_run_is_required(tmp_path) -> None:
     db = _db()
-    with pytest.raises(SystemExit, match="batch=<generation> is required"):
+    with pytest.raises(SystemExit, match="exactly one of them"):
         run_equivalence(lambda: db, {"generation": LIVE}, tmp_path)
+    with pytest.raises(SystemExit, match="exactly one of them"):
+        run_equivalence(lambda: db, {"generation": LIVE, "run": "x", "score_run": "1"},
+                        tmp_path)
 
 
-def test_a_generation_compared_with_itself_is_refused(tmp_path) -> None:
+def test_a_score_run_is_read_from_its_artifact_outside_the_report_directory(tmp_path) -> None:
+    """`score_run=<id>`: the `score` dispatch's artifact IS a harness run, fetched into a
+    temporary directory — the lane uploads `out/` whole, and a cohort is not a report."""
     db = _db()
-    with pytest.raises(SystemExit, match="trivially"):
-        run_equivalence(lambda: db, {"generation": LIVE, "batch": LIVE}, tmp_path)
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
+    staged = write_run(db, tmp_path / "staged")
+    calls: list[tuple[str, str]] = []
+
+    def fetch(run_id: str, dest: Path, mode: str) -> Path:
+        calls.append((run_id, mode))
+        for path in staged.iterdir():
+            (dest / path.name).write_bytes(path.read_bytes())
+        return dest
+
+    out = run_equivalence(lambda: db, {"generation": LIVE, "score_run": "4242"},
+                          tmp_path / "out", fetch_run=fetch)
+    assert calls == [("4242", "score")] and out["verdict"]["ok"] is True
+    assert sorted(p.name for p in (tmp_path / "out").rglob("*")) == [EQUIVALENCE_FILE]
 
 
 def test_an_unseeded_generation_is_refused(tmp_path) -> None:
     db = FakePg(now=NOW)
     with pytest.raises(SystemExit, match="no frozen calibration"):
-        run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH}, tmp_path)
+        run_equivalence(lambda: db, {"generation": LIVE,
+                                     "run": str(write_run(db, tmp_path))}, tmp_path / "out")
 
 
 # --------------------------------------------- W9m: the defects the verdict must NAME (E120)
@@ -426,12 +463,10 @@ def test_two_generations_on_different_clocks_are_a_DEFECT(tmp_path) -> None:
     not agree about it are not measuring the same thing, and every co-live feature says so."""
     db = _db()
     db.calibration[LIVE]["settings"]["live_window_from_sighting"] = True
-    db.score_runs[BATCH] = {"settings": {"live_window_from_sighting": False},
-                            "model_version": MODEL}
     db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
     db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
 
-    out = _run(db, tmp_path)
+    out = _run(db, tmp_path, settings={"live_window_from_sighting": False})
 
     assert out["clock"] == {"live": True, "batch": False, "one_definition": False}
     assert [defect["defect"] for defect in out["defects"]] == ["clock_anchor"]
@@ -544,9 +579,6 @@ def test_a_pair_the_store_kept_no_vector_for_cannot_be_attributed(tmp_path) -> N
     out = _run(db, tmp_path)
 
     assert out["pairs"]["shared_causes"] == {"no_feature_vector": 1}
-    # ...and it cannot be re-scored either: no vector, no claim either way (E121).
-    assert out["pairs"]["score_self_consistency"]["exempt"] == {"no_feature_vector": 2}
-    assert out["pairs"]["score_self_consistency"]["checked"] == 0
     assert out["verdict"]["ok"] is False
 
 
@@ -624,193 +656,80 @@ def test_a_component_holding_a_listing_that_arrived_after_the_export_is_an_arriv
     db.pairs[(BATCH, 1, 2)] = _pair()
     db.cluster_members.update({(LIVE, 1, 1), (LIVE, 1, 9)})
 
-    out = _run(db, tmp_path)
+    out = _run(db, tmp_path, cohort=range(1, 5))
 
     assert out["clusters"]["component_causes"] == {"arrival": 1}
     assert out["verdict"]["ok"] is True
 
 
-# --------- R1 / E121: a stored score must follow from its own stored vector (the hole closed)
+# ------------------------------------------------- the real path: a real `harness run` directory
 
 
-def _drifted(db: FakePg) -> None:
-    """Two listings whose delisting self-healed — the drift M173 measured, and the one an
-    attribution will legitimately name. Every case below rides on exactly this."""
-    db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
-    db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
+def test_a_real_harness_run_directory_against_the_lane_drained_over_the_same_cohort(
+        tmp_path) -> None:
+    """The run side here is what `harness run` itself WRITES (pairs.jsonl.gz, clusters.json and
+    run.json naming its artifact), not a hand-spelled copy of the format; the live side is the
+    lane's own `SqlStore` drained over the same cohort. One engine, one calibration: the diff
+    must be empty, so a drift in either writer or in `read_run` fails here (SW1 review)."""
+    import io
+
+    from autodedup import harness
+    from autodedup.dataset import load
+    from autodedup.incremental import Limits, run_pass_bounded
+    from autodedup.incremental_lane import SqlStore
+    from autodedup.incremental_store import CohortFacts, Schedule
+    from autodedup.model import hand_initialised
+    from autodedup.settings import Settings
+    from tests.autodedup.test_engine_e2e import build_records
+
+    cohort = tmp_path / "cohort.jsonl.gz"
+    with gzip.open(cohort, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"t": "meta", "exported_at": EXPORTED.isoformat()}) + "\n")
+        order = {"listing": 0, "image": 1}   # the artifact contract: listings, then images
+        for record in sorted((r for r in build_records() if r.get("t") != "meta"),
+                             key=lambda r: order.get(str(r.get("t")), 2)):
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    run_dir = tmp_path / "run"
+    assert harness.main(["run", str(cohort), "--out", str(run_dir)], out=io.StringIO()) == 0
+
+    dataset, settings, model = load(cohort), Settings(), hand_initialised()
+    db = _db(range(0))
+    db.calibration[LIVE].update({"model_version": model.version,
+                                 "settings": {"store_floor": settings.store_floor}})
+    for listing_id in dataset.listings:
+        db.scope_ids[(LIVE, "obec:563510", listing_id)] = {"resolved_at": EXPORTED}
+        db.listings[listing_id] = {"id": listing_id,
+                                   "first_seen_at": EXPORTED - timedelta(days=5)}
+    store = SqlStore(db, LIVE, store_floor=settings.store_floor)
+    work = Schedule(sorted(dataset.listings))
+    calibration = harness.calibrated(dataset, settings)[1]
+    while not work.exhausted():
+        run_pass_bounded(store, CohortFacts(dataset), work, settings, model, calibration,
+                         limits=Limits(), generation=LIVE)
+
+    report = run_equivalence(lambda: db, {"generation": LIVE, "run": str(run_dir)},
+                             tmp_path / "out")
+    assert report["verdict"]["ok"], report["verdict"]
+    stored = len(harness.read_pairs(run_dir))
+    assert report["pairs"]["identical"] and report["pairs"]["differing"] == 0
+    assert report["pairs"]["both"] == report["pairs"]["batch"] == stored > 0
+    assert report["pairs"]["only_live"] == report["pairs"]["only_batch"] == 0
+    assert report["arrivals"]["cohort"]["listings"] == len(dataset.listings)
+    assert report["clusters"]["member_sets_identical"] is True
 
 
-def test_a_decision_bug_riding_on_an_EVIDENCED_drift_is_no_longer_excused(tmp_path) -> None:
-    """The hole an adversarial read of the W9m attribution demonstrated, reproduced.
+def test_the_narrowed_instrument_checks_three_store_defects_and_no_longer_re_scores() -> None:
+    """K35 as SW1 left it (E921 iv), stated so a reader of G-live cannot assume more: the three
+    E120 store defects stay; E121's `score_not_from_vector` does not — the tool no longer
+    re-scores a stored vector, so a live row whose score does not follow from its vector reads
+    as drift or `calibration_cohort`. The manual score-vs-vector read is owed on R1's G-live."""
+    import inspect
 
-    `shared_cause` classifies by WHICH inputs moved and never asks whether the moved inputs
-    can ACCOUNT for the difference. So a genuine, evidenced clock drift — the live
-    `both_active` IS what today's `public.listings` say — was allowed to carry a zone flip and
-    a corrupted score along with it, and `verdict.ok` stayed TRUE over a real decision bug.
+    from autodedup import rt_equivalence as tool
 
-    The drift is still named. What it no longer carries is a score the row's own vector does
-    not imply: R1 is asked first, it is a DEFECT of that row, and no cause outranks it."""
-    db = _db()
-    _drifted(db)
-    db.pairs[(LIVE, 1, 2)] = _pair(score=0.98, zone="reject", decision="model",
-                                   features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
-
-    out = _run(db, tmp_path)
-
-    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
-    assert out["pairs"]["decisions_moved"] == 1
-    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 1, "batch": 0}
-    assert [defect["defect"] for defect in out["defects"]] == [SCORE_DEFECT]
-    assert out["verdict"]["ok"] is False
-    assert "does not reproduce" in " ".join(out["verdict"]["reasons"])
-
-
-def test_the_rule_reads_BOTH_stores(tmp_path) -> None:
-    """The same corruption on the batch side is the same finding. A comparison that only
-    re-scored the live store would trust whichever generation it was pointed at."""
-    db = _db()
-    _drifted(db)
-    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.44, features=_feats(both_active=0.0))
-
-    out = _run(db, tmp_path)
-
-    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
-    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 0, "batch": 1}
-    assert out["defects"][0]["side"] == "batch"
-    assert out["verdict"]["ok"] is False
-
-
-def test_a_drift_whose_two_scores_both_follow_from_their_vectors_still_passes(tmp_path):
-    """The other half of the rule: it must not fail an honest drift. Both rows carry the score
-    their own vector implies, they differ because the INPUT moved, and the verdict is ok."""
-    db = _db()
-    _drifted(db)
-    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
-
-    out = _run(db, tmp_path)
-
-    consistency = out["pairs"]["score_self_consistency"]
-    assert consistency["checked"] == 2 and consistency["defective"] == 0
-    assert consistency["max_gap"] == 0.0
-    assert out["defects"] == []
-    assert out["verdict"]["ok"] is True
-
-
-@pytest.mark.parametrize("reason,changed", [
-    ("guard_veto", {"guard_veto": "unit_designator", "score": 0.0}),
-    ("no_feature_vector", {"features": None}),
-    ("no_model_version", {"model_version": None}),
-    ("model_unavailable", {"model_version": "a_model_this_build_does_not_carry"}),
-])
-def test_a_row_the_rule_cannot_be_asked_of_is_NAMED_not_skipped(tmp_path, reason, changed):
-    """The four exemptions, each one counted in the report. A veto writes 0.0 without
-    consulting the model; a probe-only update coalesces and leaves the vector the decision was
-    taken on, so a row can hold none; a row that does not name its scorer cannot be re-scored
-    without the instrument inventing one; and a model this build does not carry cannot be
-    loaded. Silence on any of them is how a check passes on nothing."""
-    db = _db()
-    db.pairs[(LIVE, 1, 2)] = _pair(zone="band", decision="band", **changed)
-    db.pairs[(BATCH, 1, 2)] = _pair()
-
-    consistency = _run(db, tmp_path)["pairs"]["score_self_consistency"]
-
-    assert consistency["exempt"] == {reason: 1}
-    assert consistency["rows"] == 2 and consistency["checked"] == 1
-    assert consistency["defects"] == {"live": 0, "batch": 0}
-    assert consistency["models_unavailable"] == (
-        ["a_model_this_build_does_not_carry"] if reason == "model_unavailable" else [])
-
-
-def test_a_float4_store_is_re_scored_AS_a_float4_store(tmp_path) -> None:
-    """The tolerance accounts for the column's precision instead of assuming float64.
-
-    Before migration 541 `pairs.score` was `real`, so the stored number is the column's image
-    of the model's float64 — the recomputation is narrowed the same way before it is compared
-    (`store_score.narrow`, one definition, E115). A row that IS its own vector's score passes
-    under `real`; it would not if the check pretended the store were exact."""
-    db = _db()
-    _drifted(db)
-    db.score_column_type = "real"
-    vector = _feats(both_active=1.0)
-    db.pairs[(LIVE, 1, 2)] = _pair(score=narrow(_score_of(vector), "real"), features=vector)
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
-
-    consistency = _run(db, tmp_path)["pairs"]["score_self_consistency"]
-
-    assert consistency["score_column"] == "real"
-    assert consistency["checked"] == 2 and consistency["defective"] == 0
-
-
-def test_a_float4_store_does_not_excuse_a_score_that_does_not_follow(tmp_path) -> None:
-    """...and the widened tolerance is the column's resolution, not an amnesty: a score off by
-    a thousandth is still a score its vector does not imply."""
-    db = _db()
-    _drifted(db)
-    db.score_column_type = "real"
-    vector = _feats(both_active=1.0)
-    db.pairs[(LIVE, 1, 2)] = _pair(score=narrow(_score_of(vector), "real") + 1e-3,
-                                   features=vector)
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
-
-    out = _run(db, tmp_path)
-
-    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 1, "batch": 0}
-    assert [defect["defect"] for defect in out["defects"]] == ["store_score_precision",
-                                                               SCORE_DEFECT]
-    assert out["verdict"]["ok"] is False
-
-
-@pytest.mark.parametrize("stored", [float("nan"), None])
-def test_a_score_that_is_not_a_number_does_not_read_as_ok(stored) -> None:
-    """Asked of the rule directly, because neither row reaches it through a comparison: a NaN
-    compares False against every tolerance (`differences` does not call it a difference
-    either), and a NULL score is no answer at all. So the "ok" branch is the one that has to
-    be EARNED — `gap <= tol` — rather than the defect branch being the one that has to fire."""
-    pair = Pair([1, 2, stored, "merge", None, "model", None, 3, MODEL])
-    pair.features = {"tfidf_cos": 0.4}
-
-    status, recomputed, _ = score_from_vector(
-        pair, score_type="double precision", tol=1e-6, models={})
-
-    assert status == SCORE_DEFECT
-    assert recomputed == pytest.approx(_score_of(_feats(tfidf_cos=0.4)))
-
-
-def test_the_report_says_how_many_rows_were_checked_and_how_many_were_exempt(tmp_path):
-    """The denominator is the deliverable: a rule that re-scored nothing and a rule that
-    re-scored everything both report `defective: 0`, and only the counters tell them apart."""
-    db = _db()
-    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.9))
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
-    db.pairs[(LIVE, 3, 4)] = _pair(features=None)
-    db.pairs[(BATCH, 3, 4)] = _pair(zone="band", decision="band", features=None)
-
-    out = _run(db, tmp_path)
-
-    assert out["pairs"]["score_self_consistency"] == {
-        "rows": 4, "checked": 2, "exempt": {"no_feature_vector": 2},
-        "defects": {"live": 0, "batch": 0}, "defective": 0, "max_gap": 0.0,
-        "tolerance": 1e-6, "score_column": "double precision",
-        "models_unavailable": [], "examples": []}
-    assert json.loads((tmp_path / EQUIVALENCE_FILE).read_text())[
-        "pairs"]["score_self_consistency"]["checked"] == 2
-
-
-def test_the_defect_carries_the_example_that_names_the_row(tmp_path) -> None:
-    """A count nobody can chase is a rumour: the report names the pair, the model it claims
-    to have been scored by, what it holds and what its vector implies."""
-    db = _db()
-    db.pairs[(LIVE, 1, 2)] = _pair(score=0.98, features=_feats(tfidf_cos=0.4))
-    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
-
-    example = _run(db, tmp_path)["pairs"]["score_self_consistency"]["examples"][0]
-
-    assert example["side"] == "live"
-    assert (example["listing_lo"], example["listing_hi"]) == (1, 2)
-    assert example["model_version"] == MODEL
-    assert example["stored"] == 0.98
-    assert example["recomputed"] == pytest.approx(_score_of(_feats(tfidf_cos=0.4)))
-    assert example["gap"] == pytest.approx(0.98 - _score_of(_feats(tfidf_cos=0.4)))
+    every = tool._defects([{"side": "live", "rows_naming_one": 1, "rows_carrying_one": 0}],
+                          False, "real", True, False)
+    assert {entry["defect"] for entry in every} == {
+        "store_write_asymmetry", "clock_anchor", "store_score_precision"}
+    source = inspect.getsource(tool)
+    assert "score_not_from_vector" not in source and "score_from_vector" not in source

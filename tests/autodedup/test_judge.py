@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from autodedup import judge, judge_prompts
+from autodedup import export, judge, judge_prompts
 from autodedup.dataset import Image, Listing
 
 
@@ -98,7 +98,7 @@ def test_digest_names_every_absent_field_instead_of_blanking_it() -> None:
 
 
 def test_digest_says_none_when_every_tracked_field_is_present() -> None:
-    attrs = {key: "ano" for key, _ in judge.DIGEST_ATTRS}
+    attrs = {key: "ano" for key, _ in export.DIGEST_ATTRS}
     listing = make_listing(
         disposition="2+kk", area_m2=51.0, floor=1, total_floors=4, price=4_100_000.0,
         description="Byt 2+kk.", first_seen_at="2025-02-01", last_seen_at="2025-03-01",
@@ -155,13 +155,13 @@ def test_the_digest_never_states_portal_VOCABULARY_as_if_it_were_a_fact() -> Non
         assert "ownership: osobni" in rendered
         for artefact in ("celkem", "za nemovitost", "area basis"):
             assert artefact not in rendered
-    assert "area_basis" not in dict(judge.DIGEST_ATTRS)
+    assert "area_basis" not in dict(export.DIGEST_ATTRS)
 
 
 def test_digest_keeps_at_most_eight_price_points() -> None:
     history = [(f"2025-{month:02d}-01T00:00:00+00:00", 1_000_000.0 + month) for month in range(1, 13)]
     digest = judge.listing_digest(make_listing(price_history=history))
-    assert len(digest.price_history) == judge.MAX_PRICE_POINTS
+    assert len(digest.price_history) == export.DIGEST_PRICE_POINTS
     assert digest.price_history[-1][0].startswith("2025-12")
 
 
@@ -195,11 +195,6 @@ def test_digest_scrubs_a_name_that_precedes_its_role(raw: str, leaked: tuple[str
     assert "[jmeno]" in rendered
 
 
-def test_scrub_for_prompt_leaves_ordinary_advert_prose_alone() -> None:
-    text = "Byt 2+kk v Novém Městě, Rezidence Vysočany, kolaudace 2025. Cena 4 500 000 Kč."
-    assert judge.scrub_for_prompt(text) == text
-
-
 PII_CASES: tuple[str, ...] = (
     "Kontakt: Ing. Jan Novák, tel. +420 777 654 321, e-mail makler@rkdomov.cz",
     "Volejte realitní makléř Petr Svoboda na 606123456",
@@ -218,35 +213,16 @@ PII_SECRETS: tuple[str, ...] = (
 
 @pytest.mark.parametrize("raw", PII_CASES)
 def test_the_uncapped_text_scrubs_exactly_what_the_judge_digest_scrubs(raw: str) -> None:
-    """ONE scrubber, two lengths (E28). The operator's surfaces read `scrubbed_text`, which is
-    the digest's own scrub with the token cap removed — so a pattern caught for the model is
-    caught for the page, and a leak cannot appear on one path only."""
-    whole = judge.scrubbed_text(raw)
+    """ONE scrubber, two lengths (E28). The operator's surfaces read `export.scrubbed_text`, and
+    the judge's digest is that scrub with the token cap applied — so a pattern caught for the
+    model is caught for the page, and a leak cannot appear on one path only."""
+    whole = export.scrubbed_text(raw)
     capped = judge.listing_digest(make_listing(description=raw)).description
     assert whole is not None and capped is not None
     # Short enough to survive the cap, so the two paths must agree character for character.
     assert whole == capped
     for secret in PII_SECRETS:
         assert secret not in whole
-
-
-def test_scrubbed_text_is_none_for_an_absent_or_blank_description() -> None:
-    """A panel with nothing to say says nothing, rather than opening a blank box."""
-    assert judge.scrubbed_text(None) is None
-    assert judge.scrubbed_text("   \n  ") is None
-
-
-def test_the_uncapped_digest_keeps_the_whole_advert_and_says_it_is_not_truncated() -> None:
-    """The cap is a token budget, not a privacy rule: the operator pays no tokens and the unit
-    number is as often in the last paragraph as the first."""
-    raw = "a" * 400 + " tel. +420 777 654 321 " + "b" * 2000
-    digest = judge.listing_digest(make_listing(description=raw), truncate=False)
-    assert digest.description is not None
-    assert len(digest.description) > judge.DESCRIPTION_MAX_CHARS
-    assert digest.description_truncated is False
-    assert digest.description.endswith("b" * 20)
-    assert "777 654 321" not in digest.description
-    assert judge.scrubbed_text(raw) == digest.description
 
 
 def test_digest_truncates_the_description_after_scrubbing() -> None:

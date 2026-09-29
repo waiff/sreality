@@ -7,7 +7,7 @@ offline and the paid lane (`autodedup.judge_lane`) stays a thin driver.
 Three contracts it holds on behalf of that lane:
   * E28 — no broker name, phone or e-mail is ever rendered. Brokers reach the model only as
     the `same_broker` boolean of the evidence digest, and every description goes through
-    `scrub_for_prompt` here even though `autodedup.export` already scrubbed it into the
+    `export.scrub_for_reader` even though `autodedup.export` already scrubbed it into the
     artifact: the export pass only catches a name that FOLLOWS its role word, so this module
     adds the name-then-role and contact-lead forms (`Jan Novák, realitní makléř`, `Volejte
     Janu Novákovou`) that are the commonest Czech advert signature. The gold tier ships these
@@ -28,8 +28,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup import judge_prompts as prompts
-from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm, live_end_stamp
-from autodedup.export import NAME_TOKEN, scrub_description
+from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm
+from autodedup.export import DIGEST_PRICE_POINTS, ListingDigest, _clean
+from autodedup.export import listing_digest as export_digest
 from autodedup.features import STREET_GRAIN_RANK
 from autodedup.fingerprint import dominant_family, family_scores, logical_tag
 
@@ -113,7 +114,6 @@ def tool_schema(view: Presentation | None = None) -> dict[str, Any]:
     return schema
 
 DESCRIPTION_MAX_CHARS: int = 1200
-MAX_PRICE_POINTS: int = 8
 DEFAULT_IMAGES_PER_SIDE: int = 4
 GOLD_IMAGES_PER_SIDE: int = 6
 GOLD_MAJORITY_CONFIDENCE: float = 0.67
@@ -153,38 +153,6 @@ MISSING_DISCRIMINATOR: str = "no discriminator named for a non-same verdict"
 # Families that describe the building rather than the unit: a matched frame from one of these
 # is worth nothing about identity, so it must never displace an interior frame (E10).
 BUILDING_FAMILIES: frozenset[str] = frozenset({"exterior", "common", "plan"})
-
-# `attrs` slots worth stating per side: the unit-discriminating ones first, then the
-# building-level ones the prompt tells the model to weigh second. Portal VOCABULARY is NOT here:
-# `area_basis` (`usable` on seven portals, `unknown` on bazos) and the `price_unit` suffix
-# (`celkem` vs `za nemovitost` for one and the same fact) cost 10 gold NEGATIVE votes and 47
-# abstentions that cited the artefact as a discriminator — the same two slots `features.py` drops
-# from the contradictions, so the labels and the engine read one vocabulary.
-DIGEST_ATTRS: tuple[tuple[str, str], ...] = (
-    ("usable_area", "usable area"),
-    ("estate_area", "plot area"),
-    ("garden_area", "garden area"),
-    ("has_balcony", "balcony"),
-    ("terrace", "terrace"),
-    ("cellar", "cellar"),
-    ("garage", "garage"),
-    ("has_parking", "parking"),
-    ("parking_lots", "parking spaces"),
-    ("has_lift", "lift"),
-    ("furnished", "furnishing"),
-    ("ownership", "ownership"),
-    ("condition", "condition"),
-    ("energy_rating", "energy rating"),
-    ("building_type", "building type"),
-    ("published_at", "published by the portal"),
-)
-
-# Rendered as a day, not as a raw timestamp.
-DAY_ATTRS: frozenset[str] = frozenset({"published_at"})
-
-# Rendered WITH the unit: a bare `usable area: 136.0` beside `area: 136 m²` reads as two
-# measurements in two units, which is the one ambiguity the area evidence cannot afford.
-AREA_ATTRS: frozenset[str] = frozenset({"usable_area", "estate_area", "garden_area"})
 
 TOOL_SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
@@ -262,82 +230,18 @@ class JudgeParseError(ValueError):
 # --- listing digest ------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
-class ListingDigest:
-    listing_id: int
-    portal: str | None = None
-    deal: str | None = None
-    category: str | None = None
-    subtype: str | None = None
-    disposition: str | None = None
-    area_m2: float | None = None
-    floor: int | None = None
-    total_floors: int | None = None
-    price: float | None = None
-    price_history: list[tuple[str, float | None]] = field(default_factory=list)
-    attributes: dict[str, str | None] = field(default_factory=dict)
-    first_seen: str | None = None
-    last_seen: str | None = None
-    active: bool = True
-    description: str | None = None
-    description_truncated: bool = False
-    absent: list[str] = field(default_factory=list)
-
-
-_NAME_WORD = r"[A-ZÁ-Ž][a-zá-ž]+"
-# export.scrub_description only catches ROLE-then-name. These two catch the other direction and
-# the imperative lead-ins, which is how a Czech advert actually signs off.
-_NAME_THEN_ROLE_RE = re.compile(
-    rf"\b{_NAME_WORD}\s+{_NAME_WORD}"
-    r"(?=\s*[,\-–—]?\s*(?:[Rr]ealitní\s+)?(?:[Mm]akléř|[Mm]aklér|[Ss]pecialist)(?:ka|a)?\b)"
-)
-_CONTACT_LEAD_RE = re.compile(
-    r"(?:Kontaktn[ií]\s+osoba|Kontaktujte|Kontakt|[Vv]olejte|[Zz]avolejte|[Dd]omlouvá"
-    r"|[Ii]nformace\s+(?:u|podá))"
-    rf"\s*[:\-–]?\s*({_NAME_WORD}\s+{_NAME_WORD})"
-)
-
-
-def _scrub_names(text: str) -> str:
-    cleaned = _NAME_THEN_ROLE_RE.sub(NAME_TOKEN, text)
-    return _CONTACT_LEAD_RE.sub(
-        lambda match: match.group(0).replace(match.group(1), NAME_TOKEN), cleaned
-    )
-
-
-def scrub_for_prompt(text: str | None) -> str | None:
-    """E28's second layer: `autodedup.export`'s scrub, then the name forms it does not cover."""
-    cleaned = scrub_description(text)
-    return _scrub_names(cleaned) if cleaned else cleaned
-
-
-def scrubbed_text(text: str | None) -> str | None:
-    """The SAME E28 scrub, with no character cap — what a HUMAN reader is shown.
-
-    `DESCRIPTION_MAX_CHARS` is a token budget, not a privacy rule: it exists so a 6,000-char
-    advert does not cost six times the tokens of a short one. The operator validating a group
-    pays no tokens and needs the whole text, because the unit number or the floor sentence that
-    tells two developer units apart is as often in the last paragraph as the first. One scrubber
-    either way — a second copy of the PII rules is how a leak ships.
-
-    The one deliberate difference from the digest path is emptiness: a scrub that leaves only
-    whitespace is an ABSENT description here, so a surface renders nothing instead of a blank
-    panel. What survives the scrub is returned verbatim — the line breaks are the advert's own
-    paragraphs, and the page preserves them.
-    """
-    cleaned = scrub_for_prompt(text)
-    return cleaned if (cleaned or "").strip() else None
-
-
-def _clean(value: Any) -> str | None:
-    if value is None or isinstance(value, bool):
-        return None if value is None else ("yes" if value else "no")
-    text = str(value).strip()
-    return text or None
+def listing_digest(listing: Listing) -> ListingDigest:
+    """One side of the pair as the model is shown it: `export.listing_digest` (one PII rail),
+    its description capped at `DESCRIPTION_MAX_CHARS` — a token budget, not a privacy rule."""
+    digest = export_digest(listing)
+    whole = digest.description or ""
+    if len(whole) > DESCRIPTION_MAX_CHARS:
+        digest.description, digest.description_truncated = whole[:DESCRIPTION_MAX_CHARS], True
+    return digest
 
 
 def _day(value: str | None) -> str | None:
-    text = _clean(value)
+    text = (value or "").strip()
     return text[:10] if text else None
 
 
@@ -349,70 +253,6 @@ def _amount(value: float | None) -> str:
 
 def _area(value: float | None) -> str:
     return prompts.ABSENT_TOKEN if value is None else f"{value:g} m²"
-
-
-def _attr_text(key: str, raw: Any) -> str | None:
-    if raw is None:
-        return None
-    if key in DAY_ATTRS:
-        return _day(raw)
-    if key in AREA_ATTRS:
-        try:
-            return _area(float(raw))
-        except (TypeError, ValueError):
-            return _clean(raw)
-    return _clean(raw)
-
-
-def listing_digest(listing: Listing, *, truncate: bool = True) -> ListingDigest:
-    """One side of the pair, PII-free: no broker field of any kind reaches this record.
-
-    `truncate=False` keeps the whole scrubbed description (the operator's deep-dive reads it;
-    see `scrubbed_text`). The judge never passes it — its digest stays capped, unchanged.
-    """
-    attrs = listing.attrs or {}
-    attributes = {label: _attr_text(key, attrs.get(key)) for key, label in DIGEST_ATTRS}
-    scrubbed = scrub_for_prompt(listing.description)
-    truncated = truncate and bool(scrubbed) and len(scrubbed or "") > DESCRIPTION_MAX_CHARS
-    whole = scrubbed or ""
-    description = (whole[:DESCRIPTION_MAX_CHARS] if truncate else whole) or None
-
-    digest = ListingDigest(
-        listing_id=listing.id,
-        portal=_clean(listing.source),
-        deal=_clean(listing.category_type),
-        category=_clean(listing.category_main),
-        subtype=_clean(listing.subtype),
-        disposition=_clean(listing.disposition),
-        area_m2=listing.area_m2,
-        floor=listing.floor,
-        total_floors=listing.total_floors,
-        price=listing.price,
-        price_history=list(listing.price_history or [])[-MAX_PRICE_POINTS:],
-        attributes=attributes,
-        first_seen=_day(listing.first_seen_at),
-        last_seen=_day(live_end_stamp(listing)),
-        active=bool(listing.is_active),
-        description=description,
-        description_truncated=truncated,
-    )
-
-    absent: list[str] = []
-    for name, value in (
-        ("disposition", digest.disposition),
-        ("area", digest.area_m2),
-        ("floor", digest.floor),
-        ("total floors", digest.total_floors),
-        ("price", digest.price),
-        ("description", digest.description),
-        ("first seen", digest.first_seen),
-        ("last seen", digest.last_seen),
-    ):
-        if value is None:
-            absent.append(name)
-    absent.extend(label for label, value in attributes.items() if value is None)
-    digest.absent = absent
-    return digest
 
 
 def render_digest(d: ListingDigest) -> str:
@@ -433,7 +273,7 @@ def render_digest(d: ListingDigest) -> str:
         points = "; ".join(
             f"{_day(stamp) or '?'}: {_amount(value)}" for stamp, value in d.price_history
         )
-        lines.append(f"price path (oldest first, at most {MAX_PRICE_POINTS} points): {points}")
+        lines.append(f"price path (oldest first, at most {DIGEST_PRICE_POINTS} points): {points}")
     else:
         lines.append(f"price path: {prompts.ABSENT_TOKEN}")
     for label, value in d.attributes.items():

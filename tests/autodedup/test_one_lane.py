@@ -27,7 +27,7 @@ from autodedup.incremental_sql import (
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.indistinguishable import FEATURE_SLOTS
-from autodedup.replay import DatasetFacts
+from autodedup.incremental_store import CohortFacts, Schedule
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.test_apply import FakeDb, _pair_group
@@ -60,7 +60,7 @@ def _edges(store) -> None:
 
 
 def _recluster_all(store, ds: Dataset, settings: Settings) -> None:
-    facts = DatasetFacts(ds)
+    facts = CohortFacts(ds)
     _recluster(store, facts, settings, _Working(facts, settings), {A, B, C}, Limits(),
                PassResult(generation="rt", calibration_digest="x"))
 
@@ -138,7 +138,7 @@ def test_the_relation_is_the_batch_relation_on_the_same_slots() -> None:
 
 
 def _fps(ds: Dataset, settings: Settings) -> dict:
-    from autodedup.fingerprint import build_all
+    from tests.autodedup.whole_cohort import build_all
 
     return build_all(ds, settings)
 
@@ -244,14 +244,12 @@ def test_an_idle_pass_honours_a_new_same_ruling() -> None:
     must-not-link's E78 rule, for the positive word."""
     from autodedup.incremental import Calibration, run_pass
     from autodedup.model import hand_initialised
-    from autodedup.replay import ScheduleWork
-
     ds = _floors_cohort()
     store = MemoryStore()
     _known(store, A, C)
     store.ml = {(A, C), (B, 999)}
     calibration = Calibration(generation="rt", feature_version=0, built_at="", n_listings=0)
-    run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+    run_pass(store, CohortFacts(ds), Schedule([]), D43_ON, hand_initialised(),
              calibration)
     assert sorted(map(sorted, store.clusters.values())) == [[A, C]], (
         "joined; the ruling reaching outside the store (B, 999) links nothing")
@@ -259,7 +257,7 @@ def test_an_idle_pass_honours_a_new_same_ruling() -> None:
     # must-not-link (api/routes/autodedup.py) — and that seeds the component on the next pass.
     store.ml = set()
     store.mnl = {(A, C)}
-    run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+    run_pass(store, CohortFacts(ds), Schedule([]), D43_ON, hand_initialised(),
              calibration)
     assert store.clusters == {}, "the pair the ruling held is released: nothing else joins it"
 
@@ -280,8 +278,6 @@ def test_a_withdrawn_same_re_clusters_its_component_on_the_next_pass() -> None:
     the two adverts after the operator took the word back."""
     from autodedup.incremental import Calibration, run_pass
     from autodedup.model import hand_initialised
-    from autodedup.replay import ScheduleWork
-
     ds = _floors_cohort()
     store = MemoryStore()
     _known(store, A, C)
@@ -289,7 +285,7 @@ def test_a_withdrawn_same_re_clusters_its_component_on_the_next_pass() -> None:
     calibration = Calibration(generation="rt", feature_version=0, built_at="", n_listings=0)
 
     def idle_pass() -> None:
-        run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+        run_pass(store, CohortFacts(ds), Schedule([]), D43_ON, hand_initialised(),
                  calibration)
 
     idle_pass()
@@ -883,17 +879,3 @@ def test_a_seed_resets_the_rate_and_a_pass_times_its_reconcile(tmp_path, monkeyp
     ran = run_incremental(lambda: conn)
     assert seen and ran["reconcile"]["counts"]["groups"] == 7
     assert ran["reconcile"]["seconds"] >= 0
-
-
-def test_the_replay_compares_the_decisions_own_evidence_only() -> None:
-    """Review B10: the stored grain keeps E61's evidence-bearing veto rows, so the replay's
-    pair view carries whether a row has evidence — of the DECISION's own: the lane's context
-    stamp (E64) and hold markers (E93) are its rails, never the batch decision's."""
-    from autodedup.replay import decision_evidence
-
-    assert decision_evidence({"designator_lo": "A", "designator_hi": "B"})
-    assert not decision_evidence({"context_cell_n": "3", "context_image_pop_min": "1"})
-    assert not decision_evidence({"held_zone": "merge", "held_reason": "x",
-                                  "held_certificate": ""})
-    assert not decision_evidence({"ref_codes": "N115423"}), "K-R's read-back, the lane's"
-    assert not decision_evidence(None) and not decision_evidence({})

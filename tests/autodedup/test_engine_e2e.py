@@ -22,9 +22,7 @@ from typing import Any
 import pytest
 
 from autodedup import dataset as ds
-from autodedup import features
 from autodedup import harness
-from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
 from autodedup.decide import (
     Decision,
@@ -34,9 +32,9 @@ from autodedup.decide import (
     unit_evidence,
 )
 from autodedup.features import FeatureContext, pair_features
-from autodedup.fingerprint import build_all
 from autodedup.model import hand_initialised
 from autodedup.settings import Settings
+from tests.autodedup.whole_cohort import build_all, generate_pairs
 
 BLOCK_A = "turnov"
 BLOCK_B = "praha"
@@ -626,6 +624,7 @@ def test_must_not_link_blocks_a_union(engine: dict[str, Any]) -> None:
 
 
 def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) -> None:
+    """`harness run` is the lane's `run_pass` over a MemoryStore, the cohort claimed as scope."""
     out_dir = tmp_path / "run1"
     stream = io.StringIO()
     code = harness.main(["run", str(cohort), "--out", str(out_dir)], out=stream)
@@ -644,19 +643,13 @@ def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) ->
     assert summary["band_width"] == pytest.approx(
         summary["zones"]["band"] / summary["pairs_scored"]
     )
-    assert summary["blocking"]["n_guarded_pairs"] >= 2
+    assert summary["passes"] == 1 and summary["claim"] == 500
+    assert len(summary["calibration_digest"]) == 16
     assert summary["clusters"]["n_clusters"] >= 4
     assert summary["clusters"]["n_bridges_refused"] == 0
-    assert summary["clusters"]["n_must_not_link"] == 0
-    assert summary["timings"]["total_s"] > 0.0
-    assert summary["feature_params"] == {
-        "clip_sample": Settings().clip_sample,
-        "phash_sample": Settings().phash_sample,
-        "min_rare_block_docs": features.MIN_RARE_BLOCK_DOCS,
-        "rare_token_cap": features.RARE_TOKEN_CAP,
-    }
+    assert summary["must_not_link"] == {"loaded": 0, "together": 0,
+                                        "unit_designator_veto": 0}
     assert summary["model_fit"] == {}
-    assert summary["per_block"][BLOCK_A]["merge"] == 4
 
     rows = harness.read_pairs(out_dir)
     assert rows
@@ -669,6 +662,7 @@ def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) ->
     assert set(duplicate["feats"]) == set(harness.FEATURE_ORDER)
     assert all(row["score"] >= Settings().store_floor or row["zone"] in ("merge", "band")
                for row in rows)
+    assert [(row["lo"], row["hi"]) for row in rows] == sorted(by_key)
 
     clusters = json.loads((out_dir / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
     for lo, hi in ((DUP_A, DUP_B), (REPOST_A, REPOST_B), (MODEL_A, MODEL_B),
@@ -682,16 +676,28 @@ def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) ->
     assert repost_row["sources"] == ["sreality"]
 
 
+def test_harness_run_is_run_pass_in_any_order_and_claim(cohort: Path, tmp_path: Path) -> None:
+    """SW1's B0 in miniature: `harness run` writes the state `run_pass` reaches, and that state
+    is the same in every arrival order and every claim size (E70-E72)."""
+    from tests.autodedup.test_incremental import invariant_state
+
+    dataset = ds.load(cohort)
+    harness.run(dataset, Settings(), hand_initialised(), tmp_path / "run")
+    pairs, groups = invariant_state(dataset, Settings(), harness.calibrated(dataset, Settings())[1])
+    rows = {(row["lo"], row["hi"]): row for row in harness.read_pairs(tmp_path / "run")}
+    assert rows and set(rows) <= set(pairs)
+    for key, row in rows.items():
+        assert (row["zone"], row["reason"], row["certificate"]) == pairs[key][0:1] + \
+            pairs[key][2:4], key
+    clusters = json.loads((tmp_path / "run" / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
+    assert sorted(tuple(v) for v in clusters["clusters"].values()) == groups
+
+
 def test_store_floor_drops_the_low_scoring_tail(cohort: Path, tmp_path: Path) -> None:
     """E22: only pairs above the floor (or in a zone the operator sees) reach pairs.jsonl.gz."""
-    settings_path = tmp_path / "s.json"
-    settings_path.write_text(json.dumps({"store_floor": 0.30}), encoding="utf-8")
     out_dir = tmp_path / "run_floor"
-    assert harness.main(
-        ["run", str(cohort), "--out", str(out_dir), "--settings", str(settings_path)],
-        out=io.StringIO(),
-    ) == 0
-    summary = json.loads((out_dir / harness.RUN_FILE).read_text(encoding="utf-8"))
+    summary = harness.run(ds.load(cohort), Settings(store_floor=0.30), hand_initialised(),
+                          out_dir)
     assert summary["settings"]["store_floor"] == 0.30
     assert summary["pairs_stored"] < summary["pairs_scored"]
     rows = harness.read_pairs(out_dir)
@@ -701,7 +707,7 @@ def test_store_floor_drops_the_low_scoring_tail(cohort: Path, tmp_path: Path) ->
 
 
 def test_harness_run_honours_a_must_not_link_file(cohort: Path, tmp_path: Path) -> None:
-    """E27's permanent negative reaches the constrained union-find from the command line."""
+    """E27's permanent negative reaches the clustering from the command line."""
     mnl = tmp_path / "mnl.json"
     mnl.write_text(json.dumps([[DUP_B, DUP_A]]), encoding="utf-8")
     out_dir = tmp_path / "run_mnl"
@@ -710,53 +716,94 @@ def test_harness_run_honours_a_must_not_link_file(cohort: Path, tmp_path: Path) 
         out=io.StringIO(),
     ) == 0
     summary = json.loads((out_dir / harness.RUN_FILE).read_text(encoding="utf-8"))
-    assert summary["clusters"]["n_must_not_link"] == 1
+    assert summary["must_not_link"]["loaded"] == 1 and summary["must_not_link"]["together"] == 0
     clusters = json.loads((out_dir / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
     assert str(DUP_A) not in clusters["clusters"]
     assert [row["invariant"] for row in clusters["conflicts"]] == ["must_not_link"]
     assert clusters["clusters"][str(REPOST_A)] == [REPOST_A, REPOST_B]
 
 
-def test_judge_sample_can_be_restricted_to_one_zone(cohort: Path, tmp_path: Path) -> None:
-    """D3's precision sample is auto-merge pairs only — a mixed sample cannot reach n>=380."""
-    out_dir = tmp_path / "run_zone"
-    assert harness.main(["run", str(cohort), "--out", str(out_dir)], out=io.StringIO()) == 0
-    target = tmp_path / "merge_sample.json"
-    assert harness.main(
-        ["judge-sample", str(out_dir), "--zone", "merge", "--n", "50", "--out", str(target)],
-        out=io.StringIO(),
-    ) == 0
-    sample = json.loads(target.read_text(encoding="utf-8"))
-    assert sample["zones"] == ["merge"]
-    assert sample["pairs"]
-    assert all(pair["zone"] == "merge" for pair in sample["pairs"])
-    assert all(key.startswith("merge|") for key in sample["strata"])
-    mixed = harness.stratified_sample(harness.read_pairs(out_dir), 50)
-    assert {pair["zone"] for pair in mixed["pairs"]} > {"merge"}
+def test_withheld_photos_are_held_then_released_to_the_same_state(cohort: Path,
+                                                                  tmp_path: Path) -> None:
+    """E92/E93, ported from the replay (ADD05): decided first with every photograph
+    unprocessed, the photo-carried merges are HELD; once the producers land and the horizon
+    passes, the state is the plain run's exactly."""
+    dataset = ds.load(cohort)
+    plain = harness.run(dataset, Settings(), hand_initialised(), tmp_path / "plain")
+    held = harness.run(dataset, Settings(), hand_initialised(), tmp_path / "held",
+                       withhold_photos=True)
+    assert held["withheld_photos"]["held_on_first_decision"] >= 1
+    assert held["withheld_photos"]["still_held"] == 0
+    assert harness.read_pairs(tmp_path / "held") == harness.read_pairs(tmp_path / "plain")
+    assert ((tmp_path / "held" / harness.CLUSTERS_FILE).read_text(encoding="utf-8")
+            == (tmp_path / "plain" / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
+    assert held["zones"] == plain["zones"]
 
 
-def test_harness_judge_sample_returns_strata(cohort: Path, tmp_path: Path) -> None:
-    out_dir = tmp_path / "run2"
-    assert harness.main(["run", str(cohort), "--out", str(out_dir)], out=io.StringIO()) == 0
-    target = tmp_path / "sample.json"
+def test_harness_evaluate_reads_a_run_against_the_rulings(cohort: Path, tmp_path: Path) -> None:
+    """ADD07: M1-M5 off the run's own artifacts, the ruled pairs it never stored decided as an
+    explicit input set, and the D83 lists against a base run."""
+    run_dir = tmp_path / "run"
+    assert harness.main(["run", str(cohort), "--out", str(run_dir)], out=io.StringIO()) == 0
+    rulings = tmp_path / "rulings"
+    rulings.mkdir()
+    (rulings / "operator_labels.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+        {"listing_lo": DUP_A, "listing_hi": DUP_B, "verdict": "same", "decided_at": "t1"},
+        {"listing_lo": DUP_A, "listing_hi": REPOST_A, "verdict": "different",
+         "decided_at": "t1"},
+    )), encoding="utf-8")
+    # A base that DIFFERS: the same cohort with the duplicate held apart by a must-not-link, so
+    # every D83 list the arm moves against it is non-trivial.
+    mnl = tmp_path / "mnl.json"
+    mnl.write_text(json.dumps([[DUP_A, DUP_B]]), encoding="utf-8")
+    base_dir = tmp_path / "base"
+    assert harness.main(["run", str(cohort), "--out", str(base_dir), "--must-not-link",
+                         str(mnl)], out=io.StringIO()) == 0
     stream = io.StringIO()
-    assert harness.main(
-        ["judge-sample", str(out_dir), "--n", "12", "--out", str(target)], out=stream
-    ) == 0
-    sample = json.loads(target.read_text(encoding="utf-8"))
-    assert sample["n_strata"] >= 2
-    assert sample["n_selected"] == sum(row["selected"] for row in sample["strata"].values())
-    for key, row in sample["strata"].items():
-        assert row["selected"] == min(row["population"], max(harness.STRATUM_FLOOR,
-                                                             row["selected"]))
-    merge_strata = [key for key in sample["strata"] if key.startswith("merge|")]
-    assert merge_strata
-    assert any(pair["zone"] == "merge" for pair in sample["pairs"])
+    assert harness.main(["evaluate", str(run_dir), str(rulings), "--base", str(base_dir)],
+                        out=stream) == 0
+    report = json.loads((run_dir / "evaluate.json").read_text(encoding="utf-8"))
+    metrics = report["metrics"]
+    assert metrics["M2_recall"] == {"ruled_same": 1, "together": 1, "recall": 1.0}
+    assert metrics["M1_precision"]["ruled_different_together"] == 0
+    assert metrics["M5_coverage"]["verdict"].startswith("not measurable")
+    assert report["explicit_pairs"] == 1, "the different-ruled pair was never stored"
+    assert "explicit_skipped" not in report
+    lists = report["d83"]["lists"]
+    assert lists["copairs_gained"] == [[DUP_A, DUP_B, "same", None]]
+    assert lists["copairs_lost"] == [] and lists["merge_gained"] == [], (
+        "a must-not-link holds a pair apart; it never re-zones it")
+    assert [DUP_A, DUP_B] in lists["groups_arm_only"]
+    assert report["revocation"]["revoked"] is False
 
-    again = harness.stratified_sample(harness.read_pairs(out_dir), 12)
-    assert [(row["lo"], row["hi"]) for row in again["pairs"]] == [
-        (row["lo"], row["hi"]) for row in sample["pairs"]
-    ]
+
+def test_harness_evaluate_reads_an_arm_whose_settings_this_checkout_does_not_know(
+        cohort: Path, tmp_path: Path) -> None:
+    """An arm run on a branch carries dials this checkout lacks (C7's photo_override_*): the
+    metrics and the D83 lists still read, and the unstored ruled pairs are SKIPPED, counted and
+    named — never decided by this checkout's rule (SW1 review)."""
+    run_dir = tmp_path / "run"
+    assert harness.main(["run", str(cohort), "--out", str(run_dir)], out=io.StringIO()) == 0
+    summary = json.loads((run_dir / harness.RUN_FILE).read_text(encoding="utf-8"))
+    summary["settings"]["photo_override_min_pairs"] = 3
+    (run_dir / harness.RUN_FILE).write_text(json.dumps(summary), encoding="utf-8")
+    rulings = tmp_path / "rulings"
+    rulings.mkdir()
+    (rulings / "operator_labels.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+        {"listing_lo": DUP_A, "listing_hi": DUP_B, "verdict": "same", "decided_at": "t1"},
+        {"listing_lo": DUP_A, "listing_hi": REPOST_A, "verdict": "different",
+         "decided_at": "t1"},
+    )), encoding="utf-8")
+    stream = io.StringIO()
+    assert harness.main(["evaluate", str(run_dir), str(rulings), "--base", str(run_dir)],
+                        out=stream) == 0
+    report = json.loads((run_dir / "evaluate.json").read_text(encoding="utf-8"))
+    assert report["metrics"]["M2_recall"]["together"] == 1
+    assert report["explicit_pairs"] == 0
+    assert report["explicit_skipped"]["pairs"] == 1
+    assert "photo_override_min_pairs" in report["explicit_skipped"]["reason"]
+    assert report["d83"]["counts"]["pairs_new"] == 0
+    assert "explicit: skipped 1" in stream.getvalue()
 
 
 def test_harness_pair_prints_side_by_side(cohort: Path) -> None:
@@ -766,37 +813,3 @@ def test_harness_pair_prints_side_by_side(cohort: Path) -> None:
     assert f"pair {DUP_A} x {DUP_B}" in text
     assert "zone        merge" in text
     assert "phash_match_ratio" in text
-
-
-def _keys(run_dir: Path) -> list[tuple[int, int]]:
-    return [(row["lo"], row["hi"]) for row in harness.read_pairs(run_dir)]
-
-
-def test_the_family_guard_does_not_reorder_the_run_artifacts(
-    cohort: Path, tmp_path: Path
-) -> None:
-    """W11 verification: E85 holds K-B rows back until the family can be read, and holding them
-    back must change nothing but the verdict. `pairs.jsonl.gz` stays in key order, the part file
-    never survives, the clusters are identical and the guard-off run is untouched."""
-    plain = tmp_path / "run_plain"
-    assert harness.main(["run", str(cohort), "--out", str(plain)], out=io.StringIO()) == 0
-
-    settings_path = tmp_path / "guard.json"
-    settings_path.write_text(json.dumps({"family_guard_mode": "cell"}), encoding="utf-8")
-    guarded = tmp_path / "run_guard"
-    assert harness.main(
-        ["run", str(cohort), "--out", str(guarded), "--settings", str(settings_path)],
-        out=io.StringIO(),
-    ) == 0
-
-    keys = _keys(guarded)
-    assert keys == sorted(keys)
-    assert keys == _keys(plain)
-    assert (REPOST_A, REPOST_B) in keys, "the fixture's K-B pair is the row that is held back"
-    assert not list(guarded.glob("*.part"))
-
-    summary = json.loads((guarded / harness.RUN_FILE).read_text(encoding="utf-8"))
-    assert summary["family_guard"]["mode"] == "cell"
-    assert summary["family_guard"]["n_refused"] == 0, "nothing in this cohort is impure"
-    assert (guarded / harness.CLUSTERS_FILE).read_text(encoding="utf-8") == (
-        plain / harness.CLUSTERS_FILE).read_text(encoding="utf-8")

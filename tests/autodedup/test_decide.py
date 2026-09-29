@@ -562,16 +562,12 @@ def test_auto_reject_limit_is_settings_driven() -> None:
     assert strict_decision.reason == "auto_reject:attr_contradictions"
 
 
-def test_the_stratum_key_is_spelled_the_way_the_evaluation_spells_it() -> None:
-    """E48: the table an evaluation writes is the table the engine reads, so one spelling."""
-    from autodedup.evaluate import decide_stratum
-
+def test_the_stratum_key_is_the_layer_crossed_with_the_source_side() -> None:
+    """E48: the per-stratum table is keyed deciding layer x source side."""
     same = _feats(same_source=1.0)
     cross = _feats(same_source=0.0)
     assert stratum_key(same, "K-C") == "K-C|same"
     assert stratum_key(cross, None) == "model|cross"
-    assert stratum_key(same, "K-C") == decide_stratum({"certificate": "K-C", "cross_source": False})
-    assert stratum_key(cross, None) == decide_stratum({"certificate": None, "cross_source": True})
     # An unknown side is the stricter cell, never the laxer one.
     assert stratum_key(_feats(), None) == "model|cross"
 

@@ -1,9 +1,8 @@
-"""The in-memory twin of the real-time store — the replay's substrate, and the tests' fake.
+"""The in-memory twins of the real-time lane's three inputs — the harness's substrate (SW1).
 
-It implements `incremental.Store` and nothing else, so the replay-equivalence proof exercises
-the SAME code path production does: only the verbs that touch Postgres differ. Keeping it here
-rather than in the test tree is deliberate — the proof is a deliverable of this lane, not a
-fixture of one test file, and a twin that drifts from the protocol fails to import.
+`MemoryStore` implements `incremental.Store`, `CohortFacts` the `FactSource` and `Schedule` the
+`WorkSource`, so `harness run` drives the SAME `run_pass` production does: only the verbs that
+touch Postgres differ, and a twin that drifts from its protocol fails to import.
 
 It is NOT the only store the proof covers: `tests/autodedup/test_incremental_sqlstore.py`
 replays the same cohort through `incremental_lane.SqlStore` against a Postgres fake and asserts
@@ -15,15 +14,16 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
-from autodedup.dataset import Listing
-from autodedup.hazard_context import ContextStamp, address_block_key, category_group
 from dataclasses import replace
 
+from autodedup.dataset import Dataset, Image, Listing
+from autodedup.hazard_context import ContextStamp, address_block_key, category_group
 from autodedup.incremental import (
     SET_CAP,
     CellRow,
     FpRow,
     PairRow,
+    WorkItem,
     key_token,
 )
 from autodedup.store_score import PAIR_SCORE_SQL_TYPE, narrow
@@ -169,13 +169,13 @@ class MemoryStore:
             key = int(row["cluster_key"])
             self.clusters[key] = list(row["members"])
             self.cluster_row[key] = dict(row)
-        touched = {int(row["cluster_key"]) for row in rows} | set(drop_keys)
+        # `RT_CONFLICT_DROP_SQL`, exactly: a conflict goes only when BOTH its ends are members
+        # of a re-written cluster row. One with a singleton end is re-inserted beside itself on
+        # the next re-cluster — the live defect the twin must show, not hide (SW1 review).
+        touched = {int(i) for row in rows for i in row["members"]}
         self.conflicts = [c for c in self.conflicts
-                          if int(c.get("_anchor", -1)) not in touched]
-        for conflict in conflicts:
-            entry = dict(conflict)
-            entry["_anchor"] = min(int(entry["lo"]), int(entry["hi"]))
-            self.conflicts.append(entry)
+                          if not (int(c["lo"]) in touched and int(c["hi"]) in touched)]
+        self.conflicts.extend(dict(conflict) for conflict in conflicts)
 
     def must_not_link(self) -> set[tuple[int, int]]:
         return set(self.mnl)
@@ -233,3 +233,53 @@ class MemoryStore:
         but the pass that read the changed rulings has now honoured them (G4)."""
         self.ruled -= self._ruled_read
         self._ruled_read = set()
+
+
+class CohortFacts:
+    """The FactSource over an exported cohort. A `withheld` listing's photographs are handed over
+    unprocessed — `phash`, `pop`, `clip` and `tags` stripped — which is the gallery ~80 % of
+    arrivals are first decided on (E92/E93); emptying `withheld` is the producers arriving."""
+
+    def __init__(self, ds: Dataset, withheld: Iterable[int] = ()) -> None:
+        self.ds = ds
+        self.withheld = frozenset(withheld)
+
+    def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
+        out: dict[int, tuple[Listing, list[Image]]] = {}
+        for listing_id in ids:
+            listing = self.ds.listings.get(listing_id)
+            if listing is None:
+                continue
+            images = self.ds.images(listing_id)
+            if listing_id in self.withheld:
+                images = [replace(image, phash=None, pop=None, clip=None, tags=[])
+                          for image in images]
+            out[listing_id] = (listing, images)
+        return out
+
+
+class Schedule:
+    """The WorkSource: a fixed claim order instead of the watermark feeds. A claim advances
+    nothing and a commit advances over exactly what it is handed, so a pass the pair budget
+    refused (E75) re-claims the same listings, as production's feeds do. `redecide` is the
+    evidence sweep (E92): the same ids handed back to be re-decided whatever their digest."""
+
+    def __init__(self, order: Sequence[int], redecide: bool = False) -> None:
+        self.order = list(order)
+        self.redecide = redecide
+        self.cursor = 0
+
+    def claim(self, limit: int) -> list[WorkItem]:
+        feed = "evidence" if self.redecide else "new"
+        return [WorkItem(listing_id, feed, None, position, redecide=self.redecide)
+                for position, listing_id in enumerate(
+                    self.order[self.cursor:self.cursor + limit], start=self.cursor + 1)]
+
+    def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
+        positions = [int(item.cursor) for item in done if item.cursor is not None]
+        if positions:
+            self.cursor = max(positions)
+        return {"done": self.cursor, "total": len(self.order)}
+
+    def exhausted(self) -> bool:
+        return self.cursor >= len(self.order)

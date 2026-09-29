@@ -32,13 +32,11 @@ the explicit ones. Precedence inside the tier: explicit > browse_merge > implied
 operator separated by hand after merging its properties is the separation.
 
 `operator_merges.jsonl` (the same lane) carries the Browse merges at GROUP grain — who was
-merged with whom and from which side — which is what `harness yardstick` measures the engine
-against; `load_operator_merges` reads it.
+merged with whom and from which side; `harness evaluate` reads every member pair of it as a
+ruling (`evaluate.read_rulings`).
 
-The sample file is the other half of the arithmetic. Pairs are drawn with per-stratum quotas, so
-a judged pair stands for `n_total / n_selected` cohort pairs; every cohort-level number in
-`evaluate` is Horvitz-Thompson weighted by exactly that ratio, and a sample-less run falls back
-to weight 1.0 (which makes every cohort estimate a sample estimate, and says so).
+The judge lane that drew weighted samples is gone (SW1, O7), and with it the Horvitz-Thompson
+sample files: every label weighs its own credibility and nothing more.
 """
 
 from __future__ import annotations
@@ -46,13 +44,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 PairKey = tuple[int, int]
 
 OPERATOR_TIER: str = "operator"
 TIER_PRECEDENCE: tuple[str, ...] = (OPERATOR_TIER, "gold", "vision", "text")
-CHEAP_TIERS: tuple[str, ...] = ("vision", "text")
 
 POSITIVE_VERDICT: str = "same_property"
 NEGATIVE_VERDICTS: tuple[str, ...] = ("different_property", "same_building_different_unit")
@@ -485,9 +482,6 @@ STANDING_BROWSE_MERGE: str = SOURCE_BROWSE_MERGE
 STANDING_EXPLICIT: str = SOURCE_EXPLICIT
 STANDING_MUST_NOT_LINK: str = "must_not_link"
 STANDING_UNRULED: str = "unruled"
-STANDINGS: tuple[str, ...] = (
-    STANDING_BROWSE_MERGE, STANDING_EXPLICIT, STANDING_MUST_NOT_LINK, STANDING_UNRULED,
-)
 OPERATOR_MERGES_FILE: str = "operator_merges.jsonl"
 # The group file's own shape version, stamped on every row: consumers read by field name, and a
 # change that is not append-only bumps this.
@@ -524,16 +518,6 @@ def merge_pairs(
 
 
 @dataclass(slots=True)
-class MergeMember:
-    listing_id: int
-    side: int | None = None
-    property_id: int | None = None
-    source: str | None = None
-    category_type: str | None = None
-    block: str | None = None
-
-
-@dataclass(slots=True)
 class MergePair:
     lo: int
     hi: int
@@ -559,288 +543,3 @@ class MergePair:
         return True
 
 
-@dataclass(slots=True)
-class OperatorMerge:
-    """One Browse merge group: its members with their origin sides, and the pairs it asserts."""
-
-    merge_group_id: str
-    members: list[MergeMember] = field(default_factory=list)
-    pairs: list[MergePair] = field(default_factory=list)
-    merged_at: str | None = None
-    status: str = "live"
-    source: str = "browse"
-    survivor_property_id: int | None = None
-
-    @property
-    def ruled_pairs(self) -> list[MergePair]:
-        """The pairs the operator still says are one property — what a yardstick measures."""
-        return [pair for pair in self.pairs if pair.same]
-
-    @property
-    def member_ids(self) -> list[int]:
-        return [member.listing_id for member in self.members]
-
-
-def _opt_int(value: Any) -> int | None:
-    return None if value is None else int(value)
-
-
-def parse_operator_merge(payload: Mapping[str, Any]) -> OperatorMerge:
-    """One group, from the labels lane's `operator_merges.jsonl` row or from a row of
-    `autodedup.operator_merges` dumped as JSON (the parallel `member_*` arrays)."""
-    members: list[MergeMember] = []
-    raw_members = payload.get("members")
-    if isinstance(raw_members, Sequence) and not isinstance(raw_members, (str, bytes)):
-        for item in raw_members:
-            members.append(MergeMember(
-                listing_id=int(item["listing_id"]),
-                side=_opt_int(item.get("side")),
-                property_id=_opt_int(item.get("property_id_at_copy", item.get("property_id"))),
-                source=(str(item["source"]) if item.get("source") else None),
-                category_type=(
-                    str(item["category_type"]) if item.get("category_type") else None
-                ),
-                block=(str(item["block"]) if item.get("block") else None),
-            ))
-    else:
-        ids = list(payload.get("member_ids") or ())
-        sides = list(payload.get("member_sides") or [None] * len(ids))
-        props = list(payload.get("member_property_ids") or [None] * len(ids))
-        if len(sides) != len(ids) or len(props) != len(ids):
-            raise ValueError(
-                f"group {payload.get('merge_group_id')}: member arrays do not align")
-        members = [
-            MergeMember(listing_id=int(listing), side=_opt_int(side), property_id=_opt_int(prop))
-            for listing, side, prop in zip(ids, sides, props)
-        ]
-    raw_pairs = payload.get("pairs")
-    pairs: list[MergePair] = []
-    if raw_pairs is not None:
-        for item in raw_pairs:
-            if isinstance(item, Mapping):
-                lo, hi = pair_key(item["listing_lo"], item["listing_hi"])
-                pairs.append(MergePair(
-                    lo=lo, hi=hi,
-                    standing=str(item.get("standing") or STANDING_UNRULED),
-                    verdict=(str(item["verdict"]) if item.get("verdict") else None),
-                    must_not_link=bool(item.get("must_not_link")),
-                ))
-            else:
-                lo, hi = pair_key(item[0], item[1])
-                pairs.append(MergePair(lo=lo, hi=hi))
-    else:
-        known_places = any(member.property_id is not None for member in members)
-        for lo, hi in merge_pairs(
-            [member.listing_id for member in members],
-            [member.side for member in members],
-            [member.property_id for member in members] if known_places else None,
-        ):
-            pairs.append(MergePair(lo=lo, hi=hi))
-    return OperatorMerge(
-        merge_group_id=str(payload.get("merge_group_id") or ""),
-        members=members,
-        pairs=sorted(pairs, key=lambda pair: pair.key),
-        merged_at=(str(payload["merged_at"]) if payload.get("merged_at") else None),
-        status=str(payload.get("status") or "live"),
-        source=str(payload.get("source") or "browse"),
-        survivor_property_id=_opt_int(payload.get("survivor_property_id")),
-    )
-
-
-def load_operator_merges(path: str | Path) -> list[OperatorMerge]:
-    """`operator_merges.jsonl` (one group per line), or a JSON dump of the table: a list of
-    rows, or an object holding one under `groups` / `operator_merges`."""
-    text = Path(path).read_text(encoding="utf-8")
-    if Path(path).suffix == ".jsonl":
-        payloads = [json.loads(line) for line in text.splitlines() if line.strip()]
-    else:
-        data = json.loads(text)
-        if isinstance(data, Mapping):
-            data = data.get("groups", data.get("operator_merges", []))
-        payloads = list(data or ())
-    return [parse_operator_merge(payload) for payload in payloads]
-
-
-@dataclass(slots=True)
-class Stratum:
-    key: str
-    n_selected: int
-    n_total: int
-
-    @property
-    def weight(self) -> float:
-        """Horvitz-Thompson inflation: one judged pair stands for this many cohort pairs."""
-        return (self.n_total / self.n_selected) if self.n_selected > 0 else 0.0
-
-    def to_json(self) -> dict[str, Any]:
-        return {"n_selected": self.n_selected, "n_total": self.n_total, "weight": self.weight}
-
-
-@dataclass(slots=True)
-class Sample:
-    strata: dict[str, Stratum] = field(default_factory=dict)
-    pair_stratum: dict[PairKey, str] = field(default_factory=dict)
-    seed: int | None = None
-    tier: str | None = None
-    judge_version: str | None = None
-    n_requested: int | None = None
-    n_selected: int | None = None
-    path: str | None = None
-    stratum_fn: str | None = None
-
-    def stratum_of(self, key: PairKey) -> str | None:
-        return self.pair_stratum.get(key)
-
-    def inflates(self, name: str | None) -> bool:
-        """Whether this stratum actually stands for more of the cohort than it contains."""
-        if name is None:
-            return False
-        stratum = self.strata.get(name)
-        return bool(stratum and stratum.n_selected and stratum.n_total > stratum.n_selected)
-
-    def weight_for_name(self, name: str | None, default: float = 1.0) -> float:
-        stratum = self.strata.get(name) if name is not None else None
-        return stratum.weight if stratum is not None and stratum.n_selected else default
-
-    def weight_of(self, key: PairKey, default: float = 1.0) -> float:
-        """The pair's HT weight; an unsampled or unknown pair counts once, never zero."""
-        return self.weight_for_name(self.pair_stratum.get(key), default)
-
-    def weight_for(self, key: PairKey, stratum: str | None = None,
-                   default: float = 1.0) -> float:
-        """Prefer the stratum the JUDGEMENT row carries — it is the sampler's own stamp — and
-        fall back to this file's per-pair map only when the label has none."""
-        if stratum:
-            return self.weight_for_name(stratum, default)
-        return self.weight_of(key, default)
-
-    @property
-    def is_weighted(self) -> bool:
-        """True only when some stratum really inflates. `Stratum(name, n, n)` everywhere means
-        every weight is 1.0, and a report built on it is a sample rate, not a cohort estimate."""
-        return any(
-            stratum.n_selected and stratum.n_total > stratum.n_selected
-            for stratum in self.strata.values()
-        )
-
-    @property
-    def n_cohort(self) -> int:
-        return sum(stratum.n_total for stratum in self.strata.values())
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "seed": self.seed,
-            "tier": self.tier,
-            "judge_version": self.judge_version,
-            "n_requested": self.n_requested,
-            "n_selected": self.n_selected,
-            "n_strata": len(self.strata),
-            "n_cohort": self.n_cohort,
-            "path": self.path,
-            "stratum_fn": self.stratum_fn,
-            "is_weighted": self.is_weighted,
-        }
-
-
-EMPTY_SAMPLE: Sample = Sample()
-
-
-def _stratum_counts(payload: Mapping[str, Any]) -> tuple[int, int]:
-    selected = payload.get("selected", payload.get("n_selected", 0))
-    total = payload.get("population", payload.get("n_total", 0))
-    return int(selected or 0), int(total or 0)
-
-
-def _candidate_stratum_fns() -> list[tuple[str, Callable[[Mapping[str, Any]], str]]]:
-    """Every key function the samplers in `harness` actually use, in the order to try them.
-
-    `sample_pairs` (the judge lane) keys on `judge_stratum`; `judge-sample` on the CLI keys on
-    `_stratum`. The two name shapes never intersect, so recomputing with the wrong one silently
-    collapses every Horvitz-Thompson weight to 1.0 — which is why a recomputed name is CHECKED
-    against the file's own strata rather than trusted."""
-    from autodedup import harness
-
-    return [("judge_stratum", harness.judge_stratum), ("stratum", harness._stratum)]
-
-
-def _resolve_stratum_fn(
-    rows: Sequence[Mapping[str, Any]],
-    names: Mapping[str, Any],
-    stratum_fn: Callable[[Mapping[str, Any]], str] | None,
-) -> tuple[str, Callable[[Mapping[str, Any]], str]]:
-    candidates = (
-        [("explicit", stratum_fn)] if stratum_fn is not None else _candidate_stratum_fns()
-    )
-    best: tuple[int, str, Callable[[Mapping[str, Any]], str]] = (-1, "none", lambda row: "")
-    for label, fn in candidates:
-        hits = 0
-        for row in rows:
-            try:
-                hits += 1 if fn(dict(row)) in names else 0
-            except Exception:  # a row this key function cannot read is simply not a hit
-                continue
-        if hits > best[0]:
-            best = (hits, label, fn)
-    if best[0] < len(rows):
-        raise ValueError(
-            f"sample.json strata do not match any known sampler key: {best[0]} of {len(rows)} "
-            f"pairs resolved with `{best[1]}`; the file's strata look like "
-            f"{sorted(names)[:2]}. Pass the sample the judgements were actually drawn from."
-        )
-    return best[1], best[2]
-
-
-def load_sample(
-    path: str | Path,
-    *,
-    stratum_fn: Callable[[Mapping[str, Any]], str] | None = None,
-) -> Sample:
-    """Read a lane/harness `sample.json` into the per-pair stratum map the HT weights need.
-
-    The file stores strata counts but not, on every sampler, the per-pair key. A recomputed key
-    that is not one of the file's own strata is a HARD ERROR: keeping it as an empty stratum
-    would hand every pair weight 1.0 while the report still claimed to be cohort-level."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    strata = {
-        str(name): Stratum(str(name), *_stratum_counts(body))
-        for name, body in (data.get("strata") or {}).items()
-    }
-    rows = [row for row in (data.get("pairs") or ()) if not row.get("stratum")]
-    if rows and not strata:
-        raise ValueError(f"{path}: no strata in the sample file, so no weight can be recovered")
-    resolved = _resolve_stratum_fn(rows, strata, stratum_fn) if rows else None
-    pair_stratum: dict[PairKey, str] = {}
-    for row in data.get("pairs") or ():
-        key = pair_key(row["lo"], row["hi"])
-        name = str(row["stratum"]) if row.get("stratum") else str(resolved[1](dict(row)))
-        pair_stratum[key] = name
-        if name not in strata:
-            strata[name] = Stratum(name, 0, 0)
-    return Sample(
-        stratum_fn=(resolved[0] if resolved else "stamped"),
-        strata=strata,
-        pair_stratum=pair_stratum,
-        seed=(int(data["seed"]) if data.get("seed") is not None else None),
-        tier=(str(data["tier"]) if data.get("tier") else None),
-        judge_version=(str(data["judge_version"]) if data.get("judge_version") else None),
-        n_requested=(int(data["n_requested"]) if data.get("n_requested") is not None else None),
-        n_selected=(int(data["n_selected"]) if data.get("n_selected") is not None else None),
-        path=str(path),
-    )
-
-
-def sample_from_judgements(judgements: Sequence[JudgementRow]) -> Sample:
-    """A degenerate sample recovered from the judgement rows alone: strata are known, the
-    populations are not, so every weight is 1.0 and no number built on it is cohort-level."""
-    pair_stratum: dict[PairKey, str] = {}
-    for row in judgements:
-        if row.stratum:
-            pair_stratum[row.key] = row.stratum
-    counts: dict[str, int] = {}
-    for name in pair_stratum.values():
-        counts[name] = counts.get(name, 0) + 1
-    return Sample(
-        strata={name: Stratum(name, n, n) for name, n in counts.items()},
-        pair_stratum=pair_stratum,
-        stratum_fn="stamped",
-    )

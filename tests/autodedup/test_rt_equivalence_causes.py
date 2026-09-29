@@ -13,9 +13,8 @@ batch generation g15 scored on the export taken 12:38–12:47 UTC and failed on 
 
 Both are named causes now, and neither is allowed to name more than it evidences: a hold
 explains a pair only while the lane's own release rule still keeps it and only when the decision
-it holds IS the batch's; an arrival is read against the export artifact's own listing set, the
-cut is the export's start from its own ledger row, and a listing the batch store holds is never
-one.
+it holds IS the run's; an arrival is read against the run's cohort artifact — its listing set,
+cut at its own `exported_at` — and a listing the run holds is never one.
 """
 
 from __future__ import annotations
@@ -24,19 +23,18 @@ import gzip
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import pytest
 
 from autodedup.incremental import EVIDENCE_HOLD_REASON
 from autodedup.rt_equivalence import (
-    EQUIVALENCE_FILE,
     EVIDENCE_HOLD,
     HOLD_CAP_S,
     Hold,
     Pair,
     arrival_of,
-    cohort_listing_ids,
+    cohort_of,
     hold_cause,
     run_equivalence,
 )
@@ -54,11 +52,12 @@ from tests.autodedup.test_rt_equivalence import (
     _fp_row,
     _listing,
     _pair,
-    _score_of,
+    write_run,
 )
 
-EXPORT_RUN = "36251000000"
 DATA = Path(__file__).with_name("data_g1_live_rt_equivalence.json")
+# G1-live's export read its blocks at 12:38:10 UTC (run 36253408857).
+G1_EXPORT = datetime(2026, 9, 26, 12, 38, 10, tzinfo=timezone.utc)
 
 
 def _held(batch_certificate: str | None = None, **kw: Any) -> dict:
@@ -74,46 +73,10 @@ def _incomplete(db: FakePg, listing_id: int, *, age: timedelta) -> None:
                                     "first_decided_at": NOW - age}
 
 
-def _cohort(tmp: Path, ids: Iterable[int]) -> Path:
-    """An export artifact in the shape `export.py` writes: meta, listings, then images."""
-    path = tmp / "cohort.jsonl.gz"
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        fh.write(json.dumps({"t": "meta", "exported_at": EXPORTED.isoformat()}) + "\n")
-        for listing_id in sorted(ids):
-            fh.write(json.dumps({"t": "listing", "id": listing_id}) + "\n")
-        fh.write(json.dumps({"t": "image", "image_id": 1, "listing_id": 1}) + "\n")
-    return path
-
-
-def _fetcher(ids: Iterable[int], calls: list[str] | None = None):
-    """A stand-in for `gh run download`: writes the artifact into the directory it is handed."""
-    wanted = sorted(ids)
-
-    def fetch(export_run: str, dest: Path) -> Path:
-        if calls is not None:
-            calls.append(export_run)
-        dest.mkdir(parents=True, exist_ok=True)
-        return _cohort(dest, wanted)
-    return fetch
-
-
-def _refuse(export_run: str, dest: Path) -> Path:
-    raise SystemExit("GH_TOKEN (or GITHUB_TOKEN) must be set to download the export artifact")
-
-
-def _with_export(db: FakePg, *, started: datetime = EXPORTED,
-                 finished: datetime | None = None) -> None:
-    """The batch pass names its export, and the export left its own ledger row."""
-    db.score_runs[BATCH] = {"settings": {}, "model_version": MODEL, "export_run": EXPORT_RUN,
-                            "finished_at": NOW}
-    db.ledger_runs[int(EXPORT_RUN)] = {"started_at": started,
-                                       "finished_at": finished or started + timedelta(minutes=9)}
-
-
-def _run(db: FakePg, tmp_path: Path, fetch=_refuse, **args: str) -> dict:
-    out = tmp_path / "out"
-    return run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH, **args}, out,
-                           fetch_cohort=fetch)
+def _run(db: FakePg, tmp_path: Path, *, cohort: Iterable[int] | None = None,
+         exported: datetime = EXPORTED, settings: Mapping[str, Any] | None = None) -> dict:
+    run = write_run(db, tmp_path, cohort=cohort, exported=exported, settings=settings)
+    return run_equivalence(lambda: db, {"generation": LIVE, "run": str(run)}, tmp_path / "out")
 
 
 # ------------------------------------------------------------------ the hold (E908, E918)
@@ -310,71 +273,26 @@ def test_an_advert_the_export_never_had_is_an_arrival_by_the_artifact(tmp_path) 
     clock says why."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=7),
                         resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
-    calls: list[str] = []
 
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4], calls))
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
-    assert calls == [EXPORT_RUN]
     assert out["pairs"]["causes_by_side"]["live"] == {"arrival_after_export": 1}
     assert out["arrivals"]["by_clock"] == {"resolved_at": 1}
-    assert out["arrivals"]["cohort"] == {"source": f"export_run:{EXPORT_RUN}", "listings": 4,
-                                         "scope_absent": 1, "error": None, "skipped": None}
+    assert out["arrivals"]["cohort"] == {"listings": 4, "scope_absent": 1}
+    assert out["arrivals"]["cut"] == EXPORTED.isoformat()
     assert out["verdict"]["ok"] is True
 
 
-def test_the_artifact_is_not_fetched_when_nothing_could_be_an_arrival(tmp_path) -> None:
-    """Every listing the comparison asks about is in the batch store, so none can be an
-    arrival and the cohort is not pulled to say so."""
-    db = _db()
-    _with_export(db)
-    db.pairs[(LIVE, 1, 2)] = _held()
-    db.pairs[(BATCH, 1, 2)] = _pair(certificate=None, decision="model")
-    _incomplete(db, 2, age=timedelta(hours=2))
-    calls: list[str] = []
-
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4], calls))
-
-    assert calls == []
-    assert out["arrivals"]["cohort"]["skipped"] == (
-        "every listing the comparison asks about is in the batch store")
-    assert out["verdict"]["ok"] is True
-
-
-def test_the_artifact_is_downloaded_outside_the_report_directory(tmp_path) -> None:
-    """The lane uploads `out/` whole, and a 280 MB cohort is not a report."""
-    db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=7),
-                        resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
-
-    _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4]))
-
-    assert sorted(p.name for p in (tmp_path / "out").rglob("*")) == [EQUIVALENCE_FILE]
-
-
-def test_the_cut_is_the_export_s_START_from_its_own_ledger_row(tmp_path) -> None:
-    """The dispatch typed an hour too early; the export's ledger row says when it read its
-    blocks. A listing first seen between the two was in the cohort, and is not excused."""
+def test_the_cut_is_the_artifact_s_own_exported_at(tmp_path) -> None:
+    """A listing first seen and located before the run's cohort was exported was in scope at
+    the cut: its absence is not an arrival, whatever the clock says."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=30),
                         resolved=EXPORTED - timedelta(minutes=29))
-    _with_export(db, started=EXPORTED)
 
-    out = _run(db, tmp_path, exported_at=(EXPORTED - timedelta(hours=1)).isoformat())
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
-    assert out["export_window"]["cut_source"] == "export_ledger"
-    assert out["export_window"]["cut"] == EXPORTED.isoformat()
+    assert out["arrivals"]["cut"] == EXPORTED.isoformat()
     assert out["pairs"]["causes_by_side"]["live"] == {"unexplained": 1}
-
-
-def test_without_a_ledger_row_the_dispatch_s_stamp_is_the_cut(tmp_path) -> None:
-    db = _arrival_world(first_seen=EXPORTED + timedelta(hours=2),
-                        resolved=EXPORTED + timedelta(hours=2))
-
-    out = _run(db, tmp_path, exported_at="2026-09-19T12:00Z")
-
-    assert out["export_window"]["cut_source"] == "exported_at"
-    assert out["pairs"]["causes_by_side"]["live"] == {"arrival_after_export": 1}
-    assert out["arrivals"]["by_clock"] == {"first_seen_at": 1}
 
 
 def test_without_the_artifact_a_re_resolved_location_proves_nothing(tmp_path) -> None:
@@ -383,12 +301,11 @@ def test_without_the_artifact_a_re_resolved_location_proves_nothing(tmp_path) ->
     fallback is the conservative side, and the report says why it fell back."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=7),
                         resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
 
-    out = _run(db, tmp_path, fetch=_refuse)
+    out = _run(db, tmp_path)
 
     assert out["pairs"]["causes_by_side"]["live"] == {"unexplained": 1}
-    assert "GH_TOKEN" in out["arrivals"]["cohort"]["error"]
+    assert out["arrivals"]["cohort"]["listings"] is None
     assert out["verdict"]["ok"] is False
 
 
@@ -398,9 +315,8 @@ def test_a_listing_the_cohort_lacks_with_both_clocks_before_the_cut_is_not_an_ar
     export never covered, not an advert that arrived — and `scope_absent` shows its size."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(days=4),
                         resolved=EXPORTED - timedelta(days=3))
-    _with_export(db)
 
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4]))
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
     assert out["pairs"]["causes_by_side"]["live"] == {"unexplained": 1}
     assert out["arrivals"]["cohort"]["scope_absent"] == 1
@@ -412,9 +328,8 @@ def test_a_listing_the_COHORT_carries_is_never_an_arrival_however_recently_re_re
     the cohort, so a location re-written after the export says nothing about its absence."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(days=4),
                         resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
 
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4, 9]))
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4, 9])
 
     assert out["pairs"]["causes_by_side"]["live"] == {"unexplained": 1}
     assert out["arrivals"]["listings"] == 0
@@ -428,7 +343,7 @@ def test_a_listing_the_BATCH_STORE_holds_is_never_an_arrival(tmp_path) -> None:
                         resolved=EXPORTED + timedelta(hours=2))
     db.pairs[(BATCH, 3, 9)] = _pair(score=0.05, zone="reject", certificate=None)
 
-    out = _run(db, tmp_path, exported_at=EXPORTED.isoformat())
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
     assert out["pairs"]["causes_by_side"]["live"]["unexplained"] == 1
     assert "arrival_after_export" not in out["pairs"]["causes_by_side"]["live"]
@@ -454,12 +369,13 @@ def test_arrival_of_directly() -> None:
         == "first_seen_at"
 
 
-def test_cohort_listing_ids_stops_at_the_first_image(tmp_path) -> None:
-    path = _cohort(tmp_path, [5, 7])
+def test_cohort_of_stops_at_the_first_image(tmp_path) -> None:
+    db = _db()
+    path = write_run(db, tmp_path, cohort=[5, 7]) / "artifact" / "cohort.jsonl.gz"
     with gzip.open(path, "at", encoding="utf-8") as fh:
         fh.write(json.dumps({"t": "listing", "id": 99}) + "\n")
 
-    assert cohort_listing_ids(path) == {5, 7}
+    assert cohort_of(path) == ({5, 7}, EXPORTED)
 
 
 # ------------------------------------------------------------------ components (E918)
@@ -471,7 +387,6 @@ def test_a_live_group_whose_extra_member_ARRIVED_is_an_arrival(tmp_path) -> None
     arrival — the group is explained, and not filed under `upstream_pair`."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=7),
                         resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
     for key in ((1, 2), (1, 3), (2, 3)):
         db.pairs[(LIVE, *key)] = _pair()
         db.pairs[(BATCH, *key)] = _pair()
@@ -480,7 +395,7 @@ def test_a_live_group_whose_extra_member_ARRIVED_is_an_arrival(tmp_path) -> None
     db.cluster_members.update({(LIVE, 1, i) for i in (1, 2, 3, 9)})
     db.cluster_members.update({(BATCH, 1, i) for i in (1, 2, 3)})
 
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4]))
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
     assert out["clusters"]["component_causes"] == {"arrival": 1}
     assert out["clusters"]["component_examples"][0]["arrived"] == [9]
@@ -504,13 +419,12 @@ def test_a_group_with_an_arrival_AND_another_moved_edge_stays_upstream(tmp_path)
     """An arrival explains the edges it touches and nothing else."""
     db = _arrival_world(first_seen=EXPORTED - timedelta(minutes=7),
                         resolved=EXPORTED + timedelta(minutes=14))
-    _with_export(db)
     db.pairs[(BATCH, 2, 3)] = _pair()
     db.pairs[(LIVE, 2, 3)] = _pair(zone="band", decision="band", certificate=None)
     db.cluster_members.update({(LIVE, 1, 1), (LIVE, 1, 2), (LIVE, 1, 9)})
     db.cluster_members.update({(BATCH, 1, 1), (BATCH, 1, 2), (BATCH, 1, 3)})
 
-    out = _run(db, tmp_path, fetch=_fetcher([1, 2, 3, 4]))
+    out = _run(db, tmp_path, cohort=[1, 2, 3, 4])
 
     assert out["clusters"]["component_causes"] == {"upstream_pair": 1}
 
@@ -524,8 +438,7 @@ def _replay_world(g1: dict[str, Any], *, resolved_after_cut: bool = True) -> Fak
     What the report carries is used as it stands: every pair's zone, certificate, decision and
     families, which side held it, and the one arrived group's membership and edges. What it
     does not carry is supplied, and each supply is the one the report forces:
-      * the scores are the ones the fixture's vectors imply — E121 re-scores every differing row
-        — and both sides carry the same one, as every stored example does (`moved_features` is
+      * both sides carry the same score, as every stored example does (`moved_features` is
         empty on all eight);
       * a held pair holds what the batch decided (that is what `evidence.held_*` would say for a
         merge the lane took and waits on) with one endpoint's gallery incomplete, decided hours
@@ -534,8 +447,8 @@ def _replay_world(g1: dict[str, Any], *, resolved_after_cut: bool = True) -> Fak
         with 12:38 and passed over them, so it cannot have been later) and their location was
         written after the export read its blocks — the one reason a listing that existed can be
         absent from a block cohort. `resolved_after_cut=False` is the counterfactual."""
-    run_day = datetime(2026, 9, 26, tzinfo=timezone.utc)
-    export_start = run_day.replace(hour=12, minute=38, second=10)
+    run_day = G1_EXPORT.replace(hour=0, minute=0, second=0)
+    export_start = G1_EXPORT
     now = run_day.replace(hour=15, minute=52)
     arrived = {19054614, 19054616, 19055674}
     db = FakePg(now=now)
@@ -544,11 +457,6 @@ def _replay_world(g1: dict[str, Any], *, resolved_after_cut: bool = True) -> Fak
                             "settings": {"store_floor": 0.02, "live_window_from_sighting": True},
                             "model_version": MODEL}
     db.settings[scope_setting_key(LIVE)] = [{"grain": "obec", "code": 563510}]
-    db.score_runs[BATCH] = {"settings": {"live_window_from_sighting": True},
-                            "model_version": MODEL, "export_run": EXPORT_RUN,
-                            "finished_at": run_day.replace(hour=13, minute=20)}
-    db.ledger_runs[int(EXPORT_RUN)] = {"started_at": export_start,
-                                       "finished_at": run_day.replace(hour=12, minute=47)}
     vector = _feats(tfidf_cos=0.9)
 
     def _row(side: dict[str, Any], **kw: Any) -> dict:
@@ -635,8 +543,8 @@ def test_every_stored_g1_live_case_now_carries_a_cause(tmp_path) -> None:
     for group in _groups(held):
         db.cluster_members.update({(BATCH, min(group), i) for i in group})
 
-    out = _run(db, tmp_path, fetch=_fetcher(batch_ids | {18403171, 18889054}),
-               exported_at=g1["exported_at_arg"])
+    out = _run(db, tmp_path, cohort=batch_ids | {18403171, 18889054}, exported=G1_EXPORT,
+               settings={"live_window_from_sighting": True})
 
     pairs = out["pairs"]
     assert pairs["shared_causes"] == {EVIDENCE_HOLD: 8}
@@ -646,7 +554,6 @@ def test_every_stored_g1_live_case_now_carries_a_cause(tmp_path) -> None:
     assert pairs["evidence_hold"]["oldest_h"] == pytest.approx(3.0)
     assert out["arrivals"]["listings"] == 3
     assert out["arrivals"]["by_clock"] == {"resolved_at": 3}
-    assert out["export_window"]["cut_source"] == "export_ledger"
     assert out["clusters"]["component_causes"] == {"arrival": 1, EVIDENCE_HOLD: 6}
     assert out["verdict"]["ok"] is True, out["verdict"]["reasons"]
     assert out["verdict"]["notes"][0].startswith("8 shared pairs are HELD")
@@ -661,8 +568,8 @@ def test_the_g1_live_arrivals_stay_unexplained_when_the_facts_do_not_support_the
     db = _replay_world(g1, resolved_after_cut=False)
     batch_ids = {i for (g, lo, hi) in db.pairs if g == BATCH for i in (lo, hi)}
 
-    out = _run(db, tmp_path, fetch=_fetcher(batch_ids | {18403171, 18889054}),
-               exported_at=g1["exported_at_arg"])
+    out = _run(db, tmp_path, cohort=batch_ids | {18403171, 18889054}, exported=G1_EXPORT,
+               settings={"live_window_from_sighting": True})
 
     assert out["pairs"]["shared_causes"] == {EVIDENCE_HOLD: 8}
     assert out["pairs"]["causes_by_side"]["live"] == {"unexplained": 8}
