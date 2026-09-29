@@ -75,11 +75,6 @@
 "stratum": "g2:control_adv_large_trial"
 },
 {
-"lo": 270136,
-"hi": 12302470,
-"stratum": "g2:control_adv_large_trial"
-},
-{
 "lo": 323232,
 "hi": 485993,
 "stratum": "g2:control_adv_large_trial"
@@ -87,6 +82,11 @@
 {
 "lo": 323457,
 "hi": 10281553,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 329639,
+"hi": 18590828,
 "stratum": "g2:control_adv_large_trial"
 },
 {
@@ -150,11 +150,6 @@
 "stratum": "g2:control_adv_large_trial"
 },
 {
-"lo": 486064,
-"hi": 18699527,
-"stratum": "g2:control_adv_large_trial"
-},
-{
 "lo": 499893,
 "hi": 18744421,
 "stratum": "g2:control_adv_large_trial"
@@ -190,18 +185,8 @@
 "stratum": "g2:control_adv_large_trial"
 },
 {
-"lo": 527440,
-"hi": 12947380,
-"stratum": "g2:control_adv_large_trial"
-},
-{
 "lo": 535131,
 "hi": 13462905,
-"stratum": "g2:control_adv_large_trial"
-},
-{
-"lo": 10130088,
-"hi": 15034631,
 "stratum": "g2:control_adv_large_trial"
 },
 {
@@ -217,6 +202,11 @@
 {
 "lo": 13242077,
 "hi": 18781936,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 13659984,
+"hi": 14217487,
 "stratum": "g2:control_adv_large_trial"
 },
 {
@@ -245,6 +235,16 @@
 "stratum": "g2:control_adv_large_trial"
 },
 {
+"lo": 16557693,
+"hi": 18692593,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 17751606,
+"hi": 18627675,
+"stratum": "g2:control_adv_large_trial"
+},
+{
 "lo": 18627675,
 "hi": 18974859,
 "stratum": "g2:control_adv_large_trial"
@@ -267,6 +267,11 @@
 {
 "lo": 16439,
 "hi": 16441,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 40303,
+"hi": 18611134,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -325,6 +330,11 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 81778,
+"hi": 82563,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 82924,
 "hi": 83045,
 "stratum": "g2:control_adv_small_trial"
@@ -332,6 +342,16 @@
 {
 "lo": 83190,
 "hi": 83247,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 83416,
+"hi": 83483,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 101830,
+"hi": 266332,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -360,6 +380,16 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 209207,
+"hi": 467212,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 209238,
+"hi": 11302375,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 255363,
 "hi": 10103021,
 "stratum": "g2:control_adv_small_trial"
@@ -375,8 +405,23 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 266325,
+"hi": 18739399,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 277024,
+"hi": 464426,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 285571,
 "hi": 285578,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 315735,
+"hi": 315979,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -395,8 +440,23 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 329410,
+"hi": 18703011,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 332152,
+"hi": 508769,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 337887,
 "hi": 344058,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 341532,
+"hi": 18698511,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -420,8 +480,23 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 386243,
+"hi": 429887,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 388511,
 "hi": 18129146,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 388951,
+"hi": 18749008,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 399650,
+"hi": 18593362,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -440,8 +515,18 @@
 "stratum": "g2:control_adv_small_trial"
 },
 {
+"lo": 455692,
+"hi": 455717,
+"stratum": "g2:control_adv_small_trial"
+},
+{
 "lo": 464372,
 "hi": 13486565,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 490933,
+"hi": 492024,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -452,6 +537,11 @@
 {
 "lo": 492374,
 "hi": 492380,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 530534,
+"hi": 18486762,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -471,6 +561,11 @@
 },
 {
 "lo": 10513425,
+"hi": 10513429,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 10513425,
 "hi": 10513535,
 "stratum": "g2:control_adv_small_trial"
 },
@@ -482,6 +577,11 @@
 {
 "lo": 15131676,
 "hi": 19011176,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 15359822,
+"hi": 18903554,
 "stratum": "g2:control_adv_small_trial"
 },
 {
@@ -505,23 +605,13 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 8918,
-"hi": 539688,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 10117,
-"hi": 276571,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 15341,
 "hi": 137343,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 20066,
-"hi": 395440,
+"lo": 19101,
+"hi": 77416,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -535,13 +625,13 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 50687,
-"hi": 486260,
+"lo": 49714,
+"hi": 245963,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 54787,
-"hi": 83275,
+"lo": 50687,
+"hi": 486260,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -550,23 +640,18 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 77417,
-"hi": 395437,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 80729,
 "hi": 257267,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 80780,
-"hi": 10104550,
+"lo": 80738,
+"hi": 455692,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 83318,
-"hi": 18594587,
+"lo": 80780,
+"hi": 10104550,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -580,18 +665,8 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 101830,
-"hi": 358311,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 105737,
 "hi": 18675912,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 107301,
-"hi": 420093,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -610,33 +685,13 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 135559,
-"hi": 18193008,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 137407,
-"hi": 18796757,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 140919,
 "hi": 10953689,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 142648,
-"hi": 380552,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 142968,
 "hi": 333526,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 147738,
-"hi": 503197,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -647,6 +702,11 @@
 {
 "lo": 175821,
 "hi": 209519,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 180021,
+"hi": 445748,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -665,23 +725,18 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 257266,
-"hi": 13182114,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 265936,
 "hi": 13817364,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 269879,
-"hi": 312776,
+"lo": 273656,
+"hi": 304616,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 273656,
-"hi": 304616,
+"lo": 292271,
+"hi": 484363,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -695,28 +750,8 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 312776,
-"hi": 19006831,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 316264,
-"hi": 345800,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 327965,
 "hi": 379208,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 334852,
-"hi": 335498,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 339038,
-"hi": 13222227,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -725,23 +760,8 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 358185,
-"hi": 18869591,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 413039,
 "hi": 10508464,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 498228,
-"hi": 18987502,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 500170,
-"hi": 15364403,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -750,18 +770,23 @@
 "stratum": "g2:control_cand_trial"
 },
 {
+"lo": 531587,
+"hi": 12354773,
+"stratum": "g2:control_cand_trial"
+},
+{
 "lo": 10506079,
 "hi": 10506080,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 11645894,
-"hi": 13380591,
+"lo": 10954307,
+"hi": 10954972,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 12123552,
-"hi": 14217487,
+"lo": 11645894,
+"hi": 13380591,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -775,31 +800,6 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 13379761,
-"hi": 15827062,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 13462905,
-"hi": 15358962,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 13850605,
-"hi": 18974859,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 14048448,
-"hi": 18889089,
-"stratum": "g2:control_cand_trial"
-},
-{
-"lo": 15018408,
-"hi": 18584843,
-"stratum": "g2:control_cand_trial"
-},
-{
 "lo": 15494879,
 "hi": 18987502,
 "stratum": "g2:control_cand_trial"
@@ -810,13 +810,13 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 17751606,
-"hi": 18834734,
+"lo": 18223015,
+"hi": 18362611,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 18597093,
-"hi": 18602419,
+"lo": 18453993,
+"hi": 18607560,
 "stratum": "g2:control_cand_trial"
 },
 {
@@ -825,13 +825,13 @@
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 18744823,
-"hi": 18746446,
+"lo": 18664564,
+"hi": 18692275,
 "stratum": "g2:control_cand_trial"
 },
 {
-"lo": 18942229,
-"hi": 18988561,
+"lo": 18788298,
+"hi": 18889333,
 "stratum": "g2:control_cand_trial"
 }
 ]

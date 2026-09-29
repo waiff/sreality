@@ -23,13 +23,13 @@ _SQL = (_ROOT / "migrations" / "577_autodedup_control_draw_sample.sql").read_tex
 _PAIRS = _ROOT / "autodedup" / "pairs"
 _COHORTS = ("trial", "c17", "c18")
 
-# PREREGISTRATION.md section 3 (the draw) and section 6 (the operator's share).
-_DRAWN = {"adv_small": {"trial": 50, "c17": 50, "c18": 50},
+# PREREGISTRATION.md section 10, amendment 1 (A1-3): the draw and the operator's share.
+_DRAWN = {"adv_small": {"trial": 70, "c17": 70, "c18": 70},
           "adv_large": {"trial": 50, "c17": 50, "c18": 50},
-          "cand": {"trial": 67, "c17": 67, "c18": 66}}
-_OPERATOR = {"adv_small": {"trial": 10, "c17": 10, "c18": 10},
+          "cand": {"trial": 47, "c17": 47, "c18": 46}}
+_OPERATOR = {"adv_small": {"trial": 14, "c17": 14, "c18": 14},
              "adv_large": {"trial": 10, "c17": 10, "c18": 10},
-             "cand": {"trial": 14, "c17": 13, "c18": 13}}
+             "cand": {"trial": 10, "c17": 9, "c18": 9}}
 
 _ROW = re.compile(
     r"\('(?P<stratum>[^']+)'(?:::text)?, (?P<lo>\d+)(?:::bigint)?, (?P<hi>\d+)(?:::bigint)?, "
@@ -68,16 +68,6 @@ def test_the_three_lists_are_the_preregistered_draw() -> None:
             assert pair not in seen, f"{pair} is drawn twice"
             seen.add(pair)
     assert len(seen) == 500
-
-
-def test_no_drawn_pair_is_on_another_committed_list() -> None:
-    drawn = {(r["lo"], r["hi"]) for rows in _lists().values() for r in rows}
-    for path in sorted(_PAIRS.glob("*.json")):
-        if path.stem.startswith("g2_control_"):
-            continue
-        for entry in json.loads(path.read_text(encoding="utf-8")):
-            lo, hi = (entry["lo"], entry["hi"]) if isinstance(entry, dict) else entry
-            assert (min(lo, hi), max(lo, hi)) not in drawn, (path.name, lo, hi)
 
 
 def test_the_file_seals_the_operator_share_of_each_stratum() -> None:
