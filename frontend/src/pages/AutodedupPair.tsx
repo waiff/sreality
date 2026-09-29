@@ -122,19 +122,21 @@ export default function AutodedupPair() {
           AUTODEDUP · Pair <span className="font-mono text-lg">#{lo} · #{hi}</span>
         </h1>
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
-          Every signal the engine had on these two adverts. Recording a verdict here writes into the
-          program's own schema only — a negative verdict also makes the pair permanently
-          un-linkable, which is why it takes a second click.
+          Vše, co engine o těchto dvou inzerátech ví. Vaše odpověď se uloží jako rozhodnutí.
+          Odpověď Různé drží oba inzeráty trvale od sebe, proto ji potvrzujete druhým kliknutím.
         </p>
-        <p className="mt-1 text-[0.78rem]">
-          {/* Every ruling on either advert, with its history and the corrections (E920). */}
-          <Link
-            to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
-            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-          >
-            Všechna rozhodnutí o inzerátu #{lo}
-          </Link>
-        </p>
+        {/* The rulings page is not blind: on a hidden sample pair its row would show the engine. */}
+        {!engineHidden && (
+          <p className="mt-1 text-[0.78rem]">
+            {/* Every ruling on either advert, with its history and the corrections (E920). */}
+            <Link
+              to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
+              className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+            >
+              Všechna rozhodnutí o inzerátu #{lo}
+            </Link>
+          </p>
+        )}
       </header>
 
       {/* An evidence page reached from a queue of a superseded pass is itself a
@@ -246,7 +248,7 @@ export default function AutodedupPair() {
               <h2 className={EYEBROW}>Features</h2>
               {data.features.length === 0 ? (
                 <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                  No feature was stored for this pair.
+                  Engine k této dvojici neuložil žádné údaje.
                 </p>
               ) : (
                 <div className="mt-2 overflow-x-auto">

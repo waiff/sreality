@@ -289,10 +289,14 @@ describe('<AutodedupPair>', () => {
     /* "Never scored" is the engine's view too: it tells which half of the draw
      * a pair came from. */
     expect(screen.queryByText(/Engine tuto dvojici neohodnotil/)).toBeNull();
+    /* The rulings page is not blind, and after a "Nevím" it lists this pair with the
+     * engine's view: the link to it stays away while the engine is hidden. */
+    expect(screen.queryByText(/Všechna rozhodnutí o inzerátu/)).toBeNull();
     unmount();
     renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
     expect(await screen.findByText(/Engine tuto dvojici neohodnotil/)).toBeInTheDocument();
     expect(screen.queryByText(/co o dvojici ví engine/)).toBeNull();
+    expect(screen.getByText(/Všechna rozhodnutí o inzerátu/)).toBeInTheDocument();
   });
 
   it('shows the judge with no blind parameter at all', async () => {
