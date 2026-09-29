@@ -1873,13 +1873,14 @@ def test_latency_is_the_call_not_the_backoff(lane, tmp_path: Path) -> None:
 def test_the_experimental_arm_never_becomes_a_pairs_headline_verdict() -> None:
     """Migration 530 admits a fourth tier into a table two consumers read WITHOUT filtering
     tier, and the oss arm answers exactly the pairs gold already answered — on `created_at`
-    alone the rented 7B would replace ground truth as the review queue's headline and count
-    itself into `n_judged_edges`. Authority, not recency."""
+    alone the rented 7B would replace ground truth as a queue's headline and count itself into
+    `n_judged_edges`. Authority, not recency, and `oss` is not the judge at all: the one
+    headline (`_judge_best`, the residual queue and the Judge page) reads gold, vision, text."""
     from autodedup import score_sql, ui_sql
 
-    headline = ui_sql.RESIDUAL_SQL
-    assert "WHEN 'gold' THEN 0" in headline
-    assert headline.index("WHEN 'gold' THEN 0") < headline.index("ELSE 3 END")
+    for headline in (ui_sql.RESIDUAL_SQL, ui_sql.JUDGEMENTS_SQL):
+        assert "AND jj.tier IN ('gold', 'vision', 'text')" in headline
+        assert "CASE jj.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in headline
     assert "tier <> 'oss'" in score_sql.JUDGED_EDGES_SQL
 
 
