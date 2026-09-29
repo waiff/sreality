@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -334,3 +335,102 @@ def test_the_route_runs_the_judge_statements_without_jit(cur):
                 {**_BASE, **_NO_CURSOR, "limit": 26})
     plan = "\n".join(row[0] for row in cur.fetchall())
     assert "JIT:" not in plan
+
+
+# A generation far larger than the population, as at the country-wide roll-out: the engine's view
+# must read it for the judged adverts only (the planner probes its indexes), never all of it.
+BIG = "g-judge-scale"
+BIG_PAIRS, BIG_FPS, BIG_MEMBERS = 40_000, 20_000, 10_000
+_GENERATION_TABLES = ("pairs", "rt_fp", "cluster_members")
+
+
+def _rows_read(cur: Any, sql: str, params: dict[str, Any]) -> int:
+    """Rows the plan's scans of the generation's three tables returned, over every loop."""
+    cur.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + sql, params)
+    raw = cur.fetchone()[0]
+    plan = raw if isinstance(raw, list) else json.loads(raw)
+    total, stack = 0, [plan[0]["Plan"]]
+    while stack:
+        node = stack.pop()
+        if node.get("Relation Name") in _GENERATION_TABLES:
+            total += int(node["Actual Rows"]) * int(node["Actual Loops"])
+        stack.extend(node.get("Plans", []))
+    return total
+
+
+def _engine_reference(cur: Any, ids: list[int]) -> dict[int, int | None]:
+    """The generation-wide definition (the proposed splits' own CTE), read for these adverts."""
+    grouped = usql.PROPOSED_SPLIT_ADVERTS_SQL.split(", touched AS (", 1)[0]
+    cur.execute(grouped + " SELECT g.listing_id, g.cluster_key FROM grouped g"
+                " WHERE g.listing_id = ANY(%(ids)s)", {"generation": BIG, "ids": ids})
+    return dict(cur.fetchall())
+
+
+def test_the_engine_view_reads_the_generation_for_the_judged_adverts_only(cur):
+    # The population is this test's alone (rolled back), so the planner sees a dozen adverts
+    # against a generation of 70,000 rows, as it would see thousands against millions.
+    cur.execute("DELETE FROM autodedup.judgements")
+    cur.execute("DELETE FROM autodedup.eval_samples")
+    cur.execute("INSERT INTO autodedup.pairs (generation, listing_lo, listing_hi, probes)"
+                " SELECT %s, 9700000000 + 2 * i, 9700000001 + 2 * i, ARRAY['ci']"
+                " FROM generate_series(0, %s - 1) AS i", (BIG, BIG_PAIRS))
+    cur.execute("INSERT INTO autodedup.rt_fp (generation, listing_id)"
+                " SELECT %s, 9710000000 + i FROM generate_series(0, %s - 1) AS i",
+                (BIG, BIG_FPS))
+    cur.execute("INSERT INTO autodedup.cluster_members (generation, cluster_key, listing_id)"
+                " SELECT %s, i / 2, 9720000000 + i FROM generate_series(0, %s - 1) AS i",
+                (BIG, BIG_MEMBERS))
+    together, split, stored, printed, unseen, half, twice, twice_apart = (
+        _pair() for _ in range(8))
+    for pair in (together, split, stored, printed, unseen, half, twice, twice_apart):
+        _mark(cur, pair, "vision", "different_property")
+
+    def member(key: int, listing_id: int) -> None:
+        cur.execute("INSERT INTO autodedup.cluster_members (generation, cluster_key, listing_id)"
+                    " VALUES (%s, %s, %s)", (BIG, key, listing_id))
+
+    for listing_id in together:
+        member(9_000_001, listing_id)
+    member(9_000_002, split[0])
+    member(9_000_003, split[1])
+    # One advert a stored pair's LOW side only, the other a HIGH side only.
+    cur.execute("INSERT INTO autodedup.pairs (generation, listing_lo, listing_hi, probes) VALUES"
+                " (%s, %s, 9990000001, ARRAY['ci']), (%s, 9600000001, %s, ARRAY['ci'])",
+                (BIG, stored[0], BIG, stored[1]))
+    for listing_id in (*printed, half[0]):
+        cur.execute("INSERT INTO autodedup.rt_fp (generation, listing_id) VALUES (%s, %s)",
+                    (BIG, listing_id))
+    # In two groups (never expected): the larger key is the one it holds.
+    member(9_000_010, twice[0])
+    member(9_000_011, twice[0])
+    member(9_000_011, twice[1])
+    member(9_000_020, twice_apart[0])
+    member(9_000_021, twice_apart[0])
+    member(9_000_020, twice_apart[1])
+    cur.execute("ANALYZE autodedup.pairs, autodedup.rt_fp, autodedup.cluster_members,"
+                " autodedup.judgements, autodedup.eval_samples")
+
+    rows = _by_pair(cur, generation=BIG)
+    expected = {together: "together", split: "apart", stored: "apart", printed: "apart",
+                unseen: "unseen", half: "unseen", twice: "together", twice_apart: "apart"}
+    assert {pair: rows[pair]["engine_view"] for pair in expected} == expected
+    # The same answer as the generation-wide definition, advert by advert.
+    ids = [listing_id for pair in expected for listing_id in pair]
+    ref = _engine_reference(cur, ids)
+    for lo, hi in expected:
+        view = rows[(lo, hi)]["engine_view"]
+        if lo in ref and hi in ref and ref[lo] is not None and ref[lo] == ref[hi]:
+            assert view == "together"
+        elif lo in ref and hi in ref:
+            assert view == "apart"
+        else:
+            assert view == "unseen"
+
+    # The plan reads a few rows per judged advert, and the generation-wide read all of them.
+    page = _rows_read(cur, usql.JUDGEMENTS_SQL,
+                      {**_BASE, **_NO_CURSOR, "generation": BIG, "limit": 26})
+    counts = _rows_read(cur, usql.JUDGEMENTS_FACETS_SQL, {**_BASE, "generation": BIG})
+    assert page <= 4 * len(ids) + 26 and counts <= 4 * len(ids), (page, counts)
+    whole = _rows_read(cur, usql.PROPOSED_SPLIT_ADVERTS_SQL,
+                       {"generation": BIG, "property_id": None})
+    assert whole >= BIG_PAIRS + BIG_FPS + BIG_MEMBERS, whole

@@ -1721,10 +1721,8 @@ WITH s AS (
 # decides which are proposals), with the group it holds (NULL = none) and whether the generation
 # SAW it (a group member, a scored pair's side, or — for the live stream — a fingerprint the lane
 # holds); with `property_id`, that property only.
-# THE ADVERTS A GENERATION READ, each with the group it holds (NULL = none), spelled once: a group
-# member, a stored pair's side, or a fingerprint the live stream holds. The generation's own rows
-# are read once, never probed per advert (the proposed splits, the Judge page).
-_ENGINE_ADVERTS = """grouped AS (
+PROPOSED_SPLIT_ADVERTS_SQL = """
+WITH grouped AS (
     SELECT s.listing_id, max(s.cluster_key) AS cluster_key
     FROM (
         SELECT m.listing_id, m.cluster_key FROM autodedup.cluster_members m
@@ -1738,13 +1736,7 @@ _ENGINE_ADVERTS = """grouped AS (
          WHERE f.generation = %(generation)s::text
     ) s
     GROUP BY s.listing_id
-)"""
-
-PROPOSED_SPLIT_ADVERTS_SQL = (
-    """
-WITH """
-    + _ENGINE_ADVERTS
-    + """, touched AS (
+), touched AS (
     SELECT DISTINCT l.property_id FROM grouped g JOIN public.listings l ON l.id = g.listing_id
      WHERE %(property_id)s::bigint IS NULL OR l.property_id = %(property_id)s::bigint
 )
@@ -1756,7 +1748,6 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
   LEFT JOIN grouped g ON g.listing_id = l.id
  ORDER BY l.property_id, l.id
 """
-)
 
 # ------------------------------------------------------------------- the rulings page (E920)
 #
@@ -2284,11 +2275,11 @@ SELECT t.grain, t.code, t.name, t.n
 # pair, each capped at `sample_size` by its own order, and the one blind-safe page order are
 # PROGRAM.md E922; the statements below are that rule, spelled once.
 #
-# THE ORDER IS BUILT FROM THE AUTODEDUP STORE ALONE, each table read ONCE and joined by hash: the
-# marks, the operator's words, the sealed draws and the adverts the generation read. A row's town,
-# its stored pair and its headline's evidence are read for the page's rows only, after the LIMIT:
-# on production a probe into a large table is a disk read, and one per judged pair cost 10 s
-# (2026-09-29, 6,721 pairs).
+# THE ORDER IS BUILT FROM THE AUTODEDUP STORE ALONE: the marks, the operator's words and the
+# sealed draws, each read once and joined by hash, and the generation read for the population's
+# adverts only. A row's town, its stored pair and its headline's evidence are read for the page's
+# rows only, after the LIMIT: on production a probe into a large table is a disk read, and one
+# per judged pair cost 10 s (2026-09-29, 6,721 pairs).
 
 # The pairs of the sealed draws, each ranked in its draw's seeded order.
 _SEALED = """sealed AS (
@@ -2337,6 +2328,39 @@ _JUDGED_POPULATION = (
 )"""
 )
 
+# THE ENGINE'S VIEW OF THE POPULATION'S ADVERTS: each advert the generation READ -- a group
+# member, a fingerprint the live stream holds, a stored pair's side (the proposed splits' four
+# sources) -- with the group it holds (NULL = none; in two groups, never expected, the larger
+# key). Driven by the population's own adverts, each source joined on its (generation, advert)
+# index, so the read grows with the judged adverts and never with the generation: the planner
+# hashes a small generation and probes a large one. Read generation-wide, it cost 745 ms of cold
+# disk at 17,378 pairs (2026-09-29) and would take minutes at the country-wide roll-out.
+_ENGINE_VIEW = """adverts AS (
+    SELECT r.listing_lo AS listing_id FROM population r
+    UNION
+    SELECT r.listing_hi FROM population r
+), grouped AS (
+    SELECT s.listing_id, max(s.cluster_key) AS cluster_key
+    FROM (
+        SELECT a.listing_id, m.cluster_key FROM adverts a
+          JOIN autodedup.cluster_members m
+            ON m.generation = %(generation)s::text AND m.listing_id = a.listing_id
+        UNION ALL
+        SELECT a.listing_id, NULL::bigint FROM adverts a
+         WHERE EXISTS (SELECT 1 FROM autodedup.rt_fp f
+                        WHERE f.generation = %(generation)s::text AND f.listing_id = a.listing_id)
+        UNION ALL
+        SELECT a.listing_id, NULL::bigint FROM adverts a
+         WHERE EXISTS (SELECT 1 FROM autodedup.pairs q
+                        WHERE q.generation = %(generation)s::text AND q.listing_lo = a.listing_id)
+        UNION ALL
+        SELECT a.listing_id, NULL::bigint FROM adverts a
+         WHERE EXISTS (SELECT 1 FROM autodedup.pairs q
+                        WHERE q.generation = %(generation)s::text AND q.listing_hi = a.listing_id)
+    ) s
+    GROUP BY s.listing_id
+)"""
+
 # The Judge statements are one wide CTE chain whose estimated cost crosses `jit_above_cost` at any
 # size, and JIT then compiles ~900 functions to run a plan that takes milliseconds: 2.9 s against
 # 1 ms in CI's replay. The routes that read them run `SET LOCAL` in their own transaction (the
@@ -2369,7 +2393,7 @@ _JUDGEMENTS_FROM = (
     + ", "
     + _JUDGED_POPULATION
     + ", "
-    + _ENGINE_ADVERTS
+    + _ENGINE_VIEW
     + """, w AS (
     SELECT r.listing_lo, r.listing_hi, r.draw_rank, r.judge_tier, r.judge_version,
            r.judge_verdict, r.judge_confidence, r.tiers_split,
