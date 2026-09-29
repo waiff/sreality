@@ -2,8 +2,9 @@
 --
 -- The list (a label round's contested set, a sealed control draw) lived only in a pair file on
 -- a branch and a 30-day Actions artifact; `judge_version` names the prompt, not the round. The
--- Judge page filters on it ("Seznam", PROGRAM.md E922). The judge lane is the only writer: the
--- list's stamp on each pair, and on older marks when the list is dispatched again (cached, free).
+-- column is training provenance: no page reads it (PROGRAM.md E922). The judge lane is the only
+-- writer: the list's stamp on each pair, and on older marks when the list is dispatched again
+-- (cached, free).
 --
 -- ADDITIVE: a nullable column is a catalog-only change. Apply it BEFORE the code merges — the
 -- lane's upsert names the column.
