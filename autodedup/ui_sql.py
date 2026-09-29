@@ -2310,26 +2310,10 @@ WITH named AS (
 
 # ------------------------------------------------------------------------ the Judge page
 #
-# Every pair the judge marked (tiers gold, vision, text — `oss` is not the judge), and every pair
-# of a sealed random draw (`autodedup.eval_samples`, migration 528) whether or not the judge has
-# read it yet, one row per pair (`GET /autodedup/judgements`, the page `/autodedup/judge`). The
-# judge's marks train models and decide nothing; the operator's word on the pair is the exam.
-#
-# EACH ROW CARRIES FOUR REASONS TO BE READ, every one a rule over stored columns and each capped
-# at `sample_size` (100) by its own "most informative first" order:
-#   * sample   — the first 100 of each sealed draw in the seeded order (md5(lo:hi || seed));
-#   * operator — the operator's standing binary word is not the judge's (confidence first);
-#   * unsure   — text and vision said different binary words, or gold was asked (it runs only
-#                when needed), or the headline is `insufficient_evidence` (a split gold vote
-#                first, by its confidence ascending);
-#   * engine   — not unsure, the headline confidence at least `judge_sure`, and the judge's word
-#                contradicts how the generation groups the two adverts (the engine holding
-#                together what the judge calls different first: a false merge is the costly
-#                error).
-# `suggested` is any of the four. ONE ORDER serves every filter, blind or not: unruled first,
-# then the sample block, then the other suggestions, then the rest — and inside a block the
-# seeded hash, never the reason, so the position of a row cannot tell the operator what the
-# judge said about it.
+# Every pair the judge marked (gold, vision, text) and every pair of a sealed random draw
+# (`eval_samples`), one row per pair (`GET /autodedup/judgements`). The four reasons to read a
+# pair, each capped at `sample_size` by its own order, and the one blind-safe page order are
+# PROGRAM.md E922; the statements below are that rule, spelled once.
 
 _JUDGED_POPULATION = """
 marks AS (
@@ -2361,8 +2345,8 @@ marks AS (
       FULL JOIN sealed s ON s.listing_lo = g.listing_lo AND s.listing_hi = g.listing_hi
 )"""
 
-# Binary words: the judge's (`none` = not read yet, `abstain` = insufficient evidence) and the
-# operator's standing one (NULL = no standing word: none, or a withdrawal / "Nevím").
+# Binary words: the judge's (`none` = not read yet) and the operator's standing one (NULL = none,
+# or a withdrawal / "Nevím").
 _JUDGE_WORD = """CASE WHEN jb.verdict IS NULL THEN 'none'
                 WHEN jb.verdict = 'same_property' THEN 'same'
                 WHEN jb.verdict = 'insufficient_evidence' THEN 'abstain'
@@ -2467,8 +2451,7 @@ _JUDGEMENTS_FROM = (
 """
 )
 
-# The filter arms, shared by the page and its counts. `reason` is never NULL here: the route
-# resolves a missing one (to `suggested` while that set is not empty, else `all`) and says so.
+# Shared by the page and its counts. `reason` is never NULL: the route resolves a missing one.
 _JUDGEMENTS_WHERE = """
 WHERE (%(reason)s::text = 'all'
        OR (%(reason)s::text = 'suggested' AND f.is_suggested)
@@ -2527,15 +2510,9 @@ JUDGED_PAIR_COLUMNS: tuple[str, ...] = (
 
 JUDGEMENTS_SQL = (
     _JUDGEMENTS_FROM
+    + "\nSELECT "
+    + ", ".join(f"f.{name}" for name in JUDGED_PAIR_COLUMNS)
     + """
-SELECT f.listing_lo, f.listing_hi, f.stratum, f.ruled, f.operator_ruling_id,
-       f.operator_verdict, f.operator_source, f.operator_note, f.operator_decided_by,
-       f.operator_decided_at, f.judge_tier, f.judge_verdict, f.judge_confidence, f.judge_model,
-       f.judge_key_evidence, f.judge_contradicting_evidence, f.tiers_split, f.is_sample,
-       f.is_operator, f.is_engine, f.is_unsure, f.primary_reason, f.operator_agreement,
-       f.engine_agreement, f.engine_view, f.together_now, f.obec_kod, f.obec_name,
-       f.cast_obce_kod, f.cast_obce_name, f.zone, f.score, f.decision, f.guard_veto, f.block,
-       f.sort_hash
   FROM f
 """
     + _JUDGEMENTS_WHERE
@@ -2548,41 +2525,25 @@ LIMIT %(limit)s::int
 """
 )
 
-# The counters beside each filter, under the CURRENT filters (the rulings page's grammar): the
-# total and one count per value of six single-valued facets in one GROUPING SETS pass, and the
-# four reasons (a row may carry several) counted apart.
+# The counters beside each filter, under the CURRENT filters (the rulings page's grammar): each
+# row unpivoted into (facet, value) — a row may carry several reasons — plus the total.
 JUDGEMENTS_FACETS_SQL = (
     _JUDGEMENTS_FROM
     + """
-SELECT CASE WHEN grouping(f.judge_word) = 0 THEN 'judge'
-            WHEN grouping(f.tier_word) = 0 THEN 'tier'
-            WHEN grouping(f.stratum) = 0 THEN 'stratum'
-            WHEN grouping(f.ruled_word) = 0 THEN 'ruled'
-            WHEN grouping(f.operator_agreement) = 0 THEN 'operator'
-            WHEN grouping(f.engine_agreement) = 0 THEN 'engine'
-            ELSE 'total' END AS facet,
-       CASE WHEN grouping(f.judge_word) = 0 THEN f.judge_word
-            WHEN grouping(f.tier_word) = 0 THEN f.tier_word
-            WHEN grouping(f.stratum) = 0 THEN f.stratum
-            WHEN grouping(f.ruled_word) = 0 THEN f.ruled_word
-            WHEN grouping(f.operator_agreement) = 0 THEN f.operator_agreement
-            WHEN grouping(f.engine_agreement) = 0 THEN f.engine_agreement END AS value,
-       count(*) AS n
+SELECT x.facet, x.value, count(*) AS n
   FROM f
+ CROSS JOIN LATERAL (VALUES
+       ('total', NULL), ('judge', f.judge_word), ('tier', f.tier_word), ('stratum', f.stratum),
+       ('ruled', f.ruled_word), ('operator', f.operator_agreement), ('engine', f.engine_agreement),
+       ('reason', CASE WHEN f.is_suggested THEN 'suggested' END),
+       ('reason', CASE WHEN f.is_sample THEN 'sample' END),
+       ('reason', CASE WHEN f.is_operator THEN 'operator' END),
+       ('reason', CASE WHEN f.is_engine THEN 'engine' END),
+       ('reason', CASE WHEN f.is_unsure THEN 'unsure' END)) AS x(facet, value)
 """
     + _JUDGEMENTS_WHERE
-    + """GROUP BY GROUPING SETS ((), (f.judge_word), (f.tier_word), (f.stratum), (f.ruled_word),
-                        (f.operator_agreement), (f.engine_agreement))
-UNION ALL
-SELECT 'reason', x.reason, count(*)
-  FROM f
- CROSS JOIN LATERAL (VALUES ('suggested', f.is_suggested), ('sample', f.is_sample),
-                            ('operator', f.is_operator), ('engine', f.is_engine),
-                            ('unsure', f.is_unsure)) AS x(reason, hit)
-"""
-    + _JUDGEMENTS_WHERE
-    + """  AND x.hit
- GROUP BY x.reason
+    + """  AND (x.facet = 'total' OR x.value IS NOT NULL)
+ GROUP BY x.facet, x.value
 """
 )
 
@@ -2596,36 +2557,23 @@ JUDGED_TOWNS_SQL = (
     + _TOWNS_TAIL
 )
 
-# The strip's two counters for the Judge page, at PAIR grain: the whole population, and the
-# first `sample_size` of each sealed draw (the same `sealed` text the page's sample reason reads).
-# Reviewed = any word of the operator's on the pair — the rulings page's `rulings`, one
-# definition with the page's own "ruled".
-_JUDGE_COUNT_TAIL = (
-    _VALIDATION_COUNTS
-    + """FROM s
+# The strip's two counters at PAIR grain: the first `sample_size` of each sealed draw, and the
+# whole population. Reviewed = any word of the operator's (`rulings`), as the page's "ruled".
+def _judge_counts(where: str) -> str:
+    return (
+        _OPERATOR_WORDS
+        + ", "
+        + _JUDGED_POPULATION
+        + f""", s AS (
+    SELECT r.listing_lo, r.listing_hi FROM population r {where}
+)
+"""
+        + _VALIDATION_COUNTS
+        + """FROM s
 LEFT JOIN rulings v ON v.listing_lo = s.listing_lo AND v.listing_hi = s.listing_hi
 """
-)
+    )
 
-VALIDATION_JUDGE_SAMPLE_SQL = (
-    _OPERATOR_WORDS
-    + ", "
-    + _JUDGED_POPULATION
-    + """, s AS (
-    SELECT r.listing_lo, r.listing_hi FROM population r
-     WHERE r.draw_rank <= %(sample_size)s::int
-)
-"""
-    + _JUDGE_COUNT_TAIL
-)
 
-VALIDATION_JUDGE_TOTAL_SQL = (
-    _OPERATOR_WORDS
-    + ", "
-    + _JUDGED_POPULATION
-    + """, s AS (
-    SELECT r.listing_lo, r.listing_hi FROM population r
-)
-"""
-    + _JUDGE_COUNT_TAIL
-)
+VALIDATION_JUDGE_SAMPLE_SQL = _judge_counts("WHERE r.draw_rank <= %(sample_size)s::int")
+VALIDATION_JUDGE_TOTAL_SQL = _judge_counts("")

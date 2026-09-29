@@ -2936,9 +2936,12 @@ def _ruling_filters(
     }
 
 
-def _facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]]:
+def _facets(rows: list[tuple[Any, ...]],
+            names: tuple[str, ...] = ("source", "status", "verdict", "engine"),
+            ) -> tuple[int, dict[str, dict[str, int]]]:
+    """`(facet, value, n)` rows -> the total and one count per value of each named facet."""
     total = 0
-    facets: dict[str, dict[str, int]] = {"source": {}, "status": {}, "verdict": {}, "engine": {}}
+    facets: dict[str, dict[str, int]] = {name: {} for name in names}
     for row in _rows(usql.RULING_FACET_COLUMNS, rows):
         if row["facet"] == "total":
             total = int(row["n"] or 0)
@@ -2947,15 +2950,20 @@ def _facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]
     return total, facets
 
 
+def _engine_reading(row: dict[str, Any]) -> dict[str, Any]:
+    """The stored pair's certificate and "why not merged", read off its decision (None when the
+    generation stored no row for the pair)."""
+    return {
+        "certificate": _certificate(row["decision"]),
+        "why_not_merged": (_why_not_merged(row["zone"], row["decision"], row["guard_veto"])
+                           if row["zone"] is not None else None),
+    }
+
+
 def _pair_ruling(row: dict[str, Any], generation: str | None,
                  history: list[dict[str, Any]]) -> dict[str, Any]:
-    out = dict(row)
+    out = {**row, **_engine_reading(row)}
     out["reasons"] = list(row.get("reasons") or [])
-    out["certificate"] = _certificate(row["decision"])
-    out["why_not_merged"] = (
-        _why_not_merged(row["zone"], row["decision"], row["guard_veto"])
-        if row["zone"] is not None else None
-    )
     out["generation"] = generation
     out["history"] = history
     return out
@@ -3090,18 +3098,14 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
     return items
 
 
-# ------------------------------------------------------------------------------ the Judge page
+# ------------------------------------------------------------------ the Judge page (E922)
 #
-# Every pair the judge marked (gold, vision, text) and every pair of a sealed random draw, one row
-# per pair, beside the operator's word and the engine's view (`autodedup/ui_sql.py`, the Judge
-# page section). Read-only: the operator answers through `POST /autodedup/verdict`, as on every
-# queue. The judge's marks train models and never decide a merge; the operator's word is the exam.
+# Read-only; the operator answers through `POST /autodedup/verdict`, as on every queue.
 
-# `suggested` = any of the four reasons below; `all` = every judged or sampled pair.
 JUDGEMENT_REASONS: tuple[str, ...] = ("suggested", "sample", "operator", "engine", "unsure", "all")
-# The order a row lists its reasons in, and the one its primary reason is picked by.
+# The order a row lists its reasons in (the SQL's primary reason follows it too).
 REASON_ORDER: tuple[str, ...] = ("sample", "operator", "engine", "unsure")
-# The judge's headline as a binary word; `none` = the judge has not read the pair yet.
+# `none` = the judge has not read the pair yet.
 JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain", "none")
 JUDGE_TIERS: tuple[str, ...] = ("gold", "vision", "text", "none")
 JUDGEMENT_FILTER_KEYS: frozenset[str] = frozenset(
@@ -3121,17 +3125,6 @@ _JUDGEMENT_FACETS: tuple[str, ...] = (
 )
 
 
-def _judgement_facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]]:
-    total = 0
-    facets: dict[str, dict[str, int]] = {name: {} for name in _JUDGEMENT_FACETS}
-    for row in _rows(usql.RULING_FACET_COLUMNS, rows):
-        if row["facet"] == "total":
-            total = int(row["n"] or 0)
-        elif row["facet"] in facets and row["value"] is not None:
-            facets[row["facet"]][str(row["value"])] = int(row["n"] or 0)
-    return total, facets
-
-
 def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
     ruled = bool(row["ruled"])
     return {
@@ -3139,8 +3132,7 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
         "listing_hi": row["listing_hi"],
         "stratum": row["stratum"],
         "ruled": ruled,
-        # The operator's standing word as the verdict row every queue's buttons read: typed,
-        # from a Browse merge, implied by a group ruling, or a must-not-link.
+        # The operator's word as the verdict row every queue's buttons read.
         "verdict": {
             "id": row["operator_ruling_id"],
             "kind": "pair",
@@ -3173,11 +3165,7 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
         "zone": row["zone"],
         "score": row["score"],
         "guard_veto": row["guard_veto"],
-        "certificate": _certificate(row["decision"]),
-        "why_not_merged": (
-            _why_not_merged(row["zone"], row["decision"], row["guard_veto"])
-            if row["zone"] is not None else None
-        ),
+        **_engine_reading(row),
     }
 
 
@@ -3239,11 +3227,12 @@ def judgements(
     try:
         generation = _resolve_generation(conn, generation)
         params["generation"] = generation
-        total, facets = _judgement_facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params))
+        total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                _JUDGEMENT_FACETS)
         if asked is None and total == 0:
             params["reason"] = "all"
-            total, facets = _judgement_facets(
-                _fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params))
+            total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                    _JUDGEMENT_FACETS)
         rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
             conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
         towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(

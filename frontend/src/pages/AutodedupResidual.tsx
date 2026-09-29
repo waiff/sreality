@@ -60,11 +60,10 @@ import {
 import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import {
   FilterBar,
+  FilterNumber,
   FilterSelect,
   ResultCount,
   SOURCES,
-  FILTER_CONTROL,
-  FILTER_LABEL,
 } from '@/components/autodedup/FilterBar';
 import {
   EMPTY_FILTERS,
@@ -450,15 +449,12 @@ export default function AutodedupResidual() {
           * control — so this is not offered in the grouped view rather than
           * offered and ignored. */}
         {!grouped && (
-        <label className="block">
-          <span className={FILTER_LABEL}>Skóre ≥</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="decimal"
+          <FilterNumber
+            label="Skóre ≥"
+            decimal
             value={filters.min_score}
-            onChange={(e) => setFilters({ ...filters, min_score: e.target.value })}
+            onChange={(min_score) => setFilters({ ...filters, min_score })}
           />
-        </label>
         )}
         {/* Two portals, not a typed pair string: the wire filter is an unordered
           * pair and the 45 of them are not a list anyone reads. A CARD spans

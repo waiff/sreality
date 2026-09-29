@@ -242,7 +242,8 @@ describe('<AutodedupJudge> blind by default', () => {
   it('drops a judge-reading filter a shared link carries while blind', async () => {
     setup('/autodedup/judge?reason=engine&judge=same&tier=gold&engine=agrees');
     await rowOf('#11');
-    expect(lastQuery()).toMatchObject({ reason: null, judge: null, tier: null, engine: null });
+    /* Blank keys never reach the wire (`blankToNull`). */
+    expect(lastQuery()).toMatchObject({ reason: '', judge: '', tier: '', engine: '' });
   });
 
   it('carries blind into the evidence link', async () => {
@@ -259,7 +260,7 @@ describe('<AutodedupJudge> the selection and the page around it', () => {
   it('asks for no reason and shows the one the server used', async () => {
     setup();
     await rowOf('#11');
-    expect(lastQuery()?.reason).toBeNull();
+    expect(lastQuery()?.reason).toBe('');
     expect(screen.getByLabelText('Výběr')).toHaveValue('suggested');
     expect(screen.getByText(/Navržené páry jsou seřazené/)).toBeInTheDocument();
     expect(screen.getByText('2 z 2 dvojic')).toBeInTheDocument();

@@ -84,6 +84,32 @@ export const SOURCES = [
   'maxima',
 ];
 
+/* A number typed into the bar (a size, a score). An unparsable one is no
+ * filter (`filterState.num`), never a NaN on the wire. */
+export function FilterNumber({
+  label,
+  value,
+  onChange,
+  decimal = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  decimal?: boolean;
+}) {
+  return (
+    <label className="block">
+      <span className={FILTER_LABEL}>{label}</span>
+      <input
+        className={FILTER_CONTROL}
+        inputMode={decimal ? 'decimal' : 'numeric'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
+  );
+}
+
 /* The town filter (`o:<obec>` / `c:<část obce>`): the towns the listed rows
  * touch, busiest first, in two groups — and the value a link carried even when
  * the capped list does not name it, so a shared link keeps its filter. */

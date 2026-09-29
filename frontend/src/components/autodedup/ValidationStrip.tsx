@@ -20,7 +20,11 @@
 
 import { useQuery } from '@tanstack/react-query';
 
-import { getAutodedupValidationProgress, type AutodedupSurface } from '@/lib/api';
+import {
+  getAutodedupValidationProgress,
+  type AutodedupSurface,
+  type AutodedupValidationProgress,
+} from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 
 export interface ValidationStripProps {
@@ -42,15 +46,11 @@ export interface ValidationStripProps {
   minScore?: number | null;
 }
 
-const NOUNS: Record<AutodedupSurface, { one: string; many: string }> = {
-  groups: { one: 'skupina', many: 'skupin' },
-  residual: { one: 'dvojice', many: 'dvojic' },
-  candidates: { one: 'karta', many: 'karet' },
-  judge: { one: 'dvojice', many: 'dvojic' },
+const NOUNS: Record<AutodedupValidationProgress['grain'], { one: string; many: string }> = {
+  cluster: { one: 'skupina', many: 'skupin' },
+  pair: { one: 'dvojice', many: 'dvojic' },
+  candidate: { one: 'karta', many: 'karet' },
 };
-
-const noun = (surface: AutodedupSurface, n: number): string =>
-  n === 1 ? NOUNS[surface].one : NOUNS[surface].many;
 
 export default function ValidationStrip({
   surface,
@@ -91,7 +91,7 @@ export default function ValidationStrip({
         <span className="font-mono tabular-nums">
           {fmtCount(total.n_reviewed)} / {fmtCount(total.n)}
         </span>{' '}
-        {noun(surface, total.n)}
+        {total.n === 1 ? NOUNS[data.grain].one : NOUNS[data.grain].many}
         {grouped && total.n_reviewed > 0 && (
           <span className="text-[var(--color-ink-4)]">
             {' '}· z toho {fmtCount(total.n_not_same)} jiných než „stejné“

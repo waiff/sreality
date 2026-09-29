@@ -71,9 +71,8 @@ import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import MemberRow from '@/components/autodedup/MemberRow';
 import {
-  FILTER_CONTROL,
-  FILTER_LABEL,
   FilterBar,
+  FilterNumber,
   FilterSelect,
   ResultCount,
 } from '@/components/autodedup/FilterBar';
@@ -262,42 +261,20 @@ export default function AutodedupGroups() {
       <EvidenceLegend />
 
       <FilterBar value={filters} onChange={setFilters} showChangedVerdict>
-        <label className="block">
-          <span className={FILTER_LABEL}>Size ≥</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="numeric"
-            value={filters.min_size}
-            onChange={(e) => setFilters({ ...filters, min_size: e.target.value })}
+        {([
+          ['min_size', 'Velikost ≥', false],
+          ['max_size', 'Velikost ≤', false],
+          ['min_score', 'Skóre ≥', true],
+          ['max_score', 'Skóre ≤', true],
+        ] as const).map(([key, label, decimal]) => (
+          <FilterNumber
+            key={key}
+            label={label}
+            decimal={decimal}
+            value={filters[key]}
+            onChange={(next) => setFilters({ ...filters, [key]: next })}
           />
-        </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Size ≤</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="numeric"
-            value={filters.max_size}
-            onChange={(e) => setFilters({ ...filters, max_size: e.target.value })}
-          />
-        </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Score ≥</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="decimal"
-            value={filters.min_score}
-            onChange={(e) => setFilters({ ...filters, min_score: e.target.value })}
-          />
-        </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Score ≤</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="decimal"
-            value={filters.max_score}
-            onChange={(e) => setFilters({ ...filters, max_score: e.target.value })}
-          />
-        </label>
+        ))}
         <FilterSelect
           label="Sdílené fotky"
           value={filters.shared_photo}

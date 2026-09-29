@@ -1,24 +1,11 @@
-/* AUTODEDUP · Soudce — every pair the judge read, for the operator to check.
+/* AUTODEDUP · Soudce — every pair the LLM judge read, for the operator to rule
+ * (`GET /autodedup/judgements`, PROGRAM.md E922). The judge's marks train
+ * models and never merge anything; the operator's word is the exam.
  *
- * The judge is a language model (the judge lane: text, vision and the three
- * careful gold votes). It read pairs of adverts and marked each one the same
- * property or not. Its marks train models and never merge anything; the
- * operator's word is the exam of the judge and of the engine alike (E55). One
- * row per pair it marked, and per pair of a sealed random draw it may not have
- * read yet (`GET /autodedup/judgements`).
- *
- * "NAVRŽENO K POSOUZENÍ" is four rules over stored data, each capped at 100:
- * the random sample, the judge against the operator, a sure judge against the
- * engine, an unsure judge. The page asks for no reason by default; the server
- * answers with the suggested pairs while there are any, else with everything,
- * and says which. The sample comes first, then the other suggestions in one
- * seeded order, then what the operator has already ruled.
- *
- * BLIND BY DEFAULT, as on the residual queue: nothing the judge said about a
- * pair — its word, its evidence, the reasons that read it, the filters that
- * sort by it — shows before the operator has answered that pair. The moment
- * they have, the row opens in place; the list never reorders under the hand
- * that answers (the verdict overlay). */
+ * BLIND BY DEFAULT (E55): nothing the judge said about a pair — its word, its
+ * evidence, the reasons and filters that read it — shows before the operator
+ * has answered that pair; then the row opens in place, and the list never
+ * reorders under the answering hand (the verdict overlay). */
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -61,36 +48,15 @@ const PAGE_SIZE = 25;
 /* The payload names adverts by id only; the card's portal arrives with the facts read. */
 const NO_FALLBACK = { source: null, is_active: null };
 
-export interface JudgeFilterState {
-  reason: string;
-  ruled: string;
-  operator: string;
-  judge: string;
-  tier: string;
-  engine: string;
-  stratum: string;
-  town: string;
-  generation: string;
-  /* '1' (the default) hides every judge artefact on a row until it is ruled. */
-  blind: string;
-}
-
-export const JUDGE_FILTER_DEFAULTS: JudgeFilterState = {
-  /* '' = let the server choose: the suggested pairs while there are any. */
-  reason: '',
-  ruled: '',
-  operator: '',
-  judge: '',
-  tier: '',
-  engine: '',
-  stratum: '',
-  town: '',
-  generation: '',
-  blind: '1',
+/* '' is no filter — and for `reason`, the server's choice (the suggested pairs
+ * while there are any). `blind` is ON unless the link says '0'. */
+export const JUDGE_FILTER_DEFAULTS = {
+  reason: '', ruled: '', operator: '', judge: '', tier: '', engine: '', stratum: '', town: '',
+  generation: '', blind: '1',
 };
+export type JudgeFilterState = typeof JUDGE_FILTER_DEFAULTS;
 
-/* "Výběr". The two marked `judge` read the judge on an unruled row, so a blind
- * page neither offers nor sends them. */
+/* "Výběr". The two marked `judge` read the judge, so a blind page drops them. */
 const SELECTIONS: ReadonlyArray<{ value: string; label: string; judge?: true }> = [
   { value: 'suggested', label: 'Navrženo k posouzení' },
   { value: 'sample', label: 'Náhodný vzorek pro vás' },
@@ -127,9 +93,8 @@ const WHO_READ: ReadonlyArray<FilterOption> = [
 const AGREEMENTS = ['agrees', 'disagrees'];
 const TOWN = /^[oc]:\d{1,12}$/;
 
-/* A hand-edited or shared link shows the list rather than a red banner: a value
- * outside a vocabulary is no filter. And while blind, nothing that reads the
- * judge on an unruled row travels — whatever the link said. */
+/* A value outside a vocabulary is no filter; while blind, nothing that reads
+ * the judge travels, whatever a link said. */
 export function sanitizeJudgeFilters(raw: JudgeFilterState): JudgeFilterState {
   const pick = (value: string, allowed: ReadonlyArray<string>) =>
     allowed.includes(value) ? value : '';
@@ -149,31 +114,21 @@ export function sanitizeJudgeFilters(raw: JudgeFilterState): JudgeFilterState {
   };
 }
 
-function toQuery(f: JudgeFilterState, after: string | null): JudgementFilters {
-  return {
-    reason: f.reason || null,
-    ruled: f.ruled || null,
-    operator: f.operator || null,
-    judge: f.judge || null,
-    tier: f.tier || null,
-    engine: f.engine || null,
-    stratum: f.stratum || null,
-    town: f.town || null,
-    generation: f.generation || null,
-    after,
-    limit: PAGE_SIZE,
-  };
+/* Every key but `blind` is a server filter; the API drops a blank one. */
+function toQuery(f: JudgeFilterState): JudgementFilters {
+  const { blind: _blind, ...keys } = f;
+  return { ...keys, limit: PAGE_SIZE };
 }
 
-/* A pair list's name is data: `g2:s3_mf_band` reads "g2 · s3 mf band". */
+/* `g2:s3_mf_band` reads "g2 · s3 mf band": a list's name is data. */
 export function listName(stratum: string): string {
   const cut = stratum.indexOf(':');
   const words = (text: string) => text.replace(/_/g, ' ');
   return cut < 0 ? words(stratum) : `${stratum.slice(0, cut)} · ${words(stratum.slice(cut + 1))}`;
 }
 
-/* Blind and unruled, a row says only that it was drawn at random or that it is
- * suggested — the specific reasons would tell which way the judge leaned. */
+/* Blind and unruled, a row says only "sample" or "suggested": the specific
+ * reasons would tell which way the judge leaned. */
 export function reasonChips(item: JudgedPair, revealed: boolean): string[] {
   if (revealed) return item.reasons.map((r) => REASON_CHIP[r]);
   if (item.reasons.includes('sample')) return [REASON_CHIP.sample];
@@ -187,12 +142,28 @@ interface JudgeListPage extends InfiniteListPage<JudgedPair> {
   page: JudgementsPage | null;
 }
 
-function agreementOptions(facet: Record<string, number> | undefined) {
-  return [
-    { value: 'disagrees', label: counted('Neshody', facet?.disagrees) },
-    { value: '', label: 'Vše' },
-    { value: 'agrees', label: counted('Souhlasí', facet?.agrees) },
-  ];
+/* The rulings page's three-way switch: "Neshody" first, with its count. */
+function Agreement({ label, facet, value, onChange }: {
+  label: string;
+  facet: Record<string, number> | undefined;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className={FILTER_LABEL}>{label}</span>
+      <Segmented
+        label={label}
+        value={value}
+        onChange={onChange}
+        options={[
+          { value: 'disagrees', label: counted('Neshody', facet?.disagrees) },
+          { value: '', label: 'Vše' },
+          { value: 'agrees', label: counted('Souhlasí', facet?.agrees) },
+        ]}
+      />
+    </span>
+  );
 }
 
 export default function AutodedupJudge() {
@@ -201,7 +172,7 @@ export default function AutodedupJudge() {
   const blind = filters.blind !== '0';
   const { overlay, submit, pendingKey } = useVerdictOverlay();
   const notes = useVerdictAnnotations();
-  const query = useMemo(() => toQuery(filters, null), [filters]);
+  const query = useMemo(() => toQuery(filters), [filters]);
 
   const list = useInfiniteList<JudgedPair, JudgeListPage>({
     queryKey: ['autodedup', 'judgements', query],
@@ -271,25 +242,19 @@ export default function AutodedupJudge() {
         className="mt-4 space-y-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3"
       >
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          <span className="flex items-center gap-2">
-            <span className={FILTER_LABEL}>Soudce × vy</span>
-            <Segmented
-              label="Soudce × vy"
-              options={agreementOptions(facets?.operator)}
-              value={filters.operator}
-              onChange={(operator) => set({ operator })}
-            />
-          </span>
+          <Agreement
+            label="Soudce × vy"
+            facet={facets?.operator}
+            value={filters.operator}
+            onChange={(operator) => set({ operator })}
+          />
           {!blind && (
-            <span className="flex items-center gap-2">
-              <span className={FILTER_LABEL}>Soudce × engine</span>
-              <Segmented
-                label="Soudce × engine"
-                options={agreementOptions(facets?.engine)}
-                value={filters.engine}
-                onChange={(engine) => set({ engine })}
-              />
-            </span>
+            <Agreement
+              label="Soudce × engine"
+              facet={facets?.engine}
+              value={filters.engine}
+              onChange={(engine) => set({ engine })}
+            />
           )}
         </div>
         <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">

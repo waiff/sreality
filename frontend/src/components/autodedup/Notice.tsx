@@ -1,5 +1,4 @@
-/* AUTODEDUP · the one box a review page says "nothing to show" in: an empty
- * filter, a pass with nothing in it, a store the database does not hold yet. */
+/* AUTODEDUP · the one box a review page says "nothing to show" in. */
 
 import { type ReactNode } from 'react';
 
@@ -11,8 +10,7 @@ export default function Notice({ children }: { children: ReactNode }) {
   );
 }
 
-/* Migration 528's store is not in this database: every review route answers
- * `store_ready: false`, and every page says the same sentence about it. */
+/* `store_ready: false`: migration 528's store is not in this database. */
 export function StoreNotReady() {
   return (
     <Notice>
