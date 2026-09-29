@@ -81,6 +81,9 @@ class _Cursor:
             self._rows = rows[: int((params or {})["limit"])]
         elif sql in self._conn.canned:
             self._rows = list(self._conn.canned[sql])
+        elif sql == usql.JIT_OFF:
+            assert self._conn.open_tx, "SET LOCAL outside a transaction is a no-op"
+            self._rows = []
         else:
             raise AssertionError(f"unexpected statement: {' '.join(sql.split())[:90]}")
 
@@ -91,8 +94,22 @@ class _Cursor:
         return list(self._rows)
 
 
+class _Tx:
+    def __init__(self, conn: "_Conn") -> None:
+        self._conn = conn
+
+    def __enter__(self) -> "_Tx":
+        self._conn.open_tx += 1
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self._conn.open_tx -= 1
+        return False
+
+
 class _Conn:
     def __init__(self) -> None:
+        self.open_tx = 0
         self.ready = True
         self.live: dict[str, Any] = {}
         self.raises: dict[str, BaseException] = {}
@@ -109,6 +126,9 @@ class _Conn:
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
+
+    def transaction(self) -> _Tx:
+        return _Tx(self)
 
     def params(self, sql: str) -> dict[str, Any]:
         found = [p for s, p in self.calls if s == sql]
@@ -359,3 +379,11 @@ def test_every_reason_is_capped_by_the_one_sample_size():
     flat = _flat(usql.JUDGEMENTS_SQL)
     assert flat.count("<= %(sample_size)s::int") == 4
     assert "PARTITION BY e.stratum" in flat
+
+
+def test_the_judge_statements_run_without_jit_in_their_own_transaction(client, conn):
+    """JIT compiles the wide CTE chain for seconds to run a millisecond plan (measured in CI's
+    replay); the route turns it off for its own transaction only."""
+    client.get("/autodedup/judgements")
+    client.get("/autodedup/validation-progress", params={"surface": "judge"})
+    assert sum(1 for sql, _ in conn.calls if sql == usql.JIT_OFF) == 2

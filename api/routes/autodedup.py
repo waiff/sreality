@@ -1959,8 +1959,10 @@ def validation_progress(
             sample, total = _candidate_counts(conn, generation, sample_seed)
         else:
             sample_sql, total_sql = _VALIDATION_COUNT_SQL[surface]
-            sample = _counts(conn, sample_sql, params)
-            total = _counts(conn, total_sql, params)
+            with conn.transaction():
+                _execute(conn, usql.JIT_OFF, {})
+                sample = _counts(conn, sample_sql, params)
+                total = _counts(conn, total_sql, params)
     except _STORE_BEHIND:
         return _not_ready()
 
@@ -3227,16 +3229,18 @@ def judgements(
     try:
         generation = _resolve_generation(conn, generation)
         params["generation"] = generation
-        total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
-                                _JUDGEMENT_FACETS)
-        if asked is None and total == 0:
-            params["reason"] = "all"
+        with conn.transaction():
+            _execute(conn, usql.JIT_OFF, {})
             total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
                                     _JUDGEMENT_FACETS)
-        rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
-            conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
-        towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
-            conn, usql.JUDGED_TOWNS_SQL, {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
+            if asked is None and total == 0:
+                params["reason"] = "all"
+                total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                        _JUDGEMENT_FACETS)
+            rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
+                conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
+            towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
+                conn, usql.JUDGED_TOWNS_SQL, {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
     except _STORE_BEHIND:
         return _not_ready()
 

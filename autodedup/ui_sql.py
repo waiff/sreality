@@ -2345,6 +2345,13 @@ marks AS (
       FULL JOIN sealed s ON s.listing_lo = g.listing_lo AND s.listing_hi = g.listing_hi
 )"""
 
+# The Judge statements are one wide CTE chain whose estimated cost crosses `jit_above_cost` at any
+# size, and JIT then compiles ~900 functions to run a plan that takes milliseconds: 2.9 s against
+# 1 ms in CI's replay. The routes that read them run `SET LOCAL` in their own transaction (the
+# pooler is transaction-mode, so a session SET would outlive the request). Not a `*_SQL`: a SET
+# cannot be PREPAREd by the SQL-correctness gate.
+JIT_OFF = "SET LOCAL jit = off"
+
 # Binary words: the judge's (`none` = not read yet) and the operator's standing one (NULL = none,
 # or a withdrawal / "Nevím").
 _JUDGE_WORD = """CASE WHEN jb.verdict IS NULL THEN 'none'

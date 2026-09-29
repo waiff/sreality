@@ -83,6 +83,7 @@ _LABELS: dict[str, str] = {
     usql.VERDICT_PAIR_FROM_VETO_SQL: "veto_written_down",
     usql.CLUSTER_EXISTS_SQL: "cluster_exists",
     usql.PAIR_EXISTS_SQL: "pair_exists",
+    usql.JIT_OFF: "jit_off",
 }
 # The statements that fetch one row over the asked-for page size.
 _PAGED: frozenset[str] = frozenset(
