@@ -24,10 +24,10 @@ import { getAutodedupValidationProgress, type AutodedupSurface } from '@/lib/api
 import { fmtCount } from '@/lib/format';
 
 export interface ValidationStripProps {
-  /* Three surfaces, three grains: a cluster on the groups queue, a pair on the
-   * residual one, a CARD on the candidate-group view — where a card is reviewed
-   * only when every residual pair inside it is (E56). The strip never adds two
-   * of them together. */
+  /* Three grains: a cluster on the groups queue, a pair on the residual queue
+   * and the Judge page, a CARD on the candidate-group view — where a card is
+   * reviewed only when every residual pair inside it is (E56). The strip never
+   * adds two of them together. */
   surface: AutodedupSurface;
   /* The pass the QUEUE read, so the strip and the rows count one generation.
    * Null before the first page lands — the read is skipped rather than asked
@@ -46,6 +46,7 @@ const NOUNS: Record<AutodedupSurface, { one: string; many: string }> = {
   groups: { one: 'skupina', many: 'skupin' },
   residual: { one: 'dvojice', many: 'dvojic' },
   candidates: { one: 'karta', many: 'karet' },
+  judge: { one: 'dvojice', many: 'dvojic' },
 };
 
 const noun = (surface: AutodedupSurface, n: number): string =>
@@ -81,6 +82,8 @@ export default function ValidationStrip({
 
   const { sample, total } = data;
   const sampleDone = Math.min(sample.n_reviewed, sample.n);
+  /* "not the same" is a group-grain question; a pair is ruled one way or other. */
+  const grouped = data.grain !== 'pair';
   return (
     <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-2 text-[0.72rem] text-[var(--color-ink-2)]">
       <span>
@@ -89,7 +92,7 @@ export default function ValidationStrip({
           {fmtCount(total.n_reviewed)} / {fmtCount(total.n)}
         </span>{' '}
         {noun(surface, total.n)}
-        {surface !== 'residual' && total.n_reviewed > 0 && (
+        {grouped && total.n_reviewed > 0 && (
           <span className="text-[var(--color-ink-4)]">
             {' '}· z toho {fmtCount(total.n_not_same)} jiných než „stejné“
           </span>
@@ -103,7 +106,7 @@ export default function ValidationStrip({
         >
           Náhodný vzorek: <span className="font-mono tabular-nums">{fmtCount(sampleDone)} / {fmtCount(sample.n)}</span>{' '}
           zkontrolováno
-          {surface !== 'residual' && (
+          {grouped && (
             <>
               {' · '}
               <span className="font-mono tabular-nums">{fmtCount(sample.n_not_same)}</span> jiných
@@ -116,7 +119,7 @@ export default function ValidationStrip({
       {sampleOrder && (
         <span className="text-[var(--color-ink-4)]">
           semínko <span className="font-mono">{data.seed}</span> — vzorek je prvních{' '}
-          {fmtCount(data.sample_size)} v tomto pořadí nad celou generací, filtry ho nemění
+          {fmtCount(data.sample_size)} v tomto pořadí a filtry ho nemění
         </span>
       )}
     </div>
@@ -144,7 +147,8 @@ export function BlindToggle({
       <span>
         naslepo (skrýt verdikt soudce)
         <span className="text-[var(--color-ink-4)]">
-          {' '}— verdikt soudce se ukáže až po uložení vlastního verdiktu
+          {' '}— verdikt soudce se ukáže až po uložení vlastního verdiktu. Když soudce
+          uvidíte předem, vaše odpověď už ho nezkouší.
         </span>
       </span>
     </label>

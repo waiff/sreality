@@ -33,7 +33,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupPair: vi.fn(),
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -193,10 +192,6 @@ describe('<AutodedupPair>', () => {
       },
       must_not_link: true,
     });
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-      { code: 'unit_number', label: 'Číslo jednotky' },
-    ]);
   });
 
   it('arrives blind from a blind queue and un-blinds on the operator\'s own verdict', async () => {
@@ -205,7 +200,7 @@ describe('<AutodedupPair>', () => {
      * being ruled on, and the transcript is the biggest thing on the screen. */
     renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
     await screen.findByText('Judgements');
-    expect(screen.queryByText(/judge: same property/)).toBeNull();
+    expect(screen.queryByText(/soudce: stejná nemovitost/)).toBeNull();
     expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
     expect(screen.queryByText(/Unit discriminator/)).toBeNull();
     expect(screen.getByText(/verdikt soudce je skrytý/)).toBeInTheDocument();
@@ -213,29 +208,28 @@ describe('<AutodedupPair>', () => {
     expect(screen.getByText('area_rel_diff')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Stejné' }));
-    await waitFor(() => expect(screen.getByText(/judge: same property/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/soudce: stejná nemovitost/)).toBeInTheDocument());
   });
 
   it('shows the judge with no blind parameter at all', async () => {
     renderPair();
-    expect(await screen.findByText(/judge: same property/)).toBeInTheDocument();
+    expect(await screen.findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();
   });
 
   /* ------------------------------------------------- the operator's reasons (mig 533) */
 
-  it('offers the reason picker OPEN — one pair is the whole page', async () => {
+  it('offers the note OPEN, and no reason picker — one pair is the whole page', async () => {
     renderPair();
     await screen.findByText('area_rel_diff');
-    expect(await screen.findByRole('button', { name: 'Jiný půdorys' })).toBeInTheDocument();
     expect(screen.getByLabelText('Poznámka')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '+ důvod / poznámka' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '+ poznámka' })).toBeNull();
   });
 
-  it('carries the chips and the note into the verdict it posts', async () => {
+  it('carries the note into the verdict it posts', async () => {
     const user = userEvent.setup();
     renderPair();
     await screen.findByText('area_rel_diff');
-    await user.click(await screen.findByRole('button', { name: 'Číslo jednotky' }));
     await user.type(screen.getByLabelText('Poznámka'), 'byt 4 vs byt 7');
     await user.click(screen.getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
@@ -243,7 +237,7 @@ describe('<AutodedupPair>', () => {
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'same',
-      reasons: ['unit_number'],
+      reasons: [],
       note: 'byt 4 vs byt 7',
     });
   });
@@ -289,7 +283,7 @@ describe('<AutodedupPair>', () => {
 
   it('shows the judge transcript with both evidence lists', async () => {
     renderPair();
-    expect(await screen.findByText(/judge: same property/)).toBeInTheDocument();
+    expect(await screen.findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();
     expect(screen.getByText(/same kitchen tiles/)).toBeInTheDocument();
     expect(screen.getByText(/different floor stated/)).toBeInTheDocument();
     expect(screen.getByText(/Unit discriminator/)).toBeInTheDocument();
@@ -317,7 +311,7 @@ describe('<AutodedupPair>', () => {
       },
     });
     renderPair();
-    await screen.findByText(/judge: same property/);
+    await screen.findByText(/soudce: stejná nemovitost/);
     const marks = [...document.querySelectorAll('mark')].map((m) => m.textContent);
     expect(marks).toEqual(['Byt č. 14', '4. patře', '68 m²']);
   });
@@ -382,7 +376,7 @@ describe('<AutodedupPair>', () => {
       data: { ...DETAIL, pair: null },
     });
     renderPair();
-    expect(await screen.findByText(/never scored/)).toBeInTheDocument();
+    expect(await screen.findByText(/Engine tuto dvojici neohodnotil/)).toBeInTheDocument();
   });
 
   it('nests no interactive control inside another', async () => {

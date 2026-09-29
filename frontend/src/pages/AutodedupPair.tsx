@@ -50,8 +50,9 @@ import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
 } from '@/components/autodedup/VerdictNotes';
-import { JudgeChip } from '@/components/autodedup/PairCard';
-import { useVerdictOverlay } from './AutodedupGroups';
+import { JudgeChip, JudgeEvidence } from '@/components/autodedup/PairCard';
+import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+import { StoreNotReady } from '@/components/autodedup/Notice';
 import {
   GenerationNotice,
   useAutodedupGenerations,
@@ -146,14 +147,11 @@ export default function AutodedupPair() {
         </p>
       )}
       {q.error && <ErrorBanner message={(q.error as Error).message} />}
-      {storeReady === false && (
-        <p className={SECTION}>
-          Schema not migrated yet — the program's store does not exist in this database.
-        </p>
-      )}
+      {storeReady === false && <StoreNotReady />}
       {storeReady === true && data && data.pair == null && (
         <p className={SECTION}>
-          This pair was never scored, or scored below the store floor, so no row was kept for it.
+          Engine tuto dvojici neohodnotil, nebo jí dal skóre pod hranicí ukládání — nemá o ní
+          uložený řádek.
         </p>
       )}
 
@@ -298,7 +296,7 @@ export default function AutodedupPair() {
               </p>
             ) : data.judgements.length === 0 ? (
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                No judge has ruled on this pair.
+                Soudce tuto dvojici zatím nečetl.
               </p>
             ) : (
               <ul className="mt-2 space-y-3">
@@ -471,17 +469,8 @@ function JudgementBlock({ judgement }: { judgement: AutodedupJudgementRow }) {
           {judgement.unit_discriminator}
         </p>
       )}
-      <div className="mt-1 grid gap-3 sm:grid-cols-2 text-[0.7rem]">
-        <ul className="space-y-0.5 text-[var(--color-ink-2)]">
-          {(judgement.key_evidence ?? []).map((e) => (
-            <li key={e}>+ {e}</li>
-          ))}
-        </ul>
-        <ul className="space-y-0.5 text-[var(--color-brick)]">
-          {(judgement.contradicting_evidence ?? []).map((e) => (
-            <li key={e}>− {e}</li>
-          ))}
-        </ul>
+      <div className="mt-1">
+        <JudgeEvidence judgement={judgement} />
       </div>
     </li>
   );

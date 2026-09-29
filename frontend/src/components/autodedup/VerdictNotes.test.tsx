@@ -1,17 +1,16 @@
-/* VerdictNotes — the reason chips and the note (migration 533).
+/* VerdictNotes — the operator's note beside a verdict.
  *
  * The wiring per surface is pinned on the pages themselves (Residual, Pair,
- * Groups). What is pinned HERE is the component's own contract, because five
- * surfaces depend on it: the chips are a multi-select of aria-pressed buttons,
- * the note is one line, an empty note travels as null rather than '', the two
- * comparisons that decide whether "Uložit poznámku" is armed — and that the
- * whole thing is COLLAPSED and OPTIONAL: neither half is ever required (D39).
+ * Groups, Soudce). What is pinned HERE is the component's own contract, because
+ * every review surface depends on it: the note is one line, an empty note
+ * travels as null rather than '', the comparison that decides whether "Uložit
+ * poznámku" is armed — and that it is COLLAPSED and OPTIONAL (D39). There is no
+ * reason picker any more: binary verdicts, and a note in the operator's words.
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import VerdictNotes, {
   annotationInput,
@@ -19,93 +18,49 @@ import VerdictNotes, {
   storedAnnotation,
   type VerdictAnnotation,
 } from './VerdictNotes';
-import * as api from '@/lib/api';
 import type { AutodedupVerdictRow } from '@/lib/api';
 
-vi.mock('@/lib/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/lib/api')>();
-  return { ...actual, getAutodedupVerdictReasons: vi.fn() };
-});
-
-const REASONS = [
-  { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-  { code: 'broker', label: 'Stejný makléř' },
-];
-
 function renderNotes(value: VerdictAnnotation, over: Record<string, unknown> = {}) {
-  vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue(REASONS);
   const onChange = vi.fn();
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={qc}>
-      <VerdictNotes defaultOpen value={value} onChange={onChange} {...over} />
-    </QueryClientProvider>,
-  );
+  render(<VerdictNotes defaultOpen value={value} onChange={onChange} {...over} />);
   return onChange;
 }
 
 const EMPTY: VerdictAnnotation = { reasons: [], note: '' };
 
 describe('<VerdictNotes>', () => {
-  it('toggles a chip on and off, keeping the click order', async () => {
+  it('edits the note and keeps any stored reason codes untouched', async () => {
     const user = userEvent.setup();
     const onChange = renderNotes({ reasons: ['broker'], note: '' });
-    const chip = await screen.findByRole('button', { name: 'Jiný půdorys' });
-    expect(chip).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByRole('button', { name: 'Stejný makléř' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
-    await user.click(chip);
-    /* Appended, not sorted: the order the operator clicked is the order the
-     * chips read back in. */
-    expect(onChange).toHaveBeenCalledWith({ reasons: ['broker', 'floor_plan_differs'], note: '' });
+    await user.type(screen.getByLabelText('Poznámka'), 'x');
+    expect(onChange).toHaveBeenCalledWith({ reasons: ['broker'], note: 'x' });
+    /* No chip to pick: the page asks two answers and a note. */
+    expect(screen.queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
   });
 
-  it('un-picks a chip that is already on', async () => {
-    const user = userEvent.setup();
-    const onChange = renderNotes({ reasons: ['broker'], note: 'x' });
-    await user.click(await screen.findByRole('button', { name: 'Stejný makléř' }));
-    expect(onChange).toHaveBeenCalledWith({ reasons: [], note: 'x' });
-  });
-
-  it('shows the save button only when the annotation is dirty', async () => {
+  it('shows the save button only when the annotation is dirty', () => {
     renderNotes(EMPTY);
-    await screen.findByRole('button', { name: 'Jiný půdorys' });
+    expect(screen.getByLabelText('Poznámka')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Uložit poznámku' })).toBeNull();
   });
 
   it('offers the save button once the caller says the stored row disagrees', async () => {
     const onSave = vi.fn();
-    renderNotes({ reasons: ['broker'], note: '' }, { dirty: true, onSave });
+    renderNotes({ reasons: [], note: 'x' }, { dirty: true, onSave });
     await screen.findByRole('button', { name: 'Uložit poznámku' });
   });
 
-  it('is COLLAPSED by default, and nothing about it is required', async () => {
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue(REASONS);
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={qc}>
-        <VerdictNotes value={EMPTY} onChange={vi.fn()} />
-      </QueryClientProvider>,
-    );
+  it('is COLLAPSED by default, and nothing about it is required', () => {
+    render(<VerdictNotes value={EMPTY} onChange={vi.fn()} />);
     /* One dotted toggle and nothing else: the operator annotates sometimes, so
-     * an open picker per row would be a question asked on every scroll. */
-    expect(screen.getByRole('button', { name: '+ důvod / poznámka' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
+     * an open note box per row would be a question asked on every scroll. */
+    expect(screen.getByRole('button', { name: '+ poznámka' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Poznámka')).toBeNull();
   });
 
-  it('renders the note input even before the registry lands', async () => {
-    vi.mocked(api.getAutodedupVerdictReasons).mockRejectedValue(new Error('offline'));
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={qc}>
-        <VerdictNotes defaultOpen value={EMPTY} onChange={vi.fn()} />
-      </QueryClientProvider>,
-    );
-    /* A vocabulary the page could not read must not take the note down with it. */
-    expect(screen.getByLabelText('Poznámka')).toBeInTheDocument();
+  it('opens itself on a row that arrives with a note', () => {
+    render(<VerdictNotes value={{ reasons: [], note: 'jiné patro' }} onChange={vi.fn()} />);
+    expect(screen.getByLabelText('Poznámka')).toHaveValue('jiné patro');
   });
 });
 

@@ -74,6 +74,7 @@ import {
   FILTER_CONTROL,
   FILTER_LABEL,
   FilterBar,
+  FilterSelect,
   ResultCount,
 } from '@/components/autodedup/FilterBar';
 import {
@@ -94,46 +95,9 @@ import {
   type SplitState,
 } from '@/components/autodedup/UnitSplit';
 import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+import LoadMore from '@/components/autodedup/LoadMore';
+import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 
-/* The shared vocabulary, re-exported from where this queue's siblings expect to
- * find it. */
-export {
-  FILTER_CONTROL,
-  FILTER_LABEL,
-  FilterBar,
-  ResultCount,
-  SOURCES,
-} from '@/components/autodedup/FilterBar';
-export {
-  DEFAULT_SEED,
-  EMPTY_FILTERS,
-  VERDICTS,
-  pairHref,
-  sanitizeGroupFilters,
-  type GroupFilterState,
-} from '@/components/autodedup/filterState';
-export {
-  EMPTY_SPLIT,
-  SplitRow,
-  UNIT_LETTERS,
-  UnitSelect,
-  clusterVerdictOf,
-  deriveSplit,
-  distinctUnits,
-  splitInput,
-  splitSummary,
-  unitOf,
-  unitsSummary,
-  type SplitControls,
-  type SplitError,
-  type SplitReceipt,
-  type SplitState,
-  type UnitMap,
-} from '@/components/autodedup/UnitSplit';
-export { default as useVerdictOverlay } from '@/components/autodedup/useVerdictOverlay';
-export { MEMBERS_BEFORE_FOLD, EAGER_MEMBERS } from '@/components/autodedup/MemberGrid';
-
-const NOT_YET = 'not yet';
 const PAGE_SIZE = 20;
 
 /* The wire shape. An empty control is a MISSING parameter, never an empty
@@ -160,7 +124,6 @@ export function toQuery(f: GroupFilterState, after: string | null): AutodedupGro
     max_score: num(f.max_score),
     verdict: f.verdict || null,
     shared_photo: flag(f.shared_photo),
-    has_judgement: flag(f.has_judgement),
     sort: f.sort,
     /* Sent only with the order it names: a seed on a weakest-edge query is a
      * parameter the statement never reads, and it would split the react-query
@@ -335,48 +298,30 @@ export default function AutodedupGroups() {
             onChange={(e) => setFilters({ ...filters, max_score: e.target.value })}
           />
         </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Shared photos</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.shared_photo}
-            onChange={(e) => setFilters({ ...filters, shared_photo: e.target.value })}
-          >
-            <option value="">vše</option>
-            <option value="1">jen varované</option>
-            <option value="0">bez varování</option>
-          </select>
-        </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Judged</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.has_judgement}
-            onChange={(e) => setFilters({ ...filters, has_judgement: e.target.value })}
-          >
-            <option value="">vše</option>
-            <option value="1">s verdiktem soudce</option>
-            <option value="0">bez verdiktu</option>
-          </select>
-        </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Sort</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.sort}
-            onChange={(e) =>
-              setFilters({ ...filters, sort: e.target.value as GroupFilterState['sort'] })
-            }
-          >
-            <option value="weakest">weakest edge first</option>
-            <option value="newest">newest first</option>
-            <option value="largest">largest first</option>
-            {/* The one order that is not a working order: a seeded shuffle, so
-              * the error rate measured on it is about the engine rather than
-              * about the top of a queue sorted by where the errors live. */}
-            <option value="random">náhodný vzorek</option>
-          </select>
-        </label>
+        <FilterSelect
+          label="Sdílené fotky"
+          value={filters.shared_photo}
+          onChange={(shared_photo) => setFilters({ ...filters, shared_photo })}
+          options={[
+            { value: '1', label: 'jen varované' },
+            { value: '0', label: 'bez varování' },
+          ]}
+        />
+        {/* The one order that is not a working order: a seeded shuffle, so the
+          * error rate measured on it is about the engine rather than about the
+          * top of a queue sorted by where the errors live. */}
+        <FilterSelect
+          label="Řazení"
+          value={filters.sort}
+          onChange={(sort) => setFilters({ ...filters, sort: sort as GroupFilterState['sort'] })}
+          allLabel={null}
+          options={[
+            { value: 'weakest', label: 'nejslabší vazba nahoře' },
+            { value: 'newest', label: 'nejnovější nahoře' },
+            { value: 'largest', label: 'největší nahoře' },
+            { value: 'random', label: 'náhodný vzorek' },
+          ]}
+        />
       </FilterBar>
 
       <GenerationNotice
@@ -409,17 +354,10 @@ export default function AutodedupGroups() {
         </p>
       )}
 
-      {storeReady === false && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Schema not migrated yet — the program's store does not exist in this database, so there is
-          nothing to review.
-        </p>
-      )}
+      {storeReady === false && <StoreNotReady />}
 
       {storeReady !== false && !list.isLoading && !list.isError && rows.length === 0 && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          No group matches these filters — {NOT_YET} a proposal to review here.
-        </p>
+        <Notice>Těmto filtrům neodpovídá žádná skupina.</Notice>
       )}
 
       {rows.length > 0 && (
@@ -468,18 +406,7 @@ export default function AutodedupGroups() {
         </ul>
       )}
 
-      {list.hasNextPage && (
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={list.fetchNextPage}
-            disabled={list.isFetchingNextPage}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-1.5 text-sm text-[var(--color-ink-2)] hover:text-[var(--color-ink)] disabled:opacity-50"
-          >
-            {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
-      )}
+      <LoadMore list={list} />
 
       {openKey != null && (
         <GroupDialog
@@ -622,7 +549,7 @@ function GroupCard({
         dirty={notes.isDirty(noteKey, verdict)}
         pending={pending}
         onSave={() => verdict && onSaveNote(verdict)}
-        label="důvod verdiktu"
+        label="poznámka k verdiktu"
       />
     </li>
   );

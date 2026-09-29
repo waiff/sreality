@@ -113,7 +113,6 @@ export default function CandidateDialog({
             alwaysOpen
             saveLabel="Uložit rozhodnutí"
             mergeBackLabel="Uložit rozhodnutí"
-            showReasons={false}
           />
 
           <section>

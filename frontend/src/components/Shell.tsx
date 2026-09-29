@@ -97,6 +97,8 @@ const autodedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.autodedupProposedSplits.build(), label: 'Návrhy rozdělení' },
   // E920: every ruling the operator ever made, beside the engine's view of it.
   { to: ROUTES.autodedupRulings.build(), label: 'Rozhodnutí' },
+  // Every pair the LLM judge read — its marks train models, the operator checks them.
+  { to: ROUTES.autodedupJudge.build(), label: 'Soudce' },
 ];
 
 // The admin-only surfaces that used to sit in the top row, now the first

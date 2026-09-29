@@ -14,6 +14,7 @@
 
 import { type ReactNode } from 'react';
 
+import type { RulingTown } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 import BlockSelect from '@/components/autodedup/BlockSelect';
 import GenerationSelect from '@/components/autodedup/GenerationSelect';
@@ -22,6 +23,51 @@ import { type GroupFilterState } from '@/components/autodedup/filterState';
 export const FILTER_LABEL = 'text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)]';
 export const FILTER_CONTROL =
   'mt-0.5 w-full rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]';
+
+/* "label (n)" — a count beside an option is the current filter's rows with
+ * that value (the server's facets); absent, the label alone. */
+export const counted = (label: string, n: number | null | undefined): string =>
+  n == null ? label : `${label} (${fmtCount(n)})`;
+
+export interface FilterOption {
+  value: string;
+  label: string;
+  count?: number | null;
+}
+
+/* THE ONE FILTER SELECT of the review pages: a caption, "vše" (no filter) and
+ * the vocabulary, each option with its count when the page has one. `children`
+ * carries what a flat list cannot (the towns' two optgroups). */
+export function FilterSelect({
+  label,
+  value,
+  onChange,
+  options = [],
+  allLabel = 'vše',
+  children,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  options?: ReadonlyArray<FilterOption>;
+  allLabel?: string | null;
+  children?: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className={FILTER_LABEL}>{label}</span>
+      <select className={FILTER_CONTROL} value={value} onChange={(e) => onChange(e.target.value)}>
+        {allLabel != null && <option value="">{allLabel}</option>}
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {counted(o.label, o.count)}
+          </option>
+        ))}
+        {children}
+      </select>
+    </label>
+  );
+}
 
 /* The portal vocabulary is the backend's `listings.source` enum; the page only
  * offers the nine that exist rather than a free-text box, so a typo can never
@@ -36,6 +82,55 @@ export const SOURCES = [
   'ceskereality',
   'realitymix',
   'maxima',
+];
+
+/* The town filter (`o:<obec>` / `c:<část obce>`): the towns the listed rows
+ * touch, busiest first, in two groups — and the value a link carried even when
+ * the capped list does not name it, so a shared link keeps its filter. */
+export function TownSelect({
+  value,
+  towns,
+  onChange,
+}: {
+  value: string;
+  towns: ReadonlyArray<RulingTown>;
+  onChange: (next: string) => void;
+}) {
+  const group = (grain: 'o' | 'c', label: string) => {
+    const shown = towns.filter((t) => t.grain === grain);
+    return shown.length === 0 ? null : (
+      <optgroup label={label}>
+        {shown.map((t) => (
+          <option key={`${t.grain}:${t.code}`} value={`${t.grain}:${t.code}`}>
+            {counted(t.name ?? String(t.code), t.n)}
+          </option>
+        ))}
+      </optgroup>
+    );
+  };
+  return (
+    <FilterSelect label="Obec / část" value={value} onChange={onChange} allLabel="všude">
+      {group('o', 'Obce')}
+      {group('c', 'Části obce')}
+      {value && !towns.some((t) => `${t.grain}:${t.code}` === value) && (
+        <option value={value}>{value}</option>
+      )}
+    </FilterSelect>
+  );
+}
+
+const CATEGORIES: ReadonlyArray<FilterOption> = [
+  { value: 'byt', label: 'byt' },
+  { value: 'dum', label: 'dům' },
+  { value: 'pozemek', label: 'pozemek' },
+  { value: 'komercni', label: 'komerční' },
+  { value: 'ostatni', label: 'ostatní' },
+];
+
+const DEALS: ReadonlyArray<FilterOption> = [
+  { value: 'prodej', label: 'prodej' },
+  { value: 'pronajem', label: 'pronájem' },
+  { value: 'drazba', label: 'dražba' },
 ];
 
 export function FilterBar<T extends GroupFilterState>({
@@ -86,75 +181,47 @@ export function FilterBar<T extends GroupFilterState>({
           controlClassName={FILTER_CONTROL}
         />
         {showSource && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Portal</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.source}
-              onChange={(e) => set('source', e.target.value as T['source'])}
-            >
-              <option value="">vše</option>
-              {SOURCES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </label>
+          <FilterSelect
+            label="Portál"
+            value={value.source}
+            onChange={(next) => set('source', next as T['source'])}
+            options={SOURCES.map((s) => ({ value: s, label: s }))}
+          />
         )}
         {showCategory && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Druh</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.category_main}
-              onChange={(e) => set('category_main', e.target.value as T['category_main'])}
-            >
-              <option value="">vše</option>
-              <option value="byt">byt</option>
-              <option value="dum">dům</option>
-              <option value="pozemek">pozemek</option>
-              <option value="komercni">komerční</option>
-              <option value="ostatni">ostatní</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Druh"
+            value={value.category_main}
+            onChange={(next) => set('category_main', next as T['category_main'])}
+            options={CATEGORIES}
+          />
         )}
         {showCategory && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Nabídka</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.category_type}
-              onChange={(e) => set('category_type', e.target.value as T['category_type'])}
-            >
-              <option value="">vše</option>
-              <option value="prodej">prodej</option>
-              <option value="pronajem">pronájem</option>
-              <option value="drazba">dražba</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Nabídka"
+            value={value.category_type}
+            onChange={(next) => set('category_type', next as T['category_type'])}
+            options={DEALS}
+          />
         )}
         {showVerdict && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Verdict</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.verdict}
-              onChange={(e) => set('verdict', e.target.value as T['verdict'])}
-            >
-              <option value="">vše</option>
-              <option value="unreviewed">nezkontrolováno</option>
-              {showChangedVerdict && (
-                <option value="changed">změněno od verdiktu</option>
-              )}
-              <option value="same">stejné</option>
-              {/* ONE WORD OVER THREE STORED VALUES: the server widens
-                * `different` over the two finer values migration 532 wrote, so a
-                * ruling taken before D39 stays in its own queue. */}
-              <option value="different">různé</option>
-              <option value="unsure">nevím</option>
-            </select>
-          </label>
+          /* ONE WORD OVER THREE STORED VALUES: the server widens `different`
+           * over the two finer values migration 532 wrote, so a ruling taken
+           * before D39 stays in its own queue. */
+          <FilterSelect
+            label="Rozhodnutí"
+            value={value.verdict}
+            onChange={(next) => set('verdict', next as T['verdict'])}
+            options={[
+              { value: 'unreviewed', label: 'nezkontrolováno' },
+              ...(showChangedVerdict
+                ? [{ value: 'changed', label: 'změněno od verdiktu' }]
+                : []),
+              { value: 'same', label: 'stejné' },
+              { value: 'different', label: 'různé' },
+              { value: 'unsure', label: 'nevím' },
+            ]}
+          />
         )}
         {children}
       </div>
@@ -164,12 +231,14 @@ export function FilterBar<T extends GroupFilterState>({
 
 /* HOW MUCH OF THE QUEUE IS ON SCREEN. A keyset page cannot count itself, so the
  * total arrives with the first page and the loaded rows are counted here. When
- * the server sent no count the loaded number is still said plainly — "20 groups
- * loaded" — because a silent list gives no sense of the work left, and a
- * fabricated total would be worse than none. The noun agrees with the number it
- * follows: "1 groups loaded" is the kind of seam that makes a careful page read
- * as a generated one. */
-const plural = (n: number, noun: string): string => (n === 1 ? noun.replace(/s$/, '') : noun);
+ * the server sent no count the loaded number is still said plainly — "načteno
+ * 20 skupin" — because a silent list gives no sense of the work left, and a
+ * fabricated total would be worse than none. The noun agrees with its number
+ * (1 / 2–4 / 5+), and "z N" takes the genitive. */
+const NOUNS: Record<'groups' | 'pairs', readonly [string, string, string]> = {
+  groups: ['skupina', 'skupiny', 'skupin'],
+  pairs: ['dvojice', 'dvojice', 'dvojic'],
+};
 
 export function ResultCount({
   shown,
@@ -178,13 +247,14 @@ export function ResultCount({
 }: {
   shown: number;
   total: number | null;
-  noun: string;
+  noun: 'groups' | 'pairs';
 }) {
+  const [one, few, many] = NOUNS[noun];
   return (
     <p className="mt-4 text-[0.72rem] text-[var(--color-ink-3)] tabular-nums">
       {total == null
-        ? `${fmtCount(shown)} ${plural(shown, noun)} loaded`
-        : `${fmtCount(shown)} of ${fmtCount(total)} ${plural(total, noun)}`}
+        ? `načteno ${fmtCount(shown)} ${shown === 1 ? one : shown >= 2 && shown <= 4 ? few : many}`
+        : `${fmtCount(shown)} z ${fmtCount(total)} ${total === 1 ? few : many}`}
     </p>
   );
 }

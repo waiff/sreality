@@ -142,6 +142,8 @@ export const ROUTES = {
   autodedupProposedSplits: def('/autodedup/proposed-splits'),
   // E920: every operator ruling, beside the engine's view; flip / withdraw.
   autodedupRulings: def('/autodedup/rulings'),
+  // Every pair the LLM judge read, for the operator to check; blind by default.
+  autodedupJudge: def('/autodedup/judge'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

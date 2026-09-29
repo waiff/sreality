@@ -46,7 +46,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupBlocks: vi.fn(),
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
     getAutodedupValidationProgress: vi.fn(),
   };
 });
@@ -204,9 +203,6 @@ describe('<AutodedupResidual> · po skupinách', () => {
       data: { items: [], generation: 'g4' },
     });
     vi.mocked(api.getAutodedupGenerations).mockResolvedValue(GENERATIONS);
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-    ]);
     vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
     vi.mocked(api.postAutodedupCandidateSplitVerdict).mockResolvedValue(SPLIT_RESULT);
   });

@@ -59,17 +59,24 @@ import {
 } from '@/components/autodedup/GenerationSelect';
 import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import {
-  EMPTY_FILTERS,
-  FILTER_CONTROL,
-  FILTER_LABEL,
   FilterBar,
+  FilterSelect,
   ResultCount,
   SOURCES,
-  sanitizeGroupFilters,
+  FILTER_CONTROL,
+  FILTER_LABEL,
+} from '@/components/autodedup/FilterBar';
+import {
+  EMPTY_FILTERS,
+  num,
   pairHref,
-  useVerdictOverlay,
+  sanitizeGroupFilters,
   type GroupFilterState,
-} from './AutodedupGroups';
+} from '@/components/autodedup/filterState';
+import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+import LoadMore from '@/components/autodedup/LoadMore';
+import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
+import { Segmented } from '@/components/controls';
 import CandidateCard, {
   candidateDefaultSplit,
   respectLocks,
@@ -119,13 +126,6 @@ export function sourcePair(a: string, b: string): string | null {
   return [a, b].sort().join('+');
 }
 
-const num = (v: string): number | null => {
-  if (v.trim() === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-const flag = (v: string): 0 | 1 | null => (v === '1' ? 1 : v === '0' ? 0 : null);
-
 export function toResidualQuery(
   f: ResidualFilterState,
   after: string | null,
@@ -149,7 +149,6 @@ export function toResidualQuery(
      * server's own default stands. */
     min_score: f.min_score.trim() === '' ? 0 : num(f.min_score),
     source_pair: sourcePair(f.source_a, f.source_b),
-    has_judgement: flag(f.has_judgement),
     verdict: f.verdict || null,
     /* Two orders: the working one (expected yield) and the seeded sample the D6
      * agreement number is measured on. The shared `GroupFilterState.sort` also
@@ -184,6 +183,7 @@ interface ResidualPage extends InfiniteListPage<AutodedupResidualRow> {
 const pairKey = (row: AutodedupResidualRow) => `${row.listing_lo}:${row.listing_hi}`;
 
 const ZONES: ReadonlyArray<ResidualExtras['zone']> = ['', 'band', 'reject', 'merge'];
+const PORTALS = SOURCES.map((s) => ({ value: s, label: portalLabel(s) ?? s }));
 
 /* The shared keys are checked by the shared sanitiser (sort, verdict, seed) and
  * this view's own zone here, so a hand-edited link shows the queue rather than
@@ -405,33 +405,16 @@ export default function AutodedupResidual() {
 
       {/* ONE COHORT, TWO VIEWS. The switch is a view, not a filter: it changes
         * how much is asked at once, never which pairs are asked about. */}
-      <div
-        role="group"
-        aria-label="Zobrazení"
-        className="mt-3 inline-flex rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-0.5"
-      >
-        {([
-          ['', 'po skupinách'],
-          ['pairs', 'po dvojicích'],
-        ] as const).map(([value, label]) => {
-          const on = (filters.view || '') === value;
-          return (
-            <button
-              key={label}
-              type="button"
-              aria-pressed={on}
-              onClick={() => setFilters({ ...filters, view: value })}
-              className={[
-                'rounded-[var(--radius-xs)] px-3 py-1 text-[0.72rem] transition-colors',
-                on
-                  ? 'bg-[var(--color-paper-3)] text-[var(--color-ink)]'
-                  : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink)]',
-              ].join(' ')}
-            >
-              {label}
-            </button>
-          );
-        })}
+      <div className="mt-3">
+        <Segmented
+          label="Zobrazení"
+          options={[
+            { value: '', label: 'po skupinách' },
+            { value: 'pairs', label: 'po dvojicích' },
+          ]}
+          value={filters.view || ''}
+          onChange={(view) => setFilters({ ...filters, view: view as ResidualExtras['view'] })}
+        />
       </div>
 
       <EvidenceLegend />
@@ -446,41 +429,29 @@ export default function AutodedupResidual() {
         showVerdict={!grouped}
       >
         {grouped && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Stav</span>
-            <select
-              className={FILTER_CONTROL}
-              value={filters.verdict}
-              onChange={(e) => setFilters({ ...filters, verdict: e.target.value })}
-            >
-              <option value="">vše</option>
-              <option value="unreviewed">nezkontrolované</option>
-              <option value="reviewed">zkontrolované</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Stav"
+            value={filters.verdict}
+            onChange={(verdict) => setFilters({ ...filters, verdict })}
+            options={[
+              { value: 'unreviewed', label: 'nezkontrolované' },
+              { value: 'reviewed', label: 'zkontrolované' },
+            ]}
+          />
         )}
-        <label className="block">
-          <span className={FILTER_LABEL}>Zone</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.zone}
-            onChange={(e) =>
-              setFilters({ ...filters, zone: e.target.value as ResidualExtras['zone'] })
-            }
-          >
-            <option value="">vše</option>
-            <option value="band">band</option>
-            <option value="reject">reject</option>
-            <option value="merge">merge</option>
-          </select>
-        </label>
+        <FilterSelect
+          label="Pásmo"
+          value={filters.zone}
+          onChange={(zone) => setFilters({ ...filters, zone: zone as ResidualExtras['zone'] })}
+          options={ZONES.filter(Boolean).map((z) => ({ value: z, label: z }))}
+        />
         {/* THE DISPLAY FLOOR IS THE PAIR VIEW'S. The cards are packed server-side
           * at one floor — the cohort a card comes from cannot move under a
           * control — so this is not offered in the grouped view rather than
           * offered and ignored. */}
         {!grouped && (
         <label className="block">
-          <span className={FILTER_LABEL}>Score ≥</span>
+          <span className={FILTER_LABEL}>Skóre ≥</span>
           <input
             className={FILTER_CONTROL}
             inputMode="decimal"
@@ -492,75 +463,26 @@ export default function AutodedupResidual() {
         {/* Two portals, not a typed pair string: the wire filter is an unordered
           * pair and the 45 of them are not a list anyone reads. A CARD spans
           * several adverts, so a portal pair is not a question it can answer. */}
-        {!grouped && (
-        <label className="block">
-          <span className={FILTER_LABEL}>Portál A</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.source_a}
-            onChange={(e) => setFilters({ ...filters, source_a: e.target.value })}
-          >
-            <option value="">vše</option>
-            {SOURCES.map((s) => (
-              <option key={s} value={s}>
-                {portalLabel(s) ?? s}
-              </option>
-            ))}
-          </select>
-        </label>
-        )}
-        {!grouped && (
-        <label className="block">
-          <span className={FILTER_LABEL}>Portál B</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.source_b}
-            onChange={(e) => setFilters({ ...filters, source_b: e.target.value })}
-          >
-            <option value="">vše</option>
-            {SOURCES.map((s) => (
-              <option key={s} value={s}>
-                {portalLabel(s) ?? s}
-              </option>
-            ))}
-          </select>
-        </label>
-        )}
-        {/* "has a judge verdict" is a JUDGE ARTEFACT — a filter that tells the
-          * operator which rows the machine has an opinion about. It belongs to
-          * the pair view, where it predates blind mode; the grouped view, which
-          * is blind by default and carries no judge field at all, does not
-          * offer a way to sort by what the judge has done. */}
-        {!grouped && (
-        <label className="block">
-          <span className={FILTER_LABEL}>Judged</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.has_judgement}
-            onChange={(e) => setFilters({ ...filters, has_judgement: e.target.value })}
-          >
-            <option value="">vše</option>
-            <option value="1">s verdiktem soudce</option>
-            <option value="0">bez verdiktu</option>
-          </select>
-        </label>
-        )}
-        <label className="block">
-          <span className={FILTER_LABEL}>Sort</span>
-          <select
-            className={FILTER_CONTROL}
-            value={filters.sort}
-            onChange={(e) =>
-              setFilters({ ...filters, sort: e.target.value as ResidualFilterState['sort'] })
-            }
-          >
-            <option value="weakest">
-              {grouped ? 'nejslabší dvojice nahoře' : 'nejvyšší skóre nahoře'}
-            </option>
-            {grouped && <option value="largest">největší skupiny nahoře</option>}
-            <option value="random">náhodný vzorek</option>
-          </select>
-        </label>
+        {!grouped && (['source_a', 'source_b'] as const).map((key, i) => (
+          <FilterSelect
+            key={key}
+            label={`Portál ${i === 0 ? 'A' : 'B'}`}
+            value={filters[key]}
+            onChange={(next) => setFilters({ ...filters, [key]: next })}
+            options={PORTALS}
+          />
+        ))}
+        <FilterSelect
+          label="Řazení"
+          value={filters.sort}
+          onChange={(sort) => setFilters({ ...filters, sort: sort as ResidualFilterState['sort'] })}
+          allLabel={null}
+          options={[
+            { value: 'weakest', label: grouped ? 'nejslabší dvojice nahoře' : 'nejvyšší skóre nahoře' },
+            ...(grouped ? [{ value: 'largest', label: 'největší skupiny nahoře' }] : []),
+            { value: 'random', label: 'náhodný vzorek' },
+          ]}
+        />
       </FilterBar>
 
       <GenerationNotice
@@ -598,24 +520,19 @@ export default function AutodedupResidual() {
 
       {active.isLoading && (
         <p className="mt-6 flex items-center gap-2 text-sm text-[var(--color-ink-3)]">
-          <Spinner /> {grouped ? 'Načítám skupiny kandidátů…' : 'Loading residual pairs…'}
+          <Spinner /> {grouped ? 'Načítám skupiny kandidátů…' : 'Načítám dvojice…'}
         </p>
       )}
 
-      {storeReady === false && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Schema not migrated yet — the program's store does not exist in this database, so there is
-          nothing to review.
-        </p>
-      )}
+      {storeReady === false && <StoreNotReady />}
 
       {storeReady !== false && !active.isLoading && !active.isError
         && (grouped ? cardRows : rows).length === 0 && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
+        <Notice>
           {grouped
             ? 'Žádná skupina kandidátů neodpovídá těmto filtrům.'
-            : 'No pair above this score matches these filters.'}
-        </p>
+            : 'Nad tímto skóre neodpovídá těmto filtrům žádná dvojice.'}
+        </Notice>
       )}
 
       {grouped && cardRows.length > 0 && (
@@ -703,18 +620,7 @@ export default function AutodedupResidual() {
         </ul>
       )}
 
-      {active.hasNextPage && (
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={active.fetchNextPage}
-            disabled={active.isFetchingNextPage}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-1.5 text-sm text-[var(--color-ink-2)] hover:text-[var(--color-ink)] disabled:opacity-50"
-          >
-            {active.isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
-      )}
+      <LoadMore list={active} />
 
       {openCandidate != null && candidateOf(openCandidate) && (
         <CandidateDialog

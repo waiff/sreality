@@ -73,7 +73,6 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
   const queryClient = useQueryClient();
   const countAgain = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['autodedup', 'validation-progress'] });
-    queryClient.invalidateQueries({ queryKey: ['autodedup', 'agreement'] });
   }, [queryClient]);
   /* The IN-FLIGHT KEY, not a global boolean. One shared `isPending` would mark
    * every row in the queue busy while a single write lands, and disabling the
@@ -96,12 +95,12 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
       pushToast(
         'ok',
         res.must_not_link
-          ? 'Verdict recorded — this pair is now permanently un-linkable.'
+          ? 'Uloženo — tyto dva inzeráty už engine nikdy nespojí.'
           : retracted > 0
             /* A cluster confirmed as one property drops every veto inside it —
              * said out loud, because it is the permanent half of the click. */
-            ? `Verdict recorded — ${retracted} pair(s) are linkable again.`
-            : 'Verdict recorded.',
+            ? `Uloženo — zákaz spojení zrušen u ${retracted} dvojic.`
+            : 'Uloženo.',
       );
     },
     onError: (err: Error, vars, ctx) => {
@@ -111,7 +110,7 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
         else delete next[vars.key];
         return next;
       });
-      pushToast('err', `Verdict failed: ${err.message}`);
+      pushToast('err', `Uložení se nepovedlo: ${err.message}`);
     },
     onSettled: () => {
       setInFlight(null);
@@ -163,8 +162,8 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
       const reversed = res.data?.reversed_pairs?.length ?? 0;
       pushToast(
         'ok',
-        `Split recorded — ${res.data?.n_pairs_negative ?? 0} pair(s) permanently un-linkable`
-          + (reversed > 0 ? `, ${reversed} earlier ruling(s) taken back.` : '.'),
+        `Rozdělení uloženo — ${res.data?.n_pairs_negative ?? 0} dvojic engine už nikdy nespojí`
+          + (reversed > 0 ? `, ${reversed} dřívějších rozhodnutí vzato zpět.` : '.'),
       );
     },
     onError: (err: Error, vars, ctx) => {

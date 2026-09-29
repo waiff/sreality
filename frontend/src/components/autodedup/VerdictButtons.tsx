@@ -13,12 +13,11 @@
  * DISPLAYS as "Různé" and presses that button — `displayVerdict` is the one
  * place that mapping lives.
  *
- * THE ANNOTATION TRAVELS WITH THE CLICK. The chips and the note live one level
- * up (a page-level draft, beside the verdict overlay), because the same
- * annotation has to reach the POST this component fires AND the "Uložit
- * poznámku" re-post that `VerdictNotes` fires — two writers of one value. So
- * this component only carries it through: `onVerdict(value, annotation)`. Both
- * are OPTIONAL: a verdict saves with neither.
+ * THE NOTE TRAVELS WITH THE CLICK. It lives one level up (a page-level draft,
+ * beside the verdict overlay), because the same note has to reach the POST this
+ * component fires AND the "Uložit poznámku" re-post that `VerdictNotes` fires —
+ * two writers of one value. So this component only carries it through:
+ * `onVerdict(value, annotation)`. It is OPTIONAL: a verdict saves without one.
  *
  * TWO-STEP ON A NEGATIVE PAIR VERDICT. A negative verdict on a PAIR writes a
  * permanent must-not-link server-side — it outlives every recalibration — so it
@@ -29,7 +28,7 @@
 import { useEffect, useState } from 'react';
 
 import type { AutodedupVerdictRow, AutodedupVerdictValue } from '@/lib/api';
-import { ReasonChips, annotationInput, EMPTY_ANNOTATION, type VerdictAnnotation } from './VerdictNotes';
+import { annotationInput, EMPTY_ANNOTATION, type VerdictAnnotation } from './VerdictNotes';
 
 /* What the page OFFERS — a subset of what the store may hold. */
 export type OfferedVerdict = Extract<AutodedupVerdictValue, 'same' | 'different' | 'unsure'>;
@@ -84,7 +83,7 @@ export default function VerdictButtons({
     annotation: { reasons: string[]; note: string | null },
   ) => void;
   pending?: boolean;
-  /* The chips and the note as they stand on screen, sent with the verdict. */
+  /* The note as it stands on screen, sent with the verdict. */
   annotation?: VerdictAnnotation;
 }) {
   const [armed, setArmed] = useState<OfferedVerdict | null>(null);
@@ -137,14 +136,10 @@ export default function VerdictButtons({
         );
       })}
       {verdict && stored && (
-        <span className="flex flex-wrap items-center gap-1 text-[0.65rem] text-[var(--color-ink-3)]">
-          {/* Who ruled and when — the session's own audit trail, and the thing
-            * that tells a second reviewer the group was already seen. */}
+        <span className="text-[0.65rem] text-[var(--color-ink-3)]">
+          {/* Who ruled — the session's own audit trail, and the thing that
+            * tells a second reviewer the group was already seen. */}
           {VERDICT_LABELS[stored]} · {verdict.decided_by}
-          {/* WHAT THEY SAW, beside what they decided — when they said it: the
-            * chips and the note are optional everywhere, so a verdict taken
-            * without them renders exactly as it was taken. */}
-          <ReasonChips codes={verdict.reasons} />
         </span>
       )}
     </div>
