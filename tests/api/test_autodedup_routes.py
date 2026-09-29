@@ -74,7 +74,6 @@ _LABELS: dict[str, str] = {
     usql.CERTIFICATE_COUNTS_SQL: "certificates",
     usql.GENERATION_COUNTS_SQL: "generations",
     usql.VERDICT_COUNTS_SQL: "verdict_counts",
-    usql.REASON_COUNTS_SQL: "reason_counts",
     usql.JUDGEMENT_COUNTS_SQL: "judgement_counts",
     usql.LAST_SCORE_RUN_SQL: "last_run",
     usql.VERDICT_PAIR_APPEND_SQL: "verdict_write",
@@ -401,7 +400,6 @@ EMPTY_ENGINE: dict[str, Any] = {
     "latest_generation": None,
     "verdicts": [],
     "n_verdicts": 0,
-    "verdict_reasons": [],
     "judgements": [],
     "n_judgements": 0,
     "last_score_run": None,
@@ -2639,13 +2637,11 @@ def test_the_route_still_accepts_a_filter_named_in_the_older_vocabulary(client):
 # ------------------------------------------------- the operator's REASONS (migration 533)
 
 
-def test_the_reason_registry_is_served_so_the_page_hard_codes_nothing(client):
-    """No connection, no `store_ready`: the vocabulary is code, and the chips have to render
-    against a database that has not been migrated at all."""
-    body = client.get("/autodedup/verdict-reasons").json()
-    codes = [r["code"] for r in body["data"]["reasons"]]
-    assert "floor_plan_differs" in codes and codes[-1] == "other"
-    assert all(r["label"] for r in body["data"]["reasons"])
+def test_the_reason_picker_is_gone_from_the_api(client):
+    """Binary verdicts (D39): no surface offers reason chips, so nothing serves their labels or
+    counts them. A stored code still validates and reads back (below)."""
+    assert client.get("/autodedup/verdict-reasons").status_code == 404
+    assert "verdict_reasons" not in client.get("/autodedup/stats").json()["data"]["engine"]
 
 
 def test_a_pair_verdict_stores_its_reasons_and_its_note(admin_client, conn):
@@ -2739,27 +2735,6 @@ def test_re_deciding_a_verdict_appends_with_its_own_reasons(admin_client, conn):
         assert "ON CONFLICT DO NOTHING" in flat
 
 
-def test_the_reason_histogram_is_counted_per_grain(client, conn):
-    conn.canned = {
-        "reason_counts": [
-            _tuple(usql.REASON_COUNT_COLUMNS, kind="pair", reason="floor_plan_differs", n=7),
-            _tuple(usql.REASON_COUNT_COLUMNS, kind="cluster", reason="same_project", n=2),
-        ],
-    }
-    engine = client.get("/autodedup/stats").json()["data"]["engine"]
-    assert engine["verdict_reasons"] == [
-        {"kind": "pair", "reason": "floor_plan_differs", "n": 7},
-        {"kind": "cluster", "reason": "same_project", "n": 2},
-    ]
-
-
-def test_the_reason_histogram_unnests_the_array_rather_than_grouping_on_it(client, conn):
-    """Grouping on the whole array would count `{a,b}` as its own bucket — a histogram of
-    combinations, not of reasons."""
-    assert "unnest(v.reasons)" in usql.REASON_COUNTS_SQL
-    assert "GROUP BY 1, 2" in usql.REASON_COUNTS_SQL
-
-
 def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client, conn):
     """The 532 guard's sibling. A missing COLUMN is a different SQLSTATE from a rejected
     VALUE, so the two are told apart and each names its own migration."""
@@ -2785,17 +2760,6 @@ def test_a_split_against_a_store_without_533_names_that_migration(admin_client, 
     resp = admin_client.post("/autodedup/verdict/split", json=_split())
     assert resp.status_code == 503
     assert "533" in resp.json()["detail"]
-
-
-def test_the_stats_page_still_renders_against_a_store_without_533(client, conn):
-    """A READ degrades where a write refuses: the header strip is not the place to learn
-    that a migration is missing."""
-    psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.raises[usql.REASON_COUNTS_SQL] = psycopg_errors.UndefinedColumn(
-        'column v.reasons does not exist'
-    )
-    body = client.get("/autodedup/stats").json()
-    assert body["data"]["engine"]["verdict_reasons"] == []
 
 
 @pytest.mark.parametrize(

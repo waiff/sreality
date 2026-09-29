@@ -1270,25 +1270,6 @@ ORDER BY 1, 2
 """
 )
 
-# The reason histogram (migration 533): WHAT the operator saw, counted per grain. Pair and
-# cluster stay separate columns on the page because they answer different questions — a chip
-# on a pair names the discriminator one edge missed, the same chip on a cluster names why a
-# whole proposal was wrong — and summing them would hide both. `unnest` is a LATERAL over the
-# array, so a verdict with no reason contributes no row at all rather than a null bucket.
-REASON_COUNT_COLUMNS: tuple[str, ...] = ("kind", "reason", "n")
-
-REASON_COUNTS_SQL = (
-    """
-SELECT v.kind, r.reason, count(*) AS n
-"""
-    + _NEWEST_RULINGS
-    + """
-CROSS JOIN LATERAL unnest(v.reasons) AS r(reason)
-GROUP BY 1, 2
-ORDER BY 1, 2
-"""
-)
-
 JUDGEMENT_COUNT_COLUMNS: tuple[str, ...] = ("tier", "verdict", "n")
 
 JUDGEMENT_COUNTS_SQL = """

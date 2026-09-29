@@ -1011,14 +1011,6 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
     }
     verdicts = _rows(usql.VERDICT_COUNT_COLUMNS, _fetch(conn, usql.VERDICT_COUNTS_SQL))
     judgements = _rows(usql.JUDGEMENT_COUNT_COLUMNS, _fetch(conn, usql.JUDGEMENT_COUNTS_SQL))
-    # A READ degrades where a write refuses: the header strip must still render against a
-    # store that predates 533, so the histogram comes back empty rather than 500ing the page.
-    try:
-        verdict_reason_rows = _rows(
-            usql.REASON_COUNT_COLUMNS, _fetch(conn, usql.REASON_COUNTS_SQL)
-        )
-    except _UNDEFINED_COLUMN:
-        verdict_reason_rows = []
     run_rows = _fetch(conn, usql.LAST_SCORE_RUN_SQL, {"mode": "score"})
     last_run = _row(usql.SCORE_RUN_COLUMNS, run_rows[0]) if run_rows else None
     return {
@@ -1032,8 +1024,6 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
         "latest_generation": generation,
         "verdicts": verdicts,
         "n_verdicts": sum(int(row["n"]) for row in verdicts),
-        # Per (kind, reason), never summed across the two grains — see REASON_COUNTS_SQL.
-        "verdict_reasons": verdict_reason_rows,
         "judgements": judgements,
         "n_judgements": sum(int(row["n"]) for row in judgements),
         "last_score_run": _json_safe(last_run) if last_run else None,
@@ -2162,16 +2152,6 @@ class VerdictIn(BaseModel):
     # showing. The key comes from that row; a flip or a withdrawal is a new row, and it is taken
     # only while that row is still the newest word on its key (409 otherwise).
     supersedes: int | None = None
-
-
-@router.get("/verdict-reasons")
-def verdict_reasons() -> dict[str, Any]:
-    """The reason vocabulary, served so the SPA hard-codes none of it (§9).
-
-    No `store_ready` and no connection: the registry is code, not data, so the chips render
-    against a database that has not been migrated at all — and a page that cannot reach the
-    list would silently offer the operator an empty one."""
-    return {"data": {"reasons": reasons_registry.registry()}}
 
 
 @router.post("/verdict")

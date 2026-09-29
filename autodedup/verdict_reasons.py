@@ -1,16 +1,10 @@
-"""The operator's reason vocabulary — WHY a verdict was given (PROGRAM.md §9, migration 533).
+"""The operator's reason codes — WHY a verdict was given (PROGRAM.md §9, migration 533).
 
-ONE REGISTRY, SERVED TO THE SPA. The codes live here and reach the browser through
-`GET /autodedup/verdict-reasons`; the page hard-codes none of them, so adding a shape a
-review session named is one line in this file and no migration (the column carries no CHECK
-— see 533). The labels are the operator's own Czech words, because the chips are clicked in
-Czech; the CODES are what the histogram and any future feature work group on, so they never
-change once written.
-
-WHAT IT IS FOR. A chip is the evidence the engine did not have: `floor_plan_differs` on a
-pair the engine merged names a discriminator the feature set misses, and the per-code
-histogram is directly comparable with the judge's `unit_discriminator` — the feature-gap
-loop, not a comment field.
+THE PICKER IS GONE. The review pages ask two answers and a note (binary verdicts, D39); the
+reason chips were used on 6 of 1,158 rulings and left every surface with the Judge page. What
+stays is the vocabulary the stored `verdicts.reasons` column was written in: a client that
+still names a code is validated against it, and the CODES never change once written. The
+labels are the operator's own Czech words for those codes.
 """
 
 from __future__ import annotations
@@ -36,11 +30,6 @@ _KNOWN: frozenset[str] = frozenset(REASON_CODES)
 
 # A verdict cannot carry more codes than the vocabulary holds, whatever a client sends.
 MAX_REASONS: int = len(REASON_CODES)
-
-
-def registry() -> list[dict[str, str]]:
-    """The vocabulary as the wire carries it — code plus the label the chip renders."""
-    return [{"code": code, "label": label} for code, label in VERDICT_REASONS]
 
 
 def normalise(values: list[str] | None) -> list[str]:

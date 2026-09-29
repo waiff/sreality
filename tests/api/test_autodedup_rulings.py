@@ -505,7 +505,7 @@ def test_the_writes_order_newest_exactly_as_the_readers_do():
 
 def test_the_progress_counts_count_rulings_not_rows():
     """G8: with history kept, a count over rows would count a withdrawn ruling twice."""
-    for sql in (usql.VERDICT_COUNTS_SQL, usql.REASON_COUNTS_SQL):
+    for sql in (usql.VERDICT_COUNTS_SQL,):
         flat = _flat(sql)
         assert "SELECT DISTINCT ON (x.kind, x.listing_lo, x.listing_hi, x.cluster_key," in flat
         assert "x.decided_at DESC, x.id DESC" in flat
