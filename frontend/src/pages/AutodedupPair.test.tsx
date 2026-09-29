@@ -211,6 +211,34 @@ describe('<AutodedupPair>', () => {
     await waitFor(() => expect(screen.getByText(/soudce: stejná nemovitost/)).toBeInTheDocument());
   });
 
+  it('stays blind on a stored "Nevím": the Judge row\'s drill-down is no peek', async () => {
+    vi.mocked(api.getAutodedupPair).mockResolvedValue({
+      store_ready: true,
+      data: {
+        ...DETAIL,
+        verdicts: [
+          {
+            id: 7,
+            kind: 'pair',
+            cluster_key: null,
+            listing_lo: 101,
+            listing_hi: 202,
+            verdict: 'unsure',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-16T10:00:00Z',
+          },
+        ],
+      },
+    });
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
+    expect(
+      await screen.findByText(/Naslepo: verdikt soudce je skrytý/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/soudce: stejná nemovitost/)).toBeNull();
+    expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
+  });
+
   it('shows the judge with no blind parameter at all', async () => {
     renderPair();
     expect(await screen.findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();

@@ -341,7 +341,6 @@ describe('autodedup wire conformance', () => {
           {
             listing_lo: 11,
             listing_hi: 12,
-            ruled: true,
             verdict: {
               id: 41,
               kind: 'pair',

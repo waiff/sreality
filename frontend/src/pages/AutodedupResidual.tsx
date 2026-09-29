@@ -52,6 +52,7 @@ import Spinner from '@/components/Spinner';
 import { EvidenceLegend } from '@/components/autodedup/EvidenceChips';
 import PairCard from '@/components/autodedup/PairCard';
 import { annotationInput, useVerdictAnnotations } from '@/components/autodedup/VerdictNotes';
+import { revealsJudge } from '@/components/autodedup/VerdictButtons';
 import { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import {
   GenerationNotice,
@@ -560,11 +561,10 @@ export default function AutodedupResidual() {
           {rows.map((row, i) => {
             const key = pairKey(row);
             const stored = overlay[key] ?? row.verdict;
-            /* THE ONE GATE. Every judge artefact this card renders — the chip,
-              * the verdict words, the key and contradicting evidence — hangs off
-              * this single prop, so blinding is one condition rather than four
-              * places that each have to remember. */
-            const judgement = blind && stored == null ? null : row.judgement;
+            /* Every judge artefact this card renders — the chip, the verdict
+              * words, the key and contradicting evidence — hangs off this one
+              * condition, the gate every blind surface shares. */
+            const hidden = blind && !revealsJudge(stored);
             return (
             <li key={key}>
               <PairCard
@@ -581,8 +581,8 @@ export default function AutodedupResidual() {
                 guardVeto={row.guard_veto}
                 whyNotMerged={row.why_not_merged}
                 contributions={row.contributions}
-                judgement={judgement}
-                blind={blind && stored == null}
+                judgement={hidden ? null : row.judgement}
+                blind={hidden}
                 verdict={stored}
                 pending={pendingKey === key}
                 eager={i < 2}
@@ -623,13 +623,9 @@ export default function AutodedupResidual() {
           candidateKey={openCandidate}
           generation={candidateOf(openCandidate)!.generation}
           split={candidateControls(candidateOf(openCandidate)!)}
-          /* The drawer is the same review, so it blinds with the queue and
-            * un-blinds on the same condition: this card has been ruled on. */
-          blind={
-            blind
-            && candidates.overlay[openCandidate] == null
-            && !(candidateOf(openCandidate)!.reviewed)
-          }
+          /* The drawer is the same review, so it blinds with the queue; a card
+            * saved here opens it whole, and each pair otherwise on its own word. */
+          blind={blind && !revealsJudge(candidates.overlay[openCandidate])}
           onClose={() => setOpenCandidate(null)}
         />
       )}

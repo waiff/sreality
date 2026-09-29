@@ -16,8 +16,9 @@
  * re-adds one.
  *
  * BLIND CARRIES IN THE URL (`?blind=1`). Reached from a blind queue, this page
- * withholds the judge's transcript until the operator has recorded a verdict on
- * the pair — otherwise the drill-down would be the hole in the blinding: one
+ * withholds the judge's transcript until the operator's newest word on the pair
+ * is Stejné or Různé (`revealsJudge`, the queues' own gate; "Nevím" opens
+ * nothing) — otherwise the drill-down would be the hole in the blinding: one
  * click on exactly the pair being ruled on, and the verdict the operator was not
  * supposed to see yet is the largest section on the screen. Everything the
  * ENGINE knew stays visible: features, digests, photos, the score. The judge is
@@ -45,6 +46,7 @@ import MemberText from '@/components/autodedup/MemberText';
 import VerdictButtons, {
   VERDICT_LABELS,
   displayVerdict,
+  revealsJudge,
 } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
@@ -286,13 +288,13 @@ export default function AutodedupPair() {
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Judgements</h2>
-            {blind && stored == null ? (
+            {blind && !revealsJudge(stored) ? (
               /* Said in words, never rendered as an empty section: "hidden" and
                 * "nobody has judged this" are different facts, and printing the
                 * second for the first would teach the operator that a blind pair
                 * is an unjudged one. */
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                Naslepo: verdikt soudce je skrytý, dokud neuložíte vlastní verdikt.
+                Naslepo: verdikt soudce je skrytý, dokud neodpovíte Stejné nebo Různé.
               </p>
             ) : data.judgements.length === 0 ? (
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">

@@ -4953,9 +4953,6 @@ export type JudgementSelection = 'suggested' | 'sample' | 'engine' | 'unsure' | 
 export interface JudgedPair {
   listing_lo: number;
   listing_hi: number;
-  /* A standing Stejné or Různé on the pair — a "Nevím" or a withdrawal is not
-   * ruled: the row stays open, and blind. */
-  ruled: boolean;
   /* The operator's last word, "Nevím" included, with the pair's own note and
    * codes (none for a word implied by a group ruling or a bare veto). */
   verdict: AutodedupVerdictRow | null;

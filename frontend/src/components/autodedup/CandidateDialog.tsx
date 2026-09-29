@@ -12,16 +12,21 @@
  * session into design feedback. A pair inside an already-merged group is shown
  * as evidence and marked as such: it is not one of this card's questions.
  *
- * BLIND MODE TRAVELS IN. The judge column is withheld until the operator has
- * ruled on this card, exactly as the queue withholds it, and the drill-down link
- * carries `?blind=1` — a pair page that showed the transcript on arrival is the
- * hole in the blinding.
+ * BLIND MODE TRAVELS IN. The judge column opens pair by pair on the gate every
+ * blind surface shares (`revealsJudge`: the newest word is Stejné or Různé), or
+ * all at once when the card is saved here; the drill-down link carries
+ * `?blind=1`, and the pair page applies the same gate — a pair page that showed
+ * the transcript on arrival is the hole in the blinding.
  */
 
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
-import { getAutodedupCandidate, type AutodedupJudgementRow } from '@/lib/api';
+import {
+  getAutodedupCandidate,
+  type AutodedupJudgementRow,
+  type AutodedupVerdictRow,
+} from '@/lib/api';
 import Dialog from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
@@ -31,6 +36,7 @@ import { JudgeChip } from '@/components/autodedup/PairCard';
 import MemberRow from '@/components/autodedup/MemberRow';
 import { SplitRow, type SplitControls } from '@/components/autodedup/UnitSplit';
 import { pairHref } from '@/components/autodedup/filterState';
+import { revealsJudge } from '@/components/autodedup/VerdictButtons';
 
 const TH = 'py-1 pr-3 text-left font-medium whitespace-nowrap align-top';
 const TD = 'py-1 pr-3 align-top';
@@ -57,6 +63,11 @@ export default function CandidateDialog({
 
   const judgeByPair: Record<string, AutodedupJudgementRow> = {};
   for (const j of data?.judgements ?? []) judgeByPair[`${j.listing_lo}:${j.listing_hi}`] = j;
+  /* Newest first from the server, so the first row per pair is its standing word. */
+  const wordByPair: Record<string, AutodedupVerdictRow> = {};
+  for (const v of data?.member_verdicts ?? []) {
+    wordByPair[`${v.listing_lo}:${v.listing_hi}`] ??= v;
+  }
 
   const unitCount = data?.candidate.n_units ?? 2;
 
@@ -133,12 +144,11 @@ export default function CandidateDialog({
                 </thead>
                 <tbody>
                   {data.pairs.map((p) => {
-                    const judge = judgeByPair[`${p.listing_lo}:${p.listing_hi}`];
+                    const key = `${p.listing_lo}:${p.listing_hi}`;
+                    const judge = judgeByPair[key];
+                    const hidden = blind && !revealsJudge(wordByPair[key]);
                     return (
-                      <tr
-                        key={`${p.listing_lo}:${p.listing_hi}`}
-                        className="border-t border-[var(--color-rule-soft)]"
-                      >
+                      <tr key={key} className="border-t border-[var(--color-rule-soft)]">
                         <td className={`${TD} font-mono tabular-nums`}>
                           {p.listing_lo} · {p.listing_hi}
                           {p.residual === false && (
@@ -151,7 +161,7 @@ export default function CandidateDialog({
                         <td className={TD}>{p.zone ?? '—'}</td>
                         <td className={TD}>{p.why_not_merged ?? '—'}</td>
                         <td className={TD}>
-                          {blind ? (
+                          {hidden ? (
                             <span className="text-[var(--color-ink-4)]">skryto</span>
                           ) : judge ? (
                             <JudgeChip judgement={judge} />

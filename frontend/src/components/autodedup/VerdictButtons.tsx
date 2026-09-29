@@ -50,6 +50,13 @@ export function displayVerdict(value: AutodedupVerdictValue): OfferedVerdict {
   return 'different';
 }
 
+/* THE ONE BLIND GATE (E55), for every surface that hides the judge: it shows
+ * once the operator's newest word is Stejné or Různé. "Nevím", or a withdrawal
+ * (a newer "Nevím"), opens nothing — it would be a peek before the real answer. */
+export function revealsJudge(verdict: AutodedupVerdictRow | null | undefined): boolean {
+  return verdict != null && displayVerdict(verdict.verdict) !== 'unsure';
+}
+
 export const VERDICT_LABELS: Record<OfferedVerdict, string> = {
   same: 'Stejné',
   different: 'Různé',

@@ -60,7 +60,7 @@ import {
   GenerationNotice,
   useAutodedupGenerations,
 } from '@/components/autodedup/GenerationSelect';
-import VerdictButtons from '@/components/autodedup/VerdictButtons';
+import VerdictButtons, { revealsJudge } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
@@ -391,9 +391,10 @@ export default function AutodedupGroups() {
           generation={generationOf(openKey)}
           split={splitControls(openKey)}
           /* The drawer is the same review, so it blinds with the queue — and
-            * un-blinds on the same condition: the cluster carries a verdict. */
-          blind={blind && (overlay[String(openKey)] ?? null) == null
-            && (rows.find((r) => r.cluster_key === openKey)?.verdict ?? null) == null}
+            * un-blinds on the same condition as the card. */
+          blind={blind && !revealsJudge(
+            overlay[String(openKey)] ?? rows.find((r) => r.cluster_key === openKey)?.verdict,
+          )}
           onClose={() => setOpenKey(null)}
         />
       )}
@@ -426,7 +427,7 @@ function GroupCard({
   onOpen: () => void;
   pending: boolean;
   eager: boolean;
-  /* Hide every judge artefact on this card until it carries a verdict. */
+  /* Hide every judge artefact on this card until it carries Stejné or Různé. */
   blind: boolean;
   split: SplitControls;
   generation: string;
@@ -439,7 +440,7 @@ function GroupCard({
   const splitStarted = Object.keys(split.state.units).length > 0 || split.stored != null;
   /* A ruled card shows the judge again: the blinding protects the DECISION, and
    * the operator learns nothing from a chip they can never see. */
-  const revealed = !blind || verdict != null;
+  const revealed = !blind || revealsJudge(verdict);
   const noteKey = String(group.cluster_key);
   /* The overlay wins: once this session has ruled the group again, the ruling is
    * about THIS set of adverts and the hint has served its purpose. */

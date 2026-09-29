@@ -13,9 +13,9 @@
  * BLIND MODE is the other half of the same measurement. An agreement number
  * between an operator who has just read "judge: same property 0.93" and the
  * judge that wrote it is not an independent check of anything — it measures how
- * persuasive the chip is. So the judge is hidden until the operator has recorded
- * their own verdict on that pair, and revealed the moment they have: the review
- * stays blind, the LEARNING does not.
+ * persuasive the chip is. So the judge is hidden until the operator has said
+ * Stejné or Různé on that pair (`revealsJudge`; "Nevím" opens nothing), and
+ * revealed the moment they have: the review stays blind, the LEARNING does not.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -155,8 +155,8 @@ export function BlindToggle({
       <span>
         naslepo (skrýt verdikt soudce)
         <span className="text-[var(--color-ink-4)]">
-          {' '}— verdikt soudce se ukáže až po uložení vlastního verdiktu. Když soudce
-          uvidíte předem, vaše odpověď už ho nezkouší.
+          {' '}— verdikt soudce se ukáže, až odpovíte Stejné nebo Různé („Nevím“ ho
+          neodkryje). Když soudce uvidíte předem, vaše odpověď už ho nezkouší.
         </span>
       </span>
     </label>

@@ -47,7 +47,6 @@ function pair(over: Partial<api.JudgedPair> = {}): api.JudgedPair {
   return {
     listing_lo: 11,
     listing_hi: 12,
-    ruled: false,
     verdict: null,
     judgement: {
       tier: 'vision',
@@ -75,7 +74,6 @@ function pair(over: Partial<api.JudgedPair> = {}): api.JudgedPair {
 const RULED = pair({
   listing_lo: 21,
   listing_hi: 22,
-  ruled: true,
   verdict: {
     id: 5,
     kind: 'pair',
@@ -222,6 +220,15 @@ describe('<AutodedupJudge> blind by default', () => {
     const row = await rowOf('#11');
     await user.click(within(row).getByRole('button', { name: 'Nevím' }));
     await waitFor(() => expect(api.postAutodedupVerdict).toHaveBeenCalled());
+    expect(within(row).queryByText(/soudce: jiná nemovitost/)).toBeNull();
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+  });
+
+  it('keeps a row blind on a stored "Nevím" or withdrawal', async () => {
+    const nevim = { ...RULED.verdict!, listing_lo: 11, listing_hi: 12, verdict: 'unsure' as const };
+    vi.mocked(api.getAutodedupJudgements).mockResolvedValue(page([pair({ verdict: nevim })]));
+    setup();
+    const row = await rowOf('#11');
     expect(within(row).queryByText(/soudce: jiná nemovitost/)).toBeNull();
     expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
   });

@@ -33,6 +33,7 @@ import { ENGINE_VIEW } from '@/components/autodedup/engineView';
 import { DEFAULT_SEED, pairHref } from '@/components/autodedup/filterState';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+import { revealsJudge } from '@/components/autodedup/VerdictButtons';
 import {
   getAutodedupJudgements,
   type JudgedPair,
@@ -294,12 +295,8 @@ export default function AutodedupJudge() {
       <ul className="mt-3 space-y-4">
         {rows.map((item, i) => {
           const key = pairKey(item);
-          const answer = overlay[key];
-          const stored = answer ?? item.verdict;
-          /* THE ONE GATE (E55): the judge is shown once this pair is ruled — a
-           * standing Stejné or Různé, the server's or the one just given here.
-           * "Nevím" opens nothing: it would be a peek before the real answer. */
-          const revealed = !blind || (answer ? answer.verdict !== 'unsure' : item.ruled);
+          const stored = overlay[key] ?? item.verdict;
+          const revealed = !blind || revealsJudge(stored);
           const town = [item.obec_name, item.cast_obce_name].filter(Boolean).join(' · ');
           return (
             <li key={key}>

@@ -3125,7 +3125,6 @@ def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "listing_lo": row["listing_lo"],
         "listing_hi": row["listing_hi"],
-        "ruled": bool(row["ruled"]),
         # The operator's word as every queue's buttons and note read it, codes included.
         "verdict": {
             "id": row["operator_ruling_id"],

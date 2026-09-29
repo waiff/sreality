@@ -248,7 +248,7 @@ def test_a_row_carries_the_judge_the_reasons_the_engine_and_the_town(client, con
     assert data["generation"] == "g15"
     item = data["items"][0]
     assert item == {
-        "listing_lo": 11, "listing_hi": 12, "ruled": False, "verdict": None,
+        "listing_lo": 11, "listing_hi": 12, "verdict": None,
         "judgement": {
             "tier": "vision", "verdict": "different_property", "confidence": 0.93,
             "model": "gpt-5-mini", "key_evidence": ["jiné patro"],
@@ -281,20 +281,19 @@ def test_a_ruled_row_carries_the_operators_word_and_codes_as_a_verdict_row(clien
                           operator_note="stejná kuchyň", operator_reasons=["photos_same"],
                           operator_decided_by="op@example.com", operator_decided_at=AT)]
     item = client.get("/autodedup/judgements").json()["data"]["items"][0]
-    assert item["ruled"] is True
     assert item["verdict"] == {
         "id": 41, "kind": "pair", "cluster_key": None, "listing_lo": 11, "listing_hi": 12,
         "verdict": "same", "note": "stejná kuchyň", "reasons": ["photos_same"],
         "decided_by": "op@example.com", "decided_at": AT.isoformat()}
 
 
-def test_a_nevim_is_a_stored_word_but_not_a_ruling(client, conn):
-    """The buttons show the "Nevím" the operator gave, yet the pair stays unruled: it sorts with
-    the open ones and the judge stays hidden (E55)."""
+def test_a_nevim_is_a_stored_word_the_buttons_show(client, conn):
+    """The buttons show the "Nevím" the operator gave. Whether a word opens the judge is the SPA's
+    one gate (`revealsJudge`), read off this word: the payload carries no second "ruled" (E55)."""
     conn.pages = [_judged(ruled=False, operator_ruling_id=42, operator_verdict="unsure",
                           operator_decided_by="op@example.com", operator_decided_at=AT)]
     item = client.get("/autodedup/judgements").json()["data"]["items"][0]
-    assert item["ruled"] is False
+    assert "ruled" not in item
     assert item["verdict"]["verdict"] == "unsure" and item["verdict"]["reasons"] == []
 
 

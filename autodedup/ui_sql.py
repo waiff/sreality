@@ -2351,8 +2351,9 @@ marks AS (
 JIT_OFF = "SET LOCAL jit = off"
 
 # Binary words: the judge's (`none` = not read yet) and the operator's standing one (NULL = none,
-# or a withdrawal / "Nevím"). The page's ONE "ruled" is that standing word: it sorts a row down,
-# counts under "Rozhodnuto" and lifts blindness, so a "Nevím" opens nothing (E55).
+# or a withdrawal / "Nevím"). The page's ONE "ruled" is that standing word: it sorts a row down
+# and counts under "Rozhodnuto"; the SPA's `revealsJudge` lifts blindness on the same word, so a
+# "Nevím" opens nothing on any surface (E55).
 _JUDGE_WORD = """CASE WHEN jb.verdict IS NULL THEN 'none'
                 WHEN jb.verdict = 'same_property' THEN 'same'
                 WHEN jb.verdict = 'insufficient_evidence' THEN 'abstain'

@@ -249,6 +249,25 @@ describe('<AutodedupResidual>', () => {
     expect(within(row).queryByText('soudce skryt')).toBeNull();
   });
 
+  it('keeps the judge hidden on a stored "Nevím" and on a fresh one', async () => {
+    const user = userEvent.setup();
+    const nevim = { ...STORED, verdict: 'unsure' as const };
+    vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([{ ...ROW, verdict: nevim }]));
+    vi.mocked(api.postAutodedupVerdict).mockResolvedValue({
+      store_ready: true,
+      data: nevim,
+      must_not_link: false,
+    });
+    renderPage();
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+
+    await user.click(within(row).getByRole('button', { name: 'Nevím' }));
+    await waitFor(() => expect(api.postAutodedupVerdict).toHaveBeenCalled());
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+    expect(within(row).queryByText(/same kitchen/)).toBeNull();
+  });
+
   it('turns the judge back on with the toggle, and says so in the URL', async () => {
     const user = userEvent.setup();
     renderPage();
