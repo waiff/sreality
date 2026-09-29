@@ -115,7 +115,6 @@ class _Conn:
         }
         self.pages: list[tuple[Any, ...]] = [_judged()]
         self.canned: dict[str, list[tuple[Any, ...]]] = {
-            usql.JUDGED_TOWNS_SQL: [("o", 563510, "Jablonec nad Nisou", 7)],
             usql.VALIDATION_JUDGE_SAMPLE_SQL: [(100, 37, 5)],
             usql.VALIDATION_JUDGE_TOTAL_SQL: [(412, 60, 9)],
         }
@@ -168,7 +167,7 @@ def client(conn: _Conn):
     {"ruled": "2"},
     {"operator": "maybe"},
     {"engine": "together"},
-    {"town": "563510"},
+    {"town": "o:563510"},
     {"after": f"suggested|0|0|{HASH}|11"},
     {"after": f"0|0|{HASH}|11|12"},
     {"after": f"operator|0|0|{HASH}|11|12"},
@@ -186,25 +185,25 @@ def test_the_filter_registry_refuses_what_it_does_not_name(client, conn, query):
 def test_every_filter_becomes_a_parameter_of_the_statements(client, conn):
     conn.facets["unsure"] = [("total", None, 1)]
     client.get("/autodedup/judgements", params={
-        "reason": "unsure", "judge": "different", "tier": "gold", "town": "c:490245",
-        "ruled": 1, "operator": "disagrees", "engine": "agrees", "generation": "g13"})
+        "reason": "unsure", "judge": "different", "tier": "gold", "ruled": 1,
+        "operator": "disagrees", "engine": "agrees", "generation": "g13"})
     params = conn.params(usql.JUDGEMENTS_SQL)
     assert {k: params[k] for k in (
-        "reason", "judge", "tier", "obec", "cast_obce", "ruled", "operator", "engine",
-        "generation", "seed", "sample_size", "judge_sure")} == {
-        "reason": "unsure", "judge": "different", "tier": "gold", "obec": None,
-        "cast_obce": 490245, "ruled": True, "operator": "disagrees", "engine": "agrees",
-        "generation": "g13", "seed": routes.DEFAULT_SEED,
-        "sample_size": routes.VALIDATION_SAMPLE_SIZE, "judge_sure": routes.JUDGE_SURE}
+        "reason", "judge", "tier", "ruled", "operator", "engine", "generation", "seed",
+        "sample_size", "judge_sure")} == {
+        "reason": "unsure", "judge": "different", "tier": "gold", "ruled": True,
+        "operator": "disagrees", "engine": "agrees", "generation": "g13",
+        "seed": routes.DEFAULT_SEED, "sample_size": routes.VALIDATION_SAMPLE_SIZE,
+        "judge_sure": routes.JUDGE_SURE}
     # The counts run the same filter, without the page's cursor.
     facets = conn.params(usql.JUDGEMENTS_FACETS_SQL)
-    assert facets["cast_obce"] == 490245 and "after_hash" not in facets
+    assert facets["tier"] == "gold" and "after_hash" not in facets
 
 
 def test_a_blank_filter_is_no_filter(client, conn):
-    client.get("/autodedup/judgements", params={"judge": "", "town": ""})
+    client.get("/autodedup/judgements", params={"judge": "", "tier": ""})
     params = conn.params(usql.JUDGEMENTS_SQL)
-    assert (params["judge"], params["obec"]) == (None, None)
+    assert (params["judge"], params["tier"]) == (None, None)
     assert params["after_hash"] is None
 
 
@@ -259,10 +258,7 @@ def test_a_row_carries_the_judge_the_reasons_the_engine_and_the_town(client, con
         "why_not_merged": "drženo v pásmu kontroly: méně než dva nezávislé druhy důkazů"}
     assert data["facets"]["reason"] == {"suggested": 1, "sample": 1, "engine": 1}
     assert data["facets"]["ruled"] == {"0": 1}
-    assert data["towns"] == [{"grain": "o", "code": 563510, "name": "Jablonec nad Nisou",
-                              "n": 7}]
-    assert conn.params(usql.JUDGED_TOWNS_SQL) == {"seed": routes.DEFAULT_SEED,
-                                                  "limit": routes.RULING_TOWNS_LIMIT}
+    assert "towns" not in data
 
 
 @pytest.mark.parametrize("zone", ["merge", "band", "reject"])
@@ -321,20 +317,18 @@ def test_the_cursor_is_the_pages_own_order_key_and_its_selection(client, conn):
 
 
 def test_a_later_page_runs_the_page_statement_alone(client, conn):
-    """The counts and the town vocabulary are read once, with the first page: "Načíst další"
-    must not re-run the whole population three times over."""
+    """The counts are read once, with the first page: "Načíst další" runs one statement."""
     conn.facets = {"suggested": [("total", None, 0)], "all": [("total", None, 3)]}
     conn.pages = [_judged(), _judged(listing_lo=13, listing_hi=14, block=2)]
     first = client.get("/autodedup/judgements", params={"limit": 1}).json()["data"]
     assert first["reason"] == "all" and first["next_after"].startswith("all|")
     conn.calls.clear()
     later = client.get("/autodedup/judgements", params={"after": first["next_after"]}).json()
-    assert not conn.ran(usql.JUDGEMENTS_FACETS_SQL) and not conn.ran(usql.JUDGED_TOWNS_SQL)
+    assert not conn.ran(usql.JUDGEMENTS_FACETS_SQL)
     # The selection the first page fell back to holds for the whole walk.
     assert conn.params(usql.JUDGEMENTS_SQL)["reason"] == "all"
     assert later["data"]["reason"] == "all"
-    assert (later["data"]["total"], later["data"]["facets"], later["data"]["towns"]) == (
-        None, None, None)
+    assert (later["data"]["total"], later["data"]["facets"]) == (None, None)
 
 
 def test_the_engine_view_is_the_live_stream_once_it_is_live(client, conn):
@@ -365,7 +359,8 @@ def test_a_store_behind_the_code_reads_as_not_ready(client, conn):
 def test_the_page_never_reads_the_marks_list_stamp():
     """Migration 576's `stratum` is the marks' training provenance, not a filter: no Judge
     statement reads it off `autodedup.judgements` (the sealed draw's own name partitions it)."""
-    for sql in (usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL, usql.JUDGED_TOWNS_SQL):
+    for sql in (usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL,
+                usql.VALIDATION_JUDGE_SAMPLE_SQL, usql.VALIDATION_JUDGE_TOTAL_SQL):
         flat = _flat(sql)
         assert "j.stratum" not in flat and "m.stratum" not in flat and "g.stratum" not in flat
 
@@ -391,35 +386,49 @@ def _flat(sql: str) -> str:
     return " ".join(sql.split())
 
 
-def test_one_definition_of_the_operators_word_and_of_the_judges_headline():
-    """The Judge page reads the rulings page's `rulings` CTE and the residual queue's headline,
-    never a copy of either — and `oss`, the rented arm, is not the judge anywhere."""
-    assert usql._OPERATOR_WORDS in usql.RULINGS_PAIR_SQL
-    assert usql._OPERATOR_WORDS in usql.JUDGEMENTS_SQL
-    assert usql._OPERATOR_WORDS in usql.VALIDATION_JUDGE_SAMPLE_SQL
-    headline = usql._judge_best("r.listing_lo", "r.listing_hi")
-    assert headline in usql.JUDGEMENTS_SQL
-    assert usql._judge_best("p.listing_lo", "p.listing_hi") in usql.RESIDUAL_SQL
-    assert "jj.tier IN ('gold', 'vision', 'text')" in headline
+def test_one_definition_of_the_operators_word_the_headline_and_the_engines_read():
+    """The Judge page reads the rulings page's `rulings` CTE, the residual queue's headline rule
+    (tiers and their rank; `oss`, the rented arm, is not the judge anywhere) and the proposed
+    splits' adverts of the generation — never a copy of any of them."""
+    for sql in (usql.RULINGS_PAIR_SQL, usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL,
+                usql.VALIDATION_JUDGE_SAMPLE_SQL, usql.VALIDATION_JUDGE_TOTAL_SQL):
+        assert usql._OPERATOR_WORDS in sql
+    for sql, alias in ((usql.RESIDUAL_SQL, "jj"), (usql.JUDGEMENTS_SQL, "m")):
+        assert f"tier IN {usql._JUDGE_TIERS}" in sql
+        assert usql._TIER_RANK.format(t=alias) in sql
     assert "'oss'" not in usql.JUDGEMENTS_SQL
-    assert usql._PAIR_CONTEXT_JOINS in usql.RULINGS_PAIR_SQL
-    assert usql._PAIR_CONTEXT_JOINS in usql.JUDGEMENTS_SQL
+    for sql in (usql.PROPOSED_SPLIT_ADVERTS_SQL, usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL):
+        assert usql._ENGINE_ADVERTS in sql
+
+
+def test_the_order_is_built_from_the_autodedup_store_alone():
+    """On production a probe into a large public table is a disk read: one per judged pair cost
+    10 s (2026-09-29). The selection, the reasons, the caps and the order read the autodedup
+    store once, joined by hash; a row's town and stored pair are read for the page's rows only,
+    after its LIMIT. The counts and the strip read no public table at all."""
+    chain, tail = usql.JUDGEMENTS_SQL.split(", page AS (", 1)
+    for sql in (chain, usql.JUDGEMENTS_FACETS_SQL, usql.VALIDATION_JUDGE_SAMPLE_SQL,
+                usql.VALIDATION_JUDGE_TOTAL_SQL):
+        assert "public." not in sql and "LEFT JOIN LATERAL" not in sql
+    head, after_limit = tail.split("LIMIT %(limit)s::int\n)", 1)
+    assert "public." not in head and "JOIN public.listing_location ll" in after_limit
+    assert "JOIN autodedup.pairs p" in after_limit
 
 
 def test_the_order_is_one_seeded_order_and_never_the_reason():
     """Position must not tell a blind operator what the judge said: after `ruled` and the
     sample block, the seeded hash orders every row."""
     flat = _flat(usql.JUDGEMENTS_SQL)
-    assert flat.endswith(
-        "ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi "
-        "LIMIT %(limit)s::int")
-    assert "md5(j.listing_lo::text || ':' || j.listing_hi::text || %(seed)s::text)" in flat
+    order = "ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi"
+    assert f"{order} LIMIT %(limit)s::int )" in flat and flat.endswith(order)
+    assert "md5(r.listing_lo::text || ':' || r.listing_hi::text || %(seed)s::text)" in flat
     assert "md5(e.listing_lo::text || ':' || e.listing_hi::text || %(seed)s::text)" in flat
 
 
 def test_every_reason_is_capped_by_the_one_sample_size():
     flat = _flat(usql.JUDGEMENTS_SQL)
-    assert flat.count("<= %(sample_size)s::int") == 4
+    assert flat.count("draw_rank <= %(sample_size)s::int") == 1
+    assert flat.count("LIMIT %(sample_size)s::int") == 3
     assert "PARTITION BY e.stratum" in flat
 
 

@@ -83,16 +83,13 @@ _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("ruling towns",
      usql.RULING_TOWNS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM towns t")[0],
      usql.RULING_TOWN_COLUMNS),
-    # The Judge page: the outer select over `f`, the first half of the facet UNION, the towns.
+    # The Judge page: the outer select over its page, the facet counts.
     ("judged pairs",
-     usql.JUDGEMENTS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0],
+     usql.JUDGEMENTS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM page f\n")[0],
      usql.JUDGED_PAIR_COLUMNS),
     ("judged facets",
      usql.JUDGEMENTS_FACETS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0],
      usql.RULING_FACET_COLUMNS),
-    ("judged towns",
-     usql.JUDGED_TOWNS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM towns t")[0],
-     usql.RULING_TOWN_COLUMNS),
 )
 
 

@@ -572,20 +572,23 @@ JUDGEMENT_COLUMNS: tuple[str, ...] = (
     "created_at",
 )
 
-# THE JUDGE'S HEADLINE, spelled once (the residual queue and the Judge page): its best tier —
-# gold > vision > text — and the newest mark within that tier. AUTHORITY, not recency, and `oss`
-# is not the judge at all: it is the rented open-model ARM that answers the same pairs gold
-# already answered, so on the clock alone an experimental verdict would replace ground truth.
+# THE JUDGE'S HEADLINE, spelled once (the residual queue per row, the Judge page per pair in
+# `_JUDGED_POPULATION`): its best tier — gold > vision > text — and the newest mark within that
+# tier. AUTHORITY, not recency, and `oss` is not the judge at all: it is the rented open-model ARM
+# that answers the same pairs gold already answered, so on the clock alone an experimental
+# verdict would replace ground truth.
+_JUDGE_TIERS = "('gold', 'vision', 'text')"
+_TIER_RANK = "CASE {t}.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END"
+
+
 def _judge_best(lo: str, hi: str) -> str:
     return f"""
 LEFT JOIN LATERAL (
-    SELECT jj.tier, jj.verdict, jj.confidence, jj.model, jj.key_evidence,
-           jj.contradicting_evidence
+    SELECT jj.tier, jj.verdict, jj.confidence
       FROM autodedup.judgements jj
      WHERE jj.listing_lo = {lo} AND jj.listing_hi = {hi}
-       AND jj.tier IN ('gold', 'vision', 'text')
-     ORDER BY CASE jj.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END,
-              jj.created_at DESC
+       AND jj.tier IN {_JUDGE_TIERS}
+     ORDER BY {_TIER_RANK.format(t="jj")}, jj.created_at DESC
      LIMIT 1
 ) jb ON true
 """
@@ -1718,8 +1721,10 @@ WITH s AS (
 # decides which are proposals), with the group it holds (NULL = none) and whether the generation
 # SAW it (a group member, a scored pair's side, or — for the live stream — a fingerprint the lane
 # holds); with `property_id`, that property only.
-PROPOSED_SPLIT_ADVERTS_SQL = """
-WITH grouped AS (
+# THE ADVERTS A GENERATION READ, each with the group it holds (NULL = none), spelled once: a group
+# member, a stored pair's side, or a fingerprint the live stream holds. The generation's own rows
+# are read once, never probed per advert (the proposed splits, the Judge page).
+_ENGINE_ADVERTS = """grouped AS (
     SELECT s.listing_id, max(s.cluster_key) AS cluster_key
     FROM (
         SELECT m.listing_id, m.cluster_key FROM autodedup.cluster_members m
@@ -1733,7 +1738,13 @@ WITH grouped AS (
          WHERE f.generation = %(generation)s::text
     ) s
     GROUP BY s.listing_id
-), touched AS (
+)"""
+
+PROPOSED_SPLIT_ADVERTS_SQL = (
+    """
+WITH """
+    + _ENGINE_ADVERTS
+    + """, touched AS (
     SELECT DISTINCT l.property_id FROM grouped g JOIN public.listings l ON l.id = g.listing_id
      WHERE %(property_id)s::bigint IS NULL OR l.property_id = %(property_id)s::bigint
 )
@@ -1745,6 +1756,7 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
   LEFT JOIN grouped g ON g.listing_id = l.id
  ORDER BY l.property_id, l.id
 """
+)
 
 # ------------------------------------------------------------------- the rulings page (E920)
 #
@@ -1923,11 +1935,13 @@ WITH pair_rows AS (
 )"""
 )
 
-# WHERE A PAIR STANDS, spelled once for both pair lists (rulings, Judge page): production (are
-# the two adverts on one property now?), the town, the generation's stored pair, and how the
-# generation groups the two (`engine_view`). The row is `r`, carrying `listing_lo`/`listing_hi`.
-_PAIR_CONTEXT_COLUMNS = (
-    """
+_RULINGS_PAIR_FROM = (
+    _OPERATOR_WORDS
+    + """, joined AS (
+    SELECT r.ruling_id, r.ruling_kind, r.listing_lo, r.listing_hi, r.verdict, r.status,
+           r.source, r.merge_group_id, r.group_cluster_key, r.group_generation, r.note,
+           r.reasons, r.decided_by, r.decided_at, r.n_rows,
+           mnl.source AS must_not_link,
            la.property_id AS property_lo, lb.property_id AS property_hi,
            coalesce(la.property_id = lb.property_id, false) AS together_now,
            ll.obec_kod, ll.obec_name, ll.cast_obce_kod, ll.cast_obce_name,
@@ -1940,14 +1954,14 @@ _PAIR_CONTEXT_COLUMNS = (
     + """ AS seen_lo,
            """
     + _engine_seen("r.listing_hi")
-    + """ AS seen_hi"""
-)
-
-_PAIR_CONTEXT_JOINS = """
+    + """ AS seen_hi
+      FROM rulings r
       LEFT JOIN public.listings la ON la.id = r.listing_lo
       LEFT JOIN public.listings lb ON lb.id = r.listing_hi
       LEFT JOIN public.listing_location ll ON ll.listing_id = r.listing_lo
       LEFT JOIN public.listing_location lh ON lh.listing_id = r.listing_hi
+      LEFT JOIN autodedup.must_not_link mnl
+             ON mnl.listing_lo = r.listing_lo AND mnl.listing_hi = r.listing_hi
       LEFT JOIN autodedup.pairs p
              ON p.generation = %(generation)s::text
             AND p.listing_lo = r.listing_lo AND p.listing_hi = r.listing_hi
@@ -1961,31 +1975,12 @@ _PAIR_CONTEXT_JOINS = """
            WHERE m.generation = %(generation)s::text AND m.listing_id = r.listing_hi
            LIMIT 1
       ) cb ON true
-"""
-
-_ENGINE_VIEW = """
+), w AS (
+    SELECT j.*,
            CASE WHEN j.engine_group_lo IS NOT NULL AND j.engine_group_lo = j.engine_group_hi
                      THEN 'together'
                 WHEN j.seen_lo AND j.seen_hi THEN 'apart'
-                ELSE 'unseen' END AS engine_view"""
-
-_RULINGS_PAIR_FROM = (
-    _OPERATOR_WORDS
-    + """, joined AS (
-    SELECT r.ruling_id, r.ruling_kind, r.listing_lo, r.listing_hi, r.verdict, r.status,
-           r.source, r.merge_group_id, r.group_cluster_key, r.group_generation, r.note,
-           r.reasons, r.decided_by, r.decided_at, r.n_rows,
-           mnl.source AS must_not_link,"""
-    + _PAIR_CONTEXT_COLUMNS
-    + """
-      FROM rulings r"""
-    + _PAIR_CONTEXT_JOINS
-    + """      LEFT JOIN autodedup.must_not_link mnl
-             ON mnl.listing_lo = r.listing_lo AND mnl.listing_hi = r.listing_hi
-), w AS (
-    SELECT j.*,"""
-    + _ENGINE_VIEW
-    + """
+                ELSE 'unseen' END AS engine_view
       FROM joined j
 ), v AS (
     SELECT w.*,
@@ -2253,9 +2248,19 @@ ORDER BY v.decided_at DESC, v.id DESC
 # picker. Read over the side each filter reads: a pair's low advert, a group's first member.
 RULING_TOWN_COLUMNS: tuple[str, ...] = ("grain", "code", "name", "n")
 
-# The vocabulary's counting half, over any `named(listing_id)` CTE: the rulings' adverts here, the
-# Judge page's pairs (each named by its low advert) in `JUDGED_TOWNS_SQL`.
-_TOWNS_TAIL = """, towns AS (
+RULING_TOWNS_SQL = """
+WITH named AS (
+    SELECT x.listing_lo AS listing_id FROM autodedup.verdicts x
+     WHERE x.kind = 'pair' AND x.listing_lo IS NOT NULL
+    UNION
+    SELECT m.listing_lo FROM autodedup.must_not_link m
+    UNION
+    SELECT x.member_ids[1] FROM autodedup.verdicts x
+     WHERE x.kind = 'cluster' AND cardinality(x.member_ids) > 0
+    UNION
+    SELECT o.member_ids[1] FROM autodedup.operator_merges o
+     WHERE cardinality(o.member_ids) > 0
+), towns AS (
     SELECT 'o'::text AS grain, ll.obec_kod AS code, max(ll.obec_name) AS name, count(*) AS n
       FROM named d JOIN public.listing_location ll ON ll.listing_id = d.listing_id
      WHERE ll.obec_kod IS NOT NULL
@@ -2272,57 +2277,65 @@ SELECT t.grain, t.code, t.name, t.n
  LIMIT %(limit)s::int
 """
 
-RULING_TOWNS_SQL = (
-    """
-WITH named AS (
-    SELECT x.listing_lo AS listing_id FROM autodedup.verdicts x
-     WHERE x.kind = 'pair' AND x.listing_lo IS NOT NULL
-    UNION
-    SELECT m.listing_lo FROM autodedup.must_not_link m
-    UNION
-    SELECT x.member_ids[1] FROM autodedup.verdicts x
-     WHERE x.kind = 'cluster' AND cardinality(x.member_ids) > 0
-    UNION
-    SELECT o.member_ids[1] FROM autodedup.operator_merges o
-     WHERE cardinality(o.member_ids) > 0
-)"""
-    + _TOWNS_TAIL
-)
-
 # ------------------------------------------------------------------------ the Judge page
 #
 # Every pair the judge marked (gold, vision, text) and every pair of a sealed random draw
 # (`eval_samples`), one row per pair (`GET /autodedup/judgements`). The four reasons to read a
 # pair, each capped at `sample_size` by its own order, and the one blind-safe page order are
 # PROGRAM.md E922; the statements below are that rule, spelled once.
+#
+# THE ORDER IS BUILT FROM THE AUTODEDUP STORE ALONE, each table read ONCE and joined by hash: the
+# marks, the operator's words, the sealed draws and the adverts the generation read. A row's town,
+# its stored pair and its headline's evidence are read for the page's rows only, after the LIMIT:
+# on production a probe into a large table is a disk read, and one per judged pair cost 10 s
+# (2026-09-29, 6,721 pairs).
 
-_JUDGED_POPULATION = """
-marks AS (
-    SELECT DISTINCT ON (j.listing_lo, j.listing_hi, j.tier)
-           j.listing_lo, j.listing_hi, j.tier, j.verdict, j.confidence
-      FROM autodedup.judgements j
-     WHERE j.tier IN ('gold', 'vision', 'text')
-     ORDER BY j.listing_lo, j.listing_hi, j.tier, j.created_at DESC
-), judged AS (
-    SELECT m.listing_lo, m.listing_hi,
-           max(m.verdict) FILTER (WHERE m.tier = 'text') AS text_verdict,
-           max(m.verdict) FILTER (WHERE m.tier = 'vision') AS vision_verdict,
-           max(m.confidence) FILTER (WHERE m.tier = 'gold') AS gold_confidence
-      FROM marks m
-     GROUP BY m.listing_lo, m.listing_hi
-), sealed AS (
+# The pairs of the sealed draws, each ranked in its draw's seeded order.
+_SEALED = """sealed AS (
     SELECT e.listing_lo, e.listing_hi,
            row_number() OVER (
                PARTITION BY e.stratum
                ORDER BY md5(e.listing_lo::text || ':' || e.listing_hi::text || %(seed)s::text),
                         e.listing_lo, e.listing_hi) AS draw_rank
       FROM autodedup.eval_samples e
-), population AS (
+)"""
+
+# `marks` is the newest mark per pair and tier, sorted tier first: no index serves that order, so
+# the table is read in one pass, never key by key (the key order read it page by page from disk,
+# 1.3 s). `judged` is each pair's headline -- the best tier's mark -- and whether text and vision
+# said different binary words.
+_JUDGED_POPULATION = (
+    """marks AS (
+    SELECT DISTINCT ON (j.tier, j.listing_lo, j.listing_hi)
+           j.listing_lo, j.listing_hi, j.tier, j.judge_version, j.verdict, j.confidence
+      FROM autodedup.judgements j
+     WHERE j.tier IN """
+    + _JUDGE_TIERS
+    + """
+     ORDER BY j.tier, j.listing_lo, j.listing_hi, j.created_at DESC
+), judged AS (
+    SELECT DISTINCT ON (m.listing_lo, m.listing_hi)
+           m.listing_lo, m.listing_hi, m.tier, m.judge_version, m.verdict, m.confidence,
+           bool_or(m.tier <> 'gold' AND m.verdict = 'same_property') OVER pair
+           AND bool_or(m.tier <> 'gold'
+                       AND m.verdict NOT IN ('same_property', 'insufficient_evidence'))
+               OVER pair AS tiers_split
+      FROM marks m
+    WINDOW pair AS (PARTITION BY m.listing_lo, m.listing_hi)
+     ORDER BY m.listing_lo, m.listing_hi, """
+    + _TIER_RANK.format(t="m")
+    + """
+), """
+    + _SEALED
+    + """, population AS (
     SELECT coalesce(g.listing_lo, s.listing_lo) AS listing_lo,
-           coalesce(g.listing_hi, s.listing_hi) AS listing_hi, s.draw_rank
+           coalesce(g.listing_hi, s.listing_hi) AS listing_hi, s.draw_rank,
+           g.tier AS judge_tier, g.judge_version, g.verdict AS judge_verdict,
+           g.confidence AS judge_confidence, coalesce(g.tiers_split, false) AS tiers_split
       FROM judged g
       FULL JOIN sealed s ON s.listing_lo = g.listing_lo AND s.listing_hi = g.listing_hi
 )"""
+)
 
 # The Judge statements are one wide CTE chain whose estimated cost crosses `jit_above_cost` at any
 # size, and JIT then compiles ~900 functions to run a plan that takes milliseconds: 2.9 s against
@@ -2335,9 +2348,9 @@ JIT_OFF = "SET LOCAL jit = off"
 # or a withdrawal / "Nevím"). The page's ONE "ruled" is that standing word: it sorts a row down
 # and counts under "Rozhodnuto"; the SPA's `revealsJudge` lifts blindness on the same word, so a
 # "Nevím" opens nothing on any surface (E55).
-_JUDGE_WORD = """CASE WHEN jb.verdict IS NULL THEN 'none'
-                WHEN jb.verdict = 'same_property' THEN 'same'
-                WHEN jb.verdict = 'insufficient_evidence' THEN 'abstain'
+_JUDGE_WORD = """CASE WHEN r.judge_verdict IS NULL THEN 'none'
+                WHEN r.judge_verdict = 'same_property' THEN 'same'
+                WHEN r.judge_verdict = 'insufficient_evidence' THEN 'abstain'
                 ELSE 'different' END"""
 
 _OPERATOR_WORD = f"""CASE WHEN o.status = 'standing' AND o.verdict = 'same' THEN 'same'
@@ -2348,51 +2361,35 @@ _BINARY = "('same', 'different')"
 
 # `unsure` is a SPLIT, never the tier alone: text against vision, a gold vote below unanimous
 # (`judge.aggregate_gold` stores 1.0 only for three of three), or a headline that abstains -- a
-# unanimous gold mark is the surest word the judge has, so it may carry the `engine` reason.
-# The operator's note and codes travel only from a ruling typed against the pair: a group's
-# implied word or a bare veto carries none of the pair's own, so a note saved here re-posts only
-# what the pair itself holds.
+# unanimous gold mark is the surest word the judge has, so it may carry the `engine` reason. A
+# gold mark is always the headline, so the gold vote is the headline's confidence. Each cap is
+# the first `sample_size` of its reason in its own order: three short sorts, not three over all.
 _JUDGEMENTS_FROM = (
     _OPERATOR_WORDS
     + ", "
     + _JUDGED_POPULATION
-    + """, joined AS (
-    SELECT r.listing_lo, r.listing_hi, r.draw_rank,
-           g.text_verdict, g.vision_verdict, g.gold_confidence,
-           jb.tier AS judge_tier, jb.verdict AS judge_verdict,
-           jb.confidence AS judge_confidence, jb.model AS judge_model,
-           jb.key_evidence AS judge_key_evidence,
-           jb.contradicting_evidence AS judge_contradicting_evidence,
+    + ", "
+    + _ENGINE_ADVERTS
+    + """, w AS (
+    SELECT r.listing_lo, r.listing_hi, r.draw_rank, r.judge_tier, r.judge_version,
+           r.judge_verdict, r.judge_confidence, r.tiers_split,
            """
     + _JUDGE_WORD
     + """ AS judge_word,
-           o.ruling_id AS operator_ruling_id, o.verdict AS operator_verdict,
-           CASE WHEN o.ruling_kind = 'pair' THEN o.note END AS operator_note,
-           CASE WHEN o.ruling_kind = 'pair' THEN o.reasons END AS operator_reasons,
-           o.decided_by AS operator_decided_by, o.decided_at AS operator_decided_at,
            """
     + _OPERATOR_WORD
-    + """ AS operator_word,"""
-    + _PAIR_CONTEXT_COLUMNS
-    + """
+    + """ AS operator_word,
+           CASE WHEN ga.cluster_key = gb.cluster_key THEN 'together'
+                WHEN ga.listing_id IS NOT NULL AND gb.listing_id IS NOT NULL THEN 'apart'
+                ELSE 'unseen' END AS engine_view,
+           md5(r.listing_lo::text || ':' || r.listing_hi::text || %(seed)s::text) AS sort_hash
       FROM population r
-      LEFT JOIN judged g ON g.listing_lo = r.listing_lo AND g.listing_hi = r.listing_hi
-      LEFT JOIN rulings o ON o.listing_lo = r.listing_lo AND o.listing_hi = r.listing_hi"""
-    + _judge_best("r.listing_lo", "r.listing_hi")
-    + _PAIR_CONTEXT_JOINS
-    + """), w AS (
-    SELECT j.*,"""
-    + _ENGINE_VIEW
-    + """,
-           j.operator_word IS NOT NULL AS ruled,
-           md5(j.listing_lo::text || ':' || j.listing_hi::text || %(seed)s::text) AS sort_hash,
-           coalesce(j.text_verdict <> 'insufficient_evidence'
-                    AND j.vision_verdict <> 'insufficient_evidence'
-                    AND (j.text_verdict = 'same_property')
-                        <> (j.vision_verdict = 'same_property'), false) AS tiers_split
-      FROM joined j
+      LEFT JOIN rulings o ON o.listing_lo = r.listing_lo AND o.listing_hi = r.listing_hi
+      LEFT JOIN grouped ga ON ga.listing_id = r.listing_lo
+      LEFT JOIN grouped gb ON gb.listing_id = r.listing_hi
 ), scored AS (
     SELECT w.*,
+           w.operator_word IS NOT NULL AS ruled,
            CASE WHEN w.operator_word IS NULL OR w.judge_word NOT IN """
     + _BINARY
     + """ THEN 'none'
@@ -2403,8 +2400,8 @@ _JUDGEMENTS_FROM = (
     + """ OR w.engine_view = 'unseen' THEN 'none'
                 WHEN (w.judge_word = 'same') = (w.engine_view = 'together') THEN 'agrees'
                 ELSE 'disagrees' END AS engine_agreement,
-           (w.tiers_split OR coalesce(w.gold_confidence < 1, false)
-            OR w.judge_word = 'abstain') AS raw_unsure,
+           (w.tiers_split OR w.judge_word = 'abstain'
+            OR (w.judge_tier = 'gold' AND coalesce(w.judge_confidence < 1, false))) AS raw_unsure,
            coalesce(w.draw_rank <= %(sample_size)s::int, false) AS is_sample
       FROM w
 ), flagged AS (
@@ -2413,22 +2410,27 @@ _JUDGEMENTS_FROM = (
            NOT x.raw_unsure AND x.engine_agreement = 'disagrees'
            AND coalesce(x.judge_confidence >= %(judge_sure)s::real, false) AS raw_engine
       FROM scored x
+), operator_cap AS (
+    SELECT c.listing_lo, c.listing_hi FROM flagged c WHERE c.raw_operator
+     ORDER BY c.judge_confidence DESC NULLS LAST, c.sort_hash, c.listing_lo, c.listing_hi
+     LIMIT %(sample_size)s::int
+), unsure_cap AS (
+    SELECT c.listing_lo, c.listing_hi FROM flagged c WHERE c.raw_unsure
+     ORDER BY CASE WHEN c.judge_tier = 'gold' THEN c.judge_confidence END ASC NULLS LAST,
+              c.sort_hash, c.listing_lo, c.listing_hi
+     LIMIT %(sample_size)s::int
+), engine_cap AS (
+    SELECT c.listing_lo, c.listing_hi FROM flagged c WHERE c.raw_engine
+     ORDER BY (c.engine_view = 'together') DESC, c.judge_confidence DESC NULLS LAST,
+              c.sort_hash, c.listing_lo, c.listing_hi
+     LIMIT %(sample_size)s::int
 ), capped AS (
-    SELECT c.*,
-           c.raw_operator AND row_number() OVER (
-               PARTITION BY c.raw_operator
-               ORDER BY c.judge_confidence DESC NULLS LAST, c.sort_hash,
-                        c.listing_lo, c.listing_hi) <= %(sample_size)s::int AS is_operator,
-           c.raw_unsure AND row_number() OVER (
-               PARTITION BY c.raw_unsure
-               ORDER BY c.gold_confidence ASC NULLS LAST, c.sort_hash,
-                        c.listing_lo, c.listing_hi) <= %(sample_size)s::int AS is_unsure,
-           c.raw_engine AND row_number() OVER (
-               PARTITION BY c.raw_engine
-               ORDER BY (c.engine_view = 'together') DESC, c.judge_confidence DESC NULLS LAST,
-                        c.sort_hash, c.listing_lo, c.listing_hi)
-               <= %(sample_size)s::int AS is_engine
+    SELECT c.*, op.listing_lo IS NOT NULL AS is_operator,
+           un.listing_lo IS NOT NULL AS is_unsure, en.listing_lo IS NOT NULL AS is_engine
       FROM flagged c
+      LEFT JOIN operator_cap op ON op.listing_lo = c.listing_lo AND op.listing_hi = c.listing_hi
+      LEFT JOIN unsure_cap un ON un.listing_lo = c.listing_lo AND un.listing_hi = c.listing_hi
+      LEFT JOIN engine_cap en ON en.listing_lo = c.listing_lo AND en.listing_hi = c.listing_hi
 ), f AS (
     SELECT c.*,
            c.is_sample OR c.is_operator OR c.is_engine OR c.is_unsure AS is_suggested,
@@ -2438,8 +2440,7 @@ _JUDGEMENTS_FROM = (
            coalesce(c.judge_tier, 'none') AS tier_word,
            CASE WHEN c.ruled THEN '1' ELSE '0' END AS ruled_word
       FROM capped c
-)
-"""
+)"""
 )
 
 # Shared by the page and its counts. `reason` is never NULL: the route resolves a missing one.
@@ -2451,8 +2452,6 @@ WHERE (%(reason)s::text = 'all'
        OR (%(reason)s::text = 'unsure' AND f.is_unsure))
   AND (%(judge)s::text IS NULL OR f.judge_word = %(judge)s::text)
   AND (%(tier)s::text IS NULL OR f.tier_word = %(tier)s::text)
-  AND (%(obec)s::bigint IS NULL OR f.obec_kod = %(obec)s::bigint)
-  AND (%(cast_obce)s::bigint IS NULL OR f.cast_obce_kod = %(cast_obce)s::bigint)
   AND (%(ruled)s::boolean IS NULL OR f.ruled = %(ruled)s::boolean)
   AND (%(operator)s::text IS NULL OR f.operator_agreement = %(operator)s::text)
   AND (%(engine)s::text IS NULL OR f.engine_agreement = %(engine)s::text)
@@ -2489,20 +2488,39 @@ JUDGED_PAIR_COLUMNS: tuple[str, ...] = (
     "sort_hash",
 )
 
+# One page in the order, THEN what the rows show: the operator's note and codes (only from a
+# ruling typed against the pair -- a group's implied word or a bare veto carries none of the
+# pair's own, so a note saved here re-posts only what the pair itself holds), the headline's
+# model and evidence (its own row, by key), the low advert's town and the generation's stored pair.
 JUDGEMENTS_SQL = (
     _JUDGEMENTS_FROM
-    + "\nSELECT "
-    + ", ".join(f"f.{name}" for name in JUDGED_PAIR_COLUMNS)
-    + """
-  FROM f
-"""
+    + """, page AS (
+    SELECT f.* FROM f"""
     + _JUDGEMENTS_WHERE
     + """  AND (%(after_hash)s::text IS NULL
        OR (f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi)
           > (%(after_ruled)s::int, %(after_block)s::int, %(after_hash)s::text,
              %(after_lo)s::bigint, %(after_hi)s::bigint))
-ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi
-LIMIT %(limit)s::int
+     ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi
+     LIMIT %(limit)s::int
+)
+SELECT f.listing_lo, f.listing_hi, f.ruled, o.ruling_id, o.verdict,
+       CASE WHEN o.ruling_kind = 'pair' THEN o.note END,
+       CASE WHEN o.ruling_kind = 'pair' THEN o.reasons END, o.decided_by, o.decided_at,
+       f.judge_tier, f.judge_verdict, f.judge_confidence, jb.model, jb.key_evidence,
+       jb.contradicting_evidence, f.is_sample, f.is_operator, f.is_engine, f.is_unsure,
+       f.engine_view, ll.obec_name, ll.cast_obce_name, p.zone, p.score, p.decision,
+       p.guard_veto, f.block, f.sort_hash
+  FROM page f
+  LEFT JOIN rulings o ON o.listing_lo = f.listing_lo AND o.listing_hi = f.listing_hi
+  LEFT JOIN autodedup.judgements jb
+         ON jb.listing_lo = f.listing_lo AND jb.listing_hi = f.listing_hi
+        AND jb.judge_version = f.judge_version AND jb.tier = f.judge_tier
+  LEFT JOIN public.listing_location ll ON ll.listing_id = f.listing_lo
+  LEFT JOIN autodedup.pairs p
+         ON p.generation = %(generation)s::text
+        AND p.listing_lo = f.listing_lo AND p.listing_hi = f.listing_hi
+ ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi
 """
 )
 
@@ -2519,42 +2537,33 @@ SELECT x.facet, x.value, count(*) AS n
        ('reason', CASE WHEN f.is_suggested THEN 'suggested' END),
        ('reason', CASE WHEN f.is_sample THEN 'sample' END),
        ('reason', CASE WHEN f.is_engine THEN 'engine' END),
-       ('reason', CASE WHEN f.is_unsure THEN 'unsure' END)) AS x(facet, value)
-"""
+       ('reason', CASE WHEN f.is_unsure THEN 'unsure' END)) AS x(facet, value)"""
     + _JUDGEMENTS_WHERE
     + """  AND (x.facet = 'total' OR x.value IS NOT NULL)
  GROUP BY x.facet, x.value
 """
 )
 
-# The town filter's vocabulary over this population, each pair named by its low advert.
-JUDGED_TOWNS_SQL = (
-    "WITH "
-    + _JUDGED_POPULATION
-    + """, named AS (
-    SELECT r.listing_lo AS listing_id FROM population r
-)"""
-    + _TOWNS_TAIL
-)
-
 # The strip's two counters at PAIR grain: the first `sample_size` of each sealed draw, and the
 # whole population. Reviewed = any word of the operator's (`rulings`), as on every queue's strip;
 # the page's "ruled" is narrower (a standing binary word), so "Nevím" is reviewed, not ruled.
-def _judge_counts(where: str) -> str:
-    return (
-        _OPERATOR_WORDS
-        + ", "
-        + _JUDGED_POPULATION
-        + f""", s AS (
-    SELECT r.listing_lo, r.listing_hi FROM population r {where}
-)
+VALIDATION_JUDGE_SAMPLE_SQL = (
+    _OPERATOR_WORDS
+    + ", "
+    + _SEALED
+    + _VALIDATION_COUNTS
+    + """FROM sealed s
+LEFT JOIN rulings v ON v.listing_lo = s.listing_lo AND v.listing_hi = s.listing_hi
+WHERE s.draw_rank <= %(sample_size)s::int
 """
-        + _VALIDATION_COUNTS
-        + """FROM s
+)
+
+VALIDATION_JUDGE_TOTAL_SQL = (
+    _OPERATOR_WORDS
+    + ", "
+    + _JUDGED_POPULATION
+    + _VALIDATION_COUNTS
+    + """FROM population s
 LEFT JOIN rulings v ON v.listing_lo = s.listing_lo AND v.listing_hi = s.listing_hi
 """
-    )
-
-
-VALIDATION_JUDGE_SAMPLE_SQL = _judge_counts("WHERE r.draw_rank <= %(sample_size)s::int")
-VALIDATION_JUDGE_TOTAL_SQL = _judge_counts("")
+)

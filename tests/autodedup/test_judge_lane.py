@@ -1875,12 +1875,12 @@ def test_the_experimental_arm_never_becomes_a_pairs_headline_verdict() -> None:
     tier, and the oss arm answers exactly the pairs gold already answered — on `created_at`
     alone the rented 7B would replace ground truth as a queue's headline and count itself into
     `n_judged_edges`. Authority, not recency, and `oss` is not the judge at all: the one
-    headline (`_judge_best`, the residual queue and the Judge page) reads gold, vision, text."""
+    headline rule (the residual queue and the Judge page) reads gold, vision, text."""
     from autodedup import score_sql, ui_sql
 
-    for headline in (ui_sql.RESIDUAL_SQL, ui_sql.JUDGEMENTS_SQL):
-        assert "AND jj.tier IN ('gold', 'vision', 'text')" in headline
-        assert "CASE jj.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in headline
+    for headline, alias in ((ui_sql.RESIDUAL_SQL, "jj"), (ui_sql.JUDGEMENTS_SQL, "m")):
+        assert "tier IN ('gold', 'vision', 'text')" in headline
+        assert f"CASE {alias}.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in headline
     assert "tier <> 'oss'" in score_sql.JUDGED_EDGES_SQL
 
 

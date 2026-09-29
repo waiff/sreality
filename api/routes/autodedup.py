@@ -3113,8 +3113,7 @@ REASON_ORDER: tuple[str, ...] = ("sample", "operator", "engine", "unsure")
 JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain")
 JUDGE_TIERS: tuple[str, ...] = ("gold", "vision", "text", "none")
 JUDGEMENT_FILTER_KEYS: frozenset[str] = frozenset(
-    {"reason", "judge", "tier", "town", "ruled", "operator", "engine", "generation", "after",
-     "limit"}
+    {"reason", "judge", "tier", "ruled", "operator", "engine", "generation", "after", "limit"}
 )
 JUDGEMENTS_PAGE_SIZE = 25
 # A headline at least this confident that contradicts the engine is worth the operator's look.
@@ -3178,7 +3177,6 @@ def judgements(
     reason: str | None = Query(None),
     judge: str | None = Query(None),
     tier: str | None = Query(None),
-    town: str | None = Query(None),
     ruled: int | None = Query(None),
     operator: str | None = Query(None),
     engine: str | None = Query(None),
@@ -3190,10 +3188,9 @@ def judgements(
     """One page of the judge's pairs, unruled first, the random sample on top (keyset on the
     page's order). A missing `reason` means `suggested` while that set holds a pair under the
     other filters, else `all`; the answer and the cursor say which. Only the FIRST page counts
-    (`total`, `facets` under the current filter) and names the towns; a later page runs the page
-    statement alone and sends those null."""
+    (`total`, `facets` under the current filter); a later page runs the page statement alone and
+    sends those null."""
     _reject_unknown_filters(request, JUDGEMENT_FILTER_KEYS)
-    obec, cast_obce = _town_codes(town)
     asked = _one_of("reason", reason or None, JUDGEMENT_REASONS)
     page_params = _judgement_cursor(after)
     listed = page_params.pop("reason")
@@ -3203,8 +3200,6 @@ def judgements(
         "reason": listed or asked or "suggested",
         "judge": _one_of("judge", judge or None, JUDGE_WORDS),
         "tier": _one_of("tier", tier or None, JUDGE_TIERS),
-        "obec": obec,
-        "cast_obce": cast_obce,
         "ruled": _flag("ruled", ruled),
         "operator": _one_of("operator", operator or None, RULING_AGREEMENT),
         "engine": _one_of("engine", engine or None, RULING_AGREEMENT),
@@ -3214,7 +3209,7 @@ def judgements(
     }
     if not store_ready(conn):
         return _not_ready()
-    total, facets, towns = None, None, None
+    total, facets = None, None
     try:
         generation = _resolve_generation(conn, generation)
         params["generation"] = generation
@@ -3227,9 +3222,6 @@ def judgements(
                     params["reason"] = "all"
                     total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
                                             _JUDGEMENT_FACETS)
-                towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
-                    conn, usql.JUDGED_TOWNS_SQL,
-                    {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
             rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
                 conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
     except _STORE_BEHIND:
@@ -3249,7 +3241,6 @@ def judgements(
             "next_after": next_after,
             "total": total,
             "facets": facets,
-            "towns": towns,
         },
         "store_ready": True,
     }

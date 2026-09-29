@@ -36,8 +36,7 @@ _IDS = itertools.count(9_800_000_001, 2)
 
 _BASE: dict[str, Any] = {
     "generation": GEN, "seed": SEED, "sample_size": 100, "judge_sure": 0.9, "reason": "all",
-    "judge": None, "tier": None, "obec": None, "cast_obce": None, "ruled": None,
-    "operator": None, "engine": None,
+    "judge": None, "tier": None, "ruled": None, "operator": None, "engine": None,
 }
 _NO_CURSOR: dict[str, Any] = {
     "after_ruled": None, "after_block": None, "after_hash": None, "after_lo": None,
@@ -303,8 +302,8 @@ def test_the_facets_count_the_current_filter_and_every_reason(cur):
     assert facets[("reason", "suggested")] == facets[("total", None)]
     assert ("reason", "operator") not in facets, "a reason a row carries, not a selection"
     assert facets[("tier", "none")] >= 4
-    cur.execute(usql.JUDGED_TOWNS_SQL, {"seed": SEED, "limit": 40})
-    cur.fetchall()
+    # The counts count what the page lists.
+    assert facets[("total", None)] == len(_rows(cur, reason="suggested"))
 
 
 def test_the_lane_stamps_a_mark_once_and_the_first_list_keeps_it(cur):
