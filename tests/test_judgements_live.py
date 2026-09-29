@@ -281,3 +281,34 @@ def test_the_lane_stamps_a_mark_once_and_the_first_list_keeps_it(cur):
     cur.execute("SELECT stratum FROM autodedup.judgements WHERE listing_lo = %s"
                 " AND listing_hi = %s", pair)
     assert cur.fetchone() == ("g2:s2_mf_only_edge",)
+
+
+def test_zz_timing_diagnostic(cur):
+    """TEMPORARY: where the time goes (planning, execution, JIT) — removed before review."""
+    import time
+    import warnings
+
+    pairs = _seal(cur, 50)
+    for pair in pairs[:20]:
+        _mark(cur, pair, "vision", "same_property")
+    lines: list[str] = []
+    for jit in ("on", "off"):
+        cur.execute(f"SET LOCAL jit = {jit}")
+        for name, sql, params in (
+            ("items", usql.JUDGEMENTS_SQL, {**_BASE, **_NO_CURSOR, "limit": 26}),
+            ("facets", usql.JUDGEMENTS_FACETS_SQL, {**_BASE, "reason": "suggested"}),
+            ("rulings", usql.RULINGS_PAIR_SQL, None),
+        ):
+            if params is None:
+                continue
+            started = time.monotonic()
+            cur.execute("EXPLAIN (ANALYZE, SETTINGS, FORMAT TEXT) " + sql, params)
+            plan = [r[0] for r in cur.fetchall()]
+            keep = [p for p in plan if any(k in p for k in (
+                "Planning Time", "Execution Time", "JIT", "Timing:", "Functions:", "Options:",
+                "Settings:"))]
+            lines.append(f"jit={jit} {name} wall={time.monotonic() - started:.2f}s :: "
+                         + " | ".join(k.strip() for k in keep))
+    cur.execute("SHOW jit_above_cost")
+    lines.append(f"jit_above_cost={cur.fetchone()[0]}")
+    warnings.warn("TIMING " + " ## ".join(lines))
