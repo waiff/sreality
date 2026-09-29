@@ -2528,13 +2528,20 @@ JUDGEMENTS_SQL = (
      ORDER BY f.ruled::int, f.block, f.sort_hash, f.listing_lo, f.listing_hi
      LIMIT %(limit)s::int
 )
-SELECT f.listing_lo, f.listing_hi, f.ruled, o.ruling_id, o.verdict,
-       CASE WHEN o.ruling_kind = 'pair' THEN o.note END,
-       CASE WHEN o.ruling_kind = 'pair' THEN o.reasons END, o.decided_by, o.decided_at,
-       f.judge_tier, f.judge_verdict, f.judge_confidence, jb.model, jb.key_evidence,
-       jb.contradicting_evidence, f.is_sample, f.is_operator, f.is_engine, f.is_unsure,
-       f.engine_view, ll.obec_name, ll.cast_obce_name, p.zone, p.score, p.decision,
-       p.guard_veto, f.block, f.sort_hash
+SELECT f.listing_lo AS listing_lo, f.listing_hi AS listing_hi, f.ruled AS ruled,
+       o.ruling_id AS operator_ruling_id, o.verdict AS operator_verdict,
+       CASE WHEN o.ruling_kind = 'pair' THEN o.note END AS operator_note,
+       CASE WHEN o.ruling_kind = 'pair' THEN o.reasons END AS operator_reasons,
+       o.decided_by AS operator_decided_by, o.decided_at AS operator_decided_at,
+       f.judge_tier AS judge_tier, f.judge_verdict AS judge_verdict,
+       f.judge_confidence AS judge_confidence, jb.model AS judge_model,
+       jb.key_evidence AS judge_key_evidence,
+       jb.contradicting_evidence AS judge_contradicting_evidence, f.is_sample AS is_sample,
+       f.is_operator AS is_operator, f.is_engine AS is_engine, f.is_unsure AS is_unsure,
+       f.engine_view AS engine_view, ll.obec_name AS obec_name,
+       ll.cast_obce_name AS cast_obce_name, p.zone AS zone, p.score AS score,
+       p.decision AS decision, p.guard_veto AS guard_veto, f.block AS block,
+       f.sort_hash AS sort_hash
   FROM page f
   LEFT JOIN rulings o ON o.listing_lo = f.listing_lo AND o.listing_hi = f.listing_hi
   LEFT JOIN autodedup.judgements jb

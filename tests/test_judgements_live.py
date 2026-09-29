@@ -341,6 +341,13 @@ def test_the_route_runs_the_judge_statements_without_jit(cur):
     assert "JIT:" not in plan
 
 
+def test_the_page_names_its_columns_as_the_payload_reads_them(cur):
+    """The route zips rows onto `JUDGED_PAIR_COLUMNS`; the statement names each column the same."""
+    _mark(cur, _pair(), "vision", "same_property")
+    cur.execute(usql.JUDGEMENTS_SQL, {**_BASE, **_NO_CURSOR, "limit": 1})
+    assert tuple(d.name for d in cur.description) == usql.JUDGED_PAIR_COLUMNS
+
+
 # A generation far larger than the population, as at the country-wide roll-out: the engine's view
 # must read it for the judged adverts only (the planner probes its indexes), never all of it.
 BIG = "g-judge-scale"
