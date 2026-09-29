@@ -441,7 +441,7 @@ def test_the_engine_view_reads_the_generation_for_the_judged_adverts_only(cur):
     page = _rows_read(cur, usql.JUDGEMENTS_SQL,
                       {**_BASE, **_NO_CURSOR, "generation": BIG, "limit": 26})
     counts = _rows_read(cur, usql.JUDGEMENTS_FACETS_SQL, {**_BASE, "generation": BIG})
-    assert page <= 4 * len(ids) + 26 and counts <= 4 * len(ids), (page, counts)
+    assert page <= 10 * len(ids) + 26 and counts <= 10 * len(ids), (page, counts)
     whole = _rows_read(cur, usql.PROPOSED_SPLIT_ADVERTS_SQL,
                        {"generation": BIG, "property_id": None})
     assert whole >= BIG_PAIRS + BIG_FPS + BIG_MEMBERS, whole

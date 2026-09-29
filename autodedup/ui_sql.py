@@ -2328,38 +2328,30 @@ _JUDGED_POPULATION = (
 )"""
 )
 
-# THE ENGINE'S VIEW OF THE POPULATION'S ADVERTS: each advert the generation READ -- a group
-# member, a fingerprint the live stream holds, a stored pair's side (the proposed splits' four
-# sources) -- with the group it holds (NULL = none; in two groups, never expected, the larger
-# key). Driven by the population's own adverts, each source joined on its (generation, advert)
-# index, so the read grows with the judged adverts and never with the generation: the planner
-# hashes a small generation and probes a large one. Read generation-wide, it cost 745 ms of cold
-# disk at 17,378 pairs (2026-09-29) and would take minutes at the country-wide roll-out.
-_ENGINE_VIEW = """adverts AS (
+# THE ENGINE'S VIEW OF THE POPULATION'S ADVERTS: each advert the generation READ (`_engine_seen`,
+# the rulings page's test: a group member, a fingerprint, a stored pair's side), with the group it
+# holds (NULL = none; in two groups, never expected, the larger key). Driven by the population's
+# own adverts, each source read on its (generation, advert) index and the test stopping at the
+# first source that holds the advert, so the read grows with the judged adverts and never with the
+# generation; the planner hashes a small generation (a hashed subplan) and probes a large one.
+# Read generation-wide, it cost 745 ms of cold disk at 17,378 pairs (2026-09-29) and would take
+# minutes at the country-wide roll-out.
+_ENGINE_VIEW = (
+    """adverts AS (
     SELECT r.listing_lo AS listing_id FROM population r
     UNION
     SELECT r.listing_hi FROM population r
 ), grouped AS (
-    SELECT s.listing_id, max(s.cluster_key) AS cluster_key
-    FROM (
-        SELECT a.listing_id, m.cluster_key FROM adverts a
-          JOIN autodedup.cluster_members m
-            ON m.generation = %(generation)s::text AND m.listing_id = a.listing_id
-        UNION ALL
-        SELECT a.listing_id, NULL::bigint FROM adverts a
-         WHERE EXISTS (SELECT 1 FROM autodedup.rt_fp f
-                        WHERE f.generation = %(generation)s::text AND f.listing_id = a.listing_id)
-        UNION ALL
-        SELECT a.listing_id, NULL::bigint FROM adverts a
-         WHERE EXISTS (SELECT 1 FROM autodedup.pairs q
-                        WHERE q.generation = %(generation)s::text AND q.listing_lo = a.listing_id)
-        UNION ALL
-        SELECT a.listing_id, NULL::bigint FROM adverts a
-         WHERE EXISTS (SELECT 1 FROM autodedup.pairs q
-                        WHERE q.generation = %(generation)s::text AND q.listing_hi = a.listing_id)
-    ) s
-    GROUP BY s.listing_id
+    SELECT a.listing_id, max(c.cluster_key) AS cluster_key
+      FROM adverts a
+      LEFT JOIN autodedup.cluster_members c
+             ON c.generation = %(generation)s::text AND c.listing_id = a.listing_id
+     WHERE """
+    + _engine_seen("a.listing_id")
+    + """
+     GROUP BY a.listing_id
 )"""
+)
 
 # The Judge statements are one wide CTE chain whose estimated cost crosses `jit_above_cost` at any
 # size, and JIT then compiles ~900 functions to run a plan that takes milliseconds: 2.9 s against

@@ -399,25 +399,24 @@ def test_one_definition_of_the_operators_word_the_headline_and_the_engines_read(
         assert f"tier IN {usql._JUDGE_TIERS}" in sql
         assert usql._TIER_RANK.format(t=alias) in sql
     assert "'oss'" not in usql.JUDGEMENTS_SQL
-    seen = re.findall(r"WHERE (\w\.generation = %\(generation\)s::text"
-                      r" AND \w\.listing_\w+ = a\.listing_id)",
-                      _flat(usql._engine_seen("a.listing_id")))
-    assert len(seen) == 4 and all(source in _flat(usql._ENGINE_VIEW) for source in seen)
+    assert usql._engine_seen("a.listing_id") in usql._ENGINE_VIEW
+    for sql in (usql.RULINGS_PAIR_SQL, usql.RULINGS_PAIR_FACETS_SQL):
+        assert usql._engine_seen("r.listing_lo") in sql
     for sql in (usql.JUDGEMENTS_SQL, usql.JUDGEMENTS_FACETS_SQL):
         assert usql._ENGINE_VIEW in sql
 
 
 def test_the_generation_is_read_for_the_populations_adverts_only():
     """At the country-wide roll-out the generation holds millions of pairs: every read of its
-    three tables before the page's LIMIT is one of the engine view's four joins on (generation,
-    advert), driven by the population's adverts, so the read grows with the judged pairs."""
+    three tables before the page's LIMIT is the engine view's, on (generation, advert) for an
+    advert of the population, so the read grows with the judged pairs."""
     chain = _flat(usql.JUDGEMENTS_SQL.split(", page AS (", 1)[0])
     view = _flat(usql._ENGINE_VIEW)
     assert view in chain and view in _flat(usql.JUDGEMENTS_FACETS_SQL)
-    for table, n in (("autodedup.cluster_members", 1), ("autodedup.rt_fp", 1),
+    for table, n in (("autodedup.cluster_members", 2), ("autodedup.rt_fp", 1),
                      ("autodedup.pairs", 2)):
         assert chain.count(table) == view.count(table) == n
-    assert view.count("= a.listing_id") == 4
+    assert view.count("= a.listing_id") == view.count("generation = %(generation)s::text") == 5
     assert "FROM population r UNION SELECT r.listing_hi FROM population r" in view
 
 
