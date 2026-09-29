@@ -140,8 +140,10 @@ def apply_head_tags(images: Any, *, floor: float = HEAD_FLOOR, margin: float = H
 
 
 def load_head_dump(path: str) -> dict[int, list[Any]]:
-    """`tag_model dump`'s JSONL (image_id, room, winner, runner_up) -> {image_id: head record}, so an
-    offline arm reads the real winners on an export made before the export carried them."""
+    """`tag_model dump`'s JSONL (image_id, label, room, winner, runner_up) -> {image_id: head record},
+    so an offline arm reads the real winners on an export made before the export carried them. The
+    room comes from the row's label under THIS code's map, as `head_record` does for a live export,
+    not from the room the dump baked in, so a dump attaches under the map of the code that reads it."""
     import gzip
 
     out: dict[int, list[Any]] = {}
@@ -151,7 +153,7 @@ def load_head_dump(path: str) -> dict[int, list[Any]]:
             row = json.loads(line)
             if row.get("room") is None:
                 raise UnknownHeadLabel(f"dump row {row.get('image_id')} names no engine room")
-            out[int(row["image_id"])] = [str(row["room"]), float(row["winner"]),
+            out[int(row["image_id"])] = [head_room(str(row["label"])), float(row["winner"]),
                                          float(row["runner_up"])]
     return out
 

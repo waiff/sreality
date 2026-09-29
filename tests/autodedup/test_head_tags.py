@@ -97,17 +97,42 @@ def test_a_dump_attaches_the_real_winners_by_image_id(tmp_path):
 
     path = tmp_path / "tag_dump.jsonl.gz"
     with gzip.open(path, "wt") as handle:
-        handle.write(json.dumps({"image_id": 1, "room": "kitchen", "winner": 0.8,
-                                 "runner_up": 0.1}) + "\n")
+        handle.write(json.dumps({"image_id": 1, "label": "interier - kuchyně", "room": "kitchen",
+                                 "winner": 0.8, "runner_up": 0.1}) + "\n")
     dump = ht.load_head_dump(str(path))
     first, second = Image(listing_id=1, image_id=1), Image(listing_id=1, image_id=2)
     assert ht.attach_heads([first, second], dump) == 1
     assert first.head == ["kitchen", 0.8, 0.1] and second.head is None
 
 
+def test_a_dump_made_under_an_older_map_attaches_under_the_current_one(tmp_path):
+    # the D1-6 dump (run 36361064277) predates 33368d1e and baked `garage` / `technical` into its rows
+    path = tmp_path / "tag_dump.jsonl"
+    rows = [{"image_id": 1, "label": "garáž", "room": "garage", "winner": 0.9, "runner_up": 0.05},
+            {"image_id": 2, "label": "technické zařízení / místnost", "room": "technical", "winner": 0.2,
+             "runner_up": 0.1},
+            {"image_id": 3, "label": "podklad - 3d plán", "room": "plan_3d", "winner": 0.7, "runner_up": 0.2}]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    dump = ht.load_head_dump(str(path))
+    assert dump == {1: ["hallway", 0.9, 0.05], 2: ["hallway", 0.2, 0.1], 3: ["plan_3d", 0.7, 0.2]}
+    image = Image(listing_id=1, image_id=2)
+    ht.attach_heads([image], dump)
+    assert ht.apply_head_tags([image]) == {"tagged": 1, "untagged": 0, "unscored": 0}
+    assert image.tags == [("hallway", 0.2)]
+
+
 def test_a_dump_row_without_a_room_is_refused(tmp_path):
     path = tmp_path / "tag_dump.jsonl"
-    path.write_text(json.dumps({"image_id": 1, "room": None, "winner": 0.8, "runner_up": 0.1}) + "\n")
+    path.write_text(json.dumps({"image_id": 1, "label": "interier - kuchyně", "room": None, "winner": 0.8,
+                                "runner_up": 0.1}) + "\n")
+    with pytest.raises(ht.UnknownHeadLabel):
+        ht.load_head_dump(str(path))
+
+
+def test_a_dump_row_whose_label_has_no_room_is_refused(tmp_path):
+    path = tmp_path / "tag_dump.jsonl"
+    path.write_text(json.dumps({"image_id": 1, "label": "interier - ložnice", "room": "bedroom", "winner": 0.8,
+                                "runner_up": 0.1}) + "\n")
     with pytest.raises(ht.UnknownHeadLabel):
         ht.load_head_dump(str(path))
 
