@@ -1321,7 +1321,9 @@ renumber.** Navigate by area:
     group, bare veto; group grain too) beside the engine's view and where the adverts sit now,
     and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale), its split
     button through `POST /properties/{id}/split`; the property page and the proposed-splits page
-    link to it for an admin. Labeling / annotation CRUD that the old
+    link to it for an admin. `/autodedup/judge` (`GET /autodedup/judgements`) lists every pair
+    the LLM judge marked and every sealed-sample pair, blind by default, for the operator to rule
+    — the judge's marks train models only (PROGRAM.md E922). Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
     first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
     2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)

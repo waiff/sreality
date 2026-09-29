@@ -226,9 +226,22 @@ describe('<AutodedupRulings> the list', () => {
   it('asks the server for "Neshody" first-class and counts it', async () => {
     setup();
     const chip = await screen.findByRole('button', { name: 'Neshody (1)' });
+    expect(chip).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(chip);
     await waitFor(() => expect(lastQuery()).toMatchObject({ engine: 'disagrees', grain: 'pair' }));
     expect(lastQuery()?.after).toBeNull();
+    await waitFor(() => expect(chip).toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it('switches grain through the shared segmented control', async () => {
+    setup();
+    const grains = await screen.findByRole('group', { name: 'Zrnitost' });
+    expect(within(grains).getByRole('button', { name: 'Páry' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(within(grains).getByRole('button', { name: 'Skupiny' }));
+    await waitFor(() => expect(lastQuery()).toMatchObject({ grain: 'group' }));
   });
 
   it('reads a filter from the link another page built, and drops it on ✕', async () => {

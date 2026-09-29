@@ -336,8 +336,6 @@ export function SplitRow({
   alwaysOpen = false,
   saveLabel,
   mergeBackLabel,
-  /* The candidate split writes no cluster row, so it carries no reason chips. */
-  showReasons = true,
 }: {
   members: ReadonlyArray<{ listing_id: number }>;
   split: SplitControls;
@@ -348,7 +346,6 @@ export function SplitRow({
   alwaysOpen?: boolean;
   saveLabel?: string;
   mergeBackLabel?: string;
-  showReasons?: boolean;
 }) {
   const units = distinctUnits(members, split.state.units);
   const one = units.length < 2;
@@ -404,20 +401,19 @@ export function SplitRow({
         </button>
         <span className="text-[0.62rem] text-[var(--color-ink-4)]">generace {generation}</span>
       </div>
-      {/* The split's own reasons — one set for the whole ruling, and optional
-        * like every annotation on this program's surfaces. There is no "Uložit
-        * poznámku" here: the split IS the save button above, and a second one
-        * would write a second, different ruling. The toggle NAMES its
-        * destination: a card can show this picker and the cluster verdict's at
-        * once, and two identical labels over two different drafts silently drop
-        * whichever set the operator did not then save. */}
+      {/* The split's own note — one for the whole ruling, and optional like
+        * every note on this program's surfaces. There is no "Uložit poznámku"
+        * here: the split IS the save button above, and a second one would write
+        * a second, different ruling. The toggle NAMES its destination: a card
+        * can show this note and the cluster verdict's at once, and two identical
+        * labels over two different drafts silently drop whichever the operator
+        * did not then save. */}
       <VerdictNotes
         defaultOpen={notesOpen}
         value={split.annotation}
         onChange={split.setAnnotation}
         pending={split.pending}
-        label={showReasons ? 'důvod rozdělení' : 'poznámka k rozhodnutí'}
-        showReasons={showReasons}
+        label="poznámka k rozdělení"
       />
       {split.receipt && (
         <p className="text-[0.68rem] text-[var(--color-ink-2)]">

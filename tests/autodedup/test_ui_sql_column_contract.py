@@ -10,6 +10,8 @@ the rail that makes the next one loud.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from autodedup import ui_sql as usql
@@ -39,6 +41,8 @@ def _top_level(select_list: str) -> list[str]:
 def _between(sql: str, start: str, end: str) -> str:
     return sql.split(start, 1)[1].split(end)[0]
 
+
+_JUDGED_PAIR_SELECT = usql.JUDGEMENTS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM page f\n")[0]
 
 _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("clusters",
@@ -83,6 +87,11 @@ _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("ruling towns",
      usql.RULING_TOWNS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM towns t")[0],
      usql.RULING_TOWN_COLUMNS),
+    # The Judge page: the outer select over its page, the facet counts.
+    ("judged pairs", _JUDGED_PAIR_SELECT, usql.JUDGED_PAIR_COLUMNS),
+    ("judged facets",
+     usql.JUDGEMENTS_FACETS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0],
+     usql.RULING_FACET_COLUMNS),
 )
 
 
@@ -95,3 +104,15 @@ def test_the_select_list_and_the_column_tuple_are_the_same_length(
         f"{name}: the statement selects {len(items)} expressions and the tuple names "
         f"{len(columns)} — zip would silently drop or mislabel the difference"
     )
+
+
+def test_the_judge_page_names_every_column_as_its_tuple_does() -> None:
+    """The Judge page's statement aliases every output column, so the rail compares NAMES: a
+    column moved or renamed on one side only keeps the count and mislabels the payload."""
+    items = _top_level(_JUDGED_PAIR_SELECT)
+    names = []
+    for item in items:
+        alias = re.fullmatch(r"(?s).*\sAS (\w+)", item)
+        assert alias, f"judged pairs: {item!r} has no alias"
+        names.append(alias.group(1))
+    assert tuple(names) == usql.JUDGED_PAIR_COLUMNS

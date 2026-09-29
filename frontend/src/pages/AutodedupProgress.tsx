@@ -35,10 +35,9 @@ import {
   getAutodedupIterations,
   getAutodedupStats,
   type AutodedupIteration,
-  type AutodedupReasonRollup,
 } from '@/lib/api';
-import { useReasonLabels } from '@/components/autodedup/VerdictNotes';
-import AgreementPanel from '@/components/autodedup/AgreementPanel';
+import LoadMore from '@/components/autodedup/LoadMore';
+import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 import ErrorBanner from '@/components/ErrorBanner';
 import { ROUTES, withQuery } from '@/lib/routes';
 import Spinner from '@/components/Spinner';
@@ -317,73 +316,6 @@ interface IterationsPage extends InfiniteListPage<AutodedupIteration> {
   store_ready: boolean;
 }
 
-/* "DŮVODY OPERÁTORA" — the reason histogram (migration 533), pair and cluster
- * side by side and NEVER summed: the same chip means a discriminator one edge
- * missed on a pair, and a wrong proposal on a cluster. This table is the
- * feature-gap readout of §9 — the column to compare against the judge's
- * `unit_discriminator` — which is why it sits with the counts and not in a
- * drawer. Rows are ordered by the total so the loudest gap reads first. */
-export function reasonRows(
-  rollups: ReadonlyArray<AutodedupReasonRollup>,
-): Array<{ reason: string; pair: number; cluster: number; total: number }> {
-  const by = new Map<string, { reason: string; pair: number; cluster: number; total: number }>();
-  for (const r of rollups) {
-    const row = by.get(r.reason) ?? { reason: r.reason, pair: 0, cluster: 0, total: 0 };
-    if (r.kind === 'cluster') row.cluster += r.n;
-    else row.pair += r.n;
-    row.total = row.pair + row.cluster;
-    by.set(r.reason, row);
-  }
-  return [...by.values()].sort((a, b) => b.total - a.total || a.reason.localeCompare(b.reason));
-}
-
-function ReasonTable({ rollups }: { rollups: ReadonlyArray<AutodedupReasonRollup> }) {
-  const label = useReasonLabels();
-  const rows = reasonRows(rollups);
-  return (
-    <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <h2 className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-        Důvody operátora
-      </h2>
-      <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)] max-w-[46rem]">
-        Co operátor při kontrole viděl — evidence, kterou model neměl. Dvojice a skupiny se
-        nesčítají: stejný důvod znamená u dvojice chybějící rozlišovací znak, u skupiny špatný
-        návrh.
-      </p>
-      {rows.length === 0 ? (
-        <p className="mt-2 text-[0.72rem] text-[var(--color-ink-3)]">
-          {NOT_YET} — u žádného verdiktu není uveden důvod.
-        </p>
-      ) : (
-        <div className="mt-2 overflow-x-auto">
-          <table className="w-full text-[0.72rem]">
-            <thead>
-              <tr className="text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
-                <th className="py-1 pr-3 text-left font-medium">Důvod</th>
-                <th className="py-1 pr-3 text-right font-medium">Dvojice</th>
-                <th className="py-1 pr-3 text-right font-medium">Skupiny</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.reason} className="border-t border-[var(--color-rule-soft)]">
-                  <td className="py-1 pr-3">{label(row.reason)}</td>
-                  <td className="py-1 pr-3 text-right font-mono tabular-nums">
-                    {row.pair === 0 ? '—' : fmtCount(row.pair)}
-                  </td>
-                  <td className="py-1 pr-3 text-right font-mono tabular-nums">
-                    {row.cluster === 0 ? '—' : fmtCount(row.cluster)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export default function AutodedupProgress() {
   const stats = useQuery({
     queryKey: ['autodedup', 'stats'],
@@ -502,13 +434,6 @@ export default function AutodedupProgress() {
         />
       </div>
 
-      {/* THE D6 GATE, LIVE — read from the verdicts and judgements that exist,
-        * not from a lane's end-of-wave report. It renders with no argument: the
-        * newest clustering pass is the server's own answer (E54). */}
-      <AgreementPanel />
-
-      {s && <ReasonTable rollups={s.engine?.verdict_reasons ?? []} />}
-
       {stats.error && <ErrorBanner message={(stats.error as Error).message} />}
       {list.error && <ErrorBanner message={list.error.message} />}
 
@@ -518,20 +443,15 @@ export default function AutodedupProgress() {
         </p>
       )}
 
-      {storeReady === false && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Schema not migrated yet — the program's store does not exist in this database, so there is
-          nothing to show.
-        </p>
-      )}
+      {storeReady === false && <StoreNotReady />}
 
       {/* Never next to an ErrorBanner: "nothing has been recorded" is a claim
         * about the store, and a failed read is exactly the case where the page
         * does not know. */}
       {storeReady !== false && !list.isLoading && !list.isError && rows.length === 0 && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
+        <Notice>
           No iteration has been recorded yet. The first lane run writes the first entry.
-        </p>
+        </Notice>
       )}
 
       {rows.length > 0 && (
@@ -542,18 +462,7 @@ export default function AutodedupProgress() {
         </ul>
       )}
 
-      {list.hasNextPage && (
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={list.fetchNextPage}
-            disabled={list.isFetchingNextPage}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-1.5 text-sm text-[var(--color-ink-2)] hover:text-[var(--color-ink)] disabled:opacity-50"
-          >
-            {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
-      )}
+      <LoadMore list={list} />
     </div>
   );
 }

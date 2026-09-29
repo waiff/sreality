@@ -50,7 +50,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     postAutodedupSplitVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
     getAutodedupValidationProgress: vi.fn(),
   };
 });
@@ -313,10 +312,6 @@ describe('<AutodedupGroups>', () => {
         must_not_link_retracted: 0,
       },
     });
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-      { code: 'same_project', label: 'Stejný projekt' },
-    ]);
     vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
   });
 
@@ -422,7 +417,7 @@ describe('<AutodedupGroups>', () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/#7/);
-    const select = screen.getByLabelText('Verdict');
+    const select = screen.getByLabelText('Rozhodnutí');
     await user.selectOptions(select, 'changed');
     await waitFor(() =>
       expect(screen.getByTestId('search').textContent).toContain('verdict=changed'),
@@ -443,7 +438,7 @@ describe('<AutodedupGroups>', () => {
     await screen.findByText(/Zkontrolováno:/);
     expect(screen.queryByTestId('validation-sample')).toBeNull();
 
-    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await user.selectOptions(screen.getByLabelText('Řazení'), 'random');
     await waitFor(() =>
       expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
         expect.objectContaining({ sort: 'random', seed: 'v1', after: null }),
@@ -475,13 +470,14 @@ describe('<AutodedupGroups>', () => {
 
   /* ------------------------------------------------- the operator's reasons (mig 533) */
 
-  it('sends the chips and the note with a cluster verdict', async () => {
+  it('sends the note with a cluster verdict, and offers no reason chips', async () => {
     const user = userEvent.setup();
     renderPage();
     const card = (await screen.findByText('#7')).closest('li')!;
     /* Collapsed on a queue card, like the residual rows. */
-    await user.click(within(card).getByRole('button', { name: '+ důvod verdiktu' }));
-    await user.click(within(card).getByRole('button', { name: 'Stejný projekt' }));
+    await user.click(within(card).getByRole('button', { name: '+ poznámka k verdiktu' }));
+    expect(within(card).queryByRole('button', { name: 'Stejný projekt' })).toBeNull();
+    await user.type(within(card).getAllByLabelText('Poznámka')[0], 'stejný dům');
     await user.click(within(card).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'cluster',
@@ -489,39 +485,22 @@ describe('<AutodedupGroups>', () => {
       // WHICH PASS the ruling was taken on (E58) — the server refuses one without it.
       generation: 'g1',
       verdict: 'same',
-      reasons: ['same_project'],
-      note: null,
+      reasons: [],
+      note: 'stejný dům',
     });
   });
 
-  it('stamps ONE reason set on the split it sends', async () => {
+  it('names the split note and the verdict note apart', async () => {
     const user = userEvent.setup();
     renderPage();
     const card = (await screen.findByText('#7')).closest('li')!;
     await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
-    /* The split row has a picker of its OWN: what the operator saw when they
-      * separated the group is not what they saw when they confirmed it. The two
-      * are told apart by NAME, not by position — an index would pin the very
-      * ambiguity that loses the operator's chips. */
-    await user.click(within(card).getByRole('button', { name: '+ důvod rozdělení' }));
-    await user.click(within(card).getByRole('button', { name: 'Jiný půdorys' }));
-    await user.click(within(card).getByRole('button', { name: 'Save split' }));
-    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
-    expect(sent.reasons).toEqual(['floor_plan_differs']);
-    expect(sent.note).toBeNull();
-  });
-
-  it('names the split picker and the verdict picker apart', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    const card = (await screen.findByText('#7')).closest('li')!;
-    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
-    /* Two drafts, two destinations: chips ticked in one are NOT sent by the
+    /* Two drafts, two destinations: a note typed in one is NOT sent by the
      * other, so the toggles must say which ruling they belong to. */
     const toggles = within(card)
-      .getAllByRole('button', { name: /^\+ důvod/ })
+      .getAllByRole('button', { name: /^\+ poznámka/ })
       .map((el) => el.textContent);
-    expect(toggles).toEqual(['+ důvod rozdělení', '+ důvod verdiktu']);
+    expect(toggles).toEqual(['+ poznámka k rozdělení', '+ poznámka k verdiktu']);
   });
 
   it('says nothing has been merged', async () => {
@@ -684,7 +663,7 @@ describe('<AutodedupGroups>', () => {
   it('renders the empty state on an un-migrated store', async () => {
     vi.mocked(api.getAutodedupGroups).mockResolvedValue({ store_ready: false, data: null });
     renderPage();
-    expect(await screen.findByText(/Schema not migrated yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/Úložiště programu v této databázi zatím není/)).toBeInTheDocument();
   });
 
   it('never claims the queue is empty when the read failed', async () => {
@@ -702,7 +681,7 @@ describe('<AutodedupGroups>', () => {
       .mockResolvedValueOnce(page([group({ cluster_key: 900 })]));
     renderPage();
     await screen.findByText('#100');
-    await user.click(screen.getByRole('button', { name: 'Load more' }));
+    await user.click(screen.getByRole('button', { name: 'Načíst další' }));
     await waitFor(() =>
       expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
         expect.objectContaining({ after: 'cur-2' }),
@@ -854,7 +833,7 @@ describe('<AutodedupGroups>', () => {
     expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
       expect.objectContaining({ verdict: 'different' }),
     );
-    expect(screen.getByLabelText('Verdict')).toHaveValue('different');
+    expect(screen.getByLabelText('Rozhodnutí')).toHaveValue('different');
   });
 
   it('keeps the filter working when the block vocabulary cannot be read', async () => {
@@ -883,8 +862,8 @@ describe('<AutodedupGroups>', () => {
     );
     /* And the controls show what the link said — a bar that sent one filter and
      * displayed another would be worse than no url state at all. */
-    expect(screen.getByLabelText('Verdict')).toHaveValue('same');
-    expect(screen.getByLabelText('Sort')).toHaveValue('largest');
+    expect(screen.getByLabelText('Rozhodnutí')).toHaveValue('same');
+    expect(screen.getByLabelText('Řazení')).toHaveValue('largest');
   });
 
   it('writes a changed filter into the url so the view can be shared', async () => {
@@ -912,12 +891,12 @@ describe('<AutodedupGroups>', () => {
       page([group({ cluster_key: 7 })], null, 412),
     );
     renderPage();
-    expect(await screen.findByText('1 of 412 groups')).toBeInTheDocument();
+    expect(await screen.findByText('1 z 412 skupin')).toBeInTheDocument();
   });
 
   it('says what it loaded rather than inventing a total', async () => {
     renderPage();
-    expect(await screen.findByText('1 group loaded')).toBeInTheDocument();
+    expect(await screen.findByText('načteno 1 skupina')).toBeInTheDocument();
   });
 
   /* ------------------------------------------------------- broken covers */
@@ -1306,7 +1285,7 @@ describe('<AutodedupGroups>', () => {
     await user.click(within(card).getByRole('button', { name: 'Open' }));
     const dialog = await screen.findByRole('dialog');
     expect(api.getAutodedupGroup).toHaveBeenCalledWith(7, 'g1');
-    expect(await within(dialog).findByText(/judge: same property/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();
     /* The drill-down carries the generation the queue was reading — otherwise
      * the evidence page silently answers for the default one. */
     expect(within(dialog).getByRole('link', { name: 'Evidence' })).toHaveAttribute(

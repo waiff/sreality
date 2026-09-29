@@ -34,7 +34,6 @@ export interface GroupFilterState {
   max_score: string;
   verdict: string;
   shared_photo: string;
-  has_judgement: string;
   sort: 'weakest' | 'newest' | 'largest' | 'random';
   /* WHICH random sample. Only meaningful with `sort=random`, and only written to
    * the URL when it is not the default one. */
@@ -63,7 +62,6 @@ export const EMPTY_FILTERS: GroupFilterState = {
   max_score: '',
   verdict: '',
   shared_photo: '',
-  has_judgement: '',
   sort: 'weakest',
   seed: DEFAULT_SEED,
   blind: '0',
@@ -93,10 +91,14 @@ export function pairHref(
    * the operator would read the verdict they were not supposed to see yet on
    * exactly the pair they were about to rule on. */
   blind = false,
+  /* A pair of the sealed random sample: blind, the pair page withholds the
+   * engine's view too, until the same answer opens the judge. */
+  sample = false,
 ): RoutePath {
   return withQuery(ROUTES.autodedupPair.build({ lo, hi }), {
     generation: generation || null,
     blind: blind ? '1' : null,
+    sample: blind && sample ? '1' : null,
   });
 }
 

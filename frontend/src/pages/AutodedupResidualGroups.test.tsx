@@ -46,7 +46,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupBlocks: vi.fn(),
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
     getAutodedupValidationProgress: vi.fn(),
   };
 });
@@ -204,9 +203,6 @@ describe('<AutodedupResidual> · po skupinách', () => {
       data: { items: [], generation: 'g4' },
     });
     vi.mocked(api.getAutodedupGenerations).mockResolvedValue(GENERATIONS);
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-    ]);
     vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
     vi.mocked(api.postAutodedupCandidateSplitVerdict).mockResolvedValue(SPLIT_RESULT);
   });
@@ -375,6 +371,38 @@ describe('<AutodedupResidual> · po skupinách', () => {
     expect(row.textContent).toMatch(/0,41 – 0,55/);
     expect(within(row).getByText(/band 3/)).toBeTruthy();
     expect(within(row).getByText('ATTR')).toBeTruthy();
+  });
+
+  it('opens the drawer\'s judge pair by pair, and never on a "Nevím"', async () => {
+    const user = userEvent.setup();
+    const word = (hi: number, verdict: AutodedupVerdictRow['verdict']): AutodedupVerdictRow => ({
+      kind: 'pair', listing_lo: 50, listing_hi: hi, verdict, note: null,
+      decided_by: 'operator@example.com', decided_at: '2026-09-17T10:00:00Z',
+    });
+    const edge = (hi: number) => ({
+      listing_lo: 50, listing_hi: hi, score: 0.5, zone: 'band' as const, decision: null,
+      guard_veto: null, certificate: null, families: 1, probes: [], residual: true,
+    });
+    vi.mocked(api.getAutodedupCandidate).mockResolvedValue({
+      store_ready: true,
+      data: {
+        candidate: CARD,
+        members: CARD.members.map((m) => ({ ...m, images: [] })),
+        pairs: [edge(201), edge(202)],
+        judgements: [201, 202].map((hi) => ({
+          listing_lo: 50, listing_hi: hi, verdict: 'same_property' as const, confidence: 0.93,
+        })),
+        /* Newest first: 50·201 was ruled Stejné, then taken back with a "Nevím". */
+        member_verdicts: [word(201, 'unsure'), word(202, 'different'), word(201, 'same')],
+      },
+    });
+    const row = await renderCard();
+    await user.click(within(row).getByRole('button', { name: 'Open' }));
+    const dialog = await screen.findByRole('dialog');
+    const edgeRow = async (text: string) =>
+      (await within(dialog).findByText(text)).closest('tr')!;
+    expect(within(await edgeRow('50 · 201')).getByText('skryto')).toBeInTheDocument();
+    expect(within(await edgeRow('50 · 202')).getByText(/soudce: stejná/)).toBeInTheDocument();
   });
 
   /* ------------------------------------------------- the stored ruling, read back */

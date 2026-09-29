@@ -50,15 +50,12 @@ def test_one_key_is_resolved_to_one_group() -> None:
     assert flat.endswith("ORDER BY c.last_changed_at DESC, c.generation DESC LIMIT 1")
 
 
-def test_a_legacy_ruling_never_unions_member_sets_across_passes() -> None:
-    """A row with neither `generation` nor `member_ids` names no set. The agreement read still
-    falls back to `cluster_members` for it — but only where the key belongs to ONE pass, or the
-    `array_agg` would invent operator labels out of two passes' members and feed them to the D6
-    gate.
+def test_a_legacy_ruling_never_implies_a_pair() -> None:
+    """A row with neither `generation` nor `member_ids` names no set, so it implies no pair: the
+    operator's word (`_OPERATOR_WORDS`, one definition for the rulings and the Judge page) reads
+    only the sets a ruling RECORDED, and never re-derives one from `cluster_members`, where a
+    key names a group per pass and an `array_agg` would union two passes' members.
     """
-    guard = (
-        "SELECT CASE WHEN count(DISTINCT m.generation) = 1 "
-        "THEN array_agg(m.listing_id ORDER BY m.listing_id) END AS ids"
-    )
-    assert guard in _flat(usql.AGREEMENT_PAIRS_SQL)
-    assert guard in _flat(usql.AGREEMENT_OVERSIZE_SQL)
+    flat = _flat(usql._OPERATOR_WORDS)
+    assert "WHERE x.kind = 'cluster' AND x.member_ids IS NOT NULL" in flat
+    assert "cluster_members" not in flat
