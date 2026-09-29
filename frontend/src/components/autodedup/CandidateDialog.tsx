@@ -22,11 +22,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
-import {
-  getAutodedupCandidate,
-  type AutodedupJudgementRow,
-  type AutodedupVerdictRow,
-} from '@/lib/api';
+import { getAutodedupCandidate, type AutodedupJudgementRow, type AutodedupVerdictRow } from '@/lib/api';
 import Dialog from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
