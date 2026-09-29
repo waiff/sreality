@@ -118,8 +118,16 @@ export default function ValidationStrip({
 
       {sampleOrder && (
         <span className="text-[var(--color-ink-4)]">
-          semínko <span className="font-mono">{data.seed}</span> — vzorek je prvních{' '}
-          {fmtCount(data.sample_size)} v tomto pořadí a filtry ho nemění
+          {/* The Judge page's draws are sealed (E922): no seed names them. */}
+          {surface === 'judge' ? (
+            'vzorek je vylosovaný předem'
+          ) : (
+            <>
+              semínko <span className="font-mono">{data.seed}</span> — vzorek je prvních{' '}
+              {fmtCount(data.sample_size)} v tomto pořadí
+            </>
+          )}{' '}
+          a filtry ho nemění
         </span>
       )}
     </div>

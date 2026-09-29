@@ -1,8 +1,12 @@
 /* The Judge page ("Soudce"): every pair the LLM judge read, beside the
  * operator's word. Pins:
  *   * blind by DEFAULT — an unruled row shows no judge word, no judge evidence,
- *     and only a neutral reason chip; a ruled row shows all of it; answering a
- *     row opens it in place, through the verdict overlay;
+ *     and no reason but the random sample's; a ruled row shows all of it;
+ *     answering Stejné or Různé opens a row in place (the verdict overlay),
+ *     "Nevím" opens nothing;
+ *   * the engine's view in words on every row, and no "why it was not merged"
+ *     on a pair the engine holds together;
+ *   * a note saved on a ruled row re-posts its stored codes;
  *   * while blind, no control reads the judge ("Soudce řekl", "Kdo četl",
  *     "Soudce × engine" and two "Výběr" values), and a link naming them is
  *     sanitised; turning blind off offers them;
@@ -19,7 +23,6 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import AutodedupJudge, {
   JUDGE_FILTER_DEFAULTS,
-  listName,
   reasonChips,
   sanitizeJudgeFilters,
 } from './AutodedupJudge';
@@ -44,10 +47,8 @@ function pair(over: Partial<api.JudgedPair> = {}): api.JudgedPair {
   return {
     listing_lo: 11,
     listing_hi: 12,
-    stratum: 'g2:s3_mf_band',
     ruled: false,
     verdict: null,
-    operator_source: null,
     judgement: {
       tier: 'vision',
       verdict: 'different_property',
@@ -56,20 +57,17 @@ function pair(over: Partial<api.JudgedPair> = {}): api.JudgedPair {
       key_evidence: ['jiné patro'],
       contradicting_evidence: ['stejná adresa'],
     },
-    tiers_split: false,
     reasons: ['engine'],
-    primary_reason: 'engine',
-    operator_agreement: 'none',
-    engine_agreement: 'disagrees',
+    /* A band pair joined into one group through a third advert: the server
+     * sends no "why it was not merged" for it. */
     engine_view: 'together',
-    together_now: false,
     obec_name: 'Jablonec nad Nisou',
     cast_obce_name: null,
     zone: 'band',
     score: 0.61,
     guard_veto: null,
     certificate: null,
-    why_not_merged: 'skóre v pásmu kontroly',
+    why_not_merged: null,
     ...over,
   };
 }
@@ -84,15 +82,15 @@ const RULED = pair({
     listing_lo: 21,
     listing_hi: 22,
     verdict: 'same',
-    note: null,
+    note: 'stejná kuchyň',
+    reasons: ['identical_photos'],
     decided_by: 'operator@example.com',
     decided_at: AT,
   },
-  operator_source: 'pair',
   judgement: { tier: 'text', verdict: 'same_property', confidence: 0.8 },
   reasons: ['sample', 'operator'],
-  primary_reason: 'sample',
-  operator_agreement: 'disagrees',
+  engine_view: 'apart',
+  why_not_merged: 'skóre v pásmu kontroly',
 });
 
 function page(
@@ -111,7 +109,6 @@ function page(
         reason: { suggested: 2, sample: 1, operator: 1, engine: 1 },
         judge: { different: 1, same: 1 },
         tier: { vision: 1, text: 1 },
-        stratum: { 'g2:s3_mf_band': 2 },
         ruled: { '0': 1, '1': 1 },
         operator: { disagrees: 1 },
         engine: { disagrees: 1 },
@@ -182,8 +179,9 @@ describe('<AutodedupJudge> blind by default', () => {
     expect(within(unruled).queryByText(/soudce: jiná nemovitost/)).toBeNull();
     expect(within(unruled).queryByText(/jiné patro/)).toBeNull();
     expect(within(unruled).getByText('soudce skryt')).toBeInTheDocument();
-    /* The specific reason would tell which way the judge leaned. */
-    expect(within(unruled).getByText('Navrženo k posouzení')).toBeInTheDocument();
+    /* Any reason but the sample's, even unnamed, would tell which way the judge
+     * leaned. */
+    expect(within(unruled).queryByText('Navrženo k posouzení')).toBeNull();
     expect(within(unruled).queryByText('Soudce a engine se neshodují')).toBeNull();
 
     const ruled = await rowOf('#21');
@@ -210,6 +208,24 @@ describe('<AutodedupJudge> blind by default', () => {
     expect(api.getAutodedupJudgements).toHaveBeenCalledTimes(1);
   });
 
+  it('opens nothing on "Nevím": it is not a peek before the real answer', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.postAutodedupVerdict).mockResolvedValue({
+      store_ready: true,
+      data: {
+        id: 10, kind: 'pair', listing_lo: 11, listing_hi: 12, verdict: 'unsure', note: null,
+        decided_by: 'operator@example.com', decided_at: AT,
+      },
+      must_not_link: false,
+    });
+    setup();
+    const row = await rowOf('#11');
+    await user.click(within(row).getByRole('button', { name: 'Nevím' }));
+    await waitFor(() => expect(api.postAutodedupVerdict).toHaveBeenCalled());
+    expect(within(row).queryByText(/soudce: jiná nemovitost/)).toBeNull();
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+  });
+
   it('offers no control that reads the judge while blind', async () => {
     setup();
     await rowOf('#11');
@@ -217,9 +233,7 @@ describe('<AutodedupJudge> blind by default', () => {
     expect(screen.queryByLabelText('Kdo četl')).toBeNull();
     expect(screen.queryByRole('group', { name: 'Soudce × engine' })).toBeNull();
     const choices = within(screen.getByLabelText('Výběr')).getAllByRole('option');
-    expect(choices.map((o) => o.getAttribute('value'))).toEqual([
-      'suggested', 'sample', 'operator', 'all',
-    ]);
+    expect(choices.map((o) => o.getAttribute('value'))).toEqual(['suggested', 'sample', 'all']);
     /* "Soudce × vy" stays: only a ruled row can agree or disagree. */
     expect(screen.getByRole('group', { name: 'Soudce × vy' })).toBeInTheDocument();
   });
@@ -262,18 +276,43 @@ describe('<AutodedupJudge> the selection and the page around it', () => {
     await rowOf('#11');
     expect(lastQuery()?.reason).toBe('');
     expect(screen.getByLabelText('Výběr')).toHaveValue('suggested');
-    expect(screen.getByText(/Navržené páry jsou seřazené/)).toBeInTheDocument();
+    expect(screen.getByText(/Navržené dvojice jsou seřazené/)).toBeInTheDocument();
     expect(screen.getByText('2 z 2 dvojic')).toBeInTheDocument();
     expect(screen.getByTestId('validation-sample')).toHaveTextContent('37 / 100');
   });
 
-  it('names the list a pair came from in plain words', async () => {
+  it("says the engine's view in words, and never why a merged pair was not merged", async () => {
     setup();
-    const row = await rowOf('#11');
-    expect(within(row).getByText('Seznam: g2 · s3 mf band')).toBeInTheDocument();
-    expect(within(screen.getByLabelText('Seznam')).getByRole('option', {
-      name: 'g2 · s3 mf band (2)',
-    })).toBeInTheDocument();
+    const together = await rowOf('#11');
+    expect(within(together).getByText('Engine: jedna skupina')).toBeInTheDocument();
+    expect(within(together).queryByText(/Proč to engine nesloučil/)).toBeNull();
+    const apart = await rowOf('#21');
+    expect(within(apart).getByText('Engine: odděleně')).toBeInTheDocument();
+    expect(within(apart).getByText(/Proč to engine nesloučil/)).toBeInTheDocument();
+  });
+
+  it('keeps the stored codes when a note is saved on a ruled row', async () => {
+    const user = userEvent.setup();
+    setup();
+    const row = await rowOf('#21');
+    const note = within(row).getByLabelText('Poznámka');
+    await user.clear(note);
+    await user.type(note, 'stejná okna');
+    await user.click(within(row).getByRole('button', { name: 'Uložit poznámku' }));
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'pair', listing_lo: 21, listing_hi: 22, verdict: 'same',
+      reasons: ['identical_photos'], note: 'stejná okna',
+    });
+  });
+
+  it('shows no engine code without its meaning, and no internal names', async () => {
+    setup();
+    await rowOf('#11');
+    expect(screen.getByText(/pásmo kontroly/)).toBeInTheDocument();
+    expect(screen.queryByText(/generace/)).toBeNull();
+    expect(screen.getByText(/vzorek je vylosovaný předem/)).toBeInTheDocument();
+    expect(screen.queryByText(/semínko/)).toBeNull();
+    expect(screen.queryByLabelText('Seznam')).toBeNull();
   });
 
   it('says the judge has read nothing yet when everything is empty', async () => {
@@ -281,13 +320,13 @@ describe('<AutodedupJudge> the selection and the page around it', () => {
       page([], { reason: 'all', total: 0 }),
     );
     setup();
-    expect(await screen.findByText('Soudce zatím nepřečetl žádný pár.')).toBeInTheDocument();
+    expect(await screen.findByText('Soudce zatím nepřečetl žádnou dvojici.')).toBeInTheDocument();
   });
 
   it('says no pair fits when a filter empties the list', async () => {
     vi.mocked(api.getAutodedupJudgements).mockResolvedValue(page([], { total: 0 }));
     setup('/autodedup/judge?ruled=0');
-    expect(await screen.findByText('Těmto filtrům neodpovídá žádný pár.')).toBeInTheDocument();
+    expect(await screen.findByText('Těmto filtrům neodpovídá žádná dvojice.')).toBeInTheDocument();
   });
 
   it('says the store is not there yet on an un-migrated database', async () => {
@@ -313,14 +352,9 @@ describe('the Judge page helpers', () => {
       .toMatchObject({ judge: '', town: '' });
   });
 
-  it('reads a list name generically', () => {
-    expect(listName('g2:s1_ladder_only_edge')).toBe('g2 · s1 ladder only edge');
-    expect(listName('control')).toBe('control');
-  });
-
-  it('shows a blind row one neutral chip at most', () => {
+  it('shows a blind row the sample chip at most', () => {
     expect(reasonChips(pair({ reasons: ['sample', 'unsure'] }), false)).toEqual(['Náhodný vzorek']);
-    expect(reasonChips(pair({ reasons: ['unsure'] }), false)).toEqual(['Navrženo k posouzení']);
+    expect(reasonChips(pair({ reasons: ['unsure'] }), false)).toEqual([]);
     expect(reasonChips(pair({ reasons: [] }), false)).toEqual([]);
     expect(reasonChips(pair({ reasons: ['sample', 'unsure'] }), true)).toEqual([
       'Náhodný vzorek', 'Soudce si nebyl jistý',

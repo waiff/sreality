@@ -4,22 +4,24 @@
  *
  * BLIND BY DEFAULT (E55): nothing the judge said about a pair — its word, its
  * evidence, the reasons and filters that read it — shows before the operator
- * has answered that pair; then the row opens in place, and the list never
- * reorders under the answering hand (the verdict overlay). */
+ * has said Stejné or Různé on that pair ("Nevím" opens nothing); then the row
+ * opens in place, and the list never reorders under the answering hand (the
+ * verdict overlay). */
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
-import { Segmented } from '@/components/controls';
-import { Chip } from '@/components/autodedup/EvidenceChips';
+import { Chip, EvidenceLegend } from '@/components/autodedup/EvidenceChips';
 import {
-  FILTER_LABEL,
+  AgreementSwitch,
+  FILTER_GRID,
+  FilterPanel,
   FilterSelect,
+  ResetFilters,
   ResultCount,
   TownSelect,
-  counted,
   type FilterOption,
 } from '@/components/autodedup/FilterBar';
 import LoadMore from '@/components/autodedup/LoadMore';
@@ -27,6 +29,7 @@ import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 import PairCard from '@/components/autodedup/PairCard';
 import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import { annotationInput, useVerdictAnnotations } from '@/components/autodedup/VerdictNotes';
+import { ENGINE_VIEW } from '@/components/autodedup/engineView';
 import { DEFAULT_SEED, pairHref } from '@/components/autodedup/filterState';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
@@ -51,19 +54,19 @@ const NO_FALLBACK = { source: null, is_active: null };
 /* '' is no filter — and for `reason`, the server's choice (the suggested pairs
  * while there are any). `blind` is ON unless the link says '0'. */
 export const JUDGE_FILTER_DEFAULTS = {
-  reason: '', ruled: '', operator: '', judge: '', tier: '', engine: '', stratum: '', town: '',
+  reason: '', ruled: '', operator: '', judge: '', tier: '', engine: '', town: '',
   generation: '', blind: '1',
 };
 export type JudgeFilterState = typeof JUDGE_FILTER_DEFAULTS;
 
-/* "Výběr". The two marked `judge` read the judge, so a blind page drops them. */
+/* "Výběr". The two marked `judge` read the judge, so a blind page drops them.
+ * "Soudce říká opak než vy" is no selection: "Soudce × vy: Neshody" asks it. */
 const SELECTIONS: ReadonlyArray<{ value: string; label: string; judge?: true }> = [
   { value: 'suggested', label: 'Navrženo k posouzení' },
   { value: 'sample', label: 'Náhodný vzorek pro vás' },
-  { value: 'operator', label: 'Soudce říká opak než vy' },
   { value: 'engine', label: 'Soudce si je jistý a engine to vidí jinak', judge: true },
   { value: 'unsure', label: 'Soudce si nebyl jistý', judge: true },
-  { value: 'all', label: 'Všechny posouzené páry' },
+  { value: 'all', label: 'Všechny dvojice' },
 ];
 
 /* Why a row is offered, once the operator may see the judge's side of it. */
@@ -78,11 +81,11 @@ const RULED: ReadonlyArray<FilterOption> = [
   { value: '0', label: 'Čeká na vás' },
   { value: '1', label: 'Rozhodnuto' },
 ];
+/* A pair the judge has not read is "Kdo četl: Zatím nikdo", asked once. */
 const JUDGE_SAID: ReadonlyArray<FilterOption> = [
   { value: 'same', label: 'Stejná nemovitost' },
   { value: 'different', label: 'Jiná nemovitost' },
   { value: 'abstain', label: 'Nerozhodl' },
-  { value: 'none', label: 'Zatím nečetl' },
 ];
 const WHO_READ: ReadonlyArray<FilterOption> = [
   { value: 'vision', label: 'Fotky' },
@@ -110,7 +113,6 @@ export function sanitizeJudgeFilters(raw: JudgeFilterState): JudgeFilterState {
     tier: blind ? '' : pick(raw.tier, WHO_READ.map((o) => o.value)),
     engine: blind ? '' : pick(raw.engine, AGREEMENTS),
     town: TOWN.test(raw.town) ? raw.town : '',
-    stratum: raw.stratum.length <= 200 ? raw.stratum : '',
   };
 }
 
@@ -120,19 +122,10 @@ function toQuery(f: JudgeFilterState): JudgementFilters {
   return { ...keys, limit: PAGE_SIZE };
 }
 
-/* `g2:s3_mf_band` reads "g2 · s3 mf band": a list's name is data. */
-export function listName(stratum: string): string {
-  const cut = stratum.indexOf(':');
-  const words = (text: string) => text.replace(/_/g, ' ');
-  return cut < 0 ? words(stratum) : `${stratum.slice(0, cut)} · ${words(stratum.slice(cut + 1))}`;
-}
-
-/* Blind and unruled, a row says only "sample" or "suggested": the specific
- * reasons would tell which way the judge leaned. */
+/* Blind and unruled, a row says only whether it is in the random sample: any
+ * other reason, even unnamed, would tell which way the judge leaned. */
 export function reasonChips(item: JudgedPair, revealed: boolean): string[] {
-  if (revealed) return item.reasons.map((r) => REASON_CHIP[r]);
-  if (item.reasons.includes('sample')) return [REASON_CHIP.sample];
-  return item.reasons.length > 0 ? ['Navrženo k posouzení'] : [];
+  return item.reasons.filter((r) => revealed || r === 'sample').map((r) => REASON_CHIP[r]);
 }
 
 const pairKey = (row: JudgedPair) => `${row.listing_lo}:${row.listing_hi}`;
@@ -140,30 +133,6 @@ const pairKey = (row: JudgedPair) => `${row.listing_lo}:${row.listing_hi}`;
 interface JudgeListPage extends InfiniteListPage<JudgedPair> {
   store_ready: boolean;
   page: JudgementsPage | null;
-}
-
-/* The rulings page's three-way switch: "Neshody" first, with its count. */
-function Agreement({ label, facet, value, onChange }: {
-  label: string;
-  facet: Record<string, number> | undefined;
-  value: string;
-  onChange: (next: string) => void;
-}) {
-  return (
-    <span className="flex items-center gap-2">
-      <span className={FILTER_LABEL}>{label}</span>
-      <Segmented
-        label={label}
-        value={value}
-        onChange={onChange}
-        options={[
-          { value: 'disagrees', label: counted('Neshody', facet?.disagrees) },
-          { value: '', label: 'Vše' },
-          { value: 'agrees', label: counted('Souhlasí', facet?.agrees) },
-        ]}
-      />
-    </span>
-  );
 }
 
 export default function AutodedupJudge() {
@@ -210,7 +179,6 @@ export default function AutodedupJudge() {
 
   const set = (patch: Partial<JudgeFilterState>) => setFilters({ ...filters, ...patch });
   const selection = filters.reason || page?.reason || 'suggested';
-  const lists = Object.keys(facets?.stratum ?? {}).sort();
   const unfiltered = Object.entries(filters).every(
     ([key, value]) => key === 'blind' || value === '',
   );
@@ -227,7 +195,6 @@ export default function AutodedupJudge() {
         <details className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
           <summary className="w-fit cursor-pointer">(i) co je engine</summary>
           engine = program, který dnes skládá skupiny
-          {page?.generation ? ` (generace ${page.generation})` : ''}
         </details>
       </header>
 
@@ -237,19 +204,18 @@ export default function AutodedupJudge() {
         onChange={(next) => set({ blind: next ? '1' : '0' })}
       />
 
-      <section
-        aria-label="Filtry"
-        className="mt-4 space-y-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3"
-      >
+      <EvidenceLegend />
+
+      <FilterPanel>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          <Agreement
+          <AgreementSwitch
             label="Soudce × vy"
             facet={facets?.operator}
             value={filters.operator}
             onChange={(operator) => set({ operator })}
           />
           {!blind && (
-            <Agreement
+            <AgreementSwitch
               label="Soudce × engine"
               facet={facets?.engine}
               value={filters.engine}
@@ -257,7 +223,7 @@ export default function AutodedupJudge() {
             />
           )}
         </div>
-        <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className={FILTER_GRID}>
           <FilterSelect
             label="Výběr"
             value={selection}
@@ -292,54 +258,34 @@ export default function AutodedupJudge() {
               options={WHO_READ.map((o) => ({ ...o, count: facets?.tier?.[o.value] }))}
             />
           )}
-          <FilterSelect
-            label="Seznam"
-            value={filters.stratum}
-            onChange={(stratum) => set({ stratum })}
-            options={lists.map((name) => ({
-              value: name,
-              label: listName(name),
-              count: facets?.stratum?.[name],
-            }))}
-          >
-            {filters.stratum && !lists.includes(filters.stratum) && (
-              <option value={filters.stratum}>{listName(filters.stratum)}</option>
-            )}
-          </FilterSelect>
           <TownSelect
             value={filters.town}
             towns={page?.towns ?? []}
             onChange={(town) => set({ town })}
           />
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-[0.72rem] text-[var(--color-ink-3)]">
-            Navržené páry jsou seřazené: nahoře náhodný vzorek pro vás, pak ostatní. Co už máte
-            rozhodnuté, je dole.
-          </p>
-          <button
-            type="button"
+          <ResetFilters
             onClick={() => setFilters({ ...JUDGE_FILTER_DEFAULTS, blind: filters.blind })}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2.5 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
-          >
-            Zrušit filtry
-          </button>
+          />
         </div>
-      </section>
+        <p className="text-[0.72rem] text-[var(--color-ink-3)]">
+          Navržené dvojice jsou seřazené: nahoře náhodný vzorek pro vás, pak ostatní. Co už máte
+          rozhodnuté (Stejné nebo Různé), je dole.
+        </p>
+      </FilterPanel>
 
       {list.error && <ErrorBanner message={list.error.message} />}
       {detailsQ.isError && <ErrorBanner message={`Údaje inzerátů: ${detailsQ.error.message}`} />}
       {list.isLoading && (
         <p className="mt-6 flex items-center gap-2 text-sm text-[var(--color-ink-3)]">
-          <Spinner /> Načítám páry…
+          <Spinner /> Načítám dvojice…
         </p>
       )}
       {list.firstPage?.store_ready === false && <StoreNotReady />}
       {page && rows.length === 0 && (
         <Notice>
           {unfiltered && page.reason === 'all'
-            ? 'Soudce zatím nepřečetl žádný pár.'
-            : 'Těmto filtrům neodpovídá žádný pár.'}
+            ? 'Soudce zatím nepřečetl žádnou dvojici.'
+            : 'Těmto filtrům neodpovídá žádná dvojice.'}
         </Notice>
       )}
 
@@ -348,10 +294,12 @@ export default function AutodedupJudge() {
       <ul className="mt-3 space-y-4">
         {rows.map((item, i) => {
           const key = pairKey(item);
-          const stored = overlay[key] ?? item.verdict;
-          /* THE ONE GATE (E55): the judge is shown once this pair is ruled — by
-           * the server's record or by the answer just given here. */
-          const revealed = !blind || item.ruled || overlay[key] != null;
+          const answer = overlay[key];
+          const stored = answer ?? item.verdict;
+          /* THE ONE GATE (E55): the judge is shown once this pair is ruled — a
+           * standing Stejné or Různé, the server's or the one just given here.
+           * "Nevím" opens nothing: it would be a peek before the real answer. */
+          const revealed = !blind || (answer ? answer.verdict !== 'unsure' : item.ruled);
           const town = [item.obec_name, item.cast_obce_name].filter(Boolean).join(' · ');
           return (
             <li key={key}>
@@ -362,10 +310,10 @@ export default function AutodedupJudge() {
                   </Chip>
                 ))}
                 {revealed && !item.judgement && <Chip>soudce zatím nečetl</Chip>}
-                {item.stratum && (
-                  <Chip title={item.stratum}>Seznam: {listName(item.stratum)}</Chip>
-                )}
                 {town && <span className="text-[0.7rem] text-[var(--color-ink-3)]">{town}</span>}
+                <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+                  Engine: {ENGINE_VIEW[item.engine_view]}
+                </span>
               </div>
               <PairCard
                 dense

@@ -16,6 +16,7 @@ import { type ReactNode } from 'react';
 
 import type { RulingTown } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
+import { Segmented } from '@/components/controls';
 import BlockSelect from '@/components/autodedup/BlockSelect';
 import GenerationSelect from '@/components/autodedup/GenerationSelect';
 import { type GroupFilterState } from '@/components/autodedup/filterState';
@@ -23,6 +24,19 @@ import { type GroupFilterState } from '@/components/autodedup/filterState';
 export const FILTER_LABEL = 'text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)]';
 export const FILTER_CONTROL =
   'mt-0.5 w-full rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]';
+export const FILTER_GRID = 'grid gap-3 sm:grid-cols-3 lg:grid-cols-6';
+
+/* The box every review page's filters sit in. */
+export function FilterPanel({ children }: { children: ReactNode }) {
+  return (
+    <section
+      aria-label="Filtry"
+      className="mt-4 space-y-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3"
+    >
+      {children}
+    </section>
+  );
+}
 
 /* "label (n)" — a count beside an option is the current filter's rows with
  * that value (the server's facets); absent, the label alone. */
@@ -66,6 +80,47 @@ export function FilterSelect({
         {children}
       </select>
     </label>
+  );
+}
+
+/* THE ONE AGREEMENT SWITCH: "Neshody" first, with its count. */
+export function AgreementSwitch({
+  label,
+  facet,
+  value,
+  onChange,
+}: {
+  label: string;
+  facet: Record<string, number> | undefined;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className={FILTER_LABEL}>{label}</span>
+      <Segmented
+        label={label}
+        value={value}
+        onChange={onChange}
+        options={[
+          { value: 'disagrees', label: counted('Neshody', facet?.disagrees) },
+          { value: '', label: 'Vše' },
+          { value: 'agrees', label: counted('Souhlasí', facet?.agrees) },
+        ]}
+      />
+    </span>
+  );
+}
+
+export function ResetFilters({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="self-end rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2.5 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+    >
+      Zrušit filtry
+    </button>
   );
 }
 
@@ -189,8 +244,8 @@ export function FilterBar<T extends GroupFilterState>({
 }) {
   const set = <K extends keyof T>(key: K, v: T[K]) => onChange({ ...value, [key]: v });
   return (
-    <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3">
-      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+    <FilterPanel>
+      <div className={FILTER_GRID}>
         <GenerationSelect
           value={value.generation}
           onChange={(next) => set('generation', next as T['generation'])}
@@ -251,7 +306,7 @@ export function FilterBar<T extends GroupFilterState>({
         )}
         {children}
       </div>
-    </div>
+    </FilterPanel>
   );
 }
 

@@ -32,12 +32,14 @@ import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import { pairHref } from '@/components/autodedup/filterState';
+import { ENGINE_VIEW, engineLine } from '@/components/autodedup/engineView';
 import {
+  AgreementSwitch,
   FILTER_CONTROL,
   FILTER_LABEL,
   FilterSelect,
+  ResetFilters,
   TownSelect,
-  counted,
 } from '@/components/autodedup/FilterBar';
 import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 import { Segmented } from '@/components/controls';
@@ -374,13 +376,9 @@ function FilterStrip({
         />
         <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
         {/* "Neshody" first: the rulings the state of things contradicts. */}
-        <Segmented
+        <AgreementSwitch
           label="Engine"
-          options={[
-            { value: 'disagrees', label: counted('Neshody', facets?.engine?.disagrees) },
-            { value: '', label: 'Vše' },
-            { value: 'agrees', label: counted('Souhlasí', facets?.engine?.agrees) },
-          ]}
+          facet={facets?.engine}
           value={filters.engine}
           onChange={(engine) => onChange({ engine })}
         />
@@ -460,13 +458,7 @@ function FilterStrip({
             onChange={(e) => onChange({ decided_to: e.target.value })}
           />
         </label>
-        <button
-          type="button"
-          onClick={onReset}
-          className="self-end rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2.5 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
-        >
-          Zrušit filtry
-        </button>
+        <ResetFilters onClick={onReset} />
       </div>
     </section>
   );
@@ -872,27 +864,6 @@ function Consequence({ row }: { row: RulingPairRow }) {
 }
 
 /* -------------------------------------------------------------- a pair ruling */
-
-const ENGINE_VIEW: Record<RulingPairRow['engine_view'], string> = {
-  together: 'jedna skupina',
-  apart: 'odděleně',
-  unseen: 'inzeráty neviděl',
-};
-
-/* The engine's view in one line: its grouping, then the stored pair — the
- * certificate when one decided it, the decision's own name on a merge, and on
- * anything else why it was not merged. No stored row is said, not left blank:
- * the live stream keeps no machine reject (decision 7). */
-export function engineLine(row: RulingPairRow): string {
-  const parts = [ENGINE_VIEW[row.engine_view]];
-  if (!row.zone) return `${parts[0]} · pár bez uloženého řádku`;
-  let pair = `pár: ${row.zone}${row.score != null ? ` ${row.score.toFixed(2)}` : ''}`;
-  if (row.certificate) pair += ` · certifikát ${row.certificate}`;
-  else if (row.zone === 'merge' && row.decision) pair += ` · ${row.decision}`;
-  if (row.zone !== 'merge' && row.why_not_merged) pair += ` — ${row.why_not_merged}`;
-  parts.push(pair);
-  return parts.join(' · ');
-}
 
 function address(street: string | null, cp: string | null): string | null {
   if (!street && !cp) return null;

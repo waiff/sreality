@@ -4943,36 +4943,32 @@ export const getAutodedupValidationProgress = (q: {
  * operator's word and the engine's view. Why a pair is offered for reading —
  * each a rule over stored columns, capped at 100: `sample` the first 100 of a
  * sealed random draw, `operator` the judge said the opposite of the operator,
- * `engine` a sure judge against the engine's grouping, `unsure` the judge was
- * not sure. `suggested` is any of the four; `all` every judged or sampled pair. */
+ * `engine` a sure judge against the engine's grouping, `unsure` the judge's
+ * tiers or gold votes split, or it abstained. `suggested` is any of the four;
+ * `all` every judged or sampled pair. `operator` is a reason a row carries, not
+ * a selection: "Soudce × vy: Neshody" asks for it. */
 export type JudgementReason = 'sample' | 'operator' | 'engine' | 'unsure';
-export type JudgementSelection = JudgementReason | 'suggested' | 'all';
+export type JudgementSelection = 'suggested' | 'sample' | 'engine' | 'unsure' | 'all';
 
 export interface JudgedPair {
   listing_lo: number;
   listing_hi: number;
-  /* The pair list the mark was requested under (migration 576), or the sealed
-   * draw's name; null for a pair the judge lane drew itself. */
-  stratum: string | null;
-  /* Any word of the operator's on the pair, "Nevím" included. */
+  /* A standing Stejné or Různé on the pair — a "Nevím" or a withdrawal is not
+   * ruled: the row stays open, and blind. */
   ruled: boolean;
+  /* The operator's last word, "Nevím" included, with the pair's own note and
+   * codes (none for a word implied by a group ruling or a bare veto). */
   verdict: AutodedupVerdictRow | null;
-  operator_source: RulingPairSource | null;
   judgement: AutodedupJudgementRow | null;
-  /* Text and vision said different things. */
-  tiers_split: boolean;
   reasons: JudgementReason[];
-  primary_reason: JudgementReason | null;
-  operator_agreement: RulingAgreement;
-  engine_agreement: RulingAgreement;
   engine_view: RulingEngineView;
-  together_now: boolean;
   obec_name: string | null;
   cast_obce_name: string | null;
   zone: AutodedupZone | null;
   score: number | null;
   guard_veto: string | null;
   certificate: string | null;
+  /* Null when the engine stored no row for the pair, or holds it in one group. */
   why_not_merged: string | null;
 }
 
@@ -4983,19 +4979,19 @@ export interface JudgementsPage {
   reason: JudgementSelection;
   items: JudgedPair[];
   next_after: string | null;
-  total: number;
+  /* The FIRST page's only: a later page sends these null. */
+  total: number | null;
   facets: Record<
-    'reason' | 'judge' | 'tier' | 'stratum' | 'ruled' | 'operator' | 'engine',
+    'reason' | 'judge' | 'tier' | 'ruled' | 'operator' | 'engine',
     Record<string, number>
-  >;
-  towns: RulingTown[];
+  > | null;
+  towns: RulingTown[] | null;
 }
 
 export interface JudgementFilters {
   reason?: string | null;
   judge?: string | null;
   tier?: string | null;
-  stratum?: string | null;
   town?: string | null;
   ruled?: string | null;
   operator?: string | null;

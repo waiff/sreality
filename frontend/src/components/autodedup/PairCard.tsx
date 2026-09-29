@@ -43,7 +43,7 @@ export const JUDGE_WORDS: Record<AutodedupJudgementRow['verdict'], string> = {
 export function JudgeChip({ judgement }: { judgement: AutodedupJudgementRow }) {
   const tone = judgement.verdict === 'same_property' ? 'good' : 'warn';
   return (
-    <Chip tone={tone} title={`${judgement.tier ?? ''} · ${judgement.model ?? ''}`}>
+    <Chip tone={tone} title={judgement.model ?? undefined}>
       soudce: {JUDGE_WORDS[judgement.verdict]}
       {judgement.confidence != null && (
         <span className="font-mono tabular-nums"> {fmtScore(judgement.confidence)}</span>
