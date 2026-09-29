@@ -2329,13 +2329,11 @@ _JUDGED_POPULATION = (
 )
 
 # THE ENGINE'S VIEW OF THE POPULATION'S ADVERTS: each advert the generation READ (`_engine_seen`,
-# the rulings page's test: a group member, a fingerprint, a stored pair's side), with the group it
-# holds (NULL = none; in two groups, never expected, the larger key). Driven by the population's
-# own adverts, each source read on its (generation, advert) index and the test stopping at the
-# first source that holds the advert, so the read grows with the judged adverts and never with the
-# generation; the planner hashes a small generation (a hashed subplan) and probes a large one.
-# Read generation-wide, it cost 745 ms of cold disk at 17,378 pairs (2026-09-29) and would take
-# minutes at the country-wide roll-out.
+# the rulings page's test, stopping at the first source that holds it), with the group it holds
+# (NULL = none; in two groups, never expected, the larger key). Every source is read on its
+# (generation, advert) index for these adverts only, so the read grows with the judged pairs and
+# never with the generation: the planner hashes a small generation and probes a large one (read
+# whole, it cost 745 ms of cold disk at 17,378 pairs, 2026-09-29).
 _ENGINE_VIEW = (
     """adverts AS (
     SELECT r.listing_lo AS listing_id FROM population r
