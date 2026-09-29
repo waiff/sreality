@@ -83,6 +83,16 @@ _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("ruling towns",
      usql.RULING_TOWNS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM towns t")[0],
      usql.RULING_TOWN_COLUMNS),
+    # The Judge page: the outer select over `f`, the first half of the facet UNION, the towns.
+    ("judged pairs",
+     usql.JUDGEMENTS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0],
+     usql.JUDGED_PAIR_COLUMNS),
+    ("judged facets",
+     usql.JUDGEMENTS_FACETS_SQL.rsplit("\nSELECT CASE", 1)[1].split("\n  FROM f\n")[0],
+     usql.RULING_FACET_COLUMNS),
+    ("judged towns",
+     usql.JUDGED_TOWNS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM towns t")[0],
+     usql.RULING_TOWN_COLUMNS),
 )
 
 
@@ -95,3 +105,10 @@ def test_the_select_list_and_the_column_tuple_are_the_same_length(
         f"{name}: the statement selects {len(items)} expressions and the tuple names "
         f"{len(columns)} — zip would silently drop or mislabel the difference"
     )
+
+
+def test_the_judged_pair_select_names_its_columns_in_order() -> None:
+    """Every expression of the Judge page's outer select is `f.<column>`, in the tuple's order."""
+    select_list = usql.JUDGEMENTS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0]
+    names = [item.split(".", 1)[1] for item in _top_level(select_list)]
+    assert names == list(usql.JUDGED_PAIR_COLUMNS)

@@ -262,7 +262,7 @@ def test_a_pair_row_carries_the_engine_view_and_its_own_history(client, conn):
     data = client.get("/autodedup/rulings").json()["data"]
     first, implied = data["items"]
     assert first["certificate"] is None
-    assert first["why_not_merged"] == "auto-rejected on attr_contradictions"
+    assert first["why_not_merged"] == "automaticky zamítnuto: attr_contradictions"
     assert [v["id"] for v in first["history"]] == [9, 7]
     assert implied["zone"] is None and implied["why_not_merged"] is None
     # An implied pair's history is its GROUP's, in the pass the group was ruled on.
@@ -453,8 +453,18 @@ def test_a_pair_the_engine_never_stored_can_be_ruled_when_anything_was_said_abou
     assert _post(client, kind="pair", verdict="same", listing_lo=11,
                  listing_hi=12).status_code == 200
     flat = " ".join(usql.PAIR_EXISTS_SQL.split())
-    for table in ("autodedup.verdicts", "autodedup.must_not_link", "autodedup.pairs"):
+    # The Judge page lists two more kinds of pair the engine may never have stored: one the
+    # judge marked, and one of a sealed random draw.
+    for table in ("autodedup.verdicts", "autodedup.must_not_link", "autodedup.pairs",
+                  "autodedup.judgements", "autodedup.eval_samples"):
         assert f"FROM {table}" in flat
+
+
+def test_a_pair_nothing_names_answers_404(client, conn):
+    conn.canned[usql.PAIR_EXISTS_SQL] = []
+    assert _post(client, kind="pair", verdict="same", listing_lo=11,
+                 listing_hi=12).status_code == 404
+    assert not conn.ran(usql.VERDICT_PAIR_APPEND_SQL)
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)

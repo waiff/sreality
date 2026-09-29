@@ -36,7 +36,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
-from autodedup import agreement as agreement_math
 from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import proposed_splits as splits
@@ -314,13 +313,13 @@ GROUP_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "source", "category_main",
         "category_type", "min_size", "max_size", "min_score", "max_score", "verdict",
-        "shared_photo", "has_judgement", "sort", "seed",
+        "shared_photo", "sort", "seed",
     }
 )
 RESIDUAL_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "zone", "min_score",
-        "source_pair", "has_judgement", "verdict", "sort", "seed",
+        "source_pair", "verdict", "sort", "seed",
     }
 )
 DETAIL_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
@@ -335,7 +334,6 @@ CANDIDATE_FILTER_KEYS: frozenset[str] = frozenset(
 PROGRESS_FILTER_KEYS: frozenset[str] = frozenset(
     {"generation", "seed", "surface", "min_score"}
 )
-AGREEMENT_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
 
 # THE SEED IS A NAME, NOT A PREDICATE. It reaches SQL as a parameter of `md5(key || seed)`, so
 # it could not inject anything — but it is also the IDENTITY of a sample, and a sample nobody
@@ -349,9 +347,10 @@ SEED_RE = re.compile(r"^[a-z0-9]{1,16}$")
 HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # THE SAMPLE IS THE FIRST 100 OF THE SEEDED ORDER. Two of these (one per surface) is the
-# ~200-pair session D6 names; the counter counts against exactly that.
+# ~200-pair session D6 names; the counter counts against exactly that. On the Judge page it is
+# the first 100 of each sealed random draw, and it caps each reason a pair is suggested for.
 VALIDATION_SAMPLE_SIZE = 100
-VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual", "candidates")
+VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual", "candidates", "judge")
 
 # ------------------------------------------------------------------ the candidate queue (E56)
 #
@@ -362,16 +361,11 @@ CANDIDATE_SORTS: tuple[str, ...] = ("weakest", "strongest", "largest", "random")
 # Reviewed is DERIVED, not stored: there is no candidate row in `autodedup.verdicts` to carry a
 # verdict, so a group counts as reviewed when EVERY residual pair inside it carries an operator
 # pair verdict — by ANY operator, this being a single-operator platform, which is the same
-# reading `AGREEMENT_PAIRS_SQL` and the progress strip make of the same rows.
+# reading the progress strip and the operator's word on the Judge page make of the same rows.
 CANDIDATE_VERDICT_VALUES: tuple[str, ...] = ("unreviewed", "reviewed")
 # `<smallest listing id>-<10 hex>` — `candidates.candidate_key`. Validated before it is looked
 # up, so a hand-edited key is a 400 rather than a scan of the whole index.
 CANDIDATE_KEY_RE = re.compile(r"^[0-9]{1,19}-[0-9a-f]{10}$")
-
-# How big a confirmed cluster may be before the agreement read stops expanding it into pairs
-# (n members imply n(n-1)/2 of them). 12 is far above the trial's group sizes and bounds the
-# implied set at 66 pairs per group; what it skipped is reported, never dropped silently.
-AGREEMENT_MAX_CLUSTER_SIZE = 12
 
 # How many blocks the picker is offered. A generation's vocabulary is the busiest blocks
 # first: a select with thousands of options is not a control anyone uses, and the page keeps
@@ -464,20 +458,22 @@ def _certificate(decision: Any) -> str | None:
 
 
 def _why_not_merged(zone: Any, decision: Any, veto: Any) -> str:
+    """The precondition that stopped the merge, in the operator's words (the review pages are
+    Czech); a guard's or a rejection's own code stays as the engine names it."""
     text = str(decision or "")
     if veto:
-        return f"hard guard refused the pair: {veto}"
+        return f"pevné pravidlo dvojici odmítlo: {veto}"
     if text.startswith("auto_reject:"):
-        return f"auto-rejected on {text.split(':', 1)[1]}"
+        return f"automaticky zamítnuto: {text.split(':', 1)[1]}"
     if text.endswith(":evidence_gate") or text == "evidence_gate":
-        return "held in the band: fewer than two independent evidence families"
+        return "drženo v pásmu kontroly: méně než dva nezávislé druhy důkazů"
     if zone == "band":
-        return "scored inside the review band — above the reject floor, below auto-merge"
+        return "skóre v pásmu kontroly — nad hranicí zamítnutí, pod automatickým sloučením"
     if zone == "reject":
-        return "scored below the review band"
+        return "skóre pod pásmem kontroly"
     if zone == "merge":
-        return "the edge was accepted, but no cluster of this generation holds both listings"
-    return "not accepted"
+        return "dvojice prošla, ale žádná skupina této generace nedrží oba inzeráty"
+    return "nepřijato"
 
 
 def _feats(raw: Any) -> dict[str, tuple[float, bool]]:
@@ -1096,7 +1092,6 @@ def groups(
     max_score: float | None = Query(None),
     verdict: str | None = Query(None),
     shared_photo: int | None = Query(None),
-    has_judgement: int | None = Query(None),
     sort: str = Query("weakest"),
     seed: str | None = Query(None),
     conn: Any = Depends(deps.get_db_conn),
@@ -1132,7 +1127,6 @@ def groups(
         "max_score": max_score,
         "verdict": verdict,
         "shared_photo": _flag("shared_photo", shared_photo),
-        "has_judgement": _flag("has_judgement", has_judgement),
         "limit": limit + 1,
         "seed": sample_seed,
         "after_score": None,
@@ -1370,7 +1364,6 @@ def residual(
     zone: str | None = Query(None),
     min_score: float = Query(RESIDUAL_MIN_SCORE),
     source_pair: str | None = Query(None),
-    has_judgement: int | None = Query(None),
     verdict: str | None = Query(None),
     sort: str = Query("score_desc"),
     seed: str | None = Query(None),
@@ -1397,7 +1390,6 @@ def residual(
         "block": block,
         "block_grain": block_grain,
         "source_pair": source_pair,
-        "has_judgement": _flag("has_judgement", has_judgement),
         "verdict": verdict,
         "limit": limit + 1,
         "seed": sample_seed,
@@ -1976,20 +1968,9 @@ def validation_progress(
         if surface == "candidates":
             sample, total = _candidate_counts(conn, generation, sample_seed)
         else:
-            sample = _counts(
-                conn,
-                usql.VALIDATION_GROUPS_SAMPLE_SQL
-                if groups
-                else usql.VALIDATION_RESIDUAL_SAMPLE_SQL,
-                params,
-            )
-            total = _counts(
-                conn,
-                usql.VALIDATION_GROUPS_TOTAL_SQL
-                if groups
-                else usql.VALIDATION_RESIDUAL_TOTAL_SQL,
-                params,
-            )
+            sample_sql, total_sql = _VALIDATION_COUNT_SQL[surface]
+            sample = _counts(conn, sample_sql, params)
+            total = _counts(conn, total_sql, params)
     except _STORE_BEHIND:
         return _not_ready()
 
@@ -2009,6 +1990,14 @@ def validation_progress(
         },
         "store_ready": True,
     }
+
+
+# The two counters' statements per surface: the sample half, then the whole.
+_VALIDATION_COUNT_SQL: dict[str, tuple[str, str]] = {
+    "groups": (usql.VALIDATION_GROUPS_SAMPLE_SQL, usql.VALIDATION_GROUPS_TOTAL_SQL),
+    "residual": (usql.VALIDATION_RESIDUAL_SAMPLE_SQL, usql.VALIDATION_RESIDUAL_TOTAL_SQL),
+    "judge": (usql.VALIDATION_JUDGE_SAMPLE_SQL, usql.VALIDATION_JUDGE_TOTAL_SQL),
+}
 
 
 def _candidate_counts(
@@ -2050,52 +2039,6 @@ def _counts(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, int]:
         return {name: 0 for name in usql.VALIDATION_COUNT_COLUMNS}
     row = _row(usql.VALIDATION_COUNT_COLUMNS, rows[0])
     return {name: int(row[name] or 0) for name in usql.VALIDATION_COUNT_COLUMNS}
-
-
-# ----------------------------------------------------------- operator vs judge (the D6 gate)
-
-
-@router.get("/agreement")
-def agreement(
-    request: Request,
-    generation: str | None = Query(None),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """How often the operator and the LLM judge say the same thing about one pair (D6).
-
-    The operator's label set is explicit pair verdicts UNION the pairs IMPLIED by confirmed
-    clusters; the judge's is the best tier per pair (gold > vision > text, `oss` excluded).
-    `insufficient_evidence` is counted, never scored. The arithmetic — the binary mapping and
-    the Wilson interval — is `autodedup/agreement.py`, so it can be checked by hand.
-
-    THE IMPLIED HALF COMES OUT OF THE VERDICTS (E58), not out of a clustering, so this number
-    no longer moves when a later pass re-clusters: the label set is what the operator was
-    looking at. `generation` is therefore an ECHO here and not a filter — it names the pass the
-    caller is validating against, and the labels it is compared with are every ruling on
-    record."""
-    _reject_unknown_filters(request, AGREEMENT_FILTER_KEYS)
-    if not store_ready(conn):
-        return _not_ready()
-    try:
-        generation = _resolve_generation(conn, generation)
-        params = {"max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE}
-        rows = _rows(usql.AGREEMENT_COLUMNS, _fetch(conn, usql.AGREEMENT_PAIRS_SQL, params))
-        oversize_rows = _fetch(conn, usql.AGREEMENT_OVERSIZE_SQL, params)
-    except _STORE_BEHIND:
-        return _not_ready()
-
-    summary = agreement_math.summarize(rows)
-    n_oversize = int(oversize_rows[0][0] or 0) if oversize_rows and oversize_rows[0] else 0
-    return {
-        "data": {
-            "generation": generation,
-            **summary,
-            # The bound of the implied half, reported rather than assumed away.
-            "max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE,
-            "n_clusters_over_cap": n_oversize,
-        },
-        "store_ready": True,
-    }
 
 
 # ------------------------------------------------------------------------------- one pair
@@ -2976,6 +2919,17 @@ def _uuid(name: str, value: str | None) -> str | None:
         raise _bad(f"{name} must be a merge group id") from exc
 
 
+def _town_codes(town: str | None) -> tuple[int | None, int | None]:
+    """`o:<obec_kod>` / `c:<cast_obce_kod>` -> (obec, cast_obce); blank is no filter."""
+    if not town:
+        return None, None
+    match = TOWN_RE.match(town)
+    if not match:
+        raise _bad("town must be o:<obec_kod> or c:<cast_obce_kod>")
+    code = int(match.group(2))
+    return (code, None) if match.group(1) == "o" else (None, code)
+
+
 def _ruling_filters(
     grain: str, verdict: str | None, source: str | None, status: str | None,
     engine: str | None, now: str | None, decided_from: str | None, decided_to: str | None,
@@ -2983,15 +2937,7 @@ def _ruling_filters(
 ) -> dict[str, Any]:
     """The filter registry, as the statements' nullable parameters. A blank value is no filter;
     a value outside a vocabulary is a 400."""
-    obec = cast_obce = None
-    if town:
-        match = TOWN_RE.match(town)
-        if not match:
-            raise _bad("town must be o:<obec_kod> or c:<cast_obce_kod>")
-        if match.group(1) == "o":
-            obec = int(match.group(2))
-        else:
-            cast_obce = int(match.group(2))
+    obec, cast_obce = _town_codes(town)
     if now and now not in RULING_NOW:
         raise _bad(f"now must be one of: {', '.join(RULING_NOW)}")
     return {
@@ -3162,3 +3108,184 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                            and v["generation"] == r["generation"]]
         items.append(item)
     return items
+
+
+# ------------------------------------------------------------------------------ the Judge page
+#
+# Every pair the judge marked (gold, vision, text) and every pair of a sealed random draw, one row
+# per pair, beside the operator's word and the engine's view (`autodedup/ui_sql.py`, the Judge
+# page section). Read-only: the operator answers through `POST /autodedup/verdict`, as on every
+# queue. The judge's marks train models and never decide a merge; the operator's word is the exam.
+
+# `suggested` = any of the four reasons below; `all` = every judged or sampled pair.
+JUDGEMENT_REASONS: tuple[str, ...] = ("suggested", "sample", "operator", "engine", "unsure", "all")
+# The order a row lists its reasons in, and the one its primary reason is picked by.
+REASON_ORDER: tuple[str, ...] = ("sample", "operator", "engine", "unsure")
+# The judge's headline as a binary word; `none` = the judge has not read the pair yet.
+JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain", "none")
+JUDGE_TIERS: tuple[str, ...] = ("gold", "vision", "text", "none")
+JUDGEMENT_FILTER_KEYS: frozenset[str] = frozenset(
+    {
+        "reason", "judge", "tier", "stratum", "town", "ruled", "operator", "engine",
+        "generation", "after", "limit",
+    }
+)
+JUDGEMENTS_PAGE_SIZE = 25
+# A headline at least this confident that contradicts the engine is worth the operator's look.
+JUDGE_SURE = 0.9
+# A stratum is DATA — the pair list names it — so the filter bounds it and bars control
+# characters rather than owning a vocabulary; it reaches SQL only as a parameter.
+STRATUM_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
+_JUDGEMENT_FACETS: tuple[str, ...] = (
+    "reason", "judge", "tier", "stratum", "ruled", "operator", "engine",
+)
+
+
+def _judgement_facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]]:
+    total = 0
+    facets: dict[str, dict[str, int]] = {name: {} for name in _JUDGEMENT_FACETS}
+    for row in _rows(usql.RULING_FACET_COLUMNS, rows):
+        if row["facet"] == "total":
+            total = int(row["n"] or 0)
+        elif row["facet"] in facets and row["value"] is not None:
+            facets[row["facet"]][str(row["value"])] = int(row["n"] or 0)
+    return total, facets
+
+
+def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
+    ruled = bool(row["ruled"])
+    return {
+        "listing_lo": row["listing_lo"],
+        "listing_hi": row["listing_hi"],
+        "stratum": row["stratum"],
+        "ruled": ruled,
+        # The operator's standing word as the verdict row every queue's buttons read: typed,
+        # from a Browse merge, implied by a group ruling, or a must-not-link.
+        "verdict": {
+            "id": row["operator_ruling_id"],
+            "kind": "pair",
+            "cluster_key": None,
+            "listing_lo": row["listing_lo"],
+            "listing_hi": row["listing_hi"],
+            "verdict": row["operator_verdict"],
+            "note": row["operator_note"],
+            "decided_by": row["operator_decided_by"],
+            "decided_at": row["operator_decided_at"],
+        } if ruled else None,
+        "operator_source": row["operator_source"],
+        "judgement": {
+            "tier": row["judge_tier"],
+            "verdict": row["judge_verdict"],
+            "confidence": row["judge_confidence"],
+            "model": row["judge_model"],
+            "key_evidence": list(row["judge_key_evidence"] or []),
+            "contradicting_evidence": list(row["judge_contradicting_evidence"] or []),
+        } if row["judge_verdict"] is not None else None,
+        "tiers_split": bool(row["tiers_split"]),
+        "reasons": [name for name in REASON_ORDER if row[f"is_{name}"]],
+        "primary_reason": row["primary_reason"],
+        "operator_agreement": row["operator_agreement"],
+        "engine_agreement": row["engine_agreement"],
+        "engine_view": row["engine_view"],
+        "together_now": bool(row["together_now"]),
+        "obec_name": row["obec_name"],
+        "cast_obce_name": row["cast_obce_name"],
+        "zone": row["zone"],
+        "score": row["score"],
+        "guard_veto": row["guard_veto"],
+        "certificate": _certificate(row["decision"]),
+        "why_not_merged": (
+            _why_not_merged(row["zone"], row["decision"], row["guard_veto"])
+            if row["zone"] is not None else None
+        ),
+    }
+
+
+def _judgement_cursor(raw: str | None) -> dict[str, Any]:
+    """`ruled|block|hash|lo|hi` — the page's own order key, each part validated (400)."""
+    parts = _split_cursor(raw, 5)
+    if parts is None:
+        return {"after_ruled": None, "after_block": None, "after_hash": None,
+                "after_lo": None, "after_hi": None}
+    ruled, block = _as_int(parts[0]), _as_int(parts[1])
+    if ruled not in (0, 1) or block not in (0, 1, 2):
+        raise _bad("after is not a cursor from this endpoint")
+    return {"after_ruled": ruled, "after_block": block, "after_hash": _as_hash(parts[2]),
+            "after_lo": _as_int(parts[3]), "after_hi": _as_int(parts[4])}
+
+
+@router.get("/judgements")
+def judgements(
+    request: Request,
+    reason: str | None = Query(None),
+    judge: str | None = Query(None),
+    tier: str | None = Query(None),
+    stratum: str | None = Query(None),
+    town: str | None = Query(None),
+    ruled: int | None = Query(None),
+    operator: str | None = Query(None),
+    engine: str | None = Query(None),
+    generation: str | None = Query(None),
+    after: str | None = Query(None),
+    limit: int = Query(JUDGEMENTS_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One page of the judge's pairs, unruled first, the random sample on top (keyset on the
+    page's order). A missing `reason` means `suggested` while that set holds a pair under the
+    other filters, else `all`, and the answer says which it used. `facets` count the current
+    filter's rows per value; `towns` is the town filter's vocabulary."""
+    _reject_unknown_filters(request, JUDGEMENT_FILTER_KEYS)
+    obec, cast_obce = _town_codes(town)
+    if stratum and not STRATUM_RE.match(stratum):
+        raise _bad("stratum must be a pair list's name")
+    asked = _one_of("reason", reason or None, JUDGEMENT_REASONS)
+    params: dict[str, Any] = {
+        "reason": asked or "suggested",
+        "judge": _one_of("judge", judge or None, JUDGE_WORDS),
+        "tier": _one_of("tier", tier or None, JUDGE_TIERS),
+        "stratum": stratum or None,
+        "obec": obec,
+        "cast_obce": cast_obce,
+        "ruled": _flag("ruled", ruled),
+        "operator": _one_of("operator", operator or None, RULING_AGREEMENT),
+        "engine": _one_of("engine", engine or None, RULING_AGREEMENT),
+        "seed": DEFAULT_SEED,
+        "sample_size": VALIDATION_SAMPLE_SIZE,
+        "judge_sure": JUDGE_SURE,
+    }
+    page_params = _judgement_cursor(after)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
+        total, facets = _judgement_facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params))
+        if asked is None and total == 0:
+            params["reason"] = "all"
+            total, facets = _judgement_facets(
+                _fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params))
+        rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
+            conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
+        towns = _rows(usql.RULING_TOWN_COLUMNS, _fetch(
+            conn, usql.JUDGED_TOWNS_SQL, {"seed": DEFAULT_SEED, "limit": RULING_TOWNS_LIMIT}))
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    page = rows[:limit]
+    last = page[-1] if page else None
+    next_after = None
+    if len(rows) > limit and last is not None:
+        next_after = _cursor(int(bool(last["ruled"])), last["block"], last["sort_hash"],
+                             last["listing_lo"], last["listing_hi"])
+    return {
+        "data": {
+            "generation": generation,
+            "reason": params["reason"],
+            "items": [_judged_pair(row) for row in page],
+            "next_after": next_after,
+            "total": total,
+            "facets": facets,
+            "towns": towns,
+        },
+        "store_ready": True,
+    }
