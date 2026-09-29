@@ -445,16 +445,27 @@ def test_a_legacy_group_ruling_with_no_set_can_still_be_withdrawn(client, conn):
     assert (written["generation"], written["member_ids"]) == (None, None)
 
 
-def test_a_pair_the_engine_never_stored_can_be_ruled_when_anything_was_said_about_it(client,
-                                                                                    conn):
-    """G10: `PAIR_EXISTS_SQL` asks the rulings and the vetoes as well as the scored pairs."""
+def test_any_two_adverts_that_exist_can_be_ruled(client, conn):
+    """E924: the guard asks whether both ADVERTS exist, never whether the engine stored the pair
+    — a duplicate the engine missed has no row, and it is the ruling the operator must give."""
     conn.canned[usql.PAIR_EXISTS_SQL] = [(1,)]
     conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict="same")]
     assert _post(client, kind="pair", verdict="same", listing_lo=11,
                  listing_hi=12).status_code == 200
+    assert conn.params(usql.PAIR_EXISTS_SQL) == {"listing_lo": 11, "listing_hi": 12}
     flat = " ".join(usql.PAIR_EXISTS_SQL.split())
+    assert "FROM public.listings" in flat
     for table in ("autodedup.verdicts", "autodedup.must_not_link", "autodedup.pairs"):
-        assert f"FROM {table}" in flat
+        assert table not in flat
+
+
+def test_a_pair_naming_an_advert_that_does_not_exist_is_a_404_and_writes_nothing(client, conn):
+    conn.canned[usql.PAIR_EXISTS_SQL] = []
+    response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "one of the two adverts does not exist"
+    assert not conn.ran(usql.VERDICT_PAIR_APPEND_SQL)
+    assert not conn.ran(usql.MUST_NOT_LINK_UPSERT_SQL)
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)
