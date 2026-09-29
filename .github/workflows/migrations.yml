@@ -471,3 +471,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_sql_prepare.py -q
+
+      # Migration 577 (B-j, the control draw's operator sample), EXECUTED: the replay sealed the
+      # 100 pairs, a second run changes nothing, a lost row comes back, and a pair sealed under
+      # another stratum makes the file raise. The replay alone proves only that it compiles.
+      - name: The control draw's operator sample is sealed once (migration 577)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_autodedup_control_draw_migration.py -q
