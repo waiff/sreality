@@ -31,11 +31,14 @@ from autodedup.judge_sql import (
     JUDGEMENT_CACHED_SQL,
     JUDGEMENT_COST_SQL,
     JUDGEMENT_POD_COST_SQL,
+    JUDGEMENT_STRATUM_STAMP_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
 from tests.autodedup.test_engine_e2e import build_records
 
 MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / "528_autodedup_foundation.sql"
+STRATUM_MIGRATION = (Path(__file__).resolve().parents[2] / "migrations"
+                     / "576_autodedup_judgements_stratum.sql")
 
 
 # --- fakes -------------------------------------------------------------------------------
@@ -388,9 +391,10 @@ def test_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
     lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
     params = _upserts(lane.executed)
     assert params
-    expected = set(_migration_columns()) - {"created_at"}
+    expected = set(_migration_columns()) - {"created_at"} | {"stratum"}
     assert expected and set(params[0]) == expected
     row = params[0]
+    assert row["stratum"] is None, "a pair the lane drew itself belongs to no list"
     assert row["listing_lo"] < row["listing_hi"]
     assert row["tier"] == "text" and row["model"] == judge_lane.MODEL_TEXT
     assert row["judge_version"] == judge.JUDGE_VERSION
@@ -401,8 +405,25 @@ def test_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
 
 
 def test_every_upsert_column_appears_in_the_sql() -> None:
-    for column in set(_migration_columns()) - {"created_at"}:
+    for column in set(_migration_columns()) - {"created_at"} | {"stratum"}:
         assert f"%({column})s" in JUDGEMENT_UPSERT_SQL
+
+
+def test_migration_576_adds_the_stratum_column_additively() -> None:
+    body = STRATUM_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "alter table autodedup.judgements add column if not exists stratum text;" in body
+    assert "lock_timeout" in body
+    for destructive in ("drop ", "not null", "update ", "delete "):
+        assert destructive not in body.split("comment on", 1)[0].replace(
+            "reset lock_timeout", ""), destructive
+
+
+def test_a_retry_keeps_the_stamp_the_mark_already_carries() -> None:
+    assert "stratum = coalesce(autodedup.judgements.stratum, excluded.stratum)" in (
+        JUDGEMENT_UPSERT_SQL)
+    assert "j.stratum is null" in JUDGEMENT_STRATUM_STAMP_SQL
+    assert "unnest(%(los)s::bigint[], %(his)s::bigint[], %(strata)s::text[])" in (
+        JUDGEMENT_STRATUM_STAMP_SQL)
 
 
 def test_a_cached_pair_is_never_paid_for_twice(lane, tmp_path: Path) -> None:
@@ -1481,6 +1502,11 @@ def test_a_stamped_pairs_file_files_every_pair_under_its_own_stratum(
     assert {(row["lo"], row["hi"]): row["stratum"] for row in _judgements(out)} == {
         first: "a:refused_union|price", second: "e:merged_disagree|floor",
     }
+    # The stamp is STORED with every mark (migration 576), so the Judge page can list it.
+    assert {(row["listing_lo"], row["listing_hi"]): row["stratum"]
+            for row in _upserts(lane.executed)} == {
+        first: "a:refused_union|price", second: "e:merged_disagree|floor",
+    }
     # The stamp travels in sample.json, so a reader takes it without recomputing a key.
     drawn = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))["pairs"]
     assert {(row["lo"], row["hi"]): row["stratum"] for row in drawn}[first] == \
@@ -2203,3 +2229,35 @@ def test_the_first_call_of_a_run_is_still_taken_at_its_word(lane, tmp_path: Path
     assert summary["qwen_arm_disabled"] is True
     assert summary["qwen_arm_disabled_at_pair"] == 0
     assert summary["done"] == 3 * summary["drawn"]
+
+
+def _stamps(executed: list[tuple[str, Any]]) -> list[dict[str, Any]]:
+    return [params for sql, params in executed if sql is JUDGEMENT_STRATUM_STAMP_SQL]
+
+
+def test_a_list_dispatched_again_stamps_its_cached_marks_for_free(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="text", n=8, max_usd=5, dry_run=1)
+    first, second = _pairs_of(whole)[:2]
+    name = _write_pair_objects(tmp_path, monkeypatch, [
+        {"lo": first[0], "hi": first[1], "stratum": "g2:s3_mf_band"},
+        [second[0], second[1]],
+    ])
+    lane.state["cached"] = [first, second]
+    summary = lane(tmp_path / "out", export_run="1", tier="text", n=8, max_usd=5, workers=1,
+                   pairs_file=name)
+    assert summary["skipped_cached"] == 2 and not lane.calls
+    stamps = _stamps(lane.executed)
+    # Only the pair the list stamped; the bare [lo, hi] entry names no list.
+    assert stamps == [{"judge_version": judge.JUDGE_VERSION, "tier": "text",
+                       "los": [first[0]], "his": [first[1]], "strata": ["g2:s3_mf_band"]}]
+
+
+def test_a_cached_draw_without_a_list_stamps_nothing(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    lane.state["cached"] = [(row["lo"], row["hi"]) for row in _judgements(out)]
+    lane(tmp_path / "out2", export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    assert _stamps(lane.executed) == []
