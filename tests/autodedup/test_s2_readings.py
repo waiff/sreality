@@ -379,13 +379,6 @@ def test_three_tight_photo_files_recover_a_missing_reading() -> None:
     assert strong_corroboration(a, b, _feats(phash_tight_matches=2.0), cfg) is None
 
 
-def test_a_weak_interior_match_refuses_the_photo_recovery() -> None:
-    cfg = s2()
-    a, b = listing(1, description=BODY), listing(2, description=BODY)
-    feats = _feats(phash_tight_matches=4.0, tag_room_clip_min2=0.5)
-    assert strong_corroboration(a, b, feats, cfg) is None
-
-
 def test_an_advert_that_states_nothing_demonstrates_nothing() -> None:
     """One ceskereality row of a Slavonín house carries an empty body and no price."""
     cfg = s2()

@@ -652,7 +652,7 @@ def demonstration_refusal(
     if shortfall is not None:
         gap, kind = shortfall
         # E164: a reading NOBODY states is not a disagreement. Where the pair carries evidence
-        # only one unit has — three tight photo files with the interiors holding, the seller's
+        # only one unit has — three tight photo files (no room tag asked, E929), the seller's
         # own order code, or a body one advert essentially IS outside a development — the
         # missing reading is waived. A CONTRADICTION never is.
         if not (settings.demonstrate_recover_missing and kind == MISSING

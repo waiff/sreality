@@ -672,9 +672,8 @@ def strong_corroboration(
     waiving one of those facts. What is admitted here is the sub-class the four cohorts show to
     be clean:
 
-      * several tight non-catalogue photo FILES in common, with the galleries' weakest-but-one
-        shared room above the interior floor where anything is known about it — a developer
-        reuses the exterior render, not three interiors;
+      * several tight non-catalogue photo FILES in common — a developer reuses the exterior
+        render, not three photographs; the room TAG is not asked (a tag is never a fact, E929);
       * a shared rare order code, which is the seller's own name for ONE object;
       * a body one advert essentially IS — outside a development, where a shared body is the
         developer's template rather than this unit's (the Černovírské zahrady parcelling).
@@ -691,8 +690,7 @@ def strong_corroboration(
     if min(len(a.description or ""), len(b.description or "")) < RECOVER_MIN_BODY_CHARS:
         return None
     photos = _slot(feats, "phash_tight_matches") or 0.0
-    rooms = _slot(feats, "tag_room_clip_min2")
-    if photos >= settings.demonstrate_recover_min_photos and (rooms is None or rooms >= 0.90):
+    if photos >= settings.demonstrate_recover_min_photos:
         return f"photos:{photos:.0f}"
     contained = _slot(feats, "containment_max") or 0.0
     if (contained >= settings.demonstrate_recover_body_containment

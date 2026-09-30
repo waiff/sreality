@@ -3222,7 +3222,7 @@ def unit_grade_warrant(
     anyway. Counting fields is not what makes them one unit; the shared body is.
 
     The bar is E164's, not (B)'s: the seller's own order code, three tight non-catalogue photo
-    FILES with the interiors holding, or a body one advert essentially IS. And the body limb
+    FILES (the room tag is not asked, E929), or a body one advert essentially IS. And the body limb
     asks for the standing ruling's shape as well — two postings never on sale TOGETHER, which
     is a re-post. Two adverts alive at the same time sharing a body are the developer's
     template (the Černovírské zahrady parcelling), and that is the one thing this must not

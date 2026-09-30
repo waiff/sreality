@@ -1,5 +1,6 @@
-"""E929: tags are never facts. The CLIP room tag separates nothing in any mode; a floor-plan
-drawing that differs stays a distinguishing fact (operator case 11), exactly as in w31."""
+"""E929: tags are never facts. The CLIP room tag separates nothing in any mode (arm E1) and no
+longer refuses the `photos:N` waiver of a missing reading (arm E2); a floor-plan drawing that
+differs stays a distinguishing fact (operator case 11), exactly as in w31."""
 
 from __future__ import annotations
 
@@ -11,7 +12,8 @@ import pytest
 
 from autodedup.d43 import ClusterRelation, relation_for
 from autodedup.dataset import Listing, Location
-from autodedup.decide import Decision, apply_d43_rule
+from autodedup.decide import Decision, apply_d43_rule, demonstration_refusal
+from autodedup.demonstrate import strong_corroboration
 from autodedup.incremental_lane import named_config, pass_config
 from autodedup.indistinguishable import (
     CLUSTER,
@@ -21,6 +23,7 @@ from autodedup.indistinguishable import (
     PROMOTE,
     distinguishing_facts,
     promotion_warrant,
+    unit_grade_warrant,
 )
 from autodedup.settings import Settings
 
@@ -133,6 +136,42 @@ def test_a_band_pair_only_a_tag_separated_is_promoted_and_a_floor_plan_is_not() 
     promoted = apply_d43_rule(band, a, b, TAG_ONLY_CODE, W31)
     assert promoted.zone == "merge" and promoted.reason.startswith("d43_promote:")
     assert apply_d43_rule(band, a, b, FLOORPLAN_CODE, W31) is band
+
+
+# --- E2: the photos:N waiver does not ask the tag -----------------------------------------------
+BODY = "Prodej bytu 2+kk v cihlovém domě po celkové rekonstrukci, sklep a balkon. " * 4
+
+
+def _bodied(listing_id: int, source: str = "sreality") -> Listing:
+    advert = _listing(listing_id, source)
+    advert.description = BODY
+    return advert
+
+
+@pytest.mark.parametrize("clip", [None, 0.0, 0.5, 0.899, 0.95])
+def test_the_photos_waiver_no_longer_reads_the_tag(clip: float | None) -> None:
+    a, b = _bodied(1), _bodied(2, "idnes")
+    feats: dict[str, tuple[float, bool]] = {"phash_tight_matches": (4.0, True)}
+    if clip is not None:
+        feats["tag_room_clip_min2"] = (clip, True)
+    assert strong_corroboration(a, b, feats, W31) == "photos:4"
+    assert unit_grade_warrant(a, b, feats, W31) == "photos:4"
+    feats["phash_tight_matches"] = (2.0, True)
+    assert strong_corroboration(a, b, feats, W31) is None
+
+
+def test_a_weak_tag_no_longer_keeps_a_missing_reading_out_of_the_merge_zone() -> None:
+    a, b = _bodied(1), _bodied(2, "idnes")
+    b.price = None
+    feats = {"phash_tight_matches": (4.0, True), "tag_room_clip_min2": (0.5, True),
+             "floorplan_conflict": (0.0, True)}
+    assert demonstration_refusal(a, b, feats, W31) is None
+    band = Decision(1, 2, "band", 0.6, {"IMG"}, None, None, "model")
+    promoted = apply_d43_rule(band, a, b, feats, W31)
+    assert promoted.zone == "merge" and promoted.reason.startswith("d43_promote:")
+    # The floor plan still refuses the same pair: a drawing that differs is a fact.
+    held = {**feats, "floorplan_conflict": (1.0, True)}
+    assert apply_d43_rule(band, a, b, held, W31) is band
 
 
 # --- the live seed still loads (N1: no key added, none deleted) --------------------------------
