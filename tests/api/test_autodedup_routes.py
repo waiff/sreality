@@ -82,13 +82,15 @@ _LABELS: dict[str, str] = {
     usql.MUST_NOT_LINK_RETRACT_SQL: "must_not_link_retract",
     usql.VERDICT_PAIR_FROM_VETO_SQL: "veto_written_down",
     usql.CLUSTER_EXISTS_SQL: "cluster_exists",
-    usql.PAIR_EXISTS_SQL: "pair_exists",
+    usql.PAIR_CATEGORIES_SQL: "pair_categories",
     usql.JIT_OFF: "jit_off",
 }
 # The statements that fetch one row over the asked-for page size.
 _PAGED: frozenset[str] = frozenset(
     {"groups", "groups_newest", "groups_largest", "groups_random", "residual", "residual_random"}
 )
+# `PAIR_CATEGORIES_SQL`'s one row: both adverts exist and rule 15 lets them be one property.
+_BOTH_ADVERTS: list[tuple[str, str, str, str]] = [("prodej", "byt", "prodej", "byt")]
 
 
 def _tuple(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
@@ -1749,7 +1751,7 @@ def admin_client(conn: _FakeConn):
 
 
 def test_a_negative_pair_verdict_also_writes_the_permanent_must_not_link(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different",
@@ -1768,7 +1770,7 @@ def test_a_negative_pair_verdict_also_writes_the_permanent_must_not_link(admin_c
 
 
 def test_same_building_different_unit_is_also_a_must_not_link(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12,
@@ -1782,7 +1784,8 @@ def test_same_building_different_unit_is_also_a_must_not_link(admin_client, conn
 
 @pytest.mark.parametrize("verdict", ["same", "unsure"])
 def test_a_non_negative_verdict_writes_no_must_not_link(admin_client, conn, verdict):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row(verdict=verdict)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
+                   "verdict_write": [_verdict_row(verdict=verdict)]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": verdict},
@@ -1798,7 +1801,8 @@ def test_reversing_a_negative_pair_verdict_retracts_the_must_not_link(
     """The mirror of the must-not-link write. A veto the operator has taken back has to stop
     vetoing: `guards.py` refuses every pair in the table on every future run, so a row left
     behind kills a pair the page now shows as confirmed."""
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row(verdict=verdict)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
+                   "verdict_write": [_verdict_row(verdict=verdict)]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different"},
@@ -1814,7 +1818,7 @@ def test_reversing_a_negative_pair_verdict_retracts_the_must_not_link(
 
 
 def test_a_negative_verdict_does_not_retract_what_it_just_wrote(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different"},
@@ -2226,7 +2230,7 @@ def test_a_split_never_asks_whether_the_pair_was_scored(admin_client, split_conn
     """A cluster is the UNION of accepted edges, so two members can share a cluster with no
     scored edge between them. Membership is the validation; `autodedup.pairs` is not."""
     admin_client.post("/autodedup/verdict/split", json=_split())
-    assert all(sql != usql.PAIR_EXISTS_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.PAIR_CATEGORIES_SQL for sql, _ in split_conn.calls)
 
 
 @pytest.mark.parametrize(
@@ -2312,7 +2316,7 @@ def test_the_new_verdict_is_negative_everywhere_it_is_read(admin_client, conn):
     assert "same_project_different_unit" in routes.VERDICT_VALUES
     assert "same_project_different_unit" in routes.NEGATIVE_VERDICTS
     assert "same_project_different_unit" in routes.VERDICT_FILTER_VALUES
-    conn.canned = {"pair_exists": [(1,)],
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
                    "verdict_write": [_verdict_row(verdict="same_project_different_unit")]}
     body = admin_client.post(
         "/autodedup/verdict",
@@ -2374,7 +2378,7 @@ def test_the_plain_verdict_route_names_the_migration_instead_of_500ing(
     """The split route already does this. The same click on the same new value, one button
     over, must not answer with a bare 500 that sends the operator to the logs."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.canned = {"pair_exists": [(1,)], "cluster_exists": [(1,)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "cluster_exists": [(1,)]}
     conn.raises[statement] = psycopg_errors.CheckViolation(
         'new row violates check constraint "verdicts_verdict_check"'
     )
@@ -2646,7 +2650,7 @@ def test_the_reason_picker_is_gone_from_the_api(client):
 
 
 def test_a_pair_verdict_stores_its_reasons_and_its_note(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     resp = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different",
@@ -2672,7 +2676,7 @@ def test_a_cluster_verdict_stores_its_reasons(admin_client, conn):
 
 
 def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
@@ -2686,7 +2690,7 @@ def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
 def test_an_unknown_reason_is_refused_and_nothing_is_written(admin_client, conn):
     """A chip the operator clicked and the store never kept is worse than no chip at all —
     so an unknown code is the client error it is, before any statement runs."""
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     resp = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
@@ -2740,7 +2744,7 @@ def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client
     """The 532 guard's sibling. A missing COLUMN is a different SQLSTATE from a rejected
     VALUE, so the two are told apart and each names its own migration."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.canned = {"pair_exists": [(1,)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS}
     conn.raises[usql.VERDICT_PAIR_APPEND_SQL] = psycopg_errors.UndefinedColumn(
         'column "reasons" of relation "verdicts" does not exist'
     )

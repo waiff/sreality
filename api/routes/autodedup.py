@@ -46,7 +46,8 @@ from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, s
 from autodedup.export import listing_digest, scrubbed_text
 from autodedup.harness import model_of_version
 from autodedup.model import hand_initialised
-from toolkit.property_identity import record_ruling
+from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
+from toolkit.property_identity import category_clash, record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
     reversal_message,
@@ -2185,6 +2186,9 @@ def verdict(
     re-resolved -- the new word is about the set the old one was about). It is accepted only while
     that row is still the newest on its key (409: ruled again since the page loaded). Every write
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
+
+    A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
+    rental, a flat and a commercial unit) is a 409 in the operator's words (E925).
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2208,13 +2212,6 @@ def verdict(
                 raise _bad("a pair verdict carries no cluster_key")
             if body.listing_lo >= body.listing_hi:
                 raise _bad("listing_lo must be smaller than listing_hi")
-            if not _fetch(
-                conn,
-                usql.PAIR_EXISTS_SQL,
-                {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
-            ):
-                raise HTTPException(
-                    status_code=404, detail="one of the two adverts does not exist")
         try:
             with conn.transaction():
                 if body.supersedes is not None:
@@ -2222,6 +2219,13 @@ def verdict(
                     lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
                 else:
                     lo, hi = int(body.listing_lo), int(body.listing_hi)
+                sides = _fetch(conn, usql.PAIR_CATEGORIES_SQL,
+                               {"listing_lo": lo, "listing_hi": hi})
+                if not sides:
+                    raise HTTPException(
+                        status_code=404, detail="one of the two adverts does not exist")
+                if body.verdict == "same":
+                    _refuse_two_properties(sides[0])
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2305,6 +2309,31 @@ def verdict(
         },
         "store_ready": True,
     }
+
+
+# The pair page prints a refusal's detail as it is, so it is written for the operator, in the
+# Browse filters' own Czech labels.
+_SAME_REFUSED: dict[str, str] = {
+    "category_type": "Inzerát typu {a} a inzerát typu {b} nikdy nejsou jedna nemovitost, "
+                     "proto je nelze označit jako stejné.",
+    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} nemohou být jedna "
+                     "nemovitost (jediná výjimka je dům a komerční objekt), proto je nelze "
+                     "označit jako stejné.",
+}
+_CATEGORY_LABELS: dict[str, str] = {
+    option.value: option.label_cs
+    for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)
+}
+
+
+def _refuse_two_properties(sides: tuple[Any, ...]) -> None:
+    """E925: a `same` the merge chokepoint's category gate would refuse is a 409. Stored, it
+    would be a must-link the lane dissolves and re-seeds every pass, and a positive label."""
+    clash = category_clash((sides[0], sides[1]), (sides[2], sides[3]))
+    if clash is not None:
+        field, a, b = clash
+        raise HTTPException(status_code=409, detail=_SAME_REFUSED[field].format(
+            a=_CATEGORY_LABELS.get(a, a), b=_CATEGORY_LABELS.get(b, b)))
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
