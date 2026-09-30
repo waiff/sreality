@@ -438,11 +438,17 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql in (CLUSTER_CONFLICT_INSERT_SQL, S.RT_CLOSURE_CONFLICT_APPEND_SQL):
         row = dict(p)
         row["detail"] = _jsonb(p["detail"])
-        key = ("kind", "listing_lo", "listing_hi", "invariant", "detail")
-        if sql == CLUSTER_CONFLICT_INSERT_SQL or not any(
-                all(held.get(name) == row.get(name) for name in key)
-                for held in db.cluster_conflicts):
-            db.cluster_conflicts.append(row)
+        if sql == S.RT_CLOSURE_CONFLICT_APPEND_SQL:
+            detail = row["detail"]
+            newest = next((held for held in reversed(db.cluster_conflicts)
+                           if held["kind"] == row["kind"]
+                           and (held["detail"] or {}).get("must_link")
+                           and held["detail"]["generation"] == detail["generation"]
+                           and set(held["detail"]["members"]) & set(detail["members"])), None)
+            if newest is not None and all(newest.get(name) == row.get(name) for name in
+                                          ("listing_lo", "listing_hi", "invariant", "detail")):
+                return []
+        db.cluster_conflicts.append(row)
         return []
 
     # ---------------------------------------------------------------- census cells

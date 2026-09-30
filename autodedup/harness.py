@@ -542,8 +542,7 @@ def write_run(store: MemoryStore, dataset: Dataset, fps: Mapping[int, Fingerprin
         "evidence_families": dict(sorted(families.items())),
         "clusters": stats,
         "must_not_link": {"together": together(store.mnl), "unit_designator_veto": len(vetoed)},
-        "must_link": {"not_together": len(store.ml) - together(store.ml),
-                      "dissolved": sum(1 for c in store.conflicts if c.get("must_link"))},
+        "must_link": {"not_together": len(store.ml) - together(store.ml)},
     }
 
 

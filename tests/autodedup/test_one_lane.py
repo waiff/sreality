@@ -335,15 +335,59 @@ def test_the_sql_store_files_the_record_once_as_its_twin_does() -> None:
         {**CLOSURE, "kind": "invariant", "generation": "rt"}]
 
 
-def test_a_batch_run_counts_the_dissolved_closure_but_refuses_no_edge_with_it(tmp_path) -> None:
+def test_a_closure_the_rail_reclusters_again_is_counted_once() -> None:
+    """The E64 rail re-clusters a demoted pair's component inside the same pass, so the pass
+    dissolves one closure twice: the heartbeat counts closures, not re-clusters."""
+    ds = _sale_and_rent()
+    store = MemoryStore()
+    _known(store, A, B, C, D)
+    store.ml = set(SAME)
+    facts = CohortFacts(ds)
+    result = PassResult(generation="rt", calibration_digest="x")
+    for _ in range(2):
+        _recluster(store, facts, D43_ON, _Working(facts, D43_ON), {A, B, C, D}, Limits(),
+                   result)
+    assert result.to_json()["counts"]["must_link_dissolved"] == 1
+
+
+def _mnl_then_rental() -> Dataset:
+    """A, B and C are flats for sale, D one for rent."""
+    listings = {i: _listing(i) for i in (A, B, C)}
+    listings[D] = _listing(D, category_type="pronajem")
+    return Dataset(meta=Meta(), listings=listings, images_by_listing={})
+
+
+def test_a_closure_that_changes_and_changes_back_is_filed_again() -> None:
+    """Review of #1652: the record was filed when no identical one existed EVER. A-B and B-C
+    `same` with A-C `different` dissolve {A, B, C} on the must-not-link (R1); C-D `same` makes
+    it {A, B, C, D}, a sale with a rental (R2); withdrawing C-D gives R1's closure back, and
+    nothing was filed — so the newest record naming A and B, the one the rulings page shows,
+    blamed the rental. It is filed unless the NEWEST record sharing an advert is identical."""
+    ds = _mnl_then_rental()
+    db = FakePg()
+    sql, twin = SqlStore(db, "rt"), MemoryStore()
+    chain = {(A, B), (B, C)}
+    for store, rulings in ((sql, db), (twin, twin)):
+        _known(store, A, B, C, D)
+        rulings.mnl = {(A, C)}
+        for same in (chain, chain | {(C, D)}, chain, chain):
+            rulings.ml = set(same)
+            _recluster_all(store, ds, D43_ON)
+    first = ("must_not_link", [A, B, C], [[A, B], [B, C]])
+    filed = [first, ("category_type", [A, B, C, D], [[A, B], [B, C], [C, D]]), first]
+    assert [(r["invariant"], r["detail"]["members"], r["detail"]["must_link"])
+            for r in db.cluster_conflicts] == filed
+    assert [(c["invariant"], c["members"], c["must_link"]) for c in twin.conflicts] == filed
+
+
+def test_a_batch_run_refuses_no_edge_with_a_dissolved_closure(tmp_path) -> None:
     import json
 
     from autodedup import harness
     from autodedup.model import hand_initialised
 
-    summary = harness.run(_sale_and_rent(), Settings(), hand_initialised(), tmp_path,
-                          frozenset(), frozenset(SAME))
-    assert summary["must_link"]["dissolved"] == 1
+    harness.run(_sale_and_rent(), Settings(), hand_initialised(), tmp_path, frozenset(),
+                frozenset(SAME))
     written = json.loads((tmp_path / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
     assert written["conflicts"] == [] and written["stats"]["n_edges_refused"] == 0
 

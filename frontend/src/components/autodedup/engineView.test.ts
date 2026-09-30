@@ -17,9 +17,8 @@ describe('engineLine', () => {
   });
 
   it('names a dissolved closure even when the engine stored no row for the pair (E925)', () => {
-    expect(engineLine({ ...APART, why_not_merged: 'pevné pravidlo odmítlo celou skupinu: category_type' })).toBe(
-      'odděleně · pár bez uloženého řádku — pevné pravidlo odmítlo celou skupinu: category_type',
-    );
+    const why = 'vaše rozhodnutí „stejné“ spojují prodej s pronájmem';
+    expect(engineLine({ ...APART, why_not_merged: why })).toBe(`odděleně · pár bez uloženého řádku — ${why}`);
   });
 
   it('reads the stored pair, then the reason', () => {

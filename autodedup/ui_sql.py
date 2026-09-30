@@ -694,16 +694,18 @@ CONFLICT_COLUMNS: tuple[str, ...] = (
 
 # A conflict TOUCHES a cluster either by naming it or by naming one of its members — the
 # second arm is what surfaces the union an invariant refused, whose row carries the two
-# listings and no cluster key at all.
+# listings and no cluster key at all. A dissolved closure (E925) is not one: its two ends are
+# the closure's smallest and largest advert, a pair nobody ruled or scored (DISSOLVED_CLOSURES_SQL).
 CLUSTER_CONFLICTS_SQL = """
 SELECT
     cc.id, cc.kind, cc.cluster_key_a, cc.cluster_key_b, cc.listing_lo, cc.listing_hi,
     cc.invariant, cc.detail, cc.created_at
 FROM autodedup.cluster_conflicts cc
-WHERE cc.cluster_key_a = %(cluster_key)s::bigint
-   OR cc.cluster_key_b = %(cluster_key)s::bigint
-   OR cc.listing_lo = any(%(ids)s::bigint[])
-   OR cc.listing_hi = any(%(ids)s::bigint[])
+WHERE (cc.cluster_key_a = %(cluster_key)s::bigint
+       OR cc.cluster_key_b = %(cluster_key)s::bigint
+       OR cc.listing_lo = any(%(ids)s::bigint[])
+       OR cc.listing_hi = any(%(ids)s::bigint[]))
+  AND cc.detail -> 'must_link' IS NULL
 ORDER BY cc.created_at DESC, cc.id DESC
 """
 

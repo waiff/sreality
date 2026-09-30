@@ -3075,10 +3075,35 @@ def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
         pair = (r["listing_lo"], r["listing_hi"])
         for record in records:
             if {int(pair[0]), int(pair[1])} <= {int(m) for m in record["detail"]["members"]}:
-                out[pair] = ("pevné pravidlo odmítlo celou skupinu, kterou spojují vaše "
-                             f"rozhodnutí „stejné“: {record['invariant']}")
+                out[pair] = _dissolved_reason(record)
                 break
     return out
+
+
+# The limbs that can refuse a closure (inside one, the spreads are not read), in the operator's
+# words: the first three are the engine's fixed rules, the last his own `different` ruling.
+_CLOSURE_REFUSED = {
+    "size": "spojují skupinu o {n} inzerátech, větší, než pevné pravidlo dovolí",
+    "category_type": "spojují prodej s pronájmem, což pevné pravidlo nedovolí",
+    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+                     "což pevné pravidlo nedovolí"),
+    "must_not_link": "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny",
+}
+DISSOLVED_PAIRS_SHOWN = 5
+
+
+def _dissolved_reason(record: dict[str, Any]) -> str:
+    """Why a closure of `same` rulings binds nothing, and the rulings that form it — the ones to
+    revisit (E925)."""
+    detail = record["detail"]
+    why = _CLOSURE_REFUSED.get(record["invariant"], "narážejí na pevné pravidlo ({limb})")
+    pairs = [f"{lo}–{hi}" for lo, hi in detail["must_link"]]
+    shown = ", ".join(pairs[:DISSOLVED_PAIRS_SHOWN])
+    if len(pairs) > DISSOLVED_PAIRS_SHOWN:
+        shown += " …"
+    return (f"vaše rozhodnutí „stejné“ "
+            f"{why.format(n=len(detail['members']), limb=record['invariant'])}, proto engine "
+            f"skupinu nesloučil (rozhodnutí „stejné“ v ní, celkem {len(pairs)}: {shown})")
 
 
 def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],

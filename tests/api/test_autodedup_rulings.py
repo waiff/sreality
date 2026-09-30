@@ -298,14 +298,41 @@ def test_a_same_the_engine_dissolved_says_why_it_is_not_honoured(client, conn):
     ]
     first, other, withdrawn = client.get("/autodedup/rulings").json()["data"]["items"]
     assert first["why_not_merged"] == (
-        "pevné pravidlo odmítlo celou skupinu, kterou spojují vaše rozhodnutí „stejné“: "
-        "category_type")
+        "vaše rozhodnutí „stejné“ spojují prodej s pronájmem, což pevné pravidlo nedovolí, "
+        "proto engine skupinu nesloučil (rozhodnutí „stejné“ v ní, celkem 1: 11–12)")
     assert other["why_not_merged"] == (
         "dvojice prošla, ale žádná skupina této generace nedrží oba inzeráty"), (
         "no record names 13 and 14: the stored pair's own reason stands")
     assert withdrawn["why_not_merged"] == "automaticky zamítnuto: attr_contradictions"
     assert conn.params(usql.DISSOLVED_CLOSURES_SQL) == {"generation": LIVE,
                                                         "ids": [11, 12, 13, 14]}
+
+
+@pytest.mark.parametrize(("limb", "why"), [
+    ("category_type", "spojují prodej s pronájmem, což pevné pravidlo nedovolí"),
+    ("compat_class", "spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+                     "což pevné pravidlo nedovolí"),
+    ("size", "spojují skupinu o 7 inzerátech, větší, než pevné pravidlo dovolí"),
+    ("must_not_link", "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny"),
+])
+def test_each_limb_that_dissolves_a_closure_is_said_in_words(client, conn, limb, why):
+    """E925: only four limbs can refuse a closure. Three are the engine's fixed rules; a
+    must-not-link is the operator's own `different` inside it, and the page says so, not "a fixed
+    rule". Every reason names the `same` rulings that form the closure — the ones to revisit —
+    up to five of them, and how many there are."""
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    conn.canned[usql.RULINGS_PAIR_SQL] = [_pair_ruling(zone=None, decision=None)]
+    members = [11, 12, 13, 14, 15, 16, 17]
+    conn.canned[usql.DISSOLVED_CLOSURES_SQL] = [
+        _tuple(usql.CONFLICT_COLUMNS, id=3, kind="invariant", listing_lo=11, listing_hi=17,
+               invariant=limb, created_at=AT,
+               detail={"generation": LIVE, "members": members,
+                       "must_link": [[lo, lo + 1] for lo in members[:-1]]}),
+    ]
+    (item,) = client.get("/autodedup/rulings").json()["data"]["items"]
+    assert item["why_not_merged"] == (
+        f"vaše rozhodnutí „stejné“ {why}, proto engine skupinu nesloučil (rozhodnutí „stejné“ "
+        "v ní, celkem 6: 11–12, 12–13, 13–14, 14–15, 15–16 …)"), "no engine code, in words"
 
 
 def test_no_standing_same_apart_reads_no_dissolved_closure(client, conn):
