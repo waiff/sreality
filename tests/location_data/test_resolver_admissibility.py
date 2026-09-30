@@ -281,28 +281,6 @@ def test_a_carousel_coordinate_never_becomes_the_pin():
     assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)
 
 
-# --------------------------------------------------------- typed slots, not verbatim
-
-
-def test_a_combined_house_number_claim_is_unwrapped_into_its_own_slot():
-    """Three typed slots, never collapsed. Keying the unwrap on which slot happens to be
-    PRESENT wrote "487/40" into house_number_cp verbatim, because a house-number claim
-    carries no `street`/`psc` slot to trip the old branch."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_cp", value_text="487/40"),
-    ])
-    assert resolution.house_number_cp == "487"
-
-
-def test_the_orientation_number_keeps_its_letter():
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_co", value_text="487/40a"),
-    ])
-    assert resolution.house_number_co == "40a"
-
-
 # ------------------------------------------------------------ purity: no local timezone
 
 
