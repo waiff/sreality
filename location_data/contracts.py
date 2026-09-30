@@ -348,7 +348,6 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         substrates=_SLUG_SURFACES, methods=_SLUG_METHOD | _REGEX_METHOD,
         locator_keys=frozenset({"css", "attr", "pattern", "group"}),
         consults_transforms=True,
-        optional_keys=frozenset({"decode"}),
         reads_stored_body=True),
     # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker and
     # its EVIDENCE is the portal's own text or attribute. `consults_transforms` is FALSE

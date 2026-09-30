@@ -345,18 +345,24 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
 
 # The READINGS arm (W3): a reading entry reads the text lane's stored answer, never a body,
 # so its fixture is a FROZEN READING (`<portal>_readings.json`: the block + the advert text).
-# No model runs here; V1–V4 and the typed numbers are what it pins.
-def score_readings(contract: contracts.PortalContract) -> list[dict[str, Any]]:
+# No model runs here; V1–V4 and the typed numbers are what it pins, as listing -> entry -> value
+# (an entry is one claim type; surface, method and licence are pinned in `test_text_reading`).
+def score_readings(contract: contracts.PortalContract) -> dict[str, dict[str, str]]:
     path = _W2 / f"{contract.source}_readings.json"
     entries = reading_entries(fx.entries_for(contract.source))
-    out: list[dict[str, Any]] = []
+    out: dict[str, dict[str, str]] = {}
     for item in json.loads(path.read_text(encoding="utf-8")) if path.exists() else []:
         row = fx.listing(contract.source, {}, native=item["listing"])
         reading = Reading(1, item["extracted"], item["advert_text"])
-        out += [{"listing": item["listing"], "extractor_id": c.extractor_id,
-                 "claim_type": c.claim_type, "value_text": c.value_text}
-                for entry in entries for c in READERS[str(entry.reader)].fn(entry, row, reading)]
+        out[item["listing"]] = {c.extractor_id: c.value_text for entry in entries
+                                for c in READERS[str(entry.reader)].fn(entry, row, reading)}
     return out
+
+
+def _reading_rows(golden: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"listing": listing, "extractor_id": entry, "value_text": value}
+            for listing, claims in golden.get("reading_claims", {}).items()
+            for entry, value in claims.items()]
 
 
 def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
@@ -492,8 +498,8 @@ def diff_golden(golden: dict[str, Any], actual: dict[str, Any]) -> list[str]:
                            golden.get("archived_claims", []),
                            actual.get("archived_claims", []),
                            "extractor_id", "claim_type")
-    lines += _diff_section("reading claim", golden.get("reading_claims", []),
-                           actual.get("reading_claims", []), "listing", "extractor_id")
+    lines += _diff_section("reading claim", _reading_rows(golden), _reading_rows(actual),
+                           "listing", "extractor_id")
 
     old = {_fixture_key(f): f for f in golden.get("fixtures", [])}
     new = {_fixture_key(f): f for f in actual.get("fixtures", [])}

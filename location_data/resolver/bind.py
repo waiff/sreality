@@ -576,7 +576,8 @@ def bind(
     # ---- R3: the typo-tolerant rung, and the ONE place a street may be bound by similarity
     # rather than by identity. It runs only when nothing bound exactly. (W18 kept it off
     # bazos' whole headline with `claim_confidence: low`; W3's reading names the street
-    # itself, and the pilot found no R3-only bind to refuse, so the gate is gone.)
+    # itself. The pilot never reviewed R3; an offline register check (09-30) of its 42 bazos streets
+    # found 40 exact and one near-miss that is right ("náměstí Fr. Rasche"), so the gate went.)
     bound_exactly = any(c.target_kind == "street" or c.rung in ("R0", "R1") for c in out)
     if (
         constraining_obec_kods

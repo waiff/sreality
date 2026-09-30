@@ -1233,7 +1233,7 @@ _FAST_STATS = {
     "listings": 12, "claims_inserted": 34, "enqueued": 7,
     "payload_seconds": 1.234, "cursor_after_id": 987654,
     "bodies_mined": 5, "bodies_seconds": 2.0, "bodies_pass_complete": True,
-    "bodies_cursor_after_id": 4242, "readings_mined": 0,
+    "bodies_cursor_after_id": 4242,
 }
 
 
@@ -1372,7 +1372,7 @@ def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
     assert schedule.bodies_first is False
     assert schedule.bodies_cap == 300
     assert schedule.bodies_budget_share == 1.0
-    assert schedule.backlog_readout is False
+    assert (schedule.backlog_readout, schedule.readings) == (False, False)  # W3: hourly only
     assert schedule.pool is rw._intake_fast_pool()
     # The heartbeat's `last`: what the tick achieved and where it left BOTH keysets.
     assert out == {

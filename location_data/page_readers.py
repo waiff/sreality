@@ -26,7 +26,6 @@ from datetime import datetime
 from math import cos, hypot, isfinite, radians
 from multiprocessing.context import BaseContext
 from typing import Any, Protocol
-from urllib.parse import unquote
 
 import psycopg
 
@@ -91,13 +90,11 @@ EVIDENCE_METHODS = frozenset({"regex_text"})
 # one: a Nominatim-fallback reader that simply forgets to say so inherits the entry's
 # `licence_class: portal` default and a republished OSM position is filed as first-party,
 # with nothing anywhere to catch it. A required argument cannot be forgotten quietly.
-# The substrate unescapes a reader may be told to apply before it reads. Both are opt-in
-# contract data and both are named, never inferred: `percent` is a URL property (a
-# percent-encoded slug normalises to a gazetteer-unjoinable string), `js_string` is a
-# script property (maxima ships its map config as a JS string literal). A name outside the
-# set is refused rather than ignored — silently not decoding is how a claim's value stops
-# joining to anything with no error anywhere.
-_ATTR_DECODERS = frozenset({"none", "percent"})
+# The substrate unescape a reader may be told to apply before it reads: opt-in contract data,
+# named, never inferred — `js_string` is a script property (maxima ships its map config as a JS
+# string literal). A name outside the set is refused rather than ignored: silently not decoding
+# is how a claim's value stops joining to anything with no error anywhere. (`percent` left with
+# bazos' town slug, its one user, in W3.)
 _JSON_DECODERS = frozenset({"none", "js_string"})
 
 POSITION_BRANCH_PORTAL_PIN = "portal_pin"
@@ -409,10 +406,9 @@ def _read_html_attr_regex(
 ) -> list[PageRead]:
     """One capture group of a pattern run over a URL-bearing ATTRIBUTE of a DOM node.
 
-    The carrier for a fact a portal publishes ONLY in a link: bazos names the true
-    municipality nowhere on the page except the town-listings anchor's href
-    (`/inzeraty/<obec-slug>/<psc5>/`), while that anchor's visible TEXT is the okres — the
-    defect that put 29,546 active rows onto 90 distinct `locality` values.
+    The carrier for a fact a portal publishes ONLY in a link: bazos' PSČ sits in the
+    town-listings anchor's href (`/inzeraty/<slug>/<psc5>/`), while that anchor's visible TEXT
+    is the okres — the defect that put 29,546 active rows onto 90 distinct `locality` values.
 
     ALL matching nodes are considered, in document order, and the PATTERN is the
     discriminator — not `css_first`. That is the whole reason this is not `html_attr`: a
@@ -422,27 +418,16 @@ def _read_html_attr_regex(
     transform that then nulls the value yields no claim rather than a scan for a more
     agreeable neighbour.
 
-    `decode: percent` unescapes the attribute before matching, and it is opt-in because it
-    is a property of a URL substrate rather than of every attribute: on a percent-encoded
-    slug `ho%C5%99ice-v-podkrkono%C5%A1%C3%AD` normalises through `location_value_norm` to
-    `ho c5 99ice v podkrkono c5 a1 c3 ad`, which joins to no gazetteer row, while the decoded
-    form normalises to `horice v podkrkonosi`, which does.
-
     The QUOTE is the node's own serialisation, for the same reason `html_point_attrs` quotes
-    `node.html`: a decoded slug appears nowhere in the body and a bare `12` or `50801` would
-    resolve to some other digit run, while the opening tag carries the whole URL."""
+    `node.html`: a bare `12` or `50801` would resolve to some other digit run, while the
+    opening tag carries the whole URL."""
     compiled, group = _entry_pattern(entry, "html_attr_regex")
     attribute = _entry_attr(entry, "html_attr_regex")
-    decode = str(entry.locator.get("decode") or "none")
-    if decode not in _ATTR_DECODERS:
-        raise IntakeRefused(
-            f"{entry.source}:{entry.entry_id} declares decode={decode!r}; "
-            f"`html_attr_regex` implements {sorted(_ATTR_DECODERS)}")
     for node in document.css(_entry_css(entry)):
         raw = _text(node.attributes.get(attribute))
         if raw is None:
             continue
-        match = compiled.search(unquote(raw) if decode == "percent" else raw)
+        match = compiled.search(raw)
         if match is None:
             continue
         value = apply_transforms(_text(match.group(group)), entry.transform)
@@ -1097,7 +1082,7 @@ def _evidenced_optional(
     An `evidence_quote` is a promise the payload contains that text — 01 §4.2 pairs it with
     `payload_sha256` for exactly that reason. A value this reader cannot point at has no
     honest quote, and asserting one anyway is worse than asserting none:
-    `assert_evidence_complete` REQUIRES the evidence set only for `llm_text`/`regex_text`, so
+    `assert_evidence_complete` REQUIRES the evidence set only for `regex_text`, so
     a `map_widget_parse` claim may legally carry a value with no span."""
     if quote is None:
         return _base(

@@ -158,8 +158,7 @@ jobs:
       # anti-join COMPILES; W10's claim is about which row it RETURNS once a stored
       # gone page is stamped 410, and only a real schema can answer that. The registry
       # publish check joins for the same reason: carry-forward equality and the
-      # completeness read are PostGIS and anti-join answers, not SQL shapes. So does W3's
-      # readings half (migration 578): which reading is CURRENT, and what its write deletes.
+      # completeness read are PostGIS and anti-join answers, not SQL shapes; so W3's readings half.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres

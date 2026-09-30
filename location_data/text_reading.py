@@ -11,7 +11,7 @@ a real place is the register's question, asked by the resolver.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Mapping, NamedTuple
 
 from location_data.claims_common import Claim, Entry, ListingRow, _base
 
@@ -74,9 +74,9 @@ def location_block(cell: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str
             "properties": slots, "required": list(slots)}
 
 
-def read_location(payload: Mapping[str, Any] | None, advert_text: str,
-                  slots: Sequence[str] = SLOTS) -> dict[str, dict[str, Any]]:
-    """`slot -> {value, quote}` for `ad_kind`, `country` and `slots`; a slot that fails V1
+def read_location(payload: Mapping[str, Any] | None,
+                  advert_text: str) -> dict[str, dict[str, Any]]:
+    """`slot -> {value, quote}` for `ad_kind`, `country` and every slot; a slot that fails V1
     (quote not in the text) or V3 (not an offered property, or one placed abroad) is null."""
     # Lazy: toolkit imports this module, and the quote check must stay the lane's ONE check.
     from toolkit.description_extraction import quote_supports
@@ -90,7 +90,7 @@ def read_location(payload: Mapping[str, Any] | None, advert_text: str,
     country = country.strip().upper() if isinstance(country, str) and country.strip() else None
     out["country"] = {"value": country, "quote": quote if country else None}
     admitted = kind in ADMITTED_AD_KINDS and country in (None, "CZ")
-    for slot in slots:
+    for slot in SLOTS:
         value, quote = _cell(block.get(slot))
         ok = (admitted and isinstance(value, str) and value.strip()
               and isinstance(quote, str) and quote_supports(advert_text, quote))
@@ -116,15 +116,20 @@ class Reading(NamedTuple):
 _CLAIM_VALUE = {"house_number_ev": "č.ev. {}"}
 _NUMBER = {"house_number_cp": r"\d{1,6}", "house_number_co": r"\d{1,5}[a-z]?",
            "house_number_ev": r"\d{1,6}"}
-# V4, on the lane's fold. A marker, or "Street N[/M]" (a word of two letters or more first,
-# so "č. 12" is no street); a parcel, LV, k.ú., GPS or negation token anywhere drops it.
+# V4, on the lane's fold. A marker, or "Word N[/M]" whose word is the reading's OWN street,
+# town or part ("Husova 12/4", "Hodoviz 13"; so never "patro 3", "v roce 1985", "ploše 60"),
+# never a decimal or a quantity ("60,91 m²", "4. patře", "1500 Kč"); a parcel, LV, k.ú., GPS
+# or negation token anywhere drops it. "Praha 8" passes: only the prompt refuses a district.
+_ANCHORS = ("street", "town", "part_of_town")
 _MARKER = {"house_number_cp": r"c\.?\s*p\.?|cislo\s+popisne",
            "house_number_co": r"c\.?\s*o\.?|cislo\s+orientacni",
            "house_number_ev": r"c\.?\s*ev\.?|ev\.?\s*c\.?|cislo\s+evidencni|evidencni\s+cislo"}
-_FORM = {"house_number_cp": r"[^\W\d_]{{2}}\.?\s+{n}(?:\s*/\s*\d+[a-z]?)?(?![\d/])",
-         "house_number_co": r"[^\W\d_]{{2}}\.?\s+\d+\s*/\s*{n}(?![\da-z])"}
-_REFUSED_NUMBER = re.compile(
-    r"parc|\bp\.\s*c\.|\blv\b|vlastnictvi|\bk\.\s*u\.|katastr|gps|\bbez\b|\bnema\b|\bneni\b")
+_QUANTITY = r"(?![.,]\d|\s*\.?\s*(?:m2|m²|m\b|kc|%|patr|np\b|podlaz))"
+_END = {"house_number_co": r"(?![\da-z])"}
+_FORM = {"house_number_cp": r"([^\W\d_]{{2,}})\.?\s+{n}(?:\s*/\s*\d+[a-z]?)?{end}",
+         "house_number_co": r"([^\W\d_]{{2,}})\.?\s+\d+\s*/\s*{n}{end}"}
+_REFUSED_NUMBER = re.compile(r"parc|\bp\.\s*c\.|\blv\b|\blistu?\s+vlastnictvi|\bk\.\s*u\."
+                             r"|katastr|gps|\bbez\b|\bnema\b|\bneni\b")
 
 
 def read_claims(entry: Entry, row: ListingRow, reading: Reading) -> list[Claim]:
@@ -132,10 +137,11 @@ def read_claims(entry: Entry, row: ListingRow, reading: Reading) -> list[Claim]:
     and V3 (`read_location`), V2 for a name and V4 for a number. Pure: the reading is an input."""
     slots = [str(entry.locator["slot"])] + [
         str(alt["slot"]) for alt in entry.locator.get("fallback") or () if isinstance(alt, Mapping)]
-    read = read_location(reading.payload, reading.advert_text, slots)
+    read = read_location(reading.payload, reading.advert_text)
+    anchors = {w[:3] for s in _ANCHORS for w in _words(read[s]["value"] or "")}
     for slot in slots:
         value, quote = read[slot]["value"], read[slot]["quote"]
-        if value is None or not (_numbered(slot, value, quote) if slot in _NUMBER
+        if value is None or not (_numbered(slot, value, quote, anchors) if slot in _NUMBER
                                  else _grounded(value, quote)):
             continue
         return [_base(entry, row, value_text=_CLAIM_VALUE.get(slot, "{}").format(value))]
@@ -162,12 +168,15 @@ def _grounded(value: str, quote: str) -> bool:
     return bool(set(long) & {w[:3] for w in said if len(w) >= 3})
 
 
-def _numbered(slot: str, value: str, quote: str) -> bool:
-    """V4: the number stands in its quote behind its marker or in the "Street N[/M]" form."""
+def _numbered(slot: str, value: str, quote: str, anchors: set[str]) -> bool:
+    """V4: the number stands in its quote behind its marker, or behind a word of the reading's
+    own street/town/part (`anchors`: 3-letter stems), and is no decimal or quantity."""
     number, folded = value.strip().lower(), _fold(quote)
     if not re.fullmatch(_NUMBER[slot], number) or _REFUSED_NUMBER.search(folded):
         return False
-    n = re.escape(number)
-    marked = rf"\b(?:{_MARKER[slot]})\s*[:.]?\s*{n}(?![\d/])"
+    n, end = re.escape(number), _END.get(slot, r"(?![\d/])") + _QUANTITY
+    if re.search(rf"\b(?:{_MARKER[slot]})\s*[:.]?\s*{n}{end}", folded):
+        return True
     form = _FORM.get(slot)
-    return bool(re.search(marked, folded) or (form and re.search(form.format(n=n), folded)))
+    return bool(form) and any(m[1][:3] in anchors
+                              for m in re.finditer(form.format(n=n, end=end), folded))

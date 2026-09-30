@@ -1112,17 +1112,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
 - **W19 — the text lane reads location** (plain-text location reader, operator ruling 2026-09-29/30):
   built in three PRs, merged in order. W1 (#1649): the text lane reads headline + description and
   stores a quoted location block, delisted adverts read once; `extract_street` deleted; pilot passed.
-  W2 (#1650): resolver v5.5, the town rule and typed numbers. W3: the reading is the claim lane's
-  third substrate (reader `text_reading`, V1–V4), bazos@8 claims town/part/street/numbers from it
-  (`obec_slug` and `street_cue` gone), a mined reading supersedes the listing's older claims of its
-  types (stamp: migration 578), resolver v5.6 deletes the separator split and the `low` gate.
-  Rollout: 578 → merge → bazos bodies + readings re-mine (~1 day) → re-resolve; never dispatch
-  `location_claims_retire.yml` while text-less delisted rows hold @7 towns.
+  W2 (#1650): resolver v5.5, the town rule and typed numbers. W3 (#1654): the reading is the claim
+  lane's third substrate (reader `text_reading`, V1–V4; hourly, first), bazos@8 claims town/part/
+  street/numbers from it (`obec_slug`, `street_cue` and the percent decoder gone), a mined reading
+  supersedes the listing's older claims of its types (stamp: mig 578), v5.6 drops the separator split
+  and the `low` gate. Rollout: 578 → merge → readings, then bodies (~1 day) → re-resolve; never
+  dispatch `location_claims_retire.yml` while text-less delisted rows hold @7 towns.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
-campaigns or schedules (except the plain-text location reader, ruled 2026-09-29, whose stored
-reading is a claim substrate since W3); foreign is a determination, never a default; a field is added only by
+campaigns or schedules (except the plain-text location reader, ruled 2026-09-29; its stored reading
+is a claim substrate since W3); foreign is a determination, never a default; a field is added only by
 operator ruling (katastr_kod, 2026-09) or after a measured Browse/map slowdown and only to `browse_list`.
 
 ## W0 — done

@@ -93,36 +93,22 @@
       "evidence_span_len": 54
     }
   ],
-  "reading_claims": [
-    {
-      "listing": "18909736",
-      "extractor_id": "bzs.txt.town",
-      "claim_type": "obec_name",
-      "value_text": "Hradec Králové"
+  "reading_claims": {
+    "18909736": {
+      "bzs.txt.town": "Hradec Králové",
+      "bzs.txt.part_of_town": "Třebeš",
+      "bzs.txt.street": "Štefánikova"
     },
-    {
-      "listing": "18909736",
-      "extractor_id": "bzs.txt.part_of_town",
-      "claim_type": "cast_obce_name",
-      "value_text": "Třebeš"
+    "fixture-ev": {
+      "bzs.txt.town": "Moravské Prusy",
+      "bzs.txt.house_number_cp": "č.ev. 13"
     },
-    {
-      "listing": "18909736",
-      "extractor_id": "bzs.txt.street",
-      "claim_type": "street_name",
-      "value_text": "Štefánikova"
+    "220059906": {
+      "bzs.txt.street": "28. října"
     },
-    {
-      "listing": "fixture-ev",
-      "extractor_id": "bzs.txt.town",
-      "claim_type": "obec_name",
-      "value_text": "Moravské Prusy"
+    "220870847": {
+      "bzs.txt.town": "Hořice"
     },
-    {
-      "listing": "fixture-ev",
-      "extractor_id": "bzs.txt.house_number_cp",
-      "claim_type": "house_number_cp",
-      "value_text": "č.ev. 13"
-    }
-  ]
+    "fixture-wanted": {}
+  }
 }

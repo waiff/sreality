@@ -2852,14 +2852,15 @@ writes is not evidence a portal published.
   terminate the parent's session. The pool is an accelerator only: one outcome per body IN ORDER, so
   a content-triggered refusal still costs one listing's page entries and a pool the OOM killer takes
   finishes its batch on the main thread.
-* *The readings half* (W3, migration 578), in what is left of the page half's budget share, mines
-  each listing's CURRENT reading — the successful reading of its CURRENT advert text (hashed by the
-  text lane's own SQL), at the lane's `extractor_version` if one exists, else the newest — unless its
-  `mined_contract_version` stamp is the active `<source>@<version>`. No cursor, no index: one
-  hash-free read of the readings table (~0.6 s) picks the few listings to hash. ONE statement per
-  batch inserts the claims, DELETES the listing's other same-source, non-operator claims of those
-  types (SUPERSESSION: a headline edit, a model rolled back, a text reverting A→B→A), moves the stamp
-  and enqueues. Pages are never superseded, and a listing with no reading keeps its older claims — so
+* *The readings half* (W3, migration 578) runs FIRST and hourly only (its full read of the readings
+  table fails the minute lane's 5 s gate cold), in the page half's budget share. It mines each listing's
+  CURRENT reading — the successful reading of its CURRENT advert text (hashed by the text lane's SQL),
+  at the lane's `extractor_version` if one exists, else the newest — unless its stamp
+  (`mined_contract_version`) is the active `<source>@<version>`; readings of another text get it with
+  `~`, so an unread text is checked once per contract, not hashed every pass. ONE statement per batch
+  inserts the claims, DELETES the listing's other same-source, non-operator claims of those types
+  (SUPERSESSION: a headline edit, a model rolled back, A→B→A), moves the stamps and enqueues. Pages are
+  never superseded, and a listing with no reading keeps its older claims — so
   `location_claims_retire.yml` must wait while text-less delisted bazos rows hold `bazos@7` towns.
 
 **A GONE PAGE IS NOT A BODY (W10).** "Latest body" means the latest body that is an AD. Four portals

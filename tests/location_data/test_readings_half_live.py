@@ -1,8 +1,8 @@
 """The readings half (W3), EXECUTED against the replayed schema — CI's migrations lane
 (`TEST_DATABASE_URL`); every test rolls back; locally it skips. Only a real database shows which
 reading is CURRENT (the hash in SQL, migration 578's stamp, the lane's version) and what the one
-write deletes, so each trace the stamp exists for is walked: a text that reverts (A -> B -> A),
-a model rolled back (M1 -> M2 -> M1), a contract bump, a reading that names nothing.
+write deletes, so each trace the stamp exists for is walked: a headline that reverts (A -> B -> A),
+a model rolled back (M1 -> M2 -> M1), a contract bump, a delisted text never read, a wanted ad.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL not set — schema-replay test runs only in the CI DB job")
 
 A = ("Prodej bytu 2+1, Husova", "Byt v ulici Husova v Hradci Králové, kousek od Palackého.")
-B = ("Prodej bytu 2+1, Palackého", "Byt v ulici Palackého v Hradci Králové.")
+B = ("Prodej bytu 2+1, Palackého", A[1])                          # the HEADLINE alone differs
 TOWN = ("Hradec Králové", "v Hradci Králové")
 _MODEL = {"now": "m1"}
 
@@ -44,10 +44,11 @@ def conn(monkeypatch):
         yield connection
 
 
-def _listing(conn: Any, text: tuple[str, str], listing_id: int | None = None) -> int:
+def _listing(conn: Any, text: tuple[str, str], listing_id: int | None = None,
+             active: bool = True) -> int:
     if listing_id is not None:
         conn.execute("UPDATE listings SET raw_json = jsonb_build_object('title', %s::text),"
-                     " description = %s WHERE id = %s", (*text, listing_id))
+                     " description = %s, is_active = %s WHERE id = %s", (*text, active, listing_id))
         return listing_id
     return int(conn.execute(
         "INSERT INTO listings (source, source_id_native, raw_json, description, category_main,"
@@ -71,8 +72,8 @@ def _reading(conn: Any, listing_id: int, model: str, **slots: Any) -> int:
 
 
 def _mine(conn: Any) -> dict[str, Any]:
-    stats: dict[str, Any] = dict.fromkeys((
-        "readings_mined", "claims", "claims_inserted", "enqueued", "claims_superseded"), 0)
+    stats: dict[str, Any] = dict.fromkeys(("readings_mined", "claims", "claims_inserted",
+                                           "enqueued", "claims_superseded", "refusals"), 0)
     ci.drain_readings(conn, source="bazos", entries_by_source=ci.load_entries(conn),
                       statement_timeout=20, budget=ci._Budget(None), batch_id=1,
                       dry_run=False, stats=stats, refusals={})
@@ -117,12 +118,12 @@ def test_the_current_text_decides_and_supersession_spares_other_types_and_the_op
     rb = _reading(conn, listing, "m1", town=TOWN, street="Palackého")
     assert _mine(conn)["claims_superseded"] == 1
     assert _claims(conn, listing, "street_name") == {"Palackého"}
-    assert _stamps(conn, listing) == {ra: None, rb: "bazos@8"}
+    assert _stamps(conn, listing) == {ra: "bazos@8~", rb: "bazos@8"}
 
     _listing(conn, A, listing)                                 # B -> A: A's reading again
     assert _mine(conn)["readings_mined"] == 1
     assert _claims(conn, listing, "street_name") == {"Husova"}
-    assert _stamps(conn, listing) == {ra: "bazos@8", rb: None}
+    assert _stamps(conn, listing) == {ra: "bazos@8", rb: "bazos@8~"}
 
     _listing(conn, ("Koupím byt", "Koupím byt v Hradci Králové."), listing)
     _reading(conn, listing, "m1", ad_kind="wanted", town=TOWN)
@@ -144,7 +145,7 @@ def test_a_model_rolled_back_publishes_its_own_reading_again(conn):
     assert _stamps(conn, listing) == {r1: None, r2: "bazos@8"}
 
 
-def test_a_contract_bump_re_mines_the_current_reading_and_retires_the_old_versions(conn):
+def test_a_contract_bump_re_mines_the_current_reading_and_settles_a_delisted_unread_text(conn):
     listing = _listing(conn, A)
     older = _reading(conn, listing, "m0", street="Palackého")
     current = _reading(conn, listing, "m1", street="Husova")
@@ -154,3 +155,11 @@ def test_a_contract_bump_re_mines_the_current_reading_and_retires_the_old_versio
     assert (stats["readings_mined"], stats["claims_superseded"]) == (1, 1)
     assert _stamps(conn, listing) == {older: None, current: "bazos@9"}
     assert _claims(conn, listing, "street_name") == {"Husova"}
+    _listing(conn, B, listing, active=False)             # edited, then delisted before its read:
+    conn.execute("UPDATE portal_contracts SET version = 10 WHERE source = 'bazos' AND is_active")
+    assert _mine(conn)["readings_mined"] == 0            # checked once, its claims kept, and
+    assert _stamps(conn, listing) == {older: "bazos@10~", current: "bazos@10~"}  # settled
+    assert _claims(conn, listing, "street_name") == {"Husova"}
+    _listing(conn, A, listing)                           # relisted as A: mined at @10
+    assert _mine(conn)["readings_mined"] == 1
+    assert _stamps(conn, listing) == {older: None, current: "bazos@10"}

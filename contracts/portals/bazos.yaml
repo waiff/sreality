@@ -58,14 +58,13 @@ extractions:
     extraction_method: url_slug_parse
     page_kind: detail
     locator: {reader: html_attr_regex, css: "a[href*='/inzeraty/']", attr: href,
-              pattern: "/inzeraty/(?P<obec>[^/]+?)(?:-\\d+)?/(?P<psc>\\d{5})/",
-              group: psc, decode: percent}
+              pattern: "/inzeraty/[^/]+?(?:-\\d+)?/(?P<psc>\\d{5})/", group: psc}
     claim_type: psc
     licence_class: portal
     blur_evidence: none
     transform: ["psc_normalise"]
     subject_scope: {subject_scoped: true}
-    notes: "The same href's five-digit tail — five digits by construction, unlike the text."
+    notes: "The town anchor href's five-digit tail — five digits by construction, unlike the text."
 
   - id: bzs.det.blur_hint
     locator_kind: html_selector
