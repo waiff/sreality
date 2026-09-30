@@ -243,6 +243,27 @@ it (`api/`). They do not apply to the scraper.
     sweep walks past. `tests/test_measure_sql_prepare.py` is the gate for all six and must
     gain a line when a seventh appears.
 
+## Error contract and the transport deadline (Broker Unify W2)
+
+The global handler in `api/main.py` classifies unhandled exceptions into exactly two
+shapes, and every structured `detail` is `{code, message}` (the SPA's `detailText` and the
+extension both render `message`): psycopg's busy classes — `QueryCanceled` (57014, how a
+lock-blocked read dies at the 120 s statement budget), `LockNotAvailable`,
+`DeadlockDetected` — answer **503 `db_busy` + `Retry-After: 5`** (the ONE signal the SPA's
+transient-only retry predicate acts on); everything else answers **500 `internal_error`
+with a logged `ref` id** and never leaks raw exception text to the browser. A route that
+catches the busy classes itself and refuses under its own contract (property_split's
+structured 409) keeps doing so. Client side, `frontend/src/lib/api.ts` is the ONE
+transport (uploads and blob downloads included — no raw `fetch()` beside it):
+`REQUEST_DEADLINE_MS` (130 s) sits just above the server's 120 s budget and well under
+Railway's ~300 s edge close, a deadline abort is `ApiError.kind === 'timeout'` and is
+NEVER retried, and the react-query default retries once only on
+`isTransientApiError` (network failure or 502/503/504). Keep that ordering — client
+deadline > server budget — or the client gives up on requests the server would still
+answer. The extension's `chrome-extension/src/api.ts` duplicates the deadline by value
+(territories share no code); its overlay keeps `LOOKUP_TIMEOUT_MS` on top because an MV3
+message round trip can be lost to service-worker teardown, which no fetch deadline sees.
+
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
 Five auth primitives coexist — four in `api/dependencies.py`, one in `api/tenant_pool.py`:

@@ -193,7 +193,6 @@ export default function NewDedupTrainingSet() {
     queryKey: ['training-set-locate', activeId, deepLinkImage],
     queryFn: () => locateTrainingImage(activeId as number, deepLinkImage as number),
     enabled: activeId != null && deepLinkImage != null,
-    retry: false,
   });
   const located = locateQ.data?.data ?? null;
   useEffect(() => {

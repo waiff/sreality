@@ -38,7 +38,6 @@ export function useAutodedupGenerations(): GenerationVocabulary {
     queryFn: getAutodedupGenerations,
     /* The set of passes changes only when the lane rebuilds a clustering. */
     staleTime: 5 * 60_000,
-    retry: false,
   });
   return {
     items: q.data?.data?.items ?? [],

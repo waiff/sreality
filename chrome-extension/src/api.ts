@@ -53,6 +53,14 @@ export const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
  * by value) offers no retry for it. */
 export const API_NOT_CONFIGURED_DETAIL = 'API base URL not configured';
 
+/* Same transport deadline the SPA uses (frontend/src/lib/api.ts,
+ * REQUEST_DEADLINE_MS) — duplicated by value because the territories share no
+ * code. A hung request fails here with an honest detail instead of holding the
+ * panel open forever. index_overlay's LOOKUP_TIMEOUT_MS stays on top of this:
+ * it guards the chrome.runtime.sendMessage round trip, which can also be lost
+ * to MV3 service-worker teardown — a failure this fetch deadline cannot see. */
+const REQUEST_DEADLINE_MS = 130_000;
+
 async function request<T>(
   path: string,
   init: RequestInit = {},
@@ -72,27 +80,47 @@ async function request<T>(
   headers.Authorization = `Bearer ${token}`;
 
   let res: Response;
+  let text: string;
   try {
-    res = await fetch(BASE_URL + path, { ...init, headers });
+    res = await fetch(BASE_URL + path, {
+      ...init,
+      headers,
+      signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+    });
+    text = await res.text();
   } catch (err) {
+    const timedOut = err instanceof DOMException && err.name === 'TimeoutError';
     return {
       ok: false,
       status: 0,
-      detail: err instanceof Error ? err.message : 'network error',
+      detail: timedOut
+        ? `Server neodpověděl do ${Math.round(REQUEST_DEADLINE_MS / 1000)} s`
+        : err instanceof Error ? err.message : 'network error',
     };
   }
 
-  const text = await res.text();
   let body: unknown = null;
   if (text) {
     try { body = JSON.parse(text); } catch { body = text; }
   }
 
   if (!res.ok) {
-    const detail =
+    const raw =
       body && typeof body === 'object' && body !== null && 'detail' in body
-        ? String((body as { detail: unknown }).detail)
-        : res.statusText || `HTTP ${res.status}`;
+        ? (body as { detail: unknown }).detail
+        : null;
+    /* The API's structured details ({code, message} — e.g. db_busy) render
+     * their message; String() on the object would show "[object Object]". */
+    const message =
+      raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as { message?: unknown }).message
+        : null;
+    const detail =
+      typeof message === 'string'
+        ? message
+        : raw != null
+          ? String(raw)
+          : res.statusText || `HTTP ${res.status}`;
     return { ok: false, status: res.status, detail };
   }
 

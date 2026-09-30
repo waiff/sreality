@@ -288,6 +288,7 @@ function chunk<T>(xs: ReadonlyArray<T>, size: number): T[][] {
 
 export async function fetchBrokerLeaderboard(
   p: LeaderboardParams,
+  signal?: AbortSignal,
 ): Promise<BrokerLeaderRow[]> {
   const r = await apiGet<Envelope<BrokerLeaderRow[]>>(
     '/brokers/leaderboard',
@@ -305,7 +306,7 @@ export async function fetchBrokerLeaderboard(
       subtypes: p.subtypes ?? [],
       include_unknown_subtype: p.includeUnknownSubtype ?? false,
     },
-    undefined,
+    signal,
     JWT,
   );
   return r.data ?? [];

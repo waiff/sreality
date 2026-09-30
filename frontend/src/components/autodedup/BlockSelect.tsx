@@ -91,7 +91,6 @@ export default function BlockSelect({
     queryFn: () => getAutodedupBlocks(generation),
     /* The blocks of a generation change only when the lane rebuilds it. */
     staleTime: 5 * 60_000,
-    retry: false,
   });
   const blocks = q.data?.data?.items ?? [];
   /* A block the URL carries that the vocabulary does not (yet) list — a link
