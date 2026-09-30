@@ -1120,6 +1120,12 @@ component is slimmed twice — each wave rewrites one component and slims its st
   supersedes the listing's older claims of its types (stamp: mig 578), v5.6 drops the separator split
   and the `low` gate. Rollout: 578 → merge → readings, then bodies (~1 day) → re-resolve; never
   dispatch `location_claims_retire.yml` while text-less delisted rows hold @7 towns.
+  **Rule 25 ruling (operator, 2026-09-30):** W1 (+354) and W2 (+182) were waived on the promise that
+  the program nets ≤ 0 after W3; W3 alone is −42 and the program closes at **+494** (pilot tooling
+  and its review page ≈ 300, the tests that pin the new behaviour ≈ 350, the live SQL trace test
+  ≈ 150). The operator accepted +494 as the cost of a new capability and its safeguards; R3 fuzzy
+  street matching is kept for reading claims (40 of 42 pilot streets exact, the one near-miss
+  right); the `percent` decoder deletion stands.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
