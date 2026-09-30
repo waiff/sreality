@@ -202,6 +202,17 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
              min_price_czk, include_unpriced, subtypes or None,
              include_unknown_subtype))
         rows = cur.fetchall()
+        # W4: the fast branch answers from the matview, so its freshness IS the
+        # registry stamp (hourly-if-stale drain republish); a price/subtype
+        # call reads listings live and stays un-stamped (None = "as of now").
+        freshness = None
+        if min_price_czk is None and not subtypes:
+            cur.execute(
+                "SELECT last_succeeded_at FROM derived_artifacts "
+                "WHERE name = 'broker_region_type_stats'")
+            stamp = cur.fetchone() or {}
+            freshness = _iso(stamp.get("last_succeeded_at")) if stamp.get(
+                "last_succeeded_at") else None
     return _envelope(
         "broker_leaderboard", rows,
         {"region_ids": region_ids or [], "okres_ids": okres_ids or [],
@@ -210,7 +221,7 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
          "firm_ids": firm_ids or [], "min_price_czk": min_price_czk,
          "include_unpriced": include_unpriced, "subtypes": subtypes or [],
          "include_unknown_subtype": include_unknown_subtype},
-        len(rows), None)
+        len(rows), freshness)
 
 
 def firm_options(conn: Any, *, q: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -281,15 +292,17 @@ def get_broker(conn: Any, broker_id: int) -> dict[str, Any] | None:
             "SELECT * FROM broker_firm_memberships_public WHERE broker_id = %s "
             "ORDER BY last_seen_at DESC NULLS LAST", (broker_id,))
         memberships = cur.fetchall()
+        # W4: the ('*','*') rollup cell per region IS the broker's regional
+        # total, computed exactly — never sum category cells (a property whose
+        # listings straddle cells would count twice).
         cur.execute(
             "SELECT s.geo_id, o.name, "
-            "  sum(s.property_count)::bigint AS property_count, "
-            "  sum(s.active_property_count)::bigint AS active_property_count, "
-            "  sum(s.listing_count)::bigint AS listing_count "
+            "  s.property_count, s.active_property_count, s.listing_count "
             "FROM broker_region_type_stats s "
             "LEFT JOIN broker_geo_options o ON o.geo_level='region' AND o.geo_id=s.geo_id "
             "WHERE s.broker_id = %s AND s.geo_level='region' "
-            "GROUP BY s.geo_id, o.name ORDER BY active_property_count DESC", (broker_id,))
+            "  AND s.category_main = '*' AND s.category_type = '*' "
+            "ORDER BY s.active_property_count DESC", (broker_id,))
         region_shares = cur.fetchall()
         contacts = _contacts(cur, broker_id)
     for coll in (broker, *memberships):

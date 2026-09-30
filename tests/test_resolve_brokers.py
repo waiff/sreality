@@ -10,11 +10,14 @@ so these tests assert that EVERY page stays bounded (the regression guard).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from scripts.resolve_brokers import _BROKER_SOURCES, _broker_bearing_ids
+
+_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 
 
 class _KeysetCur:
@@ -1485,27 +1488,48 @@ def test_the_sweep_id_scan_covers_every_registered_source() -> None:
     assert conn.executed[0][1]["srcs"] == list(_BROKER_SOURCES)
 
 
-def test_broker_rollup_writes_cz_counts_from_the_domestic_predicate() -> None:
-    """D4: the leaderboard's stored counts. Two idnes syndication feeds carry ~26k
-    foreign listings and ranked #1 and #2 nationally, 8x the busiest genuinely
-    Czech broker, because these columns counted every attributed row."""
-    from scripts.resolve_brokers import _RECOMPUTE_BROKERS, _DOMESTIC
+def test_the_domestic_predicate_lives_only_in_the_matview() -> None:
+    """W4: ONE count book. The recompute stopped writing its own CZ totals (the
+    brokers.cz_* book disagreed with the matview for 19 of the top 100), so the
+    domestic predicate — D4's fix for two idnes syndication feeds whose ~26k
+    foreign listings ranked #1 and #2 nationally — now exists in exactly one
+    place: the matview migration, whose 'cz' cells serve every national number.
+
+    RED by: reintroducing a domestic/cz aggregate into _RECOMPUTE_BROKERS, or a
+    matview redefinition losing the domestic guard, the national level, or the
+    grouping-set rollup cells (whose per-cell count(DISTINCT) is what replaced
+    the non-additive summed distincts that inflated 556 brokers)."""
+    import re
+
+    from scripts.resolve_brokers import _RECOMPUTE_BROKERS
 
     sql = " ".join(_RECOMPUTE_BROKERS.format(bscope="", mscope="").split())
-    assert _DOMESTIC == "ll.obec_kod IS NOT NULL"
-    # The predicate is bound at import, not left for the caller to remember —
-    # W3 evaluates it ONCE, into base's `domestic` flag, and every cz_* count
-    # filters on that flag.
-    assert "{domestic}" not in sql
-    assert f"({_DOMESTIC}) AS domestic" in sql
-    for col in ("cz_listing_count", "cz_property_count",
-                "cz_active_listing_count", "cz_active_property_count"):
-        assert f"{col} = coalesce(ls.cz_" in sql
-    assert sql.count("FILTER (WHERE domestic)") == 2
-    assert sql.count("FILTER (WHERE domestic AND live)") == 2
-    # ...and the unscoped columns still count everything (rule #3: scope, not delete).
+    assert "domestic" not in sql.lower()
+    assert "cz_" not in sql.lower()
+    assert "listing_location" not in sql.lower()
+    # The unscoped columns still count everything (rule #3: scope, not delete).
     assert "listing_count = coalesce(ls.lc, 0)" in sql
     assert "active_property_count = coalesce(ls.apc, 0)" in sql
+
+    defining = [
+        p for p in _MIGRATIONS.glob("*.sql")
+        if re.search(r"create\s+materialized\s+view\s+broker_region_type_stats",
+                     p.read_text(), re.IGNORECASE)
+    ]
+    latest = max(defining, key=lambda p: int(re.match(r"(\d+)", p.name).group(1)))
+    mv = " ".join(latest.read_text().lower().split())
+    assert "where (ll.obec_kod is not null)" in mv, (
+        f"{latest.name}: the matview lost the ONE domestic guard"
+    )
+    assert "'cz'::text as geo_level" in mv, (
+        f"{latest.name}: the matview lost the national 'cz' level"
+    )
+    grouping = ("grouping sets ((category_main, category_type), "
+                "(category_main), (category_type), ())")
+    assert grouping in mv, (
+        f"{latest.name}: the matview lost its exact rollup cells — every 'Vše' "
+        "query would go back to summing count(DISTINCT) across cells"
+    )
 
 
 def test_merged_recompute_keeps_every_output_of_the_old_pair() -> None:
@@ -1539,18 +1563,15 @@ def test_merged_recompute_keeps_every_output_of_the_old_pair() -> None:
         assert fragment in sql, f"merged recompute lost: {fragment}"
 
 
-def test_manual_merge_recompute_writes_the_cz_columns_too() -> None:
+def test_manual_merge_recompute_shares_the_one_statement() -> None:
     """api.broker_review calls the same recompute for its post-merge refresh;
-    if it wrote only the unscoped counts, a merged broker's ranking would silently
-    fall back to zero until the next daily sweep."""
+    a fork here is how a merged broker's ranking silently diverges from the
+    sweep's until the next reconcile."""
     from api.broker_review import recompute_brokers as imported
 
-    from scripts.resolve_brokers import _RECOMPUTE_BROKERS, recompute_brokers
+    from scripts.resolve_brokers import recompute_brokers
 
     assert imported is recompute_brokers
-    assert "cz_active_property_count" in _RECOMPUTE_BROKERS.format(
-        bscope="AND broker_id = ANY(%(bids)s)",
-        mscope="m.broker_id = ANY(%(bids)s) AND")
 
 
 # --- the unified engine: inputs, kill switch, evidence, card hygiene ----------

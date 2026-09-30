@@ -36,7 +36,7 @@ allowlist from the same registry, so an onboarding can no longer half-land.
 Ranking is CZ-scoped (migration 396): `brokers.cz_*` counts only listings that
 resolved to a Czech obec, so the two idnes syndication feeds advertising ~26k
 Spanish/Croatian properties stay fully attributed but stop heading the leaderboard.
-Nothing is filtered out of the corpus — `_DOMESTIC` is a rollup predicate.
+Nothing is filtered out of the corpus; national/domestic cells live in the matview (W4).
 
 Identity keystone (toolkit.broker_resolver, rewritten 2026-08-20): merges are
 NAME-GATED and portal-agnostic — two identities unify when their name keys match
@@ -84,13 +84,11 @@ _AUTO_MERGE_ENABLED_KEY = "broker_auto_merge_enabled"
 _BROKER_SOURCES = BROKER_SOURCE_NAMES
 _ATTRIBUTION_SQL = attribution_statements()
 
-# Domestic = the listing resolved to a Czech obec. The resolver only ever writes a
-# RÚIAN obec, so a foreign pin lands outside every CZ boundary and `listing_location`
-# carries no obec for it (migration 501; the legacy geom-derived hierarchy went in
-# 508). Matches the split docs/design/media-integrity-architecture.md §Q4 already
-# committed the platform to, and the guard broker_region_type_stats applies at
-# refresh time — one definition of "foreign", not three.
-_DOMESTIC = "ll.obec_kod IS NOT NULL"
+# Domestic = the listing resolved to a Czech obec (a foreign pin lands outside
+# every CZ boundary, so listing_location carries no obec for it — migration
+# 501). Since W4 the predicate lives in EXACTLY one place, the
+# broker_region_type_stats matview (migration 580), whose 'cz' cells are the
+# ONE book for national counts — the rollup here stopped computing its own.
 
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
@@ -192,10 +190,8 @@ WITH base AS MATERIALIZED (
   SELECT bi.broker_id, l.broker_firm_id AS firm_id,
          coalesce(l.property_id, -l.id) AS pkey,
          (l.is_active AND l.last_seen_at > now() - interval '7 days') AS live,
-         ({domestic}) AS domestic,
          l.first_seen_at, l.last_seen_at
   FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  LEFT JOIN listing_location ll ON ll.listing_id = l.id
   WHERE bi.broker_id IS NOT NULL {bscope}
 ),
 ident AS (
@@ -215,10 +211,6 @@ lst AS (
     count(DISTINCT pkey) AS pc,
     count(*) FILTER (WHERE live) AS alc,
     count(DISTINCT pkey) FILTER (WHERE live) AS apc,
-    count(*) FILTER (WHERE domestic) AS cz_lc,
-    count(DISTINCT pkey) FILTER (WHERE domestic) AS cz_pc,
-    count(*) FILTER (WHERE domestic AND live) AS cz_alc,
-    count(DISTINCT pkey) FILTER (WHERE domestic AND live) AS cz_apc,
     min(first_seen_at) AS fseen, max(last_seen_at) AS lseen
   FROM base GROUP BY broker_id
 ),
@@ -264,10 +256,6 @@ UPDATE brokers b SET
   property_count = coalesce(ls.pc, 0),
   active_listing_count = coalesce(ls.alc, 0),
   active_property_count = coalesce(ls.apc, 0),
-  cz_listing_count = coalesce(ls.cz_lc, 0),
-  cz_property_count = coalesce(ls.cz_pc, 0),
-  cz_active_listing_count = coalesce(ls.cz_alc, 0),
-  cz_active_property_count = coalesce(ls.cz_apc, 0),
   first_seen_at = coalesce(ls.fseen, b.first_seen_at),
   last_seen_at = coalesce(ls.lseen, b.last_seen_at),
   stats_computed_at = now()
@@ -279,10 +267,6 @@ LEFT JOIN pphone pp ON pp.broker_id = il.broker_id
 WHERE b.id = il.broker_id AND b.status = 'active'
 """
 
-# Bound once, here, so every caller — including api.broker_review's per-broker
-# recompute after a manual merge/unmerge — writes the cz_* columns from the SAME
-# predicate without threading it through .format(). {bscope}/{mscope} stay open.
-_RECOMPUTE_BROKERS = _RECOMPUTE_BROKERS.replace("{domestic}", _DOMESTIC)
 
 
 def recompute_brokers(cur: Any, broker_ids: list[int] | None) -> None:
@@ -329,16 +313,20 @@ WHERE f.id = ff.id
 # s.r.o."); franchise/aggregator domains (re-max.cz: 95 offices, century21.cz)
 # have no dominant label, so they stay NULL and the UI falls back to the domain
 # rather than mislabel the brand as one office.
+# W4: the label is read off broker_identities.agency_name — captured once at
+# attribution (idnes is the only portal publishing one; migration 580 backfilled
+# the column) and weighted by each identity's listing_count — instead of
+# re-reading every idnes raw_json from TOAST on every sweep (mean 200 s,
+# max 858 s measured). Same 60%-majority rule, same franchise guard.
 _FIRM_DISPLAY_NAMES = """
 WITH agency AS (
   SELECT bi.email_domain AS domain,
-         l.raw_json->'broker'->>'agency_name' AS name,
-         count(*) AS n
-  FROM listings l
-  JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  WHERE l.source = 'idnes' AND bi.email_domain IS NOT NULL
-    AND coalesce(l.raw_json->'broker'->>'agency_name', '') <> ''
-  GROUP BY bi.email_domain, l.raw_json->'broker'->>'agency_name'
+         bi.agency_name AS name,
+         sum(greatest(bi.listing_count, 1)) AS n
+  FROM broker_identities bi
+  WHERE bi.source = 'idnes' AND bi.email_domain IS NOT NULL
+    AND coalesce(bi.agency_name, '') <> ''
+  GROUP BY bi.email_domain, bi.agency_name
 ),
 ranked AS (
   SELECT domain, name, n,
