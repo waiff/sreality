@@ -484,6 +484,7 @@ itself (migration 552). Pre-call budget guard binds before spend, proven by sour
    OPEN gates only, and the open-gate set is part of `extractor_version`. Two consequences, both stated loudly at
    the switch: with every gate closed the lane costs nothing at all (no query, no call), and opening a gate re-opens
    the corpus — open every field the bake-off cleared in ONE edit or pay for the same descriptions twice.
+   *(Superseded by location reader W1, 2026-09-30: scope = open gates ∪ `llm_text` portals; key = prompt + schema.)*
 3. *"`eligible > 0 AND claimed = 0` never persists two passes."* Two passes is not observable: `_record_pass` keeps
    only the LAST pass per lane and the check runs 6-hourly against a 5-minute lane. It is also not the right test:
    bazos arrives in bursts (1,940 rows a day over ~147 distinct minutes), so healthy passes legitimately claim

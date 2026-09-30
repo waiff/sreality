@@ -17,7 +17,8 @@ ADMITTED_AD_KINDS = frozenset({"offer", "exchange"})
 
 _SLOT_SPEC: dict[str, str] = {
     "town": "The municipality (obec) the PROPERTY is in, as the register spells it: nominative, "
-            "keeping a qualifier such as 'Lhota u Příbramě'.",
+            "keeping a qualifier such as 'Lhota u Příbramě'. A city district ('Praha 5', "
+            "'Brno-Židenice') is the city ('Praha', 'Brno'); the district goes to part_of_town.",
     "part_of_town": "The část obce / městská část / čtvrť / sídliště the property is in, "
                     "nominative.",
     "street": "The property's own street, its official nominative name, without 'ul.'/'ulice' "
@@ -27,28 +28,35 @@ _SLOT_SPEC: dict[str, str] = {
                        "in the form 'Street 123/4'.",
     "house_number_co": "Digits only: the číslo orientační ('č.o.', 'orientační'), or 4 in the "
                        "form 'Street 123/4'.",
-    "house_number_ev": "Digits only: the číslo evidenční ('č.ev.', 'ev. č.', 'evidenční').",
+    "house_number_ev": "Digits only: the číslo evidenční of the BUILDING ('chata č.ev. 13'). "
+                       "'Evidenční číslo: 928457' or 'ev.č.: 7630' is the broker's reference -> null.",
 }
 SLOTS = tuple(_SLOT_SPEC)
+_AD_KIND = ("offer: sells or lets the property described (also 'hledáme nájemníka'); exchange: "
+            "offers their own for another; wanted: seeks one; not_property: no real estate at a fixed "
+            "place (a prefab or mobile garage, a mobile home, a container, materials, a service). "
+            "Always set, even with no quote.")
 
 LOCATION_PROMPT = (
     "`location` records where the advertised property ITSELF is — never a place near it (a "
-    "tram stop, a park, a shop, '500 m od ulice X', 'pod ulicí X').\n"
-    "Never a desired location: for an exchange or a wanted advert set ad_kind and leave every "
-    "location slot null.\n"
+    "tram stop, a park, a shop, '500 m od ulice X', 'pod ulicí X', a town given by distance: "
+    "'10 km od Brna', 'nedaleko Kolína'; 'Lhota u Příbramě' is a name, not a distance).\n"
+    "Never a desired location: for an exchange advert record ONLY the property offered, never "
+    "the one wanted; for a wanted advert leave every location slot null.\n"
     "Never a broker's office address, never a secondary street (a rear entrance, a corner "
     "'roh ulic X a Y' -> null), never a project or building name.\n"
     "A house number needs the advert's own marker or the form 'Street 123/4' — never a bare "
-    "number, never a parcel, LV, k.ú., unit or reference number, never a negated one ('bez "
-    "č.p.').\n"
-    "A Slovak or foreign advert: every location slot null.\n"
+    "number ('Street 12', 'č. 12', 'Praha 8'), never a parcel, LV, k.ú., unit or reference "
+    "number, never a negated one ('bez č.p.').\n"
+    "A property outside the Czech Republic, or an advert not written in Czech (e.g. Slovak): "
+    "every location slot null.\n"
     "Every location quote obeys the same rule: a VERBATIM span of the advert text, or null."
 )
 
 
 def location_block(cell: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
     """The tool-schema property; `cell` is the lane's own `{value, evidence_quote}` wrapper."""
-    slots = {"ad_kind": cell({"type": "string", "enum": list(AD_KINDS)})}
+    slots = {"ad_kind": cell({"type": "string", "enum": list(AD_KINDS), "description": _AD_KIND})}
     for slot, description in _SLOT_SPEC.items():
         slots[slot] = cell({"type": ["string", "null"], "description": description})
     return {"type": "object", "additionalProperties": False,

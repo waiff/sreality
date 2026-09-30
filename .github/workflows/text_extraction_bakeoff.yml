@@ -29,8 +29,8 @@ name: "Field capture: text-extraction bake-off"
 # either order, and the lane does nothing until BOTH have happened: set
 # `app_settings.enrichment_model` (the lane's one switch), and flip the per-field `gate`
 # in `scraper/attribute_contract.py` for each field that cleared 95 %. Flip EVERY field
-# that cleared in ONE edit: the open-gate set is part of the cache key, so adding a field
-# later re-reads every description the lane has already paid for.
+# that cleared in ONE edit: the key hashes the prompt and every open schema, so a gate
+# opening or a prompt edit re-reads every active advert the lane has already paid for.
 #
 # Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY (both already in use by other lanes);
 # RUNPOD_API_KEY and HF_TOKEN only for an `oss:` arm (both already exist — autodedup.yml,

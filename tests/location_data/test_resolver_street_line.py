@@ -140,7 +140,7 @@ def test_an_inflected_form_does_not_match_the_register_exactly():
     off and what is left is not the register's string, so the EXACT match fails. Czech
     inflection is out of scope for W18 and is deliberately not guessed at: R3 is off for
     lines, and a single inflected token can only ever reach it at `low` confidence."""
-    assert composite.street_keys("Livornské ulici") == frozenset(
+    assert composite.street_match_keys("Livornské ulici")[1] == frozenset(
         {"livornske", "livornske ulici"})
     assert _bind("Livornské ulici, Praha", (PRAHA,)).street is None
 
@@ -198,7 +198,7 @@ def test_a_street_whose_name_IS_the_generic_word_still_binds():
     name on those, so the UNFOLDED spelling is a match key of its own. It is also why the
     CLAIM layer strips only the LEADING wrapper: the exact key is taken from the stored value,
     and `Nová ulice` folded down to `Nová` at intake can never bind afterwards."""
-    assert composite.street_keys("Nová ulice") == frozenset({"nova ulice", "nova"})
+    assert composite.street_match_keys("Nová ulice")[1] == frozenset({"nova ulice", "nova"})
     assert _line("Nová ulice", town="Kladno").street_name == "Nová ulice"
     assert _line("Na Ulici", town="Kladno").street_name == "Na Ulici"
     assert _bind("Prodej bytu, Nová ulice, Kladno", (KLADNO,)).street.code == 114

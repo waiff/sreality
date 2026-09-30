@@ -279,11 +279,6 @@ def street_match_keys(value: str) -> tuple[frozenset[str], frozenset[str]]:
     return (frozenset(k for k in exact if k), frozenset(k for k in every if k))
 
 
-def street_keys(value: str) -> frozenset[str]:
-    """Every key one name may match by — `street_match_keys` without the tier."""
-    return street_match_keys(value)[1]
-
-
 def register_street_keys(street: Street) -> frozenset[str]:
     """The same pair, taken off the REGISTER row. `ruian_streets.name_norm` is built by
     `name_index.normalize_street_name`, which drops a leading `ulice`/`ul.` and keeps

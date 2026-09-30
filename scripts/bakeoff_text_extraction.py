@@ -8,8 +8,8 @@ THE PANEL IS NOT LABELLED BY HAND. The labels are the STRUCTURED portals' own st
 fields on the SAME advert: idnes and sreality publish `has_lift`, `condition`,
 `building_type`, `energy_rating`, `floor`, `total_floors`, `has_balcony` and `has_parking`
 in a table AND describe the property in prose, so their table is a free label for what a
-model reads out of their prose. The model is shown what the lane shows it: the advert text
-(headline + description), with the lane's own prompt and tool.
+model reads out of their prose. The model reads the advert text (headline + description) under
+the lane's prompt; a location row gets the lane's own tool for its portal, an attribute row all 8.
 
 The LOCATION half (location reader W1, `--location-rows`) scores the lane's `location` block:
 sreality/idnes/realitymix/ceskereality rows whose street the portal stated in a table
@@ -41,7 +41,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from location_data import text_reading
-from location_data.resolver.normalize import normalize_match_key, strip_street_generic
+from location_data.resolver.composite import street_match_keys
+from location_data.resolver.normalize import normalize_match_key
+from scraper import attribute_contract as contract
 from scraper import db
 from toolkit import description_extraction as tx
 
@@ -137,17 +139,19 @@ SELECT l.id, 'bazos' AS source, l.category_main, {tx._TEXT_EXPR} AS advert_text,
 
 FIELDS: tuple[str, ...] = tuple(tx._FIELD_SPEC)
 
-# The location half. bazos: md5-sampled, plus the trigger listing, plus hard cases per
-# predicate (exchange/wanted, Slovak, village/k.ú., a big city with no stored street).
+# The location half. bazos: md5-sampled, plus the trigger, plus hard cases on their OWN md5 key
+# (exchange/wanted by headline intent, Slovak, k.ú., a town by distance, a streetless big city).
 TRIGGER_ID = 18909736
 _LOCATED = """ll.obec_name, ll.okres_name, ll.obec_kod, ll.cast_obce_name, ll.street_name,
        ll.house_number_cp, ll.psc"""
 _LOCATION_BAZOS_SQL = f"""
 WITH pool AS (
   SELECT x.id, md5(x.id::text) AS rk,
-         x.t ~* 'vyměn|výměn|hledám|koupím|poptáv|sháním' AS exchange_wanted,
+         split_part(x.t, E'\\n', 1)
+           ~* '\\m(vyměním|výměna\\s+za|hledám|hledáme|koupím|koupíme|sháním|poptávám)' AS exchange_wanted,
          x.t ~* '\\mponúk|\\mnehnuteľnos|\\mbyt na predaj' AS slovak,
          x.t ~* 'k\\.ú\\.|katastráln' AS village_ku,
+         x.t ~* '\\m[0-9]+([,.][0-9]+)?\\s*km\\s+(od|z|ze)\\s+[[:upper:]]' AS by_distance,
          coalesce(x.obec_name IN ('Praha', 'Brno', 'Plzeň', 'Ostrava')
                   AND x.street_name IS NULL, false) AS big_city
     FROM (SELECT l.id, {tx._TEXT_EXPR} AS t, ll.obec_name, ll.street_name
@@ -156,10 +160,11 @@ WITH pool AS (
              AND l.description IS NOT NULL AND l.description <> '') x
 ), picked AS (
   (SELECT id, 'md5' AS stratum FROM pool ORDER BY rk LIMIT %(n)s)
-  UNION ALL (SELECT id, 'exchange_wanted' FROM pool WHERE exchange_wanted ORDER BY rk LIMIT %(hard)s)
-  UNION ALL (SELECT id, 'slovak' FROM pool WHERE slovak ORDER BY rk LIMIT %(hard)s)
-  UNION ALL (SELECT id, 'village_ku' FROM pool WHERE village_ku ORDER BY rk LIMIT %(hard)s)
-  UNION ALL (SELECT id, 'big_city' FROM pool WHERE big_city ORDER BY rk LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'exchange_wanted' FROM pool WHERE exchange_wanted ORDER BY md5(id || 'exchange_wanted') LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'slovak' FROM pool WHERE slovak ORDER BY md5(id || 'slovak') LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'village_ku' FROM pool WHERE village_ku ORDER BY md5(id || 'village_ku') LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'by_distance' FROM pool WHERE by_distance ORDER BY md5(id || 'by_distance') LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'big_city' FROM pool WHERE big_city ORDER BY md5(id || 'big_city') LIMIT %(hard)s)
   UNION ALL SELECT %(trigger)s::bigint, 'trigger'
 )
 SELECT DISTINCT ON (l.id) l.id, l.source, l.category_main, p.stratum,
@@ -181,38 +186,43 @@ SELECT l.id, l.source, l.category_main, 'structured' AS stratum,
  LIMIT %(n)s
 """
 # ONE statement over every reading: does the text town exist in the register (obec, část
-# obce, k.ú.) — the nearest such unit to the pin, its okres and km — and does the text street
-# bind in the stored obec and in the text town's obec.
+# obce, k.ú.), which namesake (the obec nearest the pin, preferring the obec's own unit), how
+# many namesakes, the km from the pin (a část obce has no point in the register: its nearest
+# address point), and does the text street bind in the stored obec and in the text town's obec.
 _REGISTER_SQL = """
 WITH q AS (
   SELECT * FROM unnest(%(ids)s::bigint[], %(towns)s::text[], %(streets)s::text[])
-         AS q(listing_id, town_norm, street_norm)
+         AS q(listing_id, town_norm, street_keys)
 )
-SELECT q.listing_id, t.level, t.name, t.okres, t.km,
+SELECT q.listing_id, t.level, t.name, t.okres, t.km, t.namesakes, ll.geom IS NOT NULL,
        EXISTS (SELECT 1 FROM ruian_streets s JOIN ruian_admin_units o ON o.id = s.obec_unit_id
-                WHERE o.level = 'obec' AND o.code = ll.obec_kod
-                  AND s.name_norm = q.street_norm) AS street_binds_stored_town,
+                WHERE o.level = 'obec' AND o.code = ll.obec_kod AND s.valid_to IS NULL
+                  AND s.name_norm = ANY (string_to_array(q.street_keys, '|'))),
        EXISTS (SELECT 1 FROM ruian_streets s
-                WHERE s.obec_unit_id = t.obec_unit_id
-                  AND s.name_norm = q.street_norm) AS street_binds_text_town
+                WHERE s.obec_unit_id = t.obec_unit_id AND s.valid_to IS NULL
+                  AND s.name_norm = ANY (string_to_array(q.street_keys, '|')))
   FROM q
   LEFT JOIN listing_location ll ON ll.listing_id = q.listing_id
   LEFT JOIN LATERAL (
-    SELECT u.level::text AS level, u.name, ok.name AS okres,
-           CASE WHEN u.level = 'obec' THEN u.id ELSE u.parent_id END AS obec_unit_id,
-           ST_Distance(ll.geom::geography,
-                       coalesce(g.representative_point, u.definition_point)::geography)
-             / 1000.0 AS km
-      FROM ruian_admin_units u
-      LEFT JOIN ruian_admin_units ok
-        ON ok.level = 'okres' AND ok.retired_at IS NULL AND ok.path @> u.path
-      LEFT JOIN LATERAL (
-        SELECT g.representative_point FROM ruian_admin_unit_geometries g
-         WHERE g.unit_id = u.id AND g.purpose = 'authoritative'
-         ORDER BY g.registry_version_id DESC LIMIT 1) g ON true
-     WHERE u.name_norm = q.town_norm AND u.retired_at IS NULL
-       AND u.level IN ('obec', 'cast_obce', 'katastralni_uzemi')
-     ORDER BY km NULLS LAST
+    SELECT c.level, c.name, c.okres, c.obec_unit_id, count(*) OVER () AS namesakes,
+           min(c.unit_km) OVER (PARTITION BY c.obec_unit_id) AS km
+      FROM (SELECT u.level::text AS level, u.name, ok.name AS okres,
+                   CASE WHEN u.level = 'obec' THEN u.id ELSE u.parent_id END AS obec_unit_id,
+                   coalesce(ST_Distance(ll.geom::geography, g.representative_point::geography),
+                            (SELECT min(ST_Distance(ll.geom::geography, ap.geom::geography))
+                               FROM ruian_address_points ap
+                              WHERE ap.cast_obce_unit_id = u.id AND ap.valid_to IS NULL)
+                   ) / 1000.0 AS unit_km
+              FROM ruian_admin_units u
+              LEFT JOIN ruian_admin_units ok
+                ON ok.level = 'okres' AND ok.retired_at IS NULL AND ok.path @> u.path
+              LEFT JOIN LATERAL (
+                SELECT g.representative_point FROM ruian_admin_unit_geometries g
+                 WHERE g.unit_id = u.id AND g.purpose = 'authoritative'
+                 ORDER BY g.registry_version_id DESC LIMIT 1) g ON true
+             WHERE u.name_norm = q.town_norm AND u.retired_at IS NULL
+               AND u.level IN ('obec', 'cast_obce', 'katastralni_uzemi')) c
+     ORDER BY km NULLS LAST, c.level <> 'obec'
      LIMIT 1
   ) t ON true
 """
@@ -221,12 +231,6 @@ SELECT q.listing_id, t.level, t.name, t.okres, t.km,
 def panel_sql(fields: Iterable[str]) -> str:
     return _PANEL_SQL_TEMPLATE.format(
         text=tx._TEXT_EXPR, stated=" OR ".join(f"l.{f} IS NOT NULL" for f in fields))
-
-
-def _label_floor(source: str, stored: Any) -> int | None:
-    """The portal's floor column IS the ground = 0 label (W8); None where it is unset."""
-    del source  # every portal counts the same way now; the argument stays for the panel rows
-    return None if stored is None else int(stored)
 
 
 def build_panel(conn: Any, *, per_source: int, bazos: int,
@@ -269,7 +273,6 @@ def build_panel(conn: Any, *, per_source: int, bazos: int,
 
 def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
     labels = {f: record.get(f) for f in FIELDS}
-    labels["floor"] = _label_floor(label_source, labels.get("floor"))
     return {
         "id": record["id"],
         "source": record["source"],
@@ -288,9 +291,10 @@ def agrees(field: str, predicted: Any, label: Any) -> bool:
         return abs(int(predicted) - int(label)) <= FLOOR_TOLERANCE
     if field == "house_number_cp":
         return str(predicted).strip() == str(label).strip()
+    if field == "street":  # W3's binder keys, both tiers: 'nám. Míru' == 'náměstí Míru'
+        return bool(street_match_keys(str(predicted))[1] & street_match_keys(str(label))[1])
     if field in text_reading.SLOTS:
-        read = strip_street_generic(str(predicted)) if field == "street" else str(predicted)
-        return normalize_match_key(read) == normalize_match_key(str(label))
+        return normalize_match_key(str(predicted)) == normalize_match_key(str(label))
     return predicted == label
 
 
@@ -332,13 +336,19 @@ def score(results: list[dict[str, Any]]) -> dict[str, Any]:
                 slot, r["location"][slot]["value"], r["location_labels"][slot])
                 for r in labelled), len(labelled)),
         }
+    strata: dict[str, Any] = {}
+    for r in loc:  # a hard case is scored by what it admitted: a Slovak advert should admit none
+        st = strata.setdefault(r["stratum"], {"n": 0, "admitted": 0, "ad_kind": Counter()})
+        st["n"] += 1
+        st["admitted"] += any(r["location"][k]["value"] for k in text_reading.SLOTS)
+        st["ad_kind"][str(r["location"]["ad_kind"]["value"])] += 1
     towns = [r for r in loc if r["location"]["town"]["value"]]
     stored = [r for r in towns if r["label_kind"] == "stored" and r["location_labels"]["town"]]
     streets = [r for r in loc if r["location"]["street"]["value"]]
     location = {
         "n": len(loc),
         "ad_kind": dict(Counter(str(r["location"]["ad_kind"]["value"]) for r in loc)),
-        "per_slot": slots,
+        "per_slot": slots, "by_stratum": strata,
         "quote_validity": _rate(sum(len(r["quoted"]) for r in loc),
                                 sum(len(r["claimed"]) for r in loc)),
         "town_binds": _rate(sum(bool(r["register"].get("level")) for r in towns), len(towns)),
@@ -422,9 +432,10 @@ def _register(results: list[dict[str, Any]]) -> None:
     read = [(r["location"]["town"]["value"], r["location"]["street"]["value"]) for r in rows]
     params = {"ids": [r["id"] for r in rows],
               "towns": [normalize_match_key(t) if t else None for t, _ in read],
-              "streets": [normalize_match_key(strip_street_generic(s)) if s else None
+              "streets": ["|".join(sorted(street_match_keys(s)[0])) if s else None
                           for _, s in read]}
-    columns = ("level", "name", "okres", "km", "binds_stored_town", "binds_text_town")
+    columns = ("level", "name", "okres", "km", "namesakes", "pinned", "binds_stored_town",
+               "binds_text_town")
     with db.connect() as conn, conn.cursor() as cur:
         cur.execute(_REGISTER_SQL, params)
         found = {row[0]: dict(zip(columns, row[1:])) for row in cur.fetchall()}
@@ -441,9 +452,10 @@ def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
     from concurrent.futures import ThreadPoolExecutor
 
     del conn  # the panel was built on it; every call below runs on a worker's own
-    tool = tx.extraction_tool(FIELDS)
+    tool, lane = tx.extraction_tool(FIELDS), contract.extracted_cells()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        results = list(pool.map(lambda row: _extract_one(model, tool, row), panel))
+        results = list(pool.map(lambda row: _extract_one(model, tx.extraction_tool(
+            lane.get(row["source"], ())) if "label_kind" in row else tool, row), panel))
     _register(results)
     return {"model": model, **score(results),
             "readings": [r for r in results if "location" in r]}
@@ -553,6 +565,9 @@ def summarise(report: dict[str, Any]) -> str:
         lines += [f"| {k} | {v['answered']} | {_pct(v['answer_rate'])} | "
                   f"{_pct(v['quote_valid'])} | {v['structured_labelled']} | "
                   f"{_pct(v['structured_agreement'])} |" for k, v in loc["per_slot"].items()]
+        lines += ["", "| stratum | n | admitted a slot | ad_kind |", "| --- | ---: | ---: | --- |"]
+        lines += [f"| {k} | {v['n']} | {v['admitted']} | {dict(v['ad_kind'])} |"
+                  for k, v in loc["by_stratum"].items()]
         lines += ["", f"Town binds in the register {_pct(loc['town_binds'])}; bazos town = "
                   f"stored town {_pct(loc['bazos_town_agreement'])}; street binds in the "
                   f"stored obec {_pct(loc['street_binds_stored_town'])}, in the text town's "
@@ -574,36 +589,43 @@ def _pct(value: float | None) -> str:
 
 
 def review(report: dict[str, Any]) -> str:
-    """The sheet the operator pre-reads: 40 bazos readings (the trigger first, then md5
-    order) and up to 30 bazos town disagreements. One advert = one block."""
+    """The sheet the operator pre-reads: (i) 40 bazos readings (the trigger first, then md5
+    order), (ii) up to 30 bazos town disagreements, (iii) every hard case that admitted a
+    slot. One advert = one block of list items, so Markdown cannot merge or restyle them."""
     lines: list[str] = []
     for arm in (a for a in report["arms"] if a.get("readings")):
         bazos = sorted((r for r in arm["readings"] if r["label_kind"] == "stored"),
                        key=lambda r: (r["id"] != TRIGGER_ID,
                                       hashlib.md5(str(r["id"]).encode()).hexdigest()))
         lines += [f"# Location review — {arm['model']}", "", "## (i) 40 bazos readings", ""]
-        for r in bazos[:40]:
-            title, _, body = r["advert_text"].partition("\n")
-            read = "; ".join(f'{k} "{c["value"]}" <- "{c["quote"]}"'
-                             for k, c in r["location"].items() if k != "ad_kind" and c["value"])
-            lines += [f"### {r['id']} ({r['stratum']}, ad_kind "
-                      f"{r['location']['ad_kind']['value']})", f"Headline: {title}",
-                      f"Text: {body[:300]}", f"Read: {read or '-'}",
-                      f"Stored: {r['stored']['obec_name'] or '-'} / "
-                      f"{r['location_labels']['street'] or '-'}", ""]
+        lines += [x for r in bazos[:40] for x in _block(r)]
         disagree = [r for r in bazos if r["location"]["town"]["value"]
                     and r["location_labels"]["town"] and not agrees(
                         "town", r["location"]["town"]["value"], r["location_labels"]["town"])]
         lines += ["## (ii) Town disagreements", ""]
         for r in disagree[:30]:
             reg, town = r["register"], r["location"]["town"]
-            where = (f"{reg['level']} {reg['name']}, okres {reg['okres']}, "
-                     + (f"{reg['km']:.1f} km from the pin" if reg.get("km") is not None
-                        else "no pin") if reg.get("level") else "NOT IN THE REGISTER")
-            lines += [f"### {r['id']}", f"Stored: {r['stored']['obec_name']} (okres "
-                      f"{r['stored']['okres_name']})", f"Text: {town['value']} -> {where}",
-                      f'Quote: "{town["quote"]}"', ""]
+            km = (f"{reg['km']:.1f} km from the pin" if reg.get("km") is not None
+                  else "unit has no point" if reg.get("pinned") else "no pin")
+            where = (f"{reg['level']} {reg['name']} (1 of {reg['namesakes']}), okres "
+                     f"{reg['okres'] or '-'}, {km}" if reg.get("level") else "NOT IN THE REGISTER")
+            lines += [f"### {r['id']}", f"- Stored: {r['stored']['obec_name']} (okres "
+                      f"{r['stored']['okres_name'] or '-'})", f"- Text: {town['value']} -> {where}",
+                      f'- Quote: "{town["quote"]}"', ""]
+        lines += ["## (iii) Hard cases that admitted a slot", ""]
+        lines += [x for r in bazos if r["stratum"] not in ("md5", "trigger") and any(
+            c["value"] for k, c in r["location"].items() if k != "ad_kind") for x in _block(r)]
     return "\n".join(lines) + "\n"
+
+
+def _block(r: dict[str, Any]) -> list[str]:
+    title, _, body = r["advert_text"].partition("\n")
+    read = "; ".join(f'{k} "{c["value"]}" <- "{c["quote"]}"'
+                     for k, c in r["location"].items() if k != "ad_kind" and c["value"])
+    return [f"### {r['id']} ({r['stratum']}, ad_kind {r['location']['ad_kind']['value']})",
+            f"- Headline: {title}", f"- Text: {' '.join(body[:300].split())}",
+            f"- Read: {read or '-'}", f"- Stored: {r['stored']['obec_name'] or '-'} / "
+            f"{r['location_labels']['street'] or '-'}", ""]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -647,7 +669,8 @@ def main() -> int:
             by_source[row["source"]] = by_source.get(row["source"], 0) + 1
             key = str(row["category_main"])
             by_category[key] = by_category.get(key, 0) + 1
-        LOG.info("PANEL n=%d %s %s", len(panel), by_source, by_category)
+        LOG.info("PANEL n=%d %s %s strata=%s", len(panel), by_source, by_category,
+                 dict(Counter(r["stratum"] for r in panel if "stratum" in r)))
         (out_dir / "panel.json").write_text(
             json.dumps(panel, ensure_ascii=False, default=str), encoding="utf-8")
         if args.panel_only:

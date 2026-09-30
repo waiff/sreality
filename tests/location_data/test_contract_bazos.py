@@ -167,9 +167,9 @@ def test_the_town_entry_reads_the_town_anchors_href():
 def test_the_four_page_entries_run_on_the_page_lane_and_the_street_on_the_payload_one():
     """Rule 25 leaves ONE lane over two substrates, and bazos now uses both. The town, the
     PSČ, the blur marker and the pin are page facts — they exist only in the Lokalita row's
-    markup. The STREET is not: `scraper.bazos_parser` already mined it out of the page at
-    scrape time and wrote it to `raw_json.coords.street`, so the claim reads the parser's own
-    subject-scoped value instead of re-deriving it from the body (W18)."""
+    markup. The STREET is not: it is read off the stored payload's headline (`/title`), the
+    one place the seller names it; the parser's own street miner is deleted (location reader
+    W1) and the text lane's plain-text reading replaces this entry at @8 (W3)."""
     page = {e for e in ENTRY_IDS if e != STREET_ENTRY}
     assert {ENTRIES[e].reader for e in page} <= set(PAGE_READERS)
     assert ENTRIES[STREET_ENTRY].reader in READERS

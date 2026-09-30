@@ -59,13 +59,13 @@ def test_the_scope_is_the_open_gates_plus_the_llm_text_portals_and_names_no_port
 
 
 def test_a_delisted_advert_is_read_once_per_schema_and_an_active_one_on_every_change() -> None:
-    """Q1 (2026-09-30). The delisted arm is hash-free on purpose: a delisted row is not
-    re-fetched, and the hash would detoast ~100k adverts a pass."""
+    """Q1 (2026-09-30). The delisted arm is hash-free and runs FIRST; the CASE also fences the
+    anti-join into a per-row probe (a new version pulled up into a join grew towards 120 s)."""
     where = tx._eligible_where(OPEN_GATES)
-    arm = where[where.index("(l.is_active OR NOT EXISTS"):where.index("   AND NOT EXISTS")]
+    arm = where[where.index("CASE WHEN l.is_active OR NOT EXISTS"):where.index("   THEN NOT EXISTS")]
     assert f"d.extractor_version LIKE '{tx.SCHEMA_VERSION}:%%'" in arm
     assert "d.extracted -> 'error' IS NULL" in arm
-    assert "text_hash" not in arm
+    assert "text_hash" not in arm and where.endswith(")) END")
     assert tx.SCHEMA_VERSION == "2"
 
 
@@ -106,6 +106,7 @@ def test_one_arm_newest_first_reaches_the_backlog() -> None:
     PASS_SLICE a pass (~57k a day against a 1,940-a-day inflow). The oldest-first arm an
     earlier draft added bought nothing and cost a measured 9.4-10.0 s per run."""
     assert "ORDER BY l.first_seen_at DESC" in tx.SELECT_INFLOW_SQL
+    assert "CROSS JOIN LATERAL" in tx.SELECT_INFLOW_SQL and "l.source = s.src" in tx.SELECT_INFLOW_SQL
     assert not hasattr(tx, "SELECT_BACKLOG_SQL")
     assert not hasattr(tx, "BACKLOG_EVERY_PASSES")
 

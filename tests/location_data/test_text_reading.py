@@ -45,11 +45,12 @@ def test_the_trigger_advert_reads_street_town_and_part_and_no_number() -> None:
     assert out["house_number_cp"] == out["house_number_co"] == out["house_number_ev"] == EMPTY
 
 
-def test_an_exchange_advert_read_as_the_prompt_says_yields_no_location() -> None:
-    text = ad_haystack("Vyměním byt 2+1 Zlín", "Hledám byt v ulici Sadová nebo Školní.")
-    out = tr.read_location(_payload("exchange"), text)
+def test_an_exchange_advert_keeps_the_property_it_offers() -> None:
+    """final-plan D3: offer and exchange emit claims; the prompt asks for the OFFERED one."""
+    text = ad_haystack("Vyměním byt 2+1 Zlín", "Můj byt v ulici Dlouhá, hledám Sadovou.")
+    out = tr.read_location(_payload("exchange", street=("Dlouhá", "v ulici Dlouhá")), text)
     assert out["ad_kind"]["value"] == "exchange"
-    assert all(out[slot] == EMPTY for slot in tr.SLOTS)
+    assert out["street"] == {"value": "Dlouhá", "quote": "v ulici Dlouhá"}
 
 
 def test_v3_a_wanted_or_non_property_advert_yields_no_location_whatever_was_read() -> None:

@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from scraper.bazos_parser import _resolve_coords, parse_detail, parse_index
 
 INDEX_HTML = """

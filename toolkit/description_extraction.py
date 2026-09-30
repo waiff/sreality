@@ -318,6 +318,11 @@ _LLM_TEXT_SOURCES = (
 LLM_TEXT_SOURCES_SQL = f"SELECT DISTINCT source FROM ({_LLM_TEXT_SOURCES}) s ORDER BY 1"
 
 
+def _scope(open_sources: Iterable[str]) -> str:
+    listed = "".join(f" UNION ALL SELECT '{p}'" for p in sorted(open_sources))
+    return f"ARRAY({_LLM_TEXT_SOURCES}{listed})"
+
+
 def _eligible_where(open_sources: Iterable[str]) -> str:
     """The predicate BOTH the lane's selector and the health check's count are built from.
 
@@ -328,24 +333,24 @@ def _eligible_where(open_sources: Iterable[str]) -> str:
     hash into an index condition and detoasts + hashes every advert every pass,
     forever, including the steady state where nothing is eligible.
 
-    The scope is an ARRAY (one InitPlan, so `listings_source_id_idx` drives the scan), and
-    the delisted arm (Q1, 2026-09-30: read ONCE per SCHEMA_VERSION, never re-read on a
-    prompt or model change) carries no hash: a delisted row is not re-fetched, so its text
-    cannot change, and without the hash Postgres runs the arm as one hashed subplan
-    instead of detoasting ~100k delisted adverts a pass. Measured on prod 2026-09-30 over
-    all 164k bazos rows with every active one read: 2.0 s warm, 15-38 s cold (the pre-W1
-    selector over the 47k active rows: 21.7 s cold).
+    The CASE is a fence twice over: it keeps the anti-join a per-row probe (pulled up into a
+    join, a version ANALYZE has not seen is estimated at one row and planned as a nested loop
+    that grows with every row read at it: 7-23 s on prod's first pass, heading for the 120 s
+    statement_timeout), and it runs the delisted arm FIRST, so a delisted advert already read
+    is never detoasted. That arm (Q1: read ONCE per SCHEMA_VERSION) is hash-free, as a delisted
+    row is not re-fetched. Accepted edges: a text edited while active and delisted before its
+    re-read keeps the older reading; a given-up delisted row is retried after a version change;
+    a row read while delisted and relisted unchanged fills after the next one.
     """
-    listed = "".join(f" UNION ALL SELECT '{p}'" for p in sorted(open_sources))
     return (
-        f"l.source = ANY (ARRAY({_LLM_TEXT_SOURCES}{listed}))\n"
+        f"l.source = ANY ({_scope(open_sources)})\n"
         "   AND l.description IS NOT NULL AND l.description <> ''\n"
-        "   AND (l.is_active OR NOT EXISTS (\n"
+        "   AND CASE WHEN l.is_active OR NOT EXISTS (\n"
         "         SELECT 1 FROM listing_description_enrichments d\n"
         "          WHERE d.listing_id = l.id\n"
         f"            AND d.extractor_version LIKE '{SCHEMA_VERSION}:%%'\n"
-        "            AND d.extracted -> 'error' IS NULL))\n"
-        "   AND NOT EXISTS (\n"
+        "            AND d.extracted -> 'error' IS NULL)\n"
+        "   THEN NOT EXISTS (\n"
         "         SELECT 1 FROM listing_description_enrichments e\n"
         "          WHERE e.listing_id = l.id\n"
         "            AND e.extractor_version = %(version)s\n"
@@ -355,27 +360,28 @@ def _eligible_where(open_sources: Iterable[str]) -> str:
         # re-billed for ever. The count lives in the cache row it already writes.
         "            AND (e.extracted -> 'error' IS NULL\n"
         "                 OR coalesce((e.extracted ->> 'attempts')::int, 1)\n"
-        f"                    >= {GIVE_UP_AFTER}))"
+        f"                    >= {GIVE_UP_AFTER})) END"
     )
 
 
-# ONE arm: newest-first, every pass. The eligible rows ARE the newest, so the query stops
-# at its LIMIT in ~0.4 s whether or not a backlog exists, and because an extracted row
-# leaves the predicate the same arm walks backwards through the backlog at PASS_SLICE a
-# pass. An oldest-first companion was measured and removed: once nothing is eligible it
-# cannot stop early and becomes a 9.4-10.0 s bitmap heap scan over 55,252 blocks, run to
-# find nothing.
+# ONE arm, newest-first, walking each portal in scope on its own `(source, first_seen_at)`
+# index (LATERAL: over an ARRAY of sources the index cannot give the order). An extracted
+# row leaves the predicate, so the walk stops at LIMIT while a backlog exists (prod
+# 2026-09-30, a new version: 0.19 s) and reaches back through it at PASS_SLICE a pass; with
+# nothing eligible it reads the whole portal, delisted rows too (pre-W1, active only: 21.7 s cold).
 # The text and its hash are composed OUTSIDE the ordered pick: in its target list they were
 # computed for every candidate before the sort (prod EXPLAIN, 2026-09-30: > 50 s).
 _SELECT_SQL_TEMPLATE = f"""
 SELECT l.id, l.source, l.first_seen_at, l.is_active,
        {_TEXT_EXPR} AS advert_text, {_HASH_EXPR} AS text_hash
-  FROM (SELECT l.id FROM listings l
-         WHERE {{where}}
-         ORDER BY l.first_seen_at {{direction}}
+  FROM unnest({{scope}}) s(src)
+ CROSS JOIN LATERAL (SELECT l.id FROM listings l
+         WHERE l.source = s.src AND {{where}}
+         ORDER BY l.first_seen_at DESC
          LIMIT %(limit)s) pick
   JOIN listings l ON l.id = pick.id
- ORDER BY l.first_seen_at {{direction}}
+ ORDER BY l.first_seen_at DESC
+ LIMIT %(limit)s
 """
 
 # Per source: how many rows are waiting and how long the oldest has waited. A literal twin
@@ -407,8 +413,7 @@ SELECT count(*) AS n,
 """
 
 _OPEN = contract.extracted_cells()
-SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(
-    where=_eligible_where(_OPEN), direction="DESC")
+SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(scope=_scope(_OPEN), where=_eligible_where(_OPEN))
 ELIGIBLE_LAG_SQL = _LAG_SQL_TEMPLATE.format(where=_eligible_where(_OPEN))
 
 # The conflict target is the key migration 552 adds. DO UPDATE, not DO NOTHING, and only
@@ -493,8 +498,7 @@ def lane_scope(conn: Any) -> dict[str, tuple[str, ...]]:
 
 def select_eligible(conn: Any, *, version: str,
                     slice_size: int = PASS_SLICE) -> list[dict[str, Any]]:
-    """The newest eligible listings. An extracted row leaves the predicate, so this walks
-    backwards through a backlog at `slice_size` a pass without a second arm."""
+    """The newest eligible listings, `slice_size` a pass (the walk: `_SELECT_SQL_TEMPLATE`)."""
     with conn.cursor() as cur:
         cur.execute(SELECT_INFLOW_SQL, {"version": version, "limit": max(0, slice_size)})
         rows = cur.fetchall()
