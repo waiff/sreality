@@ -82,9 +82,12 @@ FLOOR_TOLERANCE = 1
 # large share. The quota is `limit / distinct categories`, taken newest-first inside each
 # category; a category with fewer rows than its quota contributes all it has and the
 # shortfall is NOT redistributed, so the realised mix is reported rather than assumed.
+# The advert text is composed for the LIMITed rows only: `raw_json ->> 'title'` on every
+# active sreality/idnes row detoasts ~200k large payloads and cancelled the panel build at
+# the statement timeout (run 36679009472).
 _PANEL_SQL_TEMPLATE = """
 WITH pool AS (
-  SELECT l.id, l.source, l.category_main, {text} AS advert_text,
+  SELECT l.id, l.source, l.category_main,
          l.floor, l.total_floors, l.has_balcony, l.has_lift, l.has_parking,
          l.building_type, l.condition, l.energy_rating
     FROM listings l
@@ -100,14 +103,17 @@ WITH pool AS (
   SELECT pool.*,
          row_number() OVER (PARTITION BY category_main ORDER BY id DESC) AS rn
     FROM pool
+), picked AS (
+  SELECT ranked.* FROM ranked, quota
+   WHERE ranked.rn <= quota.n
+   ORDER BY ranked.category_main, ranked.id DESC
+   LIMIT %(limit)s
 )
-SELECT ranked.id, ranked.source, ranked.category_main, ranked.advert_text,
-       ranked.floor, ranked.total_floors, ranked.has_balcony, ranked.has_lift,
-       ranked.has_parking, ranked.building_type, ranked.condition, ranked.energy_rating
-  FROM ranked, quota
- WHERE ranked.rn <= quota.n
- ORDER BY ranked.category_main, ranked.id DESC
- LIMIT %(limit)s
+SELECT picked.id, picked.source, picked.category_main, {text} AS advert_text,
+       picked.floor, picked.total_floors, picked.has_balcony, picked.has_lift,
+       picked.has_parking, picked.building_type, picked.condition, picked.energy_rating
+  FROM picked JOIN listings l ON l.id = picked.id
+ ORDER BY picked.category_main, picked.id DESC
 """
 
 # The bazos slice: scored only where one structured portal advertises the same unique
@@ -176,14 +182,20 @@ SELECT DISTINCT ON (l.id) l.id, l.source, l.category_main, p.stratum,
 # The structured portals: a street the portal stated in a table is a free label.
 LOCATION_SOURCES: tuple[str, ...] = ("sreality", "idnes", "realitymix", "ceskereality")
 _LOCATION_STRUCTURED_SQL = f"""
+WITH picked AS (
+  SELECT l.id
+    FROM listing_location ll JOIN listings l ON l.id = ll.listing_id
+   WHERE l.source = %(source)s AND l.is_active
+     AND l.description IS NOT NULL AND l.description <> ''
+     AND ll.street_name IS NOT NULL AND ll.granularity IN ('street', 'address_point')
+   ORDER BY md5(l.id::text)
+   LIMIT %(n)s
+)
 SELECT l.id, l.source, l.category_main, 'structured' AS stratum,
        {tx._TEXT_EXPR} AS advert_text, {_LOCATED}
-  FROM listing_location ll JOIN listings l ON l.id = ll.listing_id
- WHERE l.source = %(source)s AND l.is_active
-   AND l.description IS NOT NULL AND l.description <> ''
-   AND ll.street_name IS NOT NULL AND ll.granularity IN ('street', 'address_point')
+  FROM picked JOIN listings l ON l.id = picked.id
+  LEFT JOIN listing_location ll ON ll.listing_id = l.id
  ORDER BY md5(l.id::text)
- LIMIT %(n)s
 """
 # ONE statement over every reading: does the text town exist in the register (obec, část
 # obce, k.ú.), which namesake (the obec nearest the pin, preferring the obec's own unit), how
