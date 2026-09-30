@@ -1139,24 +1139,12 @@ def _max_id(conn: Any, table: str) -> int:
 
 
 def _refresh_matview(conn: Any) -> None:
-    # CONCURRENTLY: readers keep the old rows while the new build happens beside
-    # them. The plain form's ACCESS EXCLUSIVE held every reader out for the whole
-    # rebuild (352 s on 2026-09-30, in working hours since the GH cron drift) —
-    # and it isn't only the Brokers page: broker detail region_shares,
-    # broker_geo_options and outreach read this matview too. Unlike CREATE INDEX,
-    # REFRESH ... CONCURRENTLY is valid inside a transaction, so the SET LOCAL
-    # timeout lift and the stamp still share the refresh's txn (the stamp commits
-    # iff the refresh did).
-    t0 = time.monotonic()
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute(
-            "REFRESH MATERIALIZED VIEW CONCURRENTLY broker_region_type_stats")
-        cur.execute("SELECT count(*) FROM broker_region_type_stats")
-        rows = int(cur.fetchone()[0])
-        db.stamp_derived_artifact(
-            conn, "broker_region_type_stats", rows=rows,
-            duration_ms=int((time.monotonic() - t0) * 1000))
+    # The chokepoint (migration 578) refreshes CONCURRENTLY — readers never
+    # block — stamps rows + duration in-DB, and returns -1 when another refresh
+    # of this matview is already in flight (skip, never queue a second build).
+    rows = db.refresh_matview(
+        conn, "broker_region_type_stats", statement_timeout="0")
+    LOG.info("RESOLVE matview refreshed rows=%d", rows)
 
 
 _CANDIDATE_BROKERS = """

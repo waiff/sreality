@@ -515,26 +515,33 @@ def run_resilient(
     raise last_exc
 
 
-_STAMP_DERIVED_ARTIFACT_SQL = "select public.stamp_derived_artifact(%s, %s, %s)"
-
-
-def stamp_derived_artifact(
+def refresh_matview(
     conn: psycopg.Connection,
     name: str,
     *,
-    rows: int | None = None,
-    duration_ms: int | None = None,
-) -> None:
-    """Record a successful production of one derived artifact (migration 441).
+    statement_timeout: str | None = None,
+) -> int:
+    """Publish one registered matview through public.refresh_matview (migration 578)
+    — the ONE Python path to a refresh.
 
-    The ONE call shape every Python producer uses; the SQL-side function is the ONE
-    write shape the registry has. A name with no registry row is a silent no-op by
-    design (a producer must never fail because a metadata row is missing) — the typo
-    that would hide behind that is caught in CI by
-    tests/test_derived_artifacts_stamping.py, not here.
+    The SQL side refuses unregistered names (loud, replacing the silent-no-op stamp
+    for matview producers), refreshes CONCURRENTLY so readers never block (plain form
+    only on an unpopulated first populate), returns -1 without refreshing when another
+    refresh of the same matview is in flight, and stamps derived_artifacts with real
+    rows + duration_ms inside the refresh's own transaction.
+
+    `statement_timeout` re-budgets the refresh transaction ('0' = no limit); None
+    inherits the connection's budget. Callers already inside a transaction get a
+    savepoint; note a SET LOCAL made here then lasts to the END of the outer
+    transaction, so only pass a timeout from top-level callers.
     """
-    with conn.cursor() as cur:
-        cur.execute(_STAMP_DERIVED_ARTIFACT_SQL, (name, rows, duration_ms))
+    with conn.transaction(), conn.cursor() as cur:
+        if statement_timeout is not None:
+            cur.execute(
+                "select set_config('statement_timeout', %s, true)",
+                (statement_timeout,))
+        cur.execute("select public.refresh_matview(%s)", (name,))
+        return int(cur.fetchone()[0])
 
 
 @lru_cache(maxsize=None)

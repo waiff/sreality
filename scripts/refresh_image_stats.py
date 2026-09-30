@@ -31,37 +31,23 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    # db.connect adds the shared handshake-retry + TCP keepalives; autocommit is
-    # required because REFRESH ... CONCURRENTLY cannot run in a transaction block.
+    # db.connect adds the shared handshake-retry + TCP keepalives. Each matview
+    # goes through the ONE chokepoint (migration 578): CONCURRENTLY with a
+    # first-populate fallback, in-flight-refresh skip, stamped in-DB with rows +
+    # duration — the try/except ladder this loop used to carry lives there now.
     with db.connect(db_url) as conn:
         for mv in _MVS:
             try:
-                with conn.cursor() as cur:
-                    cur.execute(f"refresh materialized view concurrently {mv}")
+                rows = db.refresh_matview(conn, mv)
             except psycopg.errors.UndefinedTable:
                 # Deploy/migration race: the script can run before a newly
                 # added matview's migration is applied. Skip, don't fail the
-                # whole job — the next 2-hourly run picks it up.
+                # whole job — the next 2-hourly run picks it up. (An mv that
+                # EXISTS but has no registry row raises instead: that is a
+                # misconfiguration, not a race.)
                 LOG.warning("REFRESH skipped mv=%s (does not exist yet)", mv)
                 continue
-            except (
-                psycopg.errors.FeatureNotSupported,
-                psycopg.errors.ObjectNotInPrerequisiteState,
-            ):
-                # A matview created WITH NO DATA (e.g. when its initial
-                # population exceeds the migration-runner's statement timeout)
-                # cannot be refreshed CONCURRENTLY until populated once.
-                # Postgres raises FeatureNotSupported (0A000) for this —
-                # verified live; ObjectNotInPrerequisiteState kept for kinship.
-                with conn.cursor() as cur:
-                    cur.execute(f"refresh materialized view {mv}")
-                db.stamp_derived_artifact(conn, mv)
-                LOG.info("REFRESH done mv=%s (first populate, non-concurrent)", mv)
-                continue
-            # Both success paths stamp; the UndefinedTable path above deliberately does
-            # not, so a matview that does not exist yet reads as stale rather than fresh.
-            db.stamp_derived_artifact(conn, mv)
-            LOG.info("REFRESH done mv=%s", mv)
+            LOG.info("REFRESH done mv=%s rows=%d", mv, rows)
     return 0
 
 

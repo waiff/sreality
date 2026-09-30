@@ -45,7 +45,25 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS = _ROOT / "migrations"
 
-_FN_MIGRATION = _MIGRATIONS / "469_broker_leaderboard_subtype_filter.sql"
+def _latest_migration_defining(fn: str) -> Path:
+    """The HIGHEST-numbered migration that CREATE OR REPLACEs `fn` — i.e. the live
+    definition. This file used to pin migration 469 by name while migration 508 had
+    already superseded the body: the offline contract was validating a dead file, and
+    nothing checked the definition production actually runs (found in the 2026-09-30
+    Brokers-outage investigation). Resolving dynamically keeps the contract on the
+    live body without an edit here on every redefinition."""
+    pattern = re.compile(
+        rf"create\s+or\s+replace\s+function\s+(?:public\.)?{fn}\s*\(", re.IGNORECASE
+    )
+    hits = [
+        p for p in _MIGRATIONS.glob("*.sql")
+        if pattern.search(_strip_comments(p.read_text()))
+    ]
+    assert hits, f"no migration defines {fn}"
+    return max(hits, key=lambda p: int(re.match(r"(\d+)", p.name).group(1)))
+
+
+_FN_MIGRATION = _latest_migration_defining("broker_leaderboard")
 _OUTREACH = _ROOT / "api" / "outreach.py"
 
 
