@@ -1111,9 +1111,14 @@ component is slimmed twice — each wave rewrites one component and slims its st
 - **W18-c — `m²` is not a foreign script** (2026-09-29): `street_token` refused every headline with a
   superscript (18,118 of 50,248 live bazos). After merge: intake `mode=full source=bazos` → ≈ +3,175 streets.
 
+- **W19 — the text lane reads location** (plain-text location reader, operator ruling 2026-09-29/30):
+  W1 in review — the field-capture text lane reads headline + description and returns a quoted
+  location block stored raw, delisted adverts read once; `extract_street` deleted; the pilot is
+  `text_extraction_bakeoff.yml` with `location_rows`. NEXT: W2 resolver v5.5, W3 the readings reader.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
-campaigns or schedules; foreign is a determination, never a default; a field is added only by
+campaigns or schedules (except the plain-text location reader, ruled 2026-09-29); foreign is a determination, never a default; a field is added only by
 operator ruling (katastr_kod, 2026-09) or after a measured Browse/map slowdown and only to `browse_list`.
 
 ## W0 — done

@@ -35,10 +35,8 @@ def test_run_model_is_concurrent_and_order_preserving(monkeypatch: Any) -> None:
 def test_floor_labels_are_the_stored_value_on_every_portal() -> None:
     """W8 made listings.floor ground = 0 everywhere; a per-source offset here would score
     floor against labels one storey off (Gemma, run 35731041090)."""
-    assert bk._label_floor("sreality", 0) == 0
-    assert bk._label_floor("sreality", 3) == 3
-    assert bk._label_floor("idnes", 3) == 3
-    assert bk._label_floor("idnes", None) is None
+    row = {"id": 1, "source": "idnes", "category_main": "byt", "advert_text": "x", "floor": 0}
+    assert bk._panel_row(row, label_source="idnes")["labels"] == {"floor": 0}
 
 
 def test_the_receipt_survives_a_terminate_runpod_did_not_confirm() -> None:
@@ -63,3 +61,46 @@ def test_the_receipt_survives_a_terminate_runpod_did_not_confirm() -> None:
     assert bk._pod_is_gone(_Client({"desiredStatus": "TERMINATED"}), "p") is True
     assert bk._pod_is_gone(_Client({"desiredStatus": "RUNNING"}), "p") is False
     assert bk._pod_is_gone(_Client(TimeoutError("read timed out")), "p") is False
+
+
+def _reading(rid: int, kind: str, read: dict[str, str], labels: dict[str, str],
+             register: dict[str, Any], claimed: list[str], quoted: list[str]) -> dict[str, Any]:
+    location = {s: {"value": read.get(s), "quote": read.get(s) and f"q {read[s]}"}
+                for s in ("town", "part_of_town", "street", "house_number_cp",
+                          "house_number_co", "house_number_ev")}
+    location["ad_kind"] = {"value": "offer", "quote": None}
+    labels = {"part_of_town": None, "street": None, "house_number_cp": None, **labels}
+    return {"id": rid, "labels": {}, "values": {}, "dropped": {}, "cost_usd": 0.0, "ms": 1,
+            "location": location, "label_kind": kind, "stratum": "md5", "source": "x",
+            "location_labels": labels, "stored": {"obec_name": labels.get("town"),
+                                                  "okres_name": "O"},
+            "advert_text": "Headline\nBody", "register": register,
+            "claimed": claimed, "quoted": quoted}
+
+
+def test_the_location_half_scores_agreement_binds_and_gates() -> None:
+    """Structured rows grade the street by the register's fold (`ul. Husova` == Husova);
+    bazos rows grade only against the STORED town, and a disagreement is review material."""
+    results = [
+        _reading(1, "structured", {"street": "ul. Husova", "town": "Brno"},
+                 {"street": "Husova", "town": "Brno"},
+                 {"level": "obec", "binds_stored_town": True}, ["street", "town"],
+                 ["street", "town"]),
+        _reading(2, "stored", {"town": "Kbel"}, {"town": "Švihov"},
+                 {"level": "obec", "name": "Kbel", "okres": "Plzeň-jih", "km": 2.4,
+                  "namesakes": 2},
+                 ["town", "street"], ["town"]),
+    ]
+    out = bk.score(results)
+    loc = out["location"]
+    assert loc["per_slot"]["street"]["structured_agreement"] == 1.0
+    assert loc["per_slot"]["street"]["quote_valid"] == 0.5
+    assert loc["town_binds"] == 1.0 and loc["bazos_town_agreement"] == 0.0
+    assert loc["quote_validity"] == 0.75 and loc["ad_kind"] == {"offer": 2}
+    assert out["gates"]["structured street agreement >= 95%"] is True
+    assert out["gates"]["quote validity >= 95%"] is False
+    sheet = bk.review({"arms": [{"model": "m", "readings": results}]})
+    assert "- Text: Kbel -> obec Kbel (1 of 2), okres Plzeň-jih, 2.4 km from the pin" in sheet
+    assert loc["by_stratum"]["md5"]["admitted"] == 2 and bk.agrees("street", "nám. Míru",
+                                                                     "náměstí Míru")
+    assert 'town "Brno" <- "q Brno"' not in sheet  # structured rows are not in the sheet

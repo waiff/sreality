@@ -202,8 +202,8 @@ HEADLINE for that ad. Of 20,909 cued titles, 18,226 anchor to an obec and 14,659
 bind exactly; ~4,300 more cue-less titles carry a comma segment that folds to a register
 street. bazos hard-caps a title at 60 characters — 21,930 sit exactly on the cap, cut
 mid-word — and a truncated stem never binds. Three other surfaces were measured and left out:
-`raw_json.coords.street` is NOT subject-scoped (`extract_street` scans the title *and the
-description* and takes the first cue match, so 29,697 of its 50,529 values never appear in
+`raw_json.coords.street` (deleted 2026-09-30) was NOT subject-scoped (`extract_street` scanned
+the title *and the description* for the first cue match, so 29,697 of 50,529 values never appear in
 the title — boilerplate like "Energetická třída" and proximity prose that binds to real
 streets, which on a portal whose every pin is blurred would silently MOVE the point); the
 `<head>` title is the same capped string plus the okres and " | Bazoš.cz"; and the

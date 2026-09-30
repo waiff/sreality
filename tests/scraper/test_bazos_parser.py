@@ -11,14 +11,7 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
-from scraper.bazos_parser import (
-    _resolve_coords,
-    extract_street,
-    parse_detail,
-    parse_index,
-)
+from scraper.bazos_parser import _resolve_coords, parse_detail, parse_index
 
 INDEX_HTML = """
 <!DOCTYPE html><html><body>
@@ -84,9 +77,7 @@ DOHODOU_DETAIL_HTML = """
 # layout — label, a map-icon cell, then a cell holding the maps link (PSČ as its
 # anchor text) followed by a separate town-listings anchor, i.e. "PSČ Town" order.
 # The hand-authored 2-cell "Town PSČ" fixtures above had diverged from this and
-# hid a 100%-NULL-locality bug. Note the street ("ul. Koterovská") is at the END
-# of the title and the description opens with "Nabízíme" — the regression that
-# produced "ul. Koterovská Nabízíme" as the street.
+# hid a 100%-NULL-locality bug.
 LIVE_LOKALITA_DETAIL_HTML = """
 <!DOCTYPE html><html><body>
 <div class="drobky"><a href="https://www.bazos.cz/">Hlavní stránka</a> > <a href="https://reality.bazos.cz/">Reality</a> > <a href="https://reality.bazos.cz/pronajmu/">Pronájem</a> > <a href="https://reality.bazos.cz/pronajmu/byt/">Byty</a> > <b>Inzerát č. 219722150</b></div>
@@ -101,10 +92,9 @@ LIVE_LOKALITA_DETAIL_HTML = """
 """
 
 
-def test_parse_detail_live_three_cell_lokalita_yields_locality_and_street():
+def test_parse_detail_live_three_cell_lokalita_yields_locality():
     """Regression for the production bug: the live 3-cell Lokalita layout must
-    yield a real locality and a clean street name (no description-word bleed
-    across the title/description newline)."""
+    yield a real locality."""
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
@@ -117,11 +107,8 @@ def test_parse_detail_live_three_cell_lokalita_yields_locality_and_street():
     assert listing.zip == "326 00"
     # Breadcrumb is authoritative for the category.
     assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
-    # The raw extract stops at the title's end — no "Nabízíme" from the next line.
-    assert listing.raw["coords"]["street"] == "ul. Koterovská"
-    # The STORED street is cleaned to a bare, uniform name (prefix stripped) — it
-    # is what the street+disposition dedup engine keys on and Browse displays.
-    assert listing.street == "Koterovská"
+    # No parser street any more: the text lane reads it (2026-09-30).
+    assert listing.street is None and "street" not in listing.raw["coords"]
     # The ad's own maps-link pin is the ONLY coordinate bazos publishes.
     assert listing.raw["coords"]["source"] == "link"
     assert (listing.lat, listing.lon) == (49.720928, 13.421173)
@@ -391,19 +378,6 @@ def test_parsed_listing_bridges_into_ingest_contract():
     assert row["area_m2"] == 65.0
 
 
-def test_parse_detail_street_is_a_claim_not_a_column():
-    # The street extraction is text-only and surfaces on ScrapedListing.street
-    # (cleaned to a bare name) as the parser's READING of the page. W4-c dropped
-    # listings.street, so it deliberately does NOT ride to_row.
-    listing = parse_detail(
-        LIVE_LOKALITA_DETAIL_HTML,
-        source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
-        category_main="byt", category_type="pronajem",
-    )
-    assert listing.street == "Koterovská"
-    assert "street" not in listing.to_row(-9)
-
-
 def test_parse_detail_dohodou_price_is_none():
     url = "https://reality.bazos.cz/inzerat/219122925/y.php"
     listing = parse_detail(
@@ -416,60 +390,20 @@ def test_parse_detail_dohodou_price_is_none():
     assert listing.area_m2 == 82.0
 
 
-# --- street extraction ------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "text, expected",
-    [
-        ("Prodám byt 2+kk Letovice, ulice Dlouhá 12", "ulice Dlouhá 12"),
-        ("Pěkný byt na Vinohradské třídě v Praze", "Vinohradské třídě"),
-        ("Byt u náměstí Míru 5, Praha 2", "náměstí Míru 5"),
-        ("Prodej bytu, Husova 12, Brno", "Husova 12"),
-        ("Vinohradská třída 5, Praha", "Vinohradská třída 5"),
-        ("Dům na Pražské ulici", "Pražské ulici"),
-        ("nábřeží Kapitánů, krásný výhled", "nábřeží Kapitánů"),
-    ],
-)
-def test_extract_street_finds_streets(text, expected):
-    assert extract_street(text) == expected
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Prodám byt 2+kk Letovice 679 61",   # PSČ, not a house number
-        "Prostorný byt 3+1, 82 m2, Garáž 20",  # stopword noun + number
-        "Pozemek 800 v obci",                 # stopword noun + number
-        "Pěkný byt v klidné lokalitě",        # no street at all
-        "",                                    # empty
-    ],
-)
-def test_extract_street_rejects_non_streets(text):
-    assert extract_street(text) is None
-
-
-def test_extract_street_none_on_none():
-    assert extract_street(None) is None
-
-
 # --- coordinate resolution ---------------------------------------------------
 # The geocoder and its cross-check are gone (W4-b): the ad's own CZ-guarded maps
 # link is the only coordinate bazos publishes, so these pin exactly two outcomes.
 
 def test_resolve_uses_the_cz_guarded_link():
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.560, link_lon=16.580, street="ulice Dlouhá")
+    lat, lon, prov = _resolve_coords(link_lat=49.560, link_lon=16.580)
     assert (lat, lon) == (49.560, 16.580)
-    assert prov["source"] == "link"
-    assert prov["link_present"] is True
-    assert prov["street"] == "ulice Dlouhá"
+    assert prov == {"source": "link", "link_present": True}
 
 
 def test_resolve_without_a_link_yields_no_coordinate():
     """No street geocode stands in for a missing pin any more — a bazos ad with
     no maps anchor simply has no position, and the claim intake licenses none."""
-    lat, lon, prov = _resolve_coords(
-        link_lat=None, link_lon=None, street="ulice Dlouhá")
+    lat, lon, prov = _resolve_coords(link_lat=None, link_lon=None)
     assert (lat, lon) == (None, None)
     assert prov["source"] is None
     assert prov["link_present"] is False
@@ -487,68 +421,37 @@ def test_parse_detail_records_coord_provenance():
     assert (listing.lat, listing.lon) == (49.863882, 16.333580)
 
 
-def test_extract_street_numeral_leading_after_keyword():
-    # W0 item 0i: "28. října" (and 1. máje, 17. listopadu, ...) is a very
-    # common Czech street-name class the uppercase-first pattern can't match.
-    # extract_street returns the RAW keyword-anchored form; clean_street
-    # produces the stored bare name.
-    from scraper.street import clean_street
+def test_lokalita_trailer_yields_the_quarter():
+    from scraper.bazos_parser import _trailer_quarter as t
 
-    raw = extract_street("Pronájem bytu, ul. 28. října 15")
-    assert raw == "ul. 28. října 15"
-    assert clean_street(raw) == "28. října"
-    assert extract_street("Byt na ulici 17. listopadu") == "ulici 17. listopadu"
-    # Bare numeral forms stay unmatched — dates and floor ordinals share the
-    # shape ("od 1. ledna 2027", "ve 2. patře"); wrong street worse than NULL.
-    assert extract_street("K nastěhování od 1. ledna 2027") is None
-    assert extract_street("Byt ve 2. patře cihlového domu") is None
-
-
-def test_lokalita_trailer_yields_street_and_quarter():
-    from scraper.bazos_parser import _trailer_street_quarter
-
-    s, q = _trailer_street_quarter("Pěkný byt.\nLokalita: Bezručova, Slezské Předměstí", "Hradec Králové")
-    assert (s, q) == ("Bezručova", "Slezské Předměstí")
-    # Numeral street in the trailer.
-    s, q = _trailer_street_quarter("Lokalita: 28. října, Moravská Ostrava", "Ostrava")
-    assert (s, q) == ("28. října", "Moravská Ostrava")
-    # The town itself is not a street; the quarter still comes through.
-    s, q = _trailer_street_quarter("Lokalita: Brno, Židenice", "Brno")
-    assert (s, q) == (None, "Židenice")
+    assert t("Pěkný byt.\nLokalita: Bezručova, Slezské Předměstí", "Hradec Králové") == "Slezské Předměstí"
+    assert t("Lokalita: Brno, Židenice", "Brno") == "Židenice"
     # Prose "lokalita" without a colon-anchored value never fires.
-    assert _trailer_street_quarter("Byt v klidné lokalitě u parku.", "Brno") == (None, None)
-    # Non-street-like word rejected.
-    assert _trailer_street_quarter("Lokalita: centrum", "Brno") == (None, None)
+    assert t("Byt v klidné lokalitě u parku.", "Brno") is None
+    assert t(None, "Brno") is None
 
 
 def test_lokalita_trailer_on_newline_collapsed_text():
     # Review-confirmed critical on the first cut: parse_detail feeds _text()'d
     # descriptions — every newline collapsed to a space — so the trailer value
-    # must terminate at a following label ("Kontakt:", "Cena:", ...), never
-    # swallow the rest of the description into street/street_name_key.
-    from scraper.bazos_parser import _trailer_street_quarter as t
+    # must terminate at a following label ("Kontakt:", "Cena:", ...).
+    from scraper.bazos_parser import _trailer_quarter as t
 
-    assert t("Prodám byt. Lokalita: Bezručova Kontakt: 777 123 456", "Plzeň") == ("Bezručova", None)
-    assert t("Dispozice: 2+kk Lokalita: Bezručova Cena: dohodou", "Plzeň") == ("Bezručova", None)
-    assert t("Lokalita: Bezručova, Slezské Předměstí Kontakt: Jan", "HK") == ("Bezručova", "Slezské Předměstí")
-    # A >60-char label-less tail after the street still yields the street.
-    assert t(
-        "Lokalita: Bezručova Kontakt: 777 123 456 Volejte kdykoliv po osmnácté hodině děkuji",
-        "Plzeň",
-    ) == ("Bezručova", None)
+    assert t("Lokalita: Bezručova, Slezské Předměstí Kontakt: Jan", "HK") == "Slezské Předměstí"
+    assert t("Dispozice: 2+kk Lokalita: Bezručova Cena: dohodou", "Plzeň") is None
 
 
 def test_lokalita_trailer_quarter_is_validated():
     # Review-confirmed major on the first cut: the quarter reached
     # listings.district unvalidated — and district is a HASHED field, so
     # garbage there churns a snapshot per affected row.
-    from scraper.bazos_parser import _trailer_street_quarter as t
+    from scraper.bazos_parser import _trailer_quarter as t
 
     # Lowercase prose is not a place name.
-    assert t("Lokalita: Hradec Králové, klidná část u parku", "Hradec Králové") == (None, None)
-    assert t("Lokalita: Praha 9, výborná dostupnost MHD", "Praha 9") == (None, None)
+    assert t("Lokalita: Hradec Králové, klidná část u parku", "Hradec Králové") is None
+    assert t("Lokalita: Praha 9, výborná dostupnost MHD", "Praha 9") is None
     # The row's own town never duplicates into the district facet.
-    assert t("Lokalita: Nádražní, Ostrava", "Ostrava") == ("Nádražní", None)
+    assert t("Lokalita: Nádražní, Ostrava", "Ostrava") is None
 
 
 def test_spaced_thousands_in_the_ad_text_is_one_number():
