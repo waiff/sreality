@@ -24,8 +24,7 @@ import json
 from pathlib import Path
 
 from autodedup.dataset import Listing
-from autodedup.indistinguishable import (
-    CLUSTER, GATE, distinguishing_facts, offered_plan_space)
+from autodedup.indistinguishable import GATE, distinguishing_facts, offered_plan_space
 from autodedup.settings import Settings
 from autodedup.text_facts import (
     plan_headline_area, priced_letting_plan, printed_house_numbers,
@@ -289,22 +288,6 @@ def test_the_stored_limb_holds_when_the_dial_is_off() -> None:
     a = listing(1, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
     b = listing(2, number="734/46", description=JASIOKA_B, price=8150, area_m2=38.0)
     assert "stored_house_number" not in names(a, b, variant(d43_stored_house_number="off"))
-
-
-# --- E243: the interior floor, inside the cell it was cut in ---------------------------------
-def test_a_shared_photograph_puts_a_pair_outside_the_interior_cell() -> None:
-    a = listing(1, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
-    b = listing(2, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
-    weak = {"tag_room_clip_min2": (0.87, True), "phash_tight_matches": (7.0, True)}
-    assert "interior" in [f.name for f in distinguishing_facts(a, b, weak, S8, CLUSTER)]
-    assert "interior" not in [f.name for f in distinguishing_facts(a, b, weak, S9, CLUSTER)]
-
-
-def test_without_a_shared_photograph_the_interior_floor_still_holds() -> None:
-    a = listing(1, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
-    b = listing(2, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
-    weak = {"tag_room_clip_min2": (0.87, True), "phash_tight_matches": (0.0, True)}
-    assert "interior" in [f.name for f in distinguishing_facts(a, b, weak, S9, CLUSTER)]
 
 
 # --- E244: which room of a priced letting plan an advert is ----------------------------------

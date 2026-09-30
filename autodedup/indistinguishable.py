@@ -29,7 +29,6 @@ each is on the record:
     area                         1.6 %                     32.8 %
     street                       1.7 %                      0.0 %
     plot area                    2.1 %                     78.6 % (gold)
-    interior rooms               2.1 %                     36.8 %
     price, cross-portal          2.6 %                     27.0 %
     total floors                 4.2 %                     35.0 %
 
@@ -50,6 +49,11 @@ REFUSED by the same measurement, and named so nobody re-proposes them:
     Two portals disagree about `přízemí`; that is a vocabulary difference, not a fact.
   * the RÚIAN address code (4.2 %) and the house number (3.7 %) — one building has several
     entrances and two portals geocode one advert to two of them.
+
+REMOVED by ruling, not by measurement (E929): the CLIP room tag ALONE (`interior`,
+`tag_room_clip_min2` below 0.90; 2.1 % against 36.8 %). A tag is never a fact: it is the
+similarity of two galleries' room labels, not anything either advert states. A floor-plan
+drawing that differs is a photo proof and stays (`floorplan`, operator case 11).
 """
 
 from __future__ import annotations
@@ -181,9 +185,9 @@ PRICE_CROSS_TOL: float = 0.05
 # price at two moments. It is worth reading because it is free — 0 of 523 known duplicates —
 # and it is the only thing that separates a 2.5M nebytový prostor from a 9.9M dům on bazos.
 PRICE_SAME_SOURCE_TOL: float = 0.60
-# The weakest-but-one shared room, below which two galleries are not photographs of one home.
-# `features._tag_features` measures `tag_room_clip_min2` at AUC 0.820 in the hazard cell — the
-# best signal there is — and 0.90 is where it costs 2.1 % of known duplicates.
+# The weakest-but-one shared room at or above which `room_photo` AGREES toward promotion's bar.
+# `features._tag_features` measures `tag_room_clip_min2` at AUC 0.820 in the hazard cell. It
+# is a tag, so it may agree but never separates (E929).
 ROOM_CLIP_FLOOR: float = 0.90
 # The floor plan, read only together with a weak room match: the bare conflict is chance.
 FLOORPLAN_ROOM_CLIP_FLOOR: float = 0.90
@@ -243,7 +247,6 @@ FACT_NAMES: tuple[str, ...] = (
     "extent",
     "two_unit",
     "floorplan",
-    "interior",
     "body_align",
     "street_prose",
     "obec_prose",
@@ -2360,17 +2363,6 @@ def _read_one_text(a: Listing, b: Listing, cfg: Settings) -> bool:
     return ratio is not None and ratio >= cfg.d43_price_same_source_one_text_min
 
 
-def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
-    """E289: a same-portal re-post of ONE text at one stated area, never on sale together."""
-    if a.source is None or a.source != b.source:
-        return False
-    if a.area_m2 is None or b.area_m2 is None or float(a.area_m2) != float(b.area_m2):
-        return False
-    if not _never_live_together(a, b, cfg) or storeys_disagree(a, b):
-        return False
-    return _read_one_text(a, b, cfg)
-
-
 def floor_total_camp_shift(a: Listing, b: Listing, cfg: Settings) -> bool:
     """E301: `floor` and `total_floors` shifted TOGETHER by one storey are one counting camp.
 
@@ -2612,17 +2604,17 @@ def distinguishing_facts(
 ) -> list[Fact]:
     """Every stated fact that differs between two adverts. Empty list = indistinguishable.
 
-    `feats` is one row of the engine's own feature vector, and is the only way the image facts
-    can be read — this module computes no image evidence of its own. Passing None simply drops
-    those two facts, which is the correct reading of an advert whose photographs nobody paired.
+    `feats` is one row of the engine's own feature vector, and is the only way the image fact
+    (`floorplan`) can be read — this module computes no image evidence of its own. Passing None
+    simply drops it, which is the correct reading of an advert whose photographs nobody paired.
+    A room TAG is never a fact on its own (E929).
 
     THE THREE READINGS (E136/E138). `promote` is strict: merging on the ABSENCE of a fact is
     the one place the engine has no positive evidence to fall back on. `gate` is permissive —
     it is about to demote a merge the engine already certified, so it does not demote on a
     difference that is INFERRED rather than stated, nor on one a known vocabulary or geocode
-    ambiguity explains. `cluster` is `gate` with the image facts PUT BACK: the invariant is the
-    only thing standing between a development and one big group, and dropping its best
-    hazard-cell discriminator costs four bad groups where dropping it at the gate costs none.
+    ambiguity explains. `cluster` is `gate` with the image fact PUT BACK: the invariant is the
+    only thing standing between a development and one big group.
     """
     cfg = settings or Settings()
     out: list[Fact] = []
@@ -3109,17 +3101,6 @@ def distinguishing_facts(
     if (floorplan_conflict == 1.0 and room_clip is not None
             and room_clip < FLOORPLAN_ROOM_CLIP_FLOOR):
         add("floorplan", "conflict", f"room_clip_min2={room_clip:.3f}")
-    # E243: the floor was cut in the HAZARD cell — one address point and ZERO tight
-    # non-catalogue frames in common, which is the developer-unit shape. Two galleries holding
-    # the same photograph are not in that cell, and on cohort 11 they are 416 of the 495
-    # address-point certain duplicates S8 refuses, every one of them within 0.07 of the floor.
-    if (cfg.d43_interior_requires_no_tight_photo and tight_photo_match(feats)):
-        room_clip = None
-    if (room_clip is not None and cfg.d43_interior_sequential_repost
-            and _one_text_repost(a, b, cfg)):
-        room_clip = None
-    if room_clip is not None and room_clip < ROOM_CLIP_FLOOR:
-        add("interior", f"room_clip_min2={room_clip:.3f}", f"floor={ROOM_CLIP_FLOOR}")
 
     return out
 
