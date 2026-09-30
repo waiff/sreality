@@ -2,12 +2,13 @@ name: "Ops: retire claims under old contract versions"
 
 # Deletes every `location_claims` row written under a RETIRED contract version
 # (`portal_contracts.is_active = false`) — W6-a of the location simplification
-# sprint, ~9.5 M of ~13.2 M rows measured 2026-09-13. The resolver has never read
-# them: it admits a claim only under an ACTIVE contract header, or an operator
-# claim with no contract entry at all. So no verdict moves and NOTHING is enqueued
-# into `dirty_locations` — which is what separates this from
-# `contracts.py --retract`, the mechanism that withdraws a version's evidence
-# BECAUSE it was wrong and must re-resolve every listing it touched.
+# sprint, ~9.5 M of ~13.2 M rows measured 2026-09-13. NOT invisible to the resolver:
+# since W18-b (v5.3) it reads, PER CLAIM TYPE, the newest version <= the active one
+# a listing carries — so a listing whose type was never re-mined still stands on a
+# retired version's claim (`resolve_db._claims_sql`). The rail below is per LISTING,
+# not per type. Location reader W3: do NOT dispatch while text-less delisted bazos
+# rows still hold their bazos@7 town. Nothing is enqueued into `dirty_locations` —
+# unlike `contracts.py --retract`, which withdraws evidence BECAUSE it was wrong.
 #
 # TWO STEPS, in this order, and the first is the point of the workflow:
 #

@@ -193,27 +193,15 @@ serve delisted pages again), an off-database copy lives in R2 under
 `export_raw_pages_archive.yml`), and `tests/test_portal_raw_pages_guard.py` fails CI on
 any `DELETE`/`TRUNCATE`/`DROP` against the table. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
-sreality. **bazos' STREET is text, and since W18 it is claimed** (`bazos@7`,
-`bzs.det.street_cue`): it was the only portal of the nine with no street claim at all —
-129,871 located rows, every one obec-grain — while the ad states a street on a third of them.
-The claim reads ONE surface: `raw_json.title`, which is
-`h1.nadpisdetail` verbatim (`scraper/bazos_parser.py:485`) and therefore the SELLER'S OWN
-HEADLINE for that ad. Of 20,909 cued titles, 18,226 anchor to an obec and 14,659 (80.1 %)
-bind exactly; ~4,300 more cue-less titles carry a comma segment that folds to a register
-street. bazos hard-caps a title at 60 characters — 21,930 sit exactly on the cap, cut
-mid-word — and a truncated stem never binds. Three other surfaces were measured and left out:
-`raw_json.coords.street` (deleted 2026-09-30) was NOT subject-scoped (`extract_street` scanned
-the title *and the description* for the first cue match, so 29,697 of 50,529 values never appear in
-the title — boilerplate like "Energetická třída" and proximity prose that binds to real
-streets, which on a portal whose every pin is blurred would silently MOVE the point); the
-`<head>` title is the same capped string plus the okres and " | Bazoš.cz"; and the
-description is populated on 93 % of rows and carries a cue on 48 %, but its FIRST cue is
-usually prose and binds exactly only 19 % of the time — W19's lever, with the number already
-taken. Nothing about the text is trusted on its own: the claim keeps
-whatever the portal wrote (only the generic `ulice`/`ul.` wrapper comes off, via
-`street_token`) and the RESOLVER decides, so `Nový` — hallucinated out of "Nový 2 pokojový
-byt" and once geocoded 130 km away — is claimed and never published, while the numeric-leading
-`28. října` that the old morphology guard refused binds.
+sreality. **bazos' location TEXT is claimed from the text lane's reading since W3** (`bazos@8`, the
+`bzs.txt.*` entries): the one call that reads each advert (headline + description) for floor and lift
+also answers where the property itself is — town, part of town, street, house numbers — quoting its
+words (`location_data/text_reading.py`), and the claim lane mines that stored answer. It replaced two
+carriers: the town anchor's href slug, which names the POST OFFICE's town (35 of 137 sampled adverts
+sat in the wrong town, 33 of them by postcode — the PSČ entry stays), and W18's whole-headline street
+claim (`bzs.det.street_cue`, split by the resolver). Nothing in the reading is trusted on its own: V1
+the quote is verbatim in the advert, V2 the value is grounded in its quote, V3 an offered property in
+Czechia, V4 a number carries its marker — and the register decides whether a name is a place.
 
 **Data source (bezrealitky.cz).** A scheduled scraper (`scraper/bezrealitky_client.py`,
 `bezrealitky_parser.py`, `bezrealitky_main.py`, workflow `scrape_bezrealitky.yml` — pilot,
@@ -2598,12 +2586,12 @@ renumber.** Navigate by area:
     never flipped a consumer, so nothing exercised it end to end and nothing was ever deleted; 733
     verified findings came out of that shape, not out of any one bug. The corrective, and the
     as-built state: ONE answer table (`listing_location`, 27 columns) written by ONE four-step
-    resolver (bind → fill → grade → check); ONE hourly lane over the stored payload and the stored
-    page body; ELEVEN claim types, at most one contract entry per type, the town entry mandatory and
-    naming a reader; ONE label function and ONE four-level code predicate for every place display
-    and filter; no serving flags, no granularity floors, no second store — `listings` and
-    `properties` carry no place column, so a reader joins `ll on ll.listing_id = l.id` and casts
-    `ll.geom::geography` for anything measured in metres. The reason the answer is graded rather
+    resolver (bind → fill → grade → check); ONE hourly lane over the stored payload, the stored page
+    body and the text lane's stored reading; TWELVE claim types, at most one contract entry per
+    type, the town entry mandatory and naming a reader; ONE label function and ONE four-level code
+    predicate for every place display and filter; no serving flags, no granularity floors, no
+    second store — `listings` and `properties` carry no place column, so a reader joins `ll on
+    ll.listing_id = l.id` and casts `ll.geom::geography` for anything measured in metres. The reason the answer is graded rather
     than a bare point: a `listings.geom` carried no statement of how precisely or trustworthily it
     was known, and a 75 m dedup circle around a town-centroid pin is exactly the false-merge class
     the axes prevent — remax disagreement is predicted on 54.3 % of raw addresses, bazos ran 5.56
@@ -2822,14 +2810,14 @@ each atomic with its own `dirty_locations` enqueue, then stands the header down.
 "the contract's claims" is every listing a portal has ever had (~5 M on sreality), and one atomic
 DELETE of that size spends its `statement_timeout` and rolls back, making no progress ever.
 
-**ONE LANE, TWO HALVES.** `location_data/claims_intake.py` (hourly, `35 * * * *`) is the only writer
-of `location_claims`, and it reads the two substrates we hold: `listings.raw_json`, and the LATEST
-stored detail body in `portal_raw_payloads`, joined on `(source, source_id_native)` (`.listing_id`
-is nullable and nothing ever populated it), fetched from R2 and scoped by the contract's exclusion
-zones. ONE registry — `claims_intake.READERS`, 21 entries keyed by substrate, a name outside it a
-hard refusal — over seven payload readers and fourteen page readers
-(`location_data/page_readers.py`; the vocabulary both halves share is
-`location_data/claims_common.py`). A `listings` COLUMN is never a substrate: a column the scraper
+**ONE LANE, THREE HALVES.** `location_data/claims_intake.py` (hourly, `35 * * * *`, and the worker's
+minute lane) is the only portal writer of `location_claims`, and it reads the three substrates we
+hold: `listings.raw_json`; the LATEST stored detail body in `portal_raw_payloads`, joined on
+`(source, source_id_native)` (`.listing_id` is nullable and nothing ever populated it), fetched from
+R2 and scoped by the contract's exclusion zones; and the text lane's stored reading (W3). ONE
+registry — `claims_intake.READERS`, 22 entries keyed by substrate, a name outside it a hard refusal —
+over seven payload readers, fourteen page readers (`location_data/page_readers.py`) and one reading
+reader (`location_data/text_reading.py`); the vocabulary they share is `location_data/claims_common.py`. A `listings` COLUMN is never a substrate: a column the scraper
 writes is not evidence a portal published.
 
 * *The payload half* walks `listing_snapshots.id`. A snapshot row is appended exactly when a
@@ -2864,6 +2852,19 @@ writes is not evidence a portal published.
   terminate the parent's session. The pool is an accelerator only: one outcome per body IN ORDER, so
   a content-triggered refusal still costs one listing's page entries and a pool the OOM killer takes
   finishes its batch on the main thread.
+* *The readings half* (W3, migration 578) runs after the page half, in what is left of its budget
+  share. A listing's CURRENT reading is its successful location reading of its CURRENT advert text
+  (hashed in SQL by the text lane's own expressions), at the lane's current `extractor_version` if one
+  exists, else the newest; it is mined when its `mined_contract_version` stamp (`<source>@<version>`)
+  is not the portal's active contract. No cursor and no index: the selector reads the readings table
+  once, hash-free (~0.6 s), and hashes only the listings whose preferred reading is unstamped or that
+  have two texts read. ONE statement per batch does each reading's four acts — insert its claims;
+  DELETE the listing's other same-source, non-operator claims of the reading entries' types
+  (SUPERSESSION: a headline edit, a model rolled back M1→M2→M1, a text reverting A→B→A each publish
+  the current reading); stamp it and clear the listing's other stamps; enqueue. Pages are never
+  superseded (a degraded page must not delete a town), and a listing with no reading keeps its older
+  claims — so `location_claims_retire.yml` must not run while text-less delisted bazos rows still
+  hold their `bazos@7` town (its rail is per listing, not per claim type).
 
 **A GONE PAGE IS NOT A BODY (W10).** "Latest body" means the latest body that is an AD. Four portals
 answer HTTP 200 for a listing they have removed — bazos serves the CATEGORY INDEX page, which carries
@@ -2982,12 +2983,13 @@ reports an unfinished half THAT IT MOVED (`bodies_pass_complete=false` with `bod
 first: if any member of the `location-batch` group is already waiting the chain ends, because the
 group holds one pending slot and GitHub supersedes the OLDER entry.
 
-**ELEVEN CLAIM TYPES, AND THE CONTRACT RAILS.** `contracts/portals/<portal>.yaml` × 9 declares every
+**TWELVE CLAIM TYPES, AND THE CONTRACT RAILS.** `contracts/portals/<portal>.yaml` × 9 declares every
 extractor (permanent id, surface, licence class, caps, priors, exclusion zones) and
 `location_data/contracts.py` projects them into `portal_contracts` / `portal_contract_entries`,
 idempotent per `contract_version`, refusing a changed body under a loaded version — the YAML is data,
-git stays the store of record. The vocabulary is eleven types (`coordinate`, `precision_declaration`,
-`country`, the four admin names, `street_name`, `house_number_cp` / `_co`, `psc`); the Postgres enums
+git stays the store of record. The vocabulary is twelve types (`coordinate`, `precision_declaration`,
+`country`, the four admin names, `street_name`, `house_number_cp` / `_co`, `psc`,
+`address_point_id`); the Postgres enums
 keep their retired labels (an enum cannot shrink in place), so the loader's vocabulary is a strict
 subset of the enum's. The loader enforces the SHAPE: six legal top-level keys (`portal`,
 `contract_version`, `persistence`, `exclusion_zones`, `regressions`, `extractions`) and an unknown
@@ -3101,27 +3103,16 @@ portal's payload or its own page, and every other stamp is class E outright.
   binds nothing and the row stays unresolved. The readers no longer interpret a locality at all — the
   `statutory_city_obec` regex over eight hand-typed city names and its `address_part_cast_obce` mirror
   are deleted, the claim carries the portal's line verbatim, and both names on the answer row are the
-  register's own spelling. **A STREET STATED INSIDE A LINE IS BOUND THE SAME WAY** (`composite.resolve_street`,
-  W18, operator ruling 2026-09-16): a portal states a street inside a line as readily as it states a
-  quarter inside one — bazos' headline is "Prodej bytu 3+1, ul. Jiráskova, Mladá Bolesl" and its
-  parser's own reading is "Kladno - Dubí, Ke Křížku" — so EVERY street claim is split on the portals' own
-  separators — a value carrying none is simply one segment — and each segment is matched EXACTLY
-  against `ruian_streets` inside the anchoring obec. ONE binder and one answer: whether a claim reached
-  the exact matcher used to turn on whether the portal happened to write a comma, so a comma-less
-  headline fell through to the trigram rung and bound a street out of prose. Three rules the locality binder does not
-  need: **both keys** (the register keeps `náměstí`/`třída`/`nábřeží` in `name_norm` while S1 parses
-  them off, so claim and register are each folded both ways and matched on the pair — worth 215
-  titles that bind only with the generic word kept); **no trigram unless the CONTRACT calls the claim an
-  address field** (R3 is for one claimed name with a typo in it; over a headline it binds a street the
-  ad never named — "Byt Slunečná" scores 1.0 against Slunečná while "Prodej domu Slunečná" scores 0.429
-  and binds nothing, i.e. coverage decided by title length. The bazos title entry declares
-  `claim_confidence: low`, meaning *a headline, not an address field*, and the resolver obeys the
-  declaration — no rule names a portal. It is also why a title cut at bazos' 60-character cap, 21,930
-  of them, simply fails: there is no prefix matching anywhere in this lane. And a TIE is not a typo —
-  where the exact matcher fails closed on two register rows, R3 does not run either); and **not a place** (a segment naming the anchoring obec or
-  a část obce inside it is never a street candidate — 76 register streets across 20 obce are spelled
-  exactly like a část obce of their own town). It fails CLOSED on two distinct street codes across
-  the segments, and a bound segment carrying a house number reaches R1 rather than stopping at R2.
+  register's own spelling. **A STREET IS BOUND THE SAME WAY** (`composite.resolve_street`,
+  W18; v5.6): every street claim is matched EXACTLY against `ruian_streets` inside the anchoring obec,
+  in two tiers — a full-name match wins outright, the type-word-tolerant fold only when nothing matched
+  exactly — with **both keys** (the register keeps `náměstí`/`třída`/`nábřeží` in `name_norm` while S1
+  parses them off, so both are folded both ways — worth 215 titles) and **not a place** (a claim naming
+  the anchoring obec or a část obce inside it is never a street — 76 register streets across 20 obce are
+  spelled exactly like a část obce of their own town). It fails CLOSED on two distinct street codes,
+  and a bound street carrying a house number reaches R1. R3 (trigram) runs only when nothing bound
+  exactly and never undoes an exact tie. W18 split bazos' whole headline on separators and kept R3 off
+  it (`claim_confidence: low`); v5.6 deleted both once W3's reading named the street itself.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; **the street is the REGISTER's or it is nothing** (W18) — an unbound claim text is no

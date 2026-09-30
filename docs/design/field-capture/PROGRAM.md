@@ -191,7 +191,8 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 ## 3. What this program never does
 
 - Puts an LLM, a cache probe, or any per-row statement between a sighting and publication.
-- Adds a flag, an `app_settings` key, an env var, or a column.
+- Adds a flag, an `app_settings` key, an env var, or a column — one ruled exception: the location reader's
+  claim-lane stamp `listing_description_enrichments.mined_contract_version` (W3, migration 578, ruling 2026-09-30).
 - Blanks a stated value, writes history in bulk, or lets a heal bump `last_seen_at`.
 - Touches autodedup code/docs, or lets an attribute edit move a location contract's governed hash.
 

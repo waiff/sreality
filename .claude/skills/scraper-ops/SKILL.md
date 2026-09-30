@@ -356,8 +356,8 @@ Lanes shipped so far:
   budgets and lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it had to be idled
   before is gone with the pin-collision engine, W2-a.)
 - **Location-intake-fast lane** (W7-a) — THE claim lane's change-driven listing scan
-  (`claims_intake.run`, `mode="incremental"`; JSON half first, then a bodies pass on the
-  remainder — cap `LOCATION_INTAKE_FAST_BODIES_CAP` 300, R2 width 8, ONE 2-wide `ExtractionPool`
+  (`claims_intake.run`, `mode="incremental"`; JSON half first, then bodies + stored readings on the
+  remainder — body cap `LOCATION_INTAKE_FAST_BODIES_CAP` 300, R2 width 8, ONE 2-wide `ExtractionPool`
   reused across ticks) every ~60 s with a **2-minute** snapshot lag and a 45 s budget, under its OWN
   `claims_intake.FAST_LANE` cursor so it never moves the hourly run's 15-minute one (that run
   re-reads whatever the short lag skipped). Ships **LIVE**; env knobs on the Railway service:
@@ -387,8 +387,8 @@ Lanes shipped so far:
   records, new, failed, skipped, seconds}`; no store = `ran: false` + one warning.
 - **Text-extract lane** (field-capture W7, `toolkit/description_extraction.run_pass`) — the
   post-publication read of the facts a prose-only advert states only in its text. CONSTANT 300 s
-  interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope
-  = the contract's `text` cells whose R7 `gate` has PASSED, so with no gate open it is live and free.
+  interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope =
+  the open-R7-gate `text` cells ∪ portals declaring `llm_text`; its readings are mined by the claim lane.
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 - **Autodedup lane** (AUTODEDUP §7.3, mig 557) — THE engine's real-time SHADOW pass (`run_incremental`); one integer
   `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running), claim = engine rate × half a 1050 s deadline, budget

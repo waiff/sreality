@@ -249,8 +249,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     it adds.** `listing_location` (27 columns, migs 501/566) is the ONLY place a listing's location is stored —
     `listings`/`properties` carry none (mig 508), and there is no serving flag and no granularity floor — so a
     place read joins `ll on ll.listing_id = l.id`, casting `ll.geom::geography` for metres (uncast = DEGREES).
-    ONE hourly lane (`claims_intake`) writes `location_claims` off the stored payload + page body; ONE four-step
-    resolver (bind → fill → grade → check) writes the answer table; ELEVEN claim types, ≤ 1 contract entry each,
+    ONE hourly lane (`claims_intake`) writes `location_claims` off the stored payload + page body + the text lane's
+    stored reading; ONE four-step resolver writes the answer table; TWELVE claim types, ≤ 1 contract entry each,
     the `obec_name` entry mandatory and live; every display is `location_display_label`, every place filter
     `<level>_id = any(codes)` at four levels. CONSUMERS (browse/map/feed/watchdog/dedup) serve a listing only
     when its location is resolved or determined foreign — ONE predicate
