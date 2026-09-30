@@ -150,16 +150,16 @@ UPDATE dirty_locations
  WHERE listing_id = %s AND enqueued_at <= %s
 """
 
-# The dry run's population: the stored answer rows of the fixed sample, keyset-paged.
+# The dry run's population, the stored rows of the fixed sample, read by primary-key PROBES
+# of the candidate ids a page spans: `mod(listing_id, 100) = 7` over the key walked the heap
+# of every row it skipped (21.9 s for the first 250 rows, measured 2026-09-30).
 SAMPLE_MODULUS, SAMPLE_REMAINDER = 100, 7
 _SAMPLE_SQL = """
 SELECT listing_id, obec_kod, cast_obce_kod, house_number_cp, granularity::text,
        ST_Y(geom), ST_X(geom)
-  FROM listing_location
- WHERE (mod(listing_id, %s) = %s OR listing_id = %s) AND listing_id > %s
- ORDER BY listing_id
- LIMIT %s
+  FROM listing_location WHERE listing_id = ANY(%s::bigint[]) ORDER BY listing_id
 """
+_SAMPLE_UPPER_SQL = "SELECT coalesce(max(listing_id), 0) FROM listing_location"
 
 _QUEUE_HEALTH_SQL = """
 SELECT count(*), coalesce(extract(epoch from now() - min(enqueued_at)), 0)
@@ -884,23 +884,29 @@ def dry_run(
     """Re-resolve the sample and compare each answer with the row it would replace. Writes
     nothing, so it needs no lease and claims no queue row; one read transaction per page."""
     timeout_s = _batch_timeout_s()
-    with _bounded(conn, timeout_s):
+    with _bounded(conn, timeout_s) as cur:
         registry_version_id, registry_label = resolve_db.current_registry_version(conn)
+        cur.execute(_SAMPLE_UPPER_SQL)
+        upper = int(cur.fetchone()[0])  # type: ignore[index]
     cache = resolve_db.RunCache()
     ctx = _context(conn, registry_version_id, cache)
-    params = ((SAMPLE_MODULUS, SAMPLE_REMAINDER, -1) if only_listing_id is None
-              else (1, -1, only_listing_id))
+    span = batch_size * SAMPLE_MODULUS
+    pages = [[only_listing_id]] if only_listing_id is not None else (
+        list(range(lo + SAMPLE_REMAINDER, lo + span, SAMPLE_MODULUS))
+        for lo in range(0, upper + 1, span))
     tally: dict[str, Counter[str]] = {}
-    deadline, after = time.monotonic() + max_seconds, 0
-    while time.monotonic() < deadline:
+    deadline = time.monotonic() + max_seconds
+    for ids in pages:
+        if time.monotonic() >= deadline:
+            break
         with conn.transaction():
             with conn.cursor() as cur:
                 for statement in _batch_guc(timeout_s):
                     cur.execute(statement)
-                cur.execute(_SAMPLE_SQL, (*params, after, batch_size))
+                cur.execute(_SAMPLE_SQL, (ids,))
                 stored = cur.fetchall()
             if not stored:
-                break
+                continue
             slice_ = _prefetch(conn, [int(r[0]) for r in stored],
                                timeout_s=_prefetch_timeout_s(), restore_s=timeout_s)
             with contextlib.suppress(Exception), conn.transaction():
@@ -908,7 +914,6 @@ def dry_run(
             for row in stored:
                 new = _compute_one(int(row[0]), ctx, registry_label, slice_)
                 _tally(tally.setdefault(new.source, Counter()), row, new)
-        after = int(stored[-1][0])
     for source, counts in sorted(tally.items()):
         LOG.info("SAMPLE source=%s %s", source, " ".join(f"{k}={v}" for k, v in counts.items()))
     return tally

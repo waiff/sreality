@@ -228,34 +228,23 @@ def _bazos(town: str, psc: str, pin: tuple[float, float] | None = None):
     return claims
 
 
-def test_a_village_the_register_holds_as_a_part_binds_the_town_its_psc_serves():
-    """Černotín is named; the only Černotín OBEC is near Přerov. At the část-obce and KÚ
-    levels it climbs to Dnešice, and PSČ 334 43 is Dnešice's — so Dnešice binds, from the
-    name, and the PSČ that discriminated counts as an agreeing field."""
-    binding = _bind(_bazos("Černotín", "33443", pin=(49.6100, 13.2700)), mirror=_town_mirror())
-    assert (binding.obec_kod, binding.rung) == (557668, "R4")
-    assert "psc" in binding.agreed
+def test_a_village_the_register_holds_as_a_part_or_ku_binds_the_town_its_psc_serves():
+    """Černotín's only OBEC is near Přerov, Hory's near Karlovy Vary. As a část obce / KÚ they
+    climb to Dnešice and Oloví, whose PSČ the advert carries — so those bind, from the name,
+    and the PSČ that discriminated counts as an agreeing field."""
+    for town, psc, obec_kod in (("Černotín", "33443", 557668), ("Hory", "35707", 560588)):
+        binding = _bind(_bazos(town, psc, pin=(49.61, 13.27)), mirror=_town_mirror())
+        assert (binding.obec_kod, binding.rung, "psc" in binding.agreed) == (obec_kod, "R4", True)
 
 
-def test_hory_binds_olovi_through_its_part_and_its_ku():
-    binding = _bind(_bazos("Hory", "35707"), mirror=_town_mirror())
-    assert (binding.obec_kod, binding.rung) == (560588, "R4")
-
-
-def test_18841980_heals_through_the_ku_level():
-    """The slug "zlaté-hory-v-jeseníkách" matches no obec. It split to a "Hory" 329 km away;
-    it IS the KÚ of Zlaté Hory, whose obec carries PSČ 793 76."""
+def test_18841980_heals_through_the_ku_and_its_composite_anchor_is_refused():
+    """The slug "zlaté-hory-v-jeseníkách" matches no obec and split to a "Hory" 329 km away.
+    It IS the KÚ of Zlaté Hory, whose obec carries PSČ 793 76 (R4). Without that KÚ the line's
+    anchor is neither in the PSČ nor within 40 km of the pin, and the PSČ answers (R6)."""
     claims = _bazos("zlaté-hory-v-jeseníkách", "79376", pin=(50.24194, 17.34158))
-    binding = _bind(claims, mirror=_town_mirror())
-    assert (binding.obec_kod, binding.rung) == (597996, "R4")
-
-
-def test_a_composite_anchor_out_of_reach_falls_through_to_the_psc():
-    """Without that KÚ the line anchors on "Hory": neither in the PSČ nor within 40 km of the
-    pin, so it is refused and the PSČ answers — at R6, an inference."""
-    claims = _bazos("zlaté-hory-v-jeseníkách", "79376", pin=(50.24194, 17.34158))
-    binding = _bind(claims, mirror=_town_mirror(with_zlate_hory_ku=False))
-    assert (binding.obec_kod, binding.rung) == (597996, "R6")
+    for with_ku, rung in ((True, "R4"), (False, "R6")):
+        binding = _bind(claims, mirror=_town_mirror(with_zlate_hory_ku=with_ku))
+        assert (binding.obec_kod, binding.rung) == (597996, rung)
 
 
 def test_a_named_town_the_pin_cannot_reach_is_refused_unless_the_psc_vouches():
