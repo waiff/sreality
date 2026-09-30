@@ -14,6 +14,11 @@ from typing import Any, Callable, Mapping
 
 AD_KINDS = ("offer", "exchange", "wanted", "not_property")
 ADMITTED_AD_KINDS = frozenset({"offer", "exchange"})
+# The register is Czech: a reading that places the property abroad admits no slot. The pilot
+# (run 36679622378) saw a Croatian apartment and a Slovak cottage answered with a town.
+_COUNTRY = ("ISO 3166-1 alpha-2 of the country the property is in, from the text: 'CZ' when a "
+            "Czech town, okres or kraj is named; 'HR' for 'Chorvátsko, ostrov Vir', 'SK' for "
+            "'Slovensko'; null when nothing says. A quote is welcome, not required.")
 
 _SLOT_SPEC: dict[str, str] = {
     "town": "The municipality (obec) the PROPERTY is in, as the register spells it: nominative, "
@@ -45,18 +50,20 @@ LOCATION_PROMPT = (
     "the one wanted; for a wanted advert leave every location slot null.\n"
     "Never a broker's office address, never a secondary street (a rear entrance, a corner "
     "'roh ulic X a Y' -> null), never a project or building name.\n"
-    "A house number needs the advert's own marker or the form 'Street 123/4' — never a bare "
-    "number ('Street 12', 'č. 12', 'Praha 8'), never a parcel, LV, k.ú., unit or reference "
-    "number, never a negated one ('bez č.p.').\n"
+    "A house number needs the advert's own marker, the form 'Street 123/4', or a VILLAGE name "
+    "followed by its number ('Hodoviz 13', 'Smolná 28' -> č.p.); never a city district number "
+    "('Praha 8', 'Brno 2'), never 'Street 12' or 'č. 12' alone, never a parcel, LV, k.ú., unit "
+    "or reference number, never a negated one ('bez č.p.').\n"
     "A property outside the Czech Republic, or an advert not written in Czech (e.g. Slovak): "
-    "every location slot null.\n"
+    "set `country` and leave every other location slot null.\n"
     "Every location quote obeys the same rule: a VERBATIM span of the advert text, or null."
 )
 
 
 def location_block(cell: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
     """The tool-schema property; `cell` is the lane's own `{value, evidence_quote}` wrapper."""
-    slots = {"ad_kind": cell({"type": "string", "enum": list(AD_KINDS), "description": _AD_KIND})}
+    slots = {"ad_kind": cell({"type": "string", "enum": list(AD_KINDS), "description": _AD_KIND}),
+             "country": cell({"type": ["string", "null"], "description": _COUNTRY})}
     for slot, description in _SLOT_SPEC.items():
         slots[slot] = cell({"type": ["string", "null"], "description": description})
     return {"type": "object", "additionalProperties": False,
@@ -66,8 +73,8 @@ def location_block(cell: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str
 
 def read_location(payload: Mapping[str, Any] | None,
                   advert_text: str) -> dict[str, dict[str, Any]]:
-    """`slot -> {value, quote}` for `ad_kind` and every slot; a slot that fails V1 or V3 is
-    null."""
+    """`slot -> {value, quote}` for `ad_kind`, `country` and every slot; a slot that fails V1
+    (quote not in the text) or V3 (not an offered property, or one placed abroad) is null."""
     # Lazy: toolkit imports this module, and the quote check must stay the lane's ONE check.
     from toolkit.description_extraction import quote_supports
 
@@ -76,9 +83,13 @@ def read_location(payload: Mapping[str, Any] | None,
     kind, quote = _cell(block.get("ad_kind"))
     kind = kind if kind in AD_KINDS else None
     out = {"ad_kind": {"value": kind, "quote": quote if kind else None}}
+    country, quote = _cell(block.get("country"))
+    country = country.strip().upper() if isinstance(country, str) and country.strip() else None
+    out["country"] = {"value": country, "quote": quote if country else None}
+    admitted = kind in ADMITTED_AD_KINDS and country in (None, "CZ")
     for slot in SLOTS:
         value, quote = _cell(block.get(slot))
-        ok = (kind in ADMITTED_AD_KINDS and isinstance(value, str) and value.strip()
+        ok = (admitted and isinstance(value, str) and value.strip()
               and isinstance(quote, str) and quote_supports(advert_text, quote))
         out[slot] = ({"value": value.strip(), "quote": quote} if ok
                      else {"value": None, "quote": None})

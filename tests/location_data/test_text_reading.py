@@ -25,7 +25,7 @@ def _payload(kind: str, **slots: tuple[str, str | None]) -> dict[str, Any]:
 
 def test_the_block_is_every_slot_quoted_with_a_closed_ad_kind_and_a_tight_prompt() -> None:
     block = tx.extraction_tool(())["input_schema"]["properties"]["location"]
-    assert list(block["properties"]) == ["ad_kind", *tr.SLOTS] == block["required"]
+    assert list(block["properties"]) == ["ad_kind", "country", *tr.SLOTS] == block["required"]
     assert block["properties"]["ad_kind"]["properties"]["value"]["enum"] == list(tr.AD_KINDS)
     for slot in tr.SLOTS:
         assert block["properties"][slot]["required"] == ["value", "evidence_quote"]
@@ -59,6 +59,20 @@ def test_v3_a_wanted_or_non_property_advert_yields_no_location_whatever_was_read
         out = tr.read_location(_payload(kind, street=("Sadová", "v ulici Sadová")), text)
         assert all(out[slot] == EMPTY for slot in tr.SLOTS), kind
     assert out["ad_kind"] == EMPTY
+
+
+def test_v3_a_property_placed_abroad_admits_no_slot_whatever_the_language() -> None:
+    """Pilot run 36679622378: a Croatian apartment ('Chorvátsko, ostrov Vir') and a Slovak
+    cottage were answered with a town; 'Vir' folds onto the Czech obec Vír. The register is
+    Czech, so a reading that places the property abroad admits nothing but the country."""
+    text = ad_haystack("Apartmán Chorvátsko, ostrov Vir", "Ponúkam apartmán v časti Žitna.")
+    payload = _payload("offer", town=("Vir", "ostrov Vir"), part_of_town=("Žitna", "v časti Žitna"))
+    payload["location"]["country"] = {"value": "hr", "evidence_quote": "Chorvátsko"}
+    out = tr.read_location(payload, text)
+    assert out["country"] == {"value": "HR", "quote": "Chorvátsko"}
+    assert all(out[slot] == EMPTY for slot in tr.SLOTS)
+    payload["location"]["country"] = {"value": "CZ", "evidence_quote": None}
+    assert tr.read_location(payload, text)["town"]["value"] == "Vir"
 
 
 def test_v1_a_quote_that_is_not_in_the_advert_drops_that_slot_only() -> None:
