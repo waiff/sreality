@@ -998,6 +998,34 @@ delete from autodedup.cluster_conflicts c
    and c.listing_hi = any(%(ids)s::bigint[])
 """
 
+# E926: a must-link closure the invariants dissolved, APPENDED ON CHANGE. The lane re-reads it
+# every pass its contradiction stands, so an unconditional insert would file it once a pass. It
+# is filed unless the NEWEST record of its generation sharing an advert with it is identical —
+# not any record ever: a closure that changes and changes back must be filed again, or the
+# newest record naming its adverts would be the stale middle one.
+RT_CLOSURE_CONFLICT_APPEND_SQL = """
+insert into autodedup.cluster_conflicts (
+    kind, cluster_key_a, cluster_key_b, listing_lo, listing_hi, invariant, detail
+)
+select %(kind)s::text, %(cluster_key_a)s::bigint, %(cluster_key_b)s::bigint,
+       %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(invariant)s::text, %(detail)s::jsonb
+ where not exists (
+       select 1
+         from (select c.listing_lo, c.listing_hi, c.invariant, c.detail
+                 from autodedup.cluster_conflicts c
+                where c.kind = %(kind)s::text
+                  and c.detail -> 'must_link' is not null
+                  and c.detail ->> 'generation' = %(detail)s::jsonb ->> 'generation'
+                  and exists (select 1 from jsonb_array_elements(c.detail -> 'members') m(id)
+                               where %(detail)s::jsonb -> 'members' @> jsonb_build_array(m.id))
+                order by c.created_at desc, c.id desc
+                limit 1) newest
+        where newest.listing_lo = %(listing_lo)s::bigint
+          and newest.listing_hi = %(listing_hi)s::bigint
+          and newest.invariant is not distinct from %(invariant)s::text
+          and newest.detail = %(detail)s::jsonb)
+"""
+
 # ------------------------------------------------------------------ the live census
 RT_CELL_READ_SQL = """
 select c.cell_key, c.category_group, c.n_listings, c.shapes, c.brokers, c.source_ids, c.capped

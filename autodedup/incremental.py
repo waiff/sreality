@@ -715,6 +715,10 @@ class PassResult:
     held: int = 0
     released: int = 0
     redecided: int = 0
+    # E926: the must-link closures the pass's re-clusters dissolved, each once (the E64 rail
+    # re-clusters a component a second time) — re-read every pass the contradiction stands
+    # (`_ruling_seeds`); a component past `max_component` is not re-clustered, so not read.
+    dissolved: set[tuple[int, ...]] = field(default_factory=set)
     rail: dict[str, int] = field(default_factory=dict)
     zones: dict[str, int] = field(default_factory=dict)
     certificates: dict[str, int] = field(default_factory=dict)
@@ -749,6 +753,7 @@ class PassResult:
                 "held": self.held,
                 "released": self.released,
                 "redecided": self.redecided,
+                "must_link_dissolved": len(self.dissolved),
                 "wanted_pairs": self.wanted_pairs,
                 "attempts": self.attempts,
             },
@@ -1652,6 +1657,11 @@ def _recluster(
                       for conflict in clustered.conflicts]
         conflicts += [{**bridge, "kind": "bridge", "generation": result.generation}
                       for bridge in clustered.bridges if not bridge.get("applied")]
+        # E926: a dissolved must-link closure is a refused union too — the operator's rulings,
+        # not an edge — and its `must_link` rows are what the rulings page reads it by.
+        conflicts += [{**closure, "kind": "invariant", "generation": result.generation}
+                      for closure in clustered.dissolved]
+        result.dissolved.update(tuple(closure["members"]) for closure in clustered.dissolved)
     # A stale cluster is dropped once, by the WHOLE pass: the per-component spelling let one
     # component drop a key another had just kept, so which of the two ran last decided whether
     # the cluster survived.

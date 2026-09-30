@@ -435,9 +435,19 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == CLUSTER_MEMBER_INSERT_SQL:
         db.cluster_members.add((gen, int(p["cluster_key"]), int(p["listing_id"])))
         return []
-    if sql == CLUSTER_CONFLICT_INSERT_SQL:
+    if sql in (CLUSTER_CONFLICT_INSERT_SQL, S.RT_CLOSURE_CONFLICT_APPEND_SQL):
         row = dict(p)
         row["detail"] = _jsonb(p["detail"])
+        if sql == S.RT_CLOSURE_CONFLICT_APPEND_SQL:
+            detail = row["detail"]
+            newest = next((held for held in reversed(db.cluster_conflicts)
+                           if held["kind"] == row["kind"]
+                           and (held["detail"] or {}).get("must_link")
+                           and held["detail"]["generation"] == detail["generation"]
+                           and set(held["detail"]["members"]) & set(detail["members"])), None)
+            if newest is not None and all(newest.get(name) == row.get(name) for name in
+                                          ("listing_lo", "listing_hi", "invariant", "detail")):
+                return []
         db.cluster_conflicts.append(row)
         return []
 
