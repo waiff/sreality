@@ -1656,7 +1656,8 @@ def _intake_fast_pass(conn: Any) -> dict[str, Any]:
         note="realtime-worker fast schedule (W7-a)",
         schedule=schedule,
     )
-    _INTAKE_FAST_LAST_IDLE = not (stats["listings"] or stats["bodies_mined"])
+    _INTAKE_FAST_LAST_IDLE = not (stats["listings"] or stats["bodies_mined"]
+                                  or stats["readings_mined"])
     return {
         "ran": True,
         "listings": stats["listings"],

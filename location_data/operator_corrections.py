@@ -1,7 +1,7 @@
 """Location W1v: the OPERATOR claim producer (03 S7 rank 1, 05 5.5.5).
 
-One of the four claim producers in the design (portal contracts, the LLM lane,
-operator input, the migration loader). A correction is an appended
+One of the two claim producers (the contract-driven claim lane, over its three
+substrates, and operator input). A correction is an appended
 `location_claims` row - `surface='operator_input'`,
 `extraction_method='operator_manual'`, `licence_class='operator'`,
 `claim_confidence='exact'` - never an UPDATE of anything: a wrong correction

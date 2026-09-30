@@ -1233,7 +1233,7 @@ _FAST_STATS = {
     "listings": 12, "claims_inserted": 34, "enqueued": 7,
     "payload_seconds": 1.234, "cursor_after_id": 987654,
     "bodies_mined": 5, "bodies_seconds": 2.0, "bodies_pass_complete": True,
-    "bodies_cursor_after_id": 4242,
+    "bodies_cursor_after_id": 4242, "readings_mined": 0,
 }
 
 

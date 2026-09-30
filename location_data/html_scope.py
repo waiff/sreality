@@ -2,19 +2,17 @@
 
 06-migration-backfill.md section 6.2.3: "Excluded-block scoping is mandatory here
 too, and it is a security boundary (D7). Every portal ships a fully-formed
-address-shaped decoy ... The deterministic HTML re-miner consumes the SAME
-exclusion-zone register as the LLM lane (02 section 2.5), or it will import the
-same contamination at scale." That scale is 445,191 archived pages, and the
+address-shaped decoy ..." — at the scale of 445,191 archived pages, and the
 contamination is not hypothetical: remax's neighbour-carousel `data-address`
 already reached `listings.street` on 2 rows.
 
-02-portal-contracts.md section 2.1.4 gives the register one shape and two
-consumers — "the deterministic parser (a claim whose locator resolves inside an
-excluded zone is rejected) and the LLM lane, where the scoped payload is built by
-REMOVING these zones before the text ever reaches a model". This module is that
-one artifact. Extraction never sees the raw body: `scope_html` returns a
-`ScopedDocument` whose `.css()` is the only selector surface, so a decoy cannot be
-reached by a selector that was never given the chance to match it.
+02-portal-contracts.md section 2.1.4 designed two consumers of the register; one
+exists, the deterministic parser (a claim whose locator resolves inside an excluded
+zone is rejected). The text lane's reading, the claim lane's third substrate since
+W3, never sees a body: it reads the parsed `listings.description`, the ad's own
+block. Extraction never sees the raw body: `scope_html` returns a `ScopedDocument`
+whose `.css()` is the only selector surface, so a decoy cannot be reached by a
+selector that was never given the chance to match it.
 
 THE REGISTER IS CONTRACT DATA, NEVER A PYTHON CONSTANT. Zones arrive as the
 `{locator_kind, locator, reason}` list that `contracts.PortalContract.exclusion_zones`

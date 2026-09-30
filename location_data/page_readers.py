@@ -1,9 +1,9 @@
 """The 14 readers that mine a STORED PAGE BODY, plus the machinery to fetch one.
 
-The hourly lane (`location_data.claims_intake`) reads two substrates: `listings.raw_json`
-(its own readers) and the latest `portal_raw_payloads.body` for the listing (these). They
-live here, in a module that does NOT import the lane, because the lane imports them —
-everything both halves share is `location_data.claims_common`.
+The hourly lane (`location_data.claims_intake`) reads three substrates: `listings.raw_json`
+(its own readers), the latest `portal_raw_payloads.body` for the listing (these) and the text
+lane's stored reading (`location_data.text_reading`). They live here, in a module that does
+NOT import the lane, because the lane imports them — what they share is `claims_common`.
 
 A reader takes `(entry, row, payload, scoped_document)` and returns `PageRead`s; the lane
 owns the scan, the R2 fetch, the hash gate and the write. The exclusion-zone scoping
@@ -80,12 +80,10 @@ ARCHIVE_BLUR_EVIDENCE = frozenset({"none", "declared"})
 GEOCODED_LICENCE_CLASS = "odbl"
 ARCHIVE_EMITTABLE_LICENCE_CLASSES = EMITTABLE_LICENCE_CLASSES | {GEOCODED_LICENCE_CLASS}
 
-# 01 §4.2's `loc_claim_text_evidence` names these two methods; every other method may carry
-# evidence but is not required to. `llm_text` additionally has to satisfy
-# `loc_claim_llm_model` — a model assertion that cannot name the model that made it is not
-# evidence — which is why `LLM_METHOD` is checked separately below rather than folded in.
-EVIDENCE_METHODS = frozenset({"llm_text", "regex_text"})
-LLM_METHOD = "llm_text"
+# 01 §4.2's `loc_claim_text_evidence` named this method; every other method may carry evidence
+# but is not required to. (`llm_text` is the reading substrate's, never a page reader's: its
+# evidence is the reading row itself — value, quote, model, text hash.)
+EVIDENCE_METHODS = frozenset({"regex_text"})
 
 # Which branch of a portal's detail map a coordinate was read from. The READER states this;
 # it is never inferred from what the reader happened to stamp on the claim. Inferring it
@@ -1610,17 +1608,6 @@ def assert_evidence_complete(claim: Claim) -> None:
             f"{claim.extractor_id} produced an evidence quote with no payload_sha256; "
             f"01 §4.2's loc_claim_evidence_payload is D7's rule that a span is meaningless "
             f"without the document it indexes into")
-    if claim.extraction_method == LLM_METHOD:
-        unattributed = [
-            name for name, value in (("model", claim.model),
-                                     ("prompt_version", claim.prompt_version))
-            if value is None
-        ]
-        if unattributed:
-            raise IntakeRefused(
-                f"{claim.extractor_id} produced an llm_text claim without "
-                f"{', '.join(unattributed)}; 01 §4.2's loc_claim_llm_model refuses a model "
-                f"assertion that cannot name the model that made it")
 
 
 def assert_stampable(claim: Claim) -> None:
@@ -1650,7 +1637,7 @@ def stamp_page_claim(
             f"payload {payload.id} carries page_kind='{FORBIDDEN_PAGE_KIND}'; C10 keeps the "
             f"page's own kind on the claim and leaves that enum member unused")
     # W1-c R5 (the `precision_declaration` label + blur axis) is stamped in
-    # `claims_common._base`, the one funnel BOTH substrates' readers build a claim through,
+    # `claims_common._base`, the one funnel EVERY substrate's readers build a claim through,
     # so a page reader and a payload reader cannot answer it differently.
     return replace(
         claim,

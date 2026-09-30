@@ -142,10 +142,7 @@ POSITION_SOURCES = frozenset({
     "portal_pin", "registry_point",
 })
 BLUR_EVIDENCE = frozenset({"none", "declared", "detected", "both"})
-# `match_confidence` (01 §2). It reaches the DB two ways — as the entry's `prior` for the
-# resolver, and as `locator.claim_confidence`, which a legacy-column reader stamps onto
-# `location_claims.claim_confidence` (a typed enum column, so a typo here would fail
-# mid-batch at INSERT time instead of in CI).
+# `match_confidence` (01 §2), as the entry's `prior` for the resolver.
 MATCH_CONFIDENCES = frozenset({"low", "medium", "high", "exact"})
 LICENCE_CLASSES = frozenset({
     "portal", "cc_by_ruian", "odbl", "commercial_permanent", "ephemeral_display_only",
@@ -253,14 +250,11 @@ class ReaderContract:
 # (`legacy_text_column`, `geom_column`, `coords_stamp_quality`): the `legacy_column`
 # surface is gone, so an entry naming one could not be declared at all.
 READER_CONTRACTS: dict[str, ReaderContract] = {
-    # `claim_confidence` says what KIND of field this is — an address field, or a headline
-    # the resolver may match only exactly (W18). It is read by the reader and stamped on the
-    # claim, so it is the contract's statement and never a rule that names a portal.
     "scalar": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
         consults_transforms=True,
-        optional_keys=frozenset({"value_kind", "fallback", "claim_confidence"})),
+        optional_keys=frozenset({"value_kind", "fallback"})),
     "namespaced_id": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer", "namespace"}),
@@ -424,6 +418,13 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         consults_transforms=True,
         optional_keys=frozenset({"attr", "decode", "script_match"}),
         reads_stored_body=True),
+    # --- W3: the text lane's STORED READING of the advert (`location_data.text_reading`), the
+    # lane's third substrate. `slot` names the reading's cell; a `fallback` slot answers when
+    # the first is empty (the č.p. entry falls back to the č.ev. slot, emitted marked).
+    "text_reading": ReaderContract(
+        substrates=frozenset({"description"}), methods=frozenset({"llm_text"}),
+        locator_keys=frozenset({"slot"}),
+        optional_keys=frozenset({"fallback"})),
 }
 
 # The substrate axis on its own — what `claims_intake`'s module docstring points at, and
@@ -462,12 +463,6 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
     # tail — no name table to fall outside of, and CZ dropped rather than claimed.
     "foreign_country_code",
-    # W18: a street named in PROSE, where the contract's own cue-anchored pattern already
-    # did the selecting. It neither strips the cue (S1 owns that) nor asks whether the
-    # token looks Czech (the REGISTER owns that, and `looks_like_czech_street` refuses the
-    # real street `28. října`) — it refuses a geo name, a foreign script and trailing
-    # sentence punctuation, and nothing else.
-    "street_token",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 
@@ -744,11 +739,6 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
     if prior.get("match_confidence") is not None:
         _member(prior["match_confidence"], MATCH_CONFIDENCES, where,
                 "prior.match_confidence")
-    if locator.get("claim_confidence") is not None:
-        # 06 §6.1.1: a class-B legacy column is capped at `medium`. The cap is contract
-        # data (the reader never invents one), so it is validated here.
-        _member(locator["claim_confidence"], MATCH_CONFIDENCES, where,
-                "locator.claim_confidence")
 
     transforms = [str(t) for t in (raw.get("transform") or [])]
     guards = [str(g) for g in (raw.get("guards") or [])]
