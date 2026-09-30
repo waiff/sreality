@@ -417,11 +417,11 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_verdicts_ledger_live.py -q
 
-      # E925, EXECUTED: a dissolved must-link closure is filed when it differs from the NEWEST
+      # E926, EXECUTED: a dissolved must-link closure is filed when it differs from the NEWEST
       # record sharing an advert (filed again when it changes back), the rulings page reads it by
       # any member and generation, and the group dialog does not read it. The fakes re-implement
       # the dedupe in Python; PREPARE proves only that the jsonb comparisons compile.
-      - name: A dissolved closure is filed on change (E925)
+      - name: A dissolved closure is filed on change (E926)
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres

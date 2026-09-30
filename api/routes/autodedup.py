@@ -3060,7 +3060,7 @@ def rulings(
 
 def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
                         generation: str | None) -> dict[tuple[int, int], str]:
-    """E925: a standing `same` of the pair's own is a must-link (E910); when the engine holds its
+    """E926: a standing `same` of the pair's own is a must-link (E910); when the engine holds its
     adverts apart because the invariants dissolved the closure its rulings form, that is the
     reason — the newest record naming both adverts, one statement a page."""
     wanted = [r for r in page if r["verdict"] == "same" and r["status"] == "standing"
@@ -3094,7 +3094,7 @@ DISSOLVED_PAIRS_SHOWN = 5
 
 def _dissolved_reason(record: dict[str, Any]) -> str:
     """Why a closure of `same` rulings binds nothing, and the rulings that form it — the ones to
-    revisit (E925)."""
+    revisit (E926)."""
     detail = record["detail"]
     why = _CLOSURE_REFUSED.get(record["invariant"], "narážejí na pevné pravidlo ({limb})")
     pairs = [f"{lo}–{hi}" for lo, hi in detail["must_link"]]

@@ -30,7 +30,7 @@ E910 (Decision 8): the operator's `same` rulings are MUST-LINKS. Their connected
 (the repartition works on the contracted graph, so every move shifts a whole closure), the D43
 relation and the machine vetoes do not separate two adverts of one closure, and the spreads are
 read across closures only. With no must-link every one of those is today's rule exactly.
-A closure the hard limbs refuse is dissolved, and E925 records it: one row on `dissolved`
+A closure the hard limbs refuse is dissolved, and E926 records it: one row on `dissolved`
 naming its rulings and the limb, so a ruling the engine cannot honour never looks honoured.
 """
 
@@ -201,7 +201,7 @@ def _valid_closures(
 
     Inside a closure only the size, the deal type, the category and an operator must-not-link
     can refuse (the operator's own rulings contradicting each other); a refused closure binds
-    nothing rather than half of itself, and its record names the rulings and the limb (E925)."""
+    nothing rather than half of itself, and its record names the rulings and the limb (E926)."""
     kept: dict[int, list[int]] = {}
     dissolved: list[dict[str, Any]] = []
     for key, members in must_link_closures(must_link, fps).items():

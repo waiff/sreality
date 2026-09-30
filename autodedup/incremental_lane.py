@@ -865,7 +865,7 @@ def _cluster_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
 
 
 def _conflict_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
-    """A refused union, a refused bridge or a dissolved closure (E925), in the score lane's
+    """A refused union, a refused bridge or a dissolved closure (E926), in the score lane's
     own row shape."""
     lo, hi = sorted((int(row["lo"]), int(row["hi"])))
     kind = str(row.get("kind") or "invariant")

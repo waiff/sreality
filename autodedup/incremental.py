@@ -715,7 +715,7 @@ class PassResult:
     held: int = 0
     released: int = 0
     redecided: int = 0
-    # E925: the must-link closures the pass's re-clusters dissolved, each once (the E64 rail
+    # E926: the must-link closures the pass's re-clusters dissolved, each once (the E64 rail
     # re-clusters a component a second time) — re-read every pass the contradiction stands
     # (`_ruling_seeds`); a component past `max_component` is not re-clustered, so not read.
     dissolved: set[tuple[int, ...]] = field(default_factory=set)
@@ -1657,7 +1657,7 @@ def _recluster(
                       for conflict in clustered.conflicts]
         conflicts += [{**bridge, "kind": "bridge", "generation": result.generation}
                       for bridge in clustered.bridges if not bridge.get("applied")]
-        # E925: a dissolved must-link closure is a refused union too — the operator's rulings,
+        # E926: a dissolved must-link closure is a refused union too — the operator's rulings,
         # not an edge — and its `must_link` rows are what the rulings page reads it by.
         conflicts += [{**closure, "kind": "invariant", "generation": result.generation}
                       for closure in clustered.dissolved]

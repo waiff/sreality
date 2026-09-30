@@ -1,4 +1,4 @@
-"""E925 executed: a dissolved must-link closure's record is appended when it differs from the
+"""E926 executed: a dissolved must-link closure's record is appended when it differs from the
 NEWEST record of its generation sharing an advert with it, the rulings page reads it by any
 member and by generation, and the group dialog does not read it at all. The fakes re-implement
 the dedupe in Python; only Postgres runs the jsonb equality and the member filters. Runs in CI's

@@ -16,7 +16,7 @@ describe('engineLine', () => {
     expect(engineLine(APART)).toBe('odděleně · pár bez uloženého řádku');
   });
 
-  it('names a dissolved closure even when the engine stored no row for the pair (E925)', () => {
+  it('names a dissolved closure even when the engine stored no row for the pair (E926)', () => {
     const why = 'vaše rozhodnutí „stejné“ spojují prodej s pronájmem';
     expect(engineLine({ ...APART, why_not_merged: why })).toBe(`odděleně · pár bez uloženého řádku — ${why}`);
   });

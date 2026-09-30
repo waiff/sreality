@@ -382,7 +382,7 @@ nothing else.
   reconcile_reason, reconcile_groups, reconcile_seconds, reconcile_refused, reconcile_failed,
   reconcile_waiting (a block not fully read), reconcile_skipped_at_apply, reconcile_quarantined,
   reconcile_deferred (the run cap), must_link_dissolved (operator `same` closures the pass
-  dissolved, E925), skipped (0/1) + reason, errors (0/1) + refused/aborted,
+  dissolved, E926), skipped (0/1) + reason, errors (0/1) + refused/aborted,
   deadline_exceeded, seconds, held, retired, latency_p50_s, latency_p95_s, bound_by}`; an absent
   store (migrations 539/540) = `skipped: store_absent` + one warning. A change of the reconcile
   state is logged once.

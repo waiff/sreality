@@ -537,7 +537,7 @@ def test_the_heartbeat_says_what_the_reconcile_did_and_did_not_do(
 
 def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """E925: a closure of the operator's `same` rulings the invariants dissolved is re-read every
+    """E926: a closure of the operator's `same` rulings the invariants dissolved is re-read every
     pass while it stands, so the heartbeat says so every pass, beside the reconcile counters."""
     conn = _Conn()
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)

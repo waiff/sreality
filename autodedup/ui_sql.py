@@ -694,7 +694,7 @@ CONFLICT_COLUMNS: tuple[str, ...] = (
 
 # A conflict TOUCHES a cluster either by naming it or by naming one of its members — the
 # second arm is what surfaces the union an invariant refused, whose row carries the two
-# listings and no cluster key at all. A dissolved closure (E925) is not one: its two ends are
+# listings and no cluster key at all. A dissolved closure (E926) is not one: its two ends are
 # the closure's smallest and largest advert, a pair nobody ruled or scored (DISSOLVED_CLOSURES_SQL).
 CLUSTER_CONFLICTS_SQL = """
 SELECT
@@ -709,7 +709,7 @@ WHERE (cc.cluster_key_a = %(cluster_key)s::bigint
 ORDER BY cc.created_at DESC, cc.id DESC
 """
 
-# E925: the must-link closures a generation dissolved that name one of the given adverts — why a
+# E926: the must-link closures a generation dissolved that name one of the given adverts — why a
 # standing `same` is not honoured. A record names its whole closure in `detail -> 'members'`.
 DISSOLVED_CLOSURES_SQL = """
 SELECT

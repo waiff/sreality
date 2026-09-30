@@ -998,7 +998,7 @@ delete from autodedup.cluster_conflicts c
    and c.listing_hi = any(%(ids)s::bigint[])
 """
 
-# E925: a must-link closure the invariants dissolved, APPENDED ON CHANGE. The lane re-reads it
+# E926: a must-link closure the invariants dissolved, APPENDED ON CHANGE. The lane re-reads it
 # every pass its contradiction stands, so an unconditional insert would file it once a pass. It
 # is filed unless the NEWEST record of its generation sharing an advert with it is identical —
 # not any record ever: a closure that changes and changes back must be filed again, or the

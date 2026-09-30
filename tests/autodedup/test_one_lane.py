@@ -263,7 +263,7 @@ def test_an_idle_pass_honours_a_new_same_ruling() -> None:
     assert store.clusters == {}, "the pair the ruling held is released: nothing else joins it"
 
 
-# ------------------------------------------------- E925: a dissolved closure leaves a record
+# ------------------------------------------------- E926: a dissolved closure leaves a record
 
 D = 404
 SAME = {(A, C), (B, D)}

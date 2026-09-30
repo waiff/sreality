@@ -1932,7 +1932,7 @@ def _autodedup_outcome(
             reconcile_skipped_at_apply=int(merged.get("skipped_at_apply") or 0),
             reconcile_quarantined=int(merged.get("quarantined") or 0),
             reconcile_deferred=int(merged.get("deferred_run_cap") or 0),
-            # E925: operator `same` closures the invariants dissolved — rulings the lane
+            # E926: operator `same` closures the invariants dissolved — rulings the lane
             # re-reads every pass and cannot honour (their records: `cluster_conflicts`).
             must_link_dissolved=int(counts.get("must_link_dissolved") or 0),
         )

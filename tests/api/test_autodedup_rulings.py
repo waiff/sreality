@@ -278,7 +278,7 @@ def test_a_pair_row_carries_the_engine_view_and_its_own_history(client, conn):
 
 
 def test_a_same_the_engine_dissolved_says_why_it_is_not_honoured(client, conn):
-    """E925: the operator's `same` rulings form a closure the invariants refused (here a sale
+    """E926: the operator's `same` rulings form a closure the invariants refused (here a sale
     ruled one flat with a rental), so the lane holds the adverts apart. The page names that,
     not the stored pair's zone; a ruling whose closure was honoured, or that is not standing,
     reads the record of nothing."""
@@ -316,7 +316,7 @@ def test_a_same_the_engine_dissolved_says_why_it_is_not_honoured(client, conn):
     ("must_not_link", "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny"),
 ])
 def test_each_limb_that_dissolves_a_closure_is_said_in_words(client, conn, limb, why):
-    """E925: only four limbs can refuse a closure. Three are the engine's fixed rules; a
+    """E926: only four limbs can refuse a closure. Three are the engine's fixed rules; a
     must-not-link is the operator's own `different` inside it, and the page says so, not "a fixed
     rule". Every reason names the `same` rulings that form the closure — the ones to revisit —
     up to five of them, and how many there are."""
