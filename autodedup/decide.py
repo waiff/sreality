@@ -30,7 +30,13 @@ from autodedup.demonstrate import (
 )
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
-from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
+from autodedup.guards import (
+    SHARE_PRICE_VETO,
+    UNIT_DESIGNATOR_VETO,
+    pair_veto,
+    share_price_conflict,
+    unit_designator_conflict,
+)
 from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
 from autodedup.indistinguishable import (
     GATE,
@@ -717,6 +723,11 @@ def _decide_layers(
             f"guard:{UNIT_DESIGNATOR_VETO}",
             {"unit_lo": designators[0], "unit_hi": designators[1]},
         )
+    # E927 stands here for E61's reason: it reads the price paths, which the stored five-column
+    # retrieval side (`incremental.GuardRow`) does not carry.
+    if share_price_conflict(fa, fb):
+        return Decision(lo, hi, "veto", 0.0, set(), None, SHARE_PRICE_VETO,
+                        f"guard:{SHARE_PRICE_VETO}")
 
     families = evidence_families(feats)
     score = model.predict_proba(feats)

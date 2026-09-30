@@ -1267,8 +1267,13 @@ renumber.** Navigate by area:
     where the property's own last row disagrees (a pre-559 absorbed property ends on the old
     merge's false 'inactive' and gets its 'active' back). **Apply 559 before its code merges**
     — the rollup and both notification producers read `listing_price_steps` with no fallback.
-    **Category compatibility is enforced at the chokepoint** via the single
-    `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
+    **Category compatibility is enforced at the chokepoint** via the `room_taxonomy` helpers
+    (`property_identity.category_clash`, also the E925 verdict guard). `category_type_compatible`
+    reads the deal CLASS: a sale ≠ a rental ≠ an auction, but a share sale (`podil` — sreality
+    alone has a "Podíly" section; every other portal lists the same advert as `prodej`) IS a
+    sale (operator ruling 2026-09-30, autodedup PROGRAM.md E927; the AUTODEDUP engine merges a
+    share with a sale only at one stated price, `autodedup.guards.share_price_conflict`, while
+    the operator's own merge needs none). `category_main_compatible`: a
     flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔ komercni** (the same
     building listed as a house on one portal and commercial on another is one real-world
     property, irrespective of sub-type). This guard is deliberately *at the merge*, not in the

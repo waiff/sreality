@@ -166,7 +166,7 @@ from autodedup.text_facts import (
     further_areas,
     unit_designators,
 )
-from toolkit.room_taxonomy import category_main_compatible
+from toolkit.room_taxonomy import category_main_compatible, category_type_compatible
 
 # The parcel: the engine's own `plot_area_exact` bar. Below it two portals printed one parcel.
 PLOT_TOL: float = 0.02
@@ -2631,8 +2631,7 @@ def distinguishing_facts(
         out.append(Fact(name, str(left), str(right)))
 
     # The standing rulings first: these are not tolerances, they are walls.
-    if (a.category_type is not None and b.category_type is not None
-            and a.category_type != b.category_type):
+    if not category_type_compatible(a.category_type, b.category_type):
         add("category_type", a.category_type, b.category_type)
     # `category_main_compatible`, not raw inequality: dům <-> komerční is the one sanctioned
     # cross-type (rule #15), and the operator has confirmed 8 merges across it in this cohort.

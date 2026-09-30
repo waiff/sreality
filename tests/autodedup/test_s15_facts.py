@@ -508,7 +508,9 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
                     reason="the W14 offline data pack is not on this machine")
 def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
     """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). Every
-    stored row decides identically and the groups are the same member sets under the same keys."""
+    stored row decides identically and the groups are the same member sets under the same keys
+    — except E927's: a share-sale advert (`podil`) now meets the sale at its price, so the rows
+    and groups that name one are the one change since S14 (4 adverts, 7 rows, 4 groups)."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -519,6 +521,10 @@ def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
         mnl if S14.operator_must_not_link else frozenset())
     decided = lambda rows: {(r["lo"], r["hi"]): (r["zone"], r["reason"], r["certificate"],  # noqa: E731
                                                  r["veto"], round(r["score"], 9)) for r in rows}
-    assert decided(read_pairs(tmp_path)) == decided(read_pairs(S14_TRIAL_RUN))
-    groups = lambda d: json.loads((d / "clusters.json").read_text())["clusters"]  # noqa: E731
+    share = {i for i, row in ds.listings.items() if row.category_type == "podil"}
+    rest = lambda rows: {k: v for k, v in decided(rows).items() if not share & set(k)}  # noqa: E731
+    assert rest(read_pairs(tmp_path)) == rest(read_pairs(S14_TRIAL_RUN))
+    groups = lambda d: {  # noqa: E731
+        key: kept for key, members in json.loads((d / "clusters.json").read_text())[
+            "clusters"].items() if len(kept := [m for m in members if m not in share]) > 1}
     assert groups(tmp_path) == groups(S14_TRIAL_RUN)

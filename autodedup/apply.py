@@ -60,7 +60,7 @@ from toolkit.property_identity import (
     merge_property_set,
     survivor_of,
 )
-from toolkit.room_taxonomy import category_main_compatible
+from toolkit.room_taxonomy import category_main_compatible, deal_class_of
 
 SCOPE_SETTING: str = "autodedup_apply_scope"
 # The worker lane's one switch (migrations 557/568): 0 = stopped. A live apply or unapply runs
@@ -571,7 +571,7 @@ def _set_reasons(
     facts = [listing_of.get(lid) or Member(lid, None, None, None) for lid in sorted(listings)]
     types = {f.category_type for f in facts} - {None}
     types |= {p["category_type"] for p in props if p["category_type"] is not None}
-    if len(types) > 1:
+    if len({deal_class_of(t) for t in types}) > 1:
         reasons.append(SKIP_CATEGORY_TYPE)
         detail["category_types"] = sorted(types)
     mains = {f.category_main for f in facts}

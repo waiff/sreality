@@ -27,6 +27,7 @@ from typing import Any
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import pair_veto
 from autodedup.settings import Settings
+from toolkit.room_taxonomy import deal_class_of
 
 # Fan-out fills in this order (E17), so the cap can only ever discard the weakest class.
 PROBE_PRIORITY: tuple[str, ...] = (
@@ -80,7 +81,7 @@ class BlockIndex:
         self.fingerprints[fp.listing_id] = fp
 
     def finalize(self) -> "BlockIndex":
-        """Compute price deciles per (cat_group, category_type), post every index key, and
+        """Compute price deciles per (cat_group, deal class), post every index key, and
         mark any key over `max_block_size` as exploded."""
         if self._finalized:
             return self
@@ -100,7 +101,8 @@ class BlockIndex:
         groups: dict[tuple[str | None, str | None], list[float]] = {}
         for fp in self.fingerprints.values():
             if fp.price is not None:
-                groups.setdefault((fp.cat_group, fp.category_type), []).append(float(fp.price))
+                groups.setdefault((fp.cat_group, deal_class_of(fp.category_type)),
+                                  []).append(float(fp.price))
         for key, prices in groups.items():
             prices.sort()
             n = len(prices)
@@ -109,13 +111,13 @@ class BlockIndex:
             ]
 
     def price_decile(self, fp: Fingerprint) -> int | None:
-        """0..9 within the listing's (cat_group, category_type) cohort; None without a price,
+        """0..9 within the listing's (cat_group, deal class) cohort; None without a price,
         and None for a cohort this index never saw — an unknown decile, not the cheapest one."""
         if not self._keys_ready:
             raise RuntimeError("BlockIndex.price_decile before finalize")
         if fp.price is None:
             return None
-        cuts = self.price_cuts.get((fp.cat_group, fp.category_type))
+        cuts = self.price_cuts.get((fp.cat_group, deal_class_of(fp.category_type)))
         if not cuts:
             return None
         decile = 0
@@ -126,10 +128,12 @@ class BlockIndex:
         return min(decile, _DECILES - 1)
 
     def index_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
-        """The keys this listing is POSTED under — exact band, exact decile."""
+        """The keys this listing is POSTED under — exact band, exact decile. The attribute keys
+        carry the deal CLASS (E927), so a share sale meets the sale of the same property."""
         if not self._keys_ready:
             raise RuntimeError("BlockIndex.index_keys before finalize")
         out: list[tuple[str, Any]] = []
+        deal = deal_class_of(fp.category_type)
         if fp.obec_kod is not None and fp.street_key and fp.house_number:
             out.append(("addr", (fp.obec_kod, fp.street_key, fp.house_number)))
         for band_no, band_val, _phash in fp.anchor_bands:
@@ -138,22 +142,19 @@ class BlockIndex:
             for band_no, band_val in fp.desc_bands:
                 out.append(("text", (band_no, band_val)))
         if fp.broker_key:
-            out.append(("broker", (fp.broker_key, fp.cat_group, fp.category_type,
-                                   self.price_decile(fp))))
+            out.append(("broker", (fp.broker_key, fp.cat_group, deal, self.price_decile(fp))))
         if fp.block_key and fp.disposition:
-            out.append(("attr_dispo", (fp.block_key, fp.cat_group, fp.category_type,
-                                       fp.disposition)))
+            out.append(("attr_dispo", (fp.block_key, fp.cat_group, deal, fp.disposition)))
         if fp.block_key and fp.area_band is not None:
-            out.append(("attr_area", (fp.block_key, fp.cat_group, fp.category_type, fp.area_band)))
+            out.append(("attr_area", (fp.block_key, fp.cat_group, deal, fp.area_band)))
         if fp.country_status == FOREIGN_STATUS and fp.area_band is not None:
-            out.append(("foreign", (fp.country_status, fp.cat_group, fp.category_type,
-                                    fp.area_band)))
+            out.append(("foreign", (fp.country_status, fp.cat_group, deal, fp.area_band)))
         # E300: path C's C1 — town + disposition + area band. An advert with no area states
         # nothing the key could bound; the disposition may be unknown and then keys as such.
         if (self.settings.attr_probe_town_grain and fp.obec_kod is not None
                 and fp.area_band is not None):
-            out.append((TOWN_PROBE, (fp.obec_kod, fp.cat_group, fp.category_type,
-                                     fp.disposition, fp.area_band)))
+            out.append((TOWN_PROBE, (fp.obec_kod, fp.cat_group, deal, fp.disposition,
+                                     fp.area_band)))
         return out
 
     def probe_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
@@ -161,22 +162,21 @@ class BlockIndex:
         out: list[tuple[str, Any]] = []
         for probe, key in self.index_keys(fp):
             if probe == "attr_area":
-                block_key, cat_group, category_type, band = key
+                block_key, cat_group, deal, band = key
                 for offset in (-1, 0, 1):
-                    out.append((probe, (block_key, cat_group, category_type, band + offset)))
+                    out.append((probe, (block_key, cat_group, deal, band + offset)))
             elif probe == TOWN_PROBE:
                 if not probes_town_key(fp):
                     continue
-                obec_kod, cat_group, category_type, disposition, band = key
+                obec_kod, cat_group, deal, disposition, band = key
                 for offset in (-1, 0, 1):
-                    out.append((probe, (obec_kod, cat_group, category_type, disposition,
-                                        band + offset)))
+                    out.append((probe, (obec_kod, cat_group, deal, disposition, band + offset)))
             elif probe == "broker" and key[3] is not None:
-                broker_key, cat_group, category_type, decile = key
+                broker_key, cat_group, deal, decile = key
                 for offset in (-1, 0, 1):
                     neighbour = decile + offset
                     if 0 <= neighbour < _DECILES:
-                        out.append((probe, (broker_key, cat_group, category_type, neighbour)))
+                        out.append((probe, (broker_key, cat_group, deal, neighbour)))
             else:
                 out.append((probe, key))
         return out

@@ -18,7 +18,12 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
 from autodedup.dataset import Listing
 from autodedup.settings import Settings
 from autodedup.text_facts import address_block_key, unit_designators
-from toolkit.room_taxonomy import category_main_compatible
+from toolkit.room_taxonomy import (
+    category_main_compatible,
+    category_type_compatible,
+    crosses_deal_type,
+    deal_class_of,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from autodedup.d43 import ClusterRelation
@@ -28,6 +33,7 @@ LAND_CATEGORY: str = "pozemek"
 FLAT_CATEGORY: str = "byt"
 
 UNIT_DESIGNATOR_VETO: str = "unit_designator_conflict"
+SHARE_PRICE_VETO: str = "share_price"
 
 
 class GuardSide(Protocol):
@@ -66,8 +72,7 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> s
 
     Missing data is never a mismatch (E12): every clause needs BOTH sides known."""
     cfg = settings or Settings()
-    if (a.category_type is not None and b.category_type is not None
-            and a.category_type != b.category_type):
+    if not category_type_compatible(a.category_type, b.category_type):
         return "category_type"
     if not category_main_compatible(a.category_main, b.category_main):
         return "category_main"
@@ -82,6 +87,26 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> s
             and abs(a.floor - b.floor) >= 2):
         return "floor"
     return None
+
+
+def _price_path(fp: "Fingerprint") -> list[float]:
+    """Every amount the advert has printed, the current one included (E134/N2)."""
+    points = [float(price) for _when, price in fp.price_events if price and float(price) > 0.0]
+    if fp.price and float(fp.price) > 0.0:
+        points.append(float(fp.price))
+    return points
+
+
+def share_price_conflict(a: "Fingerprint", b: "Fingerprint") -> bool:
+    """E927 (operator 2026-09-30): a share sale and a sale are one property only at ONE stated
+    price — an amount on one advert's price path is E160's round-equal of one on the other's.
+    A missing price is not the same price. Only a pair that crosses deal types is read."""
+    if not crosses_deal_type(a.category_type, b.category_type):
+        return False
+    from autodedup.demonstrate import prices_round_equal  # demonstrate imports this module
+
+    right = _price_path(b)
+    return not any(prices_round_equal(left, other) for left in _price_path(a) for other in right)
 
 
 def unit_designator_conflict(
@@ -193,17 +218,18 @@ def cluster_invariants_ok(
 
     E910: `closure_of` maps a member to its must-link closure (the operator's `same` rulings,
     Decision 8), and an advert it does not name is a closure of its own. The hard limbs (size,
-    deal type, category) and the operator's must-not-links read the whole set; the spreads
-    (area, disposition, floor) are read across closures only, because the operator has ruled
-    two adverts of one closure one property — with no ruling that is every pair, today's rule
-    exactly. The relation must be bound to the same closures by the caller.
+    deal class, category) and the operator's must-not-links read the whole set; the share-sale
+    price (E927) and the spreads (area, disposition, floor) are read across closures only,
+    because the operator has ruled two adverts of one closure one property — with no ruling
+    that is every pair, today's rule exactly. The relation must be bound to the same closures
+    by the caller.
     """
     cfg = settings or Settings()
     if len(members) > cfg.max_cluster_size:
         return "size"
 
-    types = {fp.category_type for fp in members if fp.category_type is not None}
-    if len(types) > 1:
+    classes = {deal_class_of(fp.category_type) for fp in members if fp.category_type is not None}
+    if len(classes) > 1:
         return "category_type"
 
     cats = sorted({fp.category_main for fp in members if fp.category_main is not None})
@@ -211,6 +237,14 @@ def cluster_invariants_ok(
         for right in cats[index + 1:]:
             if not category_main_compatible(left, right):
                 return "compat_class"
+
+    typed = [fp for fp in members if fp.category_type is not None]
+    if len({fp.category_type for fp in typed}) > 1:
+        for index, left_fp in enumerate(typed):
+            for right_fp in typed[index + 1:]:
+                if (share_price_conflict(left_fp, right_fp) and not _same_closure(
+                        left_fp.listing_id, right_fp.listing_id, closure_of)):
+                    return SHARE_PRICE_VETO
 
     sized = [(fp.listing_id, fp.area_m2) for fp in members
              if fp.area_m2 is not None and fp.area_m2 > 0.0]

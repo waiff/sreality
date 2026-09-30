@@ -161,6 +161,31 @@ def test_merge_rejects_sale_vs_rent_at_chokepoint():
     assert _find(conn.executed, "UPDATE listings SET property_id =") is None
 
 
+@pytest.mark.parametrize("other", ["pronajem", "drazba"])
+def test_merge_rejects_a_share_sale_with_a_rental_or_an_auction_at_chokepoint(other):
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "podil", "pozemek", None), (20, "active", other, "pozemek", None)]),
+    ])
+    with pytest.raises(MergeError):
+        merge_properties(
+            conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+        )
+    assert _find(conn.executed, "UPDATE listings SET property_id =") is None
+
+
+def test_merge_allows_a_share_sale_with_a_sale_at_chokepoint():
+    # E927 (operator 2026-09-30): sreality alone files a share sale as `podil`; every other
+    # portal lists it as `prodej`. The chokepoint reads the deal class; price is the engine's.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "podil", "pozemek", None), (20, "active", "prodej", "pozemek", None)]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,), (2,)]),
+    ])
+    merge_properties(conn, survivor_id=10, retired_id=20, reason="manual", source="operator")
+    assert _find(conn.executed, "UPDATE listings SET property_id =") is not None
+
+
 def test_merge_rejects_byt_vs_dum_at_chokepoint():
     conn = _FakeConn([
         (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
