@@ -673,7 +673,7 @@ def strong_corroboration(
     be clean:
 
       * several tight non-catalogue photo FILES in common — a developer reuses the exterior
-        render, not three photographs; the room TAG is not asked (a tag is never a fact, E929);
+        render, not three interiors; the room TAG is not asked (a tag is never a fact, E929);
       * a shared rare order code, which is the seller's own name for ONE object;
       * a body one advert essentially IS — outside a development, where a shared body is the
         developer's template rather than this unit's (the Černovírské zahrady parcelling).
