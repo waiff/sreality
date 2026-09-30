@@ -61,13 +61,13 @@ _SENTENCE_TAIL = re.compile(r"(?<=[a-záčďéěíňóřšťúůýž])\.\s*$")
 # '28. října', '17. listopadu', '1. máje' — a LEADING ordinal is part of the street name,
 # never a house number (03 §3.3.1, named regression test).
 _NUMERIC_LEADING = re.compile(r"^\s*\d{1,3}\.\s*\S")
-# čp / čo forms: '128', '128/40', '128/40a', 'ev. č. 12', 'č.ev. 12'
-_EVIDENCNI = re.compile(r"(?:ev\.?\s*č\.?|č\.?\s*ev\.?|evidenční\s*číslo)\s*(\d{1,6})", re.IGNORECASE)
+# čp / čo forms: '128', '128/40', '128/40a', 'ev. č. 12', 'č.ev. 12', bezrealitky's 'ev.32'
+_EVIDENCNI = re.compile(r"(?:\bev\.?\s*(?:č\.?)?|č\.?\s*ev\.?|evidenční\s*číslo)\s*(\d{1,6})", re.IGNORECASE)
 _HN = re.compile(r"(\d{1,6})(?:\s*/\s*(\d{1,5})\s*([a-zA-Z])?)?")
 # The number that ENDS a street claim, WITH the marker that types it: "Chata Moravské Prusy
 # č.ev. 13" is evidence number 13, and splitting the bare digits off read it as č.p. 13 (D7).
 _TRAILING_NUMBER = re.compile(
-    r"\s+((?:č\.?\s*p\.?|č\.?\s*ev\.?|ev\.?\s*č\.?)?\s*\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$",
+    r"\s+((?:č\.?\s*p\.?|č\.?\s*ev\.?|ev\.?\s*(?:č\.?)?)?\s*\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$",
     re.IGNORECASE)
 # `ruian_address_points.typ_so`, the register's own two labels (measured 2026-09-30: 2,614,947
 # current `č.p.` points and 406,256 `č.ev.`, nothing else). The domovní číslo means nothing
@@ -171,12 +171,14 @@ def normalize_house_number(raw: str) -> dict[str, object]:
     return slots
 
 
-def house_number(slots: dict[str, object]) -> tuple[int | None, str]:
-    """-> (the domovní číslo, its `typ_so`) off the typed slots: a č.p. first, else a č.ev."""
-    for slot, typ in (("cislo_domovni", TYP_CP), ("evidencni", TYP_EV)):
+def house_number(slots: dict[str, object]) -> tuple[int | None, str | None]:
+    """-> (the domovní číslo, its `typ_so`). Only a MARKED č.ev. is typed: an unmarked number
+    is None, which BIND reads as a č.p. where the scope has one, else a č.ev. (ceskereality
+    writes a cottage's "Dlouhá 6" with no marker at all)."""
+    for slot, typ in (("cislo_domovni", None), ("evidencni", TYP_EV)):
         if str(slots.get(slot) or "").isdigit():
             return int(str(slots[slot])), typ
-    return None, TYP_CP
+    return None, None
 
 
 def split_street_and_number(raw: str) -> tuple[str, dict[str, object]]:

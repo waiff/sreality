@@ -84,7 +84,7 @@ def confidence(binding: Binding, position: Position, *, blurred: bool) -> str:
     if not binding.bound:
         return "low"
     if binding.ambiguous or set(binding.relaxations) & LOW_CONFIDENCE_QUALIFIERS:
-        return "low"  # a tie-break or a post-town guess decided it, not a field
+        return "low"  # a tie-break or a nearest-obec sliver decided it, not a field
     agreed = len(binding.agreed)
     if binding.target_kind == "address_point" and _pin_corroborates(position):
         value = "exact"

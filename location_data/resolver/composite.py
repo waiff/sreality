@@ -42,7 +42,6 @@ from dataclasses import dataclass
 
 from location_data.resolver.normalize import (
     STREET_LINE_SEPARATOR,
-    TYP_CP,
     house_number,
     normalize_match_key,
     split_street_and_number,
@@ -245,7 +244,7 @@ class StreetBind:
 
     street: Street | None = None
     cislo_domovni: int | None = None
-    typ_so: str = TYP_CP
+    typ_so: str | None = None
     cislo_orientacni: int | None = None
     reason: str = "no_match"
 

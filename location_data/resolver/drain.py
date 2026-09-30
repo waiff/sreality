@@ -62,9 +62,8 @@ The lease stays on the CALLER's connection and is taken exactly once: workers ar
 CLI:  python -m location_data.resolver.drain [--max-seconds N] [--batch-size N]
                                              [--listing-id N] [--dry-run]
 
-`--dry-run` takes no lease and no queue row: it re-resolves the fixed 1 % sample (`listing_id %
-100 = 7`, or `--listing-id`) and counts, per portal, what the rules would change in the stored
-rows (v5.5; it used to re-claim one queue slice for the whole budget and only log it).
+`--dry-run` (v5.5) takes no lease and no queue row: it re-resolves the fixed 1 % sample (or
+`--listing-id`) and counts, per portal, what the rules would change in the stored rows.
 
 The CLI has no `--workers`: the GitHub lane is the backstop, it is RTT-bound against a US
 runner rather than IO-bound beside the instance, and N runner connections into the session
@@ -150,16 +149,17 @@ UPDATE dirty_locations
  WHERE listing_id = %s AND enqueued_at <= %s
 """
 
-# The dry run's population, the stored rows of the fixed sample, read by primary-key PROBES
-# of the candidate ids a page spans: `mod(listing_id, 100) = 7` over the key walked the heap
-# of every row it skipped (21.9 s for the first 250 rows, measured 2026-09-30).
-SAMPLE_MODULUS, SAMPLE_REMAINDER = 100, 7
+# The dry run's rows: the fixed 1 % sample (`listing_id % 100 = 7`) by primary-key PROBES, 2.8 s
+# for all 9,201 (a `mod()` filter took 21.9 s per 250, 2026-09-30); hash order, so a run cut
+# short by its budget has still covered a spread of ids.
 _SAMPLE_SQL = """
 SELECT listing_id, obec_kod, cast_obce_kod, house_number_cp, granularity::text,
        ST_Y(geom), ST_X(geom)
-  FROM listing_location WHERE listing_id = ANY(%s::bigint[]) ORDER BY listing_id
+  FROM listing_location
+ WHERE listing_id = ANY(coalesce(%s::bigint[], ARRAY(
+       SELECT generate_series(7, max(listing_id), 100) FROM listing_location)))
+ ORDER BY md5(listing_id::text)
 """
-_SAMPLE_UPPER_SQL = "SELECT coalesce(max(listing_id), 0) FROM listing_location"
 
 _QUEUE_HEALTH_SQL = """
 SELECT count(*), coalesce(extract(epoch from now() - min(enqueued_at)), 0)
@@ -875,45 +875,38 @@ def _write_slice(conn: psycopg.Connection, resolutions: list[Any]) -> None:
 
 
 def dry_run(
-    conn: psycopg.Connection,
-    *,
-    batch_size: int = DEFAULT_BATCH,
-    max_seconds: int = DEFAULT_MAX_SECONDS,
-    only_listing_id: int | None = None,
+    conn: psycopg.Connection, *, batch_size: int = DEFAULT_BATCH,
+    max_seconds: int = DEFAULT_MAX_SECONDS, only_listing_id: int | None = None,
 ) -> dict[str, Counter[str]]:
     """Re-resolve the sample and compare each answer with the row it would replace. Writes
-    nothing, so it needs no lease and claims no queue row; one read transaction per page."""
+    nothing, so it needs no lease and claims no queue row. A page that fails is counted and
+    skipped, and the deadline ends the loop, never the report."""
+    deadline = time.monotonic() + max_seconds
     timeout_s = _batch_timeout_s()
     with _bounded(conn, timeout_s) as cur:
         registry_version_id, registry_label = resolve_db.current_registry_version(conn)
-        cur.execute(_SAMPLE_UPPER_SQL)
-        upper = int(cur.fetchone()[0])  # type: ignore[index]
+        cur.execute(_SAMPLE_SQL, (None if only_listing_id is None else [only_listing_id],))
+        stored = cur.fetchall()
     cache = resolve_db.RunCache()
     ctx = _context(conn, registry_version_id, cache)
-    span = batch_size * SAMPLE_MODULUS
-    pages = [[only_listing_id]] if only_listing_id is not None else (
-        list(range(lo + SAMPLE_REMAINDER, lo + span, SAMPLE_MODULUS))
-        for lo in range(0, upper + 1, span))
-    tally: dict[str, Counter[str]] = {}
-    deadline = time.monotonic() + max_seconds
-    for ids in pages:
+    tally: dict[str, Counter[str]] = {"*": Counter(of=len(stored))}
+    for at in range(0, len(stored), batch_size):
+        rows = stored[at : at + batch_size]
         if time.monotonic() >= deadline:
             break
-        with conn.transaction():
-            with conn.cursor() as cur:
-                for statement in _batch_guc(timeout_s):
-                    cur.execute(statement)
-                cur.execute(_SAMPLE_SQL, (ids,))
-                stored = cur.fetchall()
-            if not stored:
-                continue
-            slice_ = _prefetch(conn, [int(r[0]) for r in stored],
-                               timeout_s=_prefetch_timeout_s(), restore_s=timeout_s)
-            with contextlib.suppress(Exception), conn.transaction():
-                _warm(slice_, ctx, cache)
-            for row in stored:
-                new = _compute_one(int(row[0]), ctx, registry_label, slice_)
-                _tally(tally.setdefault(new.source, Counter()), row, new)
+        try:
+            with _bounded(conn, timeout_s):
+                slice_ = _prefetch(conn, [int(r[0]) for r in rows],
+                                   timeout_s=_prefetch_timeout_s(), restore_s=timeout_s)
+                with contextlib.suppress(Exception), conn.transaction():
+                    _warm(slice_, ctx, cache)
+                new = [_compute_one(int(r[0]), ctx, registry_label, slice_) for r in rows]
+        except Exception as exc:  # noqa: BLE001 - one page, never the report
+            tally["*"]["failed"] += len(rows)
+            LOG.warning("SAMPLE rows %d.. failed: %s", at, exc)
+            continue
+        for row, item in zip(rows, new):
+            _tally(tally.setdefault(item.source, Counter()), row, item)
     for source, counts in sorted(tally.items()):
         LOG.info("SAMPLE source=%s %s", source, " ".join(f"{k}={v}" for k, v in counts.items()))
     return tally
@@ -1029,10 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         "--sweep-window", type=int, default=DEFAULT_SWEEP_WINDOW,
         help="full-sweep only: listing-id width of one bounded window",
     )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="compare the fixed 1%% sample (or --listing-id) with the stored rows; no writes",
-    )
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with open_connection() as conn:

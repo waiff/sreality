@@ -76,11 +76,11 @@ from __future__ import annotations
 #      fallback branch is gone). The bump re-queues the corpus so every row gets its KÚ; the
 #      MF view swap (migration 567) refuses to apply until the address-grain rows have one.
 # v5.5 = text-reader W2 (operator rulings 2026-09-30). THE TOWN RULE (D4): a town name is
-#      looked up as obec / část obce / KÚ, climbed to its obec, kept by the listing's PSČ, else
-#      as an obec within 40 km of the pin; a tie goes to the pin's obec, else the nearest (the
-#      lowest-id pick is gone); nothing left -> composite line (same test), part names, PSČ.
-#      House numbers are TYPED (D7): a č.ev. joins only a `č.ev.` point, a streetless number
-#      is looked up inside the one bound část, and only a bound č.p. publishes a number (the
-#      `street_segment` rung is deleted). A street in a named town carries the register's part
-#      when all its doors lie in one (Q3). Six dead claim types are no longer read.
+#      looked up as obec / část obce / KÚ and climbed to its obec, kept by the PSČ, else by
+#      okres/kraj and, with a PSČ or a precise pin, within 40 km of the pin; a pin settles a tie
+#      (its obec, else the nearest — no lowest-id pick where a pin exists). House numbers are
+#      TYPED (D7): a marked č.ev. joins only a `č.ev.` point, an unmarked number a č.p. first;
+#      a streetless one is looked up in the one bound část; only a bound č.p. publishes one
+#      (`street_segment` deleted). An exact street in a named town takes the register's část
+#      when all its doors lie in one (Q3). Six dead claim types leave BIND, eleven leave S1.
 RESOLVER_VERSION = "resolver:v5.5"

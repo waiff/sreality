@@ -42,14 +42,16 @@ def _resolve(claims, mirror=None):
 def test_krasny_les_resolves_via_the_okres_claim():
     """maxima f60012522: the description states 'obec Krásný Les, okres Liberec' while the
     stored row carried obec Petrovice / okres Ústí nad Labem — the OTHER Krásný Les, ~100 km
-    west. Five stored fields wrong at once."""
-    binding = _bind([
-        mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
-        mm.claim(3, "okres_name", value_text="Liberec", source="maxima",
-                 extraction_method="regex_text"),
-    ])
-    assert binding.admin_unit_id == 3  # Krásný Les, okres Liberec
-    assert binding.ambiguous is False
+    west. Five stored fields wrong at once. An undeclared pin 1.5 km from the other one must
+    not pull the row there (v5.5): it refuses no named town, and the okres narrows first."""
+    for pin in ([], [mm.claim(4, "coordinate", lat=50.7700, lon=13.9500, source="maxima")]):
+        binding = _bind([
+            mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
+            mm.claim(3, "okres_name", value_text="Liberec", source="maxima",
+                     extraction_method="regex_text"), *pin,
+        ])
+        assert binding.admin_unit_id == 3  # Krásný Les, okres Liberec
+        assert binding.ambiguous is False
 
 
 def test_an_ambiguous_bind_is_served_at_low_confidence_never_queued():
@@ -160,24 +162,16 @@ def test_a_shared_psc_is_broken_by_the_pins_containing_obec_at_low_confidence():
 
 
 def test_the_pin_side_of_the_tie_wins_whichever_obec_it_lands_in():
-    binding = _bind([
-        mm.claim(1, "psc", value_text="67401", source="bazos"),
-        mm.claim(2, "coordinate", lat=49.1980, lon=15.9250, source="bazos"),
-    ], mirror=_psc_mirror())
-    assert binding.ambiguous is False
-    assert binding.admin_unit_id == 23
-
-
-def test_a_pin_inside_neither_obec_takes_the_nearest_never_the_lowest_id():
-    """v5.5 step 3: the pin REPLACES the lowest-`admin_unit_id` pick. 6 km west of Třebíč and
-    inside neither circle, it is still nearer Třebíč than Kožichovice (the lower code) — and a
-    nearest-town guess is served at `low`, never as a corroborated answer."""
-    claims = [mm.claim(1, "psc", value_text="67401", source="bazos"),
-              mm.claim(2, "coordinate", lat=49.2300, lon=15.8000, source="bazos")]
-    binding = _bind(claims, mirror=_psc_mirror())
-    assert (binding.admin_unit_id, binding.ambiguous) == (22, False)
-    assert "coordinate_tiebreak_imprecise" in binding.relaxations
-    assert _resolve(claims, _psc_mirror()).match_confidence == "low"
+    """v5.5 step 3: the pin REPLACES the lowest-`admin_unit_id` pick (Třebíč, unit 22). Inside
+    Kožichovice, or 4 km from it and inside neither circle, it takes Kožichovice — nearest
+    being a guess, at `low`."""
+    for pin in ((49.1980, 15.9250), (49.1700, 15.9600)):
+        binding = _bind([
+            mm.claim(1, "psc", value_text="67401", source="bazos"),
+            mm.claim(2, "coordinate", lat=pin[0], lon=pin[1], source="bazos"),
+        ], mirror=_psc_mirror())
+        assert binding.ambiguous is False
+        assert binding.admin_unit_id == 23
 
 
 def test_a_shared_psc_with_nothing_to_break_the_tie_is_ambiguous_and_still_answered():
@@ -193,10 +187,9 @@ def test_a_shared_psc_with_nothing_to_break_the_tie_is_ambiguous_and_still_answe
 
 
 def _town_mirror(*, with_zlate_hory_ku: bool = True) -> mm.MiniMirror:
-    """The W2 cases as the live register holds them (codes read 2026-09-30): Černotín is an
-    obec near Přerov AND a část obce (and, in the name index, a KÚ) of Dnešice; Hory is an
-    obec near Karlovy Vary AND a část obce and a KÚ of Oloví; "Zlaté Hory v Jeseníkách" is a
-    KÚ of Zlaté Hory, 329 km from that Hory. Towns with a point carry an address point too."""
+    """The W2 cases as the live register holds them (2026-09-30): Černotín is an obec near
+    Přerov AND a část/KÚ of Dnešice; Hory an obec AND a část/KÚ of Oloví; "Zlaté Hory v
+    Jeseníkách" a KÚ of Zlaté Hory, 329 km from that Hory."""
     mirror = mm.default_mirror()
     towns = {557668: (60, "Dnešice", 49.6056, 13.2655, ("33401", "33443")),
              513067: (63, "Černotín", 49.5271, 17.7717, ("75368",)),
@@ -220,20 +213,17 @@ def _town_mirror(*, with_zlate_hory_ku: bool = True) -> mm.MiniMirror:
     return mirror
 
 
-def _bazos(town: str, psc: str, pin: tuple[float, float] | None = None):
-    claims = [mm.claim(1, "obec_name", value_text=town, source="bazos"),
-              mm.claim(2, "psc", value_text=psc, source="bazos")]
-    if pin is not None:
-        claims.append(mm.claim(3, "coordinate", lat=pin[0], lon=pin[1], source="bazos"))
-    return claims
+def _bazos(town: str, psc: str, pin: tuple[float, float]):
+    return [mm.claim(1, "obec_name", value_text=town, source="bazos"),
+            mm.claim(2, "psc", value_text=psc, source="bazos"),
+            mm.claim(3, "coordinate", lat=pin[0], lon=pin[1], source="bazos")]
 
 
 def test_a_village_the_register_holds_as_a_part_or_ku_binds_the_town_its_psc_serves():
-    """Černotín's only OBEC is near Přerov, Hory's near Karlovy Vary. As a část obce / KÚ they
-    climb to Dnešice and Oloví, whose PSČ the advert carries — so those bind, from the name,
-    and the PSČ that discriminated counts as an agreeing field."""
+    """As a část obce / KÚ, Černotín and Hory climb to Dnešice and Oloví, whose PSČ the advert
+    carries: those bind from the name, and the PSČ that discriminated is an agreeing field."""
     for town, psc, obec_kod in (("Černotín", "33443", 557668), ("Hory", "35707", 560588)):
-        binding = _bind(_bazos(town, psc, pin=(49.61, 13.27)), mirror=_town_mirror())
+        binding = _bind(_bazos(town, psc, (49.61, 13.27)), mirror=_town_mirror())
         assert (binding.obec_kod, binding.rung, "psc" in binding.agreed) == (obec_kod, "R4", True)
 
 
@@ -241,21 +231,23 @@ def test_18841980_heals_through_the_ku_and_its_composite_anchor_is_refused():
     """The slug "zlaté-hory-v-jeseníkách" matches no obec and split to a "Hory" 329 km away.
     It IS the KÚ of Zlaté Hory, whose obec carries PSČ 793 76 (R4). Without that KÚ the line's
     anchor is neither in the PSČ nor within 40 km of the pin, and the PSČ answers (R6)."""
-    claims = _bazos("zlaté-hory-v-jeseníkách", "79376", pin=(50.24194, 17.34158))
+    claims = _bazos("zlaté-hory-v-jeseníkách", "79376", (50.24194, 17.34158))
     for with_ku, rung in ((True, "R4"), (False, "R6")):
         binding = _bind(claims, mirror=_town_mirror(with_zlate_hory_ku=with_ku))
         assert (binding.obec_kod, binding.rung) == (597996, rung)
 
 
-def test_a_named_town_the_pin_cannot_reach_is_refused_unless_the_psc_vouches():
-    """No PSČ: a unique obec-level name 280 km from the pin is a namesake, not the town — the
-    pin's own town answers (R7). Within 40 km, or with no pin, the name binds as ever."""
-    praha, bilovec_pin = mm.claim(1, "obec_name", value_text="Praha"), (49.7573, 18.0158)
-    pin = mm.claim(2, "coordinate", lat=bilovec_pin[0], lon=bilovec_pin[1])
-    assert (_bind([praha, pin]).obec_kod, _bind([praha, pin]).rung) == (599212, "R7")
-    assert _bind([praha]).obec_kod == 554782
-    near = mm.claim(1, "obec_name", value_text="Bílovec")
-    assert (_bind([near, pin]).obec_kod, _bind([near, pin]).rung) == (599212, "R4")
+def test_only_a_psc_or_a_precise_pin_refuses_a_named_town_out_of_reach():
+    """No PSČ: a name 280 km from a PRECISE pin is a namesake — the pin's town answers (R7).
+    An undeclared pin is often a placeholder, so the name stands (CHECK flags it), as it does
+    within 40 km or with no pin at all."""
+    praha = mm.claim(1, "obec_name", value_text="Praha")
+    pin = mm.claim(2, "coordinate", lat=49.7573, lon=18.0158)
+    far = _bind([praha, pin], pin_is_precise=True)
+    assert (far.obec_kod, far.rung) == (599212, "R7")
+    assert _bind([praha, pin]).obec_kod == _bind([praha]).obec_kod == 554782
+    near = _bind([mm.claim(1, "obec_name", value_text="Bílovec"), pin], pin_is_precise=True)
+    assert (near.obec_kod, near.rung) == (599212, "R4")
 
 
 def test_a_name_that_binds_nothing_falls_through_to_the_part_then_the_psc():

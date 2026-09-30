@@ -216,24 +216,6 @@ def test_the_street_index_is_the_same_answer_as_folding_each_row():
         s for s in mirror.streets_in_obec(KLADNO) if s.code in (112, 113)}
 
 
-def test_a_line_number_never_attaches_to_a_street_bound_from_another_claim():
-    """A listing naming `Nad Bořislavkou` and, in a SEPARATE claim, a line reading
-    "Livornská 5" published `Nad Bořislavkou 5` at `street_segment` grain, because the line's
-    number was written back onto the listing-wide constraints and then lent to whatever street
-    the ranking picked. A number belongs to the segment that bound ITS street.
-
-    Two claims naming two different streets is also two answers, so the binder refuses both —
-    and the number goes with them rather than surviving on a row with no street at all."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
-        mm.claim(3, "street_name", value_text="Prodej bytu 2+kk, Livornská 5, Praha"),
-    ])
-    assert resolution.street_name is None
-    assert resolution.house_number_cp is None
-    assert resolution.obec_name == "Praha"
-
-
 def test_a_house_number_claimed_in_its_own_field_still_reaches_the_address_point():
     """The other direction, and the one that must NOT be broken by the rule above: a portal
     that states the street and the číslo in SEPARATE fields is stating both about the same

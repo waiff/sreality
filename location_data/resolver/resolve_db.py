@@ -261,7 +261,7 @@ SELECT {_ADDRESS_POINT_COLUMNS}{_ADDRESS_POINT_FROM}
  WHERE ap.obec_unit_id IN {_OBEC_UNIT_ID_SUBQUERY.strip()}
    AND ap.valid_to IS NULL
    AND (%s::text IS NULL OR s.name_norm = %s::text)
-   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer AND ap.typ_so = %s::text)
+   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer AND ap.typ_so = coalesce(%s::text, ap.typ_so))
    AND (%s::integer IS NULL OR ap.cislo_orientacni = %s::integer)
    AND (%s::bigint IS NULL OR ap.cast_obce_unit_id = %s::bigint)
  ORDER BY ap.kod_adm
@@ -352,7 +352,7 @@ _ADMIN_COLUMNS = _admin_columns("u.definition_point")
 _ADMIN_CHAIN_COLUMNS = _admin_columns("coalesce(u.definition_point, gp.pt)")
 
 _ADMIN_BY_NAME_SQL = f"""
-SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
+SELECT {_ADMIN_COLUMNS}, n.psc_set
   FROM ruian_name_index n
   JOIN ruian_admin_units u ON u.id = n.entity_id AND u.level = n.entity_kind
  WHERE n.registry_version_id = %s
@@ -382,7 +382,7 @@ SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
 # that KÚ by the hierarchy alone, so FILL needs no geometry for 3,942 of the 6,258 obce. An
 # index read on `ruian_admin_units_parent`, in the round trip FILL already makes.
 _ADMIN_CHAIN_TAIL = f"""
-SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[], ks.code
+SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::char(5)[], ks.code
   FROM chain c
   JOIN ruian_admin_units u ON u.id = c.id
   LEFT JOIN LATERAL (
@@ -456,7 +456,7 @@ CONTAINING_OBEC_SQL = f"""
 SELECT p.idx, c.*
   FROM {_POINTS}
   CROSS JOIN LATERAL (
-    SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
+    SELECT {_ADMIN_COLUMNS}, NULL::char(5)[]
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
@@ -488,7 +488,7 @@ _NEAREST_OBEC_SQL = f"""
 SELECT p.idx, c.*
   FROM {_POINTS}
   CROSS JOIN LATERAL (
-    SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[],
+    SELECT {_ADMIN_COLUMNS}, NULL::char(5)[],
            ST_Distance(g.geom::geography, {_PT}::geography) AS d
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
@@ -497,7 +497,7 @@ SELECT p.idx, c.*
        AND u.level = 'obec'
        AND g.geom && ST_Expand({_PT}, %s / 60000.0)
        AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
-     ORDER BY 13
+     ORDER BY 11
      LIMIT 1
   ) c
 """
@@ -616,8 +616,7 @@ def _admin_unit(row: Sequence[Any], *, sole_katastr_kod: int | None = None) -> A
         name_norm=str(row[4]), path=path, parent_id=row[6],
         lat=None if row[7] is None else float(row[7]),
         lon=None if row[8] is None else float(row[8]),
-        qualifier=row[9], homonym_count=int(row[10] or 1),
-        psc_set=tuple(str(p).strip() for p in (row[11] or ())),
+        psc_set=tuple(str(p).strip() for p in (row[9] or ())),
         obec_kod=_path_code(path, "b"), okres_kod=_path_code(path, "o"),
         kraj_kod=_path_code(path, "k"), sole_katastr_kod=sole_katastr_kod,
     )
@@ -625,7 +624,7 @@ def _admin_unit(row: Sequence[Any], *, sole_katastr_kod: int | None = None) -> A
 
 def _chain_unit(row: Sequence[Any]) -> AdminUnit:
     """A chain row: the unit columns, then the obec's one KÚ child (NULL off an obec row)."""
-    return _admin_unit(row[:12], sole_katastr_kod=row[12])
+    return _admin_unit(row[:10], sole_katastr_kod=row[10])
 
 
 def _path_code(path: str, prefix: str) -> int | None:
@@ -705,7 +704,7 @@ class SqlRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
-        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
+        typ_so: str | None = None, cast_obce_unit_id: int | None = None,
     ) -> list[AddressPoint]:
         rows = self._rows(
             "address_points_by_number",
@@ -803,7 +802,7 @@ class SqlRegistryView:
         )
         if not rows:
             return None
-        return _admin_unit(rows[0][1:]), float(rows[0][13])
+        return _admin_unit(rows[0][1:]), float(rows[0][11])
 
     def in_czechia_polygon_bulk(self, points: Sequence[tuple[float, float]]) -> dict[int, bool]:
         if not points:
@@ -934,7 +933,7 @@ class CachedRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
-        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
+        typ_so: str | None = None, cast_obce_unit_id: int | None = None,
     ) -> Sequence[AddressPoint]:
         key = ("address_points_by_number", obec_kod, street_name_norm, cislo_domovni,
                cislo_orientacni, typ_so, cast_obce_unit_id)

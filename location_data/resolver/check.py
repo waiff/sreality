@@ -121,7 +121,7 @@ _FOREIGN_BUCKET_TOKENS = frozenset({"zahranici", "zahranicni"})
 # as a code — it is `status='foreign'` with a NULL `country_code`.
 UNKNOWN_FOREIGN = "XX"
 
-_TEXT_COUNTRY_TYPES = ("address_line_verbatim", "obec_name", "landmark")
+_TEXT_COUNTRY_TYPES = ("address_line_verbatim", "obec_name")
 
 
 def in_cz_bbox(lat: float, lon: float) -> bool:

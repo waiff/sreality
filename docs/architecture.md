@@ -3082,7 +3082,8 @@ portal's payload or its own page, and every other stamp is class E outright.
   obec + street + a typed čp/čev/čo (or a number inside the one bound část obce); a street; an obec /
   část obce by name; a PSČ set; the pin's obec; the nearest obec within the 250 m sliver; last the
   okres or kraj. A town name binds by the v5.5 TOWN RULE (obec/část/KÚ climbed to the obec, kept by
-  the PSČ, else within 40 km of the pin; a tie goes to the pin's obec, else the nearest). The tail of that
+  the PSČ, else by okres/kraj and — when a PSČ exists or the pin is declared precise — within 40 km
+  of the pin; a tie goes to the pin's obec, else the nearest). The tail of that
   chain is what keeps a border pin or a region-only listing from having no town at all, which rule 25
   does not allow: each answers at `low` confidence, and a sliver is NOT a dispute, because a polygon
   edge is not a disagreement. **The pin BIND reverse-geocodes from is the pin the row publishes** —
@@ -3126,8 +3127,10 @@ portal's payload or its own page, and every other stamp is class E outright.
   spelling; **the street is the REGISTER's or it is nothing** (W18) — an unbound claim text is no
   longer copied through preserve-if-null, because a `street_name` with `ulice_kod` NULL cannot be
   joined, filtered, compared across portals or de-duplicated on, and the 1,864 production rows in
-  that state included the hallucination class the rule exists to stop; čp / čo / psč still fall back
-  to a claim, preserve-if-null, and only an operator correction outranks the registry. It also fills
+  that state included the hallucination class the rule exists to stop; so is a house number (v5.5):
+  only a bound `č.p.` point publishes one, and only psč still falls back to a claim, preserve-if-null.
+  A street bound in a town the advert's town field names takes the část obce all its doors lie in
+  (Q3), else none. Only an operator correction outranks the registry. It also fills
   **the position: the portal pin when admissible, else the finest bound unit's point on surface** — the boundary's stored
   inscribed-circle centre, inside the polygon where `ST_Centroid` need not be, read off the same
   chain rather than as a tenth registry question. It WALKS that chain, because RÚIAN draws no polygon

@@ -66,14 +66,8 @@ class GranularityRank:
         except KeyError as exc:  # a rung with no rank row is a schema bug, never a default
             raise KeyError(f"no location_granularity_rank row for {granularity!r}") from exc
 
-    def at_least(self, granularity: str, floor: str) -> bool:
-        return self.rank(granularity) >= self.rank(floor)
-
     def coarser_of(self, a: str, b: str) -> str:
         return a if self.rank(a) <= self.rank(b) else b
-
-    def finer_of(self, a: str, b: str) -> str:
-        return a if self.rank(a) >= self.rank(b) else b
 
 
 # --------------------------------------------------------------------------- claims
@@ -155,8 +149,6 @@ class AdminUnit:
     okres_kod: int | None = None
     kraj_kod: int | None = None
     obec_kod: int | None = None
-    qualifier: str | None = None
-    homonym_count: int = 1
     psc_set: tuple[str, ...] = ()
     # An OBEC's one KÚ child, else None — answered by `admin_chain` only, like the point. A
     # one-KÚ obec is 3,942 of 6,258 (gate 0, 2026-09-25), and every entity inside one lies in
@@ -238,11 +230,11 @@ class RegistryView(Protocol):
         street_name_norm: str | None,
         cislo_domovni: int | None,
         cislo_orientacni: int | None,
-        typ_so: str = "č.p.",
+        typ_so: str | None = None,
         cast_obce_unit_id: int | None = None,
     ) -> Sequence[AddressPoint]:
-        """`cislo_domovni` matches only a point of its `typ_so`. `cast_obce_unit_id` scopes a
-        STREETLESS lookup to one část obce, where the number is unique by law."""
+        """`cislo_domovni` matches only a point of its `typ_so` (None: either). `cast_obce_unit_id`
+        scopes a STREETLESS lookup to one část obce, where the number is unique by law."""
 
     def streets_in_obec(self, obec_kod: int) -> Sequence[Street]: ...
 
@@ -307,7 +299,7 @@ class Binding:
 
     `agreed` names the INDEPENDENT fields that matched the entity — it is GRADE's whole
     input. `relaxations` names the qualifiers that had to be applied to get here; some of
-    them (a coordinate tie-break, a post-town guess) cap the answer at `low` however many
+    them (a coordinate tie-break, a nearest-obec sliver) cap the answer at `low` however many
     fields agreed.
     """
 

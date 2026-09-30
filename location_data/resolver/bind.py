@@ -81,8 +81,8 @@ AGREEMENT_QUALIFIERS = frozenset({"psc", "okres", "kraj"})
 
 # THE TOWN RULE (v5.5, D4). A town name is looked up at these three levels and every match
 # climbs to its obec: "Černotín" in PSČ 334 43 is a část obce of Dnešice, "Zlaté Hory v
-# Jeseníkách" a katastrální území of Zlaté Hory. Only an OBEC-level match may bind by the pin's
-# reach alone; a part or a KÚ binds its town only through the PSČ.
+# Jeseníkách" a katastrální území of Zlaté Hory. A part or a KÚ binds its town only through the
+# PSČ — or as the unique part a composite line names, whose town `_admits` tests like any other.
 TOWN_NAME_LEVELS = ("obec", "cast_obce", "katastralni_uzemi")
 # How far from the pin a town the PSČ does not vouch for may lie. The 28 verified true towns of
 # the wrong-town sample all lie within 25.1 km of theirs; 18841980's "Hory" lay 329 km away.
@@ -199,9 +199,9 @@ class Constraints:
     # one answer, and no rung whose reach depends on whether the portal wrote a comma.
     street_lines: tuple[str, ...] = ()
     # The domovní číslo and its RÚIAN `typ_so`, TYPED from claim to SQL (D7): "č.ev. 13" is
-    # a cottage's evidence number and may only ever match a `č.ev.` point.
+    # a cottage's evidence number and may only ever match a `č.ev.` point (None: unmarked).
     cislo_domovni: int | None = None
-    typ_so: str = TYP_CP
+    typ_so: str | None = None
     cislo_orientacni: int | None = None
     kod_adm: int | None = None
     pin: tuple[float, float] | None = None
@@ -225,8 +225,7 @@ def collect_constraints(
     obec_lines: list[str] = []
     street_lines: list[str] = []
     street_key = None
-    cp = co = kod_adm = None
-    typ = TYP_CP
+    cp = co = kod_adm = typ = None
     pin: tuple[float, float] | None = None
 
     def note(kind: str, claim_id: int) -> None:
@@ -346,15 +345,12 @@ def bind_towns(
     pin_is_precise: bool,
 ) -> tuple[list[AdminUnit], list[str]]:
     """THE TOWN RULE (v5.5, D4) for one set of names -> (the towns left, the qualifiers).
-
     1. Every match at `levels` climbs to its obec; the towns carrying the listing's PSČ stay.
-    2. If none does, or there is no PSČ: the OBEC-level matches the pin reaches stay, however
-       many (all of them when there is no pin — the pre-v5.5 answer).
-    3. `narrow_towns` settles what is left.
-
-    It replaces a ladder whose PSČ and pin steps ran only on a TIE: a single namesake 329 km
-    away bound unchallenged (18841980), and a village the register holds as a část obce or a
-    KÚ of another municipality bound nothing at all."""
+    2. Else the OBEC-level matches, narrowed by okres/kraj first, then to those in reach of a
+       pin worth more than the name: the PSČ vouched for none, or the portal declares the pin
+       precise. An undeclared pin is often a placeholder (56 realitymix rows share the centre
+       of Czechia): there the name stands, and CHECK flags `pin_outside_obec`.
+    3. `narrow_towns` settles what is left: the pin's obec, else the nearest."""
     direct: dict[int, AdminUnit] = {}
     climbed: set[int] = set()
     for key in keys:
@@ -375,8 +371,8 @@ def bind_towns(
             return narrow_towns(towns, constraints, registry=registry,
                                 pin_is_precise=pin_is_precise,
                                 applied=["psc"] if len(codes) > 1 else [])
-    reached = [t for _, t in sorted(direct.items()) if _reaches(t, constraints.pin, registry)]
-    return narrow_towns(reached, constraints, registry=registry, pin_is_precise=pin_is_precise)
+    return narrow_towns([t for _, t in sorted(direct.items())], constraints, registry=registry,
+                        pin_is_precise=pin_is_precise, reach=_reach_of(constraints, pin_is_precise))
 
 
 def narrow_towns(
@@ -386,10 +382,11 @@ def narrow_towns(
     registry: RegistryView,
     pin_is_precise: bool,
     applied: list[str] | None = None,
+    reach: tuple[float, float] | None = None,
 ) -> tuple[list[AdminUnit], list[str]]:
-    """Step 3: the okres/kraj claims, then the pin — the town containing it, else the nearest.
-    The pin REPLACES the lowest-`admin_unit_id` pick wherever there is one; without a pin a tie
-    stays a tie and grades `low`. Only a declared-precise pin settles a tie at full confidence."""
+    """The okres/kraj claims, `reach` (step 2), then the pin — which REPLACES the lowest-id pick
+    wherever there is one; without a pin a tie stays a tie and grades `low`. Only a
+    declared-precise pin settles a tie at full confidence."""
     applied = list(applied or [])
     surviving = list(towns)
     for keys, attr, label in (
@@ -403,6 +400,7 @@ def narrow_towns(
         if filtered:
             surviving = filtered
             applied.append(label)
+    surviving = [u for u in surviving if _reaches(u, reach, registry)]
     pin = constraints.pin
     if pin is not None and len(surviving) > 1:
         covering = registry.containing_obec(*pin)
@@ -414,12 +412,18 @@ def narrow_towns(
     return surviving, applied
 
 
-def _admits(town: AdminUnit, constraints: Constraints, registry: RegistryView) -> bool:
+def _admits(
+    town: AdminUnit, constraints: Constraints, registry: RegistryView, pin_is_precise: bool
+) -> bool:
     """Steps 1-2 for the ONE town a composite line anchored on."""
     if constraints.psc and _carrying_psc([town.code], {town.code: town}, constraints.psc,
                                          registry):
         return True
-    return _reaches(town, constraints.pin, registry)
+    return _reaches(town, _reach_of(constraints, pin_is_precise), registry)
+
+
+def _reach_of(constraints: Constraints, pin_is_precise: bool) -> tuple[float, float] | None:
+    return constraints.pin if constraints.psc or pin_is_precise else None
 
 
 def _carrying_psc(
@@ -453,6 +457,40 @@ def _town_distance(town: AdminUnit, pin: tuple[float, float], registry: Registry
     point = (chain[0].lat, chain[0].lon) if chain and chain[0].lat is not None else None
     distance = distance_between(point, pin)  # type: ignore[arg-type]
     return math.inf if distance is None else distance
+
+
+def constraining_towns(
+    constraints: Constraints, registry: RegistryView, *, pin_is_precise: bool
+) -> tuple[list[AdminUnit], list[str], str, bool, CompositeBind]:
+    """-> (towns, qualifiers, rung, named, composite line) off the advert's town names, its
+    composite line, its part names, then the PSČ — an INFERENCE, so R6 with no agreeing field.
+    `named` (the advert's OWN town field gave it) is what Q3 reads. S1's town-as-street test
+    asks this same function, so the two cannot disagree about the town."""
+    composite = CompositeBind()
+    towns, applied = bind_towns(constraints.obec_keys, TOWN_NAME_LEVELS, constraints,
+                                registry=registry, pin_is_precise=pin_is_precise)
+    if not towns and constraints.obec_lines:
+        # W9: the line named no obec, so the REGISTER is asked what it DOES name — the whole
+        # string at every level first, then its parts scoped by the anchoring town, and
+        # nothing at all when that is ambiguous. "Praha 4 - Podolí" comes back as Praha +
+        # Podolí, both spelled by RÚIAN. The anchor must pass the PSČ-or-reach test like any
+        # named town (v5.5): 18841980's slug split to a "Hory" 329 km from its pin.
+        found = first_composite_bind(constraints.obec_lines, registry)
+        if found.obec is not None and _admits(found.obec, constraints, registry, pin_is_precise):
+            composite, towns, applied = found, [found.obec], ["composite_locality"]
+    if towns:
+        return towns, applied, "R4", True, composite
+    if constraints.cast_obce_keys:
+        towns, applied = bind_towns(constraints.cast_obce_keys, PART_LEVELS, constraints,
+                                    registry=registry, pin_is_precise=pin_is_precise)
+        if towns:
+            return towns, applied, "R4", False, composite
+    by_psc = [chain[0] for k in (registry.obec_codes_for_psc(constraints.psc)
+                                 if constraints.psc else ())
+              if (chain := registry.admin_chain_by_code("obec", k))]
+    towns, applied = narrow_towns(_dedupe_units(by_psc), constraints, registry=registry,
+                                  pin_is_precise=pin_is_precise, applied=["psc"])
+    return towns, applied, "R6", False, composite
 
 
 # ------------------------------------------------------------------------- the ladder
@@ -495,41 +533,8 @@ def bind(
     constraints = collect_constraints(claims, normalized, pin_claim_id=pin_claim_id)
     out: list[_Candidate] = []
 
-    # ---- the constraining obec set, by THE TOWN RULE (feeds R1-R3 and the R4/R6 rows below).
-    # `obec_rung` is the record of HOW the town was bound, and the one Q3 reads: R4 = from a
-    # name the listing states (a town, a composite line, a part of town), R6 = from the PSČ
-    # alone, R7/R8 further down = from the pin. A PSČ set is an INFERENCE — the obec was looked
-    # up, not named — so it grades at R6 and contributes no agreeing field.
-    obec_rung = "R4"
-    composite = CompositeBind()
-    obec_units, obec_qualifiers = bind_towns(
-        constraints.obec_keys, TOWN_NAME_LEVELS, constraints,
-        registry=registry, pin_is_precise=pin_is_precise)
-    if not obec_units and constraints.obec_lines:
-        # W9: the line named no obec, so the REGISTER is asked what it DOES name — the whole
-        # string at every level first, then its parts scoped by the anchoring town, and
-        # nothing at all when that is ambiguous. "Praha 4 - Podolí" comes back as Praha +
-        # Podolí, both spelled by RÚIAN. The anchor must pass the PSČ-or-reach test like any
-        # named town (v5.5): 18841980's slug split to a "Hory" 329 km from its pin.
-        found = first_composite_bind(constraints.obec_lines, registry)
-        if found.obec is not None and _admits(found.obec, constraints, registry):
-            composite = found
-            obec_units, obec_qualifiers = [found.obec], ["composite_locality"]
-    if not obec_units and constraints.cast_obce_keys:
-        obec_units, obec_qualifiers = bind_towns(
-            constraints.cast_obce_keys, PART_LEVELS, constraints,
-            registry=registry, pin_is_precise=pin_is_precise)
-    if not obec_units and constraints.psc:
-        by_psc = [
-            chain[0]
-            for k in registry.obec_codes_for_psc(constraints.psc)
-            if (chain := registry.admin_chain_by_code("obec", k))
-        ]
-        obec_units, obec_qualifiers = narrow_towns(
-            _dedupe_units(by_psc), constraints, registry=registry,
-            pin_is_precise=pin_is_precise, applied=["psc"])
-        obec_rung = "R6"
-
+    obec_units, obec_qualifiers, obec_rung, named, composite = constraining_towns(
+        constraints, registry, pin_is_precise=pin_is_precise)
     constraining_obec_kods = tuple(sorted({u.code for u in obec_units}))
 
     # ---- R0: a portal-supplied registry key. The prize (bezrealitky `ruianId`).
@@ -572,7 +577,7 @@ def bind(
         cislo_domovni, typ_so = ((line.cislo_domovni, line.typ_so) if line.cislo_domovni
                                  else (constraints.cislo_domovni, constraints.typ_so))
         cislo_orientacni = line.cislo_orientacni or constraints.cislo_orientacni
-        points = (
+        points = _typed(
             registry.address_points_by_number(
                 obec_kod=line.street.obec_kod,
                 street_name_norm=line.street.name_norm,
@@ -667,10 +672,10 @@ def bind(
     if (town is not None and constraints.cislo_domovni is not None
             and not constraints.street_lines and not any(
                 c.target_kind == "address_point" for c in out)):
-        points = registry.address_points_by_number(
+        points = _typed(registry.address_points_by_number(
             obec_kod=town.code, street_name_norm=None,
             cislo_domovni=constraints.cislo_domovni, typ_so=constraints.typ_so,
-            cislo_orientacni=constraints.cislo_orientacni, cast_obce_unit_id=part.unit_id)
+            cislo_orientacni=constraints.cislo_orientacni, cast_obce_unit_id=part.unit_id))
         if len(points) == 1 and _pin_agrees(points[0], constraints.pin, blurred=pin_blurred):
             out.append(_point_candidate(
                 points[0], rung="R1", agreed=("house_number", "cast_obce", "obec"),
@@ -740,13 +745,12 @@ def bind(
         if top.target_kind == "street" and top.street is not None
         else None
     )
-    # Q3 (operator ruling 2026-09-30): a street bound INSIDE a town the listing names carries
-    # the REGISTER's part of town — the one část obce every door of it lies in — whatever part
-    # the advert claims. A street across several parts gets none: RÚIAN draws no část polygon a
-    # pin could be tested against, and a part guessed from a door near the pin is still a
-    # guess. A town the PSČ supplied (R6) lends its street no part.
+    # Q3 (operator ruling 2026-09-30): a street bound EXACTLY (R2) in a town the advert's town
+    # field names takes the REGISTER's part — the one část obce all its doors lie in — whatever
+    # the advert claims. Across several parts: none (RÚIAN draws no část polygon to test a pin
+    # against). A town only the PSČ or a part claim supplied lends its street no part.
     part_unit_id = top.cast_obce_unit_id
-    if street_point is not None and obec_rung == "R4" and len(street_point.part_unit_ids) == 1:
+    if named and top.rung == "R2" and street_point and len(street_point.part_unit_ids) == 1:
         part_unit_id = street_point.part_unit_ids[0]
     # The margin compares LIKE WITH LIKE. Comparing the top candidate against the next row
     # whatever it is compared it against its own ANCESTOR: a quarter (45 + 5) ties the obec
@@ -833,6 +837,12 @@ def _point_candidate(
         cast_obce_unit_id=point.cast_obce_unit_id,
         agreed=agreed, source_claim_ids=claim_ids,
     )
+
+
+def _typed(points: Sequence[AddressPoint]) -> list[AddressPoint]:
+    """An unmarked number is a č.p. where the scope holds one, else a č.ev. (D7) — a marked
+    one already came back as its own type only."""
+    return [p for p in points if p.typ_so == TYP_CP] or list(points)
 
 
 def _pin_agrees(

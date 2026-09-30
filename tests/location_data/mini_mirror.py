@@ -58,14 +58,14 @@ class MiniMirror:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
-        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
+        typ_so: str | None = None, cast_obce_unit_id: int | None = None,
     ) -> list[AddressPoint]:
         return [
             p
             for p in self.points
             if p.obec_kod == obec_kod
             and (street_name_norm is None or p.street_name_norm == street_name_norm)
-            and (cislo_domovni is None or (p.cislo_domovni, p.typ_so) == (cislo_domovni, typ_so))
+            and (cislo_domovni is None or p.cislo_domovni == cislo_domovni and typ_so in (None, p.typ_so))
             and (cislo_orientacni is None or p.cislo_orientacni == cislo_orientacni)
             and (cast_obce_unit_id is None or p.cast_obce_unit_id == cast_obce_unit_id)
         ]
@@ -176,13 +176,11 @@ def _doors_katastr(doors: Sequence[AddressPoint]) -> int | None:
 
 
 def _unit(unit_id, level, code, name, name_norm, path, parent=None, lat=None, lon=None,
-          psc_set=(), qualifier=None, homonym_count=1) -> AdminUnit:
-    """The okres/kraj/obec codes come off the ltree path, exactly as `resolve_db._admin_unit`
-    derives them — a fixture that left them empty tested a registry we do not have."""
+          psc_set=()) -> AdminUnit:
+    """The okres/kraj/obec codes come off the ltree path, as `resolve_db._admin_unit` does."""
     return AdminUnit(
         unit_id=unit_id, level=level, code=code, name=name, name_norm=name_norm, path=path,
         parent_id=parent, lat=lat, lon=lon, psc_set=tuple(psc_set),
-        qualifier=qualifier, homonym_count=homonym_count,
         okres_kod=_path_code(path, "o"), kraj_kod=_path_code(path, "k"),
         obec_kod=_path_code(path, "b"),
     )
@@ -204,7 +202,7 @@ def default_mirror() -> MiniMirror:
         _unit(2, "okres", 3506, "Liberec", "liberec", "k51.o3506", parent=1,
               lat=50.7663, lon=15.0562),
         _unit(3, "obec", 563943, "Krásný Les", "krasny les", "k51.o3506.b563943", parent=2,
-              lat=50.9330, lon=15.1500, psc_set=("46346",), homonym_count=2),
+              lat=50.9330, lon=15.1500, psc_set=("46346",)),
         _unit(4, "katastralni_uzemi", 673986, "Krásný Les u Frýdlantu",
               "krasny les u frydlantu", "k51.o3506.b563943", parent=3),
         # --- Ústecký kraj / okres Ústí nad Labem / Krásný Les (the WRONG one, ~100 km west)
@@ -213,7 +211,7 @@ def default_mirror() -> MiniMirror:
         _unit(6, "okres", 3805, "Ústí nad Labem", "usti nad labem", "k42.o3805", parent=5,
               lat=50.6607, lon=14.0328),
         _unit(7, "obec", 567931, "Krásný Les", "krasny les", "k42.o3805.b567931", parent=6,
-              lat=50.7676, lon=13.9353, psc_set=("40302",), homonym_count=2),
+              lat=50.7676, lon=13.9353, psc_set=("40302",)),
         # --- Moravskoslezský kraj / okres Nový Jičín / Bílovec
         _unit(8, "kraj", 80, "Moravskoslezský kraj", "moravskoslezsky kraj", "k80",
               lat=49.7500, lon=18.0000),
