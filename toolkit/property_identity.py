@@ -309,16 +309,25 @@ def restore_must_not_link(
     return len(put)
 
 
+def category_clash(
+    a: tuple[str | None, str | None], b: tuple[str | None, str | None],
+) -> tuple[str, str | None, str | None] | None:
+    """Rule 15's gate on two (category_type, category_main): the field that makes them two
+    properties and its two values — sale != rent, flat != house, except the one sanctioned
+    dum <-> komercni — or None. NULL = unknown, not a conflict. The chokepoint and the verdict
+    route (E925) read this one definition."""
+    if a[0] is not None and b[0] is not None and a[0] != b[0]:
+        return ("category_type", a[0], b[0])
+    if not category_main_compatible(a[1], b[1]):
+        return ("category_main", a[1], b[1])
+    return None
+
+
 def _category_refusal(
     a: tuple[str | None, str | None], b: tuple[str | None, str | None],
 ) -> str | None:
-    """Rule 15's gate on two (category_type, category_main): sale != rent, flat != house, except
-    the one sanctioned dum <-> komercni. NULL = unknown, not a conflict."""
-    if a[0] is not None and b[0] is not None and a[0] != b[0]:
-        return f"category_type mismatch ({a[0]} vs {b[0]}); refusing to merge"
-    if not category_main_compatible(a[1], b[1]):
-        return f"category_main mismatch ({a[1]} vs {b[1]}); refusing to merge"
-    return None
+    clash = category_clash(a, b)
+    return "{} mismatch ({} vs {}); refusing to merge".format(*clash) if clash else None
 
 
 def _canonical_pairs(conn: psycopg.Connection, property_ids: list[int]) -> set[tuple[int, int]]:

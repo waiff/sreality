@@ -30,6 +30,8 @@ E910 (Decision 8): the operator's `same` rulings are MUST-LINKS. Their connected
 (the repartition works on the contracted graph, so every move shifts a whole closure), the D43
 relation and the machine vetoes do not separate two adverts of one closure, and the spreads are
 read across closures only. With no must-link every one of those is today's rule exactly.
+A closure the hard limbs refuse is dissolved, and E926 records it: one row on `dissolved`
+naming its rulings and the limb, so a ruling the engine cannot honour never looks honoured.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ class ClusterResult:
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
     bridges: list[dict[str, Any]] = field(default_factory=list)
+    dissolved: list[dict[str, Any]] = field(default_factory=list)
 
     def cluster_of(self, listing_id: int) -> int | None:
         for key, members in self.clusters.items():
@@ -193,21 +196,27 @@ def _valid_closures(
     fps: Mapping[int, Fingerprint],
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
-) -> tuple[dict[int, list[int]], int]:
-    """The closures the hard limbs accept, and how many were dissolved.
+) -> tuple[dict[int, list[int]], list[dict[str, Any]]]:
+    """The closures the hard limbs accept, and one record per closure they dissolved.
 
     Inside a closure only the size, the deal type, the category and an operator must-not-link
     can refuse (the operator's own rulings contradicting each other); a refused closure binds
-    nothing rather than half of itself."""
+    nothing rather than half of itself, and its record names the rulings and the limb (E926)."""
     kept: dict[int, list[int]] = {}
-    dissolved = 0
+    dissolved: list[dict[str, Any]] = []
     for key, members in must_link_closures(must_link, fps).items():
         closure_of = {member: key for member in members}
-        if cluster_invariants_ok([fps[m] for m in members], settings, must_not_link, None,
-                                 closure_of) is None:
+        invariant = cluster_invariants_ok([fps[m] for m in members], settings, must_not_link,
+                                          None, closure_of)
+        if invariant is None:
             kept[key] = members
-        else:
-            dissolved += 1
+            continue
+        inside = set(members)
+        dissolved.append({
+            "lo": members[0], "hi": members[-1], "invariant": invariant, "members": members,
+            "must_link": [[lo, hi] for lo, hi in sorted(must_link)
+                          if lo != hi and lo in inside and hi in inside],
+        })
     return kept, dissolved
 
 
@@ -340,15 +349,14 @@ def cluster_pairs(
     `must_not_link` is the operator's; `machine_vetoes` (E61's designator vetoes) refuse like
     it everywhere except inside a must-link closure (E910)."""
     closures, dissolved = (_valid_closures(must_link, fps, settings, must_not_link)
-                           if must_link else ({}, 0))
+                           if must_link else ({}, []))
     closure_of = {member: key for key, members in closures.items() for member in members}
     must_not_link = frozenset(must_not_link) | frozenset(
         pair for pair in machine_vetoes
         if closure_of.get(pair[0]) is None or closure_of.get(pair[0]) != closure_of.get(pair[1]))
     if closure_of and relation is not None:
         relation = relation.bound(closure_of)
-    linked = {"n_must_link": len(must_link), "n_must_link_closures": len(closures),
-              "n_must_link_dissolved": dissolved}
+    linked = {"n_must_link": len(must_link), "n_must_link_closures": len(closures)}
     edges = sorted(
         (decision for decision in decisions if decision.zone == "merge"), key=edge_rank
     )
@@ -372,6 +380,7 @@ def cluster_pairs(
                 **(linked if must_link else {}),
             ),
             bridges=[],
+            dissolved=dissolved,
         )
     union_find = _UnionFind()
     grouped: dict[int, list[int]] = {}
@@ -447,7 +456,8 @@ def cluster_pairs(
         **(linked if must_link else {}),
     )
     return ClusterResult(
-        clusters=clusters, conflicts=conflicts, stats=stats, bridges=bridges
+        clusters=clusters, conflicts=conflicts, stats=stats, bridges=bridges,
+        dissolved=dissolved,
     )
 
 
@@ -457,9 +467,9 @@ def _cluster_stats(
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
     **counts: int,
 ) -> dict[str, Any]:
-    linked = {key: counts.pop(key) for key in
-              ("n_must_link", "n_must_link_closures", "n_must_link_dissolved") if key in counts}
     """One stats shape whichever pass built the clusters, so the two are comparable."""
+    linked = {key: counts.pop(key) for key in ("n_must_link", "n_must_link_closures")
+              if key in counts}
     sizes = [len(members) for members in clusters.values()]
     histogram: dict[str, int] = {}
     for size in sizes:

@@ -17,7 +17,7 @@ export function engineLine(
   row: Pick<RulingPairRow, 'engine_view' | 'zone' | 'score' | 'certificate' | 'decision' | 'why_not_merged'>,
 ): string {
   const view = ENGINE_VIEW[row.engine_view];
-  if (!row.zone) return `${view} · pár bez uloženého řádku`;
+  if (!row.zone) return `${view} · pár bez uloženého řádku${row.why_not_merged ? ` — ${row.why_not_merged}` : ''}`;
   let pair = `pár: ${row.zone}${row.score != null ? ` ${row.score.toFixed(2)}` : ''}`;
   if (row.certificate) pair += ` · certifikát ${row.certificate}`;
   else if (row.zone === 'merge' && row.decision) pair += ` · ${row.decision}`;
