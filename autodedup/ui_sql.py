@@ -707,6 +707,21 @@ WHERE cc.cluster_key_a = %(cluster_key)s::bigint
 ORDER BY cc.created_at DESC, cc.id DESC
 """
 
+# E925: the must-link closures a generation dissolved that name one of the given adverts — why a
+# standing `same` is not honoured. A record names its whole closure in `detail -> 'members'`.
+DISSOLVED_CLOSURES_SQL = """
+SELECT
+    cc.id, cc.kind, cc.cluster_key_a, cc.cluster_key_b, cc.listing_lo, cc.listing_hi,
+    cc.invariant, cc.detail, cc.created_at
+FROM autodedup.cluster_conflicts cc
+WHERE cc.kind = 'invariant'
+  AND cc.detail -> 'must_link' IS NOT NULL
+  AND cc.detail ->> 'generation' = %(generation)s::text
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(cc.detail -> 'members') AS m(id)
+               WHERE m.id::bigint = any(%(ids)s::bigint[]))
+ORDER BY cc.created_at DESC, cc.id DESC
+"""
+
 # ------------------------------------------------------------------------- the residual view
 
 RESIDUAL_COLUMNS: tuple[str, ...] = (

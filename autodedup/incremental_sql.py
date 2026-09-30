@@ -998,6 +998,24 @@ delete from autodedup.cluster_conflicts c
    and c.listing_hi = any(%(ids)s::bigint[])
 """
 
+# E925: a must-link closure the invariants dissolved, APPENDED ON CHANGE. The lane re-reads it
+# every pass its contradiction stands, so an unconditional insert would file it once a pass;
+# the record is keyed on its whole content, generation included (it rides in `detail`).
+RT_CLOSURE_CONFLICT_APPEND_SQL = """
+insert into autodedup.cluster_conflicts (
+    kind, cluster_key_a, cluster_key_b, listing_lo, listing_hi, invariant, detail
+)
+select %(kind)s::text, %(cluster_key_a)s::bigint, %(cluster_key_b)s::bigint,
+       %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(invariant)s::text, %(detail)s::jsonb
+ where not exists (
+       select 1 from autodedup.cluster_conflicts c
+        where c.kind = %(kind)s::text
+          and c.listing_lo = %(listing_lo)s::bigint
+          and c.listing_hi = %(listing_hi)s::bigint
+          and c.invariant is not distinct from %(invariant)s::text
+          and c.detail = %(detail)s::jsonb)
+"""
+
 # ------------------------------------------------------------------ the live census
 RT_CELL_READ_SQL = """
 select c.cell_key, c.category_group, c.n_listings, c.shapes, c.brokers, c.source_ids, c.capped

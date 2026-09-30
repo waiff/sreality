@@ -2965,8 +2965,10 @@ def _engine_reading(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pair_ruling(row: dict[str, Any], generation: str | None,
-                 history: list[dict[str, Any]]) -> dict[str, Any]:
+                 history: list[dict[str, Any]], dissolved: str | None = None) -> dict[str, Any]:
     out = {**row, **_engine_reading(row)}
+    if dissolved is not None:
+        out["why_not_merged"] = dissolved
     out["reasons"] = list(row.get("reasons") or [])
     out["generation"] = generation
     out["history"] = history
@@ -3056,6 +3058,29 @@ def rulings(
     }
 
 
+def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
+                        generation: str | None) -> dict[tuple[int, int], str]:
+    """E925: a standing `same` of the pair's own is a must-link (E910); when the engine holds its
+    adverts apart because the invariants dissolved the closure its rulings form, that is the
+    reason — the newest record naming both adverts, one statement a page."""
+    wanted = [r for r in page if r["verdict"] == "same" and r["status"] == "standing"
+              and r["source"] in ("pair", "browse_merge") and r["engine_view"] == "apart"]
+    if not wanted or generation is None:
+        return {}
+    ids = sorted({int(r[side]) for r in wanted for side in ("listing_lo", "listing_hi")})
+    records = _rows(usql.CONFLICT_COLUMNS, _fetch(conn, usql.DISSOLVED_CLOSURES_SQL,
+                                                  {"generation": generation, "ids": ids}))
+    out: dict[tuple[int, int], str] = {}
+    for r in wanted:
+        pair = (r["listing_lo"], r["listing_hi"])
+        for record in records:
+            if {int(pair[0]), int(pair[1])} <= {int(m) for m in record["detail"]["members"]}:
+                out[pair] = ("pevné pravidlo odmítlo celou skupinu, kterou spojují vaše "
+                             f"rozhodnutí „stejné“: {record['invariant']}")
+                break
+    return out
+
+
 def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                   generation: str | None) -> list[dict[str, Any]]:
     """The page's rows with each key's whole history (one statement per page, never per row):
@@ -3072,6 +3097,7 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
         group_rows = (_rows(usql.VERDICT_COLUMNS,
                             _fetch(conn, usql.GROUP_RULING_HISTORY_SQL, {"keys": keys}))
                       if keys else [])
+        dissolved = _dissolved_closures(conn, page, generation)
         items = []
         for r in page:
             if r["source"] == "implied":
@@ -3082,7 +3108,8 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                 history = [v for v in pair_rows
                            if (v["listing_lo"], v["listing_hi"])
                            == (r["listing_lo"], r["listing_hi"])]
-            items.append(_pair_ruling(r, generation, history))
+            items.append(_pair_ruling(r, generation, history,
+                                      dissolved.get((r["listing_lo"], r["listing_hi"]))))
         return items
     keys = sorted({int(r["cluster_key"]) for r in page if r["cluster_key"] is not None})
     group_rows = (_rows(usql.VERDICT_COLUMNS,

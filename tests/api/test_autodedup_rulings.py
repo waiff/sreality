@@ -137,7 +137,7 @@ class _Conn:
             usql.RULINGS_PAIR_FACETS_SQL: [], usql.RULINGS_GROUP_FACETS_SQL: [],
             usql.RULING_TOWNS_SQL: [], usql.PAIR_VERDICTS_SQL: [],
             usql.GROUP_RULING_HISTORY_SQL: [], usql.RULINGS_PAIR_SQL: [],
-            usql.RULINGS_GROUP_SQL: [],
+            usql.RULINGS_GROUP_SQL: [], usql.DISSOLVED_CLOSURES_SQL: [],
         }
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.tx_calls: list[str] = []
@@ -275,6 +275,44 @@ def test_a_pair_row_carries_the_engine_view_and_its_own_history(client, conn):
     assert data["towns"] == [{"grain": "o", "code": 563510, "name": "Jablonec nad Nisou",
                               "n": 12}]
     assert data["next_after"] is None
+
+
+def test_a_same_the_engine_dissolved_says_why_it_is_not_honoured(client, conn):
+    """E925: the operator's `same` rulings form a closure the invariants refused (here a sale
+    ruled one flat with a rental), so the lane holds the adverts apart. The page names that,
+    not the stored pair's zone; a ruling whose closure was honoured, or that is not standing,
+    reads the record of nothing."""
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    conn.canned[usql.RULINGS_PAIR_SQL] = [
+        _pair_ruling(zone=None, decision=None),
+        _pair_ruling(ruling_id=8, listing_lo=13, listing_hi=14, zone="merge",
+                     decision="model"),
+        _pair_ruling(ruling_id=9, listing_lo=11, listing_hi=15, status="withdrawn",
+                     verdict="unsure"),
+    ]
+    conn.canned[usql.DISSOLVED_CLOSURES_SQL] = [
+        _tuple(usql.CONFLICT_COLUMNS, id=3, kind="invariant", listing_lo=11, listing_hi=12,
+               invariant="category_type", created_at=AT,
+               detail={"generation": LIVE, "members": [11, 12],
+                       "must_link": [[11, 12]]}),
+    ]
+    first, other, withdrawn = client.get("/autodedup/rulings").json()["data"]["items"]
+    assert first["why_not_merged"] == (
+        "pevné pravidlo odmítlo celou skupinu, kterou spojují vaše rozhodnutí „stejné“: "
+        "category_type")
+    assert other["why_not_merged"] == (
+        "dvojice prošla, ale žádná skupina této generace nedrží oba inzeráty"), (
+        "no record names 13 and 14: the stored pair's own reason stands")
+    assert withdrawn["why_not_merged"] == "automaticky zamítnuto: attr_contradictions"
+    assert conn.params(usql.DISSOLVED_CLOSURES_SQL) == {"generation": LIVE,
+                                                        "ids": [11, 12, 13, 14]}
+
+
+def test_no_standing_same_apart_reads_no_dissolved_closure(client, conn):
+    conn.canned[usql.RULINGS_PAIR_SQL] = [_pair_ruling(verdict="different"),
+                                          _pair_ruling(engine_view="together")]
+    client.get("/autodedup/rulings")
+    assert not conn.ran(usql.DISSOLVED_CLOSURES_SQL)
 
 
 def test_the_page_is_keyset_paged_on_decided_at_and_the_pair(client, conn):

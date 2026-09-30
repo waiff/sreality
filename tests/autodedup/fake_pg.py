@@ -435,10 +435,14 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == CLUSTER_MEMBER_INSERT_SQL:
         db.cluster_members.add((gen, int(p["cluster_key"]), int(p["listing_id"])))
         return []
-    if sql == CLUSTER_CONFLICT_INSERT_SQL:
+    if sql in (CLUSTER_CONFLICT_INSERT_SQL, S.RT_CLOSURE_CONFLICT_APPEND_SQL):
         row = dict(p)
         row["detail"] = _jsonb(p["detail"])
-        db.cluster_conflicts.append(row)
+        key = ("kind", "listing_lo", "listing_hi", "invariant", "detail")
+        if sql == CLUSTER_CONFLICT_INSERT_SQL or not any(
+                all(held.get(name) == row.get(name) for name in key)
+                for held in db.cluster_conflicts):
+            db.cluster_conflicts.append(row)
         return []
 
     # ---------------------------------------------------------------- census cells

@@ -193,7 +193,8 @@ def test_a_same_ruling_exempts_its_pair_from_the_machine_veto_only() -> None:
     operator = _cluster(ds, Settings(), EDGES[:1], must_not_link=veto,
                         must_link=frozenset({(A, B)}))
     assert _groups(operator) == [], "an operator must-not-link inside the closure still binds"
-    assert operator.stats["n_must_link_dissolved"] == 1, "and the contradiction is counted"
+    assert [d["invariant"] for d in operator.dissolved] == ["must_not_link"], (
+        "and the contradiction is recorded")
 
 
 def test_the_spreads_are_read_across_closures_only() -> None:
@@ -260,6 +261,91 @@ def test_an_idle_pass_honours_a_new_same_ruling() -> None:
     run_pass(store, CohortFacts(ds), Schedule([]), D43_ON, hand_initialised(),
              calibration)
     assert store.clusters == {}, "the pair the ruling held is released: nothing else joins it"
+
+
+# ------------------------------------------------- E925: a dissolved closure leaves a record
+
+D = 404
+SAME = {(A, C), (B, D)}
+
+
+def _sale_and_rent() -> Dataset:
+    """The operator ruled A and C one flat, but A is offered for sale and C for rent — a union
+    no invariant admits (never a rental with a sale). B and D he joined too, and nothing
+    refuses them."""
+    listings = {A: _listing(A), B: _listing(B), C: _listing(C, category_type="pronajem"),
+                D: _listing(D)}
+    return Dataset(meta=Meta(), listings=listings, images_by_listing={})
+
+
+CLOSURE = {"lo": A, "hi": C, "invariant": "category_type", "members": [A, C],
+           "must_link": [[A, C]]}
+
+
+def test_a_refused_closure_is_one_record_naming_its_rulings_and_its_limb() -> None:
+    ds = _sale_and_rent()
+    for settings in (Settings(), Settings(repartition=True)):
+        result = _cluster(ds, settings, [], must_link=frozenset(SAME))
+        assert _groups(result) == [[B, D]], "the honoured closure binds, the refused one nothing"
+        assert result.dissolved == [CLOSURE], "one record, and none for the honoured closure"
+        assert result.conflicts == [], "no edge was refused"
+
+
+def _idle_pass(store: MemoryStore, ds: Dataset) -> PassResult:
+    from autodedup.incremental import Calibration, run_pass
+    from autodedup.model import hand_initialised
+
+    return run_pass(store, CohortFacts(ds), Schedule([]), D43_ON, hand_initialised(),
+                    Calibration(generation="rt", feature_version=0, built_at="", n_listings=0))
+
+
+def test_a_refused_closure_is_recorded_once_across_passes_and_the_lane_goes_on() -> None:
+    """The contradiction seeds its component every pass (`_ruling_seeds`), so every pass
+    dissolves the closure again: the heartbeat counts it each time, the store files it once."""
+    ds = _sale_and_rent()
+    store = MemoryStore()
+    _known(store, A, B, C, D)
+    store.ml = set(SAME)
+    for _ in range(3):
+        result = _idle_pass(store, ds)
+        assert not result.aborted
+        assert result.to_json()["counts"]["must_link_dissolved"] == 1
+        assert sorted(map(sorted, store.clusters.values())) == [[B, D]]
+        records = [c for c in store.conflicts if c.get("must_link")]
+        assert records == [{**CLOSURE, "kind": "invariant", "generation": "rt"}]
+    assert store.conflicts == records, "the honoured closure left nothing"
+
+
+def test_the_sql_store_files_the_record_once_as_its_twin_does() -> None:
+    ds = _sale_and_rent()
+    db = FakePg()
+    db.ml = set(SAME)
+    sql, twin = SqlStore(db, "rt"), MemoryStore()
+    twin.ml = set(SAME)
+    for store in (sql, twin):
+        _known(store, A, B, C, D)
+        for _ in range(2):
+            _recluster_all(store, ds, D43_ON)
+    rows = [row for row in db.cluster_conflicts if (row["detail"] or {}).get("must_link")]
+    assert [(r["kind"], r["listing_lo"], r["listing_hi"], r["invariant"]) for r in rows] == [
+        ("invariant", A, C, "category_type")]
+    assert {k: rows[0]["detail"][k] for k in ("generation", "members", "must_link")} == {
+        "generation": "rt", "members": [A, C], "must_link": [[A, C]]}
+    assert [c for c in twin.conflicts if c.get("must_link")] == [
+        {**CLOSURE, "kind": "invariant", "generation": "rt"}]
+
+
+def test_a_batch_run_counts_the_dissolved_closure_but_refuses_no_edge_with_it(tmp_path) -> None:
+    import json
+
+    from autodedup import harness
+    from autodedup.model import hand_initialised
+
+    summary = harness.run(_sale_and_rent(), Settings(), hand_initialised(), tmp_path,
+                          frozenset(), frozenset(SAME))
+    assert summary["must_link"]["dissolved"] == 1
+    written = json.loads((tmp_path / harness.CLUSTERS_FILE).read_text(encoding="utf-8"))
+    assert written["conflicts"] == [] and written["stats"]["n_edges_refused"] == 0
 
 
 def test_the_sql_store_reads_the_newest_pair_ruling_only() -> None:

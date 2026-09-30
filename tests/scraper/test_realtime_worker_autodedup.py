@@ -243,6 +243,7 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "bound_by": "count", "reconcile_groups": 0, "reconcile_seconds": None,
         "reconcile_refused": 0, "reconcile_failed": 0, "reconcile_waiting": 0,
         "reconcile_skipped_at_apply": 0, "reconcile_quarantined": 0, "reconcile_deferred": 0,
+        "must_link_dissolved": 0,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -532,3 +533,16 @@ def test_the_heartbeat_says_what_the_reconcile_did_and_did_not_do(
         rw._autodedup_note(last)
     assert last["reconcile"] == "seed_version" and "re-seed" in last["reconcile_reason"]
     assert any("reconcile: seed_version" in r.getMessage() for r in caplog.records)
+
+
+def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """E925: a closure of the operator's `same` rulings the invariants dissolved is re-read every
+    pass while it stands, so the heartbeat says so every pass, beside the reconcile counters."""
+    conn = _Conn()
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    _settings(monkeypatch)
+    summary = _summary()
+    summary["counts"] = {**summary["counts"], "must_link_dissolved": 2}
+    _stub_engine(monkeypatch, summary)
+    assert rw._autodedup_sync()["must_link_dissolved"] == 2
