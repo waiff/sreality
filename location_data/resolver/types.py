@@ -97,7 +97,6 @@ class Claim:
     declared_precision_label: str | None = None
     declared_radius_m: float | None = None
     blur_evidence: str = "none"
-    claim_confidence: str | None = None
     subject_scoped: bool | None = None
     extractor_id: str = ""
     declared_confidence: str | None = None

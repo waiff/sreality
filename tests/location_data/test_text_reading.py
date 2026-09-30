@@ -83,3 +83,63 @@ def test_v1_a_quote_that_is_not_in_the_advert_drops_that_slot_only() -> None:
     assert out["town"]["value"] == "Hradec Králové"
     for payload in (None, {}, {"location": "x"}):
         assert all(c["value"] is None for c in tr.read_location(payload, TRIGGER).values())
+
+
+# ------------------------------------------------ the claim reader (W3): V2, V4, typed numbers
+
+def _claims(payload: dict[str, Any], text: str) -> dict[str, str]:
+    """The bazos@8 reading entries over one reading, as the claim lane runs them."""
+    from location_data.claims_intake import READERS, reading_entries
+    from tests.location_data import claim_intake_fixtures as fx
+
+    row, reading = fx.listing("bazos", {}), tr.Reading(1, payload, text)
+    return {c.claim_type: c.value_text for e in reading_entries(fx.entries_for("bazos"))
+            for c in READERS[str(e.reader)].fn(e, row, reading)}
+
+
+def test_the_trigger_reading_becomes_its_town_part_and_street_claims() -> None:
+    claims = _claims(_payload(
+        "offer", street=("Štefánikova", "v ulici Štefánikova"),
+        town=("Hradec Králové", "v Hradci Králové"), part_of_town=("Třebeš", "části Třebše"),
+    ), TRIGGER)
+    assert claims == {"obec_name": "Hradec Králové", "cast_obce_name": "Třebeš",
+                      "street_name": "Štefánikova"}
+
+
+def test_v2_a_value_must_be_grounded_in_its_own_quote() -> None:
+    """A value word of 3+ letters shares its first three with a quote word, after the lane's
+    fold plus ů->o — so inflection passes and an unrelated quote does not."""
+    for value, quote in (("Praha", "v Praze"), ("Brno", "v Brně"), ("Plzeň", "v Plzni"),
+                         ("Hora", "na Hoře"), ("Dvůr Králové", "ve Dvoře Králové"),
+                         ("Sochorova", "ul. A.Sochora"), ("Nový Jičín", "v Novém Jičíně"),
+                         ("Aš", "Aš")):
+        assert tr._grounded(value, quote), (value, quote)
+    for value, quote in (("Masarykova", "v centru města"), ("Aš", "v Aši")):
+        assert not tr._grounded(value, quote), (value, quote)
+
+
+def test_v4_a_number_needs_its_marker_or_the_street_form() -> None:
+    cp, co, ev = "house_number_cp", "house_number_co", "house_number_ev"
+    for slot, value, quote in ((cp, "12", "č.p. 12"), (cp, "12", "čp.12"),
+                               (cp, "12", "Husova 12/4"), (cp, "13", "Hodoviz 13"),
+                               (co, "4", "Husova 12/4"), (co, "4", "č.o. 4"),
+                               (ev, "13", "chata č.ev. 13")):
+        assert tr._numbered(slot, value, quote), (slot, quote)
+    for slot, value, quote in ((cp, "12", "č. 12"), (cp, "60", "60.91 m²"),
+                               (cp, "12", "parc. č. 12"), (cp, "12", "LV 12"),
+                               (cp, "487", "bez č.p. 487"), (co, "4", "Husova 4"),
+                               (ev, "13", "chata 13"), (cp, "12a", "č.p. 12a")):
+        assert not tr._numbered(slot, value, quote), (slot, quote)
+
+
+def test_a_cottages_ev_rides_the_cp_entry_marked_and_the_resolver_types_it() -> None:
+    from location_data.resolver.normalize import TYP_EV, house_number, normalize_house_number
+
+    text = ad_haystack("Prodej chaty Moravské Prusy", "Chata č.ev. 13, 40 m², č.p. neuvedeno.")
+    claims = _claims(_payload("offer", house_number_ev=("13", "Chata č.ev. 13"),
+                              house_number_co=("40", "40 m²")), text)
+    assert claims == {"house_number_cp": "č.ev. 13"}
+    assert house_number(normalize_house_number(claims["house_number_cp"])) == (13, TYP_EV)
+    claims = _claims(_payload("offer", house_number_cp=("5", "č.p. 5"),
+                              house_number_ev=("13", "Chata č.ev. 13")), text + " č.p. 5")
+    assert claims == {"house_number_cp": "5"}

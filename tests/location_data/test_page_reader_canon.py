@@ -1278,12 +1278,11 @@ def test_every_archive_reader_may_be_stamped_with_the_surface_the_lane_stamps():
         assert "archived_html" in contracts.READER_CONTRACTS[name].substrates, name
 
 
-def test_no_archive_reader_claims_a_method_the_lane_cannot_evidence():
-    """`llm_text` needs a model and a prompt version this lane has no way to supply, and
-    `assert_evidence_complete` refuses such a claim before the write — so no DOM reader may
-    declare it."""
-    for name in PAGE_READERS:
-        assert "llm_text" not in contracts.READER_CONTRACTS[name].methods, name
+def test_llm_text_is_the_reading_substrates_and_no_archive_readers():
+    """W3: a model's answer reaches a claim only as the text lane's stored reading, whose row
+    is its evidence (value, quote, model, text hash); a DOM reader never declares it."""
+    declaring = {n for n, spec in contracts.READER_CONTRACTS.items() if "llm_text" in spec.methods}
+    assert declaring == {"text_reading"} and not declaring & set(PAGE_READERS)
 
 
 # One representative entry per canonical reader, in the shape a portal activation will write

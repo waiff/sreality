@@ -83,4 +83,8 @@ from __future__ import annotations
 #      a streetless one is looked up in the one bound část; only a bound č.p. publishes one
 #      (`street_segment` deleted). An exact street in a named town takes the register's část
 #      when all its doors lie in one (Q3). Six dead claim types leave BIND, eleven leave S1.
-RESOLVER_VERSION = "resolver:v5.5"
+# v5.6 = text-reader W3: the separator split is deleted — a street claim is matched whole —
+#      and R3 runs for every street claim (the `claim_confidence: low` gate is gone with
+#      bazos' headline claim, the only one that carried it). bazos' town, part, street and
+#      numbers now come from the stored reading; the bump re-resolves the corpus once.
+RESOLVER_VERSION = "resolver:v5.6"

@@ -144,14 +144,6 @@ def test_a_blurred_pin_loses_to_the_street_the_ad_names():
     assert resolution.uncertainty_radius_m == max(step_grade.RADIUS_M["street"], _extent())
     assert resolution.match_confidence == "medium"
 
-    # The same row through the OTHER surface — the capped headline rather than the parser's
-    # own value — is the same answer: the line binder reaches the same register row.
-    from_title = _resolve(_bazos(
-        street="Prodej bytu 3+1 s lodžií, 86 m2, ul. Jiráskova, Mladá Bolesl",
-        pin=BLURRED_PIN, label="approximate_location"))
-    assert (from_title.ulice_kod, from_title.granularity) == (105, "street")
-    assert (round(from_title.lat, 5), round(from_title.lon, 5)) == (STREET_LAT, STREET_LON)
-
 
 def test_the_same_row_without_a_street_is_unchanged_by_w18():
     """The control, and the other half of the rule: with nothing bound below the town the

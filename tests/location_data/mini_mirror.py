@@ -377,7 +377,6 @@ def claim(
     declared_precision_label: str | None = None,
     declared_radius_m: float | None = None,
     blur_evidence: str = "none",
-    claim_confidence: str | None = "high",
     minutes: int = 0,
 ) -> Claim:
     return Claim(
@@ -388,7 +387,6 @@ def claim(
         value_text=value_text, lat=lat, lon=lon, subject_scoped=subject_scoped,
         declared_precision_label=declared_precision_label,
         declared_radius_m=declared_radius_m, blur_evidence=blur_evidence,
-        claim_confidence=claim_confidence,
     )
 
 
