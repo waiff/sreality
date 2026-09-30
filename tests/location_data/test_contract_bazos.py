@@ -613,3 +613,10 @@ def test_a_geo_name_or_a_digit_string_is_refused_before_it_reaches_the_register(
     # And the one thing it does NOT do: judge whether the token looks like a Czech street.
     assert apply_transforms("Nový", ENTRIES[STREET_ENTRY].transform) == "Nový"
     assert apply_transforms("28. října 12", ENTRIES[STREET_ENTRY].transform) == "28. října 12"
+
+
+def test_an_area_in_the_headline_is_not_a_foreign_script():
+    """bazos 223894449: `²` is a superscript digit, not a letter of another script."""
+    title = "Prodej bytu 3+1 60.91 m² Štefánikova, Hradec Králové"
+    assert street_of({"id": "223894449", "title": title}) == title
+    assert street_of({"id": "1", "title": "Квартира 45 m², ул. Ленина"}) is None
