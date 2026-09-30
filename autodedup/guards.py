@@ -89,24 +89,18 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> s
     return None
 
 
-def _price_path(fp: "Fingerprint") -> list[float]:
-    """Every amount the advert has printed, the current one included (E134/N2)."""
-    points = [float(price) for _when, price in fp.price_events if price and float(price) > 0.0]
-    if fp.price and float(fp.price) > 0.0:
-        points.append(float(fp.price))
-    return points
-
-
 def share_price_conflict(a: "Fingerprint", b: "Fingerprint") -> bool:
     """E927 (operator 2026-09-30): a share sale and a sale are one property only at ONE stated
     price — an amount on one advert's price path is E160's round-equal of one on the other's.
     A missing price is not the same price. Only a pair that crosses deal types is read."""
     if not crosses_deal_type(a.category_type, b.category_type):
         return False
-    from autodedup.demonstrate import prices_round_equal  # demonstrate imports this module
+    # Both import this module.
+    from autodedup.demonstrate import price_paths_round_equal
+    from autodedup.indistinguishable import price_path
 
-    right = _price_path(b)
-    return not any(prices_round_equal(left, other) for left in _price_path(a) for other in right)
+    return not price_paths_round_equal(price_path(a.price, a.price_events),
+                                       price_path(b.price, b.price_events))
 
 
 def unit_designator_conflict(

@@ -323,11 +323,11 @@ def price_demonstrated(
     # packages' 0.1 % — so leaving it alone readmits through the path every pair the exact bar
     # refuses, and the exactness is then a claim the engine does not keep.
     if settings.demonstrate_price_path_exact:
-        from autodedup.indistinguishable import price_paths_agree
+        from autodedup.indistinguishable import _price_points, price_paths_agree
 
         paths_agree = price_paths_agree(a, b, tol) or (
             settings.demonstrate_price_rounding_aware
-            and price_paths_round_equal(a, b))
+            and price_paths_round_equal(_price_points(a), _price_points(b)))
     if paths_agree:
         return True
     # A cut between two SEQUENTIAL postings is one unit (the standing ruling).
@@ -382,12 +382,10 @@ def prices_round_equal(left: float, right: float) -> bool:
     return rendering_equal(left, right, PRICE_ROUNDING_CAP)
 
 
-def price_paths_round_equal(a: Listing, b: Listing) -> bool:
-    """`prices_round_equal` over every amount the two adverts have ever printed."""
-    from autodedup.indistinguishable import _price_points
-
-    return any(prices_round_equal(left, right)
-               for left in _price_points(a) for right in _price_points(b))
+def price_paths_round_equal(left: Sequence[float], right: Sequence[float]) -> bool:
+    """`prices_round_equal` over two price paths (`indistinguishable.price_path`): every
+    amount the two adverts have ever printed."""
+    return any(prices_round_equal(x, y) for x in left for y in right)
 
 
 # A co-live price difference WIDER than this is not two units. D49 refused the co-live price

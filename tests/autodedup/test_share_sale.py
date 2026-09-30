@@ -195,15 +195,19 @@ def test_a_group_never_mixes_the_sale_class_with_an_auction_or_a_rental() -> Non
 # --------------------------------------------------------------------- blocking
 
 
-def test_a_share_sale_meets_its_sale_on_the_attribute_and_town_probes() -> None:
+def test_a_share_sale_meets_its_sale_on_the_attribute_town_and_broker_probes() -> None:
     settings = Settings(attr_probe_town_grain=True)
-    share = build_fingerprint(_listing(1, category_type="podil"), [], settings)
-    sale = build_fingerprint(_listing(2, category_type="prodej", source="idnes"), [], settings)
+    share = build_fingerprint(_listing(1, category_type="podil", broker_key="k"), [], settings)
+    sale = build_fingerprint(_listing(2, category_type="prodej", source="idnes", broker_key="k"),
+                             [], settings)
     rental = build_fingerprint(_listing(3, category_type="pronajem", source="idnes"), [],
                                settings)
     index = build_index([share, sale, rental], settings)
+    # The decile is read in the sale class's cohort; an unknown one would never probe its
+    # neighbours, and the broker probe would silently miss the twin.
+    assert index.price_decile(share) == index.price_decile(sale) is not None
     shared = set(index.index_keys(share)) & set(index.probe_keys(sale))
-    assert {"attr_area", "town"} <= {probe for probe, _key in shared}
+    assert {"attr_area", "town", "broker"} <= {probe for probe, _key in shared}
     # The text probe is type-free (E14); the attribute probes keep the rental out.
     reached = set(index.index_keys(rental)) & set(index.probe_keys(share))
     assert {probe for probe, _key in reached} == {"text"}

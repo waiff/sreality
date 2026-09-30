@@ -297,15 +297,17 @@ def _present(feats: Feats | None, name: str) -> float | None:
     return float(slot[0])  # type: ignore[arg-type]
 
 
-def _price_points(listing: Listing) -> list[float]:
-    """Every amount this advert has ever printed, the current one included (E134/N2)."""
-    points: list[float] = []
-    for _stamp, price in listing.price_history or ():
-        if price is not None and float(price) > 0.0:
-            points.append(float(price))
-    if listing.price and float(listing.price) > 0.0:
-        points.append(float(listing.price))
+def price_path(price: float | None, history: Iterable[tuple[str, float | None]]) -> list[float]:
+    """Every amount an advert has ever printed, the current one included (E134/N2) — the one
+    reader of a Listing's `price_history` and a Fingerprint's `price_events`."""
+    points = [float(p) for _stamp, p in history or () if p is not None and float(p) > 0.0]
+    if price and float(price) > 0.0:
+        points.append(float(price))
     return points
+
+
+def _price_points(listing: Listing) -> list[float]:
+    return price_path(listing.price, listing.price_history)
 
 
 def price_paths_agree(a: Listing, b: Listing, tol: float) -> bool:
