@@ -148,7 +148,6 @@ function IncludeNoPriceToggle({
     enabled: hasBound,
     placeholderData: (prev) => prev,
     staleTime: 60_000,
-    retry: false,
   });
   const count = hasBound ? countQuery.data ?? null : null;
   const fmt = (n: number) => n.toLocaleString('cs-CZ');
@@ -238,7 +237,6 @@ function ShowDismissedToggle({
     queryKey: dismissalKeys.count,
     queryFn: fetchDismissedCount,
     staleTime: 60_000,
-    retry: false,
   });
   const hasAny = (anyQ.data ?? 0) > 0;
   const totalWith = (showDismissed: boolean) => {

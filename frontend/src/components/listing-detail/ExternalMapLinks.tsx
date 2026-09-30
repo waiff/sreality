@@ -35,7 +35,6 @@ export default function ExternalMapLinks({
     enabled: !!label,
     // Seznam's locality ids don't move; the server caches a day as well.
     staleTime: Infinity,
-    retry: false,
   });
   const links = [...externalMapLinks(lat, lng), srealityPriceMapLink(priceMapQ.data)];
   /* Two rows rather than one: five equal chips don't fit the 400px map column

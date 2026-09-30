@@ -34,15 +34,20 @@ double count enshrined by a test, and two disagreeing CZ-count books (19/100 top
   `test_matview_indexes.py` (every matview CONCURRENTLY-refreshable + exact broker
   index set), contract test now tracks the live leaderboard definition dynamically.
 
-## Next
+- **W2 — failures fail fast and say so** (app-wide): one client deadline
+  (`REQUEST_DEADLINE_MS` 130 s, above the server's 120 s budget, under Railway's
+  ~300 s close; a timeout is never retried), transient-only retry predicate replacing
+  the blanket `retry: 1`, API classifies QueryCanceled/LockNotAvailable/Deadlock as
+  503 `db_busy` + Retry-After and answers everything else 500 with a `ref` id (raw
+  exception text no longer reaches the browser), the 3 raw `fetch()` bypasses folded
+  into `request()` (uploads + blob mode), Brokers gets the shared ErrorBanner + retry
+  + honest busy state + placeholder rows captioned by their OWN place label, the
+  extension gets the same deadline. 8 of 12 per-query `retry: false` patches deleted
+  (audited; BrowseExperience's paid-LLM guard, Shell's documented one, auth's and
+  LocationTypeahead's stay). The dedicated short-lock-budget API DB role is
+  deliberately deferred (operator decision 2026-09-30) — propose after the sprint.
 
-- **W2 — failures fail fast and say so** (app-wide): one client deadline in
-  `request()` (above the server's 120 s budget, under Railway's 300 s close),
-  transient-only retry predicate, API classifies QueryCanceled/LockNotAvailable as 503
-  `db_busy` + Retry-After, fold the 3 raw `fetch()` bypasses into `request()`, shared
-  error state + retry affordance on Brokers, same deadline in the extension. The
-  dedicated short-lock-budget API DB role is deliberately deferred (operator decision
-  2026-09-30) — propose after the sprint.
+## Next
 - **W3 — broker maintenance on the rule-#20 shape**: one `recompute_brokers()` (single
   MATERIALIZED base CTE, one corpus walk replacing the 9-window loop, acceptance gate
   <8 min measured before merge), worker-lane drain of `dirty_broker_listings` (~2 min
