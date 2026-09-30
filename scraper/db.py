@@ -345,6 +345,7 @@ def connect(
     *,
     attempts: int = _CONNECT_ATTEMPTS,
     retry_delay: float = _CONNECT_RETRY_DELAY,
+    connect_timeout: int | None = None,
 ) -> psycopg.Connection:
     """Open an autocommit connection. Callers manage transactions explicitly.
 
@@ -355,13 +356,16 @@ def connect(
 
     A pooler handshake drop is retried `attempts` times spaced `retry_delay`s
     apart (see _connect_with_retry). Callers that can't afford the full budget —
-    the synchronous API per-request path — pass a smaller one.
+    the synchronous API per-request path — pass a smaller one, and a caller that
+    must finish quickly passes `connect_timeout` (seconds per address; psycopg's
+    default is 130).
     """
     return _connect_with_retry(
         lambda: psycopg.connect(
             url or database_url(),
             autocommit=True,
             prepare_threshold=None,
+            connect_timeout=connect_timeout,
             **_KEEPALIVES,
         ),
         attempts=attempts,

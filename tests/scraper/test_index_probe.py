@@ -199,7 +199,7 @@ def test_probe_gives_up_on_a_refused_source_without_counting_an_error():
     def probe_category(category, conn, dry_run, limiter, probe_pages):
         asked.append(category)
         if category == "B":
-            limiter.refused = "cap"
+            limiter.refused = True
             raise RateBudgetUnavailable("fake: next shared slot 3600s away")
         return ({"x"}, {"found_new": 1, "enqueued": 1}, 99, 1, False)
 
@@ -217,7 +217,7 @@ def test_probe_reads_a_refusal_the_walk_swallowed():
 
     def walk_category(c, conn, dry_run, limiter):
         p.calls["walk"].append(c)
-        limiter.refused = "cap"
+        limiter.refused = True
         return (set(), {"found_new": 0, "enqueued": 0}, None, 0, False)
 
     p.walk_category = walk_category
@@ -247,17 +247,18 @@ def test_probe_builds_limiter_through_factory(monkeypatch):
     # shared_rate_limiter engages the DB politeness ledger for probes too.
     seen: dict[str, Any] = {}
 
-    def fake_build(source, rate, shared, *, lease_n=0):
-        seen.update(source=source, rate=rate, shared=shared, lease_n=lease_n)
+    def fake_build(source, rate, shared, *, lease_n=0, max_wait_s=None):
+        seen.update(
+            source=source, rate=rate, shared=shared, lease_n=lease_n, max_wait_s=max_wait_s)
         return portal_runner.RateLimiter(rate)
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
     p = _ProbePortal()
     p.shared_rate_limiter = True
-    portal_runner.run_index_probe(p, dry_run=True)
+    portal_runner.run_index_probe(p, dry_run=True, max_wait_s=120.0)
     assert seen == {
         "source": "fake", "rate": 100.0, "shared": True,
-        "lease_n": portal_runner.PROBE_LEASE_N,
+        "lease_n": portal_runner.PROBE_LEASE_N, "max_wait_s": 120.0,
     }
 
 

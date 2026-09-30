@@ -17,7 +17,6 @@ import asyncio
 import inspect
 import logging
 import re
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +46,7 @@ MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / (
 @pytest.fixture(autouse=True)
 def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Per-process guards reset per test."""
-    monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", threading.Lock())
-    monkeypatch.setattr(rw, "_AUTODEDUP_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", rw._PassLock("autodedup"))
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
 
@@ -349,14 +347,14 @@ def test_any_other_failure_is_the_lanes_failed_pass_and_closes_the_connection(
     with pytest.raises(RuntimeError):
         rw._autodedup_sync()
     assert conn.closed
-    assert rw._AUTODEDUP_PASS_LOCK.acquire(blocking=False), "the lock was not released"
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter(), "the lock was not released"
     rw._AUTODEDUP_PASS_LOCK.release()
 
 
 def test_an_abandoned_pass_is_never_overlapped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail(
         "a second pass must not open a connection while the first still holds the lock"))
-    assert rw._AUTODEDUP_PASS_LOCK.acquire(blocking=False)
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter()
     try:
         last = rw._autodedup_sync()
     finally:

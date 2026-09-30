@@ -16,12 +16,14 @@ multiplies the shared `penalty_factor` (x2, capped at 8x) and pushes
 healthy lease decays the factor (x0.9, floor 1.0). The lease that follows a
 penalize takes ONE slot, not a batch.
 
-Bounded waits: a lease whose window starts more than MAX_WAIT_S away, or after
-the caller's deadline, is refused without moving the frontier, and the limiter
-raises RateBudgetUnavailable on that acquire and every later one. On 2026-09-29
-ceskereality answered 403 to everything, each retry leased a fresh batch, the
-frontier ran an hour ahead and every caller slept there: the realtime worker's
-probe and drain threads never came back and starved its thread pool.
+Bounded waits, per caller: a limiter built with `max_wait_s` refuses a lease
+whose window starts further out than that, without moving the frontier, and
+raises RateBudgetUnavailable on that acquire and every later one. Only the
+realtime worker passes a bound; the Actions walks and drains wait as long as the
+ledger says. On 2026-09-29 ceskereality answered 403 to everything, each retry
+leased a fresh batch, the frontier ran an hour ahead and every caller slept
+there: the worker's probe and drain threads never came back and starved its
+thread pool.
 
 Failure posture: politeness must never depend on DB availability. Any DB error
 in lease/penalize logs once and permanently falls back to pure-local pacing for
@@ -51,18 +53,9 @@ PENALTY_MULT = 2.0
 PENALTY_CAP = 8.0
 RECOVERY_FACTOR = 0.9
 
-# The longest any caller waits for its leased window. At penalty 1x the frontier sits
-# at most one lease per OTHER in-flight caller ahead: for the slowest ledger portal
-# (0.5 req/s) with a walk, two drains and a probe leasing at once that is ~110 s, and
-# ceskereality's is ~80 s, so a healthy caller is not refused. A window further out
-# means the portal is pushing back (a penalty) or the budget is oversubscribed, and
-# waiting through it only parks a thread. It is also the worker drain's whole budget
-# (realtime_worker.DRAIN_MAX_SECONDS): a longer wait is never useful to that lane.
-MAX_WAIT_S = 120.0
-
 
 class RateBudgetUnavailable(Exception):
-    """The shared ledger has no slot for this caller within MAX_WAIT_S or its deadline."""
+    """The shared ledger has no slot for this caller within its `max_wait_s`."""
 
 
 _ENSURE_SQL = """
@@ -74,9 +67,9 @@ _ENSURE_SQL = """
 # One statement leases N slots: window_start = the shared frontier (never in
 # the past), the frontier advances by N pre-decay slot widths, and the caller
 # gets back (seconds until its window starts, slot width, granted). A window
-# starting more than max_wait_s away is NOT leased and the row is left as it
-# was, so a refused caller pushes nobody else back. interval_ms is refreshed to
-# the caller's config so an operator limits edit propagates.
+# starting more than max_wait_s away (NULL: no bound) is NOT leased and the row
+# is left as it was, so a refused caller pushes nobody else back. interval_ms is
+# refreshed to the caller's config so an operator limits edit propagates.
 _LEASE_SQL = """
     WITH cur AS (
         SELECT source,
@@ -94,7 +87,8 @@ _LEASE_SQL = """
                updated_at     = now()
           FROM cur
          WHERE p.source = cur.source
-           AND cur.window_start <= now() + make_interval(secs => %(max_wait_s)s)
+           AND (%(max_wait_s)s::float8 IS NULL
+                OR cur.window_start <= now() + make_interval(secs => %(max_wait_s)s::float8))
      RETURNING p.source
     )
     SELECT greatest(extract(epoch FROM (cur.window_start - now())), 0.0)::float8,
@@ -126,7 +120,7 @@ class LedgerRateLimiter(RateLimiter):
         *,
         lease_n: int = DEFAULT_LEASE_N,
         connect: Callable[[], Any] | None = None,
-        deadline: float | None = None,
+        max_wait_s: float | None = None,
     ) -> None:
         if lease_n < 1:
             raise ValueError("lease_n must be >= 1")
@@ -136,7 +130,7 @@ class LedgerRateLimiter(RateLimiter):
         self._interval_ms = max(1, round(1000.0 / rate_per_s))
         self._lease_n = lease_n
         self._connect = connect or db.connect
-        self._deadline = deadline
+        self._max_wait_s = max_wait_s
         self._conn: Any = None
         self._ensured = False
         self._slots_left = 0
@@ -150,8 +144,7 @@ class LedgerRateLimiter(RateLimiter):
         with self._lease_lock:
             if self.refused:
                 raise RateBudgetUnavailable(
-                    f"{self._source}: the shared ledger already refused this run "
-                    f"({self.refused})")
+                    f"{self._source}: the shared ledger already refused this run")
             if not self._fallen_back:
                 if self._slots_left <= 0:
                     self._lease_locked()
@@ -196,14 +189,8 @@ class LedgerRateLimiter(RateLimiter):
                 raise
         return cur
 
-    def _max_wait(self) -> float:
-        if self._deadline is None:
-            return MAX_WAIT_S
-        return max(0.0, min(MAX_WAIT_S, self._deadline - time.monotonic()))
-
     def _lease_locked(self) -> None:
         n = 1 if self._single_leases_owed else self._lease_n
-        max_wait = self._max_wait()
         try:
             with self._cursor() as cur:
                 cur.execute(_LEASE_SQL, {
@@ -211,7 +198,7 @@ class LedgerRateLimiter(RateLimiter):
                     "interval_ms": self._interval_ms,
                     "n": n,
                     "decay": RECOVERY_FACTOR,
-                    "max_wait_s": max_wait,
+                    "max_wait_s": self._max_wait_s,
                 })
                 row = cur.fetchone()
             if row is None:
@@ -221,16 +208,15 @@ class LedgerRateLimiter(RateLimiter):
             self._fall_back(exc)
             return
         if not granted:
-            self.refused = "cap" if delay_s > MAX_WAIT_S else "deadline"
-            if self.refused == "cap":
-                LOG.warning(
-                    "RATE budget refused source=%s: the next shared slot is %.0fs away "
-                    "(cap %.0fs); giving up on this portal for this run",
-                    self._source, delay_s, MAX_WAIT_S,
-                )
+            self.refused = True
+            LOG.warning(
+                "RATE budget refused source=%s: the next shared slot is %.0fs away "
+                "(bound %.0fs); giving up on this portal for this run",
+                self._source, delay_s, self._max_wait_s,
+            )
             raise RateBudgetUnavailable(
                 f"{self._source}: next shared slot {delay_s:.0f}s away, "
-                f"bound {max_wait:.0f}s ({self.refused})")
+                f"bound {self._max_wait_s:.0f}s")
         self._single_leases_owed = max(0, self._single_leases_owed - 1)
         self._slots_left = n
         self.reschedule(slot_s, time.monotonic() + delay_s)
@@ -262,12 +248,12 @@ def build_rate_limiter(
     shared: bool,
     *,
     lease_n: int = DEFAULT_LEASE_N,
-    deadline: float | None = None,
+    max_wait_s: float | None = None,
 ) -> RateLimiter:
     """The runner's one-line seam: the plain per-process RateLimiter unless the
     portal's `shared_rate_limiter` limit flag is on (then the DB-backed ledger).
-    `deadline` (a time.monotonic() instant) bounds the ledger's waits; the local
-    limiter's are bounded by its own spacing and take none."""
+    `max_wait_s` bounds the ledger's waits; the local limiter's are bounded by
+    its own spacing and take none."""
     if not shared:
         return RateLimiter(rate_per_s)
-    return LedgerRateLimiter(source, rate_per_s, lease_n=lease_n, deadline=deadline)
+    return LedgerRateLimiter(source, rate_per_s, lease_n=lease_n, max_wait_s=max_wait_s)

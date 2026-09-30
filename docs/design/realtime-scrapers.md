@@ -401,32 +401,42 @@ added one (eighteen by 23:15, plus drain threads) until asyncio's default execut
 (min(32, cpu+4)) was full. The heartbeat write and every lane's interval read ran on that same
 executor, so they starved; the event loop stayed alive, so Railway's restart policy never fired.
 Four changes, each closing one link:
-- **The ledger never parks a caller.** A lease whose window starts more than `MAX_WAIT_S` (120 s)
-  out, or after the caller's deadline, is refused inside `_LEASE_SQL` WITHOUT moving the
-  frontier, and the limiter raises `RateBudgetUnavailable` on that acquire and every later one
-  (`limiter.refused` = `cap` | `deadline`). 120 s sits above a healthy frontier (at 1x one lease
-  per other in-flight caller, ≤ ~110 s for the slowest ledger portal) and equals the worker drain's
-  whole budget. The retry after a penalize leases ONE slot. Every portal's `fetch_detail` swallows
-  exceptions, so the runner reads the refusal off the limiter: the probe gives the portal up for the
-  pass (`budget_refused`, not an error), the drain hands its unfetched claims back untouched
-  (`db.release_claims`, no attempt spent) and stops, and a walk counts the category failed and
-  stops (every attempted category refused = rc 1, as any blocked portal). The drain's `max_seconds`
-  now reaches the limiter as its deadline.
-- **Probe and drain hold pass locks** like the five lanes that already did: each pass runs in ONE
-  thread, so a lane leaks at most one; a skipped pass records `previous_pass_running`.
-- **The liveness path has its own threads.** The heartbeat writes on a one-thread executor nothing
-  else uses; the per-pass settings reads (every lane's interval included) run on a four-thread
-  pool with a 30 s bound, falling back to the lane's default. A starved lane pool now shows as
-  `in_flight_s` in a heartbeat that keeps arriving, which `worker_lane_stall` reads.
-- **A watchdog that exits.** A daemon thread, independent of the loop and of every executor,
-  compares now with the last SUCCESSFUL beat; past `LIVENESS_BOUND_SECONDS` (300 s, ten beats) it
-  logs the passes in flight, `faulthandler`-dumps every thread's stack (from a helper thread it
-  waits on for at most 10 s, so a blocked stderr cannot hold the exit) and calls `os._exit(1)` —
-  never `sys.exit`, whose interpreter shutdown joins the stuck executor threads and hangs — so
-  Railway starts a fresh process. A database unreachable for five minutes restarts the worker too.
+- **The worker never parks a thread in the ledger.** Its probe and drain build their limiters
+  with `max_wait_s = LEDGER_MAX_WAIT_SECONDS` (120 s, the drain's whole per-portal budget); a
+  lease whose window starts farther out is refused inside `_LEASE_SQL` WITHOUT moving the
+  frontier, and the limiter raises `RateBudgetUnavailable` on that acquire and every later one of
+  the run (`limiter.refused`). Every portal's `fetch_detail` swallows exceptions, so the runner
+  reads the refusal off the limiter: the probe gives the portal up for the pass (`budget_refused`,
+  not an error); the drain hands its unfetched claims back untouched (`db.release_claims`, no
+  attempt spent) and stops. The Actions walks and drains pass no bound (NULL) and wait as long as
+  the ledger says: a walk is built to wait, and a sticky refusal would abandon the rest of a
+  three-hour walk (at penalty > 1x a healthy frontier can pass 120 s on the slowest ledger
+  portal). Two changes cut the frontier's growth for every caller: the retry after a penalize
+  leases ONE slot, and a drain's lease is sized to its claims (`min(20, max_claims)`; the worker
+  caps `max_claims` at what is waiting) instead of 20 slots per pass whatever the work.
+- **Probe and drain hold pass locks** like the five lanes that already did, all seven through one
+  `_PassLock`: each pass runs in ONE thread, so a lane leaks at most one; a skipped pass records
+  `previous_pass_running`. While an abandoned pass still holds its lock, the lane's `in_flight_s`
+  keeps counting from that pass's start (a skip otherwise reads like a quick pass), so
+  `worker_lane_stall` warns at 20 min and fails at 60.
+- **The heartbeat is the executor's canary.** It stays on the default executor every lane shares,
+  pinned at 32 threads (`LANE_EXECUTOR_THREADS`; thirteen lanes hold at most one each in normal
+  running), so anything that fills it (leaked threads from the lanes without a pass lock, say)
+  stops the beats. A beat connects once with a 10 s timeout, so a slow connect cannot outlast
+  the watchdog's bound in the middle of a beat.
+- **A watchdog that exits.** A daemon thread, independent of the loop and of the executor, compares
+  now with the last FINISHED beat (written or not: a database that refuses the write is not
+  something a restart fixes, and a heartbeat-only fault must not restart every lane every five
+  minutes); past `LIVENESS_BOUND_SECONDS` (300 s, ten beats) it `faulthandler`-dumps every thread's
+  stack (from a helper thread it waits on for at most 10 s, so a blocked stderr cannot hold the
+  exit) and calls `os._exit(1)` — never `sys.exit`, whose interpreter shutdown joins the stuck
+  executor threads and hangs — so Railway starts a fresh process.
 Not done here, follow-ups: a per-portal circuit breaker (trip a portal that 403s everything
-instead of re-probing it each pass) and Health alerts on `budget_refused` / `portal_rate_state`
-running ahead.
+instead of re-probing it each pass), Health alerts on `budget_refused` / `portal_rate_state`
+running ahead, handing unused leased slots back when a run ends, and a `faulthandler`
+timer for a C call that holds the GIL (the watchdog thread cannot run then). After a blocked
+portal recovers, reset its `portal_rate_state` row (`penalty_factor = 1`, `next_slot_at = now()`)
+before lifting the kill switches: a refused lease does not decay the penalty.
 
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as

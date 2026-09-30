@@ -383,26 +383,6 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
     assert agg["index_pages"] == 0
 
 
-def test_index_walk_stops_on_a_refused_ledger_and_fails_that_category(monkeypatch):
-    # ceskereality's slices swallow a fetch error, the ledger's refusal included, so
-    # walk_category RETURNS: the runner must read the refusal off the limiter, count
-    # the category failed (it was not walked), nominate nothing and stop.
-    cap = _nominations(monkeypatch)
-
-    class _Refused(_FakePortal):
-        def walk_category(self, c, conn, dry_run, limiter, deadline=None):
-            out = super().walk_category(c, conn, dry_run, limiter, deadline)
-            limiter.refused = "cap"
-            return out
-
-    p = _Refused(supports_complete_walk=True, reached_end=True)
-    rc, agg = portal_runner.run_index_walk(p, dry_run=False)
-    assert p.calls["walk"] == ["A"]
-    assert (rc, agg["errors"]) == (1, 1)
-    assert cap["queued"] == []
-    assert agg["by_category"][0]["walk_reached_end"] is False
-
-
 # --- run_detail_drain -------------------------------------------------------
 
 
@@ -524,10 +504,7 @@ def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
     assert p.conn.closed             # but finalized cleanly (no stuck run)
 
 
-@pytest.mark.parametrize("reason,counted", [("cap", 1), ("deadline", 0)])
-def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(
-    monkeypatch, reason, counted,
-):
+def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(monkeypatch):
     # Every portal's fetch_detail turns the refusal into an ordinary "error" item.
     # Recording it would spend an attempt of a listing that did nothing wrong (five
     # and it is given up), so the claim goes back untouched and the drain stops.
@@ -549,7 +526,7 @@ def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(
         def fetch_detail(self, client, native_id, ref):
             if native_id == "1":
                 return super().fetch_detail(client, native_id, ref)
-            self.limiter.refused = reason
+            self.limiter.refused = True
             return DrainItem(native_id=native_id, kind="error", error="refused")
 
     p = _Refused()
@@ -559,12 +536,15 @@ def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(
     assert cap["fail"] == [] and p.calls["failure"] == []
     assert len(cap["claim_n"]) == 1                 # the second chunk is never claimed
     assert p.calls["write"] == [["1"]]
-    assert (agg["budget_refused"], agg["deferred"], agg["errors"]) == (counted, 2, 0)
+    assert (agg["budget_refused"], agg["errors"]) == (1, 0)
 
 
-def test_detail_drain_hands_its_deadline_to_the_limiter(monkeypatch):
-    # max_seconds was checked only between claims: a 40-minute Actions drain once ran
-    # 50 minutes with every thread asleep in the shared ledger.
+@pytest.mark.parametrize("max_claims,lease_n", [(3, 3), (200, 20), (None, 20)])
+def test_detail_drain_hands_its_bound_and_a_lease_sized_to_its_work_to_the_limiter(
+    monkeypatch, max_claims, lease_n,
+):
+    # Every leased slot moves the shared frontier, used or not: a worker drain with three
+    # rows waiting leased twenty every 30 s and pushed the other callers back.
     seen: dict[str, Any] = {}
 
     def fake_build(source, rate, shared, **kw):
@@ -572,11 +552,11 @@ def test_detail_drain_hands_its_deadline_to_the_limiter(monkeypatch):
         return portal_runner.RateLimiter(rate)
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
-    monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 1000.0)
     _patch_queue(monkeypatch, [])
     portal_runner.run_detail_drain(
-        _FakePortal(), None, False, detail_workers=1, detail_rate=1.0, max_seconds=120.0)
-    assert seen["deadline"] == 1120.0
+        _FakePortal(), max_claims, False, detail_workers=1, detail_rate=1.0,
+        max_seconds=120.0, max_wait_s=120.0)
+    assert seen == {"lease_n": lease_n, "max_wait_s": 120.0}
 
 
 def test_detail_drain_swallows_teardown_close_failure(monkeypatch):

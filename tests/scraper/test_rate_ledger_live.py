@@ -48,7 +48,7 @@ def source(conn: psycopg.Connection) -> Iterator[str]:
     conn.execute("DELETE FROM listing_detail_queue WHERE source = %s", (name,))
 
 
-def _lease(conn: psycopg.Connection, source: str, *, max_wait_s: float) -> Any:
+def _lease(conn: psycopg.Connection, source: str, *, max_wait_s: float | None) -> Any:
     return conn.execute(_LEASE_SQL, {
         "source": source, "interval_ms": 1000, "n": 5, "decay": 0.9,
         "max_wait_s": max_wait_s,
@@ -86,14 +86,21 @@ def test_a_lease_beyond_the_bound_is_refused_and_moves_nothing(conn, source):
     assert _row(conn, source) == before
 
 
-def test_a_zero_bound_still_takes_a_slot_that_is_free_now(conn, source):
-    # A drain past its deadline may still take a slot that costs no wait.
+def test_an_unbounded_lease_is_granted_however_far_out_its_window_is(conn, source):
+    # The Actions walks and drains pass no bound (NULL): they wait as long as the
+    # ledger says, and only the worker's bounded callers can be refused.
     conn.execute(
-        "UPDATE portal_rate_state SET next_slot_at = now() - interval '1 minute' "
+        "UPDATE portal_rate_state SET next_slot_at = now() + interval '1 hour' "
         "WHERE source = %s", (source,),
     )
-    _delay_s, _slot_s, granted = _lease(conn, source, max_wait_s=0.0)
+    delay_s, _slot_s, granted = _lease(conn, source, max_wait_s=None)
     assert granted is True
+    assert delay_s == pytest.approx(3600.0, abs=5.0)
+    ahead = conn.execute(
+        "SELECT extract(epoch FROM next_slot_at - now())::float8 "
+        "FROM portal_rate_state WHERE source = %s", (source,),
+    ).fetchone()[0]
+    assert ahead == pytest.approx(3605.0, abs=5.0)
 
 
 def test_released_claims_keep_their_attempts(conn, source):
