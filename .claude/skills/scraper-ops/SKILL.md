@@ -50,15 +50,13 @@ to `/thumbs/XXX/YY/e/`, silently corrupting the only data a media test can asser
 **Never commit an unscrubbed portal page — this repo is PUBLIC.** A live detail page carries the
 broker's mobile, work e-mail and name, and merging one publishes them permanently. For a fixture
 kept for its **bytes** rather than its visible text (the payload-normaliser set,
-`tests/fixtures/location_w2a_refetch/`), the blanket sweep above is the wrong tool — masking
-*every* 9-digit run rewrites `data-gps-lat="50.069672777778"`, JSON-escaped photo ids the URL
-mask never sees, and Tailwind custom properties. Use the contact-scoped mode instead:
+`tests/fixtures/location_w2a_refetch/`), the blanket sweep is the wrong tool — masking *every*
+9-digit run rewrites `data-gps-lat`, JSON-escaped photo ids, Tailwind custom properties. Use:
 `python scripts/fetch_and_anonymize_fixtures.py --scrub-contacts <files> --name "<agent name>"`.
 It seeds phones only from markup that says "phone" (`tel:`, schema.org `telephone`, a rendered
 `+420` group, a whole-text-node number, reveal-on-click attributes, **and a JSON `phone`/`mobile`
-key** — plain, entity- or backslash-escaped, which is how a portal whose payload is an embedded
-JSON prop spells it: mmreality's agent number arrives as `&quot;phone&quot;:&quot;731404040&quot;`
-with no `+420`, no grouping and no `tel:` href). It replaces e-mails, **re-encodes Cloudflare's
+key** — plain, entity- or backslash-escaped, how an embedded-JSON portal spells it: mmreality's
+agent number arrives as `&quot;phone&quot;:&quot;731404040&quot;`, no `+420`, no `tel:` href). It replaces e-mails, **re-encodes Cloudflare's
 obfuscated e-mail payloads** (`data-cfemail`, `/cdn-cgi/l/email-protection#…` — an XOR against
 their own leading byte, so a committed one publishes the address while matching no plaintext
 rule; the placeholder is re-encoded under the page's OWN key, which preserves the per-response
@@ -66,10 +64,9 @@ key that is itself measured churn on Cloudflare-fronted portals), and takes each
 name in plain, JSON-escaped **and** slugged form (the profile-URL slug is the one that gets
 forgotten). Pass `--name` once per name, **longest first** — replacing "Radomír Kočí" before
 "Bc. Radomír Kočí, DiS." leaves the longer form half-rewritten.
-Same placeholders, so a fixture set stays consistent either way; it is idempotent, so re-running
-it on a committed fixture proves the fixture is clean. Two tests in
-`tests/location_data/test_payload_norm_measured.py` fail if a committed fixture carries contact
-details in plaintext **or** in Cloudflare's hex.
+Same placeholders either way; idempotent, so re-running it on a committed fixture proves it clean.
+Two tests in `tests/location_data/test_payload_norm_measured.py` fail if a committed fixture
+carries contact details in plaintext **or** in Cloudflare's hex.
 
 **The nine SCRAPER portal parsers are a separate fixture set** in `tests/fixtures/portal_html/`
 (`tests/scraper/test_portal_media_fixtures.py`), distinct from the LLM `source_parsers` set
@@ -203,23 +200,21 @@ not a write; a listing's place is `listing_location` (join on `listing_id`).
 
 Monitor/alerting workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow
 failures", cron `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures`
-so the Health page can list them, since GitHub only emails about failed *scheduled* runs; a
-never-started supersession cancel is distinguished from a genuine failure, and the run's cursor +
-whether a timeout killed it are captured) and `llm_health.yml` ("Monitoring: acute health", hourly
+for the Health page, since GitHub only emails about failed *scheduled* runs; a never-started
+supersession cancel is distinguished from a real failure; cursor + timeout-kill captured) and `llm_health.yml` ("Monitoring: acute health", hourly
 — verify_pipeline's acute lane: `llm_errors`, `llm_burn_rate`, `db_saturation`,
 `worker_liveness`, `property_maintenance`, `broker_resolution_freshness`, with
 `--exit-nonzero-on-fail` so any `fail` goes red and emails). A credit-balance error alarms
-immediately, and the LLM failure probe is INDEPENDENT of pending work — that blind spot kept a
-credit-exhausted account green for ~8h while condition scoring happened to be quiet; `LLMClient`
-records the failure row on every provider exception, so the check needs no key of its own.
+immediately, and the LLM failure probe is INDEPENDENT of pending work (a quiet-queue blind spot
+once kept a credit-exhausted account green ~8h); `LLMClient` records the failure row on every
+provider exception, so the check needs no key of its own.
 `llm_burn_rate` watches daily LLM spend for the recurring credit-depletion pattern (warn threshold
-operator-tuned via `pipeline_check_thresholds`, currently 130; incident history in the
-`llm-credit-outage-health-gap` memory) and lands its rows in the same `pipeline_check_results`
-table the verification harness below writes to. Run any directly:
-- CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
-  Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
-- Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
-  flags → **Run workflow**. (All sreality scraping workflows are prefixed `Scraping:`.)
+operator-tuned via `pipeline_check_thresholds`, currently 130) and lands its rows in the same
+`pipeline_check_results` table the harness below writes to. Run any directly:
+- CLI: `gh workflow run index_walk.yml --ref <branch>` (`-f` for flags); watch with
+  `gh run list --workflow=index_walk.yml` then `gh run watch`.
+- Browser: repo → **Actions** → the workflow → **Run workflow** → branch + flags. (All sreality
+  scraping workflows are prefixed `Scraping:`.)
 
 **Each scrape workflow self-declares its portal with a `# portal: <source>` tag.** A one-line
 comment near the top of a portal's index/drain/combined workflow (`<source>` = the
@@ -335,14 +330,11 @@ Lanes shipped so far:
 - **Property-maintenance lane**, every 2 min (PR #716) — `run_incremental_pass` against `dirty_properties`
   (rule #20), far more often than the 5-min GH cron; serialized with it + the daily sweep by the lease-row
   CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded. Its
-  drain also mirrors each claimed property's attributed listings into `dirty_broker_listings`, so
-  delist/revive flips reach broker counts in minutes (Broker Unify W3).
-- **Broker-maintenance lane** (Broker Unify W3) — same cadence setting as property maintenance; calls
-  `scripts.resolve_brokers.run_incremental_pass` (THE driver `broker_resolution.yml` also runs, backstop-
-  only now): drain `dirty_broker_listings` until empty, attribute + recompute only the affected brokers
-  (one merged `recompute_brokers` statement), and republish `broker_region_type_stats` through the
-  migration-578 chokepoint when its `derived_artifacts` stamp is older than ~an hour. Serialized by
-  `broker_resolution_lock`; a concurrent caller skips.
+  drain also mirrors claimed properties' attributed listings into `dirty_broker_listings` (Broker Unify W3).
+- **Broker-maintenance lane** (Broker Unify W3) — same cadence; `scripts.resolve_brokers.
+  run_incremental_pass` (`broker_resolution.yml` runs the SAME driver as backstop): drain until empty,
+  recompute affected brokers (one merged statement), republish `broker_region_type_stats` via the
+  mig-578 chokepoint when its registry stamp is >~1 h old; `broker_resolution_lock` serializes.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
   deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run used
   to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one `pending`
