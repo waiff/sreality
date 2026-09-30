@@ -434,6 +434,20 @@ def _drain_dirty(
         # the one lock the rebuild's `drop table` waits behind. The live dirty depth
         # is a couple of dozen; only a post-freeze backlog claims a full slice.
         sync_browse_list(conn, ids)
+        # Mirror the claim into the BROKER dirty queue (Broker Unify W3): every
+        # delist/revive flip site enqueues dirty_properties only, so broker
+        # active counts used to see a flip no sooner than the daily full sweep.
+        # This lane is the one place that knows which properties just changed;
+        # their attributed listings feed the broker drain, which recomputes only
+        # the affected brokers minutes later. ON CONFLICT bumps marked_at, same
+        # as the detail writers' enqueue.
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO dirty_broker_listings (listing_id) "
+                "SELECT l.id FROM listings l "
+                "WHERE l.property_id = ANY(%(ids)s) AND l.broker_identity_id IS NOT NULL "
+                "ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()",
+                {"ids": ids})
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
