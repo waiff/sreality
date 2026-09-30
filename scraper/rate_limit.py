@@ -36,7 +36,10 @@ class RateLimiter:
         # Set once a bounded shared ledger (scraper/rate_ledger.py) refused this run a
         # slot. Read by the runner, because every portal's fetch_detail turns the raised
         # refusal into an ordinary "error" item. A local limiter never refuses.
+        # `refused_reason` says why: "cap" (the next slot lay past the caller's wait
+        # bound: a blocked portal) or "deadline" (the run's time budget ran out).
         self.refused = False
+        self.refused_reason: str | None = None
 
     def acquire(self) -> None:
         """Block until this thread's slot; sleep happens outside the lock."""

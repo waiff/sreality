@@ -747,7 +747,8 @@ def run_detail_drain(
 
     `max_wait_s` bounds each wait for a shared-ledger slot and, with `max_seconds`, the
     run: every acquire past the deadline is refused too. On a refusal the unfetched
-    claims go back untouched and the drain stops (`budget_refused`).
+    claims go back untouched and the drain stops (`budget_refused` for a blocked
+    portal, `deadline_stopped` for a time budget reached mid-chunk).
     """
     counts: dict[str, int] = {
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
@@ -900,9 +901,14 @@ def run_detail_drain(
                     conn, lambda c: db.release_claims(c, portal.source, deferred),
                     reconnect=portal.connect_drain, label="drain.release",
                 )
-                LOG.warning(
-                    "DRAIN stopped source=%s: the shared rate budget refused the run; "
-                    "%d claims handed back untouched", portal.source, len(deferred))
+                if limiter.refused_reason == "deadline":
+                    LOG.info(
+                        "DRAIN time budget reached mid-chunk; %d claims handed back "
+                        "source=%s", len(deferred), portal.source)
+                else:
+                    LOG.warning(
+                        "DRAIN stopped source=%s: the shared rate budget refused the run; "
+                        "%d claims handed back untouched", portal.source, len(deferred))
                 break
         conn = _flush_drain_batch(
             portal, conn, buffer, counts, dry_run, portal.connect_drain)
@@ -947,7 +953,8 @@ def run_detail_drain(
         "listings_inactive":    counts["gone"],
         "images_discovered":    counts["images_discovered"],
         "errors":               counts["errors"],
-        "budget_refused":       int(limiter.refused),
+        "budget_refused":       int(limiter.refused and limiter.refused_reason != "deadline"),
+        "deadline_stopped":     int(limiter.refused_reason == "deadline"),
         "by_category":          [],
     }
     return (0, scrape_agg)

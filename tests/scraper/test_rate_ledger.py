@@ -269,7 +269,7 @@ def test_a_window_beyond_the_bound_raises_instead_of_sleeping(monkeypatch, caplo
             lim.acquire()
     assert sleeps == []                               # never parked the thread
     assert ledger.rows["x"]["next_slot_at"] == frontier  # refusal leased nothing
-    assert lim.refused is True
+    assert (lim.refused, lim.refused_reason) == (True, "cap")  # a blocked portal
     assert ledger.executed[-1][2]["max_wait_s"] == BOUND_S
     assert any("RATE budget refused" in r.getMessage() for r in caplog.records)
 
@@ -353,12 +353,43 @@ def test_an_acquire_after_the_deadline_is_refused_without_a_trip(monkeypatch, ca
     lim.acquire()
     clock.now += BOUND_S
     statements, slept = len(ledger.executed), len(sleeps)
-    with caplog.at_level(logging.WARNING, logger="scraper.rate_ledger"):
+    with caplog.at_level(logging.INFO, logger="scraper.rate_ledger"):
         with pytest.raises(RateBudgetUnavailable):
             lim.acquire()                             # slots were left: still refused
-    assert lim.refused is True
+    assert (lim.refused, lim.refused_reason) == (True, "deadline")
     assert (len(ledger.executed), len(sleeps)) == (statements, slept)
-    assert any("deadline has passed" in r.getMessage() for r in caplog.records)
+    # A time budget that ran out is not a blocked portal, and does not log like one.
+    assert any("RATE deadline reached" in r.getMessage() for r in caplog.records)
+    assert not any("RATE budget refused" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("frontier_s,reason,slept", [
+    (20.0, None, 20.0),            # inside the time left: waited for
+    (60.0, "deadline", None),      # inside the bound, past the deadline: time is up
+    (BOUND_S + 60.0, "cap", None),  # past the bound: a blocked portal, whatever time is left
+])
+def test_the_lease_bound_shrinks_to_the_time_left_before_the_deadline(
+    monkeypatch, frontier_s, reason, slept,
+):
+    # An acquire 30 s before the deadline must not sleep up to 120 s past it.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect,
+                            max_wait_s=BOUND_S, deadline=clock.now + BOUND_S)
+    lim.acquire()
+    clock.now += BOUND_S - 30.0
+    ledger.rows["x"]["next_slot_at"] = frontier = clock.now + frontier_s
+    lim._slots_left = 0
+    if reason is None:
+        lim.acquire()
+        assert sleeps[-1] == pytest.approx(slept)
+    else:
+        with pytest.raises(RateBudgetUnavailable):
+            lim.acquire()
+        assert ledger.rows["x"]["next_slot_at"] == frontier  # refusal leased nothing
+    assert ledger.executed[-1][2]["max_wait_s"] == pytest.approx(30.0)
+    assert (lim.refused, lim.refused_reason) == (reason is not None, reason)
 
 
 def test_single_leases_owed_never_outgrow_one_batch(monkeypatch):

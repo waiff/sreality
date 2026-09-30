@@ -1042,7 +1042,7 @@ def _drain_sync(
         counts = _claimable_by_source()
         totals = {
             "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
-            "budget_refused": 0,
+            "budget_refused": 0, "deadline_stopped": 0,
         }
         for source in REALTIME_SOURCES:
             if stop_event.is_set():
@@ -1067,12 +1067,14 @@ def _drain_sync(
             totals["gone"] += agg.get("listings_inactive", 0)
             totals["errors"] += agg.get("errors", 0)
             totals["budget_refused"] += agg.get("budget_refused", 0)
+            totals["deadline_stopped"] += agg.get("deadline_stopped", 0)
             LOG.info(
                 "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d "
-                "budget_refused=%d",
+                "budget_refused=%d deadline_stopped=%d",
                 source, claimable, agg.get("listings_scraped_new", 0),
                 agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
                 agg.get("errors", 0), agg.get("budget_refused", 0),
+                agg.get("deadline_stopped", 0),
             )
         return totals
     finally:
@@ -2192,20 +2194,30 @@ async def _heartbeat_pass(state: dict[str, Any]) -> None:
     await asyncio.to_thread(_beat_sync, state)
 
 
+def _arm_exit_backstop(seconds: float) -> None:
+    # faulthandler's timer thread takes no GIL and calls _exit(1) itself: it ends a
+    # process whose Python threads are all stopped, and as PID 1, where the kernel drops
+    # a default-action signal. It dumps to /dev/null: it fires only when the dump to
+    # stderr is stuck, and a second write into that pipe would block the timer too.
+    faulthandler.dump_traceback_later(
+        seconds, exit=True, file=os.open(os.devnull, os.O_WRONLY))
+
+
 def _watchdog(
     state: dict[str, Any],
     *,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     exit_: Callable[[int], None] = os._exit,
-    alarm: Callable[[int], Any] = signal.alarm,
+    arm_backstop: Callable[[float], Any] = _arm_exit_backstop,
 ) -> None:
     """Exit the process once no heartbeat pass has FINISHED for LIVENESS_BOUND_SECONDS,
     or once a pass lock has been held for PASS_LOCK_BOUND_SECONDS.
 
     Runs on its own daemon thread, so it needs neither the event loop nor an executor,
     the two things a freeze takes down. os._exit, never sys.exit: a normal exit joins
-    every executor thread, and a thread asleep inside a portal call never returns."""
+    every executor thread, and a thread asleep inside a portal call never returns. A
+    faulthandler timer armed before the dump exits even if the dump holds the GIL."""
     while True:
         sleep(HEARTBEAT_INTERVAL_SECONDS)
         now = clock()
@@ -2232,10 +2244,9 @@ def _watchdog(
             )
             faulthandler.dump_traceback(all_threads=True)
 
-        # The backstop if the dump still holds the GIL: nothing in this process installs
-        # a SIGALRM handler, so the default action ends it, and Railway's restartPolicy
-        # ALWAYS starts a fresh one.
-        alarm(int(WATCHDOG_LAST_WORDS_SECONDS) + 5)
+        # The backstop if the dump still holds the GIL (the join below and exit_ both
+        # need it): the timer _exits and Railway's restartPolicy ALWAYS starts a new one.
+        arm_backstop(WATCHDOG_LAST_WORDS_SECONDS + 5)
         speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
         speaker.start()
         speaker.join(WATCHDOG_LAST_WORDS_SECONDS)

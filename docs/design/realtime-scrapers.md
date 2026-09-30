@@ -406,13 +406,21 @@ Four changes, each closing one link:
   their limiters with `max_wait_s = LEDGER_MAX_WAIT_SECONDS` (120 s, the drain's whole per-portal
   budget); a lease whose window starts farther out is refused inside `_LEASE_SQL` WITHOUT moving
   the frontier, and the limiter raises `RateBudgetUnavailable` on that acquire and every later one
-  of the run (`limiter.refused`). The worker's drain limiter also carries the drain's deadline
-  (run start + `DRAIN_MAX_SECONDS`): the drain loop checks its budget only between chunks, so
+  of the run (`limiter.refused`, `limiter.refused_reason = "cap"`). The worker's drain limiter
+  also carries the drain's deadline (run start + `DRAIN_MAX_SECONDS`; shared-ledger portals only,
+  a local limiter takes no bound): the drain loop checks its budget only between chunks, so
   without it a 403 storm on a one-worker portal could hold one chunk, and the pass lock, for an
-  hour; every acquire past the deadline is refused the same way. Every portal's `fetch_detail`
-  swallows exceptions, so the runner reads the refusal off the limiter: the probe gives the
-  portal up for the pass (`budget_refused`, not an error); the drain hands its unfetched claims
-  back untouched (`db.release_claims`, no attempt spent) and stops; the sold_comps tick stops at
+  hour. Every acquire past the deadline is refused the same way, and a lease before it is bounded
+  by the lesser of 120 s and the time left, so a slot just before the deadline never sleeps a
+  whole bound past it (`refused_reason = "deadline"`, or `"cap"` when the window lies past 120 s
+  anyway). Every portal's `fetch_detail` swallows exceptions, so the runner reads the refusal off
+  the limiter: the probe gives the portal up for the pass (`budget_refused`, not an error); the
+  drain hands its unfetched claims back untouched (`db.release_claims`, no attempt spent) and
+  stops, counted `budget_refused` for a blocked portal (`DRAIN stopped ... refused the run`) and
+  `deadline_stopped` for a healthy pass with a backlog that ran out of time mid-chunk (`DRAIN time
+  budget reached mid-chunk; N claims handed back`). The hand-back keys on `limiter.refused`, not
+  on why an item failed, so an item whose own error lands after the refusal is handed back too,
+  without an attempt charge (a retry, never a lost attempt). The sold_comps tick stops at
   the refused cell (`fetch_cell` re-raises the refusal and writes no ledger row) instead of
   failing every remaining cell one by one. The Actions walks and drains and the `reas_main` CLI
   pass no bound (NULL) and wait as long as the ledger says: a walk is built to wait, and a sticky
@@ -444,13 +452,18 @@ Four changes, each closing one link:
   thread the watchdog waits on for at most 10 s, but `faulthandler` writes while holding the GIL,
   so a blocking write into a full stderr pipe would stop every thread, the watchdog included.
   So the helper first switches stderr to non-blocking (a full pipe answers EAGAIN; the dump may be
-  cut short, the exit is not), and before starting it the watchdog arms `signal.alarm(15)`: the
-  worker installs no SIGALRM handler, so if the process is still alive then, the default action
-  kills it and Railway's restartPolicy ALWAYS restarts it.
+  cut short, the exit is not), and before starting it the watchdog arms
+  `faulthandler.dump_traceback_later(15, exit=True)`: its timer runs on a C thread that takes no
+  GIL and calls `_exit(1)` itself, so a process still alive then ends, and Railway's restartPolicy
+  ALWAYS restarts it. Not a signal: the worker is its container's PID 1 (`python -m
+  scraper.realtime_worker`, no init), and the kernel drops a default-action signal sent to PID 1,
+  so a `signal.alarm` backstop kills nothing. The timer dumps to /dev/null: it fires only when the
+  dump into stderr is stuck, and its own write into that pipe would block it too.
 Not done here, follow-ups: a per-portal circuit breaker (trip a portal that 403s everything
 instead of re-probing it each pass), Health alerts on `budget_refused` / `portal_rate_state`
-running ahead, handing unused leased slots back when a run ends, and a `faulthandler`
-timer for a C call that holds the GIL (the watchdog thread cannot run then). After a blocked
+running ahead, handing unused leased slots back when a run ends, and a standing `faulthandler`
+timer, re-armed by each beat, for a C call that holds the GIL (the watchdog thread cannot run to
+arm its own then). After a blocked
 portal recovers, reset its `portal_rate_state` row (`penalty_factor = 1`, `next_slot_at = now()`)
 before lifting the kill switches: a refused lease does not decay the penalty.
 

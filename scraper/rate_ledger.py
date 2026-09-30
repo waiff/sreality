@@ -19,7 +19,8 @@ penalize takes ONE slot, not a batch.
 Bounded waits, per caller: a limiter built with `max_wait_s` refuses a lease
 whose window starts further out than that, without moving the frontier, and
 raises RateBudgetUnavailable on that acquire and every later one; one built with
-a `deadline` does the same for every acquire after it. Only the realtime worker
+a `deadline` does the same for every acquire after it and every window starting
+after it (`refused_reason` "cap" or "deadline" says which). Only the realtime worker
 passes either; the Actions walks and drains wait as long as the ledger says. On
 2026-09-29 ceskereality answered 403 to everything, each retry leased a fresh
 batch, the frontier ran an hour ahead and every caller slept there: the worker's
@@ -146,9 +147,9 @@ class LedgerRateLimiter(RateLimiter):
         with self._lease_lock:
             if (not self.refused and self._deadline is not None
                     and time.monotonic() >= self._deadline):
-                self.refused = True
-                LOG.warning(
-                    "RATE budget refused source=%s: the run's deadline has passed",
+                self.refused, self.refused_reason = True, "deadline"
+                LOG.info(
+                    "RATE deadline reached source=%s: the run's time budget has passed",
                     self._source)
             if self.refused:
                 raise RateBudgetUnavailable(
@@ -202,6 +203,11 @@ class LedgerRateLimiter(RateLimiter):
 
     def _lease_locked(self) -> None:
         n = 1 if self._single_leases_owed else self._lease_n
+        # A slot just before the deadline must not sleep a whole bound past it.
+        bound = self._max_wait_s
+        if self._deadline is not None:
+            left = max(0.0, self._deadline - time.monotonic())
+            bound = left if bound is None else min(bound, left)
         try:
             with self._cursor() as cur:
                 cur.execute(_LEASE_SQL, {
@@ -209,7 +215,7 @@ class LedgerRateLimiter(RateLimiter):
                     "interval_ms": self._interval_ms,
                     "n": n,
                     "decay": RECOVERY_FACTOR,
-                    "max_wait_s": self._max_wait_s,
+                    "max_wait_s": bound,
                 })
                 row = cur.fetchone()
             if row is None:
@@ -220,14 +226,21 @@ class LedgerRateLimiter(RateLimiter):
             return
         if not granted:
             self.refused = True
-            LOG.warning(
-                "RATE budget refused source=%s: the next shared slot is %.0fs away "
-                "(bound %.0fs); giving up on this portal for this run",
-                self._source, delay_s, self._max_wait_s,
-            )
+            if self._max_wait_s is not None and delay_s > self._max_wait_s:
+                self.refused_reason = "cap"
+                LOG.warning(
+                    "RATE budget refused source=%s: the next shared slot is %.0fs away "
+                    "(bound %.0fs); giving up on this portal for this run",
+                    self._source, delay_s, self._max_wait_s,
+                )
+            else:
+                self.refused_reason = "deadline"
+                LOG.info(
+                    "RATE deadline reached source=%s: the next shared slot is %.0fs away, "
+                    "past the run's time budget (%.0fs left)", self._source, delay_s, bound)
             raise RateBudgetUnavailable(
                 f"{self._source}: next shared slot {delay_s:.0f}s away, "
-                f"bound {self._max_wait_s:.0f}s")
+                f"bound {bound:.0f}s ({self.refused_reason})")
         self._single_leases_owed = max(0, self._single_leases_owed - 1)
         self._slots_left = n
         self.reschedule(slot_s, time.monotonic() + delay_s)

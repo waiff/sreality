@@ -11,7 +11,6 @@ import inspect
 import io
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -2123,14 +2122,19 @@ def test_probe_and_drain_count_a_refused_portal_and_move_on(monkeypatch):
     monkeypatch.setattr(rw, "_run_probe_sync", lambda s: _probe_agg(
         budget_refused=int(s == "ceskereality")))
     monkeypatch.setattr(rw, "_run_drain_sync", lambda s, n: _drain_agg(
-        budget_refused=int(s == "ceskereality")))
+        budget_refused=int(s == "ceskereality"), deadline_stopped=int(s == "idnes")))
     state = rw._new_state()
     asyncio.run(rw._probe_pass(asyncio.Event(), state))
     asyncio.run(rw._drain_pass(asyncio.Event(), state))
     probe, drain = state["lanes"]["probe"]["last"], state["lanes"]["drain"]["last"]
     assert (probe["portals"], probe["budget_refused"], probe["errors"]) == (
         len(rw.REALTIME_SOURCES), 1, 0)
-    assert (drain["sources"], drain["budget_refused"], drain["errors"]) == (2, 1, 0)
+    # A drain out of time mid-chunk (idnes, a backlog) is not a blocked portal: the
+    # heartbeat keeps the two apart.
+    assert (drain["sources"], drain["budget_refused"], drain["deadline_stopped"],
+            drain["errors"]) == (2, 1, 1, 0)
+    snapshot = rw._lane_snapshot(state["lanes"])["drain"]["last"]
+    assert (snapshot["budget_refused"], snapshot["deadline_stopped"]) == (1, 1)
 
 
 def test_only_the_worker_bounds_its_ledger_waits(monkeypatch):
@@ -2155,14 +2159,15 @@ def test_only_the_worker_bounds_its_ledger_waits(monkeypatch):
 def _watchdog_off_the_terminal(monkeypatch) -> list[int]:
     """No pass lock held, and a stderr without a descriptor: the watchdog switches stderr
     to non-blocking before its dump, which must never reach the terminal running the
-    tests. Returns what the fake alarm records."""
+    tests. Returns what the fake backstop records: a real faulthandler timer would
+    _exit the test run."""
     monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
     monkeypatch.setattr(sys, "stderr", io.StringIO())
     return []
 
 
 def test_watchdog_exits_once_no_beat_finishes(monkeypatch, caplog):
-    alarms = _watchdog_off_the_terminal(monkeypatch)
+    backstops = _watchdog_off_the_terminal(monkeypatch)
     clock = [1000.0]
     state = rw._new_state()
     state["beat_done_at"] = 1000.0
@@ -2175,9 +2180,9 @@ def test_watchdog_exits_once_no_beat_finishes(monkeypatch, caplog):
 
     with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
         rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
-                     alarm=alarms.append)
+                     arm_backstop=backstops.append)
     assert exits == [1]
-    assert alarms == [int(rw.WATCHDOG_LAST_WORDS_SECONDS) + 5]  # armed before the dump
+    assert backstops == [rw.WATCHDOG_LAST_WORDS_SECONDS + 5]  # armed before the dump
     assert clock[0] - 1000.0 == rw.LIVENESS_BOUND_SECONDS == 10 * rw.HEARTBEAT_INTERVAL_SECONDS
     assert dumps == [{"all_threads": True}]
     assert sum("WATCHDOG" in r.getMessage() for r in caplog.records) == 1
@@ -2203,28 +2208,50 @@ rw._watchdog(state, sleep=lambda s: None)
 """
 
 
-@pytest.mark.parametrize("mode,returncode", [
-    ("as_shipped", 1), ("blocking", -signal.SIGALRM)])
-def test_watchdog_exits_even_when_stderr_is_a_full_pipe(mode, returncode):
+@pytest.mark.parametrize("mode", ["as_shipped", "blocking"])
+def test_watchdog_exits_even_when_stderr_is_a_full_pipe(mode):
     # faulthandler writes holding the GIL, so a dump into a full pipe stops every thread,
     # the watchdog's join and os._exit included. A REAL full pipe, in a child process: as
-    # shipped the dump gets EAGAIN and the watchdog exits 1; with the dump blocking
-    # anyway, the alarm armed before it kills the process (no SIGALRM handler).
+    # shipped the dump gets EAGAIN and the watchdog's os._exit(1) ends it; with the dump
+    # blocking anyway, the faulthandler timer armed before it does, _exit(1) from a thread
+    # that needs no GIL (a signal would not: as PID 1 the kernel drops SIGALRM's default).
+    started = time.monotonic()
     child = subprocess.Popen(
         [sys.executable, "-c", _FULL_STDERR_CHILD, mode],
         cwd=Path(__file__).resolve().parents[2],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        assert child.wait(timeout=60) == returncode
+        assert child.wait(timeout=60) == 1
     finally:
         child.kill()
         child.stderr.close()
+    if mode == "blocking":  # the timer, not the watchdog's own exit 1 s after the dump
+        assert time.monotonic() - started >= 1.0 + 5
+
+
+
+def test_the_backstop_is_a_faulthandler_timer_that_exits_and_writes_off_stderr(monkeypatch):
+    # A timer thread, never a signal: the worker is its container's PID 1, and the kernel
+    # drops a default-action signal sent to PID 1. Its dump goes nowhere: it fires only
+    # when the dump into stderr is stuck, and a write into that pipe would block it too.
+    armed: list[tuple[float, dict[str, Any]]] = []
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback_later",
+                        lambda timeout, **kw: armed.append((timeout, kw)))
+    rw._arm_exit_backstop(15.0)
+    ((timeout, kw),) = armed
+    try:
+        assert (timeout, kw["exit"]) == (15.0, True)
+        assert os.readlink(f"/proc/self/fd/{kw['file']}") == os.devnull
+    finally:
+        os.close(kw["file"])
+    assert inspect.signature(rw._watchdog).parameters["arm_backstop"].default is (
+        rw._arm_exit_backstop)
 
 
 def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog):
     # A probe or drain thread stuck in an HTTP read or a lock wait is one thread: the
     # executor never fills, the beats go on, and the lane is dead for every portal.
-    alarms = _watchdog_off_the_terminal(monkeypatch)
+    backstops = _watchdog_off_the_terminal(monkeypatch)
     monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {"drain": 0.0})
     monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
     clock = [0.0]
@@ -2240,7 +2267,7 @@ def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog)
 
     with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
         rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
-                     alarm=alarms.append)
+                     arm_backstop=backstops.append)
     assert exits == [1]
     assert clock[0] == rw.PASS_LOCK_BOUND_SECONDS == 2 * rw.LANE_PASS_TIMEOUT_SECONDS
     assert any("pass lock of drain" in r.getMessage() for r in caplog.records)
@@ -2248,7 +2275,7 @@ def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog)
 
 def test_watchdog_stays_quiet_while_beats_finish(monkeypatch):
     # Beats every 240 s -- slower than the 30 s cadence, inside the bound.
-    alarms = _watchdog_off_the_terminal(monkeypatch)
+    backstops = _watchdog_off_the_terminal(monkeypatch)
     clock = [0.0]
     state = rw._new_state()
     state["beat_done_at"] = 0.0
@@ -2270,8 +2297,8 @@ def test_watchdog_stays_quiet_while_beats_finish(monkeypatch):
     exits: list[int] = []
     with pytest.raises(_Enough):
         rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
-                     alarm=alarms.append)
-    assert exits == [] and alarms == []
+                     arm_backstop=backstops.append)
+    assert exits == [] and backstops == []
 
 
 def test_a_beat_that_fails_still_finishes_and_connects_once_with_a_bound(monkeypatch):
@@ -2304,7 +2331,7 @@ def test_a_full_executor_stops_the_heartbeat_and_the_watchdog_exits(monkeypatch)
     # starve the beat, and a beat that never finishes is an exit, not a silent freeze.
     from concurrent.futures import ThreadPoolExecutor
 
-    alarms = _watchdog_off_the_terminal(monkeypatch)
+    backstops = _watchdog_off_the_terminal(monkeypatch)
     conn = _FakeConn()
     monkeypatch.setattr(rw.db, "connect", lambda **_: conn)
     monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
@@ -2334,7 +2361,7 @@ def test_a_full_executor_stops_the_heartbeat_and_the_watchdog_exits(monkeypatch)
         clock[0] += seconds
 
     rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
-                 alarm=alarms.append)
+                 arm_backstop=backstops.append)
     assert exits == [1]
 
 
