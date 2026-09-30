@@ -212,22 +212,16 @@ def test_the_registry_wins_the_house_number_and_the_psc_where_it_has_them():
     assert resolution.psc == "16000"
 
 
-def test_a_claimed_house_number_survives_when_the_registry_has_none():
+def test_a_claimed_house_number_the_registry_cannot_place_is_not_published():
+    """v5.5 (D7): a number is the REGISTER's or nothing. The claimed PSČ still falls back —
+    it is the one field that may."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_cp", value_text="487/40"),
+        mm.claim(2, "house_number_cp", value_text="487/40a"),
         mm.claim(3, "psc", value_text="160 00"),
     ])
-    assert resolution.house_number_cp == "487"
+    assert (resolution.house_number_cp, resolution.house_number_co) == (None, None)
     assert resolution.psc == "16000"
-
-
-def test_the_orientation_number_keeps_its_letter():
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_co", value_text="487/40a"),
-    ])
-    assert resolution.house_number_co == "40a"
 
 
 # ------------------------------------------- the position: a towned row always has one

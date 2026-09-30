@@ -131,9 +131,11 @@ CLAIM_TYPES = frozenset({
 # town" is rule 25's invariant and `location_town_coverage` is red until it holds, so a
 # contract that cannot state a town is not a contract this fleet can ship.
 MANDATORY_CLAIM_TYPE = "obec_name"
+# `street_segment` left with the resolver's unbound-number rung (v5.5); the DB enum label stays,
+# inert, because dropping a label is a type rebuild.
 GRANULARITIES = frozenset({
     "unknown", "country", "kraj", "okres", "obec", "cast_obce_or_quarter", "street",
-    "street_segment", "parcel", "building", "address_point",
+    "parcel", "building", "address_point",
 })
 POSITION_SOURCES = frozenset({
     "none", "admin_centroid", "derived_geocode", "carried_forward", "portal_pin_blurred",

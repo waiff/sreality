@@ -33,7 +33,6 @@ RADIUS_M: dict[str, float] = {
     "address_point": 10.0,          # 383: registry_point / address_point
     "building": 15.0,               # 383: registry_point / building
     "parcel": 25.0,                 # 383: registry_point / parcel
-    "street_segment": 100.0,        # 383: portal_pin / street_segment
     "street": 300.0,                # 383 + 491: street centroid
     "cast_obce_or_quarter": 750.0,  # 383: blur fallback, quarter-level
     "obec": 1_000.0,                # 383: blur fallback, obec-level

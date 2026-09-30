@@ -39,30 +39,17 @@ def _resolve(claims, mirror=None):
 # ---------------------------------------------------- regression 1: Krásný Les (maxima)
 
 
-def test_krasny_les_resolves_via_the_cadastral_name_and_the_okres_claim():
-    """maxima f60012522: the description states 'katastrální území Krásný Les u Frýdlantu,
-    obec Krásný Les, okres Liberec' while the stored row carried obec Petrovice / okres Ústí
-    nad Labem — the OTHER Krásný Les, ~100 km west. Five stored fields wrong at once."""
+def test_krasny_les_resolves_via_the_okres_claim():
+    """maxima f60012522: the description states 'obec Krásný Les, okres Liberec' while the
+    stored row carried obec Petrovice / okres Ústí nad Labem — the OTHER Krásný Les, ~100 km
+    west. Five stored fields wrong at once."""
     binding = _bind([
         mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
-        mm.claim(2, "cadastral_territory_name", value_text="Krásný Les u Frýdlantu",
-                 source="maxima", extraction_method="regex_text"),
         mm.claim(3, "okres_name", value_text="Liberec", source="maxima",
                  extraction_method="regex_text"),
     ])
     assert binding.admin_unit_id == 3  # Krásný Les, okres Liberec
     assert binding.ambiguous is False
-
-
-def test_krasny_les_with_the_qualifier_alone_stays_ambiguous():
-    """The qualifier lives on the cadastral name in the gazetteer, so the okres claim is the
-    decisive one; without it the pair stays AMBIGUOUS rather than silently picking."""
-    binding = _bind([
-        mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
-        mm.claim(2, "homonym_qualifier", value_text="u Frýdlantu", source="maxima",
-                 extraction_method="regex_text"),
-    ])
-    assert binding.ambiguous is True
 
 
 def test_an_ambiguous_bind_is_served_at_low_confidence_never_queued():
@@ -105,7 +92,7 @@ def test_a_fuzzy_street_match_can_never_become_an_obec_resolution():
     ])
     assert binding.rung in ("R2", "R3")
     assert binding.target_kind == "street"
-    assert binding.granularity in ("street", "street_segment")
+    assert binding.granularity == "street"
     assert binding.obec_kod == 599212
 
 
@@ -181,18 +168,16 @@ def test_the_pin_side_of_the_tie_wins_whichever_obec_it_lands_in():
     assert binding.admin_unit_id == 23
 
 
-def test_without_a_pin_the_post_town_name_breaks_the_tie_still_at_low_confidence():
-    claims = [
-        mm.claim(1, "psc", value_text="67401", source="bazos"),
-        mm.claim(2, "postal_town", value_text="674 01 Třebíč", source="bazos",
-                 extraction_method="legacy_column"),
-    ]
+def test_a_pin_inside_neither_obec_takes_the_nearest_never_the_lowest_id():
+    """v5.5 step 3: the pin REPLACES the lowest-`admin_unit_id` pick. 6 km west of Třebíč and
+    inside neither circle, it is still nearer Třebíč than Kožichovice (the lower code) — and a
+    nearest-town guess is served at `low`, never as a corroborated answer."""
+    claims = [mm.claim(1, "psc", value_text="67401", source="bazos"),
+              mm.claim(2, "coordinate", lat=49.2300, lon=15.8000, source="bazos")]
     binding = _bind(claims, mirror=_psc_mirror())
-    assert binding.admin_unit_id == 22
-    assert "postal_town" in binding.relaxations
-    resolution = _resolve(claims, _psc_mirror())
-    assert resolution.obec_kod == 590266
-    assert resolution.match_confidence == "low"
+    assert (binding.admin_unit_id, binding.ambiguous) == (22, False)
+    assert "coordinate_tiebreak_imprecise" in binding.relaxations
+    assert _resolve(claims, _psc_mirror()).match_confidence == "low"
 
 
 def test_a_shared_psc_with_nothing_to_break_the_tie_is_ambiguous_and_still_answered():
@@ -269,14 +254,13 @@ def test_a_named_town_corroborated_by_its_psc_still_grades_high():
 
 
 def test_a_quarter_is_not_ambiguous_against_the_town_that_contains_it():
-    """Reproduced: naming the obec by its RÚIAN CODE scored it 45 + 5, tying the quarter
-    below it at 45 + 5, and the zero gap graded the row `low`. Supplying stronger evidence
-    made the answer worse. One answer containing another is not two answers."""
-    quarter = mm.claim(2, "cast_obce_name", value_text="Vokovice")
-    by_name = _resolve([mm.claim(1, "obec_name", value_text="Praha"), quarter])
-    by_code = _resolve([mm.claim(1, "obec_code", value_text="554782"), quarter])
-    assert by_name.cast_obce_kod == by_code.cast_obce_kod == 490067
-    assert by_code.match_confidence == by_name.match_confidence == "high"
+    """Reproduced: a town qualified by one field scored 45 + 5, tying the quarter below it at
+    45 + 5, and the zero gap graded the row `low`. One answer containing another is not two
+    answers, so the margin compares like with like."""
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Praha"),
+                           mm.claim(2, "cast_obce_name", value_text="Vokovice")])
+    assert resolution.cast_obce_kod == 490067
+    assert resolution.match_confidence == "high"
 
 
 # ------------------------------------------------------- the region is the chain's last word
@@ -318,7 +302,7 @@ def test_a_town_still_outranks_the_region_that_contains_it():
 
 def test_the_parcel_rung_is_gone():
     """R5 was unreachable — no portal states a cadastral parcel in a form that joins — and it
-    was the only reader of `ruian_parcels`. A cadastral claim still QUALIFIES a homonym; it
-    just cannot bind an entity of its own."""
+    was the only reader of `ruian_parcels`. A KÚ is a LOOKUP LEVEL of the town rule (v5.5); it
+    binds no entity of its own."""
     assert "R5" not in step_bind._RUNG_BASE_SCORE
     assert not hasattr(mm.default_mirror(), "parcels")

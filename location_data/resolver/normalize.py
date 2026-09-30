@@ -64,6 +64,15 @@ _NUMERIC_LEADING = re.compile(r"^\s*\d{1,3}\.\s*\S")
 # čp / čo forms: '128', '128/40', '128/40a', 'ev. č. 12', 'č.ev. 12'
 _EVIDENCNI = re.compile(r"(?:ev\.?\s*č\.?|č\.?\s*ev\.?|evidenční\s*číslo)\s*(\d{1,6})", re.IGNORECASE)
 _HN = re.compile(r"(\d{1,6})(?:\s*/\s*(\d{1,5})\s*([a-zA-Z])?)?")
+# The number that ENDS a street claim, WITH the marker that types it: "Chata Moravské Prusy
+# č.ev. 13" is evidence number 13, and splitting the bare digits off read it as č.p. 13 (D7).
+_TRAILING_NUMBER = re.compile(
+    r"\s+((?:č\.?\s*p\.?|č\.?\s*ev\.?|ev\.?\s*č\.?)?\s*\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$",
+    re.IGNORECASE)
+# `ruian_address_points.typ_so`, the register's own two labels (measured 2026-09-30: 2,614,947
+# current `č.p.` points and 406,256 `č.ev.`, nothing else). The domovní číslo means nothing
+# without one of them.
+TYP_CP, TYP_EV = "č.p.", "č.ev."
 
 # bazos ships two PORTAL BUCKETS in the PSČ field; they are country signals, not postcodes
 # (03 §3.3.2, mining-bazos).
@@ -162,6 +171,14 @@ def normalize_house_number(raw: str) -> dict[str, object]:
     return slots
 
 
+def house_number(slots: dict[str, object]) -> tuple[int | None, str]:
+    """-> (the domovní číslo, its `typ_so`) off the typed slots: a č.p. first, else a č.ev."""
+    for slot, typ in (("cislo_domovni", TYP_CP), ("evidencni", TYP_EV)):
+        if str(slots.get(slot) or "").isdigit():
+            return int(str(slots[slot])), typ
+    return None, TYP_CP
+
+
 def split_street_and_number(raw: str) -> tuple[str, dict[str, object]]:
     """Split a street claim that carries its own number. A LEADING ordinal stays with the
     name — bazos's regex loses '28. října' exactly here."""
@@ -173,7 +190,7 @@ def split_street_and_number(raw: str) -> tuple[str, dict[str, object]]:
         prefix = head + sep
     else:
         prefix, rest = "", text
-    match = re.search(r"\s+(\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$", rest)
+    match = _TRAILING_NUMBER.search(rest)
     if not match:
         return (prefix + rest).strip(), {}
     return (prefix + rest[: match.start()]).strip(), normalize_house_number(match.group(1))
@@ -225,25 +242,11 @@ def normalize_claim(
         if rejection:
             rejections.append(rejection)
         ascii_key = psc or ""
-    elif claim.claim_type in ("house_number_cp", "house_number_co", "evidencni", "house_unit"):
+    elif claim.claim_type in ("house_number_cp", "house_number_co"):
         slots.update(normalize_house_number(verbatim))
         if not slots:
             rejections.append("house_number_unparsed")
-    elif claim.claim_type in (
-        "obec_name",
-        "cast_obce_name",
-        "quarter_name",
-        "mestsky_obvod_name",
-        "okres_name",
-        "orp_name",
-        "kraj_name",
-        "cadastral_territory_name",
-        "postal_town",
-        "homonym_qualifier",
-        "landmark",
-        "development_name",
-        "country",
-    ):
+    elif claim.claim_type in ("obec_name", "cast_obce_name", "okres_name", "kraj_name", "country"):
         cleaned = split_glue(verbatim.strip())
         ascii_key = normalize_match_key(cleaned)
         cf = case_fold(cleaned)

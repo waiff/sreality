@@ -27,7 +27,9 @@ from typing import Any, Protocol
 
 # Mirrors migration 380's location_granularity_rank seed. The TABLE survives (it is read by
 # `toolkit/dedup_candidates_sql.py`), but the resolver no longer spends a round trip loading
-# a mapping that is fixed by the enum's own declaration order.
+# a mapping that is fixed by the enum's own declaration order. `street_segment` (70) is gone
+# from the resolver's vocabulary with the unbound-number rung that was its only producer (v5.5,
+# D7); the DB enum label and its rank row stay, inert, because dropping one is a type rebuild.
 DEFAULT_GRANULARITY_RANK: dict[str, int] = {
     "unknown": 0,
     "country": 10,
@@ -36,7 +38,6 @@ DEFAULT_GRANULARITY_RANK: dict[str, int] = {
     "obec": 40,
     "cast_obce_or_quarter": 50,
     "street": 60,
-    "street_segment": 70,
     "parcel": 80,
     "building": 90,
     "address_point": 100,
@@ -183,6 +184,8 @@ class AddressPoint:
     cast_obce_kod: int | None = None
     # The KÚ whose `pip` piece covers this point at the view's registry version (PR-B).
     katastr_kod: int | None = None
+    # `č.p.` or `č.ev.` — what `cislo_domovni` IS (D7). Only a č.p. is published as one.
+    typ_so: str = "č.p."
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +221,9 @@ class StreetPoint:
     # The one KÚ holding EVERY door of the street, else None — the door rule (Q7, PR-B), off
     # the same point set as the centroid.
     katastr_kod: int | None = None
+    # The distinct část obce units of those doors (Q3, v5.5); a NULL part is kept as None, so
+    # "one part" is never read off an incomplete set.
+    part_unit_ids: tuple[int | None, ...] = ()
 
 
 class RegistryView(Protocol):
@@ -232,7 +238,11 @@ class RegistryView(Protocol):
         street_name_norm: str | None,
         cislo_domovni: int | None,
         cislo_orientacni: int | None,
-    ) -> Sequence[AddressPoint]: ...
+        typ_so: str = "č.p.",
+        cast_obce_unit_id: int | None = None,
+    ) -> Sequence[AddressPoint]:
+        """`cislo_domovni` matches only a point of its `typ_so`. `cast_obce_unit_id` scopes a
+        STREETLESS lookup to one část obce, where the number is unique by law."""
 
     def streets_in_obec(self, obec_kod: int) -> Sequence[Street]: ...
 
@@ -318,12 +328,6 @@ class Binding:
     street_extent_m: float | None = None
     # The same read's door rule: the one KÚ holding every door of the bound street (PR-B).
     street_katastr_kod: int | None = None
-    # A house number that belongs to THIS bind and to no other claim on the listing (W18).
-    # A street bound out of one line's segment carries that segment's number; nothing else on
-    # the row may lend it one, which is the defect this field exists to make impossible —
-    # `Nad Bořislavkou` + a different line's "Livornská 5" published "Nad Bořislavkou 5".
-    house_number_cp: str | None = None
-    house_number_co: str | None = None
     agreed: tuple[str, ...] = ()
     relaxations: tuple[str, ...] = ()
     ambiguous: bool = False

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from location_data.resolver.geo import haversine_m
+from location_data.resolver.resolve_db import _path_code
 from location_data.resolver.types import (
     AddressPoint,
     AdminUnit,
@@ -57,14 +58,16 @@ class MiniMirror:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
+        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
     ) -> list[AddressPoint]:
         return [
             p
             for p in self.points
             if p.obec_kod == obec_kod
             and (street_name_norm is None or p.street_name_norm == street_name_norm)
-            and (cislo_domovni is None or p.cislo_domovni == cislo_domovni)
+            and (cislo_domovni is None or (p.cislo_domovni, p.typ_so) == (cislo_domovni, typ_so))
             and (cislo_orientacni is None or p.cislo_orientacni == cislo_orientacni)
+            and (cast_obce_unit_id is None or p.cast_obce_unit_id == cast_obce_unit_id)
         ]
 
     def streets_in_obec(self, obec_kod: int) -> list[Street]:
@@ -83,7 +86,9 @@ class MiniMirror:
         lon = sum(p.lon for p in points) / len(points)
         extent = max(haversine_m(lat, lon, p.lat, p.lon) for p in points)
         return StreetPoint(lat=lat, lon=lon, extent_m=extent, point_count=len(points),
-                           katastr_kod=_doors_katastr(points))
+                           katastr_kod=_doors_katastr(points),
+                           part_unit_ids=tuple(sorted({p.cast_obce_unit_id for p in points},
+                                                      key=lambda u: (u is None, u or 0))))
 
     def part_katastr_kod(self, unit_id: int) -> int | None:
         return _doors_katastr([
@@ -172,10 +177,14 @@ def _doors_katastr(doors: Sequence[AddressPoint]) -> int | None:
 
 def _unit(unit_id, level, code, name, name_norm, path, parent=None, lat=None, lon=None,
           psc_set=(), qualifier=None, homonym_count=1) -> AdminUnit:
+    """The okres/kraj/obec codes come off the ltree path, exactly as `resolve_db._admin_unit`
+    derives them — a fixture that left them empty tested a registry we do not have."""
     return AdminUnit(
         unit_id=unit_id, level=level, code=code, name=name, name_norm=name_norm, path=path,
         parent_id=parent, lat=lat, lon=lon, psc_set=tuple(psc_set),
         qualifier=qualifier, homonym_count=homonym_count,
+        okres_kod=_path_code(path, "o"), kraj_kod=_path_code(path, "k"),
+        obec_kod=_path_code(path, "b"),
     )
 
 

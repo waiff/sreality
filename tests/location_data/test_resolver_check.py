@@ -166,10 +166,14 @@ def test_a_pin_outside_the_resolved_obec_keeps_the_pin_and_drops_to_the_admin_le
     NO street here, deliberately. W18 gave a bound street a point of its own, and a row that
     has one no longer has "the pin because it is the only position there is" — it takes the
     register's point and disputes `pin_off_street` instead (the test below). This rail is
-    about the rows that still have nothing else."""
+    about the rows that still have nothing else.
+
+    The PSČ is what keeps Praha here (v5.5): with nothing vouching for it, the town rule
+    refuses a name 280 km from its pin (`test_resolver_bind`)."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "coordinate", lat=49.7573, lon=18.0158),
+        mm.claim(3, "psc", value_text="160 00"),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.obec_kod == 554782
@@ -215,6 +219,7 @@ def test_a_blurred_pin_outside_the_town_is_still_flagged_once_the_street_places_
         mm.claim(4, "precision_declaration", source="bazos",
                  value_text="approximate_location",
                  declared_precision_label="approximate_location", blur_evidence="declared"),
+        mm.claim(5, "psc", source="bazos", value_text="160 00"),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.granularity == "street"
@@ -232,6 +237,7 @@ def test_an_exact_pin_outside_the_town_outranks_the_off_street_reason():
         mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
         mm.claim(3, "coordinate", lat=49.7573, lon=18.0158,
                  declared_precision_label="gps"),
+        mm.claim(4, "psc", value_text="160 00"),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.granularity == "street"
@@ -272,6 +278,7 @@ def test_the_containment_test_asks_about_the_pin_and_never_about_the_published_p
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40"),
         mm.claim(3, "coordinate", lat=49.7573, lon=18.0158),
+        mm.claim(4, "psc", value_text="160 00"),
     ])
     assert resolution.ruian_adm_kod == 21690278
     assert (resolution.lat, resolution.lon) == (50.101, 14.348)

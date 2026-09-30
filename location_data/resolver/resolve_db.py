@@ -226,7 +226,7 @@ _ADDRESS_POINT_COLUMNS = """
        ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
        ST_Y(ap.geom), ST_X(ap.geom), ap.ulice_kod, s.name_norm, s.name,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
-       ap.cast_obce_unit_id, ap.cast_obce_kod, ku.code"""
+       ap.cast_obce_unit_id, ap.cast_obce_kod, ku.code, ap.typ_so"""
 
 # Every address-point read answers its KÚ in the SAME round trip — the drain's cost is round
 # trips, and FILL reads the bound point anyway. Binds the registry version FIRST.
@@ -261,8 +261,9 @@ SELECT {_ADDRESS_POINT_COLUMNS}{_ADDRESS_POINT_FROM}
  WHERE ap.obec_unit_id IN {_OBEC_UNIT_ID_SUBQUERY.strip()}
    AND ap.valid_to IS NULL
    AND (%s::text IS NULL OR s.name_norm = %s::text)
-   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer)
+   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer AND ap.typ_so = %s::text)
    AND (%s::integer IS NULL OR ap.cislo_orientacni = %s::integer)
+   AND (%s::bigint IS NULL OR ap.cast_obce_unit_id = %s::bigint)
  ORDER BY ap.kod_adm
  LIMIT 50
 """
@@ -294,10 +295,11 @@ SELECT s.code, s.name, s.name_norm, u.code, s.id
 # listing that binds a street. `::geography` on the distance because the answer is METRES;
 # the centroid stays geometry (4326 degrees), which is what `ST_Y`/`ST_X` want.
 #
-# The same door set answers the street's KÚ (PR-B, the door rule) in the same round trip.
+# The same door set answers the street's KÚ (PR-B, the door rule) and its část obce units
+# (Q3, v5.5) in the same round trip.
 _STREET_POINT_SQL = f"""
 WITH p AS (
-    SELECT ap.kod_adm, ap.geom
+    SELECT ap.kod_adm, ap.geom, ap.cast_obce_unit_id
       FROM ruian_address_points ap
      WHERE ap.street_id = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 ), c AS (
@@ -306,7 +308,8 @@ WITH p AS (
 SELECT ST_Y(c.g), ST_X(c.g),
        MAX(ST_Distance(c.g::geography, p.geom::geography)),
        count(*),
-       ({_doors_katastr("p")})
+       ({_doors_katastr("p")}),
+       array_agg(DISTINCT p.cast_obce_unit_id)
   FROM p, c
  GROUP BY 1, 2
 """
@@ -642,6 +645,7 @@ def _address_point(row: Sequence[Any]) -> AddressPoint:
         ulice_kod=row[6], street_name_norm=row[7], street_name=row[8],
         cislo_domovni=row[9], cislo_orientacni=row[10], znak_orientacniho=row[11],
         cast_obce_unit_id=row[12], cast_obce_kod=row[13], katastr_kod=row[14],
+        typ_so=str(row[15]),
     )
 
 
@@ -701,12 +705,14 @@ class SqlRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
+        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
     ) -> list[AddressPoint]:
         rows = self._rows(
             "address_points_by_number",
             _ADDRESS_POINTS_BY_NUMBER_SQL,
             (self._version, obec_kod, street_name_norm, street_name_norm, cislo_domovni,
-             cislo_domovni, cislo_orientacni, cislo_orientacni),
+             cislo_domovni, typ_so, cislo_orientacni, cislo_orientacni,
+             cast_obce_unit_id, cast_obce_unit_id),
         )
         return [_address_point(r) for r in rows]
 
@@ -732,7 +738,7 @@ class SqlRegistryView:
         return StreetPoint(
             lat=float(rows[0][0]), lon=float(rows[0][1]),
             extent_m=float(rows[0][2] or 0.0), point_count=int(rows[0][3] or 0),
-            katastr_kod=rows[0][4],
+            katastr_kod=rows[0][4], part_unit_ids=tuple(rows[0][5] or ()),
         )
 
     def part_katastr_kod(self, unit_id: int) -> int | None:
@@ -928,15 +934,17 @@ class CachedRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
+        typ_so: str = "č.p.", cast_obce_unit_id: int | None = None,
     ) -> Sequence[AddressPoint]:
         key = ("address_points_by_number", obec_kod, street_name_norm, cislo_domovni,
-               cislo_orientacni)
+               cislo_orientacni, typ_so, cast_obce_unit_id)
         return self._cache.get(
             key,
             lambda: tuple(
                 self._inner.address_points_by_number(
                     obec_kod=obec_kod, street_name_norm=street_name_norm,
                     cislo_domovni=cislo_domovni, cislo_orientacni=cislo_orientacni,
+                    typ_so=typ_so, cast_obce_unit_id=cast_obce_unit_id,
                 )
             ),
         )
