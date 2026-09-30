@@ -60,13 +60,23 @@ double count enshrined by a test, and two disagreeing CZ-count books (19/100 top
   nothing. Dropped `dirty_broker_listings.sreality_id` (pre-approved; 576-row
   ephemeral-queue snapshot taken before apply). Leaderboard freshness: ~24 h → ≤1 h.
 
+- **W4 — one count book** (migration 580): matview rebuilt with exact GROUPING SETS
+  cells — (m,t)/(m,'*')/('*',t)/('*','*') per geo — plus a national `cz` level, so
+  every fast-path shape reads a precomputed exact cell and nothing ever sums
+  count(DISTINCT) across overlapping cells. The leaderboard's four summing arms
+  collapse to ONE exact-cell arm; nested chips count once in SQL (admin_boundaries
+  parent suppression — operator ruling); `brokers_public` serves cz_* from the
+  ('cz',0,'*','*') cell and the 4 `brokers.cz_*` columns are dropped (one book);
+  region_shares/outreach read cells (outreach stops mislabeling listing counts as
+  property counts); `broker_identities.agency_name` captures idnes's firm label at
+  attribution, ending the daily raw_json TOAST pass (mean 200 s); the domestic
+  predicate exists in exactly one place (the matview); leaderboard envelopes carry
+  the registry stamp as data_freshness. Measured before merge: default top-100
+  shifts for 2 brokers (±4 properties), "Vše" top-100 for 35 (≤4 each) — the fixes
+  are semantic (nested chips, one book), not a re-ranking earthquake. The `==17`
+  double-count test retired for a count-once pin + a disjoint-additivity pin.
+
 ## Next
-- **W4 — one count book**: matview rebuilt with exact grouping-set cells incl. national
-  `cz` level, nested chips count once (operator-confirmed), `brokers_public` reads the
-  cz cell, region_shares/outreach read cells directly, firm display names captured at
-  attribution (ends the daily idnes raw_json TOAST pass), retire the `==17`
-  double-count test. Destructive (pre-approved, dump first): DROP+CREATE of the
-  matview; drop the 4 `brokers.cz_*` columns.
 
 **Cut, deliberately.** W5 (one lease primitive across property/notification/broker):
 unsafe cross-host cutover while a sweep is mid-run, off the north star; the lock-loss

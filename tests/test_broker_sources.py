@@ -77,11 +77,17 @@ _POST_REGISTRY_FAMILIES: dict[str, tuple[str, ...]] = {
 }
 _ALL_FAMILIES = {**_FAMILIES, **_POST_REGISTRY_FAMILIES}
 
-# Which of the three documented deviations explains each non-identical statement.
+# Which of the documented deviations explains each non-identical statement.
 _DELTA_INLINED_CTE = {("sreality", "email"), ("sreality", "phone")}
 _DELTA_NULL_COLUMNS = {("idnes", "identity"), ("ceskereality", "identity"),
                        ("realitymix", "identity"), ("remax", "identity")}
 _DELTA_NORMALISE_IN_CTE = {("ceskereality", "phone")}
+# Deviation 4 (Broker Unify W4): every identity statement carries the
+# agency_name capture — a real extraction on idnes, NULL::text elsewhere. It
+# OVERLAPS deviation 2 on the four portals whose identity was already a
+# null-columns delta; sreality's identity leaves the byte-identical set here.
+_DELTA_AGENCY_CAPTURE = {(s, "identity") for s in
+                         ("sreality", "idnes", "ceskereality", "realitymix", "remax")}
 
 _BY_SOURCE = {c.source: c for c in BROKER_SOURCES}
 _KEYS = [(src, kind) for src, kinds in _FAMILIES.items() for kind in kinds]
@@ -133,16 +139,16 @@ def test_the_generated_statements_are_exactly_the_pre_registry_families() -> Non
 
 
 def test_the_set_of_statements_that_deviate_is_frozen() -> None:
-    """Nine statements are byte-identical to the pre-registry SQL and must stay
-    that way; the other seven are each claimed by exactly one documented
-    deviation. A statement silently leaving or joining the identical set is the
-    refactor breaking its own equivalence argument."""
+    """Eight statements are byte-identical to the pre-registry SQL and must stay
+    that way; the other eight are each claimed by at least one documented
+    deviation (deviation 4 — W4's agency capture — deliberately overlaps
+    deviation 2 on four identities). A statement silently leaving or joining
+    the identical set is the refactor breaking its own equivalence argument."""
     deviating = {k for k in _KEYS if _norm(PRE_REGISTRY_SQL[k].format(sel=SEL)) != _one(*k)}
-    assert len(_KEYS) - len(deviating) == 9
+    assert len(_KEYS) - len(deviating) == 8
     assert deviating == set(REGISTRY_DELTAS)
-    assert deviating == _DELTA_INLINED_CTE | _DELTA_NULL_COLUMNS | _DELTA_NORMALISE_IN_CTE
-    assert len(_DELTA_INLINED_CTE) + len(_DELTA_NULL_COLUMNS) \
-        + len(_DELTA_NORMALISE_IN_CTE) == len(deviating)
+    assert deviating == (_DELTA_INLINED_CTE | _DELTA_NULL_COLUMNS
+                         | _DELTA_NORMALISE_IN_CTE | _DELTA_AGENCY_CAPTURE)
 
 
 @pytest.mark.parametrize(("source", "kind"), sorted(_DELTA_NULL_COLUMNS))
@@ -160,7 +166,7 @@ def test_null_column_deltas_only_add_columns(source: str, kind: str) -> None:
             added.append(" ".join(after[j1:j2]))
     assert added
     for run in added:
-        assert any(col in run for col in ("email", "rating", "reviews", "review_count")), run
+        assert any(col in run for col in ("email", "rating", "reviews", "review_count", "agency")), run
 
 
 @pytest.mark.parametrize("kind", ["email", "phone"])
