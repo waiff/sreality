@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from scraper.db import (  # noqa: F401 (re-export connect)
     connect,
     database_url,
-    stamp_derived_artifact,
+    refresh_matview,
 )
 from scraper.price_stats_metrics import compute_city_metrics
 
@@ -463,14 +463,6 @@ def recompute_metrics(
 
 
 def refresh_choropleth(conn: psycopg.Connection) -> None:
-    """Refresh the map matview (CONCURRENTLY needs the unique index, present)."""
-    with conn.cursor() as cur:
-        try:
-            cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY price_stat_choropleth")
-        except psycopg.errors.ObjectNotInPrerequisiteState:
-            # CONCURRENTLY requires a prior non-concurrent populate.
-            cur.execute("REFRESH MATERIALIZED VIEW price_stat_choropleth")
-    # Reached only when one of the two paths above returned without raising, which is the
-    # only definition of "this artifact was produced" available: the non-concurrent branch
-    # swaps the heap, so pg_stat_user_tables reads zero and pg_stat_file is denied here.
-    stamp_derived_artifact(conn, "price_stat_choropleth")
+    """Publish the map matview through the ONE chokepoint (migration 578):
+    CONCURRENTLY with a first-populate fallback, stamped in-DB."""
+    refresh_matview(conn, "price_stat_choropleth")

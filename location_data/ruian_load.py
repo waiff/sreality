@@ -58,6 +58,7 @@ from location_data import (
     ruian_boundaries,
     ruian_csv,
 )
+from scraper import db
 from location_data.load_assertions import Assertion, PriorLoad, StagingStats
 
 LOG = logging.getLogger("location_data.ruian_load")
@@ -1041,11 +1042,11 @@ def publish(conn: psycopg.Connection, version_id: int) -> None:
 def refresh_rent_map_cells(conn: psycopg.Connection) -> None:
     """MF's rent cells (`mf_reference`'s only input) group KÚ under their obec through the
     mirror's `valid_to IS NULL` units, which step 6 rewrites; rebuilt once the version they
-    belong to is live — CONCURRENTLY, so readers never block. Not stamped: the rent-map
-    ingest is the registered producer and stamps it monthly. Not guarded: this lands after
-    the migration that creates the matview is applied."""
-    with conn.cursor() as cur:
-        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY rent_map_cells")
+    belong to is live — through the ONE chokepoint (migration 578), so readers never block
+    and this rebuild is stamped too (the rent-map ingest stays the registered producer; a
+    second producer recording a real rebuild is honest freshness, not a conflict). Not
+    guarded: this lands after the migration that creates the matview is applied."""
+    db.refresh_matview(conn, "rent_map_cells")
 
 
 # ---------- dry run ----------

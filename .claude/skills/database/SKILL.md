@@ -354,20 +354,34 @@ inside its own transaction.**
 **Every producer stamps through the ONE helper, `public.stamp_derived_artifact(name, rows,
 duration_ms)`** (migration 441) — SECURITY DEFINER, `set search_path = public`, EXECUTE
 revoked from `public` *and* `anon`/`authenticated` (PostgreSQL's built-in default grants
-EXECUTE to PUBLIC, so revoking only the named roles leaves it callable). Python producers
-call `scraper.db.stamp_derived_artifact(conn, name)`; SQL producers `perform` it. **Its
-UPDATE is deliberately a silent no-op on an unregistered name** — a producer must never fail
-because a metadata row is missing — so a typo'd name stamps nothing forever and reads on the
-Health panel exactly like a dead artifact; that hole is closed offline by
-`tests/test_derived_artifacts_stamping.py`, which extracts every name literal from both the
-repo tree and `pg_proc.prosrc`, checks every `producer` resolves to a real function or file,
-and pins the health fan-out to **six individual stamps, each right after its own REFRESH**
-(that buys six real per-matview `last_duration_ms` values, since `clock_timestamp()` advances
-inside a transaction). Two artifacts have **no other freshness signal in existence** —
-`price_stat_choropleth` and `rent_map_choropleth` are refreshed non-concurrently, which swaps
-the heap so `pg_stat_user_tables` reads zero, and `pg_stat_file` is denied on this instance.
+EXECUTE to PUBLIC, so revoking only the named roles leaves it callable). **Its UPDATE is
+deliberately a silent no-op on an unregistered name** — a producer must never fail because a
+metadata row is missing — a hole closed offline by `tests/test_derived_artifacts_stamping.py`,
+which extracts every name literal from both the repo tree and `pg_proc.prosrc`, checks every
+`producer` resolves to a real function or file, and pins the health fan-out to **six
+individual stamps, each right after its own REFRESH** (six real per-matview
+`last_duration_ms` values, since `clock_timestamp()` advances inside a transaction).
 `llm_cost_hour_rollup` keeps its own inline UPDATE because it must pass its own watermark as
 `complete_through`; don't unify it onto the helper without a fourth parameter.
+
+**Matview publication has ONE idiom: `select public.refresh_matview(name)`** (migration 578,
+the Broker Unify sprint's answer to the 2026-09-30 outage — a plain ACCESS EXCLUSIVE REFRESH
+of `broker_region_type_stats` blocked every reader for 352 s in working hours). Python
+producers call `scraper.db.refresh_matview(conn, name)` and never run
+`refresh materialized view` themselves (`tests/test_matview_refresh_convention.py` fails CI
+on a bypass, and on a plain refresh in any migration after 578). The chokepoint RAISEs on a
+name with no `derived_artifacts` row (so for matviews the silent-no-op stamp hole is closed
+at runtime too), refreshes CONCURRENTLY — plain form only on an unpopulated first populate —
+skips with -1 when a refresh of the same matview is already in flight
+(`pg_try_advisory_xact_lock`: transaction-scoped, so pooler-safe), and stamps rows +
+duration in the refresh's own transaction. **CONCURRENTLY is valid inside a transaction**
+(the restriction people misremember is `CREATE INDEX CONCURRENTLY`'s); two producer comments
+claimed otherwise and drove the blocking design — never re-derive that claim from a comment.
+Every matview therefore needs one plain unique index (`tests/test_matview_indexes.py` pins
+this for all matviews, plus the exact broker index set — migration 508's DROP+CREATE
+silently lost 414's covering index and no test noticed). Pre-578 SQL producers
+(`refresh_health_matviews`, `refresh_location_pin_audit_mv`, the blue-green rebuilds) keep
+their pinned inline shapes; new SQL producers call the chokepoint.
 
 **A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a
 column predicate.** Three cases, don't conflate them:
