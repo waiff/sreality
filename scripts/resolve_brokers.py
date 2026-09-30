@@ -1139,18 +1139,24 @@ def _max_id(conn: Any, table: str) -> int:
 
 
 def _refresh_matview(conn: Any) -> None:
-    # Non-concurrent REFRESH inside a txn so SET LOCAL can lift the statement
-    # timeout — the matview aggregates the whole linked-listings corpus and
-    # CONCURRENTLY cannot run in a txn (so it can't get the raised timeout). A
-    # brief lock on a matview only the Brokers page reads, once per daily sweep,
-    # is the right tradeoff for reliability.
+    # CONCURRENTLY: readers keep the old rows while the new build happens beside
+    # them. The plain form's ACCESS EXCLUSIVE held every reader out for the whole
+    # rebuild (352 s on 2026-09-30, in working hours since the GH cron drift) —
+    # and it isn't only the Brokers page: broker detail region_shares,
+    # broker_geo_options and outreach read this matview too. Unlike CREATE INDEX,
+    # REFRESH ... CONCURRENTLY is valid inside a transaction, so the SET LOCAL
+    # timeout lift and the stamp still share the refresh's txn (the stamp commits
+    # iff the refresh did).
+    t0 = time.monotonic()
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
-        # Joins the refresh's own transaction, so the stamp commits if and only if the
-        # refresh did — this matview is otherwise unobservable (a non-concurrent REFRESH
-        # swaps the heap, zeroing pg_stat_user_tables).
-        db.stamp_derived_artifact(conn, "broker_region_type_stats")
+        cur.execute(
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY broker_region_type_stats")
+        cur.execute("SELECT count(*) FROM broker_region_type_stats")
+        rows = int(cur.fetchone()[0])
+        db.stamp_derived_artifact(
+            conn, "broker_region_type_stats", rows=rows,
+            duration_ms=int((time.monotonic() - t0) * 1000))
 
 
 _CANDIDATE_BROKERS = """
@@ -1721,7 +1727,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto_merge: bool
 
     step(_firm_rollup, "resolve.firm_rollup", attempts=2)
     LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
-    step(_refresh_matview, "resolve.matview", attempts=2)
+    step(_refresh_matview, "resolve.matview", attempts=1)
     candidates = step(_generate_merge_candidates, "resolve.candidates", attempts=2)
     LOG.info("RESOLVE full merge candidates proposed=%d elapsed=%.1fs",
              candidates, time.monotonic() - t0)

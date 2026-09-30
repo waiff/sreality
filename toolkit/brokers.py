@@ -162,9 +162,9 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
     property value (min_price_czk, migration 448) + property subtypes
     (subtypes, migration 469).
 
-    Thin wrapper over the broker_leaderboard RPC (the same one Browse calls), so the
-    agent and Browse never disagree on the ranking. Empty id arrays = national /
-    every company.
+    Thin wrapper over the broker_leaderboard RPC, so every caller (this page and
+    api/outreach.select_targets) ranks brokers identically. Empty id arrays =
+    national / every company.
 
     `min_price_czk` reads `listings.price_czk` directly — same column, same ">="
     semantics as Browse's own min_price_czk filter (toolkit.comparables), unit-for-unit
