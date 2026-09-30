@@ -2188,7 +2188,8 @@ def verdict(
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
 
     A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
-    rental, a flat and a commercial unit) is a 409 in the operator's words (E925).
+    rental, a flat and a commercial unit) is a 422 in the operator's words (E925), never a 409:
+    the rulings page reads every 409 as "ruled again since the page loaded".
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2224,8 +2225,11 @@ def verdict(
                 if not sides:
                     raise HTTPException(
                         status_code=404, detail="one of the two adverts does not exist")
-                if body.verdict == "same":
-                    _refuse_two_properties(sides[0])
+                if body.verdict == "same" and (
+                        clash := category_clash(sides[0][:2], sides[0][2:])) is not None:
+                    raise HTTPException(status_code=422, detail=_SAME_REFUSED[clash[0]].format(
+                        a=_CATEGORY_LABELS.get(clash[1], clash[1]),
+                        b=_CATEGORY_LABELS.get(clash[2], clash[2])))
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2311,29 +2315,21 @@ def verdict(
     }
 
 
-# The pair page prints a refusal's detail as it is, so it is written for the operator, in the
-# Browse filters' own Czech labels.
+# E925: a `same` the merge chokepoint's category gate refuses; stored, it would be a must-link
+# the lane dissolves and re-seeds every pass, and a positive label. The pair page and the rulings
+# page print the detail as it is: the system's rule, not a claim about the property (an auction
+# and a sale of one flat ARE one flat), in the Browse filters' own Czech labels.
 _SAME_REFUSED: dict[str, str] = {
-    "category_type": "Inzerát typu {a} a inzerát typu {b} nikdy nejsou jedna nemovitost, "
-                     "proto je nelze označit jako stejné.",
-    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} nemohou být jedna "
-                     "nemovitost (jediná výjimka je dům a komerční objekt), proto je nelze "
-                     "označit jako stejné.",
+    "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
+                     "nemovitosti, proto je nelze označit jako stejné.",
+    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
+                     "do jedné nemovitosti (jediná výjimka je dům a komerční objekt), proto je "
+                     "nelze označit jako stejné.",
 }
 _CATEGORY_LABELS: dict[str, str] = {
     option.value: option.label_cs
     for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)
 }
-
-
-def _refuse_two_properties(sides: tuple[Any, ...]) -> None:
-    """E925: a `same` the merge chokepoint's category gate would refuse is a 409. Stored, it
-    would be a must-link the lane dissolves and re-seeds every pass, and a positive label."""
-    clash = category_clash((sides[0], sides[1]), (sides[2], sides[3]))
-    if clash is not None:
-        field, a, b = clash
-        raise HTTPException(status_code=409, detail=_SAME_REFUSED[field].format(
-            a=_CATEGORY_LABELS.get(a, a), b=_CATEGORY_LABELS.get(b, b)))
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:

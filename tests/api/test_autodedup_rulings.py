@@ -483,14 +483,16 @@ _NOTHING_WRITTEN = (usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQ
     (("prodej", "byt", "prodej", "komercni"), ("v kategorii Byty", "v kategorii Komerční")),
     (("prodej", "komercni", "prodej", "byt"), ("v kategorii Komerční", "v kategorii Byty")),
 ], ids=["rent vs sale", "flat vs commercial", "commercial vs flat"])
-def test_a_same_between_two_properties_is_a_409_in_czech_and_writes_nothing(
+def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
         client, conn, sides, named):
+    """422, never 409: the rulings page reads every 409 as "ruled again since the page loaded"
+    and swaps the detail for that text."""
     conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]
     response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
-    assert response.status_code == 409
+    assert response.status_code == 422
     detail = response.json()["detail"]
     assert all(part in detail for part in named)
-    assert "nelze označit jako stejné" in detail
+    assert "systém nikdy nespojí" in detail and "nelze označit jako stejné" in detail
     assert not any(conn.ran(sql) for sql in _NOTHING_WRITTEN)
 
 
@@ -524,7 +526,7 @@ def test_a_correction_to_same_between_two_properties_is_refused_too(client, conn
     conn.canned[usql.PAIR_NEWEST_RULING_SQL] = [_verdict(id=7, verdict="different")]
     conn.canned[usql.PAIR_CATEGORIES_SQL] = [("pronajem", "byt", "prodej", "byt")]
     response = _post(client, kind="pair", verdict="same", supersedes=7)
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert "Pronájem" in response.json()["detail"]
     assert conn.params(usql.PAIR_CATEGORIES_SQL) == {"listing_lo": 11, "listing_hi": 12}
     assert conn.tx_calls == [usql.VERDICT_ONE_SQL, usql.PAIR_NEWEST_RULING_SQL,
