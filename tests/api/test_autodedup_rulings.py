@@ -47,6 +47,10 @@ def _verdict(**over: Any) -> tuple[Any, ...]:
     return _tuple(usql.VERDICT_COLUMNS, **values)
 
 
+# `PAIR_CATEGORIES_SQL`'s row: (category_type, category_main) of listing_lo, then listing_hi.
+_FLATS_FOR_SALE = ("prodej", "byt", "prodej", "byt")
+
+
 def _pair_ruling(**over: Any) -> tuple[Any, ...]:
     values: dict[str, Any] = {
         "ruling_id": 7, "ruling_kind": "pair", "listing_lo": 11, "listing_hi": 12,
@@ -137,7 +141,8 @@ class _Conn:
             usql.RULINGS_PAIR_FACETS_SQL: [], usql.RULINGS_GROUP_FACETS_SQL: [],
             usql.RULING_TOWNS_SQL: [], usql.PAIR_VERDICTS_SQL: [],
             usql.GROUP_RULING_HISTORY_SQL: [], usql.RULINGS_PAIR_SQL: [],
-            usql.RULINGS_GROUP_SQL: [],
+            usql.RULINGS_GROUP_SQL: [], usql.DISSOLVED_CLOSURES_SQL: [],
+            usql.PAIR_CATEGORIES_SQL: [_FLATS_FOR_SALE],
         }
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.tx_calls: list[str] = []
@@ -262,7 +267,7 @@ def test_a_pair_row_carries_the_engine_view_and_its_own_history(client, conn):
     data = client.get("/autodedup/rulings").json()["data"]
     first, implied = data["items"]
     assert first["certificate"] is None
-    assert first["why_not_merged"] == "auto-rejected on attr_contradictions"
+    assert first["why_not_merged"] == "automaticky zamítnuto: attr_contradictions"
     assert [v["id"] for v in first["history"]] == [9, 7]
     assert implied["zone"] is None and implied["why_not_merged"] is None
     # An implied pair's history is its GROUP's, in the pass the group was ruled on.
@@ -275,6 +280,71 @@ def test_a_pair_row_carries_the_engine_view_and_its_own_history(client, conn):
     assert data["towns"] == [{"grain": "o", "code": 563510, "name": "Jablonec nad Nisou",
                               "n": 12}]
     assert data["next_after"] is None
+
+
+def test_a_same_the_engine_dissolved_says_why_it_is_not_honoured(client, conn):
+    """E926: the operator's `same` rulings form a closure the invariants refused (here a sale
+    ruled one flat with a rental), so the lane holds the adverts apart. The page names that,
+    not the stored pair's zone; a ruling whose closure was honoured, or that is not standing,
+    reads the record of nothing."""
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    conn.canned[usql.RULINGS_PAIR_SQL] = [
+        _pair_ruling(zone=None, decision=None),
+        _pair_ruling(ruling_id=8, listing_lo=13, listing_hi=14, zone="merge",
+                     decision="model"),
+        _pair_ruling(ruling_id=9, listing_lo=11, listing_hi=15, status="withdrawn",
+                     verdict="unsure"),
+    ]
+    conn.canned[usql.DISSOLVED_CLOSURES_SQL] = [
+        _tuple(usql.CONFLICT_COLUMNS, id=3, kind="invariant", listing_lo=11, listing_hi=12,
+               invariant="category_type", created_at=AT,
+               detail={"generation": LIVE, "members": [11, 12],
+                       "must_link": [[11, 12]]}),
+    ]
+    first, other, withdrawn = client.get("/autodedup/rulings").json()["data"]["items"]
+    assert first["why_not_merged"] == (
+        "vaše rozhodnutí „stejné“ spojují prodej s pronájmem, což pevné pravidlo nedovolí, "
+        "proto engine skupinu nesloučil (rozhodnutí „stejné“ v ní, celkem 1: 11–12)")
+    assert other["why_not_merged"] == (
+        "dvojice prošla, ale žádná skupina této generace nedrží oba inzeráty"), (
+        "no record names 13 and 14: the stored pair's own reason stands")
+    assert withdrawn["why_not_merged"] == "automaticky zamítnuto: attr_contradictions"
+    assert conn.params(usql.DISSOLVED_CLOSURES_SQL) == {"generation": LIVE,
+                                                        "ids": [11, 12, 13, 14]}
+
+
+@pytest.mark.parametrize(("limb", "why"), [
+    ("category_type", "spojují prodej s pronájmem, což pevné pravidlo nedovolí"),
+    ("compat_class", "spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+                     "což pevné pravidlo nedovolí"),
+    ("size", "spojují skupinu o 7 inzerátech, větší, než pevné pravidlo dovolí"),
+    ("must_not_link", "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny"),
+])
+def test_each_limb_that_dissolves_a_closure_is_said_in_words(client, conn, limb, why):
+    """E926: only four limbs can refuse a closure. Three are the engine's fixed rules; a
+    must-not-link is the operator's own `different` inside it, and the page says so, not "a fixed
+    rule". Every reason names the `same` rulings that form the closure — the ones to revisit —
+    up to five of them, and how many there are."""
+    conn.live = {seed_version_key(): SEED_VERSION, bootstrap_key(): False}
+    conn.canned[usql.RULINGS_PAIR_SQL] = [_pair_ruling(zone=None, decision=None)]
+    members = [11, 12, 13, 14, 15, 16, 17]
+    conn.canned[usql.DISSOLVED_CLOSURES_SQL] = [
+        _tuple(usql.CONFLICT_COLUMNS, id=3, kind="invariant", listing_lo=11, listing_hi=17,
+               invariant=limb, created_at=AT,
+               detail={"generation": LIVE, "members": members,
+                       "must_link": [[lo, lo + 1] for lo in members[:-1]]}),
+    ]
+    (item,) = client.get("/autodedup/rulings").json()["data"]["items"]
+    assert item["why_not_merged"] == (
+        f"vaše rozhodnutí „stejné“ {why}, proto engine skupinu nesloučil (rozhodnutí „stejné“ "
+        "v ní, celkem 6: 11–12, 12–13, 13–14, 14–15, 15–16 …)"), "no engine code, in words"
+
+
+def test_no_standing_same_apart_reads_no_dissolved_closure(client, conn):
+    conn.canned[usql.RULINGS_PAIR_SQL] = [_pair_ruling(verdict="different"),
+                                          _pair_ruling(engine_view="together")]
+    client.get("/autodedup/rulings")
+    assert not conn.ran(usql.DISSOLVED_CLOSURES_SQL)
 
 
 def test_the_page_is_keyset_paged_on_decided_at_and_the_pair(client, conn):
@@ -347,8 +417,8 @@ def test_a_correction_that_contradicts_its_ruling_is_a_400(client, conn, body):
 
 
 def test_a_withdrawal_appends_unsure_and_retracts_the_veto_in_one_transaction(client, conn):
-    """No `PAIR_EXISTS_SQL`: the ruling being corrected proves the pair — a Browse merge's or a
-    detach's pair the engine never stored is correctable (G10)."""
+    """The ruling being corrected names the pair — a Browse merge's or a detach's pair the engine
+    never stored is correctable (G10) — and its categories are read inside the write (E925)."""
     conn.canned[usql.VERDICT_ONE_SQL] = [_verdict(id=7, verdict="different")]
     conn.canned[usql.PAIR_NEWEST_RULING_SQL] = [_verdict(id=7, verdict="different")]
     conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(id=12, verdict="unsure",
@@ -357,13 +427,13 @@ def test_a_withdrawal_appends_unsure_and_retracts_the_veto_in_one_transaction(cl
     written = conn.params(usql.VERDICT_PAIR_APPEND_SQL)
     assert (written["listing_lo"], written["listing_hi"], written["verdict"]) == (11, 12, "unsure")
     assert written["decided_by"] == "operator@example.com"
-    assert not conn.ran(usql.PAIR_EXISTS_SQL)
+    assert conn.params(usql.PAIR_CATEGORIES_SQL) == {"listing_lo": 11, "listing_hi": 12}
     assert conn.ran(usql.MUST_NOT_LINK_RETRACT_SQL)
     assert not conn.ran(usql.MUST_NOT_LINK_UPSERT_SQL)
     # The "still the newest" check runs over the LOCKED ruling, in the write's own transaction.
     assert conn.tx_calls == [usql.VERDICT_ONE_SQL, usql.PAIR_NEWEST_RULING_SQL,
-                             usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQL,
-                             usql.MUST_NOT_LINK_RETRACT_SQL]
+                             usql.PAIR_CATEGORIES_SQL, usql.VERDICT_PAIR_FROM_VETO_SQL,
+                             usql.VERDICT_PAIR_APPEND_SQL, usql.MUST_NOT_LINK_RETRACT_SQL]
     assert _flat(usql.VERDICT_ONE_SQL).endswith("FOR UPDATE")
     assert body["data"]["verdict"]["id"] == 12
     assert body["data"]["superseded"]["id"] == 7
@@ -448,24 +518,98 @@ def test_a_legacy_group_ruling_with_no_set_can_still_be_withdrawn(client, conn):
 def test_any_two_adverts_that_exist_can_be_ruled(client, conn):
     """E924: the guard asks whether both ADVERTS exist, never whether the engine stored the pair
     — a duplicate the engine missed has no row, and it is the ruling the operator must give."""
-    conn.canned[usql.PAIR_EXISTS_SQL] = [(1,)]
     conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict="same")]
     assert _post(client, kind="pair", verdict="same", listing_lo=11,
                  listing_hi=12).status_code == 200
-    assert conn.params(usql.PAIR_EXISTS_SQL) == {"listing_lo": 11, "listing_hi": 12}
-    flat = " ".join(usql.PAIR_EXISTS_SQL.split())
+    assert conn.params(usql.PAIR_CATEGORIES_SQL) == {"listing_lo": 11, "listing_hi": 12}
+    flat = " ".join(usql.PAIR_CATEGORIES_SQL.split())
     assert "FROM public.listings" in flat
     for table in ("autodedup.verdicts", "autodedup.must_not_link", "autodedup.pairs"):
         assert table not in flat
 
 
 def test_a_pair_naming_an_advert_that_does_not_exist_is_a_404_and_writes_nothing(client, conn):
-    conn.canned[usql.PAIR_EXISTS_SQL] = []
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = []
     response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
     assert response.status_code == 404
     assert response.json()["detail"] == "one of the two adverts does not exist"
     assert not conn.ran(usql.VERDICT_PAIR_APPEND_SQL)
     assert not conn.ran(usql.MUST_NOT_LINK_UPSERT_SQL)
+
+
+# ------------------------------------ a `same` rule 15 forbids is refused at write time (E925)
+
+_NOTHING_WRITTEN = (usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQL,
+                    usql.MUST_NOT_LINK_UPSERT_SQL, usql.MUST_NOT_LINK_RETRACT_SQL)
+
+
+@pytest.mark.parametrize(("sides", "named"), [
+    (("pronajem", "byt", "prodej", "byt"), ("Inzerát typu Pronájem", "typu Prodej")),
+    (("prodej", "byt", "prodej", "komercni"), ("v kategorii Byty", "v kategorii Komerční")),
+    (("prodej", "komercni", "prodej", "byt"), ("v kategorii Komerční", "v kategorii Byty")),
+], ids=["rent vs sale", "flat vs commercial", "commercial vs flat"])
+def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
+        client, conn, sides, named):
+    """422, never 409: the rulings page reads every 409 as "ruled again since the page loaded"
+    and swaps the detail for that text."""
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]
+    response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert all(part in detail for part in named)
+    assert "systém nikdy nespojí" in detail and "nelze označit jako stejné" in detail
+    assert not any(conn.ran(sql) for sql in _NOTHING_WRITTEN)
+
+
+@pytest.mark.parametrize("sides", [
+    ("prodej", "dum", "prodej", "komercni"),  # the one sanctioned cross-type
+    ("prodej", "byt", "prodej", "byt"),
+    (None, "byt", "prodej", None),  # unknown is never a conflict
+], ids=["house vs commercial", "flat vs flat", "unknown"])
+def test_a_same_rule_15_allows_is_written(client, conn, sides):
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]
+    conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict="same")]
+    response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
+    assert response.status_code == 200
+    assert conn.params(usql.VERDICT_PAIR_APPEND_SQL)["verdict"] == "same"
+
+
+@pytest.mark.parametrize("verdict", ["different", "same_building_different_unit", "unsure"])
+def test_only_same_is_refused_a_negative_between_two_properties_is_consistent(
+        client, conn, verdict):
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = [("pronajem", "byt", "prodej", "komercni")]
+    conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict=verdict)]
+    response = _post(client, kind="pair", verdict=verdict, listing_lo=11, listing_hi=12)
+    assert response.status_code == 200
+    assert conn.params(usql.VERDICT_PAIR_APPEND_SQL)["verdict"] == verdict
+
+
+def test_a_correction_to_same_between_two_properties_is_refused_too(client, conn):
+    """A rent/sale `different` is a sound ruling; flipping it on the rulings page is the same
+    `same` the typed path refuses, read over the ruling's own pair inside the write."""
+    conn.canned[usql.VERDICT_ONE_SQL] = [_verdict(id=7, verdict="different")]
+    conn.canned[usql.PAIR_NEWEST_RULING_SQL] = [_verdict(id=7, verdict="different")]
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = [("pronajem", "byt", "prodej", "byt")]
+    response = _post(client, kind="pair", verdict="same", supersedes=7)
+    assert response.status_code == 422
+    assert "Pronájem" in response.json()["detail"]
+    assert conn.params(usql.PAIR_CATEGORIES_SQL) == {"listing_lo": 11, "listing_hi": 12}
+    assert conn.tx_calls == [usql.VERDICT_ONE_SQL, usql.PAIR_NEWEST_RULING_SQL,
+                             usql.PAIR_CATEGORIES_SQL]
+    assert not any(conn.ran(sql) for sql in _NOTHING_WRITTEN)
+
+
+def test_the_route_and_the_merge_chokepoint_read_one_gate():
+    """No second definition: the route refuses exactly what `merge_properties` refuses."""
+    from api.routes import autodedup as routes
+    from toolkit import property_identity
+
+    assert routes.category_clash is property_identity.category_clash
+    assert property_identity._category_refusal(("pronajem", "byt"), ("prodej", "byt")) == (
+        "category_type mismatch (pronajem vs prodej); refusing to merge")
+    assert property_identity._category_refusal(("prodej", "byt"), ("prodej", "komercni")) == (
+        "category_main mismatch (byt vs komercni); refusing to merge")
+    assert property_identity._category_refusal(("prodej", "dum"), ("prodej", "komercni")) is None
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)
@@ -506,7 +650,7 @@ def test_the_writes_order_newest_exactly_as_the_readers_do():
 
 def test_the_progress_counts_count_rulings_not_rows():
     """G8: with history kept, a count over rows would count a withdrawn ruling twice."""
-    for sql in (usql.VERDICT_COUNTS_SQL, usql.REASON_COUNTS_SQL):
+    for sql in (usql.VERDICT_COUNTS_SQL,):
         flat = _flat(sql)
         assert "SELECT DISTINCT ON (x.kind, x.listing_lo, x.listing_hi, x.cluster_key," in flat
         assert "x.decided_at DESC, x.id DESC" in flat

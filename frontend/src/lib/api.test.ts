@@ -330,4 +330,61 @@ describe('autodedup wire conformance', () => {
     };
     expect(image.listing_id).toBe(11);
   });
+
+  it('types the Judge page as /judgements sends it', async () => {
+    /* Verbatim: the route's own fake connection (tests/api/test_autodedup_judgements.py). */
+    const body: import('./api').AutodedupEnvelope<import('./api').JudgementsPage> = {
+      data: {
+        generation: 'g15',
+        reason: 'suggested',
+        items: [
+          {
+            listing_lo: 11,
+            listing_hi: 12,
+            verdict: {
+              id: 41,
+              kind: 'pair',
+              cluster_key: null,
+              listing_lo: 11,
+              listing_hi: 12,
+              verdict: 'same',
+              note: 'stejná kuchyň',
+              reasons: ['identical_photos'],
+              decided_by: 'op@example.com',
+              decided_at: '2026-09-29T08:00:00+00:00',
+            },
+            judgement: {
+              tier: 'vision',
+              verdict: 'different_property',
+              confidence: 0.93,
+              model: 'gpt-5-mini',
+              key_evidence: ['jiné patro'],
+              contradicting_evidence: ['stejná adresa'],
+            },
+            reasons: ['sample', 'operator', 'engine'],
+            engine_view: 'apart',
+            obec_name: 'Jablonec nad Nisou',
+            cast_obce_name: null,
+            zone: 'band',
+            score: 0.61,
+            guard_veto: null,
+            certificate: 'K-A',
+            why_not_merged: 'drženo v pásmu kontroly: méně než dva nezávislé druhy důkazů',
+          },
+        ],
+        next_after: null,
+        total: 1,
+        facets: {
+          reason: { suggested: 1, sample: 1 },
+          judge: { different: 1 },
+          tier: {},
+          ruled: {},
+          operator: {},
+          engine: {},
+        },
+      },
+      store_ready: true,
+    };
+    expect(body.data?.items[0].reasons).toContain('engine');
+  });
 });

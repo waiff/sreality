@@ -257,14 +257,17 @@ export function Segmented<T extends string | number | null>({
   value,
   onChange,
   variant = 'soft',
+  label,
 }: {
   options: ReadonlyArray<{ value: T; label: string }>;
   value: T;
   onChange: (v: T) => void;
   variant?: 'soft' | 'solid';
+  /* Names the choice when no Field caption does. */
+  label?: string;
 }) {
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-wrap gap-1" role={label ? 'group' : undefined} aria-label={label}>
       {options.map((o) => (
         <PickButton
           key={String(o.value)}

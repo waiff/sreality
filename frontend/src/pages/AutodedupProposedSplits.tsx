@@ -54,11 +54,11 @@ import {
 } from '@/lib/mergedAdverts';
 import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
-import type { ImagePublic, ListingPublic } from '@/lib/types';
+import type { ListingPublic } from '@/lib/types';
+import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
+import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 
 const PAGE_SIZE = 20;
-/* The frames each member card pages, as the review queues ship them. */
-const PHOTOS_PER_ADVERT = 12;
 
 const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], string> = {
   conflict: 'konflikt',
@@ -329,17 +329,13 @@ export default function AutodedupProposedSplits() {
           <Spinner /> Načítám návrhy…
         </p>
       )}
-      {q.data && !q.data.store_ready && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Úložiště programu v této databázi zatím není — není co navrhnout.
-        </p>
-      )}
+      {q.data && !q.data.store_ready && <StoreNotReady />}
       {page && items.length === 0 && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
+        <Notice>
           {page.withheld
             ? `Živý proud engine ještě není v provozu — návrhy zatím nejsou (${page.withheld}).`
             : 'Žádné návrhy rozdělení.'}
-        </p>
+        </Notice>
       )}
 
       {outcomes.length > 0 && (
@@ -443,7 +439,9 @@ export default function AutodedupProposedSplits() {
             disabled={armed || run.isPending}
             onToggle={() => toggleCard(item.property_id)}
             onTicks={(ids, on) => setTicks(item, ids, on)}
-            member={(a) => toMember(a, detailsQ.data?.get(a.listing_id), photos.get(a.listing_id) ?? [])}
+            member={(a) =>
+              memberFromListing(a.listing_id, a, detailsQ.data?.get(a.listing_id),
+                photos.get(a.listing_id) ?? [])}
           />
         ))}
       </ul>
@@ -470,34 +468,6 @@ export default function AutodedupProposedSplits() {
       )}
     </div>
   );
-}
-
-/* A proposal's advert in the shape every review surface renders. */
-function toMember(
-  a: ProposedSplitAdvert,
-  l: ListingPublic | undefined,
-  images: ImagePublic[],
-): AutodedupMember {
-  return {
-    listing_id: a.listing_id,
-    source: a.source,
-    is_active: a.is_active,
-    source_url: l?.source_url ?? null,
-    source_id_native: l?.source_id_native ?? null,
-    sreality_id: l?.sreality_id ?? null,
-    category_main: l?.category_main ?? null,
-    category_type: l?.category_type ?? null,
-    disposition: l?.disposition ?? null,
-    area_m2: l?.area_m2 ?? null,
-    floor: l?.floor ?? null,
-    total_floors: l?.total_floors ?? null,
-    price_czk: l?.price_czk ?? null,
-    first_seen_at: l?.first_seen_at ?? null,
-    last_seen_at: l?.last_seen_at ?? null,
-    cover: images[0] ?? null,
-    n_images: images.length,
-    images: images.slice(0, PHOTOS_PER_ADVERT),
-  };
 }
 
 function ProposalCard({

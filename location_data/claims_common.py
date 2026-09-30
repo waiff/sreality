@@ -303,10 +303,6 @@ class Claim:
     span_start: int | None = None
     span_end: int | None = None
     payload_scope_version: str | None = None
-    # `loc_claim_llm_model` forces both non-null on an `llm_text` claim. No lane emits
-    # one (rule 25: no model in the claim lane) and the columns stay, because the CHECK
-    # does: a `Claim` that can be spelled but not written is a trap that takes a whole
-    # batch down at the constraint, once, in production.
     model: str | None = None
     prompt_version: str | None = None
     # NULL on every claim the one lane writes: both its substrates are latest-wins (the
@@ -617,8 +613,8 @@ def _address_part_street(value: str, arg: str) -> str | None:
     return cleaned
 
 
-# W18: the street a portal states as TEXT. bazos is the first carrier (`/coords/street`,
-# then the capped headline), and this is the only normalisation that text gets — it is
+# W18: the street a portal states as TEXT. bazos is the first carrier (its capped
+# headline), and this is the only normalisation that text gets — it is
 # deliberately the THINNEST of the street transforms.
 #
 # What it does NOT do is the point.
@@ -648,7 +644,6 @@ def _address_part_street(value: str, arg: str) -> str | None:
 # asked). A value carrying a line separator skips even that: on "Kladno - Dubí, Ke Křížku" the
 # dash is a separator and `Ke Křížku` is the street, so the line is gated per SEGMENT instead.
 _STREET_TOKEN_TRIM_RE = re.compile(r"^[\s\-–—,;:/|]+|[\s\-–—,;:/|]+$")
-_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 
 
 @transform("street_token")
@@ -676,7 +671,7 @@ def _street_token(value: str, arg: str) -> str | None:
 def _is_latin_script(value: str) -> bool:
     """Every LETTER folds to ASCII a-z. Czech diacritics do; Cyrillic and Greek do not, and
     a street spelled in one of those is a foreign listing's, never a Czech register row's."""
-    letters = _LETTER_RE.findall(value)
+    letters = [ch for ch in value if ch.isalpha()]  # `²` in `m²` is a digit
     if not letters:
         return False
     return all(_fold(ch).isascii() and _fold(ch).isalpha() for ch in letters)

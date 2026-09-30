@@ -192,21 +192,21 @@ export default function EvidenceChips({
  * vocabulary — family codes, zone words, certificate ids — and each carries a
  * `title`, which no touch device shows and no keyboard reaches. A non-technical
  * operator should not have to hover to read the evidence row, so the legend is
- * on the page in text. */
+ * on the page in text, in the review pages' Czech. */
 const LEGEND: ReadonlyArray<readonly [string, string]> = [
-  ['ATTR', 'attributes'],
-  ['PRICE', 'price'],
-  ['TXT', 'description text'],
-  ['BRK', 'broker'],
-  ['LOC', 'location'],
-  ['IMG', 'photos'],
-  ['TIME', 'timing'],
+  ['ATTR', 'parametry'],
+  ['PRICE', 'cena'],
+  ['TXT', 'text popisu'],
+  ['BRK', 'makléř'],
+  ['LOC', 'poloha'],
+  ['IMG', 'fotky'],
+  ['TIME', 'načasování'],
 ];
 
 export function EvidenceLegend() {
   return (
     <p className="mt-3 text-[0.68rem] leading-relaxed text-[var(--color-ink-3)]">
-      <span className="text-[var(--color-ink-4)]">Evidence families: </span>
+      <span className="text-[var(--color-ink-4)]">Druhy důkazů: </span>
       {LEGEND.map(([code, words], i) => (
         <span key={code}>
           {i > 0 && ' · '}
@@ -214,11 +214,13 @@ export function EvidenceLegend() {
         </span>
       ))}
       <span className="text-[var(--color-ink-4)]">
-        {' '}· zones: <span className="font-mono">merge</span> = above the auto-merge line,{' '}
-        <span className="font-mono">band</span> = between the two lines,{' '}
-        <span className="font-mono">reject</span> = below them · a{' '}
-        <span className="font-mono">K-…</span> chip means a structural certificate decided the
-        pair, not the model.
+        {' '}· pásma: <span className="font-mono">merge</span> = nad hranicí automatického
+        sloučení, <span className="font-mono">band</span> = mezi oběma hranicemi (pásmo
+        kontroly), <span className="font-mono">reject</span> = pod nimi ·{' '}
+        <span className="font-mono">p</span> = pravděpodobnost podle modelu, že jde o stejnou
+        nemovitost · štítek <span className="font-mono">K-…</span> znamená, že dvojici rozhodlo
+        pevné pravidlo (certifikát), ne model · <span className="font-mono">veto</span> = pevné
+        pravidlo dvojici odmítlo.
       </span>
     </p>
   );

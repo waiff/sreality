@@ -254,8 +254,6 @@ export default function CandidateCard({
         alwaysOpen
         saveLabel="Uložit rozhodnutí"
         mergeBackLabel="Uložit rozhodnutí"
-        /* No cluster row here, so no reason chips (§9) — the note still travels. */
-        showReasons={false}
       />
     </li>
   );

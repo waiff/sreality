@@ -32,6 +32,17 @@ import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import { pairHref } from '@/components/autodedup/filterState';
+import { ENGINE_VIEW, engineLine } from '@/components/autodedup/engineView';
+import {
+  AgreementSwitch,
+  FILTER_CONTROL,
+  FILTER_LABEL,
+  FilterSelect,
+  ResetFilters,
+  TownSelect,
+} from '@/components/autodedup/FilterBar';
+import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
+import { Segmented } from '@/components/controls';
 import {
   NEGATIVE_VERDICTS,
   VERDICT_LABELS,
@@ -55,7 +66,6 @@ import {
   type RulingGroupRow,
   type RulingPairRow,
   type RulingStatus,
-  type RulingTown,
   type RulingsPage,
 } from '@/lib/api';
 import { fmtAbsolute, fmtCount } from '@/lib/format';
@@ -273,16 +283,8 @@ export default function AutodedupRulings() {
           <Spinner /> Načítám rozhodnutí…
         </p>
       )}
-      {q.data && !q.data.store_ready && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Úložiště programu v této databázi zatím není.
-        </p>
-      )}
-      {page && items.length === 0 && (
-        <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          Žádné rozhodnutí neodpovídá filtru.
-        </p>
-      )}
+      {q.data && !q.data.store_ready && <StoreNotReady />}
+      {page && items.length === 0 && <Notice>Žádné rozhodnutí neodpovídá filtru.</Notice>}
 
       <ul className="mt-4 space-y-5">
         {items.map((item) =>
@@ -335,16 +337,7 @@ export default function AutodedupRulings() {
 
 const CHIP =
   'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.75rem] transition-colors tabular-nums';
-const CHIP_ON = 'border-[var(--color-ink-2)] bg-[var(--color-paper-2)] text-[var(--color-ink)]';
-const CHIP_OFF =
-  'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]';
-const SELECT =
-  'rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.78rem] text-[var(--color-ink)]';
-const LABEL = 'flex flex-col gap-0.5 text-[0.66rem] uppercase tracking-[0.08em] text-[var(--color-ink-3)]';
-
-function counted(label: string, n: number | undefined): string {
-  return n == null ? label : `${label} (${fmtCount(n)})`;
-}
+const DATE = FILTER_CONTROL.replace('w-full ', '');
 
 function FilterStrip({
   filters,
@@ -360,7 +353,6 @@ function FilterStrip({
   onReset: () => void;
 }) {
   const facets = page?.facets;
-  const towns = page?.towns ?? [];
   const pinned = [
     filters.listing && { key: 'listing' as const, label: `inzerát #${filters.listing}` },
     filters.property && { key: 'property' as const, label: `nemovitost #${filters.property}` },
@@ -373,174 +365,102 @@ function FilterStrip({
   return (
     <section aria-label="Filtry" className="mt-5 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div role="tablist" aria-label="Zrnitost" className="flex gap-1">
-          {(['pair', 'group'] as const).map((g) => (
-            <button
-              key={g}
-              role="tab"
-              type="button"
-              aria-selected={grain === g}
-              onClick={() => onChange({ grain: g, source: '' })}
-              className={`${CHIP} ${grain === g ? CHIP_ON : CHIP_OFF}`}
-            >
-              {g === 'pair' ? 'Páry' : 'Skupiny'}
-            </button>
-          ))}
-        </div>
+        <Segmented
+          label="Zrnitost"
+          options={[
+            { value: 'pair', label: 'Páry' },
+            { value: 'group', label: 'Skupiny' },
+          ]}
+          value={grain}
+          onChange={(g) => onChange({ grain: g, source: '' })}
+        />
         <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
         {/* "Neshody" first: the rulings the state of things contradicts. */}
-        {([
-          ['disagrees', 'Neshody'],
-          ['', 'Vše'],
-          ['agrees', 'Souhlasí'],
-        ] as const).map(([value, label]) => (
-          <button
-            key={label}
-            type="button"
-            aria-pressed={filters.engine === value}
-            onClick={() => onChange({ engine: value })}
-            className={`${CHIP} ${filters.engine === value ? CHIP_ON : CHIP_OFF} ${
-              value === 'disagrees' ? 'font-medium' : ''
-            }`}
-          >
-            {value ? counted(label, facets?.engine?.[value]) : label}
-          </button>
-        ))}
+        <AgreementSwitch
+          label="Engine"
+          facet={facets?.engine}
+          value={filters.engine}
+          onChange={(engine) => onChange({ engine })}
+        />
         {pinned.map((p) => (
           <button
             key={p.key}
             type="button"
             onClick={() => onChange({ [p.key]: '' })}
             aria-label={`Zrušit filtr ${p.label}`}
-            className={`${CHIP} ${CHIP_ON}`}
+            className={`${CHIP} border-[var(--color-ink-2)] bg-[var(--color-paper-2)] text-[var(--color-ink)]`}
           >
             {p.label} ✕
           </button>
         ))}
       </div>
 
-      <div className="flex flex-wrap items-end gap-3">
-        <label className={LABEL}>
-          Rozhodnutí
-          <select
-            className={SELECT}
-            value={filters.verdict}
-            onChange={(e) => onChange({ verdict: e.target.value })}
-          >
-            <option value="">vše</option>
-            {VERDICT_FILTERS.map((v) => (
-              <option key={v} value={v}>
-                {counted(VERDICT_LABELS[v], facets?.verdict?.[v])}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className={LABEL}>
-          Původ
-          <select
-            className={SELECT}
-            value={filters.source}
-            onChange={(e) => onChange({ source: e.target.value })}
-          >
-            <option value="">vše</option>
-            {SOURCES[grain].map((s) => (
-              <option key={s} value={s}>
-                {counted(SOURCE_LABEL[s], facets?.source?.[s])}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className={LABEL}>
-          Stav
-          <select
-            className={SELECT}
-            value={filters.status}
-            onChange={(e) => onChange({ status: e.target.value })}
-          >
-            <option value="">vše</option>
-            {STATUSES[grain].map((s) => (
-              <option key={s} value={s}>
-                {counted(STATUS_LABEL[s], facets?.status?.[s])}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className={LABEL}>
-          Nyní
-          <select
-            className={SELECT}
-            value={filters.now}
-            onChange={(e) => onChange({ now: e.target.value })}
-          >
-            <option value="">vše</option>
-            <option value="together">v jedné nemovitosti</option>
-            <option value="apart">v různých nemovitostech</option>
-          </select>
-        </label>
-        <label className={LABEL}>
-          Obec / část
-          <select
-            className={SELECT}
-            value={filters.town}
-            onChange={(e) => onChange({ town: e.target.value })}
-          >
-            <option value="">všude</option>
-            <TownOptions towns={towns} grain="o" label="Obce" />
-            <TownOptions towns={towns} grain="c" label="Části obce" />
-            {filters.town && !towns.some((t) => `${t.grain}:${t.code}` === filters.town) && (
-              <option value={filters.town}>{filters.town}</option>
-            )}
-          </select>
-        </label>
-        <label className={LABEL}>
-          Od
+      <div className="grid gap-3 sm:grid-cols-4 lg:grid-cols-8">
+        <FilterSelect
+          label="Rozhodnutí"
+          value={filters.verdict}
+          onChange={(verdict) => onChange({ verdict })}
+          options={VERDICT_FILTERS.map((v) => ({
+            value: v,
+            label: VERDICT_LABELS[v],
+            count: facets?.verdict?.[v],
+          }))}
+        />
+        <FilterSelect
+          label="Původ"
+          value={filters.source}
+          onChange={(source) => onChange({ source })}
+          options={SOURCES[grain].map((v) => ({
+            value: v,
+            label: SOURCE_LABEL[v],
+            count: facets?.source?.[v],
+          }))}
+        />
+        <FilterSelect
+          label="Stav"
+          value={filters.status}
+          onChange={(status) => onChange({ status })}
+          options={STATUSES[grain].map((v) => ({
+            value: v,
+            label: STATUS_LABEL[v],
+            count: facets?.status?.[v],
+          }))}
+        />
+        <FilterSelect
+          label="Nyní"
+          value={filters.now}
+          onChange={(now) => onChange({ now })}
+          options={[
+            { value: 'together', label: 'v jedné nemovitosti' },
+            { value: 'apart', label: 'v různých nemovitostech' },
+          ]}
+        />
+        <TownSelect
+          value={filters.town}
+          towns={page?.towns ?? []}
+          onChange={(town) => onChange({ town })}
+        />
+        <label className="block">
+          <span className={FILTER_LABEL}>Od</span>
           <input
             type="date"
-            className={SELECT}
+            className={DATE}
             value={filters.decided_from}
             onChange={(e) => onChange({ decided_from: e.target.value })}
           />
         </label>
-        <label className={LABEL}>
-          Do (bez)
+        <label className="block">
+          <span className={FILTER_LABEL}>Do (bez)</span>
           <input
             type="date"
-            className={SELECT}
+            className={DATE}
             value={filters.decided_to}
             onChange={(e) => onChange({ decided_to: e.target.value })}
           />
         </label>
-        <button
-          type="button"
-          onClick={onReset}
-          className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2.5 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
-        >
-          Zrušit filtry
-        </button>
+        <ResetFilters onClick={onReset} />
       </div>
     </section>
-  );
-}
-
-function TownOptions({
-  towns,
-  grain,
-  label,
-}: {
-  towns: RulingTown[];
-  grain: 'o' | 'c';
-  label: string;
-}) {
-  const shown = towns.filter((t) => t.grain === grain);
-  if (shown.length === 0) return null;
-  return (
-    <optgroup label={label}>
-      {shown.map((t) => (
-        <option key={`${t.grain}:${t.code}`} value={`${t.grain}:${t.code}`}>
-          {counted(t.name ?? String(t.code), t.n)}
-        </option>
-      ))}
-    </optgroup>
   );
 }
 
@@ -944,27 +864,6 @@ function Consequence({ row }: { row: RulingPairRow }) {
 }
 
 /* -------------------------------------------------------------- a pair ruling */
-
-const ENGINE_VIEW: Record<RulingPairRow['engine_view'], string> = {
-  together: 'jedna skupina',
-  apart: 'odděleně',
-  unseen: 'inzeráty neviděl',
-};
-
-/* The engine's view in one line: its grouping, then the stored pair — the
- * certificate when one decided it, the decision's own name on a merge, and on
- * anything else why it was not merged. No stored row is said, not left blank:
- * the live stream keeps no machine reject (decision 7). */
-export function engineLine(row: RulingPairRow): string {
-  const parts = [ENGINE_VIEW[row.engine_view]];
-  if (!row.zone) return `${parts[0]} · pár bez uloženého řádku`;
-  let pair = `pár: ${row.zone}${row.score != null ? ` ${row.score.toFixed(2)}` : ''}`;
-  if (row.certificate) pair += ` · certifikát ${row.certificate}`;
-  else if (row.zone === 'merge' && row.decision) pair += ` · ${row.decision}`;
-  if (row.zone !== 'merge' && row.why_not_merged) pair += ` — ${row.why_not_merged}`;
-  parts.push(pair);
-  return parts.join(' · ');
-}
 
 function address(street: string | null, cp: string | null): string | null {
   if (!street && !cp) return null;

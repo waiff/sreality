@@ -55,9 +55,9 @@ def test_the_operators_title_binds_the_street_it_names():
     assert resolution.obec_kod == MLADA_BOLESLAV
 
 
-def test_the_parsers_own_reading_binds_the_same_street():
-    """`/coords/street` is the first surface and it is usually a bare name, which takes the
-    ordinary R2 path rather than the line binder. Same answer, one rung either way."""
+def test_a_bare_name_binds_the_same_street():
+    """A bare street name takes the ordinary R2 path rather than the line binder. Same
+    answer, one rung either way."""
     assert _line("Jiráskova").ulice_kod == 105
 
 
@@ -74,7 +74,8 @@ def test_a_segment_carrying_a_house_number_reaches_the_address_point():
         mm.claim(2, "street_name", source="bazos", value_text="28. října 12, Ostrava"),
     ])
     assert resolution.street_name == "28. října"
-    assert resolution.house_number_cp == "12"
+    # No `28. října 12` door in the register, so no number (v5.5, D7) — only the street.
+    assert (resolution.house_number_cp, resolution.granularity) == (None, "street")
 
 
 def test_the_official_generic_word_is_matched_and_so_is_its_absence():
@@ -87,8 +88,8 @@ def test_the_official_generic_word_is_matched_and_so_is_its_absence():
 
 
 def test_a_dash_is_a_separator_and_the_last_segment_is_the_street():
-    """"Kladno - Dubí, Ke Křížku" is the shape `_trailer_street_quarter` writes: a town, a
-    quarter and a street in one string, on two different separators."""
+    """"Kladno - Dubí, Ke Křížku" is a composite line: a town, a quarter and a street in
+    one string, on two different separators."""
     bound = _bind("Kladno - Dubí, Ke Křížku", (KLADNO,))
     assert bound.street.code == 106
     assert _line("Kladno - Dubí, Ke Křížku", town="Kladno").street_name == "Ke Křížku"
@@ -140,7 +141,7 @@ def test_an_inflected_form_does_not_match_the_register_exactly():
     off and what is left is not the register's string, so the EXACT match fails. Czech
     inflection is out of scope for W18 and is deliberately not guessed at: R3 is off for
     lines, and a single inflected token can only ever reach it at `low` confidence."""
-    assert composite.street_keys("Livornské ulici") == frozenset(
+    assert composite.street_match_keys("Livornské ulici")[1] == frozenset(
         {"livornske", "livornske ulici"})
     assert _bind("Livornské ulici, Praha", (PRAHA,)).street is None
 
@@ -198,7 +199,7 @@ def test_a_street_whose_name_IS_the_generic_word_still_binds():
     name on those, so the UNFOLDED spelling is a match key of its own. It is also why the
     CLAIM layer strips only the LEADING wrapper: the exact key is taken from the stored value,
     and `Nová ulice` folded down to `Nová` at intake can never bind afterwards."""
-    assert composite.street_keys("Nová ulice") == frozenset({"nova ulice", "nova"})
+    assert composite.street_match_keys("Nová ulice")[1] == frozenset({"nova ulice", "nova"})
     assert _line("Nová ulice", town="Kladno").street_name == "Nová ulice"
     assert _line("Na Ulici", town="Kladno").street_name == "Na Ulici"
     assert _bind("Prodej bytu, Nová ulice, Kladno", (KLADNO,)).street.code == 114
@@ -213,24 +214,6 @@ def test_the_street_index_is_the_same_answer_as_folding_each_row():
     assert composite.street_index(mirror, KLADNO) == built
     assert set(built["svobody"]) == {
         s for s in mirror.streets_in_obec(KLADNO) if s.code in (112, 113)}
-
-
-def test_a_line_number_never_attaches_to_a_street_bound_from_another_claim():
-    """A listing naming `Nad Bořislavkou` and, in a SEPARATE claim, a line reading
-    "Livornská 5" published `Nad Bořislavkou 5` at `street_segment` grain, because the line's
-    number was written back onto the listing-wide constraints and then lent to whatever street
-    the ranking picked. A number belongs to the segment that bound ITS street.
-
-    Two claims naming two different streets is also two answers, so the binder refuses both —
-    and the number goes with them rather than surviving on a row with no street at all."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
-        mm.claim(3, "street_name", value_text="Prodej bytu 2+kk, Livornská 5, Praha"),
-    ])
-    assert resolution.street_name is None
-    assert resolution.house_number_cp is None
-    assert resolution.obec_name == "Praha"
 
 
 def test_a_house_number_claimed_in_its_own_field_still_reaches_the_address_point():

@@ -16,19 +16,22 @@ from __future__ import annotations
 # E29: a pair is judged once per (version, tier). A re-run of the same tier is a RETRY, not a
 # second opinion, so it overwrites — and `created_at` is restamped with it, because a row whose
 # timestamp predates the verdict it holds cannot be reconciled against `llm_calls` by time.
+# `stratum` (migration 576) is the pair list's stamp, NULL for a pair the lane drew itself. The
+# first list that asked for a pair names it: a retry keeps the stamp the row already carries.
 JUDGEMENT_UPSERT_SQL = """
     insert into autodedup.judgements (
         listing_lo, listing_hi, judge_version, tier, model, verdict, confidence,
         unit_discriminator, key_evidence, contradicting_evidence,
-        developer_project_suspected, llm_call_id, cost_usd
+        developer_project_suspected, llm_call_id, cost_usd, stratum
     ) values (
         %(listing_lo)s, %(listing_hi)s, %(judge_version)s, %(tier)s, %(model)s,
         %(verdict)s, %(confidence)s::real, %(unit_discriminator)s::text,
         %(key_evidence)s::text[], %(contradicting_evidence)s::text[],
         %(developer_project_suspected)s::boolean, %(llm_call_id)s::bigint,
-        %(cost_usd)s::numeric
+        %(cost_usd)s::numeric, %(stratum)s::text
     )
     on conflict (listing_lo, listing_hi, judge_version, tier) do update set
+        stratum = coalesce(autodedup.judgements.stratum, excluded.stratum),
         model = excluded.model,
         verdict = excluded.verdict,
         confidence = excluded.confidence,
@@ -39,6 +42,21 @@ JUDGEMENT_UPSERT_SQL = """
         llm_call_id = excluded.llm_call_id,
         cost_usd = excluded.cost_usd,
         created_at = now()
+"""
+
+# A list dispatched again finds its pairs cached and pays nothing; this is what the cached marks
+# still owe the list — its stamp, on the marks written before migration 576. A mark that
+# already carries a stratum keeps it, as in the upsert above.
+JUDGEMENT_STRATUM_STAMP_SQL = """
+    update autodedup.judgements j
+       set stratum = s.stratum
+      from unnest(%(los)s::bigint[], %(his)s::bigint[], %(strata)s::text[])
+             as s(lo, hi, stratum)
+     where j.judge_version = %(judge_version)s
+       and j.tier = %(tier)s
+       and j.listing_lo = s.lo
+       and j.listing_hi = s.hi
+       and j.stratum is null
 """
 
 # E29's cache read: which of this sample's pairs already carry a verdict at this version and

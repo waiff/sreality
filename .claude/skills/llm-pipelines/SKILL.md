@@ -84,17 +84,21 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   rebuilt by field-capture W7 on the **realtime worker** (lane `text_extract`, constant 300 s, no
   flag / setting / env var). **A field is in scope only once its `Cell.gate.passed` is true** (R7,
   a measured ≥ 95 % panel — `scripts/bakeoff_text_extraction.py`, dispatch-only): a closed gate is
-  not extracted, not billed and not written, and every gate ships closed, so the lane is live and
-  free until the bake-off opens one. The declared set is bazos's eight prose-only columns. The
-  cache `listing_description_enrichments` is keyed `(listing_id, text_hash, extractor_version)`
-  (migration 552), `extractor_version` being `'<schema>:<open-gate hash>:<model>'` — a model swap
-  re-attempts, a price-only snapshot never re-bills, and **opening a gate re-opens the corpus**, so
-  open every field that cleared in ONE edit. Concurrency + the one pre-call budget guard come from
-  `toolkit.vision_batch.run_batch`; the write is NULL-only (`coalesce`) with the `dirty_properties`
-  enqueue in the same CTE and no snapshot; a failed call is cached with an attempt count and given
-  up on after 5.
+  not extracted, not billed and not written (open since 2026-09-22: bazos `floor` + `has_lift`).
+  **Since location reader W1 (2026-09-30)** the lane reads the ADVERT TEXT (headline + description,
+  composed and hashed once in SQL), its scope is the open-gate portals ∪ those whose active
+  contract declares `llm_text`, and every call also returns a `location` block
+  (`location_data/text_reading.py`: ad_kind, town, part of town, street, č.p./č.o./č.ev., each
+  quoted) stored RAW in `listing_description_enrichments.extracted` — nothing mines it until W3.
+  The cache is keyed `(listing_id, text_hash, extractor_version)` (migration 552),
+  `extractor_version` being `'<schema>:<prompt + schema hash>:<model>'` — a model swap re-attempts,
+  a price-only snapshot never re-bills, and **a prompt edit or a gate opening re-reads the corpus**
+  (delisted adverts only once per schema; they are never filled), so batch such edits. Concurrency
+  + the one pre-call budget guard come from `toolkit.vision_batch.run_batch`; the write is
+  NULL-only (`coalesce`), active rows only, with the `dirty_properties` enqueue in the same CTE and
+  no snapshot; a failed call is cached with an attempt count and given up on after 5.
   `false` needs an explicit negation in the evidence quote, every value needs a quote verbatim in
-  the description, and `floor` comes back as the advert's own words for `scraper/floor.py` to
+  the advert text, and `floor` comes back as the advert's own words for `scraper/floor.py` to
   convert. Health: `verify_pipeline`'s `text_extraction_lag`, built from the lane's OWN selector
   (R8). `app_settings.enrichment_model` is the one switch. `docs/design/field-capture/PROGRAM.md`.
 

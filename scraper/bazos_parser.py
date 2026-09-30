@@ -27,7 +27,6 @@ from scraper.floor import floor_from_text
 from scraper.price_text import is_per_area_price
 from scraper.published import bazos_posted_date
 from scraper.scraped_listing import ScrapedListing
-from scraper.street import clean_street
 
 # Bazos URL segments -> our canonical labels (mirrors parser.CATEGORY_* style).
 SALE_TYPE: dict[str, str] = {
@@ -83,46 +82,6 @@ def _full_size_image_url(src: str) -> str:
 # lat/lon can never become a bogus geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
-
-# Street extraction over title + description. Keyword-anchored forms are the
-# reliable signal; the bare "<Name> <house-no>" form is gated by a street-like
-# suffix + a stopword list because a wrong street is worse than none.
-_CZ_UPPER = "A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
-# Inter-word whitespace is horizontal only ([^\S\r\n]): the street name must not
-# span the title->description line break, or a description's opening word leaks in
-# ("ul. Koterovská" + "\nNabízíme k pronájmu…" -> "ul. Koterovská Nabízíme").
-_STREET_NAME = rf"[{_CZ_UPPER}]\w+(?:[^\S\r\n]+[{_CZ_UPPER}]\w+){{0,2}}"
-_CZ_LOWER = "a-záčďéěíňóřšťúůýž"
-# Czech numeral street names ("28. října", "1. máje", "17. listopadu"): a 1-2
-# digit ordinal + a lowercase genitive word (W0 item 0i — a very common name
-# class the uppercase-first _STREET_NAME can never match). Accepted ONLY after
-# an explicit street keyword: bare, the same shape is a date ("od 1. ledna
-# 2027") or a floor ordinal ("ve 2. patře"), and a wrong street is worse than
-# NULL.
-_NUMERAL_STREET_NAME = rf"\d{{1,2}}\.[^\S\r\n]*[{_CZ_LOWER}]\w+"
-# Optional trailing house number; the lookahead rejects a PSČ ("679 61").
-_HOUSE_NO = r"(?:\s+\d{1,4}(?:/\d{1,4})?(?!\s*\d))?"
-# Dotted abbreviations (ul./tř./nám./nábř.) may be glued to the name with no
-# space ("ul.Výstavní"); the spelled-out keywords still require a space.
-_STREET_PREFIX_RE = re.compile(
-    rf"(?:(?i:\bul\.|\btř\.|\bnám\.|\bnábř\.)\s*"
-    rf"|(?i:\bulic[ei]|\btříd[aěu]|\bnáměstí|\bnábřeží|\bsídlišt[ěi])\s+)"
-    rf"(?:{_STREET_NAME}|{_NUMERAL_STREET_NAME}){_HOUSE_NO}"
-)
-_STREET_SUFFIX_RE = re.compile(
-    rf"\b{_STREET_NAME}\s+(?i:ulic[ei]|tříd[aěy]|náměstí|nábřeží){_HOUSE_NO}"
-)
-_STREET_HOUSENO_RE = re.compile(
-    rf"\b([{_CZ_UPPER}]\w+)\s+\d{{1,4}}(?:/\d{{1,4}})?(?!\s*\d)"
-)
-_STREET_WORD_ENDINGS: tuple[str, ...] = (
-    "ova", "ová", "ská", "cká", "ená", "ní", "ého", "ích", "á", "é", "í", "ý",
-)
-_HOUSENO_STOPWORDS: frozenset[str] = frozenset({
-    "byt", "dům", "dum", "garáž", "garaz", "pozemek", "chata", "chalupa",
-    "prodej", "pronájem", "pronajem", "patro", "cena", "sleva", "novostavba",
-    "vila", "zahrada", "balkon", "balkón", "sklep", "parkování", "podlaží",
-})
 
 
 def _in_cz_bbox(lat: float, lon: float) -> bool:
@@ -201,25 +160,14 @@ def _parse_coords(href: str | None) -> tuple[float | None, float | None]:
     return lat, lon
 
 
-def _clean_street(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip(" ,.;:")
-
-
-def _looks_like_street_word(word: str) -> bool:
-    w = word.lower()
-    if w in _HOUSENO_STOPWORDS:
-        return False
-    return w.endswith(_STREET_WORD_ENDINGS)
-
-
-# The explicit "Lokalita: <street>[, <quarter>]" trailer some ads append to
+# The explicit "Lokalita: <place>[, <quarter>]" trailer some ads append to
 # the description (W0 item 0i). The colon distinguishes it from prose ("v
 # klidné lokalitě"). IMPORTANT: parse_detail feeds NEWLINE-COLLAPSED text
 # (_text() folds all whitespace to single spaces), so a line-end anchor is
 # dead here — the value is instead truncated at the first following label
 # token ("Kontakt:", "Cena:", "Tel:", ...) and gated word-by-word
 # (review-confirmed critical on this item's first cut: the loose capture
-# swallowed the rest of the description into street/street_name_key).
+# swallowed the rest of the description).
 _LOKALITA_TRAILER_RE = re.compile(
     r"(?i)\blokalita:[^\S\r\n]*(?:ul\.[^\S\r\n]*)?"
     r"([^,\r\n]{2,60}?)"
@@ -246,34 +194,12 @@ def _trailer_value_words(raw: str) -> list[str]:
     return out
 
 
-def _trailer_street_quarter(
-    description: str | None, locality: str | None,
-) -> tuple[str | None, str | None]:
-    """(street, quarter) from a description's 'Lokalita:' trailer, or Nones.
-
-    Both values are label-truncated and word-count-bounded (street <=4 words
-    incl. a house number, quarter <=3), the street must look street-like (the
-    ending/stopword gate or a numeral street name), the quarter must look
-    like a place name (capitalized first word), and a candidate equal to the
-    row's own town is dropped."""
-    if not description:
-        return None, None
-    m = _LOKALITA_TRAILER_RE.search(description)
-    if m is None:
-        return None, None
-
-    street_words = _trailer_value_words(m.group(1).strip(" ."))
-    cand = " ".join(street_words).strip(" .") or None
-    if cand is not None:
-        numeral = re.fullmatch(_NUMERAL_STREET_NAME + _HOUSE_NO, cand) is not None
-        if (
-            len(street_words) > 4
-            or (locality and cand.lower() == locality.lower())
-            or (not numeral and not _looks_like_street_word(street_words[0]))
-        ):
-            cand = None
-
-    quarter_words = _trailer_value_words((m.group(2) or "").strip(" ."))
+def _trailer_quarter(description: str | None, locality: str | None) -> str | None:
+    """The quarter from a description's 'Lokalita: <place>, <quarter>' trailer, or None:
+    label-truncated, at most 3 words, capitalised, and never the row's own town. The
+    street half is gone (2026-09-30): the text lane reads the street now."""
+    m = _LOKALITA_TRAILER_RE.search(description or "")
+    quarter_words = _trailer_value_words(((m and m.group(2)) or "").strip(" ."))
     quarter = " ".join(quarter_words).strip(" .") or None
     if quarter is not None and (
         len(quarter_words) > 3
@@ -281,34 +207,13 @@ def _trailer_street_quarter(
         or (locality and quarter.lower() == locality.lower())
     ):
         quarter = None
-    return cand, quarter
-
-
-def extract_street(haystack: str | None) -> str | None:
-    """Best-effort Czech street name from the title + description, or None.
-
-    Conservative on purpose: the keyword-anchored forms ("ulice Dlouhá",
-    "náměstí Míru", "Vinohradská třída") are reliable; the bare "<Name>
-    <house-no>" form only fires for a street-like word so a listing noun
-    ("Byt 3", "Garáž 20", "Letovice 679 61") never masquerades as a street.
-    """
-    if not haystack:
-        return None
-    for rx in (_STREET_PREFIX_RE, _STREET_SUFFIX_RE):
-        m = rx.search(haystack)
-        if m:
-            return _clean_street(m.group(0))
-    m = _STREET_HOUSENO_RE.search(haystack)
-    if m and _looks_like_street_word(m.group(1)):
-        return _clean_street(m.group(0))
-    return None
+    return quarter
 
 
 def _resolve_coords(
     *,
     link_lat: float | None,
     link_lon: float | None,
-    street: str | None,
 ) -> tuple[float | None, float | None, dict[str, Any]]:
     """The ad's own maps-link pin, CZ-guarded, or nothing.
 
@@ -318,7 +223,6 @@ def _resolve_coords(
     present = link_lat is not None and link_lon is not None
     prov: dict[str, Any] = {
         "source": "link" if present else None,
-        "street": street,
         "link_present": present,
     }
     return (link_lat, link_lon, prov) if present else (None, None, prov)
@@ -519,13 +423,7 @@ def parse_detail(
     )
     locality, psc = _locality(_text(lok_cell))
 
-    street = extract_street(haystack)
-    trailer_street, trailer_quarter = _trailer_street_quarter(description, locality)
-    if street is None:
-        street = trailer_street
-    lat, lon, coord_provenance = _resolve_coords(
-        link_lat=link_lat, link_lon=link_lon, street=street,
-    )
+    lat, lon, coord_provenance = _resolve_coords(link_lat=link_lat, link_lon=link_lon)
 
     # The listing's own photos carry its ad id in the URL (/img/N/sub/<id>.jpg); the
     # "podobné inzeráty" footer shows OTHER ads' cover thumbnails — scope to this id.
@@ -575,15 +473,12 @@ def parse_detail(
         floor=floor,
         total_floors=total_floors,
         locality=locality,
-        district=trailer_quarter,
+        district=_trailer_quarter(description, locality),
         # The Lokalita cell's PSČ was parsed into raw_json.psc since day one but
         # never written to the column — 29,538 of 29,543 active rows had it in
         # the payload with listings.zip NULL (W0 item 0c). A municipality-grain
         # anchor far better than bazos's collapsed town pins.
         zip=psc,
-        # The STORED street is cleaned to a bare, uniform name (prefix stripped,
-        # trailing description bleed like "ul. Teplého Nabízíme" trimmed).
-        street=clean_street(street),
         lat=lat,
         lon=lon,
         description=description,

@@ -10,6 +10,8 @@
  *   * each photo carries the best Hamming distance to the other side, and a
  *     photo with no match says so;
  *   * the judge's transcript shows both evidence lists;
+ *   * a blind pair of the random sample (`?blind=1&sample=1`) withholds the
+ *     engine's view too, until the answer that opens the judge;
  *   * a negative verdict still takes two clicks here;
  *   * no interactive control is nested inside another.
  */
@@ -33,7 +35,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupPair: vi.fn(),
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -193,10 +194,6 @@ describe('<AutodedupPair>', () => {
       },
       must_not_link: true,
     });
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-      { code: 'unit_number', label: 'Číslo jednotky' },
-    ]);
   });
 
   it('arrives blind from a blind queue and un-blinds on the operator\'s own verdict', async () => {
@@ -205,7 +202,7 @@ describe('<AutodedupPair>', () => {
      * being ruled on, and the transcript is the biggest thing on the screen. */
     renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
     await screen.findByText('Judgements');
-    expect(screen.queryByText(/judge: same property/)).toBeNull();
+    expect(screen.queryByText(/soudce: stejná nemovitost/)).toBeNull();
     expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
     expect(screen.queryByText(/Unit discriminator/)).toBeNull();
     expect(screen.getByText(/verdikt soudce je skrytý/)).toBeInTheDocument();
@@ -213,29 +210,114 @@ describe('<AutodedupPair>', () => {
     expect(screen.getByText('area_rel_diff')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Stejné' }));
-    await waitFor(() => expect(screen.getByText(/judge: same property/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/soudce: stejná nemovitost/)).toBeInTheDocument());
+  });
+
+  it('stays blind on a stored "Nevím": the Judge row\'s drill-down is no peek', async () => {
+    vi.mocked(api.getAutodedupPair).mockResolvedValue({
+      store_ready: true,
+      data: {
+        ...DETAIL,
+        verdicts: [
+          {
+            id: 7,
+            kind: 'pair',
+            cluster_key: null,
+            listing_lo: 101,
+            listing_hi: 202,
+            verdict: 'unsure',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-16T10:00:00Z',
+          },
+        ],
+      },
+    });
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
+    expect(
+      await screen.findByText(/Naslepo: verdikt soudce je skrytý/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/soudce: stejná nemovitost/)).toBeNull();
+    expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
+  });
+
+  it("withholds the engine's view on a blind pair of the random sample until answered", async () => {
+    const user = userEvent.setup();
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1&sample=1`);
+    expect(await screen.findByText(/co o dvojici ví engine, je skryté/)).toBeInTheDocument();
+    expect(screen.queryByText('band')).toBeNull();
+    expect(screen.queryByText('evidence_gate')).toBeNull();
+    expect(screen.queryByText('k1')).toBeNull();
+    expect(screen.queryByText('area_rel_diff')).toBeNull();
+    expect(screen.getByText(/verdikt soudce je skrytý/)).toBeInTheDocument();
+    /* The adverts themselves stay: they are what the operator rules on. */
+    expect(screen.getByText('Digests')).toBeInTheDocument();
+    expect(screen.getByText('Photos')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Stejné' }));
+    await waitFor(() => expect(screen.getByText('area_rel_diff')).toBeInTheDocument());
+    expect(screen.getByText('band')).toBeInTheDocument();
+    expect(screen.getByText('evidence_gate')).toBeInTheDocument();
+    expect(screen.queryByText(/co o dvojici ví engine/)).toBeNull();
+  });
+
+  it('keeps the engine withheld on a stored "Nevím", and shows it outside the sample', async () => {
+    vi.mocked(api.getAutodedupPair).mockResolvedValue({
+      store_ready: true,
+      data: {
+        ...DETAIL,
+        pair: null,
+        verdicts: [
+          {
+            id: 8,
+            kind: 'pair',
+            cluster_key: null,
+            listing_lo: 101,
+            listing_hi: 202,
+            verdict: 'unsure',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-16T10:00:00Z',
+          },
+        ],
+      },
+    });
+    const { unmount } = renderPair(
+      `${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1&sample=1`,
+    );
+    expect(await screen.findByText(/co o dvojici ví engine, je skryté/)).toBeInTheDocument();
+    /* "Never scored" is the engine's view too: it tells which half of the draw
+     * a pair came from. */
+    expect(screen.queryByText(/Engine tuto dvojici neohodnotil/)).toBeNull();
+    /* The rulings page is not blind, and after a "Nevím" it lists this pair with the
+     * engine's view: the link to it stays away while the engine is hidden. */
+    expect(screen.queryByText(/Všechna rozhodnutí o inzerátu/)).toBeNull();
+    unmount();
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
+    expect(await screen.findByText(/Engine tuto dvojici neohodnotil/)).toBeInTheDocument();
+    expect(screen.queryByText(/co o dvojici ví engine/)).toBeNull();
+    expect(screen.getByText(/Všechna rozhodnutí o inzerátu/)).toBeInTheDocument();
   });
 
   it('shows the judge with no blind parameter at all', async () => {
     renderPair();
-    expect(await screen.findByText(/judge: same property/)).toBeInTheDocument();
+    expect(await screen.findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();
   });
 
   /* ------------------------------------------------- the operator's reasons (mig 533) */
 
-  it('offers the reason picker OPEN — one pair is the whole page', async () => {
+  it('offers the note OPEN, and no reason picker — one pair is the whole page', async () => {
     renderPair();
     await screen.findByText('area_rel_diff');
-    expect(await screen.findByRole('button', { name: 'Jiný půdorys' })).toBeInTheDocument();
     expect(screen.getByLabelText('Poznámka')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '+ důvod / poznámka' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '+ poznámka' })).toBeNull();
   });
 
-  it('carries the chips and the note into the verdict it posts', async () => {
+  it('carries the note into the verdict it posts', async () => {
     const user = userEvent.setup();
     renderPair();
     await screen.findByText('area_rel_diff');
-    await user.click(await screen.findByRole('button', { name: 'Číslo jednotky' }));
     await user.type(screen.getByLabelText('Poznámka'), 'byt 4 vs byt 7');
     await user.click(screen.getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
@@ -243,7 +325,7 @@ describe('<AutodedupPair>', () => {
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'same',
-      reasons: ['unit_number'],
+      reasons: [],
       note: 'byt 4 vs byt 7',
     });
   });
@@ -289,7 +371,7 @@ describe('<AutodedupPair>', () => {
 
   it('shows the judge transcript with both evidence lists', async () => {
     renderPair();
-    expect(await screen.findByText(/judge: same property/)).toBeInTheDocument();
+    expect(await screen.findByText(/soudce: stejná nemovitost/)).toBeInTheDocument();
     expect(screen.getByText(/same kitchen tiles/)).toBeInTheDocument();
     expect(screen.getByText(/different floor stated/)).toBeInTheDocument();
     expect(screen.getByText(/Unit discriminator/)).toBeInTheDocument();
@@ -317,7 +399,7 @@ describe('<AutodedupPair>', () => {
       },
     });
     renderPair();
-    await screen.findByText(/judge: same property/);
+    await screen.findByText(/soudce: stejná nemovitost/);
     const marks = [...document.querySelectorAll('mark')].map((m) => m.textContent);
     expect(marks).toEqual(['Byt č. 14', '4. patře', '68 m²']);
   });
@@ -382,7 +464,7 @@ describe('<AutodedupPair>', () => {
       data: { ...DETAIL, pair: null },
     });
     renderPair();
-    expect(await screen.findByText(/never scored/)).toBeInTheDocument();
+    expect(await screen.findByText(/Engine tuto dvojici neohodnotil/)).toBeInTheDocument();
   });
 
   it('nests no interactive control inside another', async () => {

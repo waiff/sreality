@@ -64,8 +64,8 @@ _LABELS: dict[str, str] = {
     usql.VALIDATION_GROUPS_TOTAL_SQL: "validation_total",
     usql.VALIDATION_RESIDUAL_SAMPLE_SQL: "validation_sample",
     usql.VALIDATION_RESIDUAL_TOTAL_SQL: "validation_total",
-    usql.AGREEMENT_PAIRS_SQL: "agreement_pairs",
-    usql.AGREEMENT_OVERSIZE_SQL: "agreement_oversize",
+    usql.VALIDATION_JUDGE_SAMPLE_SQL: "validation_sample",
+    usql.VALIDATION_JUDGE_TOTAL_SQL: "validation_total",
     usql.GROUPS_COUNT_SQL: "groups_count",
     usql.RESIDUAL_COUNT_SQL: "residual_count",
     usql.BLOCKS_SQL: "blocks",
@@ -74,7 +74,6 @@ _LABELS: dict[str, str] = {
     usql.CERTIFICATE_COUNTS_SQL: "certificates",
     usql.GENERATION_COUNTS_SQL: "generations",
     usql.VERDICT_COUNTS_SQL: "verdict_counts",
-    usql.REASON_COUNTS_SQL: "reason_counts",
     usql.JUDGEMENT_COUNTS_SQL: "judgement_counts",
     usql.LAST_SCORE_RUN_SQL: "last_run",
     usql.VERDICT_PAIR_APPEND_SQL: "verdict_write",
@@ -83,12 +82,15 @@ _LABELS: dict[str, str] = {
     usql.MUST_NOT_LINK_RETRACT_SQL: "must_not_link_retract",
     usql.VERDICT_PAIR_FROM_VETO_SQL: "veto_written_down",
     usql.CLUSTER_EXISTS_SQL: "cluster_exists",
-    usql.PAIR_EXISTS_SQL: "pair_exists",
+    usql.PAIR_CATEGORIES_SQL: "pair_categories",
+    usql.JIT_OFF: "jit_off",
 }
 # The statements that fetch one row over the asked-for page size.
 _PAGED: frozenset[str] = frozenset(
     {"groups", "groups_newest", "groups_largest", "groups_random", "residual", "residual_random"}
 )
+# `PAIR_CATEGORIES_SQL`'s one row: both adverts exist and rule 15 lets them be one property.
+_BOTH_ADVERTS: list[tuple[str, str, str, str]] = [("prodej", "byt", "prodej", "byt")]
 
 
 def _tuple(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
@@ -401,7 +403,6 @@ EMPTY_ENGINE: dict[str, Any] = {
     "latest_generation": None,
     "verdicts": [],
     "n_verdicts": 0,
-    "verdict_reasons": [],
     "judgements": [],
     "n_judgements": 0,
     "last_score_run": None,
@@ -786,7 +787,6 @@ def test_group_filters_reach_the_statement_as_parameters(client, conn):
             "max_score": 0.9,
             "verdict": "unreviewed",
             "shared_photo": 1,
-            "has_judgement": 0,
             "limit": 10,
         },
     )
@@ -799,7 +799,6 @@ def test_group_filters_reach_the_statement_as_parameters(client, conn):
     assert params["verdict"] == "unreviewed"
     # 0|1 off the wire becomes the boolean the `::boolean` arm compares
     assert params["shared_photo"] is True
-    assert params["has_judgement"] is False
     assert params["limit"] == 11
 
 
@@ -840,7 +839,7 @@ def test_an_unset_group_filter_is_a_null_parameter_not_a_predicate(client, conn)
     params = _last_call(conn, usql.GROUPS_WEAKEST_SQL)
     for key in ("block", "block_grain", "source", "category_main", "category_type",
                 "min_size", "max_size",
-                "min_score", "max_score", "verdict", "shared_photo", "has_judgement",
+                "min_score", "max_score", "verdict", "shared_photo",
                 "after_score", "after_key", "after_ts", "after_size"):
         assert params[key] is None, key
 
@@ -1307,109 +1306,15 @@ def test_the_counter_renders_against_an_un_migrated_store(client, conn):
     assert len(conn.calls) == 1
 
 
-# -------------------------------------------------- operator vs judge (the D6 gate)
+def test_has_judgement_is_no_filter_of_the_queues(client, conn):
+    """A judged pair is browsed on the Judge page; on a queue the hint was a blind leak (E55)."""
+    for surface in ("/autodedup/groups", "/autodedup/residual"):
+        assert client.get(surface, params={"has_judgement": 1}).status_code == 400
+    assert "has_judgement" not in usql._CLUSTER_WHERE + usql._RESIDUAL_FILTERS
 
 
-def _agree_row(
-    lo: int,
-    hi: int,
-    operator: str,
-    judge: str,
-    tier: str = "gold",
-    source: str = "explicit",
-) -> tuple[Any, ...]:
-    return _tuple(
-        usql.AGREEMENT_COLUMNS,
-        listing_lo=lo,
-        listing_hi=hi,
-        operator_verdict=operator,
-        operator_source=source,
-        judge_verdict=judge,
-        judge_tier=tier,
-        judge_model="gpt-5.6-luna",
-    )
-
-
-def test_the_agreement_read_reports_the_gate_the_directions_and_the_bound(client, conn):
-    """Hand-computed: 4 comparable pairs, 3 agree. 3/4 = 0.75, and the Wilson 95% interval is
-    0.30064–0.95442 — worked through on paper (z = 1.959964, z^2 = 3.841459; denominator
-    1 + z^2/4 = 1.960365; centre (0.75 + 0.480182)/1.960365 = 0.627530; half-width
-    (z/1.960365) * sqrt(0.046875 + 0.060023) = 0.326886) and pinned here, so a rewrite of the
-    maths shows up as a failing number rather than as a different gate."""
-    conn.canned = {
-        "agreement_pairs": [
-            _agree_row(1, 2, "same", "same_property"),
-            _agree_row(3, 4, "same", "same_property", source="implied"),
-            _agree_row(5, 6, "different", "different_property", tier="vision"),
-            _agree_row(7, 8, "same", "different_property", source="implied"),
-            # Not a judgement: counted, never scored.
-            _agree_row(9, 10, "same", "insufficient_evidence", tier="vision"),
-        ],
-        "agreement_oversize": [(2,)],
-    }
-    data = client.get("/autodedup/agreement").json()["data"]
-    assert data["generation"] == "g3"
-    assert data["overall"]["n"] == 4
-    assert data["overall"]["n_agree"] == 3
-    assert data["overall"]["agreement"] == pytest.approx(0.75)
-    assert data["overall"]["ci_low"] == pytest.approx(0.627530 - 0.326886, abs=1e-5)
-    assert data["overall"]["ci_high"] == pytest.approx(0.627530 + 0.326886, abs=1e-5)
-    # The two directions, apart.
-    assert data["overall"]["n_judge_different_operator_same"] == 1
-    assert data["overall"]["n_judge_same_operator_different"] == 0
-    # Where the labels came from.
-    assert (data["overall"]["n_explicit"], data["overall"]["n_implied"]) == (2, 2)
-    assert data["n_insufficient_evidence"] == 1
-    gold = next(t for t in data["tiers"] if t["tier"] == "gold")
-    assert (gold["n"], gold["n_agree"]) == (3, 2)
-    assert data["gate"] == {"tier": "gold", "bar": 0.95, "target_n": 200}
-    # The implied expansion's bound, reported rather than assumed away.
-    assert data["max_cluster_size"] == routes.AGREEMENT_MAX_CLUSTER_SIZE
-    assert data["n_clusters_over_cap"] == 2
-    assert [
-        (d["listing_lo"], d["listing_hi"]) for d in data["disagreements"]
-    ] == [(7, 8)]
-    params = _last_call(conn, usql.AGREEMENT_PAIRS_SQL)
-    # The label set is every ruling on record (E58: a verdict carries its own member set), so
-    # the generation is an ECHO in the answer and NOT a filter on the statement.
-    assert "generation" not in params
-    assert params["max_cluster_size"] == routes.AGREEMENT_MAX_CLUSTER_SIZE
-
-
-def test_the_agreement_statement_unions_explicit_and_implied_pairs(client, conn):
-    """The implied half is the reason the number exists at all — 103 confirmed groups carry
-    far more pair evidence than the pairs ruled on one at a time. Asserted on the statement,
-    since the fake connection cannot execute a CTE."""
-    sql = " ".join(usql.AGREEMENT_PAIRS_SQL.split())
-    # Only a `same` cluster implies anything; a rejected group says nothing per pair.
-    assert "WHERE cf.verdict = 'same'" in sql
-    # THE SET COMES OFF THE VERDICT (E58), not off today's clustering: `member_ids` is what
-    # the operator was looking at, so a later pass re-clustering the key cannot change what
-    # this label asserts. `cluster_members` survives only as the LEGACY fallback, scoped to
-    # the verdict's OWN generation.
-    assert "unnest(cf.member_ids)" in sql
-    assert "coalesce(v.member_ids, fb.ids)" in sql
-    assert "v.generation IS NULL OR m.generation = v.generation" in sql
-    assert "JOIN autodedup.clusters" not in sql
-    # Each pair once.
-    assert "mb.id > ma.id" in sql
-    # The explicit verdict WINS: an implied row is dropped when the pair carries one.
-    assert "WHERE NOT EXISTS ( SELECT 1 FROM explicit e2" in sql
-    # `unsure` is not a label; `oss` is not a judge here; the best tier wins.
-    assert "WHERE o.verdict <> 'unsure'" in sql
-    assert "j.tier IN ('gold', 'vision', 'text')" in sql
-    assert "CASE j.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in sql
-    # The implied expansion is bounded, and bounded on the SET the operator ruled.
-    assert "array_length(cf.member_ids, 1), 0) <= %(max_cluster_size)s::int" in sql
-
-
-def test_the_agreement_read_renders_against_an_un_migrated_store(client, conn):
-    conn.ready = False
-    assert client.get("/autodedup/agreement").json() == {"data": None, "store_ready": False}
-
-
-def test_the_agreement_read_refuses_an_unknown_filter(client, conn):
-    assert client.get("/autodedup/agreement", params={"tier": "gold"}).status_code == 400
+def test_the_agreement_read_is_gone(client, conn):
+    assert client.get("/autodedup/agreement").status_code == 404
 
 
 # ----------------------------------------------------------------------- one group, whole
@@ -1464,7 +1369,7 @@ def test_group_detail_carries_members_photos_edges_and_conflicts(client, conn):
     # the certificate is parsed back out of the reason string, not invented
     assert pair["certificate"] == "K-A"
     assert pair["family_names"] == ["ATTR", "IMG"]
-    assert "evidence families" in pair["why_not_merged"]
+    assert "druhy důkazů" in pair["why_not_merged"]
     assert data["judgements"][0]["verdict"] == "same_property"
     assert data["judgements"][0]["key_evidence"] == ["same street and number"]
     assert data["conflicts"][0]["invariant"] == "floor_conflict"
@@ -1600,7 +1505,7 @@ def test_residual_pairs_carry_both_sides_and_why_they_were_not_merged(client, co
     assert item["a"]["listing_id"] == 21 and item["b"]["listing_id"] == 22
     assert item["judge"] == {"verdict": "same_property", "confidence": 0.81, "tier": "text"}
     assert item["verdict"] is None
-    assert "review band" in item["why_not_merged"]
+    assert "pásmu kontroly" in item["why_not_merged"]
     # the pair was scored by the hand prior, which ships with the repo, so the breakdown is
     # the model's own log-odds contributions rather than a stand-in
     assert len(item["top_features"]) <= routes.TOP_FEATURES
@@ -1643,11 +1548,11 @@ def test_a_pair_scored_by_a_model_this_deployment_has_not_got_falls_back_to_feat
 @pytest.mark.parametrize(
     "decision,veto,zone,expected",
     [
-        ("model", "sale_rent", "reject", "hard guard"),
-        ("auto_reject:numeral_conflict", None, "reject", "auto-rejected"),
-        ("certificate:K-C:evidence_gate", None, "band", "evidence families"),
-        ("model", None, "reject", "below the review band"),
-        ("model", None, "merge", "no cluster of this generation"),
+        ("model", "sale_rent", "reject", "pevné pravidlo dvojici odmítlo: sale_rent"),
+        ("auto_reject:numeral_conflict", None, "reject", "automaticky zamítnuto: numeral"),
+        ("certificate:K-C:evidence_gate", None, "band", "dva nezávislé druhy důkazů"),
+        ("model", None, "reject", "pod pásmem kontroly"),
+        ("model", None, "merge", "žádná skupina této generace"),
     ],
 )
 def test_why_not_merged_names_the_precondition_that_failed(
@@ -1663,7 +1568,7 @@ def test_residual_filters_and_cursor_reach_the_statement(client, conn):
     page = client.get(
         "/autodedup/residual",
         params={"limit": 1, "zone": "band", "min_score": 0.3, "source_pair": "bazos+sreality",
-                "block": 500123, "has_judgement": 1, "verdict": "unreviewed"},
+                "block": 500123, "verdict": "unreviewed"},
     ).json()["data"]
     assert page["has_more"] is True
     assert page["next_after"] == "0.44|21|22"
@@ -1672,7 +1577,6 @@ def test_residual_filters_and_cursor_reach_the_statement(client, conn):
     assert params["min_score"] == 0.3
     assert params["source_pair"] == "bazos+sreality"
     assert params["block"] == 500123
-    assert params["has_judgement"] is True
     assert params["limit"] == 2
 
     client.get("/autodedup/residual", params={"after": "0.44|21|22"})
@@ -1847,7 +1751,7 @@ def admin_client(conn: _FakeConn):
 
 
 def test_a_negative_pair_verdict_also_writes_the_permanent_must_not_link(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different",
@@ -1866,7 +1770,7 @@ def test_a_negative_pair_verdict_also_writes_the_permanent_must_not_link(admin_c
 
 
 def test_same_building_different_unit_is_also_a_must_not_link(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12,
@@ -1880,7 +1784,8 @@ def test_same_building_different_unit_is_also_a_must_not_link(admin_client, conn
 
 @pytest.mark.parametrize("verdict", ["same", "unsure"])
 def test_a_non_negative_verdict_writes_no_must_not_link(admin_client, conn, verdict):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row(verdict=verdict)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
+                   "verdict_write": [_verdict_row(verdict=verdict)]}
     body = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": verdict},
@@ -1896,7 +1801,8 @@ def test_reversing_a_negative_pair_verdict_retracts_the_must_not_link(
     """The mirror of the must-not-link write. A veto the operator has taken back has to stop
     vetoing: `guards.py` refuses every pair in the table on every future run, so a row left
     behind kills a pair the page now shows as confirmed."""
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row(verdict=verdict)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
+                   "verdict_write": [_verdict_row(verdict=verdict)]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different"},
@@ -1912,7 +1818,7 @@ def test_reversing_a_negative_pair_verdict_retracts_the_must_not_link(
 
 
 def test_a_negative_verdict_does_not_retract_what_it_just_wrote(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different"},
@@ -2324,7 +2230,7 @@ def test_a_split_never_asks_whether_the_pair_was_scored(admin_client, split_conn
     """A cluster is the UNION of accepted edges, so two members can share a cluster with no
     scored edge between them. Membership is the validation; `autodedup.pairs` is not."""
     admin_client.post("/autodedup/verdict/split", json=_split())
-    assert all(sql != usql.PAIR_EXISTS_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.PAIR_CATEGORIES_SQL for sql, _ in split_conn.calls)
 
 
 @pytest.mark.parametrize(
@@ -2410,7 +2316,7 @@ def test_the_new_verdict_is_negative_everywhere_it_is_read(admin_client, conn):
     assert "same_project_different_unit" in routes.VERDICT_VALUES
     assert "same_project_different_unit" in routes.NEGATIVE_VERDICTS
     assert "same_project_different_unit" in routes.VERDICT_FILTER_VALUES
-    conn.canned = {"pair_exists": [(1,)],
+    conn.canned = {"pair_categories": _BOTH_ADVERTS,
                    "verdict_write": [_verdict_row(verdict="same_project_different_unit")]}
     body = admin_client.post(
         "/autodedup/verdict",
@@ -2472,7 +2378,7 @@ def test_the_plain_verdict_route_names_the_migration_instead_of_500ing(
     """The split route already does this. The same click on the same new value, one button
     over, must not answer with a bare 500 that sends the operator to the logs."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.canned = {"pair_exists": [(1,)], "cluster_exists": [(1,)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "cluster_exists": [(1,)]}
     conn.raises[statement] = psycopg_errors.CheckViolation(
         'new row violates check constraint "verdicts_verdict_check"'
     )
@@ -2736,17 +2642,15 @@ def test_the_route_still_accepts_a_filter_named_in_the_older_vocabulary(client):
 # ------------------------------------------------- the operator's REASONS (migration 533)
 
 
-def test_the_reason_registry_is_served_so_the_page_hard_codes_nothing(client):
-    """No connection, no `store_ready`: the vocabulary is code, and the chips have to render
-    against a database that has not been migrated at all."""
-    body = client.get("/autodedup/verdict-reasons").json()
-    codes = [r["code"] for r in body["data"]["reasons"]]
-    assert "floor_plan_differs" in codes and codes[-1] == "other"
-    assert all(r["label"] for r in body["data"]["reasons"])
+def test_the_reason_picker_is_gone_from_the_api(client):
+    """Binary verdicts (D39): no surface offers reason chips, so nothing serves their labels or
+    counts them. A stored code still validates and reads back (below)."""
+    assert client.get("/autodedup/verdict-reasons").status_code == 404
+    assert "verdict_reasons" not in client.get("/autodedup/stats").json()["data"]["engine"]
 
 
 def test_a_pair_verdict_stores_its_reasons_and_its_note(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     resp = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different",
@@ -2772,7 +2676,7 @@ def test_a_cluster_verdict_stores_its_reasons(admin_client, conn):
 
 
 def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
@@ -2786,7 +2690,7 @@ def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
 def test_an_unknown_reason_is_refused_and_nothing_is_written(admin_client, conn):
     """A chip the operator clicked and the store never kept is worse than no chip at all —
     so an unknown code is the client error it is, before any statement runs."""
-    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS, "verdict_write": [_verdict_row()]}
     resp = admin_client.post(
         "/autodedup/verdict",
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
@@ -2836,32 +2740,11 @@ def test_re_deciding_a_verdict_appends_with_its_own_reasons(admin_client, conn):
         assert "ON CONFLICT DO NOTHING" in flat
 
 
-def test_the_reason_histogram_is_counted_per_grain(client, conn):
-    conn.canned = {
-        "reason_counts": [
-            _tuple(usql.REASON_COUNT_COLUMNS, kind="pair", reason="floor_plan_differs", n=7),
-            _tuple(usql.REASON_COUNT_COLUMNS, kind="cluster", reason="same_project", n=2),
-        ],
-    }
-    engine = client.get("/autodedup/stats").json()["data"]["engine"]
-    assert engine["verdict_reasons"] == [
-        {"kind": "pair", "reason": "floor_plan_differs", "n": 7},
-        {"kind": "cluster", "reason": "same_project", "n": 2},
-    ]
-
-
-def test_the_reason_histogram_unnests_the_array_rather_than_grouping_on_it(client, conn):
-    """Grouping on the whole array would count `{a,b}` as its own bucket — a histogram of
-    combinations, not of reasons."""
-    assert "unnest(v.reasons)" in usql.REASON_COUNTS_SQL
-    assert "GROUP BY 1, 2" in usql.REASON_COUNTS_SQL
-
-
 def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client, conn):
     """The 532 guard's sibling. A missing COLUMN is a different SQLSTATE from a rejected
     VALUE, so the two are told apart and each names its own migration."""
     psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.canned = {"pair_exists": [(1,)]}
+    conn.canned = {"pair_categories": _BOTH_ADVERTS}
     conn.raises[usql.VERDICT_PAIR_APPEND_SQL] = psycopg_errors.UndefinedColumn(
         'column "reasons" of relation "verdicts" does not exist'
     )
@@ -2882,17 +2765,6 @@ def test_a_split_against_a_store_without_533_names_that_migration(admin_client, 
     resp = admin_client.post("/autodedup/verdict/split", json=_split())
     assert resp.status_code == 503
     assert "533" in resp.json()["detail"]
-
-
-def test_the_stats_page_still_renders_against_a_store_without_533(client, conn):
-    """A READ degrades where a write refuses: the header strip is not the place to learn
-    that a migration is missing."""
-    psycopg_errors = pytest.importorskip("psycopg.errors")
-    conn.raises[usql.REASON_COUNTS_SQL] = psycopg_errors.UndefinedColumn(
-        'column v.reasons does not exist'
-    )
-    body = client.get("/autodedup/stats").json()
-    assert body["data"]["engine"]["verdict_reasons"] == []
 
 
 @pytest.mark.parametrize(
@@ -3718,37 +3590,35 @@ def test_the_candidate_counter_renders_against_an_un_migrated_store(client, conn
     assert body == {"data": None, "store_ready": False}
 
 
-# --------------------------------------------- the candidate split feeds the D6 agreement
+# --------------------------------------------- the candidate split is the operator's word
 
 
-def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement(
+def test_candidate_split_verdicts_are_explicit_operator_words_on_the_judge_page(
     admin_client, candidate_conn
 ):
-    """D6's agreement read takes EVERY pair verdict as an explicit operator label (§9/E55).
+    """The Judge page compares the judge with EVERY pair verdict (`_OPERATOR_WORDS`, §9/E55).
 
     The candidate split writes through the same `VERDICT_PAIR_APPEND_SQL` with `kind = 'pair'`
-    as the pair queue does, and `AGREEMENT_PAIRS_SQL`'s `explicit` CTE selects those rows with
-    no predicate beyond the kind — so a card ruled here counts towards the gate exactly as a
-    pair ruled one at a time does. Both halves are asserted, because either one alone would
-    let the two drift apart."""
+    as the pair queue does, and the operator-words `pair_rows` CTE selects those rows with no
+    predicate beyond the kind — so a card ruled here is the operator's word exactly as a pair
+    ruled one at a time is. Both halves are asserted, because either one alone would let the
+    two drift apart."""
     admin_client.post(
         "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
     )
     writes = _calls(candidate_conn, usql.VERDICT_PAIR_APPEND_SQL)
     assert writes, "the split wrote no pair verdict"
-    # `kind` is written as the literal 'pair' — the same row shape the pair queue writes.
     assert "INSERT INTO autodedup.verdicts (kind," in usql.VERDICT_PAIR_APPEND_SQL
     assert "SELECT 'pair', %(listing_lo)s::bigint" in usql.VERDICT_PAIR_APPEND_SQL
-    explicit = usql.AGREEMENT_PAIRS_SQL[
-        usql.AGREEMENT_PAIRS_SQL.index("WITH explicit AS"):
-        usql.AGREEMENT_PAIRS_SQL.index("confirmed AS")
+    pair_rows = usql._OPERATOR_WORDS[
+        usql._OPERATOR_WORDS.index("WITH pair_rows AS"):
+        usql._OPERATOR_WORDS.index("newest AS")
     ]
-    assert "FROM autodedup.verdicts v" in explicit
-    assert "v.kind = 'pair'" in explicit
-    # no generation, no cluster, no source: a pair verdict is a pair verdict
-    for narrowing in ("generation", "cluster_key", "cluster_members", "decided_by"):
-        assert narrowing not in explicit
-    assert "'explicit'::text AS source" in usql.AGREEMENT_PAIRS_SQL
+    assert "FROM autodedup.verdicts x" in pair_rows
+    assert "x.kind = 'pair'" in pair_rows
+    for narrowing in ("generation", "cluster_key", "cluster_members", "decided_by ="):
+        assert narrowing not in pair_rows
+    assert usql._OPERATOR_WORDS in usql.JUDGEMENTS_SQL
 
 
 # ================================ E58 — a cluster verdict binds a member set (migration 538)

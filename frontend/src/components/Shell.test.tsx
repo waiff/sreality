@@ -151,7 +151,7 @@ describe('<Shell> admin menu', () => {
     await user.click(trigger);
     /* Every section that used to be its own trigger, still reachable — and the
      * three admin-only links that used to spend a slot in the row. */
-    for (const label of ['Broker Review', 'Datasets', 'Groups', 'Residual', 'Health']) {
+    for (const label of ['Broker Review', 'Datasets', 'Groups', 'Residual', 'Soudce', 'Health']) {
       expect(within(nav).getByRole('menuitem', { name: label })).toBeInTheDocument();
     }
     /* Paused, not removed: a surface switched off is a different fact from one

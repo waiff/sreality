@@ -11,9 +11,9 @@
  *     never evidence against a duplicate;
  *   * a negative PAIR verdict takes two clicks, because it writes a permanent
  *     must-not-link; the positive one does not;
- *   * the reason picker is COLLAPSED on a queue row — an open picker per row
- *     pushes the next pair off the screen, which is the one thing a review
- *     queue may not do — and the chips reach the POST once it is opened;
+ *   * the note is COLLAPSED on a queue row — an open box per row pushes the
+ *     next pair off the screen, which is the one thing a review queue may not
+ *     do — and it reaches the POST once it is opened; there is no reason picker;
  *   * a zone filter sends a key and restarts the keyset;
  *   * no interactive control is nested inside another.
  */
@@ -37,7 +37,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupBlocks: vi.fn(),
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
-    getAutodedupVerdictReasons: vi.fn(),
     getAutodedupValidationProgress: vi.fn(),
   };
 });
@@ -221,10 +220,6 @@ describe('<AutodedupResidual>', () => {
     vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
     vi.mocked(api.getAutodedupGenerations).mockResolvedValue(GENERATIONS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
-    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
-      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
-      { code: 'identical_photos', label: 'Stejné fotky' },
-    ]);
     vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
   });
 
@@ -233,10 +228,10 @@ describe('<AutodedupResidual>', () => {
   it('hides every judge artefact by default and reveals it once the pair is ruled', async () => {
     const user = userEvent.setup();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* The chip, the verdict words and the judge's own evidence are all gone —
      * one gate, not four places that each remember. */
-    expect(within(row).queryByText(/judge: not enough evidence/)).toBeNull();
+    expect(within(row).queryByText(/soudce: nerozhodl/)).toBeNull();
     expect(within(row).queryByText(/different floor/)).toBeNull();
     expect(within(row).queryByText(/same kitchen/)).toBeNull();
     /* And it SAYS it is hidden: "hidden" and "nobody judged this" are different
@@ -249,18 +244,37 @@ describe('<AutodedupResidual>', () => {
 
     await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     await waitFor(() =>
-      expect(within(row).getByText(/judge: not enough evidence/)).toBeInTheDocument(),
+      expect(within(row).getByText(/soudce: nerozhodl/)).toBeInTheDocument(),
     );
     expect(within(row).queryByText('soudce skryt')).toBeNull();
+  });
+
+  it('keeps the judge hidden on a stored "Nevím" and on a fresh one', async () => {
+    const user = userEvent.setup();
+    const nevim = { ...STORED, verdict: 'unsure' as const };
+    vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([{ ...ROW, verdict: nevim }]));
+    vi.mocked(api.postAutodedupVerdict).mockResolvedValue({
+      store_ready: true,
+      data: nevim,
+      must_not_link: false,
+    });
+    renderPage();
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+
+    await user.click(within(row).getByRole('button', { name: 'Nevím' }));
+    await waitFor(() => expect(api.postAutodedupVerdict).toHaveBeenCalled());
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+    expect(within(row).queryByText(/same kitchen/)).toBeNull();
   });
 
   it('turns the judge back on with the toggle, and says so in the URL', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     await user.click(screen.getByLabelText(/naslepo/));
     await waitFor(() =>
-      expect(screen.getByText(/judge: not enough evidence/)).toBeInTheDocument(),
+      expect(screen.getByText(/soudce: nerozhodl/)).toBeInTheDocument(),
     );
     expect(screen.getByTestId('search').textContent).toContain('blind=0');
   });
@@ -268,8 +282,8 @@ describe('<AutodedupResidual>', () => {
   it('asks for the seeded sample order and keeps the default seed out of the URL', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
-    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await screen.findByText(/Proč to engine nesloučil/);
+    await user.selectOptions(screen.getByLabelText('Řazení'), 'random');
     await waitFor(() =>
       expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
         expect.objectContaining({ sort: 'random', seed: 'v1', after: null }),
@@ -284,12 +298,12 @@ describe('<AutodedupResidual>', () => {
   it('counts the seeded sample in the header strip, and only in that order', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     /* The whole-generation count is always there… */
     await screen.findByText(/Zkontrolováno:/);
     /* …the sample only when the queue IS the sample. */
     expect(screen.queryByTestId('validation-sample')).toBeNull();
-    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await user.selectOptions(screen.getByLabelText('Řazení'), 'random');
     await waitFor(() =>
       expect(screen.getByTestId('validation-sample')).toHaveTextContent(
         /Náhodný vzorek: 12 \/ 100 zkontrolováno/,
@@ -299,7 +313,7 @@ describe('<AutodedupResidual>', () => {
 
   it('asks for the display floor of 0.20 on the first read', async () => {
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     expect(api.getAutodedupResidual).toHaveBeenCalledWith(
       expect.objectContaining({ min_score: 0.2, after: null, sort: 'score_desc' }),
     );
@@ -309,20 +323,20 @@ describe('<AutodedupResidual>', () => {
     /* Blind is this queue's default (D6), so the judge is asked for explicitly
      * here: everything BUT the judge is on the row either way. */
     renderPage('/autodedup/residual?view=pairs&blind=0');
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* Each id appears on its own card and again as a diff-table caption. */
     expect(within(row).getAllByText('#101').length).toBeGreaterThan(0);
     expect(within(row).getAllByText('#202').length).toBeGreaterThan(0);
     expect(row).toHaveTextContent('Only one evidence family was present');
     expect(within(row).getByText('img_best_hamming')).toBeInTheDocument();
-    expect(within(row).getByText(/judge: not enough evidence/)).toBeInTheDocument();
+    expect(within(row).getByText(/soudce: nerozhodl/)).toBeInTheDocument();
     expect(within(row).getByText(/different floor/)).toBeInTheDocument();
     expectNoNestedInteractive(row);
   });
 
   it('marks a disagreeing attribute and leaves a gap unmarked', async () => {
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* The diff table is the only table on the row; the cards use <dl>. */
     const diff = within(row).getByRole('table');
     /* Floor 3 vs 5 — both known and different. */
@@ -343,22 +357,24 @@ describe('<AutodedupResidual>', () => {
 
   it('renders no control the residual route does not accept', async () => {
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     /* `RESIDUAL_FILTER_KEYS` carries no category keys, and `toResidualQuery`
      * sends none — an inert select that silently returns the same list is worse
      * than no select at all. */
     const controls = screen.getAllByRole('combobox').map((el) => el.closest('label')?.textContent);
     expect(controls).not.toContain(expect.stringContaining('Druh'));
     expect(controls).not.toContain(expect.stringContaining('Nabídka'));
-    expect(controls).not.toContain(expect.stringContaining('Portal'));
+    /* Nor a judge filter: a judged pair is browsed on the Judge page, and a
+     * "judged" hint on a blind queue would lean the operator (E55). */
+    expect(controls).not.toContain(expect.stringContaining('Judged'));
     /* The ones it DOES send are still there. */
-    expect(controls.some((t) => t?.includes('Zone'))).toBe(true);
+    expect(controls.some((t) => t?.includes('Pásmo'))).toBe(true);
   });
 
   it('takes two clicks for a negative verdict and one for a positive one', async () => {
     const user = userEvent.setup();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     const separate = within(row).getByRole('button', { name: 'Různé' });
     await user.click(separate);
     /* Armed, not written: this verdict outlives every recalibration. */
@@ -384,7 +400,7 @@ describe('<AutodedupResidual>', () => {
   it('writes a positive verdict on the first click', async () => {
     const user = userEvent.setup();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'pair', verdict: 'same' }),
@@ -394,8 +410,8 @@ describe('<AutodedupResidual>', () => {
   it('sends the zone filter as a key', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
-    await user.selectOptions(screen.getByLabelText('Zone'), 'reject');
+    await screen.findByText(/Proč to engine nesloučil/);
+    await user.selectOptions(screen.getByLabelText('Pásmo'), 'reject');
     await waitFor(() =>
       expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
         expect.objectContaining({ zone: 'reject', after: null }),
@@ -407,7 +423,7 @@ describe('<AutodedupResidual>', () => {
     /* The scroll asks which scored pairs a clustering did NOT join; against the
      * superseded `g1` it answered about a clustering nobody is validating. */
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
       expect.objectContaining({ generation: null }),
     );
@@ -418,7 +434,7 @@ describe('<AutodedupResidual>', () => {
     /* The link used to carry the page's hard-coded `g1` whatever the queue was
      * showing — a drill-down into a pass nobody asked for. */
     renderPage();
-    const link = await screen.findByRole('link', { name: 'Full evidence' });
+    const link = await screen.findByRole('link', { name: 'Celý důkaz' });
     /* And it carries the blind mode with it — a drill-down out of a blind queue
      * that showed the transcript on arrival would be the hole in the blinding. */
     expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g3&blind=1');
@@ -430,7 +446,7 @@ describe('<AutodedupResidual>', () => {
   it('composes the source pair from two portal selects, in the order the server compares', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     /* 45 unordered pairs is not a list anyone reads, and the old control was a
      * text box whose placeholder ("bazos+sreality") read as a value. */
     await user.selectOptions(screen.getByLabelText('Portál A'), 'sreality');
@@ -446,7 +462,7 @@ describe('<AutodedupResidual>', () => {
   it('says so rather than filtering silently when only one portal is chosen', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     await user.selectOptions(screen.getByLabelText('Portál A'), 'sreality');
     expect(await screen.findByText(/Vyberte oba portály/)).toBeInTheDocument();
     expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
@@ -458,7 +474,7 @@ describe('<AutodedupResidual>', () => {
 
   it('reads its filters out of the query string', async () => {
     renderPage('/autodedup/residual?view=pairs&zone=reject&min_score=0.5&block=563510');
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
       expect.objectContaining({
         zone: 'reject',
@@ -467,14 +483,14 @@ describe('<AutodedupResidual>', () => {
         block_grain: null,
       }),
     );
-    expect(screen.getByLabelText('Zone')).toHaveValue('reject');
+    expect(screen.getByLabelText('Pásmo')).toHaveValue('reject');
   });
 
   it('writes the display floor into the url when it is cleared', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
-    await user.clear(screen.getByLabelText('Score ≥'));
+    await screen.findByText(/Proč to engine nesloučil/);
+    await user.clear(screen.getByLabelText('Skóre ≥'));
     /* "no floor" is a filter; a url that dropped the key would restore 0.20 on
      * the next reload — a different queue from the one that was shared. */
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('min_score='));
@@ -492,7 +508,7 @@ describe('<AutodedupResidual>', () => {
   it('offers the blocks by name', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     const select = screen.getByLabelText('Block');
     expect(select.tagName).toBe('SELECT');
     await waitFor(() =>
@@ -516,12 +532,12 @@ describe('<AutodedupResidual>', () => {
   it('says how much of the filtered queue is on screen', async () => {
     vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([ROW], null, 58));
     renderPage();
-    expect(await screen.findByText('1 of 58 pairs')).toBeInTheDocument();
+    expect(await screen.findByText('1 z 58 dvojic')).toBeInTheDocument();
   });
 
   it('renders the covers as queue-grain thumbnails, not hero photos', async () => {
     const { container } = renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     /* jsdom loads no CSS, so the grain is asserted where it is decided: the
      * dense cover box (w-40 = 160px, 4:3). Without it two ~600px photos push
      * the diff table, the reason and the four answers below the fold — the
@@ -563,7 +579,7 @@ describe('<AutodedupResidual>', () => {
     const user = userEvent.setup();
     withGalleries();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* One cover is the weakest evidence a portal offers: two adverts for one flat
      * often share nothing but the floor plan. So both sides page, right here. */
     expect(within(row).getByText('1 / 3')).toBeInTheDocument();
@@ -587,7 +603,7 @@ describe('<AutodedupResidual>', () => {
     const user = userEvent.setup();
     withGalleries();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     await user.click(within(row).getAllByRole('button', { name: 'Next photo' })[0]);
     /* A chevron inside a review row must mean exactly one thing: the row's own
      * "Full evidence" link and the four verdict buttons are NOT what was clicked. */
@@ -599,7 +615,7 @@ describe('<AutodedupResidual>', () => {
   it('keeps the queue grain while it pages', async () => {
     withGalleries();
     const { container } = renderPage();
-    await screen.findByText(/Why it wasn't merged/);
+    await screen.findByText(/Proč to engine nesloučil/);
     /* jsdom loads no CSS, so the grain is asserted where it is decided: the 160px
      * dense box. A gallery that grew the footprint would push the diff table, the
      * reason and the four answers below the fold — the whole decision off screen. */
@@ -608,7 +624,7 @@ describe('<AutodedupResidual>', () => {
 
   it('falls back to the cover when a side carries no gallery', async () => {
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* Nothing to page, so no chevrons and no counter — never an empty box. */
     expect(within(row).queryByRole('button', { name: 'Next photo' })).toBeNull();
     expect(within(row).getAllByRole('presentation', { hidden: true }).length).toBe(2);
@@ -616,7 +632,7 @@ describe('<AutodedupResidual>', () => {
 
   it('labels a cover the portal refuses to serve', async () => {
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     const img = within(row).getAllByRole('presentation', { hidden: true })[0] as HTMLImageElement;
     fireEvent.error(img);
     await waitFor(() =>
@@ -627,32 +643,27 @@ describe('<AutodedupResidual>', () => {
   it('renders the empty state on an un-migrated store', async () => {
     vi.mocked(api.getAutodedupResidual).mockResolvedValue({ store_ready: false, data: null });
     renderPage();
-    expect(await screen.findByText(/Schema not migrated yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/Úložiště programu v této databázi zatím není/)).toBeInTheDocument();
   });
 
   /* ------------------------------------------------- the operator's reasons (mig 533) */
 
-  it('keeps the reason picker collapsed until the operator asks for it', async () => {
+  it('keeps the note collapsed until the operator asks for it', async () => {
     const user = userEvent.setup();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
     /* Nothing but the toggle: a queue is a scroll. */
-    expect(within(row).queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
     expect(within(row).queryByLabelText('Poznámka')).toBeNull();
-    await user.click(within(row).getByRole('button', { name: '+ důvod / poznámka' }));
-    expect(within(row).getByRole('button', { name: 'Jiný půdorys' })).toBeInTheDocument();
+    await user.click(within(row).getByRole('button', { name: '+ poznámka' }));
     expect(within(row).getByLabelText('Poznámka')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
   });
 
-  it('sends the chips and the note with the verdict', async () => {
+  it('sends the note with the verdict', async () => {
     const user = userEvent.setup();
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
-    await user.click(within(row).getByRole('button', { name: '+ důvod / poznámka' }));
-    const chip = within(row).getByRole('button', { name: 'Jiný půdorys' });
-    expect(chip).toHaveAttribute('aria-pressed', 'false');
-    await user.click(chip);
-    await waitFor(() => expect(chip).toHaveAttribute('aria-pressed', 'true'));
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
+    await user.click(within(row).getByRole('button', { name: '+ poznámka' }));
     await user.type(within(row).getByLabelText('Poznámka'), 'jiny byt');
     await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
@@ -660,38 +671,37 @@ describe('<AutodedupResidual>', () => {
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'same',
-      reasons: ['floor_plan_differs'],
+      reasons: [],
       note: 'jiny byt',
     });
   });
 
-  it('hydrates the chips from a stored verdict and arms the save button on an edit', async () => {
+  it('hydrates the note from a stored verdict and keeps its stored reason codes', async () => {
     const user = userEvent.setup();
     vi.mocked(api.getAutodedupResidual).mockResolvedValue(
       page([{ ...ROW, verdict: { ...STORED, reasons: ['identical_photos'], note: 'stejny byt' } }]),
     );
     renderPage();
-    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
-    /* An annotated row opens itself — hiding the operator's own evidence behind
-     * a toggle is the write-only failure one level down. */
-    const stored = await within(row).findByRole('button', { name: 'Stejné fotky' });
-    expect(stored).toHaveAttribute('aria-pressed', 'true');
-    expect(within(row).getByLabelText('Poznámka')).toHaveValue('stejny byt');
+    const row = (await screen.findByText(/Proč to engine nesloučil/)).closest('li')!;
+    /* An annotated row opens itself — hiding the operator's own words behind a
+     * toggle is the write-only failure one level down. */
+    const note = await within(row).findByLabelText('Poznámka');
+    expect(note).toHaveValue('stejny byt');
     /* Not dirty yet: nothing was edited, so there is nothing to save. */
     expect(within(row).queryByRole('button', { name: 'Uložit poznámku' })).toBeNull();
 
-    await user.click(within(row).getByRole('button', { name: 'Jiný půdorys' }));
+    await user.type(note, '!');
     const save = await within(row).findByRole('button', { name: 'Uložit poznámku' });
     await user.click(save);
-    /* The SAME verdict, re-posted with the new annotation — one endpoint, one
-     * overlay, and no second vocabulary for "just the note". */
+    /* The SAME verdict, re-posted with the new note — one endpoint, one overlay;
+     * a code stored before the picker left rides along unchanged. */
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'different',
-      reasons: ['identical_photos', 'floor_plan_differs'],
-      note: 'stejny byt',
+      reasons: ['identical_photos'],
+      note: 'stejny byt!',
     });
   });
 });

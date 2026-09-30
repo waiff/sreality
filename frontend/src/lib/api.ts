@@ -3383,7 +3383,7 @@ export interface RulingFilters {
   limit?: number;
 }
 
-function blankToNull(f: RulingFilters): Record<string, QueryValue> {
+function blankToNull(f: RulingFilters | JudgementFilters): Record<string, QueryValue> {
   return Object.fromEntries(
     Object.entries(f).map(([k, v]) => [k, v === '' || v === undefined ? null : v]),
   ) as Record<string, QueryValue>;
@@ -3865,17 +3865,6 @@ export interface AutodedupScoreRun {
  * (kind+verdict, tier+verdict) that no flat record can hold without inventing a
  * separator. `latest_generation` is the first of `generations`, which the
  * statement already returns newest-first. */
-/* One bucket of the reason histogram (migration 533): how often the operator
- * picked one reason code, at one verdict grain. Pair and cluster are separate
- * rows because they answer different questions — a chip on a pair names the
- * discriminator one edge missed, the same chip on a cluster names why a whole
- * proposal was wrong — so the page never sums them. */
-export interface AutodedupReasonRollup {
-  kind: 'pair' | 'cluster';
-  reason: string;
-  n: number;
-}
-
 export interface AutodedupEngineStats {
   pairs_by_zone: Partial<Record<AutodedupZone, number>>;
   n_pairs: number;
@@ -3884,9 +3873,6 @@ export interface AutodedupEngineStats {
   latest_generation: string | null;
   verdicts: AutodedupVerdictRollup[];
   n_verdicts: number;
-  /* Absent against a store that predates 533 — the read degrades, it does not
-   * 500 — so the table above it says "not yet" rather than "none". */
-  verdict_reasons?: AutodedupReasonRollup[];
   judgements: AutodedupJudgementRollup[];
   n_judgements: number;
   last_score_run: AutodedupScoreRun | null;
@@ -4508,7 +4494,6 @@ export interface AutodedupGroupFilters {
   max_score?: number | null;
   verdict?: string | null;
   shared_photo?: 0 | 1 | null;
-  has_judgement?: 0 | 1 | null;
   /* `random` is the SEEDED sample order (D6) — stable across pages and reloads
    * for one seed, and uncorrelated with anything the engine did, which is what
    * makes an error rate measured on it an error rate about the engine rather
@@ -4528,7 +4513,6 @@ export interface AutodedupResidualFilters {
   zone?: AutodedupZone | null;
   min_score?: number | null;
   source_pair?: string | null;
-  has_judgement?: 0 | 1 | null;
   verdict?: string | null;
   sort?: 'score_desc' | 'random' | null;
   seed?: string | null;
@@ -4688,21 +4672,6 @@ export interface AutodedupVerdictResult {
    * every one inside the group, which is a thing the operator should be told. */
   must_not_link_retracted?: number;
 }
-
-/* THE REASON VOCABULARY, SERVED (PROGRAM.md §9). The codes live in
- * `autodedup/verdict_reasons.py` and the SPA hard-codes NONE of them: a chip
- * list copied into the browser is a second vocabulary that drifts the first
- * time a review session names a shape. No `store_ready` — the registry is code,
- * so it answers against a database that has not been migrated at all. */
-export interface AutodedupVerdictReason {
-  code: string;
-  label: string;
-}
-
-export const getAutodedupVerdictReasons = (): Promise<AutodedupVerdictReason[]> =>
-  request<{ data: { reasons: AutodedupVerdictReason[] } }>('/autodedup/verdict-reasons', {
-    jwt: true,
-  }).then((res) => res.data?.reasons ?? []);
 
 export const postAutodedupVerdict = async (
   body: AutodedupVerdictInput,
@@ -4937,16 +4906,16 @@ export interface AutodedupValidationCounts {
   n_not_same: number;
 }
 
-export type AutodedupSurface = 'groups' | 'residual' | 'candidates';
+export type AutodedupSurface = 'groups' | 'residual' | 'candidates' | 'judge';
 
 export interface AutodedupValidationProgress {
   generation: string | null;
   surface: AutodedupSurface;
   seed: string;
   sample_size: number;
-  /* `cluster` on the groups queue, `pair` on the residual one, `candidate` on
-   * the candidate-group view — three different units of work, never added
-   * together on a page. A candidate card is reviewed when every residual pair
+  /* `cluster` on the groups queue, `pair` on the residual queue and the Judge
+   * page, `candidate` on the candidate-group view — three different units of
+   * work, never added together on a page. A candidate card is reviewed when every residual pair
    * inside it is, so its counter is deliberately not the pair counter. */
   grain: 'cluster' | 'pair' | 'candidate';
   sample: AutodedupValidationCounts;
@@ -4969,60 +4938,65 @@ export const getAutodedupValidationProgress = (q: {
     jwt: true,
   });
 
-/* OPERATOR vs JUDGE (D6, the gate that can stop the program). One binary
- * question — one property, or not — asked of both, over the pairs where both
- * have spoken. `ci_low`/`ci_high` are a Wilson 95% interval computed
- * server-side; `agreement` is null when nothing is comparable yet, which is a
- * different statement from zero. */
-export interface AutodedupAgreementStats {
-  n: number;
-  n_agree: number;
-  agreement: number | null;
-  ci_low: number | null;
-  ci_high: number | null;
-  /* The two directions, never summed: an engine the operator over-ruled and a
-   * judge that under-calls duplicates are different failures. */
-  n_judge_different_operator_same: number;
-  n_judge_same_operator_different: number;
-  /* Where the operator's label came from: a verdict on THAT pair, or a pair
-   * implied by a confirmed group. */
-  n_explicit: number;
-  n_implied: number;
-}
+/* THE JUDGE PAGE (`GET /autodedup/judgements`). One row per pair the judge
+ * marked (gold, vision, text) or that sits in a sealed random draw, beside the
+ * operator's word and the engine's view. Why a pair is offered for reading —
+ * each a rule over stored columns, capped at 100: `sample` the first 100 of a
+ * sealed random draw, `operator` the judge said the opposite of the operator,
+ * `engine` a sure judge against the engine's grouping, `unsure` the judge's
+ * tiers or gold votes split, or it abstained. `suggested` is any of the four;
+ * `all` every judged or sampled pair. `operator` is a reason a row carries, not
+ * a selection: "Soudce × vy: Neshody" asks for it. */
+export type JudgementReason = 'sample' | 'operator' | 'engine' | 'unsure';
+export type JudgementSelection = 'suggested' | 'sample' | 'engine' | 'unsure' | 'all';
 
-export interface AutodedupAgreementTier extends AutodedupAgreementStats {
-  tier: string;
-}
-
-export interface AutodedupDisagreement {
+export interface JudgedPair {
   listing_lo: number;
   listing_hi: number;
-  operator_verdict: AutodedupVerdictValue;
-  operator_source: 'explicit' | 'implied';
-  judge_verdict: AutodedupJudgementRow['verdict'];
-  judge_tier: string;
-  judge_model: string | null;
+  /* The operator's last word, "Nevím" included, with the pair's own note and
+   * codes (none for a word implied by a group ruling or a bare veto). */
+  verdict: AutodedupVerdictRow | null;
+  judgement: AutodedupJudgementRow | null;
+  reasons: JudgementReason[];
+  engine_view: RulingEngineView;
+  obec_name: string | null;
+  cast_obce_name: string | null;
+  zone: AutodedupZone | null;
+  score: number | null;
+  guard_veto: string | null;
+  certificate: string | null;
+  /* Null when the engine stored no row for the pair, or holds it in one group. */
+  why_not_merged: string | null;
 }
 
-export interface AutodedupAgreement {
+export interface JudgementsPage {
   generation: string | null;
-  overall: AutodedupAgreementStats;
-  tiers: AutodedupAgreementTier[];
-  n_insufficient_evidence: number;
-  insufficient_by_tier: Record<string, number>;
-  disagreements: AutodedupDisagreement[];
-  n_disagreements: number;
-  /* The bar this number is measured against, served rather than hard-coded, so
-   * the page and the program document cannot drift apart. */
-  gate: { tier: string; bar: number; target_n: number };
-  max_cluster_size: number;
-  n_clusters_over_cap: number;
+  /* The selection the server used: a missing `reason` is `suggested` while
+   * that set holds a pair, else `all`. */
+  reason: JudgementSelection;
+  items: JudgedPair[];
+  next_after: string | null;
+  /* The FIRST page's only: a later page sends these null. */
+  total: number | null;
+  facets: Record<
+    'reason' | 'judge' | 'tier' | 'ruled' | 'operator' | 'engine',
+    Record<string, number>
+  > | null;
 }
 
-export const getAutodedupAgreement = (
-  generation?: string | null,
-): Promise<AutodedupEnvelope<AutodedupAgreement>> =>
-  request<AutodedupEnvelope<AutodedupAgreement>>('/autodedup/agreement', {
-    query: { generation: generation ?? null },
-    jwt: true,
-  });
+export interface JudgementFilters {
+  reason?: string | null;
+  judge?: string | null;
+  tier?: string | null;
+  ruled?: string | null;
+  operator?: string | null;
+  engine?: string | null;
+  generation?: string | null;
+  after?: string | null;
+  limit?: number;
+}
+
+export const getAutodedupJudgements = (
+  f: JudgementFilters,
+): Promise<AutodedupEnvelope<JudgementsPage>> =>
+  request('/autodedup/judgements', { query: blankToNull(f), jwt: true });

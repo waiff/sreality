@@ -389,10 +389,10 @@ _SOLD_COMPS_WEDGE_LOGGED = False
 # app_settings row, no env var and no flag — the estimation lane is the cautionary case
 # (its flag was never set, so it has been dark since it shipped and is absent from
 # worker_heartbeats entirely, which makes it invisible to every monitor). This lane's whole
-# scope is `attribute_contract.extracted_cells()` — the cells whose R7 gate the bake-off
-# has OPENED. None open (the shipping state) and the pass returns before it opens a cursor,
-# so the lane is live, visible and free. Five minutes puts a new listing well inside the
-# lane's 20-minute SLO even after a missed pass.
+# scope is `description_extraction.lane_scope` — the portals with an R7 gate the bake-off
+# has OPENED or an active contract entry declaring `llm_text`. With none the pass returns
+# after one small query, so the lane is live, visible and free. Five minutes puts a new
+# listing well inside the lane's 20-minute SLO even after a missed pass.
 TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
 # The sold_comps lane's reason, with money on it: a pass abandoned at
 # LANE_PASS_TIMEOUT_SECONDS keeps its eight threads — and their billing — running, and the
@@ -1837,8 +1837,8 @@ def _text_extract_sync() -> dict[str, Any]:
     other lane on this worker needs on the startup path. No try/except around run_pass —
     a raise is the signal, and _lane_loop records the failed pass.
 
-    While every gate in `attribute_contract` is closed the pass returns before it opens a
-    cursor, so this lane is live, visible in the heartbeat and free from the day it ships.
+    With an empty scope the pass returns before it selects anything, so this lane is live,
+    visible in the heartbeat and free from the day it ships.
     """
     global _TEXT_EXTRACT_WEDGE_LOGGED
 
@@ -1932,6 +1932,9 @@ def _autodedup_outcome(
             reconcile_skipped_at_apply=int(merged.get("skipped_at_apply") or 0),
             reconcile_quarantined=int(merged.get("quarantined") or 0),
             reconcile_deferred=int(merged.get("deferred_run_cap") or 0),
+            # E926: operator `same` closures the invariants dissolved — rulings the lane
+            # re-reads every pass and cannot honour (their records: `cluster_conflicts`).
+            must_link_dissolved=int(counts.get("must_link_dissolved") or 0),
         )
         if reconciled.get("reason"):
             last["reconcile_reason"] = str(reconciled["reason"])[:AUTODEDUP_REASON_CHARS]

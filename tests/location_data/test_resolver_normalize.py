@@ -48,6 +48,17 @@ def test_a_numeric_leading_street_keeps_its_ordinal():
     assert slots["cislo_domovni"] == "15"
 
 
+def test_a_trailing_number_keeps_its_marker():
+    """v5.5 (D7): the bare digits used to be split off, so a cottage's č.ev. read as a č.p.;
+    bezrealitky writes it `ev.32`. An unmarked number stays untyped (None)."""
+    for raw, slots in (("Chata Moravské Prusy č.ev. 13", {"evidencni": "13"}),
+                       ("Eliášova ev.32", {"evidencni": "32"}),
+                       ("Bukovina u Čisté č.p. 23", {"cislo_domovni": "23"})):
+        assert normalize.split_street_and_number(raw)[1] == slots
+    assert normalize.house_number({"evidencni": "13"}) == (13, normalize.TYP_EV)
+    assert normalize.house_number({"cislo_domovni": "487"}) == (487, None)
+
+
 def test_a_bare_numeric_leading_street_takes_no_house_number():
     street, slots = normalize.split_street_and_number("17. listopadu")
     assert street == "17. listopadu"

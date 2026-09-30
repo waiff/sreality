@@ -226,9 +226,22 @@ describe('<AutodedupRulings> the list', () => {
   it('asks the server for "Neshody" first-class and counts it', async () => {
     setup();
     const chip = await screen.findByRole('button', { name: 'Neshody (1)' });
+    expect(chip).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(chip);
     await waitFor(() => expect(lastQuery()).toMatchObject({ engine: 'disagrees', grain: 'pair' }));
     expect(lastQuery()?.after).toBeNull();
+    await waitFor(() => expect(chip).toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it('switches grain through the shared segmented control', async () => {
+    setup();
+    const grains = await screen.findByRole('group', { name: 'Zrnitost' });
+    expect(within(grains).getByRole('button', { name: 'Páry' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(within(grains).getByRole('button', { name: 'Skupiny' }));
+    await waitFor(() => expect(lastQuery()).toMatchObject({ grain: 'group' }));
   });
 
   it('reads a filter from the link another page built, and drops it on ✕', async () => {
@@ -289,6 +302,23 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
     expect(await within(card).findByRole('alert')).toHaveTextContent(
       'Mezitím bylo o tomto rozhodnuto znovu',
     );
+  });
+
+  it('prints a refused flip to same as the server words it (422, E925)', async () => {
+    const refused = 'Inzerát typu Pronájem a inzerát typu Prodej systém nikdy nespojí';
+    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
+      page([pairRow({ verdict: 'different', agreement: 'agrees' })]) as never,
+    );
+    vi.mocked(api.postAutodedupVerdict).mockRejectedValue(
+      new api.ApiError(refused, 422, { detail: refused }),
+    );
+    setup();
+    const card = await screen.findByTestId('ruling-11-12');
+    fireEvent.click(within(card).getByRole('button', { name: 'Otočit na Stejné' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Ano, zapsat' }));
+    const alert = await within(card).findByRole('alert');
+    expect(alert).toHaveTextContent(`Chyba: ${refused}`);
+    expect(alert).not.toHaveTextContent('Mezitím');
   });
 
   it('an implied pair is ruled at pair grain, superseding nothing', async () => {

@@ -1,10 +1,9 @@
 /* AUTODEDUP · one pair, compared.
  *
  * THE one comparison component (§12: "build exactly one new comparison
- * component, PairCard, used by both verdict views"). The residual list renders
- * a stack of these; the group drawer and the pair page render the same card for
- * a single edge, so an edge can never look like one thing in a list and another
- * on a detail page.
+ * component, PairCard, used by both verdict views"). The residual list and the
+ * Judge page render a stack of these, so a pair can never look like one thing
+ * on one queue and another on the next.
  *
  * WHAT IT SHOWS, IN THE ORDER THE QUESTION IS ASKED: the two adverts side by
  * side (photos first — a human answers most of these from the photos alone),
@@ -31,25 +30,47 @@ import ListingMini from './ListingMini';
 import VerdictButtons from './VerdictButtons';
 import VerdictNotes, { EMPTY_ANNOTATION, type VerdictAnnotation } from './VerdictNotes';
 
-/* The judge's four verdicts, in the operator's words. `insufficient_evidence`
- * is an answer, not a failure — it is what the judge says when the digests
- * genuinely do not settle the question. */
-const JUDGE_WORDS: Record<AutodedupJudgementRow['verdict'], string> = {
-  same_property: 'judge: same property',
-  different_property: 'judge: different property',
-  same_building_different_unit: 'judge: same building, different unit',
-  insufficient_evidence: 'judge: not enough evidence',
+/* The judge's four verdicts, in the operator's words — ONE map for every
+ * surface. `insufficient_evidence` is an answer, not a failure — it is what the
+ * judge says when the adverts genuinely do not settle the question. */
+export const JUDGE_WORDS: Record<AutodedupJudgementRow['verdict'], string> = {
+  same_property: 'stejná nemovitost',
+  different_property: 'jiná nemovitost',
+  same_building_different_unit: 'stejný dům, jiná jednotka',
+  insufficient_evidence: 'nerozhodl (málo důkazů)',
 };
 
 export function JudgeChip({ judgement }: { judgement: AutodedupJudgementRow }) {
   const tone = judgement.verdict === 'same_property' ? 'good' : 'warn';
   return (
-    <Chip tone={tone} title={`${judgement.tier} tier · ${judgement.model}`}>
-      {JUDGE_WORDS[judgement.verdict]}
+    <Chip tone={tone} title={judgement.model ?? undefined}>
+      soudce: {JUDGE_WORDS[judgement.verdict]}
       {judgement.confidence != null && (
         <span className="font-mono tabular-nums"> {fmtScore(judgement.confidence)}</span>
       )}
     </Chip>
+  );
+}
+
+/* What the judge read for and against — the one list, on a queue row and on the
+ * pair page's transcript alike. */
+export function JudgeEvidence({ judgement }: { judgement: AutodedupJudgementRow }) {
+  const keyEvidence = judgement.key_evidence ?? [];
+  const contraEvidence = judgement.contradicting_evidence ?? [];
+  if (keyEvidence.length === 0 && contraEvidence.length === 0) return null;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 text-[0.7rem]">
+      <ul className="space-y-0.5 text-[var(--color-ink-2)]">
+        {keyEvidence.map((e) => (
+          <li key={e}>+ {e}</li>
+        ))}
+      </ul>
+      <ul className="space-y-0.5 text-[var(--color-brick)]">
+        {contraEvidence.map((e) => (
+          <li key={e}>− {e}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -120,10 +141,6 @@ export default function PairCard({
   onSaveAnnotation,
 }: PairCardProps) {
   const top = (contributions ?? []).slice(0, 5);
-  /* The queue's judge summary carries no evidence lists; the pair page's full
-   * transcript does. Absent is empty, never a rendered "null". */
-  const keyEvidence = judgement?.key_evidence ?? [];
-  const contraEvidence = judgement?.contradicting_evidence ?? [];
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -136,16 +153,14 @@ export default function PairCard({
         />
         {judgement && <JudgeChip judgement={judgement} />}
         {blind && (
-          <Chip title="Blind review: the judge's verdict appears once you have recorded yours">
-            soudce skryt
-          </Chip>
+          <Chip title="Naslepo: verdikt soudce se ukáže, až uložíte svůj">soudce skryt</Chip>
         )}
         {evidenceHref && (
           <Link
             to={evidenceHref}
             className="ml-auto text-[0.7rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
           >
-            Full evidence
+            Celý důkaz
           </Link>
         )}
       </div>
@@ -164,7 +179,7 @@ export default function PairCard({
 
       {whyNotMerged && (
         <p className="rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper)] px-3 py-2 text-[0.72rem] leading-relaxed text-[var(--color-ink-2)]">
-          <span className="text-[var(--color-ink-4)]">Why it wasn't merged: </span>
+          <span className="text-[var(--color-ink-4)]">Proč to engine nesloučil: </span>
           {whyNotMerged}
         </p>
       )}
@@ -172,7 +187,7 @@ export default function PairCard({
       {top.length > 0 && (
         <div>
           <h4 className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-            Top contributions
+            Co nejvíc rozhodlo v modelu
           </h4>
           <ul className="mt-1 space-y-0.5">
             {top.map((c) => (
@@ -185,7 +200,7 @@ export default function PairCard({
                   {/* Value and contribution are different quantities and are
                     * never merged into one number: a feature can be large and
                     * weigh nothing. An absent feature says so. */}
-                  {c.present ? fmtScore(c.value) : 'absent'}
+                  {c.present ? fmtScore(c.value) : 'chybí'}
                   {c.contribution != null && (
                     <span className="ml-2 text-[var(--color-ink-4)]">
                       {c.contribution > 0 ? '+' : ''}
@@ -199,20 +214,7 @@ export default function PairCard({
         </div>
       )}
 
-      {judgement && (keyEvidence.length > 0 || contraEvidence.length > 0) && (
-        <div className="grid gap-3 sm:grid-cols-2 text-[0.7rem]">
-          <ul className="space-y-0.5 text-[var(--color-ink-2)]">
-            {keyEvidence.map((e) => (
-              <li key={e}>+ {e}</li>
-            ))}
-          </ul>
-          <ul className="space-y-0.5 text-[var(--color-brick)]">
-            {contraEvidence.map((e) => (
-              <li key={e}>− {e}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {judgement && <JudgeEvidence judgement={judgement} />}
 
       {onVerdict && (
         <div className="space-y-2">

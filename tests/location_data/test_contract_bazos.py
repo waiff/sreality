@@ -167,9 +167,9 @@ def test_the_town_entry_reads_the_town_anchors_href():
 def test_the_four_page_entries_run_on_the_page_lane_and_the_street_on_the_payload_one():
     """Rule 25 leaves ONE lane over two substrates, and bazos now uses both. The town, the
     PSČ, the blur marker and the pin are page facts — they exist only in the Lokalita row's
-    markup. The STREET is not: `scraper.bazos_parser` already mined it out of the page at
-    scrape time and wrote it to `raw_json.coords.street`, so the claim reads the parser's own
-    subject-scoped value instead of re-deriving it from the body (W18)."""
+    markup. The STREET is not: it is read off the stored payload's headline (`/title`), the
+    one place the seller names it; the parser's own street miner is deleted (location reader
+    W1) and the text lane's plain-text reading replaces this entry at @8 (W3)."""
     page = {e for e in ENTRY_IDS if e != STREET_ENTRY}
     assert {ENTRIES[e].reader for e in page} <= set(PAGE_READERS)
     assert ENTRIES[STREET_ENTRY].reader in READERS
@@ -532,19 +532,6 @@ def test_the_street_entry_reads_the_sellers_headline_and_only_that():
     assert "fallback" not in entry.locator
 
 
-def test_the_parsers_own_street_field_is_deliberately_not_read():
-    """`scraper.bazos_parser.extract_street` scans the title AND THE DESCRIPTION and returns
-    the FIRST cue match, so its value is not the subject's: 29,697 of 50,529 (58.8 %) do not
-    appear in the title at all. The head of that distribution is boilerplate ("Energetická
-    třída" x527, "RK třída" x556, "DPH třída" x280) and the tail is proximity prose that binds
-    to REAL streets — "Kubánské náměstí" ten minutes away, "Fügnerova 450" where 450 is metres
-    and R1 would take it for a house number. Every bazos pin is declared blurred, so each of
-    those would MOVE the published point with nothing marked disputed."""
-    assert ENTRIES[STREET_ENTRY].locator["json_pointer"] != "/coords/street"
-    assert street_of({"id": "1", "coords": {"street": "Energetická třída"}}) is None
-    assert street_of({"id": "1", "coords": {"street": "ul. Jiráskova"}}) is None
-
-
 def test_the_head_title_and_the_description_are_deliberately_not_declared():
     """Both were measured and both lost. The `<head>` title is the same capped string with the
     okres and " | Bazoš.cz" appended; the description is populated on 93 % of rows and carries
@@ -613,3 +600,10 @@ def test_a_geo_name_or_a_digit_string_is_refused_before_it_reaches_the_register(
     # And the one thing it does NOT do: judge whether the token looks like a Czech street.
     assert apply_transforms("Nový", ENTRIES[STREET_ENTRY].transform) == "Nový"
     assert apply_transforms("28. října 12", ENTRIES[STREET_ENTRY].transform) == "28. října 12"
+
+
+def test_an_area_in_the_headline_is_not_a_foreign_script():
+    """bazos 223894449: `²` is a superscript digit, not a letter of another script."""
+    title = "Prodej bytu 3+1 60.91 m² Štefánikova, Hradec Králové"
+    assert street_of({"id": "223894449", "title": title}) == title
+    assert street_of({"id": "1", "title": "Квартира 45 m², ул. Ленина"}) is None

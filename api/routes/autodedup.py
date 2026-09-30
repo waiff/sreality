@@ -36,7 +36,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
-from autodedup import agreement as agreement_math
 from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import proposed_splits as splits
@@ -47,7 +46,8 @@ from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, s
 from autodedup.export import listing_digest, scrubbed_text
 from autodedup.harness import model_of_version
 from autodedup.model import hand_initialised
-from toolkit.property_identity import record_ruling
+from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
+from toolkit.property_identity import category_clash, record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
     reversal_message,
@@ -314,13 +314,13 @@ GROUP_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "source", "category_main",
         "category_type", "min_size", "max_size", "min_score", "max_score", "verdict",
-        "shared_photo", "has_judgement", "sort", "seed",
+        "shared_photo", "sort", "seed",
     }
 )
 RESIDUAL_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "zone", "min_score",
-        "source_pair", "has_judgement", "verdict", "sort", "seed",
+        "source_pair", "verdict", "sort", "seed",
     }
 )
 DETAIL_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
@@ -335,7 +335,6 @@ CANDIDATE_FILTER_KEYS: frozenset[str] = frozenset(
 PROGRESS_FILTER_KEYS: frozenset[str] = frozenset(
     {"generation", "seed", "surface", "min_score"}
 )
-AGREEMENT_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
 
 # THE SEED IS A NAME, NOT A PREDICATE. It reaches SQL as a parameter of `md5(key || seed)`, so
 # it could not inject anything — but it is also the IDENTITY of a sample, and a sample nobody
@@ -349,9 +348,10 @@ SEED_RE = re.compile(r"^[a-z0-9]{1,16}$")
 HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # THE SAMPLE IS THE FIRST 100 OF THE SEEDED ORDER. Two of these (one per surface) is the
-# ~200-pair session D6 names; the counter counts against exactly that.
+# ~200-pair session D6 names; the counter counts against exactly that. On the Judge page it is
+# the first 100 of each sealed random draw, and it caps each reason a pair is suggested for.
 VALIDATION_SAMPLE_SIZE = 100
-VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual", "candidates")
+VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual", "candidates", "judge")
 
 # ------------------------------------------------------------------ the candidate queue (E56)
 #
@@ -362,16 +362,11 @@ CANDIDATE_SORTS: tuple[str, ...] = ("weakest", "strongest", "largest", "random")
 # Reviewed is DERIVED, not stored: there is no candidate row in `autodedup.verdicts` to carry a
 # verdict, so a group counts as reviewed when EVERY residual pair inside it carries an operator
 # pair verdict — by ANY operator, this being a single-operator platform, which is the same
-# reading `AGREEMENT_PAIRS_SQL` and the progress strip make of the same rows.
+# reading the progress strip and the operator's word on the Judge page make of the same rows.
 CANDIDATE_VERDICT_VALUES: tuple[str, ...] = ("unreviewed", "reviewed")
 # `<smallest listing id>-<10 hex>` — `candidates.candidate_key`. Validated before it is looked
 # up, so a hand-edited key is a 400 rather than a scan of the whole index.
 CANDIDATE_KEY_RE = re.compile(r"^[0-9]{1,19}-[0-9a-f]{10}$")
-
-# How big a confirmed cluster may be before the agreement read stops expanding it into pairs
-# (n members imply n(n-1)/2 of them). 12 is far above the trial's group sizes and bounds the
-# implied set at 66 pairs per group; what it skipped is reported, never dropped silently.
-AGREEMENT_MAX_CLUSTER_SIZE = 12
 
 # How many blocks the picker is offered. A generation's vocabulary is the busiest blocks
 # first: a select with thousands of options is not a control anyone uses, and the page keeps
@@ -464,20 +459,22 @@ def _certificate(decision: Any) -> str | None:
 
 
 def _why_not_merged(zone: Any, decision: Any, veto: Any) -> str:
+    """The precondition that stopped the merge, in the operator's words (the review pages are
+    Czech); a guard's or a rejection's own code stays as the engine names it."""
     text = str(decision or "")
     if veto:
-        return f"hard guard refused the pair: {veto}"
+        return f"pevné pravidlo dvojici odmítlo: {veto}"
     if text.startswith("auto_reject:"):
-        return f"auto-rejected on {text.split(':', 1)[1]}"
+        return f"automaticky zamítnuto: {text.split(':', 1)[1]}"
     if text.endswith(":evidence_gate") or text == "evidence_gate":
-        return "held in the band: fewer than two independent evidence families"
+        return "drženo v pásmu kontroly: méně než dva nezávislé druhy důkazů"
     if zone == "band":
-        return "scored inside the review band — above the reject floor, below auto-merge"
+        return "skóre v pásmu kontroly — nad hranicí zamítnutí, pod automatickým sloučením"
     if zone == "reject":
-        return "scored below the review band"
+        return "skóre pod pásmem kontroly"
     if zone == "merge":
-        return "the edge was accepted, but no cluster of this generation holds both listings"
-    return "not accepted"
+        return "dvojice prošla, ale žádná skupina této generace nedrží oba inzeráty"
+    return "nepřijato"
 
 
 def _feats(raw: Any) -> dict[str, tuple[float, bool]]:
@@ -1015,14 +1012,6 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
     }
     verdicts = _rows(usql.VERDICT_COUNT_COLUMNS, _fetch(conn, usql.VERDICT_COUNTS_SQL))
     judgements = _rows(usql.JUDGEMENT_COUNT_COLUMNS, _fetch(conn, usql.JUDGEMENT_COUNTS_SQL))
-    # A READ degrades where a write refuses: the header strip must still render against a
-    # store that predates 533, so the histogram comes back empty rather than 500ing the page.
-    try:
-        verdict_reason_rows = _rows(
-            usql.REASON_COUNT_COLUMNS, _fetch(conn, usql.REASON_COUNTS_SQL)
-        )
-    except _UNDEFINED_COLUMN:
-        verdict_reason_rows = []
     run_rows = _fetch(conn, usql.LAST_SCORE_RUN_SQL, {"mode": "score"})
     last_run = _row(usql.SCORE_RUN_COLUMNS, run_rows[0]) if run_rows else None
     return {
@@ -1036,8 +1025,6 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
         "latest_generation": generation,
         "verdicts": verdicts,
         "n_verdicts": sum(int(row["n"]) for row in verdicts),
-        # Per (kind, reason), never summed across the two grains — see REASON_COUNTS_SQL.
-        "verdict_reasons": verdict_reason_rows,
         "judgements": judgements,
         "n_judgements": sum(int(row["n"]) for row in judgements),
         "last_score_run": _json_safe(last_run) if last_run else None,
@@ -1096,7 +1083,6 @@ def groups(
     max_score: float | None = Query(None),
     verdict: str | None = Query(None),
     shared_photo: int | None = Query(None),
-    has_judgement: int | None = Query(None),
     sort: str = Query("weakest"),
     seed: str | None = Query(None),
     conn: Any = Depends(deps.get_db_conn),
@@ -1132,7 +1118,6 @@ def groups(
         "max_score": max_score,
         "verdict": verdict,
         "shared_photo": _flag("shared_photo", shared_photo),
-        "has_judgement": _flag("has_judgement", has_judgement),
         "limit": limit + 1,
         "seed": sample_seed,
         "after_score": None,
@@ -1370,7 +1355,6 @@ def residual(
     zone: str | None = Query(None),
     min_score: float = Query(RESIDUAL_MIN_SCORE),
     source_pair: str | None = Query(None),
-    has_judgement: int | None = Query(None),
     verdict: str | None = Query(None),
     sort: str = Query("score_desc"),
     seed: str | None = Query(None),
@@ -1397,7 +1381,6 @@ def residual(
         "block": block,
         "block_grain": block_grain,
         "source_pair": source_pair,
-        "has_judgement": _flag("has_judgement", has_judgement),
         "verdict": verdict,
         "limit": limit + 1,
         "seed": sample_seed,
@@ -1976,20 +1959,11 @@ def validation_progress(
         if surface == "candidates":
             sample, total = _candidate_counts(conn, generation, sample_seed)
         else:
-            sample = _counts(
-                conn,
-                usql.VALIDATION_GROUPS_SAMPLE_SQL
-                if groups
-                else usql.VALIDATION_RESIDUAL_SAMPLE_SQL,
-                params,
-            )
-            total = _counts(
-                conn,
-                usql.VALIDATION_GROUPS_TOTAL_SQL
-                if groups
-                else usql.VALIDATION_RESIDUAL_TOTAL_SQL,
-                params,
-            )
+            sample_sql, total_sql = _VALIDATION_COUNT_SQL[surface]
+            with conn.transaction():
+                _execute(conn, usql.JIT_OFF, {})
+                sample = _counts(conn, sample_sql, params)
+                total = _counts(conn, total_sql, params)
     except _STORE_BEHIND:
         return _not_ready()
 
@@ -2009,6 +1983,14 @@ def validation_progress(
         },
         "store_ready": True,
     }
+
+
+# The two counters' statements per surface: the sample half, then the whole.
+_VALIDATION_COUNT_SQL: dict[str, tuple[str, str]] = {
+    "groups": (usql.VALIDATION_GROUPS_SAMPLE_SQL, usql.VALIDATION_GROUPS_TOTAL_SQL),
+    "residual": (usql.VALIDATION_RESIDUAL_SAMPLE_SQL, usql.VALIDATION_RESIDUAL_TOTAL_SQL),
+    "judge": (usql.VALIDATION_JUDGE_SAMPLE_SQL, usql.VALIDATION_JUDGE_TOTAL_SQL),
+}
 
 
 def _candidate_counts(
@@ -2050,52 +2032,6 @@ def _counts(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, int]:
         return {name: 0 for name in usql.VALIDATION_COUNT_COLUMNS}
     row = _row(usql.VALIDATION_COUNT_COLUMNS, rows[0])
     return {name: int(row[name] or 0) for name in usql.VALIDATION_COUNT_COLUMNS}
-
-
-# ----------------------------------------------------------- operator vs judge (the D6 gate)
-
-
-@router.get("/agreement")
-def agreement(
-    request: Request,
-    generation: str | None = Query(None),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """How often the operator and the LLM judge say the same thing about one pair (D6).
-
-    The operator's label set is explicit pair verdicts UNION the pairs IMPLIED by confirmed
-    clusters; the judge's is the best tier per pair (gold > vision > text, `oss` excluded).
-    `insufficient_evidence` is counted, never scored. The arithmetic — the binary mapping and
-    the Wilson interval — is `autodedup/agreement.py`, so it can be checked by hand.
-
-    THE IMPLIED HALF COMES OUT OF THE VERDICTS (E58), not out of a clustering, so this number
-    no longer moves when a later pass re-clusters: the label set is what the operator was
-    looking at. `generation` is therefore an ECHO here and not a filter — it names the pass the
-    caller is validating against, and the labels it is compared with are every ruling on
-    record."""
-    _reject_unknown_filters(request, AGREEMENT_FILTER_KEYS)
-    if not store_ready(conn):
-        return _not_ready()
-    try:
-        generation = _resolve_generation(conn, generation)
-        params = {"max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE}
-        rows = _rows(usql.AGREEMENT_COLUMNS, _fetch(conn, usql.AGREEMENT_PAIRS_SQL, params))
-        oversize_rows = _fetch(conn, usql.AGREEMENT_OVERSIZE_SQL, params)
-    except _STORE_BEHIND:
-        return _not_ready()
-
-    summary = agreement_math.summarize(rows)
-    n_oversize = int(oversize_rows[0][0] or 0) if oversize_rows and oversize_rows[0] else 0
-    return {
-        "data": {
-            "generation": generation,
-            **summary,
-            # The bound of the implied half, reported rather than assumed away.
-            "max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE,
-            "n_clusters_over_cap": n_oversize,
-        },
-        "store_ready": True,
-    }
 
 
 # ------------------------------------------------------------------------------- one pair
@@ -2221,16 +2157,6 @@ class VerdictIn(BaseModel):
     supersedes: int | None = None
 
 
-@router.get("/verdict-reasons")
-def verdict_reasons() -> dict[str, Any]:
-    """The reason vocabulary, served so the SPA hard-codes none of it (§9).
-
-    No `store_ready` and no connection: the registry is code, not data, so the chips render
-    against a database that has not been migrated at all — and a page that cannot reach the
-    list would silently offer the operator an empty one."""
-    return {"data": {"reasons": reasons_registry.registry()}}
-
-
 @router.post("/verdict")
 def verdict(
     body: VerdictIn,
@@ -2260,6 +2186,10 @@ def verdict(
     re-resolved -- the new word is about the set the old one was about). It is accepted only while
     that row is still the newest on its key (409: ruled again since the page loaded). Every write
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
+
+    A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
+    rental, a flat and a commercial unit) is a 422 in the operator's words (E925), never a 409:
+    the rulings page reads every 409 as "ruled again since the page loaded".
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2283,13 +2213,6 @@ def verdict(
                 raise _bad("a pair verdict carries no cluster_key")
             if body.listing_lo >= body.listing_hi:
                 raise _bad("listing_lo must be smaller than listing_hi")
-            if not _fetch(
-                conn,
-                usql.PAIR_EXISTS_SQL,
-                {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
-            ):
-                raise HTTPException(
-                    status_code=404, detail="one of the two adverts does not exist")
         try:
             with conn.transaction():
                 if body.supersedes is not None:
@@ -2297,6 +2220,16 @@ def verdict(
                     lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
                 else:
                     lo, hi = int(body.listing_lo), int(body.listing_hi)
+                sides = _fetch(conn, usql.PAIR_CATEGORIES_SQL,
+                               {"listing_lo": lo, "listing_hi": hi})
+                if not sides:
+                    raise HTTPException(
+                        status_code=404, detail="one of the two adverts does not exist")
+                if body.verdict == "same" and (
+                        clash := category_clash(sides[0][:2], sides[0][2:])) is not None:
+                    raise HTTPException(status_code=422, detail=_SAME_REFUSED[clash[0]].format(
+                        a=_CATEGORY_LABELS.get(clash[1], clash[1]),
+                        b=_CATEGORY_LABELS.get(clash[2], clash[2])))
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2380,6 +2313,23 @@ def verdict(
         },
         "store_ready": True,
     }
+
+
+# E925: a `same` the merge chokepoint's category gate refuses; stored, it would be a must-link
+# the lane dissolves and re-seeds every pass, and a positive label. The pair page and the rulings
+# page print the detail as it is: the system's rule, not a claim about the property (an auction
+# and a sale of one flat ARE one flat), in the Browse filters' own Czech labels.
+_SAME_REFUSED: dict[str, str] = {
+    "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
+                     "nemovitosti, proto je nelze označit jako stejné.",
+    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
+                     "do jedné nemovitosti (jediná výjimka je dům a komerční objekt), proto je "
+                     "nelze označit jako stejné.",
+}
+_CATEGORY_LABELS: dict[str, str] = {
+    option.value: option.label_cs
+    for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)
+}
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
@@ -2977,6 +2927,17 @@ def _uuid(name: str, value: str | None) -> str | None:
         raise _bad(f"{name} must be a merge group id") from exc
 
 
+def _town_codes(town: str | None) -> tuple[int | None, int | None]:
+    """`o:<obec_kod>` / `c:<cast_obce_kod>` -> (obec, cast_obce); blank is no filter."""
+    if not town:
+        return None, None
+    match = TOWN_RE.match(town)
+    if not match:
+        raise _bad("town must be o:<obec_kod> or c:<cast_obce_kod>")
+    code = int(match.group(2))
+    return (code, None) if match.group(1) == "o" else (None, code)
+
+
 def _ruling_filters(
     grain: str, verdict: str | None, source: str | None, status: str | None,
     engine: str | None, now: str | None, decided_from: str | None, decided_to: str | None,
@@ -2984,15 +2945,7 @@ def _ruling_filters(
 ) -> dict[str, Any]:
     """The filter registry, as the statements' nullable parameters. A blank value is no filter;
     a value outside a vocabulary is a 400."""
-    obec = cast_obce = None
-    if town:
-        match = TOWN_RE.match(town)
-        if not match:
-            raise _bad("town must be o:<obec_kod> or c:<cast_obce_kod>")
-        if match.group(1) == "o":
-            obec = int(match.group(2))
-        else:
-            cast_obce = int(match.group(2))
+    obec, cast_obce = _town_codes(town)
     if now and now not in RULING_NOW:
         raise _bad(f"now must be one of: {', '.join(RULING_NOW)}")
     return {
@@ -3011,9 +2964,12 @@ def _ruling_filters(
     }
 
 
-def _facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]]:
+def _facets(rows: list[tuple[Any, ...]],
+            names: tuple[str, ...] = ("source", "status", "verdict", "engine"),
+            ) -> tuple[int, dict[str, dict[str, int]]]:
+    """`(facet, value, n)` rows -> the total and one count per value of each named facet."""
     total = 0
-    facets: dict[str, dict[str, int]] = {"source": {}, "status": {}, "verdict": {}, "engine": {}}
+    facets: dict[str, dict[str, int]] = {name: {} for name in names}
     for row in _rows(usql.RULING_FACET_COLUMNS, rows):
         if row["facet"] == "total":
             total = int(row["n"] or 0)
@@ -3022,15 +2978,23 @@ def _facets(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, dict[str, int]]
     return total, facets
 
 
+def _engine_reading(row: dict[str, Any]) -> dict[str, Any]:
+    """The stored pair's certificate and "why not merged" off its decision: no reason without a
+    stored row, nor for two adverts in ONE group (a band pair joins one through a third advert)."""
+    return {
+        "certificate": _certificate(row["decision"]),
+        "why_not_merged": (_why_not_merged(row["zone"], row["decision"], row["guard_veto"])
+                           if row["zone"] is not None and row["engine_view"] != "together"
+                           else None),
+    }
+
+
 def _pair_ruling(row: dict[str, Any], generation: str | None,
-                 history: list[dict[str, Any]]) -> dict[str, Any]:
-    out = dict(row)
+                 history: list[dict[str, Any]], dissolved: str | None = None) -> dict[str, Any]:
+    out = {**row, **_engine_reading(row)}
+    if dissolved is not None:
+        out["why_not_merged"] = dissolved
     out["reasons"] = list(row.get("reasons") or [])
-    out["certificate"] = _certificate(row["decision"])
-    out["why_not_merged"] = (
-        _why_not_merged(row["zone"], row["decision"], row["guard_veto"])
-        if row["zone"] is not None else None
-    )
     out["generation"] = generation
     out["history"] = history
     return out
@@ -3119,6 +3083,54 @@ def rulings(
     }
 
 
+def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
+                        generation: str | None) -> dict[tuple[int, int], str]:
+    """E926: a standing `same` of the pair's own is a must-link (E910); when the engine holds its
+    adverts apart because the invariants dissolved the closure its rulings form, that is the
+    reason — the newest record naming both adverts, one statement a page."""
+    wanted = [r for r in page if r["verdict"] == "same" and r["status"] == "standing"
+              and r["source"] in ("pair", "browse_merge") and r["engine_view"] == "apart"]
+    if not wanted or generation is None:
+        return {}
+    ids = sorted({int(r[side]) for r in wanted for side in ("listing_lo", "listing_hi")})
+    records = _rows(usql.CONFLICT_COLUMNS, _fetch(conn, usql.DISSOLVED_CLOSURES_SQL,
+                                                  {"generation": generation, "ids": ids}))
+    out: dict[tuple[int, int], str] = {}
+    for r in wanted:
+        pair = (r["listing_lo"], r["listing_hi"])
+        for record in records:
+            if {int(pair[0]), int(pair[1])} <= {int(m) for m in record["detail"]["members"]}:
+                out[pair] = _dissolved_reason(record)
+                break
+    return out
+
+
+# The limbs that can refuse a closure (inside one, the spreads are not read), in the operator's
+# words: the first three are the engine's fixed rules, the last his own `different` ruling.
+_CLOSURE_REFUSED = {
+    "size": "spojují skupinu o {n} inzerátech, větší, než pevné pravidlo dovolí",
+    "category_type": "spojují prodej s pronájmem, což pevné pravidlo nedovolí",
+    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+                     "což pevné pravidlo nedovolí"),
+    "must_not_link": "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny",
+}
+DISSOLVED_PAIRS_SHOWN = 5
+
+
+def _dissolved_reason(record: dict[str, Any]) -> str:
+    """Why a closure of `same` rulings binds nothing, and the rulings that form it — the ones to
+    revisit (E926)."""
+    detail = record["detail"]
+    why = _CLOSURE_REFUSED.get(record["invariant"], "narážejí na pevné pravidlo ({limb})")
+    pairs = [f"{lo}–{hi}" for lo, hi in detail["must_link"]]
+    shown = ", ".join(pairs[:DISSOLVED_PAIRS_SHOWN])
+    if len(pairs) > DISSOLVED_PAIRS_SHOWN:
+        shown += " …"
+    return (f"vaše rozhodnutí „stejné“ "
+            f"{why.format(n=len(detail['members']), limb=record['invariant'])}, proto engine "
+            f"skupinu nesloučil (rozhodnutí „stejné“ v ní, celkem {len(pairs)}: {shown})")
+
+
 def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                   generation: str | None) -> list[dict[str, Any]]:
     """The page's rows with each key's whole history (one statement per page, never per row):
@@ -3135,6 +3147,7 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
         group_rows = (_rows(usql.VERDICT_COLUMNS,
                             _fetch(conn, usql.GROUP_RULING_HISTORY_SQL, {"keys": keys}))
                       if keys else [])
+        dissolved = _dissolved_closures(conn, page, generation)
         items = []
         for r in page:
             if r["source"] == "implied":
@@ -3145,7 +3158,8 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                 history = [v for v in pair_rows
                            if (v["listing_lo"], v["listing_hi"])
                            == (r["listing_lo"], r["listing_hi"])]
-            items.append(_pair_ruling(r, generation, history))
+            items.append(_pair_ruling(r, generation, history,
+                                      dissolved.get((r["listing_lo"], r["listing_hi"]))))
         return items
     keys = sorted({int(r["cluster_key"]) for r in page if r["cluster_key"] is not None})
     group_rows = (_rows(usql.VERDICT_COLUMNS,
@@ -3163,3 +3177,147 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                            and v["generation"] == r["generation"]]
         items.append(item)
     return items
+
+
+# ------------------------------------------------------------------ the Judge page (E922)
+#
+# Read-only; the operator answers through `POST /autodedup/verdict`, as on every queue.
+
+JUDGEMENT_REASONS: tuple[str, ...] = ("suggested", "sample", "engine", "unsure", "all")
+# The order a row lists its reasons in; `operator` is carried, not selected ("Soudce × vy" asks).
+REASON_ORDER: tuple[str, ...] = ("sample", "operator", "engine", "unsure")
+# An unread pair is tier `none` ("Kdo četl: Zatím nikdo"), asked once.
+JUDGE_WORDS: tuple[str, ...] = ("same", "different", "abstain")
+JUDGE_TIERS: tuple[str, ...] = ("gold", "vision", "text", "none")
+JUDGEMENT_FILTER_KEYS: frozenset[str] = frozenset(
+    {"reason", "judge", "tier", "ruled", "operator", "engine", "generation", "after", "limit"}
+)
+JUDGEMENTS_PAGE_SIZE = 25
+# A headline at least this confident that contradicts the engine is worth the operator's look.
+JUDGE_SURE = 0.9
+_JUDGEMENT_FACETS: tuple[str, ...] = ("reason", "judge", "tier", "ruled", "operator", "engine")
+
+
+def _judged_pair(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "listing_lo": row["listing_lo"],
+        "listing_hi": row["listing_hi"],
+        # The operator's word as every queue's buttons and note read it, codes included.
+        "verdict": {
+            "id": row["operator_ruling_id"],
+            "kind": "pair",
+            "cluster_key": None,
+            "listing_lo": row["listing_lo"],
+            "listing_hi": row["listing_hi"],
+            "verdict": row["operator_verdict"],
+            "note": row["operator_note"],
+            "reasons": list(row["operator_reasons"] or []),
+            "decided_by": row["operator_decided_by"],
+            "decided_at": row["operator_decided_at"],
+        } if row["operator_verdict"] is not None else None,
+        "judgement": {
+            "tier": row["judge_tier"],
+            "verdict": row["judge_verdict"],
+            "confidence": row["judge_confidence"],
+            "model": row["judge_model"],
+            "key_evidence": list(row["judge_key_evidence"] or []),
+            "contradicting_evidence": list(row["judge_contradicting_evidence"] or []),
+        } if row["judge_verdict"] is not None else None,
+        "reasons": [name for name in REASON_ORDER if row[f"is_{name}"]],
+        "engine_view": row["engine_view"],
+        "obec_name": row["obec_name"],
+        "cast_obce_name": row["cast_obce_name"],
+        "zone": row["zone"],
+        "score": row["score"],
+        "guard_veto": row["guard_veto"],
+        **_engine_reading(row),
+    }
+
+
+def _judgement_cursor(raw: str | None) -> dict[str, Any]:
+    """`reason|ruled|block|hash|lo|hi` — the first page's selection, then the order key (400)."""
+    parts = _split_cursor(raw, 6)
+    if parts is None:
+        return {"reason": None, "after_ruled": None, "after_block": None, "after_hash": None,
+                "after_lo": None, "after_hi": None}
+    ruled, block = _as_int(parts[1]), _as_int(parts[2])
+    if parts[0] not in JUDGEMENT_REASONS or ruled not in (0, 1) or block not in (0, 1, 2):
+        raise _bad("after is not a cursor from this endpoint")
+    return {"reason": parts[0], "after_ruled": ruled, "after_block": block,
+            "after_hash": _as_hash(parts[3]), "after_lo": _as_int(parts[4]),
+            "after_hi": _as_int(parts[5])}
+
+
+@router.get("/judgements")
+def judgements(
+    request: Request,
+    reason: str | None = Query(None),
+    judge: str | None = Query(None),
+    tier: str | None = Query(None),
+    ruled: int | None = Query(None),
+    operator: str | None = Query(None),
+    engine: str | None = Query(None),
+    generation: str | None = Query(None),
+    after: str | None = Query(None),
+    limit: int = Query(JUDGEMENTS_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One page of the judge's pairs, unruled first, the random sample on top (keyset on the
+    page's order). A missing `reason` means `suggested` while that set holds a pair under the
+    other filters, else `all`; the answer and the cursor say which. Only the FIRST page counts
+    (`total`, `facets` under the current filter); a later page runs the page statement alone and
+    sends those null."""
+    _reject_unknown_filters(request, JUDGEMENT_FILTER_KEYS)
+    asked = _one_of("reason", reason or None, JUDGEMENT_REASONS)
+    page_params = _judgement_cursor(after)
+    listed = page_params.pop("reason")
+    if listed is not None and asked not in (None, listed):
+        raise _bad("after is not a cursor from this list")
+    params: dict[str, Any] = {
+        "reason": listed or asked or "suggested",
+        "judge": _one_of("judge", judge or None, JUDGE_WORDS),
+        "tier": _one_of("tier", tier or None, JUDGE_TIERS),
+        "ruled": _flag("ruled", ruled),
+        "operator": _one_of("operator", operator or None, RULING_AGREEMENT),
+        "engine": _one_of("engine", engine or None, RULING_AGREEMENT),
+        "seed": DEFAULT_SEED,
+        "sample_size": VALIDATION_SAMPLE_SIZE,
+        "judge_sure": JUDGE_SURE,
+    }
+    if not store_ready(conn):
+        return _not_ready()
+    total, facets = None, None
+    try:
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
+        with conn.transaction():
+            _execute(conn, usql.JIT_OFF, {})
+            if listed is None:
+                total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                        _JUDGEMENT_FACETS)
+                if asked is None and total == 0:
+                    params["reason"] = "all"
+                    total, facets = _facets(_fetch(conn, usql.JUDGEMENTS_FACETS_SQL, params),
+                                            _JUDGEMENT_FACETS)
+            rows = _rows(usql.JUDGED_PAIR_COLUMNS, _fetch(
+                conn, usql.JUDGEMENTS_SQL, {**params, **page_params, "limit": limit + 1}))
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    page = rows[:limit]
+    last = page[-1] if page else None
+    next_after = None
+    if len(rows) > limit and last is not None:
+        next_after = _cursor(params["reason"], int(bool(last["ruled"])), last["block"],
+                             last["sort_hash"], last["listing_lo"], last["listing_hi"])
+    return {
+        "data": {
+            "generation": generation,
+            "reason": params["reason"],
+            "items": [_judged_pair(row) for row in page],
+            "next_after": next_after,
+            "total": total,
+            "facets": facets,
+        },
+        "store_ready": True,
+    }

@@ -16,12 +16,16 @@
  * re-adds one.
  *
  * BLIND CARRIES IN THE URL (`?blind=1`). Reached from a blind queue, this page
- * withholds the judge's transcript until the operator has recorded a verdict on
- * the pair — otherwise the drill-down would be the hole in the blinding: one
+ * withholds the judge's transcript until the operator's newest word on the pair
+ * is Stejné or Různé (`revealsJudge`, the queues' own gate; "Nevím" opens
+ * nothing) — otherwise the drill-down would be the hole in the blinding: one
  * click on exactly the pair being ruled on, and the verdict the operator was not
  * supposed to see yet is the largest section on the screen. Everything the
  * ENGINE knew stays visible: features, digests, photos, the score. The judge is
- * the only thing hidden, and only until the operator has answered.
+ * the only thing hidden, and only until the operator has answered — except on a
+ * pair of the sealed random sample (`?sample=1`, from the Judge page): the
+ * sample measures the engine too, so its zone, score, certificate, rule, probes
+ * and features wait for the same answer.
  */
 
 import { useState } from 'react';
@@ -45,13 +49,15 @@ import MemberText from '@/components/autodedup/MemberText';
 import VerdictButtons, {
   VERDICT_LABELS,
   displayVerdict,
+  revealsJudge,
 } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
 } from '@/components/autodedup/VerdictNotes';
-import { JudgeChip } from '@/components/autodedup/PairCard';
-import { useVerdictOverlay } from './AutodedupGroups';
+import { JudgeChip, JudgeEvidence } from '@/components/autodedup/PairCard';
+import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+import { StoreNotReady } from '@/components/autodedup/Notice';
 import {
   GenerationNotice,
   useAutodedupGenerations,
@@ -78,6 +84,7 @@ export default function AutodedupPair() {
   /* Only the explicit '1' blinds: this page is reachable directly, and its own
    * default is the full record. */
   const blind = params.get('blind') === '1';
+  const sample = params.get('sample') === '1';
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
@@ -105,6 +112,8 @@ export default function AutodedupPair() {
   const storeReady = q.data?.store_ready ?? null;
   const key = `${lo}:${hi}`;
   const stored = overlay[key] ?? data?.verdicts?.[0] ?? null;
+  const judgeHidden = blind && !revealsJudge(stored);
+  const engineHidden = judgeHidden && sample;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -113,19 +122,21 @@ export default function AutodedupPair() {
           AUTODEDUP · Pair <span className="font-mono text-lg">#{lo} · #{hi}</span>
         </h1>
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
-          Every signal the engine had on these two adverts. Recording a verdict here writes into the
-          program's own schema only — a negative verdict also makes the pair permanently
-          un-linkable, which is why it takes a second click.
+          Vše, co engine o těchto dvou inzerátech ví. Vaše odpověď se uloží jako rozhodnutí.
+          Odpověď Různé drží oba inzeráty trvale od sebe, proto ji potvrzujete druhým kliknutím.
         </p>
-        <p className="mt-1 text-[0.78rem]">
-          {/* Every ruling on either advert, with its history and the corrections (E920). */}
-          <Link
-            to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
-            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-          >
-            Všechna rozhodnutí o inzerátu #{lo}
-          </Link>
-        </p>
+        {/* The rulings page is not blind: on a hidden sample pair its row would show the engine. */}
+        {!engineHidden && (
+          <p className="mt-1 text-[0.78rem]">
+            {/* Every ruling on either advert, with its history and the corrections (E920). */}
+            <Link
+              to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
+              className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+            >
+              Všechna rozhodnutí o inzerátu #{lo}
+            </Link>
+          </p>
+        )}
       </header>
 
       {/* An evidence page reached from a queue of a superseded pass is itself a
@@ -146,34 +157,40 @@ export default function AutodedupPair() {
         </p>
       )}
       {q.error && <ErrorBanner message={(q.error as Error).message} />}
-      {storeReady === false && (
+      {storeReady === false && <StoreNotReady />}
+      {storeReady === true && data && data.pair == null && !engineHidden && (
         <p className={SECTION}>
-          Schema not migrated yet — the program's store does not exist in this database.
-        </p>
-      )}
-      {storeReady === true && data && data.pair == null && (
-        <p className={SECTION}>
-          This pair was never scored, or scored below the store floor, so no row was kept for it.
+          Engine tuto dvojici neohodnotil, nebo jí dal skóre pod hranicí ukládání — nemá o ní
+          uložený řádek.
         </p>
       )}
 
       {data && (
         <>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <EvidenceChips
-              zone={data.pair?.zone}
-              score={data.pair?.score}
-              certificate={data.pair?.certificate}
-              families={data.family_names}
-              guardVeto={data.pair?.guard_veto}
-            />
-            {data.pair?.decision && <Chip title="The rule that decided it">{data.pair.decision}</Chip>}
-            {(data.pair?.probes ?? []).map((p) => (
-              <Chip key={p} title="A blocking probe that proposed this pair">
-                {p}
-              </Chip>
-            ))}
-          </div>
+          {engineHidden ? (
+            <p className="mt-4 text-[0.72rem] text-[var(--color-ink-3)]">
+              Náhodný vzorek: co o dvojici ví engine, je skryté, dokud neodpovíte Stejné nebo
+              Různé.
+            </p>
+          ) : (
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <EvidenceChips
+                zone={data.pair?.zone}
+                score={data.pair?.score}
+                certificate={data.pair?.certificate}
+                families={data.family_names}
+                guardVeto={data.pair?.guard_veto}
+              />
+              {data.pair?.decision && (
+                <Chip title="The rule that decided it">{data.pair.decision}</Chip>
+              )}
+              {(data.pair?.probes ?? []).map((p) => (
+                <Chip key={p} title="A blocking probe that proposed this pair">
+                  {p}
+                </Chip>
+              ))}
+            </div>
+          )}
 
           <div className="mt-3 space-y-2">
             <VerdictButtons
@@ -226,45 +243,47 @@ export default function AutodedupPair() {
             </section>
           )}
 
-          <section className={SECTION}>
-            <h2 className={EYEBROW}>Features</h2>
-            {data.features.length === 0 ? (
-              <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                No feature was stored for this pair.
-              </p>
-            ) : (
-              <div className="mt-2 overflow-x-auto">
-                <table className="w-full text-[0.72rem]">
-                  <thead>
-                    <tr className={EYEBROW}>
-                      <th className={TH}>Feature</th>
-                      <th className={TH}>Value</th>
-                      <th className={TH}>Present</th>
-                      <th className={TH}>Contribution</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.features.map((f) => (
-                      <tr key={f.name} className="border-t border-[var(--color-rule-soft)]">
-                        <td className={`${TD} font-mono text-[var(--color-ink-2)]`}>{f.name}</td>
-                        <td className={`${TD} font-mono tabular-nums`}>
-                          {f.present ? fmtScore(f.value) : '—'}
-                        </td>
-                        <td className={`${TD} ${f.present ? '' : 'text-[var(--color-ink-4)]'}`}>
-                          {f.present ? 'ano' : 'absent'}
-                        </td>
-                        <td className={`${TD} font-mono tabular-nums`}>
-                          {f.contribution == null
-                            ? '—'
-                            : `${f.contribution > 0 ? '+' : ''}${fmtScore(f.contribution)}`}
-                        </td>
+          {!engineHidden && (
+            <section className={SECTION}>
+              <h2 className={EYEBROW}>Features</h2>
+              {data.features.length === 0 ? (
+                <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
+                  Engine k této dvojici neuložil žádné údaje.
+                </p>
+              ) : (
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-[0.72rem]">
+                    <thead>
+                      <tr className={EYEBROW}>
+                        <th className={TH}>Feature</th>
+                        <th className={TH}>Value</th>
+                        <th className={TH}>Present</th>
+                        <th className={TH}>Contribution</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+                    </thead>
+                    <tbody>
+                      {data.features.map((f) => (
+                        <tr key={f.name} className="border-t border-[var(--color-rule-soft)]">
+                          <td className={`${TD} font-mono text-[var(--color-ink-2)]`}>{f.name}</td>
+                          <td className={`${TD} font-mono tabular-nums`}>
+                            {f.present ? fmtScore(f.value) : '—'}
+                          </td>
+                          <td className={`${TD} ${f.present ? '' : 'text-[var(--color-ink-4)]'}`}>
+                            {f.present ? 'ano' : 'absent'}
+                          </td>
+                          <td className={`${TD} font-mono tabular-nums`}>
+                            {f.contribution == null
+                              ? '—'
+                              : `${f.contribution > 0 ? '+' : ''}${fmtScore(f.contribution)}`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Digests</h2>
@@ -288,17 +307,17 @@ export default function AutodedupPair() {
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Judgements</h2>
-            {blind && stored == null ? (
+            {judgeHidden ? (
               /* Said in words, never rendered as an empty section: "hidden" and
                 * "nobody has judged this" are different facts, and printing the
                 * second for the first would teach the operator that a blind pair
                 * is an unjudged one. */
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                Naslepo: verdikt soudce je skrytý, dokud neuložíte vlastní verdikt.
+                Naslepo: verdikt soudce je skrytý, dokud neodpovíte Stejné nebo Různé.
               </p>
             ) : data.judgements.length === 0 ? (
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
-                No judge has ruled on this pair.
+                Soudce tuto dvojici zatím nečetl.
               </p>
             ) : (
               <ul className="mt-2 space-y-3">
@@ -471,17 +490,8 @@ function JudgementBlock({ judgement }: { judgement: AutodedupJudgementRow }) {
           {judgement.unit_discriminator}
         </p>
       )}
-      <div className="mt-1 grid gap-3 sm:grid-cols-2 text-[0.7rem]">
-        <ul className="space-y-0.5 text-[var(--color-ink-2)]">
-          {(judgement.key_evidence ?? []).map((e) => (
-            <li key={e}>+ {e}</li>
-          ))}
-        </ul>
-        <ul className="space-y-0.5 text-[var(--color-brick)]">
-          {(judgement.contradicting_evidence ?? []).map((e) => (
-            <li key={e}>− {e}</li>
-          ))}
-        </ul>
+      <div className="mt-1">
+        <JudgeEvidence judgement={judgement} />
       </div>
     </li>
   );

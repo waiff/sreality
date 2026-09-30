@@ -113,9 +113,10 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   diacritic fold, ONE `(field, portal_label) → canonical` registry, ONE disposition grammar, ONE boolean helper.
   An unmapped label is NULL + a counted event, never a passthrough enum. LLM tool schemas and the DB-resident prompts
   are **generated from / CI-diffed against** it, with real JSON `enum` arrays.
-- **R6 — Derived cells never mint a snapshot.** A text cell is a pure function of `description` (a hashed column);
-  the extraction cache is keyed `(listing_id, description-hash, extractor_version)` — never `snapshot_id`, so a
-  price-only change neither re-bills nor loses an extraction. No derived writer ever touches `raw_json`.
+- **R6 — Derived cells never mint a snapshot.** A text cell is a pure function of the advert text (headline +
+  description, since location reader W1); the cache is keyed `(listing_id, text-hash, extractor_version)`, the version
+  hashing the prompt + schema — never `snapshot_id`, so a price-only change neither re-bills nor loses an extraction.
+  No derived writer ever touches `raw_json`.
 - **R7 — A field may be written by the text lane only after a labelled panel shows ≥ 95 % precision** (floor:
   ≥ 95 % within ±1 — operator ruling: populate even if off by one). `false` is written only from an explicit negation
   in the evidence quote ("bez výtahu"), never from silence. Floor is returned as the advert's own words and converted
@@ -483,6 +484,7 @@ itself (migration 552). Pre-call budget guard binds before spend, proven by sour
    OPEN gates only, and the open-gate set is part of `extractor_version`. Two consequences, both stated loudly at
    the switch: with every gate closed the lane costs nothing at all (no query, no call), and opening a gate re-opens
    the corpus — open every field the bake-off cleared in ONE edit or pay for the same descriptions twice.
+   *(Superseded by location reader W1, 2026-09-30: scope = open gates ∪ `llm_text` portals; key = prompt + schema.)*
 3. *"`eligible > 0 AND claimed = 0` never persists two passes."* Two passes is not observable: `_record_pass` keeps
    only the LAST pass per lane and the check runs 6-hourly against a 5-minute lane. It is also not the right test:
    bazos arrives in bursts (1,940 rows a day over ~147 distinct minutes), so healthy passes legitimately claim
@@ -734,7 +736,9 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
 New columns for facts no column holds today (year built, heating, orientation…); lowering the 15-minute
 `browse_list` rebuild itself; re-keying `listing_summaries` / `listing_condition_scores` onto a text hash (right move,
 LLM-pipelines track); merging the bazos location-claims LLM call with the attribute call (same text, different store,
-different gate — coupling two lifecycles is not a subtraction); unifying the two content-hash implementations
+different gate — coupling two lifecycles is not a subtraction) — SUPERSEDED by the operator ruling of 2026-09-29/30
+("yes, it needs to grab the location information from plain text too"): location reader W1 asks the same call for a
+location block; unifying the two content-hash implementations
 (sreality raw-JSON vs `_HASH_FIELDS`) — a 100k-snapshot churn event that needs its own program.
 
 ## 7. Residual risks (accepted, watched)

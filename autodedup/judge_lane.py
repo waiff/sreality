@@ -58,6 +58,7 @@ from autodedup.judge_sql import (
     JUDGEMENT_CACHED_SQL,
     JUDGEMENT_COST_SQL,
     JUDGEMENT_POD_COST_SQL,
+    JUDGEMENT_STRATUM_STAMP_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
 from autodedup.incremental import Keyer
@@ -1123,8 +1124,10 @@ def judgement_params(
     verdict: Any,
     llm_call_id: int | None,
     cost_usd: float | None,
+    stratum: str | None,
 ) -> dict[str, Any]:
-    """Migration 528's `autodedup.judgements` columns, read off the judge's verdict object.
+    """Migration 528's `autodedup.judgements` columns (+ 576's `stratum`, the pair list's stamp),
+    read off the judge's verdict object.
 
     Read by `getattr` rather than by field: `Verdict` and `GoldVerdict` carry the same seven
     answer fields under one contract, and a gold aggregate legitimately lacks some of them."""
@@ -1147,6 +1150,7 @@ def judgement_params(
         ),
         "llm_call_id": int(llm_call_id) if llm_call_id is not None else None,
         "cost_usd": round(float(cost_usd), 6) if cost_usd is not None else None,
+        "stratum": stratum,
     }
 
 
@@ -1364,6 +1368,30 @@ def _cached_pairs(conn: Any, judge_version: str, tier: str,
     with conn.cursor() as cur:
         cur.execute(JUDGEMENT_CACHED_SQL, params)
         return {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
+
+
+def _stamp_cached(conn_factory: Callable[[], Any], judge_version: str, tier: str,
+                  jobs: list[PairJob]) -> None:
+    """A list dispatched again pays nothing for its cached pairs, but still stamps them with its
+    stratum where they carry none (marks written before migration 576)."""
+    stamped = [job for job in jobs if job.row.get("stratum")]
+    if not stamped:
+        return
+    conn = conn_factory()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(JUDGEMENT_STRATUM_STAMP_SQL, {
+                "judge_version": judge_version,
+                "tier": tier,
+                "los": [job.lo for job in stamped],
+                "his": [job.hi for job in stamped],
+                "strata": [str(job.row["stratum"]) for job in stamped],
+            })
+        commit = getattr(conn, "commit", None)
+        if callable(commit):
+            commit()
+    finally:
+        _close(conn)
 
 
 def _gold_pairs(conn: Any, judge_version: str) -> set[tuple[int, int]]:
@@ -1653,6 +1681,9 @@ def run_judge(
             _close(conn)
         if cached:
             counters.skipped_cached = sum(1 for job in jobs if (job.lo, job.hi) in cached)
+            if parsed.pairs_file:
+                _stamp_cached(conn_factory, judge_version, parsed.tier,
+                              [job for job in jobs if (job.lo, job.hi) in cached])
             jobs = [job for job in jobs if (job.lo, job.hi) not in cached]
 
     budget: Budget = Budget(parsed.max_usd)
@@ -2146,7 +2177,7 @@ def _run_job(
             _persist(conn, judgement_params(
                 lo=job.lo, hi=job.hi, judge_version=judge_version, tier=vote.tier,
                 model=vote.model, verdict=parsed_vote, llm_call_id=call_id,
-                cost_usd=stored_cost,
+                cost_usd=stored_cost, stratum=job.row.get("stratum"),
             ), counters, lock)
 
     for record in results:
@@ -2186,6 +2217,7 @@ def _run_job(
     _persist(conn, judgement_params(
         lo=job.lo, hi=job.hi, judge_version=judge_version, tier="gold",
         model=models, verdict=aggregate, llm_call_id=first_id, cost_usd=total,
+        stratum=job.row.get("stratum"),
     ), counters, lock)
     emit({
         "lo": job.lo, "hi": job.hi, "stratum": job.stratum, "tier": "gold",
