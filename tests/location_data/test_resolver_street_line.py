@@ -1,10 +1,5 @@
-"""The street matcher (W18, v5.6): a street claim bound whole against the register.
-
-W18 split bazos' headline on the portals' separators and bound it segment by segment; W3
-retired that headline claim (the text reading names the street itself) and v5.6 deleted the
-split. What stays is the matcher: exact inside the anchoring obec, in two tiers, fail-closed,
-never a place of that town — and R3 for a typo when nothing matched exactly.
-"""
+"""The street matcher (W18; v5.6 deleted its separator split with bazos' headline claim): exact
+inside the anchoring obec, two tiers, fail-closed, never a place of that town; R3 for a typo."""
 
 from __future__ import annotations
 
@@ -35,8 +30,8 @@ def _bind(value: str, obec_kods=(MLADA_BOLESLAV,)):
 
 
 def test_a_street_binds_inside_its_town_and_nowhere_else():
-    """The constraining obec keeps a common street name from placing a listing 200 km away —
-    the Krásný Les lesson one level down."""
+    """The Krásný Les lesson one level down: a common street name never places a listing 200 km
+    away."""
     assert _street("Jiráskova").ulice_kod == 105
     assert _bind("Ke Křížku", (KLADNO,)).street is not None
     assert _bind("Ke Křížku", (MLADA_BOLESLAV,)).street is None
@@ -73,8 +68,7 @@ def test_a_street_whose_name_IS_the_generic_word_still_binds():
     assert _street("Na Ulici", town="Kladno").street_name == "Na Ulici"
 
 
-def test_the_street_index_is_the_same_answer_as_folding_each_row():
-    """The per-obec index is an ACCELERATOR and nothing else."""
+def test_the_street_index_is_an_accelerator_and_nothing_else():
     mirror = mm.default_mirror()
     built = composite.build_street_index(mirror.streets_in_obec(KLADNO))
     assert composite.street_index(mirror, KLADNO) == built

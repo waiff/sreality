@@ -11,8 +11,7 @@ a real place is the register's question, asked by the resolver.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from location_data.claims_common import Claim, Entry, ListingRow, _base
 
@@ -105,9 +104,8 @@ def _cell(raw: Any) -> tuple[Any, Any]:
     return raw.get("value"), raw.get("evidence_quote")
 
 
-@dataclass(frozen=True, slots=True)
-class Reading:
-    """A listing's CURRENT reading, as the claim lane selects it: the row id, the raw block
+class Reading(NamedTuple):
+    """A listing's CURRENT reading as the claim lane selects it: the row id, the raw block
     (`{"location": …}`) and the advert text it was read from, composed in SQL."""
     id: int
     payload: Mapping[str, Any]
@@ -157,8 +155,7 @@ def _words(text: str) -> list[str]:
 def _grounded(value: str, quote: str) -> bool:
     """V2: a value word of 3+ letters shares its first three with a quote word (Brno/Brně,
     Plzeň/Plzni, Hora/Hoře); a name with no such word ("Aš") must stand in the quote whole."""
-    said = _words(quote)
-    named = _words(value)
+    said, named = _words(quote), _words(value)
     long = [w[:3] for w in named if len(w) >= 3]
     if not long:
         return bool(named) and all(w in said for w in named)

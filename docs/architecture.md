@@ -2852,19 +2852,15 @@ writes is not evidence a portal published.
   terminate the parent's session. The pool is an accelerator only: one outcome per body IN ORDER, so
   a content-triggered refusal still costs one listing's page entries and a pool the OOM killer takes
   finishes its batch on the main thread.
-* *The readings half* (W3, migration 578) runs after the page half, in what is left of its budget
-  share. A listing's CURRENT reading is its successful location reading of its CURRENT advert text
-  (hashed in SQL by the text lane's own expressions), at the lane's current `extractor_version` if one
-  exists, else the newest; it is mined when its `mined_contract_version` stamp (`<source>@<version>`)
-  is not the portal's active contract. No cursor and no index: the selector reads the readings table
-  once, hash-free (~0.6 s), and hashes only the listings whose preferred reading is unstamped or that
-  have two texts read. ONE statement per batch does each reading's four acts — insert its claims;
-  DELETE the listing's other same-source, non-operator claims of the reading entries' types
-  (SUPERSESSION: a headline edit, a model rolled back M1→M2→M1, a text reverting A→B→A each publish
-  the current reading); stamp it and clear the listing's other stamps; enqueue. Pages are never
-  superseded (a degraded page must not delete a town), and a listing with no reading keeps its older
-  claims — so `location_claims_retire.yml` must not run while text-less delisted bazos rows still
-  hold their `bazos@7` town (its rail is per listing, not per claim type).
+* *The readings half* (W3, migration 578), in what is left of the page half's budget share, mines
+  each listing's CURRENT reading — the successful reading of its CURRENT advert text (hashed by the
+  text lane's own SQL), at the lane's `extractor_version` if one exists, else the newest — unless its
+  `mined_contract_version` stamp is the active `<source>@<version>`. No cursor, no index: one
+  hash-free read of the readings table (~0.6 s) picks the few listings to hash. ONE statement per
+  batch inserts the claims, DELETES the listing's other same-source, non-operator claims of those
+  types (SUPERSESSION: a headline edit, a model rolled back, a text reverting A→B→A), moves the stamp
+  and enqueues. Pages are never superseded, and a listing with no reading keeps its older claims — so
+  `location_claims_retire.yml` must wait while text-less delisted bazos rows hold `bazos@7` towns.
 
 **A GONE PAGE IS NOT A BODY (W10).** "Latest body" means the latest body that is an AD. Four portals
 answer HTTP 200 for a listing they have removed — bazos serves the CATEGORY INDEX page, which carries

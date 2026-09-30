@@ -27,12 +27,11 @@ import tests.scraper.test_bazos_parser as bp
 from location_data import contracts
 from location_data.claims_common import ARCHIVED_COORDINATE_RULES, IntakeRefused
 from location_data.claims_intake import (
-    DEFAULT_MAX_CLAIM_VALUE_BYTES,
     READERS,
     SUBSTRATE_READING,
     Entry,
     ListingRow,
-    extract_listing,
+    payload_entries,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from location_data.page_readers import (
@@ -195,7 +194,11 @@ def test_the_capture_is_still_scrubbed_of_the_sellers_identity():
 # ------------------------------------------------------------------ per-entry extraction
 
 def test_the_psc_comes_off_the_town_anchors_href_on_the_live_capture():
-    psc = claim_of(PSC_ENTRY)
+    """The selector also matches the live category link; only the `/<5 digits>/` tail — the
+    PATTERN, not the selector — picks the node (`html_attr_regex` vs `html_attr`)."""
+    doc = document()
+    assert len(doc.css("a[href*='/inzeraty/']")) > 1
+    psc = claim_of(PSC_ENTRY, doc)
     assert (psc.claim_type, psc.value_text) == ("psc", LIVE_PSC)
     assert psc.licence_class == "portal" and psc.blur_evidence == "none"
 
@@ -228,14 +231,6 @@ def test_the_two_cell_layouts_carry_no_town_and_the_name_entries_stay_silent(bod
     # The blur hint needs the portal's own "Přibližná lokalita" title, which neither
     # hand-authored constant carries — a marker entry states the label or says nothing.
     assert run(ENTRIES["bzs.det.blur_hint"], doc) == []
-
-
-def test_the_pattern_and_not_the_selector_picks_the_node():
-    """THE behaviour that separates `html_attr_regex` from `html_attr`: the selector matches
-    the live category link too, and only the `/<5 digits>/` tail tells them apart."""
-    doc = document()
-    assert len(doc.css("a[href*='/inzeraty/']")) > 1
-    assert claim_of(PSC_ENTRY, doc).value_text == LIVE_PSC
 
 
 def test_a_slug_without_the_five_digit_tail_is_not_an_obec():
@@ -392,12 +387,7 @@ def test_an_href_the_pattern_does_not_match_is_silence_not_an_exception():
 
 # ------------------------------------------------------------------ the payload half
 
-@pytest.mark.parametrize("raw_json", [fx.BAZOS_LINK, fx.BAZOS_STREET_GEOCODE,
-                                      fx.BAZOS_LOCALITY_GEOCODE])
-def test_the_payload_half_claims_nothing_for_bazos(raw_json):
-    """v8 has no payload entry: the headline street it carried (W18) is the reading's now, and
+def test_the_payload_half_claims_nothing_for_bazos():
+    """v8 has no payload entry: W18's headline street is the reading's now, and
     `raw_json.locality_text` (the Lokalita cell, the okres on the live layout) was never one."""
-    result = extract_listing(
-        fx.listing("bazos", raw_json, native=str(raw_json["id"])), fx.entries_for("bazos"),
-        max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
-    assert result.claims == []
+    assert payload_entries(fx.entries_for("bazos")) == []

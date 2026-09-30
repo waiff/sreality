@@ -2,19 +2,13 @@
 # The detail page's Lokalita row still gives the PSČ (the town anchor's href; its visible text
 # is the OKRES) and the ad's own maps link — the blur marker and the pin.
 #
-# v8 takes the TOWN, the PART OF TOWN, the STREET and the HOUSE NUMBERS from the text lane's
-# stored reading: the one call that reads each advert for floor and lift also reads its
-# headline + description and answers where the property ITSELF is, quoting the words it relied
-# on (`location_data.text_reading`). The claim lane checks each value against the advert (V1
-# the quote is verbatim, V2 the value is grounded in its quote, V3 an offered property in
-# Czechia, V4 a number carries its marker) and the register decides the rest.
-#
-# What leaves, and why (operator rulings 2026-09-30):
-#  * `bzs.det.obec_slug` — the town anchor's href names the POST OFFICE's town: 35 of 137
-#    sampled adverts sat in the wrong town, 33 of them by postcode. The stated town replaces it;
-#    the PSČ stays, and a reading that names no town leaves the town to the PSČ.
-#  * `bzs.det.street_cue` — the whole capped headline, split by the resolver. The reading
-#    names the street itself, in the headline or the description.
+# v8 takes the TOWN, PART OF TOWN, STREET and HOUSE NUMBERS from the text lane's stored
+# reading: the call that reads each advert (headline + description) for floor and lift also
+# says where the property ITSELF is, quoting its words (`location_data.text_reading`: V1 quote
+# verbatim, V2 value grounded in it, V3 an offer in Czechia, V4 a number's marker).
+# Leaving (operator rulings 2026-09-30): `bzs.det.obec_slug` — the href names the POST
+# OFFICE's town (35 of 137 sampled adverts in the wrong town, 33 by postcode; the PSČ stays
+# and decides when a reading names no town) — and `bzs.det.street_cue`, the whole headline.
 # A mined reading supersedes the listing's older claims of its types; a listing with no
 # reading (a delisted advert with no text) keeps its v7 town.
 

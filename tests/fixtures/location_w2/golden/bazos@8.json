@@ -98,61 +98,31 @@
       "listing": "18909736",
       "extractor_id": "bzs.txt.town",
       "claim_type": "obec_name",
-      "value_text": "Hradec Králové",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
+      "value_text": "Hradec Králové"
     },
     {
       "listing": "18909736",
       "extractor_id": "bzs.txt.part_of_town",
       "claim_type": "cast_obce_name",
-      "value_text": "Třebeš",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
+      "value_text": "Třebeš"
     },
     {
       "listing": "18909736",
       "extractor_id": "bzs.txt.street",
       "claim_type": "street_name",
-      "value_text": "Štefánikova",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
+      "value_text": "Štefánikova"
     },
     {
       "listing": "fixture-ev",
       "extractor_id": "bzs.txt.town",
       "claim_type": "obec_name",
-      "value_text": "Moravské Prusy",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
+      "value_text": "Moravské Prusy"
     },
     {
       "listing": "fixture-ev",
       "extractor_id": "bzs.txt.house_number_cp",
       "claim_type": "house_number_cp",
-      "value_text": "č.ev. 13",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
-    },
-    {
-      "listing": "fixture-ungrounded",
-      "extractor_id": "bzs.txt.town",
-      "claim_type": "obec_name",
-      "value_text": "Kyjov",
-      "surface": "description",
-      "extraction_method": "llm_text",
-      "licence_class": "portal",
-      "subject_scoped": true
+      "value_text": "č.ev. 13"
     }
   ]
 }

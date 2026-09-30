@@ -17,9 +17,8 @@ WHAT THIS LANE IS (rule 25: one store, one lane, twelve claim types, no flags)
       - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the listing's
         `(source, source_id_native)`, fetched from R2 and scoped by the contract's exclusion
         zones — the 14 page readers in `location_data.page_readers`;
-      - the STORED READING: the text lane's answer about where the advertised property is,
-        in `listing_description_enrichments` — the reader `location_data.text_reading`. The
-        text lane writes readings and never claims; this lane mines them, and a mined
+      - the STORED READING: the text lane's answer about where the property is
+        (`listing_description_enrichments`, reader `location_data.text_reading`); a mined
         reading SUPERSEDES the listing's other claims of the types it declares.
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
@@ -957,21 +956,14 @@ _CLAIM_WRITE_SQL = (_CLAIM_INSERT_CTES + _ENQUEUE_CTE.format(changed="ins") + ""
     SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued)
 """)
 
-# THE READINGS HALF (location reader W3, final-plan D1/D5). A listing's CURRENT reading is its
-# successful location reading of the listing's CURRENT advert text (hashed in SQL by the text
-# lane's own expressions), at the lane's current `extractor_version` if one exists, else the
-# newest. It is MINED when its stamp (migration 578, `<source>@<version>`) is not the source's
-# active contract. `id`/`created_at` are no change signal (the text lane rewrites an error row
-# in place), so nothing here keys on them.
-#
-# NO CURSOR AND NO INDEX (final-plan §10: a cursor skips late commits, a partial index dies at
-# the second bump). Driven from `listings` alone the walk hashed every advert every pass and
-# ran past 50 s on prod; so `unsettled` first reads the readings table once, hash-free
-# (0.6 s, 2026-09-30), and keeps only the listings whose current reading COULD be unmined: the
-# preferred reading is not stamped at an active contract, or two advert texts were read (the
-# text may have gone back to the older one, A -> B -> A). Only those are hashed. A listing
-# whose readings all share one text and whose preferred one is stamped is mined whatever its
-# text is now: the same text is that stamped reading, and a text never read has no reading.
+# THE READINGS HALF (W3, final-plan D1/D5). A listing's CURRENT reading is its successful
+# location reading of its CURRENT advert text (hashed by the text lane's own SQL), at the lane's
+# `extractor_version` if one exists, else the newest; it is MINED when its stamp (migration 578,
+# `<source>@<version>`) is not the active contract. No cursor, no index (final-plan §10). Driven
+# from `listings` alone the walk hashed every advert and ran past 50 s on prod, so `unsettled`
+# reads the readings table once, hash-free (0.6 s, 2026-09-30), and hashes only a listing whose
+# preferred reading is unstamped or that has two texts read (A -> B -> A): one text with its
+# preferred reading stamped is settled, whatever the text is now.
 _READING = "e.extracted ? 'location' AND e.extracted -> 'error' IS NULL"
 _PREFERRED = ("(e.extractor_version IS NOT DISTINCT FROM %(version)s::text) DESC, "
               "e.created_at DESC, e.id DESC")
@@ -1002,12 +994,10 @@ _UNMINED_READINGS_SQL = f"""
      LIMIT %(cap)s
 """
 
-# ONE STATEMENT for a batch of mined readings, each reading's four acts inside it: its claims
-# inserted; the listing's other claims of the reading entries' types (same source, never an
-# operator's) DELETED unless just written — the per-listing supersession that retires a stale
-# headline, a model's older answer, an older text's street; this reading stamped and the
-# listing's other readings' stamps cleared, so one that becomes current again is mined again;
-# and the enqueue. Readings only, never pages: a degraded page must not delete a town.
+# ONE STATEMENT per batch, each reading's four acts in it: insert its claims; DELETE the
+# listing's other same-source, non-operator claims of the reading entries' types (SUPERSESSION,
+# readings only — a degraded page must never delete a town); stamp it and clear the listing's
+# other stamps, so a reading that becomes current again is mined again; enqueue.
 _READING_WRITE_SQL = (_CLAIM_INSERT_CTES + """, mined AS (
         SELECT * FROM jsonb_to_recordset(%(readings)s::jsonb) AS m(
             listing_id bigint, source text, reading_id bigint, stamp text, claim_types text[])
@@ -1819,9 +1809,7 @@ def drain_unmined_bodies(
     stats["bodies_seconds"] = time.monotonic() - started
 
 
-# A batch of readings is one statement of tiny rows (~5 claims each), so the bound is the
-# transaction's length, not memory: 1 000 is ~2 s of work against a ~1 s selector.
-READINGS_PER_BATCH = 1_000
+READINGS_PER_BATCH = 1_000  # tiny rows (~5 claims each): the bound is the transaction's length
 
 
 def drain_readings(
@@ -1829,10 +1817,8 @@ def drain_readings(
     statement_timeout: int, budget: _Budget, batch_id: int | None, dry_run: bool,
     stats: dict[str, Any], refusals: dict[str, int], schedule: Schedule = HOURLY,
 ) -> None:
-    """The READINGS half (W3): mine every listing's current reading that is not stamped at
-    its portal's active contract, `READINGS_PER_BATCH` at a time, in what is left of the
-    bodies' budget share. Scope is data: the portals whose ACTIVE contract has an entry on the
-    reading substrate (rule 21). No cursor: a mined reading leaves the selection by its stamp."""
+    """The READINGS half (W3), in what is left of the bodies' budget share. Scope is data: the
+    portals whose ACTIVE contract has an entry on the reading substrate (rule 21)."""
     scope = {s: found for s in sorted(entries_by_source) if source in (None, s)
              if (found := reading_entries(entries_by_source[s]))}
     if not scope:
@@ -1842,7 +1828,6 @@ def drain_readings(
     model = text_lane.resolve_model(conn)
     params = {"sources": list(scope), "stamps": stamps, "cap": READINGS_PER_BATCH,
               "version": text_lane.extractor_version(model) if model else None}
-    started = time.monotonic()
     last_seconds = 0.0
 
     def reading_batch(phase: _Phase) -> int:
@@ -1860,7 +1845,6 @@ def drain_readings(
                               "reading_id": int(reading_id), "claim_types": types[src]})
             stats["readings_mined"] += len(mined)
             stats["claims"] += len(result.claims)
-            stats["claims_reading"] += len(result.claims)
             if mined and not dry_run and batch_id is not None:
                 phase.name = "readings insert / supersede / stamp / enqueue"
                 cur.execute(_READING_WRITE_SQL, {
@@ -1877,13 +1861,10 @@ def drain_readings(
         selected = _with_lock_retry(reading_batch, family="readings", stats=stats,
                                     refusals=refusals, budget=budget)
         last_seconds = time.monotonic() - batch_started
-        LOG.info("INTAKE readings batch mined=%d claims=%d superseded=%d in %.1fs",
-                 selected, stats["claims_reading"], stats["claims_superseded"], last_seconds)
-        # A short batch is the end of the backlog; a dry run stamps nothing, so its next
-        # batch would select the same rows.
-        if selected < READINGS_PER_BATCH or dry_run:
+        LOG.info("INTAKE readings batch mined=%d superseded=%d in %.1fs",
+                 selected, stats["claims_superseded"], last_seconds)
+        if selected < READINGS_PER_BATCH or dry_run:  # a dry run stamps nothing: same rows
             break
-    stats["readings_seconds"] = time.monotonic() - started
 
 
 def run(
@@ -2003,8 +1984,7 @@ def run(
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "bodies_resumed_from_id": 0, "bodies_cursor_after_id": 0,
-        "bodies_cursor_versions": None, "readings_mined": 0, "claims_reading": 0,
-        "claims_superseded": 0, "readings_seconds": 0.0,
+        "bodies_cursor_versions": None, "readings_mined": 0, "claims_superseded": 0,
         "full_walk_continued": False, "full_walk_cursor": None, "lock_retries": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }

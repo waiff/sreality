@@ -6,7 +6,10 @@ from __future__ import annotations
 from typing import Any
 
 from location_data import text_reading as tr
+from location_data.claims_intake import READERS, reading_entries
+from location_data.resolver.normalize import TYP_EV, house_number, normalize_house_number
 from scraper.bazos_parser import ad_haystack
+from tests.location_data import claim_intake_fixtures as fx
 from toolkit import description_extraction as tx
 
 # Listing 18909736, the trigger: street, part and town stated, no house number anywhere.
@@ -89,9 +92,6 @@ def test_v1_a_quote_that_is_not_in_the_advert_drops_that_slot_only() -> None:
 
 def _claims(payload: dict[str, Any], text: str) -> dict[str, str]:
     """The bazos@8 reading entries over one reading, as the claim lane runs them."""
-    from location_data.claims_intake import READERS, reading_entries
-    from tests.location_data import claim_intake_fixtures as fx
-
     row, reading = fx.listing("bazos", {}), tr.Reading(1, payload, text)
     return {c.claim_type: c.value_text for e in reading_entries(fx.entries_for("bazos"))
             for c in READERS[str(e.reader)].fn(e, row, reading)}
@@ -133,8 +133,6 @@ def test_v4_a_number_needs_its_marker_or_the_street_form() -> None:
 
 
 def test_a_cottages_ev_rides_the_cp_entry_marked_and_the_resolver_types_it() -> None:
-    from location_data.resolver.normalize import TYP_EV, house_number, normalize_house_number
-
     text = ad_haystack("Prodej chaty Moravské Prusy", "Chata č.ev. 13, 40 m², č.p. neuvedeno.")
     claims = _claims(_payload("offer", house_number_ev=("13", "Chata č.ev. 13"),
                               house_number_co=("40", "40 m²")), text)

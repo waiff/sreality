@@ -343,11 +343,9 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     return out
 
 
-# --------------------------------------------------- the READINGS arm (W3)
-#
-# A reading entry reads the text lane's stored answer, never a body, so its fixture is a
-# FROZEN READING: the location block and the advert text it was read from, committed as
-# `<portal>_readings.json`. No model runs here — V1–V4 and the typed numbers are what it pins.
+# The READINGS arm (W3): a reading entry reads the text lane's stored answer, never a body,
+# so its fixture is a FROZEN READING (`<portal>_readings.json`: the block + the advert text).
+# No model runs here; V1–V4 and the typed numbers are what it pins.
 def score_readings(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     path = _W2 / f"{contract.source}_readings.json"
     entries = reading_entries(fx.entries_for(contract.source))
@@ -356,9 +354,7 @@ def score_readings(contract: contracts.PortalContract) -> list[dict[str, Any]]:
         row = fx.listing(contract.source, {}, native=item["listing"])
         reading = Reading(1, item["extracted"], item["advert_text"])
         out += [{"listing": item["listing"], "extractor_id": c.extractor_id,
-                 "claim_type": c.claim_type, "value_text": c.value_text,
-                 "surface": c.surface, "extraction_method": c.extraction_method,
-                 "licence_class": c.licence_class, "subject_scoped": c.subject_scoped}
+                 "claim_type": c.claim_type, "value_text": c.value_text}
                 for entry in entries for c in READERS[str(entry.reader)].fn(entry, row, reading)]
     return out
 
