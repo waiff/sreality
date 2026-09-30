@@ -245,24 +245,17 @@ it (`api/`). They do not apply to the scraper.
 
 ## Error contract and the transport deadline (Broker Unify W2)
 
-The global handler in `api/main.py` classifies unhandled exceptions into exactly two
-shapes, and every structured `detail` is `{code, message}` (the SPA's `detailText` and the
-extension both render `message`): psycopg's busy classes — `QueryCanceled` (57014, how a
-lock-blocked read dies at the 120 s statement budget), `LockNotAvailable`,
-`DeadlockDetected` — answer **503 `db_busy` + `Retry-After: 5`** (the ONE signal the SPA's
-transient-only retry predicate acts on); everything else answers **500 `internal_error`
-with a logged `ref` id** and never leaks raw exception text to the browser. A route that
-catches the busy classes itself and refuses under its own contract (property_split's
-structured 409) keeps doing so. Client side, `frontend/src/lib/api.ts` is the ONE
-transport (uploads and blob downloads included — no raw `fetch()` beside it):
-`REQUEST_DEADLINE_MS` (130 s) sits just above the server's 120 s budget and well under
-Railway's ~300 s edge close, a deadline abort is `ApiError.kind === 'timeout'` and is
-NEVER retried, and the react-query default retries once only on
-`isTransientApiError` (network failure or 502/503/504). Keep that ordering — client
-deadline > server budget — or the client gives up on requests the server would still
-answer. The extension's `chrome-extension/src/api.ts` duplicates the deadline by value
-(territories share no code); its overlay keeps `LOOKUP_TIMEOUT_MS` on top because an MV3
-message round trip can be lost to service-worker teardown, which no fetch deadline sees.
+`api/main.py`'s global handler answers exactly two shapes, both `{code, message}` details (the
+SPA's `detailText` and the extension render `message`): psycopg's busy classes (`QueryCanceled`
+57014 — a lock-blocked read dying at the 120 s budget — `LockNotAvailable`, `DeadlockDetected`) →
+**503 `db_busy` + `Retry-After`**; everything else → **500 `internal_error` + logged `ref` id**,
+never raw exception text. Route-owned refusals (property_split's 409) stay.
+`frontend/src/lib/api.ts` is the ONE transport (uploads + blob downloads, no raw `fetch()` beside
+it): `REQUEST_DEADLINE_MS` (130 s) sits above the server's 120 s budget and under Railway's ~300 s
+close — keep that ordering — a deadline abort (`ApiError.kind === 'timeout'`) is NEVER retried;
+react-query retries once only on `isTransientApiError` (network or 502/503/504). The extension
+duplicates the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 message-port loss
+no fetch deadline sees.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
@@ -300,7 +293,7 @@ Five auth primitives coexist — four in `api/dependencies.py`, one in `api/tena
   postures: notifications' 400, curation's `SYSTEM` fallback (290 has no SYSTEM arm → a 500), pipeline's `None`.
 
 `SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"` (migration 286) owns a SERVICE-ROLE
-write whose caller has no JWT `sub`, and ONLY where the table carries a SYSTEM RLS arm
+write whose caller has no JWT `sub`, ONLY where the table carries a SYSTEM RLS arm
 (`estimation_runs`, 291/292) — never a fallback on a tenant conn (290 gave curation none).
 
 For routes that need per-account **data isolation** (not just an admin/non-admin split), use
@@ -316,58 +309,43 @@ restate it here or in a module docstring.** Standing gates: `tests/api/test_admi
 `/brokers/*` + `POST /estimations` are service-role and excluded structurally) and
 `tests/api/test_account_scope_census.py` (no nullable tenant scope anywhere in `api/`).
 
-**Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment
-5) adds a **fourth** auth class alongside the three above: `POST /billing/webhook` verifies
-the `Stripe-Signature` header as an HMAC over the raw request body using the stdlib (no
-Stripe SDK), rejects payloads outside a 300s replay window, and fails closed with no
-`STRIPE_WEBHOOK_SECRET` configured — it does NOT use `require_token`/`verify_jwt` at all.
-One DB transaction covers both the `stripe_webhook_events` idempotency INSERT (`ON CONFLICT
-DO NOTHING` on the Stripe event id — atomic already-processed check, never check-then-act)
-and the event handler, so a mid-handler crash lets Stripe's own retry reprocess safely.
-`checkout.session.completed` anchors the Stripe customer id to an account (never re-points
-an already-bound one); `customer.subscription.*` upserts plan/status/period guarded by
-`last_event_created` (Stripe doesn't guarantee delivery order). `GET /billing/me` rides
-`tenant_conn` (RLS) and returns the caller's plan + agenda visibility.
-`require_entitlement(agenda)` is a dependency **factory** (not a single dependency like
-`require_admin`) — call it as `Depends(require_entitlement("watchdogs"))` to 403 unless the
-caller's plan has that agenda's visibility flag on; its bypass check is `is_admin` alone
-(the operator is never billing-gated) — the dead `claims.get("legacy")` disjunct was
-deleted 2026-09-11. Wired
-to no *router* yet — the first real enforcement is **inline in `create_estimation_run`**
-(below), not via the dependency.
+**Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment 5) adds a
+**fourth** auth class: `POST /billing/webhook` verifies the `Stripe-Signature` HMAC over the raw
+body with the stdlib (no SDK), rejects payloads outside a 300s replay window, and fails closed with
+no `STRIPE_WEBHOOK_SECRET` — never `require_token`/ `verify_jwt`. One DB transaction covers the
+`stripe_webhook_events` idempotency INSERT (`ON CONFLICT DO NOTHING` on the event id — atomic,
+never check-then-act) AND the handler, so a mid-handler crash lets Stripe's retry reprocess safely.
+`checkout.session.completed` anchors the customer id to an account (never re-points a bound one);
+`customer.subscription.*` upserts plan/status/period guarded by `last_event_created` (delivery
+order isn't guaranteed). `GET /billing/me` rides `tenant_conn` (RLS). `require_entitlement(agenda)`
+is a dependency **factory** — `Depends(require_entitlement( "watchdogs"))` 403s unless the plan
+carries that agenda; bypass is `is_admin` alone. Wired to no *router* yet — the first real
+enforcement is inline in `create_estimation_run` (below).
 
 **Agent-estimation metering** (Wave 1, migration 355) is the first metered path. The paid
-`mode:'agent'` submit is gated **inside `api/estimation_runs.py:create_estimation_run`**, at
-the single choke point *before the URL parse* (`_prepare_metered_submit`) so a rejected submit
-spends zero LLM cost. Meter = **per successful agent run, monthly** (operator decision, not
-USD): free plan `plans.agent_estimations_monthly_quota` = 3, `trial_*` = 10 (used while
-`entitlements.status='trialing'` + unexpired). Only a real, non-admin tenant sending
-`mode:'agent'` is metered — admin/SYSTEM and all deterministic runs bypass, mirroring
-`require_entitlement` (`_is_privileged`'s dead `claims.get("legacy")` disjunct was deleted
-2026-09-11). ClickUp is named in the comments here as
-a bypass beneficiary via `claims is None` (an internal/direct-Python call path, not the
-`POST /estimations` HTTP route — that route's `Depends(deps.verify_jwt)` always yields a
-dict, never `None`), but ClickUp has zero historical rows in `estimation_runs`/
-`building_runs` (verified live 2026-08-04) — it has never actually called the HTTP API with
-the static token. If it ever does, that call now 401s at `verify_jwt` like any other; giving
-it a real credential is deferred until the integration is actually activated (operator
-decision 2026-08-04). The enforcement is **atomic** (A9 — never check-then-act over
-the tx pooler): the INSERT is `INSERT … SELECT WHERE (monthly non-failed count) < quota AND
-(in-flight count) < cap ON CONFLICT (account_id, idempotency_key) DO NOTHING` — budget +
-per-account concurrency + idempotency in one write, arbiter index `estimation_runs_inflight_idem`.
-The budget counts `estimation_runs` (non-failed this month) directly, not `usage_ledger`;
-`usage_ledger` is the append-only billing/margin record (one row per metered success, cost =
-the run's `llm_calls` sum), written at the agent terminal, RLS-scoped like `entitlements`.
-Flags (app_settings, read on the service-role conn): `estimation_budget_enabled` (absent ⇒
-**enforced** — fail-closed; the emergency off), `agent_estimation_concurrency_cap` (default 3).
-Deferred: granting the trial at signup, and the extension sending `mode:'agent'`.
+`mode:'agent'` submit is gated **inside `api/estimation_runs.py:create_estimation_run`**, at the
+single choke point *before the URL parse* (`_prepare_metered_submit`) so a rejected submit spends
+zero LLM cost. Meter = **per successful agent run, monthly** (operator decision, not USD): free
+plan `plans.agent_estimations_monthly_quota` = 3, `trial_*` = 10 (while
+`entitlements.status='trialing'` + unexpired). Only a real, non-admin tenant sending `mode:'agent'`
+is metered — admin/SYSTEM and all deterministic runs bypass, mirroring `require_entitlement`.
+(ClickUp is named in comments as a `claims is None` bypass — an internal direct-Python path only;
+it has zero historical rows, verified 2026-08-04, any HTTP call 401s, and a real credential waits
+until the integration activates.) Enforcement is **atomic** (A9 — never check-then-act over the tx
+pooler): `INSERT … SELECT WHERE (monthly non-failed count) < quota AND (in-flight count) < cap ON
+CONFLICT (account_id, idempotency_key) DO NOTHING` — budget + per-account concurrency + idempotency
+in one write, arbiter index `estimation_runs_inflight_idem`. The budget counts `estimation_runs`
+directly; `usage_ledger` is the append-only billing/margin record (one row per metered success,
+cost = the run's `llm_calls` sum), written at the agent terminal, RLS-scoped like `entitlements`.
+Flags (app_settings, service-role read): `estimation_budget_enabled` (absent ⇒ **enforced**, fail-
+closed), `agent_estimation_concurrency_cap` (3). Deferred: trial at signup, extension
+`mode:'agent'`.
 
 ## Auth and secrets
 
 All secrets are GitHub Actions secrets and/or Railway env vars in production. Backend code
 references them by name; never write a value into a committed file (`.env` is gitignored).
-API keys are **backend-only** — never `VITE_*`-prefix a backend secret; the `frontend/` build
-must not see them.
+API keys are **backend-only** — never `VITE_*`-prefix one; `frontend/` must not see them.
 
 Database:
 - `SUPABASE_DB_URL` — Postgres connection string (Supabase → Database → Connection string →
