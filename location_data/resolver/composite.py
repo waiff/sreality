@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from location_data.resolver.normalize import (
     STREET_LINE_SEPARATOR,
+    house_number,
     normalize_match_key,
     split_street_and_number,
     split_street_type,
@@ -97,7 +98,7 @@ def resolve_locality(value: str, registry: RegistryView) -> CompositeBind:
 
     town_only: AdminUnit | None = None
     for index, unit in _anchor_candidates(tokens, registry):
-        obec = _obec_of(unit, registry)
+        obec = obec_of(unit, registry)
         if obec is None:
             continue
         part = _part_inside(tokens, index, obec, registry)
@@ -113,7 +114,7 @@ def resolve_locality(value: str, registry: RegistryView) -> CompositeBind:
 
 
 def _resolve_up(unit: AdminUnit, registry: RegistryView, reason: str) -> CompositeBind:
-    obec = _obec_of(unit, registry)
+    obec = obec_of(unit, registry)
     if obec is None:
         return CompositeBind(reason="no_obec_ancestor")
     return CompositeBind(obec=obec, part=None if unit.level == "obec" else unit, reason=reason)
@@ -167,7 +168,7 @@ def _part_inside(
             inside = [
                 unit
                 for unit in _lookup(registry, key, (level,))
-                if (parent := _obec_of(unit, registry)) is not None and parent.code == obec.code
+                if (parent := obec_of(unit, registry)) is not None and parent.code == obec.code
             ]
             if len(inside) == 1:
                 return inside[0]
@@ -176,7 +177,7 @@ def _part_inside(
     return None
 
 
-def _obec_of(unit: AdminUnit, registry: RegistryView) -> AdminUnit | None:
+def obec_of(unit: AdminUnit, registry: RegistryView) -> AdminUnit | None:
     if unit.level == "obec":
         return unit
     for ancestor in registry.admin_chain(unit.unit_id):
@@ -243,8 +244,8 @@ class StreetBind:
 
     street: Street | None = None
     cislo_domovni: int | None = None
+    typ_so: str | None = None
     cislo_orientacni: int | None = None
-    znak_orientacniho: str | None = None
     reason: str = "no_match"
 
     @property
@@ -376,13 +377,10 @@ def resolve_street(
     if len(found) > 1:
         return StreetBind(reason="ambiguous_streets")
     street, numbers = found[next(iter(sorted(found)))]
+    cislo_domovni, typ_so = house_number(numbers)
     return StreetBind(
-        street=street,
-        cislo_domovni=_as_int(numbers.get("cislo_domovni")),
-        cislo_orientacni=_as_int(numbers.get("cislo_orientacni")),
-        znak_orientacniho=(str(numbers["znak_orientacniho"])
-                           if numbers.get("znak_orientacniho") else None),
-        reason="segment_match",
+        street=street, cislo_domovni=cislo_domovni, typ_so=typ_so,
+        cislo_orientacni=_as_int(numbers.get("cislo_orientacni")), reason="segment_match",
     )
 
 
@@ -402,7 +400,7 @@ def _names_a_place(
             # Through the CHAIN, not through `AdminUnit.obec_kod`: that column is filled off
             # the ltree path by the SQL view and is empty on any other `RegistryView`, so
             # reading it here would make the rail fire in production and nowhere else.
-            town = _obec_of(unit, registry)
+            town = obec_of(unit, registry)
             if town is not None and town.code in obec_kods:
                 return True
     return False

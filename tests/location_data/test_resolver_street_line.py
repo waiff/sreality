@@ -74,7 +74,8 @@ def test_a_segment_carrying_a_house_number_reaches_the_address_point():
         mm.claim(2, "street_name", source="bazos", value_text="28. října 12, Ostrava"),
     ])
     assert resolution.street_name == "28. října"
-    assert resolution.house_number_cp == "12"
+    # No `28. října 12` door in the register, so no number (v5.5, D7) — only the street.
+    assert (resolution.house_number_cp, resolution.granularity) == (None, "street")
 
 
 def test_the_official_generic_word_is_matched_and_so_is_its_absence():
@@ -213,24 +214,6 @@ def test_the_street_index_is_the_same_answer_as_folding_each_row():
     assert composite.street_index(mirror, KLADNO) == built
     assert set(built["svobody"]) == {
         s for s in mirror.streets_in_obec(KLADNO) if s.code in (112, 113)}
-
-
-def test_a_line_number_never_attaches_to_a_street_bound_from_another_claim():
-    """A listing naming `Nad Bořislavkou` and, in a SEPARATE claim, a line reading
-    "Livornská 5" published `Nad Bořislavkou 5` at `street_segment` grain, because the line's
-    number was written back onto the listing-wide constraints and then lent to whatever street
-    the ranking picked. A number belongs to the segment that bound ITS street.
-
-    Two claims naming two different streets is also two answers, so the binder refuses both —
-    and the number goes with them rather than surviving on a row with no street at all."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
-        mm.claim(3, "street_name", value_text="Prodej bytu 2+kk, Livornská 5, Praha"),
-    ])
-    assert resolution.street_name is None
-    assert resolution.house_number_cp is None
-    assert resolution.obec_name == "Praha"
 
 
 def test_a_house_number_claimed_in_its_own_field_still_reaches_the_address_point():

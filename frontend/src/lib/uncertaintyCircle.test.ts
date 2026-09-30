@@ -19,7 +19,6 @@ const RANK = {
   obec: 40,
   cast_obce_or_quarter: 50,
   street: 60,
-  street_segment: 70,
   parcel: 80,
   building: 90,
   address_point: 100,

@@ -48,10 +48,19 @@ def resolve(
     source = ordered[0].source if ordered else (source or "unknown")
 
     # ---- normalize. Two passes: the town-as-street rejection needs the constraining obec,
-    # and the constraining obec is read off the first pass. Deterministic either way.
+    # and the constraining obec is read off the first pass by BIND's own town rule, so S1 and
+    # BIND cannot disagree about the town. The second pass only ever rejects a street claim,
+    # so the pin and its declared precision are read off the first.
     first_pass = step_normalize.normalize_all(ordered)
-    prelim = step_bind.collect_constraints(_admissible(ordered, first_pass), first_pass)
-    obec_kods = _constraining_obec_kods(prelim, ctx)
+    first = _admissible(ordered, first_pass)
+    pin_claim = step_bind.elect_pin(first)
+    pin_claim_id = pin_claim.id if pin_claim else None
+    declared = step_bind.read_declared_precision(first, coordinate_claim_id=pin_claim_id)
+    pin_is_precise = bool(declared.label) and not declared.blurred
+    towns = step_bind.constraining_towns(
+        step_bind.collect_constraints(first, first_pass, pin_claim_id=pin_claim_id),
+        ctx.registry, pin_is_precise=pin_is_precise)[0]
+    obec_kods = tuple(sorted({u.code for u in towns}))
     normalized = step_normalize.normalize_all(
         ordered,
         is_place_name=lambda key: _is_place_name(key, ctx),
@@ -63,14 +72,9 @@ def resolve(
     admissible = _admissible(ordered, normalized)
 
     # ---- 1. BIND.
-    pin_claim = step_bind.elect_pin(admissible)
-    declared = step_bind.read_declared_precision(
-        admissible, coordinate_claim_id=(pin_claim.id if pin_claim else None)
-    )
-    pin_is_precise = bool(declared.label) and not declared.blurred
     binding, constraints = step_bind.bind(
         admissible, normalized, ctx, pin_is_precise=pin_is_precise,
-        pin_claim_id=(pin_claim.id if pin_claim else None),
+        pin_blurred=declared.blurred, pin_claim_id=pin_claim_id,
     )
     position = step_bind.place(binding, pin_claim, declared=declared)
 
@@ -135,25 +139,6 @@ def _admissible(
     return tuple(
         c for c in claims if step_bind.admissible(c, normalized.get(c.id)) is None  # type: ignore[arg-type]
     )
-
-
-def _constraining_obec_kods(
-    constraints: step_bind.Constraints, ctx: ResolverContext
-) -> tuple[int, ...]:
-    if constraints.obec_kods:
-        return constraints.obec_kods
-    codes: list[int] = []
-    for key in constraints.obec_keys:
-        codes.extend(u.code for u in ctx.registry.admin_units_by_name(key, levels=("obec",)))
-    if not codes and constraints.obec_lines:
-        # W9: a composite line ("Brno - Dolní Heršpice") names no obec by itself, and without
-        # this the town-as-street test on the same listing had no obec to ask about.
-        composite = step_bind.first_composite_bind(constraints.obec_lines, ctx.registry)
-        if composite.obec is not None:
-            codes.append(composite.obec.code)
-    if not codes and constraints.psc:
-        codes.extend(ctx.registry.obec_codes_for_psc(constraints.psc))
-    return tuple(sorted(set(codes)))
 
 
 def _is_place_name(key: str, ctx: ResolverContext) -> bool:

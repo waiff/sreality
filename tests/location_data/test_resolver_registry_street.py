@@ -101,6 +101,7 @@ def test_a_street_the_registry_cannot_bind_is_not_published_at_all():
     ])
     assert resolution.street_name is None
     assert resolution.ulice_kod is None
-    # The rest of the row is untouched: dropping a street is not dropping the listing.
+    # The rest of the row is untouched: dropping a street is not dropping the listing. Its
+    # number goes with it (v5.5, D7): a number that joins no address point is not published.
     assert resolution.obec_name == "Praha"
-    assert resolution.house_number_cp == "4"
+    assert resolution.house_number_cp is None
