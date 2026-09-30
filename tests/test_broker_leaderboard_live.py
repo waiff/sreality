@@ -77,7 +77,10 @@ def _seed_broker(cur, broker_id: int, status: str = "active", firm_id=None):
     )
 
 
-def _seed_stats(cur, broker_id: int, apc: int, geo_level: str = "region", geo_id: int = 1):
+def _seed_stats(cur, broker_id: int, apc: int, geo_level: str = "cz", geo_id: int = 0):
+    """Default cell = the national ('cz', 0) one: since W4 a call with no geo
+    arrays reads exactly that cell (it no longer sums region rows), so a no-geo
+    test must seed it. Geo tests pass explicit levels."""
     cur.execute(
         "insert into broker_region_type_stats "
         "(broker_id, geo_level, geo_id, category_main, category_type, "
