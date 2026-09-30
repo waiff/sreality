@@ -18,12 +18,12 @@ penalize takes ONE slot, not a batch.
 
 Bounded waits, per caller: a limiter built with `max_wait_s` refuses a lease
 whose window starts further out than that, without moving the frontier, and
-raises RateBudgetUnavailable on that acquire and every later one. Only the
-realtime worker passes a bound; the Actions walks and drains wait as long as the
-ledger says. On 2026-09-29 ceskereality answered 403 to everything, each retry
-leased a fresh batch, the frontier ran an hour ahead and every caller slept
-there: the worker's probe and drain threads never came back and starved its
-thread pool.
+raises RateBudgetUnavailable on that acquire and every later one; one built with
+a `deadline` does the same for every acquire after it. Only the realtime worker
+passes either; the Actions walks and drains wait as long as the ledger says. On
+2026-09-29 ceskereality answered 403 to everything, each retry leased a fresh
+batch, the frontier ran an hour ahead and every caller slept there: the worker's
+probe and drain threads never came back and starved its thread pool.
 
 Failure posture: politeness must never depend on DB availability. Any DB error
 in lease/penalize logs once and permanently falls back to pure-local pacing for
@@ -121,6 +121,7 @@ class LedgerRateLimiter(RateLimiter):
         lease_n: int = DEFAULT_LEASE_N,
         connect: Callable[[], Any] | None = None,
         max_wait_s: float | None = None,
+        deadline: float | None = None,
     ) -> None:
         if lease_n < 1:
             raise ValueError("lease_n must be >= 1")
@@ -131,6 +132,7 @@ class LedgerRateLimiter(RateLimiter):
         self._lease_n = lease_n
         self._connect = connect or db.connect
         self._max_wait_s = max_wait_s
+        self._deadline = deadline  # time.monotonic(); every acquire after it is refused
         self._conn: Any = None
         self._ensured = False
         self._slots_left = 0
@@ -142,6 +144,12 @@ class LedgerRateLimiter(RateLimiter):
 
     def acquire(self) -> None:
         with self._lease_lock:
+            if (not self.refused and self._deadline is not None
+                    and time.monotonic() >= self._deadline):
+                self.refused = True
+                LOG.warning(
+                    "RATE budget refused source=%s: the run's deadline has passed",
+                    self._source)
             if self.refused:
                 raise RateBudgetUnavailable(
                     f"{self._source}: the shared ledger already refused this run")
@@ -159,8 +167,11 @@ class LedgerRateLimiter(RateLimiter):
                 return
             # Drop the rest of the leased window so the next acquire re-leases
             # at the widened shared interval -- one slot for the retry, not a batch.
+            # Capped at one batch: sreality's client acquires once and retries inside
+            # _request, up to four penalizes to one lease, so the debt would outlive the
+            # storm and keep every later lease a single slot.
             self._slots_left = 0
-            self._single_leases_owed += 1
+            self._single_leases_owed = min(self._single_leases_owed + 1, self._lease_n)
             try:
                 with self._cursor() as cur:
                     cur.execute(_PENALIZE_SQL, {
@@ -249,11 +260,13 @@ def build_rate_limiter(
     *,
     lease_n: int = DEFAULT_LEASE_N,
     max_wait_s: float | None = None,
+    deadline: float | None = None,
 ) -> RateLimiter:
     """The runner's one-line seam: the plain per-process RateLimiter unless the
     portal's `shared_rate_limiter` limit flag is on (then the DB-backed ledger).
-    `max_wait_s` bounds the ledger's waits; the local limiter's are bounded by
-    its own spacing and take none."""
+    `max_wait_s` and `deadline` bound the ledger's waits; the local limiter's are
+    bounded by its own spacing and take neither."""
     if not shared:
         return RateLimiter(rate_per_s)
-    return LedgerRateLimiter(source, rate_per_s, lease_n=lease_n, max_wait_s=max_wait_s)
+    return LedgerRateLimiter(
+        source, rate_per_s, lease_n=lease_n, max_wait_s=max_wait_s, deadline=deadline)

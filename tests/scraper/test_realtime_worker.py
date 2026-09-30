@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import logging
 import os
+import signal
+import subprocess
+import sys
 import threading
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1721,9 +1727,10 @@ def test_the_daily_lane_never_reads_as_a_stalled_one() -> None:
 def _patch_sold_comps(
     monkeypatch: pytest.MonkeyPatch,
     cells: list[int] | None,
-    results: list[dict[str, Any]] | None = None,
+    results: list[dict[str, Any] | Exception] | None = None,
 ) -> dict[str, Any]:
-    """Stub the work-list and the cell fetch; capture what the lane asked for."""
+    """Stub the work-list and the cell fetch (an Exception in `results` is raised);
+    capture what the lane asked for."""
     captured: dict[str, Any] = {"kwargs": {}, "fetched": [], "clients": 0}
 
     class _Conn:
@@ -1744,12 +1751,16 @@ def _patch_sold_comps(
     def fake_fetch(c: Any, client: Any, obec_kod: int, **kw: Any) -> dict[str, Any]:
         captured["fetched"].append(obec_kod)
         if scripted:
-            return scripted.pop(0)
+            nxt = scripted.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
         return {"obec_kod": obec_kod, "status": "ok", "records": 2, "new": 1,
                 "pages": 1, "source_total": 625, "dropped": 0, "error": None}
 
-    def fake_client() -> object:
+    def fake_client(**kw: Any) -> object:
         captured["clients"] += 1
+        captured["client_kwargs"] = kw
         return object()
 
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
@@ -1798,7 +1809,28 @@ def test_sold_comps_tick_fetches_the_capped_cell_list_on_one_client(
     # One client per pass: the politeness ledger is shared, the session need not be.
     assert captured["clients"] == 1
     assert out == {"ran": True, "cells": 2, "records": 4, "new": 2, "failed": 0,
-                   "skipped": 0, "seconds": out["seconds"]}
+                   "skipped": 0, "budget_refused": 0, "seconds": out["seconds"]}
+    assert captured["conn_obj"].closed is True
+    # The worker's third ledger caller is bounded like the probe and the drain.
+    assert captured["client_kwargs"] == {"max_wait_s": rw.LEDGER_MAX_WAIT_SECONDS}
+
+
+def test_a_ledger_refusal_ends_the_sold_comps_tick_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The refusal is sticky for the client, so every later cell would be refused too and
+    # written to the ledger as a failure it is not.
+    from scraper.rate_ledger import RateBudgetUnavailable
+
+    captured = _patch_sold_comps(monkeypatch, [1, 2, 3], results=[
+        {"obec_kod": 1, "status": "ok", "records": 5, "new": 5, "pages": 1,
+         "source_total": 625, "dropped": 0, "error": None},
+        RateBudgetUnavailable("reas: next shared slot 900s away, bound 120s"),
+    ])
+
+    out = rw._sold_comps_sync()
+
+    assert captured["fetched"] == [1, 2]
+    assert (out["cells"], out["records"], out["failed"], out["budget_refused"]) == (1, 5, 0, 1)
     assert captured["conn_obj"].closed is True
 
 
@@ -2066,8 +2098,6 @@ def test_a_lane_wedged_behind_its_pass_lock_stays_in_flight(monkeypatch):
     # every later pass is skipped in ~0 s: without the lock's age the heartbeat would show
     # a lane passing happily while its one thread sits stuck, and worker_lane_stall, which
     # reads in_flight_s, would never see it.
-    from datetime import datetime, timedelta, timezone
-
     monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
     monkeypatch.setattr(rw, "_PROBE_PASS_LOCK", rw._PassLock("probe"))
     monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
@@ -2075,7 +2105,7 @@ def test_a_lane_wedged_behind_its_pass_lock_stays_in_flight(monkeypatch):
     rw._record_pass_start(state, "probe")
     assert rw._PROBE_PASS_LOCK.try_enter()  # the abandoned pass's thread
     try:
-        rw._PASS_LOCKS_HELD["probe"] = datetime.now(timezone.utc) - timedelta(seconds=2400)
+        rw._PASS_LOCKS_HELD["probe"] = time.monotonic() - 2400
         rw._record_pass_failed(state, "probe", float(rw.LANE_PASS_TIMEOUT_SECONDS))
         asyncio.run(rw._probe_pass(asyncio.Event(), state))
         assert state["lanes"]["probe"]["last"] == {"previous_pass_running": True}
@@ -2124,7 +2154,17 @@ def test_only_the_worker_bounds_its_ledger_waits(monkeypatch):
         rw.LEDGER_MAX_WAIT_SECONDS) == rw.DRAIN_MAX_SECONDS
 
 
+def _watchdog_off_the_terminal(monkeypatch) -> list[int]:
+    """No pass lock held, and a stderr without a descriptor: the watchdog switches stderr
+    to non-blocking before its dump, which must never reach the terminal running the
+    tests. Returns what the fake alarm records."""
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    return []
+
+
 def test_watchdog_exits_once_no_beat_finishes(monkeypatch, caplog):
+    alarms = _watchdog_off_the_terminal(monkeypatch)
     clock = [1000.0]
     state = rw._new_state()
     state["beat_done_at"] = 1000.0
@@ -2136,36 +2176,81 @@ def test_watchdog_exits_once_no_beat_finishes(monkeypatch, caplog):
         clock[0] += seconds
 
     with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
-        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     alarm=alarms.append)
     assert exits == [1]
+    assert alarms == [int(rw.WATCHDOG_LAST_WORDS_SECONDS) + 5]  # armed before the dump
     assert clock[0] - 1000.0 == rw.LIVENESS_BOUND_SECONDS == 10 * rw.HEARTBEAT_INTERVAL_SECONDS
     assert dumps == [{"all_threads": True}]
     assert sum("WATCHDOG" in r.getMessage() for r in caplog.records) == 1
 
 
-def test_watchdog_exits_even_when_writing_its_last_words_blocks(monkeypatch):
-    # A full stderr pipe is one way a process freezes; the exit must not wait on it.
-    monkeypatch.setattr(rw, "WATCHDOG_LAST_WORDS_SECONDS", 0.05)
-    blocked = threading.Event()
-    monkeypatch.setattr(
-        rw.faulthandler, "dump_traceback", lambda **kw: blocked.wait(5))
+_FULL_STDERR_CHILD = """
+import logging, os, sys
+from scraper import realtime_worker as rw
+logging.getLogger().addHandler(logging.NullHandler())  # the dump is stderr's only writer
+os.set_blocking(2, False)
+try:
+    while True:
+        os.write(2, b"x" * 65536)
+except BlockingIOError:
+    pass
+os.set_blocking(2, True)
+if sys.argv[1] == "blocking":
+    os.set_blocking = lambda fd, blocking: None
+rw.WATCHDOG_LAST_WORDS_SECONDS = 1.0
+state = rw._new_state()
+state["beat_done_at"] = -1e9
+rw._watchdog(state, sleep=lambda s: None)
+"""
+
+
+@pytest.mark.parametrize("mode,returncode", [
+    ("as_shipped", 1), ("blocking", -signal.SIGALRM)])
+def test_watchdog_exits_even_when_stderr_is_a_full_pipe(mode, returncode):
+    # faulthandler writes holding the GIL, so a dump into a full pipe stops every thread,
+    # the watchdog's join and os._exit included. A REAL full pipe, in a child process: as
+    # shipped the dump gets EAGAIN and the watchdog exits 1; with the dump blocking
+    # anyway, the alarm armed before it kills the process (no SIGALRM handler).
+    child = subprocess.Popen(
+        [sys.executable, "-c", _FULL_STDERR_CHILD, mode],
+        cwd=Path(__file__).resolve().parents[2],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        assert child.wait(timeout=60) == returncode
+    finally:
+        child.kill()
+        child.stderr.close()
+
+
+def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog):
+    # A probe or drain thread stuck in an HTTP read or a lock wait is one thread: the
+    # executor never fills, the beats go on, and the lane is dead for every portal.
+    alarms = _watchdog_off_the_terminal(monkeypatch)
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {"drain": 0.0})
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
     clock = [0.0]
     state = rw._new_state()
     state["beat_done_at"] = 0.0
     exits: list[int] = []
 
     def sleep(seconds: float) -> None:
+        if clock[0] > 2 * rw.PASS_LOCK_BOUND_SECONDS:
+            pytest.fail("the watchdog never exited on the wedged lock")
         clock[0] += seconds
+        state["beat_done_at"] = clock[0]  # the heartbeat never stops
 
-    try:
-        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
-        assert exits == [1]
-    finally:
-        blocked.set()
+    with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     alarm=alarms.append)
+    assert exits == [1]
+    assert clock[0] == rw.PASS_LOCK_BOUND_SECONDS == 2 * rw.LANE_PASS_TIMEOUT_SECONDS
+    assert any("pass lock of drain" in r.getMessage() for r in caplog.records)
 
 
 def test_watchdog_stays_quiet_while_beats_finish(monkeypatch):
     # Beats every 240 s -- slower than the 30 s cadence, inside the bound.
+    alarms = _watchdog_off_the_terminal(monkeypatch)
     clock = [0.0]
     state = rw._new_state()
     state["beat_done_at"] = 0.0
@@ -2186,8 +2271,9 @@ def test_watchdog_stays_quiet_while_beats_finish(monkeypatch):
 
     exits: list[int] = []
     with pytest.raises(_Enough):
-        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
-    assert exits == []
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     alarm=alarms.append)
+    assert exits == [] and alarms == []
 
 
 def test_a_beat_that_fails_still_finishes_and_connects_once_with_a_bound(monkeypatch):
@@ -2220,6 +2306,7 @@ def test_a_full_executor_stops_the_heartbeat_and_the_watchdog_exits(monkeypatch)
     # starve the beat, and a beat that never finishes is an exit, not a silent freeze.
     from concurrent.futures import ThreadPoolExecutor
 
+    alarms = _watchdog_off_the_terminal(monkeypatch)
     conn = _FakeConn()
     monkeypatch.setattr(rw.db, "connect", lambda **_: conn)
     monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
@@ -2248,7 +2335,8 @@ def test_a_full_executor_stops_the_heartbeat_and_the_watchdog_exits(monkeypatch)
     def sleep(seconds: float) -> None:
         clock[0] += seconds
 
-    rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
+    rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                 alarm=alarms.append)
     assert exits == [1]
 
 

@@ -745,19 +745,24 @@ def run_detail_drain(
     committed work's counts instead of finalize zeroing them (caller passes
     bump_already_applied=True so the happy path counts exactly once).
 
-    `max_wait_s` bounds each wait for a shared-ledger slot; on a refusal the
-    unfetched claims go back untouched and the drain stops (`budget_refused`).
+    `max_wait_s` bounds each wait for a shared-ledger slot and, with `max_seconds`, the
+    run: every acquire past the deadline is refused too. On a refusal the unfetched
+    claims go back untouched and the drain stops (`budget_refused`).
     """
     counts: dict[str, int] = {
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
     }
     breaker = _GoneRateBreaker(portal.source)
+    deadline = (time.monotonic() + max_seconds) if max_seconds else None
     # A lease is sized to the work: every leased slot moves the shared frontier
     # whether or not it is used, so a 3-row drain leasing 20 pushed every other caller back.
+    # A bounded caller also gets the deadline: the loop below checks it only between
+    # chunks, and a 403 storm on a one-worker portal held one chunk for an hour.
     limiter = build_rate_limiter(
         portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False),
-        lease_n=min(DEFAULT_LEASE_N, max_claims or DEFAULT_LEASE_N), max_wait_s=max_wait_s)
+        lease_n=min(DEFAULT_LEASE_N, max_claims or DEFAULT_LEASE_N), max_wait_s=max_wait_s,
+        deadline=deadline if max_wait_s is not None else None)
     client = portal.make_client(limiter)
 
     if dry_run:
@@ -766,7 +771,6 @@ def run_detail_drain(
         LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
         return (0, {})
 
-    deadline = (time.monotonic() + max_seconds) if max_seconds else None
     claim_chunk = min(DRAIN_CLAIM_CHUNK, 100) if max_seconds else DRAIN_CLAIM_CHUNK
     conn = portal.connect_drain()
     total_claimed = 0
@@ -897,7 +901,7 @@ def run_detail_drain(
                     reconnect=portal.connect_drain, label="drain.release",
                 )
                 LOG.warning(
-                    "DRAIN stopped source=%s: the shared rate budget is unavailable; "
+                    "DRAIN stopped source=%s: the shared rate budget refused the run; "
                     "%d claims handed back untouched", portal.source, len(deferred))
                 break
         conn = _flush_drain_batch(

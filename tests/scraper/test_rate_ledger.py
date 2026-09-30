@@ -342,10 +342,50 @@ def test_a_portal_answering_403_to_everything_ends_in_a_refusal_not_an_hour(monk
     assert ledger.rows["x"]["next_slot_at"] - clock.now < BOUND_S + 20 * 1 / 0.7 * 8
 
 
-def test_factory_hands_the_bound_to_the_ledger():
-    lim = build_rate_limiter("x", 2.0, True, max_wait_s=BOUND_S)
+def test_an_acquire_after_the_deadline_is_refused_without_a_trip(monkeypatch, caplog):
+    # The worker's drain checks its budget only between chunks; the deadline is what ends
+    # a chunk that a 403 storm on a one-worker portal would otherwise stretch for an hour.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect,
+                            max_wait_s=BOUND_S, deadline=clock.now + BOUND_S)
+    lim.acquire()
+    clock.now += BOUND_S
+    statements, slept = len(ledger.executed), len(sleeps)
+    with caplog.at_level(logging.WARNING, logger="scraper.rate_ledger"):
+        with pytest.raises(RateBudgetUnavailable):
+            lim.acquire()                             # slots were left: still refused
+    assert lim.refused is True
+    assert (len(ledger.executed), len(sleeps)) == (statements, slept)
+    assert any("deadline has passed" in r.getMessage() for r in caplog.records)
+
+
+def test_single_leases_owed_never_outgrow_one_batch(monkeypatch):
+    # portal_base clients acquire before every retry, so each penalize is paid back by
+    # the retry's one-slot lease. sreality's client acquires once and retries inside
+    # _request: four penalizes to one lease. Uncapped, the debt outlived the storm and
+    # every later request leased a single slot, one round trip each.
+    clock = _Clock()
+    _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect)
+    for _ in range(50):                               # the storm, sreality-style
+        lim.acquire()
+        for _ in range(4):
+            lim.penalize()
+    assert lim._single_leases_owed == 5
+    storm = len(ledger.executed)
+    for _ in range(12):                               # the storm is over
+        lim.acquire()
+    assert [p["n"] for kind, _, p in ledger.executed[storm:] if kind == "lease"] == [
+        1, 1, 1, 1, 1, 5, 5]
+
+
+def test_factory_hands_the_bounds_to_the_ledger():
+    lim = build_rate_limiter("x", 2.0, True, max_wait_s=BOUND_S, deadline=5.0)
     assert isinstance(lim, LedgerRateLimiter)
-    assert lim._max_wait_s == BOUND_S
+    assert (lim._max_wait_s, lim._deadline) == (BOUND_S, 5.0)
     assert build_rate_limiter("x", 2.0, False, max_wait_s=BOUND_S).refused is False
 
 

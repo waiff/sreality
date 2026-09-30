@@ -81,9 +81,10 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              towns where the deal pipeline holds a live card, stalest first, minus
              the cells whose newest `sold_transaction_fetches` row is younger than
              35 days (ok) or 6 hours (failed). One integer is cadence AND kill
-             switch; no boolean flag, no env var, no queue. A cell attempt always
-             ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
-             an unmigrated database skips with one warning.
+             switch; no boolean flag, no env var, no queue. A cell attempt ends in
+             the ledger unless the shared rate ledger refuses the tick (then the
+             tick stops, `budget_refused`), and an unmigrated database skips with
+             one warning.
 - autodedup: every `realtime_autodedup_interval_seconds` (DARK: the seeded row is
              0), ONE bounded pass of THE autodedup lane
              (autodedup.incremental_lane.run_incremental, its only caller): the pass
@@ -100,7 +101,8 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              worker_heartbeats (migration 269) — the Health-page liveness hook. It
              runs on the executor every lane shares, so it is that executor's
              canary: a watchdog thread exits the process (Railway restarts it)
-             once no beat has finished for LIVENESS_BOUND_SECONDS.
+             once no beat has finished for LIVENESS_BOUND_SECONDS, or once a lane's
+             pass lock has been held for PASS_LOCK_BOUND_SECONDS.
 
 SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
@@ -126,6 +128,7 @@ import importlib
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -139,6 +142,7 @@ from scraper import (
     db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
 from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.rate_ledger import RateBudgetUnavailable
 
 LOG = logging.getLogger("scraper.realtime_worker")
 
@@ -150,13 +154,13 @@ PROBE_INTERVAL_DEFAULT = 180
 DRAIN_INTERVAL_DEFAULT = 30
 DRAIN_SLICE_DEFAULT = 200
 DRAIN_MAX_SECONDS = 120.0
-# The longest a probe or drain waits for one slot of a portal's shared rate ledger
-# (scraper/rate_ledger.py) before giving that portal up for the pass: the drain's whole
-# per-portal budget, so a longer wait is never useful to it. On 2026-09-29 the wait was
-# unbounded, an hour per thread, and the threads filled the executor. A penalized portal's
-# frontier can sit past it, and then the worker skips that portal for a pass instead of
-# parking a thread; the Actions walks and drains take no bound and wait as long as the
-# ledger says.
+# The longest a probe, drain or sold_comps pass waits for one slot of a source's shared
+# rate ledger (scraper/rate_ledger.py) before giving that source up for the pass: the
+# drain's whole per-portal budget, so a longer wait is never useful to it. On 2026-09-29
+# the wait was unbounded, an hour per thread, and the threads filled the executor. A
+# penalized portal's frontier can sit past it, and then the worker skips that portal for a
+# pass instead of parking a thread; the Actions walks and drains take no bound and wait as
+# long as the ledger says.
 LEDGER_MAX_WAIT_SECONDS = DRAIN_MAX_SECONDS
 IMAGES_INTERVAL_DEFAULT = 60
 IMAGES_SLICE_DEFAULT = 500
@@ -189,13 +193,17 @@ LANE_RESTART_SECONDS = 30.0
 # up to DRAIN_MAX_SECONDS each (~16 min worst case), so this sits well above any
 # healthy pass and far below the nine-hour wedge it exists to bound.
 LANE_PASS_TIMEOUT_SECONDS = 1800
+# A pass lock held this long is a wedged lane (a probe or drain thread stuck in an HTTP
+# read or a lock wait). One stuck thread never fills the executor, so the heartbeat
+# beats on while the lane is dead for every portal; the watchdog exits on it too.
+PASS_LOCK_BOUND_SECONDS = 2 * LANE_PASS_TIMEOUT_SECONDS
 
-# lane -> when the thread holding that lane's pass lock took it. A pass abandoned at
-# LANE_PASS_TIMEOUT_SECONDS is no longer stamped in the lane's state, yet its thread
-# still holds the lock and every later pass is skipped in ~0 s, which reads like a quick
-# pass. _lane_snapshot counts the lock's age into in_flight_s, where worker_lane_stall
-# sees the wedge.
-_PASS_LOCKS_HELD: dict[str, datetime] = {}
+# lane -> time.monotonic() when the thread holding that lane's pass lock took it. A pass
+# abandoned at LANE_PASS_TIMEOUT_SECONDS is no longer stamped in the lane's state, yet its
+# thread still holds the lock and every later pass is skipped in ~0 s, which reads like a
+# quick pass. _lane_snapshot counts the lock's age into in_flight_s, where
+# worker_lane_stall sees the wedge, and _watchdog exits past PASS_LOCK_BOUND_SECONDS.
+_PASS_LOCKS_HELD: dict[str, float] = {}
 
 
 class _PassLock:
@@ -218,7 +226,7 @@ class _PassLock:
                     "still running", self._lane.upper())
             return False
         self._skip_logged = False
-        _PASS_LOCKS_HELD[self._lane] = datetime.now(timezone.utc)
+        _PASS_LOCKS_HELD[self._lane] = time.monotonic()
         return True
 
     def release(self) -> None:
@@ -1859,7 +1867,8 @@ def _sold_comps_sync() -> dict[str, Any]:
     No lease (the location_refetch lane's reason: one SELECT and a handful of
     idempotent cell writes), but one in-process lock — an abandoned pass has written
     no ledger row, so nothing else can stop the next tick re-walking its cells beside
-    it. `fetch_cell` never raises, so one bad cell costs its own ledger row.
+    it. `fetch_cell` raises only the shared ledger's refusal, which ends the tick; any
+    other bad cell costs its own ledger row.
     """
     global _SOLD_COMPS_STORE_WARNED
 
@@ -1881,9 +1890,16 @@ def _sold_comps_sync() -> dict[str, Any]:
                 return {"ran": False, "reason": "store_missing",
                         "seconds": round(time.monotonic() - started, 1)}
             results: list[dict[str, Any]] = []
+            refused = False
             if cells:
-                client = sold_fetch.build_client()
-                results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
+                client = sold_fetch.build_client(max_wait_s=LEDGER_MAX_WAIT_SECONDS)
+                for kod in cells:
+                    try:
+                        results.append(sold_fetch.fetch_cell(conn, client, kod))
+                    except RateBudgetUnavailable:
+                        # Sticky for the client: every later cell would be refused too.
+                        refused = True
+                        break
             return {
                 "ran": True,
                 "cells": len(results),
@@ -1894,6 +1910,7 @@ def _sold_comps_sync() -> dict[str, Any]:
                 # reaches the lane again the heartbeat — not the ledger — is the only
                 # place it can show. Counted so it can never read as a quiet pass.
                 "skipped": sum(1 for r in results if r["status"] == "skipped"),
+                "budget_refused": int(refused),
                 "seconds": round(time.monotonic() - started, 1),
             }
         finally:
@@ -2138,16 +2155,15 @@ def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     will alarm on. A lane whose pass lock is still held by an abandoned pass is in
     flight since that pass began (see _PASS_LOCKS_HELD).
     """
-    now = datetime.now(timezone.utc)
+    now, mono = datetime.now(timezone.utc), time.monotonic()
     held = dict(_PASS_LOCKS_HELD)
     out: dict[str, Any] = {}
     for lane, info in lanes.items():
         entry = dict(info)
-        starts = [held[lane]] if lane in held else []
+        ages = [mono - held[lane]] if lane in held else []
         with contextlib.suppress(TypeError, ValueError):
-            starts.append(datetime.fromisoformat(entry.get("started_at")))
-        entry["in_flight_s"] = (
-            round((now - min(starts)).total_seconds(), 1) if starts else None)
+            ages.append((now - datetime.fromisoformat(entry.get("started_at"))).total_seconds())
+        entry["in_flight_s"] = round(max(ages), 1) if ages else None
         out[lane] = entry
     return out
 
@@ -2179,28 +2195,44 @@ def _watchdog(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     exit_: Callable[[int], None] = os._exit,
+    alarm: Callable[[int], Any] = signal.alarm,
 ) -> None:
-    """Exit the process once no heartbeat pass has FINISHED for LIVENESS_BOUND_SECONDS.
+    """Exit the process once no heartbeat pass has FINISHED for LIVENESS_BOUND_SECONDS,
+    or once a pass lock has been held for PASS_LOCK_BOUND_SECONDS.
 
     Runs on its own daemon thread, so it needs neither the event loop nor an executor,
     the two things a freeze takes down. os._exit, never sys.exit: a normal exit joins
     every executor thread, and a thread asleep inside a portal call never returns."""
     while True:
         sleep(HEARTBEAT_INTERVAL_SECONDS)
-        silent = clock() - state["beat_done_at"]
-        if silent < LIVENESS_BOUND_SECONDS:
+        now = clock()
+        silent = now - state["beat_done_at"]
+        wedged = sorted(
+            lane for lane, at in dict(_PASS_LOCKS_HELD).items()
+            if now - at >= PASS_LOCK_BOUND_SECONDS)
+        if silent < LIVENESS_BOUND_SECONDS and not wedged:
             continue
+        why = (
+            f"pass lock of {','.join(wedged)} held over {PASS_LOCK_BOUND_SECONDS}s" if wedged
+            else f"no heartbeat pass finished for {silent:.0f}s "
+                 f"(bound {LIVENESS_BOUND_SECONDS:.0f}s)")
 
         def last_words() -> None:
+            # faulthandler writes holding the GIL: on a full stderr pipe a blocking write
+            # would stop every thread, this watchdog's join and exit included. EAGAIN
+            # instead; the dump may then be cut short, the exit is not.
+            with contextlib.suppress(Exception):
+                os.set_blocking(sys.stderr.fileno(), False)
             LOG.critical(
-                "WATCHDOG no heartbeat pass finished for %.0fs (bound %.0fs); dumping "
-                "every thread's stack to stderr and exiting so Railway restarts the worker",
-                silent, LIVENESS_BOUND_SECONDS,
+                "WATCHDOG %s; dumping every thread's stack to stderr and exiting so "
+                "Railway restarts the worker", why,
             )
             faulthandler.dump_traceback(all_threads=True)
 
-        # Spoken from a helper thread and waited for briefly: if a blocked stderr is
-        # itself the freeze, the exit must still happen.
+        # The backstop if the dump still holds the GIL: nothing in this process installs
+        # a SIGALRM handler, so the default action ends it, and Railway's restartPolicy
+        # ALWAYS starts a fresh one.
+        alarm(int(WATCHDOG_LAST_WORDS_SECONDS) + 5)
         speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
         speaker.start()
         speaker.join(WATCHDOG_LAST_WORDS_SECONDS)

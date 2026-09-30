@@ -6,6 +6,7 @@ are monkeypatched.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -553,10 +554,19 @@ def test_detail_drain_hands_its_bound_and_a_lease_sized_to_its_work_to_the_limit
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
     _patch_queue(monkeypatch, [])
+    before = time.monotonic()
     portal_runner.run_detail_drain(
         _FakePortal(), max_claims, False, detail_workers=1, detail_rate=1.0,
         max_seconds=120.0, max_wait_s=120.0)
+    # The deadline too: the loop checks its budget only between chunks, and a 403 storm
+    # on a one-worker portal held one chunk under the worker's pass lock for an hour.
+    assert before + 120.0 <= seen.pop("deadline") <= time.monotonic() + 120.0
     assert seen == {"lease_n": lease_n, "max_wait_s": 120.0}
+    # An Actions drain (no bound) keeps its old behaviour: no deadline in the limiter.
+    portal_runner.run_detail_drain(
+        _FakePortal(), max_claims, False, detail_workers=1, detail_rate=1.0,
+        max_seconds=120.0)
+    assert seen["deadline"] is None and seen["max_wait_s"] is None
 
 
 def test_detail_drain_swallows_teardown_close_failure(monkeypatch):
