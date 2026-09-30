@@ -92,9 +92,14 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   open every field that cleared in ONE edit. Concurrency + the one pre-call budget guard come from
   `toolkit.vision_batch.run_batch`; the write is NULL-only (`coalesce`) with the `dirty_properties`
   enqueue in the same CTE and no snapshot; a failed call is cached with an attempt count and given
-  up on after 5.
+  up on after 5. **Since location reader W1 (2026-09-30)** the lane reads the ADVERT TEXT (headline +
+  description, composed and hashed once in SQL), its scope is the open-gate portals ∪ those whose
+  active contract declares `llm_text`, `extractor_version` hashes prompt + schema, and every call
+  also returns a `location` block (`location_data/text_reading.py`: ad_kind, town, part of town,
+  street, č.p./č.o./č.ev., each quoted) stored RAW in `listing_description_enrichments.extracted`;
+  nothing mines it until W3. Delisted adverts are read once per schema and never filled.
   `false` needs an explicit negation in the evidence quote, every value needs a quote verbatim in
-  the description, and `floor` comes back as the advert's own words for `scraper/floor.py` to
+  the advert text, and `floor` comes back as the advert's own words for `scraper/floor.py` to
   convert. Health: `verify_pipeline`'s `text_extraction_lag`, built from the lane's OWN selector
   (R8). `app_settings.enrichment_model` is the one switch. `docs/design/field-capture/PROGRAM.md`.
 

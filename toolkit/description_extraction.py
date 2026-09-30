@@ -30,7 +30,7 @@ What the deleted lane got wrong, and what this one does instead:
     `building_type`. They are real JSON `enum` arrays generated from `scraper.vocabulary`.
   * It wrote `false` from silence — 92.9 % precision on `has_lift`, against a filter
     predicate that needs better. A `false` needs an explicit negation inside the evidence
-    quote, and every value needs a quote that is verbatim in the description (R7).
+    quote, and every value needs a quote that is verbatim in the advert text (R7).
   * It converted floors itself, at ~73 % and across two conventions. The model returns the
     advert's OWN words ('3. patro', '1. NP', 'přízemí') and `scraper.floor` converts them.
 
@@ -440,7 +440,7 @@ ON CONFLICT (listing_id, extractor_version, text_hash) DO UPDATE
 # value another writer put there while this call was in flight wins, with no compare-and-set
 # needed — and the WHERE keeps the statement off rows it would not change, so a pass that
 # fills nothing marks nothing. `listing_snapshots` and `last_seen_at` appear nowhere in it.
-# Active rows only: a delisted advert is read, never filled (field capture, PROGRAM.md §5).
+# Active rows only: a delisted advert is read, never filled (PROGRAM.md §5, step iii).
 _WRITE_SQL_TEMPLATE = """
 WITH updated AS (
     UPDATE listings AS l

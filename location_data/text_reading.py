@@ -1,10 +1,11 @@
 """The plain-text location reading: what the text lane asks for, and the one reader of it.
 
 The text lane (`toolkit/description_extraction.py`) asks for this block in the SAME call that
-reads the attribute fields, and stores the answer RAW in `listing_description_enrichments.extracted`
-under `location`. Nothing here writes. `read_location` applies only the checks that need nothing
-but the advert itself — V1 (the quote is verbatim in it) and V3 (the advert offers a property);
-whether a value names a real place is the register's question, asked by the claim reader (W3).
+reads the attribute fields, and stores the answer RAW under `location` in
+`listing_description_enrichments.extracted`. Nothing here writes. `read_location` applies only
+the checks that need nothing but the advert itself — V1 (the quote is verbatim in it) and V3
+(the advert offers a property); whether a value names a real place is the register's question,
+asked by the claim reader (W3).
 """
 
 from __future__ import annotations

@@ -617,8 +617,8 @@ def _address_part_street(value: str, arg: str) -> str | None:
     return cleaned
 
 
-# W18: the street a portal states as TEXT. bazos is the first carrier (`/coords/street`,
-# then the capped headline), and this is the only normalisation that text gets — it is
+# W18: the street a portal states as TEXT. bazos is the first carrier (its capped
+# headline), and this is the only normalisation that text gets — it is
 # deliberately the THINNEST of the street transforms.
 #
 # What it does NOT do is the point.

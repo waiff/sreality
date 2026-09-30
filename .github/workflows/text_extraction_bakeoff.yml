@@ -7,9 +7,10 @@ name: "Field capture: text-extraction bake-off"
 # fields on the SAME advert: idnes and sreality publish has_lift / condition /
 # building_type / energy_rating / floor / total_floors / balcony / parking in a table AND
 # describe the property in prose, so their table grades what a model reads out of their
-# prose. The model is shown the description alone. A bazos slice rides along, scored only
-# where a cross-portal sibling exists (842 live on 2026-09-22), because broker prose is not seller
-# prose and the lane's target portal is the second kind.
+# prose. The model is shown the advert text (headline + description) with the lane's own prompt
+# and tool. A bazos slice rides along, scored only where a cross-portal sibling exists (842 live
+# on 2026-09-22). The LOCATION half (location_rows) scores the lane's location block against
+# structured streets and bazos's stored towns, and writes review.md for the joint review.
 #
 # START WITH panel_only: it builds and uploads the panel, makes no LLM call and spends
 # nothing. Read `panel.json` before paying for anything.
@@ -54,6 +55,11 @@ on:
         description: "Bazos rows, scored only where a cross-portal sibling exists. The in-domain read, and a small one."
         required: false
         default: "300"
+        type: string
+      location_rows:
+        description: "Location half: md5 bazos rows (+ listing 18909736 + ~10 % per hard case) and this many per structured portal (sreality, idnes, realitymix, ceskereality). 0 skips it."
+        required: false
+        default: "100"
         type: string
       oss_cloud:
         description: "RunPod cloud for an oss: arm. The default open candidates need an 80 GB card, which is SECURE."
@@ -102,6 +108,7 @@ jobs:
           MODELS: ${{ inputs.models }}
           PER_SOURCE: ${{ inputs.per_source }}
           BAZOS: ${{ inputs.bazos }}
+          LOCATION_ROWS: ${{ inputs.location_rows }}
           OSS_CLOUD: ${{ inputs.oss_cloud }}
           OSS_MAX_PRICE: ${{ inputs.oss_max_price }}
           PANEL_ONLY: ${{ inputs.panel_only }}
@@ -113,8 +120,10 @@ jobs:
           esac
           case "${PER_SOURCE}" in ''|*[!0-9]*) echo "::error::per_source must be a number"; exit 1 ;; esac
           case "${BAZOS}" in ''|*[!0-9]*) echo "::error::bazos must be a number"; exit 1 ;; esac
+          case "${LOCATION_ROWS}" in ''|*[!0-9]*) echo "::error::location_rows must be a number"; exit 1 ;; esac
           case "${OSS_MAX_PRICE}" in ''|*[!0-9.]*) echo "::error::oss_max_price must be a number"; exit 1 ;; esac
           ARGS=(--models "${MODELS}" --per-source "${PER_SOURCE}" --bazos "${BAZOS}"
+                --location-rows "${LOCATION_ROWS}"
                 --oss-cloud "${OSS_CLOUD}" --oss-max-price "${OSS_MAX_PRICE}"
                 --out-dir bakeoff)
           if [ "${PANEL_ONLY}" = "true" ]; then ARGS+=(--panel-only); fi

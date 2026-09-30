@@ -8,20 +8,19 @@ THE PANEL IS NOT LABELLED BY HAND. The labels are the STRUCTURED portals' own st
 fields on the SAME advert: idnes and sreality publish `has_lift`, `condition`,
 `building_type`, `energy_rating`, `floor`, `total_floors`, `has_balcony` and `has_parking`
 in a table AND describe the property in prose, so their table is a free label for what a
-model reads out of their prose. The model is shown the description alone.
+model reads out of their prose. The model is shown what the lane shows it: the advert text
+(headline + description), with the lane's own prompt and tool.
 
-Two caveats that go in every summary this writes:
+The LOCATION half (location reader W1, `--location-rows`) scores the lane's `location` block:
+sreality/idnes/realitymix/ceskereality rows whose street the portal stated in a table
+(`label_kind=structured`, free labels), and bazos rows labelled by the STORED
+`listing_location` (`label_kind=stored` — not ground truth: its disagreements are the review).
 
-  * DOMAIN SHIFT. An idnes/sreality description is broker prose; a bazos description is a
-    seller writing their own ad. So the panel carries a bazos slice too, scored where a
-    cross-portal sibling exists — 842 pairs on 2026-09-22, on unique (price_czk, area_m2,
-    disposition) — which is small, and stated as small.
-  * FLOOR CONVENTION. idnes stores ground = 0 and sreality ground = 1 (W8/A9, proven by
-    sibling pairs), so a sreality label is `floor - 1` and only for `floor >= 1`: that
-    portal writes BOTH 0 and 1 for the ground storey ('zvýšené přízemí', 4,591 rows), so a
-    row at 0 is ambiguous and is not a label. The MODEL never converts anything — it
-    returns the advert's own words and `scraper.floor` reads them, which is the thing
-    being measured.
+The caveat that goes in every summary this writes, DOMAIN SHIFT: an idnes/sreality
+description is broker prose; a bazos description is a seller writing their own ad. So the
+panel carries a bazos slice too, scored where a cross-portal sibling exists — 842 pairs on
+2026-09-22, on unique (price_czk, area_m2, disposition) — which is small, and stated as small.
+(Floor labels are the stored value on every portal since W8; the MODEL never converts a floor.)
 
 The winner is not decided here and is not hardcoded anywhere: the operator sets
 `app_settings.enrichment_model`, which is the lane's one switch.
@@ -30,15 +29,19 @@ The winner is not decided here and is not hardcoded anywhere: the operator sets
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import statistics
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from location_data import text_reading
+from location_data.resolver.normalize import normalize_match_key, strip_street_generic
 from scraper import db
 from toolkit import description_extraction as tx
 
@@ -62,7 +65,6 @@ LOG = logging.getLogger("bakeoff_text_extraction")
 DEFAULT_MODELS = ("gpt-5.6-luna", "oss:Qwen/Qwen3-VL-32B-Instruct",
                   "oss:google/gemma-4-26B-A4B-it")
 
-# The portals whose own table labels the panel, with the offset their floor column carries.
 # The two structured portals whose stated fields label the panel. `listings.floor` is
 # ground = 0 on every portal since field-capture W8 healed the six ground = 1 portals
 # (2026-09-22), so a label is the stored value itself; the per-source offset this table
@@ -80,7 +82,7 @@ FLOOR_TOLERANCE = 1
 # shortfall is NOT redistributed, so the realised mix is reported rather than assumed.
 _PANEL_SQL_TEMPLATE = """
 WITH pool AS (
-  SELECT l.id, l.source, l.category_main, l.description,
+  SELECT l.id, l.source, l.category_main, {text} AS advert_text,
          l.floor, l.total_floors, l.has_balcony, l.has_lift, l.has_parking,
          l.building_type, l.condition, l.energy_rating
     FROM listings l
@@ -97,7 +99,7 @@ WITH pool AS (
          row_number() OVER (PARTITION BY category_main ORDER BY id DESC) AS rn
     FROM pool
 )
-SELECT ranked.id, ranked.source, ranked.category_main, ranked.description,
+SELECT ranked.id, ranked.source, ranked.category_main, ranked.advert_text,
        ranked.floor, ranked.total_floors, ranked.has_balcony, ranked.has_lift,
        ranked.has_parking, ranked.building_type, ranked.condition, ranked.energy_rating
   FROM ranked, quota
@@ -108,7 +110,7 @@ SELECT ranked.id, ranked.source, ranked.category_main, ranked.description,
 
 # The bazos slice: scored only where one structured portal advertises the same unique
 # (price_czk, area_m2, disposition), which is the same sibling key the W8 floor gate uses.
-_BAZOS_PANEL_SQL = """
+_BAZOS_PANEL_SQL = f"""
 WITH b AS (
   SELECT price_czk, area_m2, disposition, min(id) AS id
     FROM listings
@@ -122,7 +124,7 @@ WITH b AS (
      AND price_czk IS NOT NULL AND area_m2 IS NOT NULL AND disposition IS NOT NULL
    GROUP BY 1, 2, 3 HAVING count(*) = 1
 )
-SELECT l.id, 'bazos' AS source, l.category_main, l.description,
+SELECT l.id, 'bazos' AS source, l.category_main, {tx._TEXT_EXPR} AS advert_text,
        sib.floor, sib.total_floors, sib.has_balcony, sib.has_lift, sib.has_parking,
        sib.building_type, sib.condition, sib.energy_rating, sib.source AS label_source
   FROM b JOIN s USING (price_czk, area_m2, disposition)
@@ -135,10 +137,90 @@ SELECT l.id, 'bazos' AS source, l.category_main, l.description,
 
 FIELDS: tuple[str, ...] = tuple(tx._FIELD_SPEC)
 
+# The location half. bazos: md5-sampled, plus the trigger listing, plus hard cases per
+# predicate (exchange/wanted, Slovak, village/k.ú., a big city with no stored street).
+TRIGGER_ID = 18909736
+_LOCATED = """ll.obec_name, ll.okres_name, ll.obec_kod, ll.cast_obce_name, ll.street_name,
+       ll.house_number_cp, ll.psc"""
+_LOCATION_BAZOS_SQL = f"""
+WITH pool AS (
+  SELECT x.id, md5(x.id::text) AS rk,
+         x.t ~* 'vyměn|výměn|hledám|koupím|poptáv|sháním' AS exchange_wanted,
+         x.t ~* '\\mponúk|\\mnehnuteľnos|\\mbyt na predaj' AS slovak,
+         x.t ~* 'k\\.ú\\.|katastráln' AS village_ku,
+         coalesce(x.obec_name IN ('Praha', 'Brno', 'Plzeň', 'Ostrava')
+                  AND x.street_name IS NULL, false) AS big_city
+    FROM (SELECT l.id, {tx._TEXT_EXPR} AS t, ll.obec_name, ll.street_name
+            FROM listings l LEFT JOIN listing_location ll ON ll.listing_id = l.id
+           WHERE l.source = 'bazos' AND l.is_active
+             AND l.description IS NOT NULL AND l.description <> '') x
+), picked AS (
+  (SELECT id, 'md5' AS stratum FROM pool ORDER BY rk LIMIT %(n)s)
+  UNION ALL (SELECT id, 'exchange_wanted' FROM pool WHERE exchange_wanted ORDER BY rk LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'slovak' FROM pool WHERE slovak ORDER BY rk LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'village_ku' FROM pool WHERE village_ku ORDER BY rk LIMIT %(hard)s)
+  UNION ALL (SELECT id, 'big_city' FROM pool WHERE big_city ORDER BY rk LIMIT %(hard)s)
+  UNION ALL SELECT %(trigger)s::bigint, 'trigger'
+)
+SELECT DISTINCT ON (l.id) l.id, l.source, l.category_main, p.stratum,
+       {tx._TEXT_EXPR} AS advert_text, {_LOCATED}
+  FROM picked p JOIN listings l ON l.id = p.id
+  LEFT JOIN listing_location ll ON ll.listing_id = l.id
+ ORDER BY l.id, p.stratum <> 'trigger', p.stratum <> 'md5'
+"""
+# The structured portals: a street the portal stated in a table is a free label.
+LOCATION_SOURCES: tuple[str, ...] = ("sreality", "idnes", "realitymix", "ceskereality")
+_LOCATION_STRUCTURED_SQL = f"""
+SELECT l.id, l.source, l.category_main, 'structured' AS stratum,
+       {tx._TEXT_EXPR} AS advert_text, {_LOCATED}
+  FROM listing_location ll JOIN listings l ON l.id = ll.listing_id
+ WHERE l.source = %(source)s AND l.is_active
+   AND l.description IS NOT NULL AND l.description <> ''
+   AND ll.street_name IS NOT NULL AND ll.granularity IN ('street', 'address_point')
+ ORDER BY md5(l.id::text)
+ LIMIT %(n)s
+"""
+# ONE statement over every reading: does the text town exist in the register (obec, část
+# obce, k.ú.) — the nearest such unit to the pin, its okres and km — and does the text street
+# bind in the stored obec and in the text town's obec.
+_REGISTER_SQL = """
+WITH q AS (
+  SELECT * FROM unnest(%(ids)s::bigint[], %(towns)s::text[], %(streets)s::text[])
+         AS q(listing_id, town_norm, street_norm)
+)
+SELECT q.listing_id, t.level, t.name, t.okres, t.km,
+       EXISTS (SELECT 1 FROM ruian_streets s JOIN ruian_admin_units o ON o.id = s.obec_unit_id
+                WHERE o.level = 'obec' AND o.code = ll.obec_kod
+                  AND s.name_norm = q.street_norm) AS street_binds_stored_town,
+       EXISTS (SELECT 1 FROM ruian_streets s
+                WHERE s.obec_unit_id = t.obec_unit_id
+                  AND s.name_norm = q.street_norm) AS street_binds_text_town
+  FROM q
+  LEFT JOIN listing_location ll ON ll.listing_id = q.listing_id
+  LEFT JOIN LATERAL (
+    SELECT u.level::text AS level, u.name, ok.name AS okres,
+           CASE WHEN u.level = 'obec' THEN u.id ELSE u.parent_id END AS obec_unit_id,
+           ST_Distance(ll.geom::geography,
+                       coalesce(g.representative_point, u.definition_point)::geography)
+             / 1000.0 AS km
+      FROM ruian_admin_units u
+      LEFT JOIN ruian_admin_units ok
+        ON ok.level = 'okres' AND ok.retired_at IS NULL AND ok.path @> u.path
+      LEFT JOIN LATERAL (
+        SELECT g.representative_point FROM ruian_admin_unit_geometries g
+         WHERE g.unit_id = u.id AND g.purpose = 'authoritative'
+         ORDER BY g.registry_version_id DESC LIMIT 1) g ON true
+     WHERE u.name_norm = q.town_norm AND u.retired_at IS NULL
+       AND u.level IN ('obec', 'cast_obce', 'katastralni_uzemi')
+     ORDER BY km NULLS LAST
+     LIMIT 1
+  ) t ON true
+"""
+
 
 def panel_sql(fields: Iterable[str]) -> str:
     return _PANEL_SQL_TEMPLATE.format(
-        stated=" OR ".join(f"l.{f} IS NOT NULL" for f in fields))
+        text=tx._TEXT_EXPR, stated=" OR ".join(f"l.{f} IS NOT NULL" for f in fields))
 
 
 def _label_floor(source: str, stored: Any) -> int | None:
@@ -147,9 +229,10 @@ def _label_floor(source: str, stored: Any) -> int | None:
     return None if stored is None else int(stored)
 
 
-def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any]]:
+def build_panel(conn: Any, *, per_source: int, bazos: int,
+                location_rows: int = 0) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    columns = ("id", "source", "category_main", "description", *FIELDS)
+    columns = ("id", "source", "category_main", "advert_text", *FIELDS)
     with conn.cursor() as cur:
         for source in LABEL_SOURCES:
             cur.execute(panel_sql(FIELDS), {"source": source, "limit": per_source})
@@ -160,6 +243,27 @@ def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any
             for row in cur.fetchall():
                 record = dict(zip((*columns, "label_source"), row))
                 rows.append(_panel_row(record, label_source=record["label_source"]))
+        if location_rows:
+            loc_columns = ("id", "source", "category_main", "stratum", "advert_text",
+                           "obec_name", "okres_name", "obec_kod", "cast_obce_name",
+                           "street_name", "house_number_cp", "psc")
+            cur.execute(_LOCATION_BAZOS_SQL, {"n": location_rows, "trigger": TRIGGER_ID,
+                                              "hard": max(1, location_rows // 10)})
+            fetched = cur.fetchall()
+            for source in LOCATION_SOURCES:
+                cur.execute(_LOCATION_STRUCTURED_SQL, {"source": source, "n": location_rows})
+                fetched += cur.fetchall()
+            for r in (dict(zip(loc_columns, row)) for row in fetched):
+                rows.append({**{k: r[k] for k in ("id", "source", "category_main", "stratum",
+                                                   "advert_text")},
+                             "label_source": r["source"], "labels": {},
+                             "label_kind": "structured" if r["stratum"] == "structured"
+                             else "stored",
+                             "stored": {k: r[k] for k in ("obec_name", "okres_name", "psc")},
+                             "location_labels": {"town": r["obec_name"],
+                                                 "part_of_town": r["cast_obce_name"],
+                                                 "street": r["street_name"],
+                                                 "house_number_cp": r["house_number_cp"]}})
     return rows
 
 
@@ -171,7 +275,7 @@ def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
         "source": record["source"],
         "label_source": label_source,
         "category_main": record["category_main"],
-        "description": record["description"],
+        "advert_text": record["advert_text"],
         "labels": {k: v for k, v in labels.items() if v is not None},
     }
 
@@ -182,11 +286,22 @@ def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
 def agrees(field: str, predicted: Any, label: Any) -> bool:
     if field == "floor":
         return abs(int(predicted) - int(label)) <= FLOOR_TOLERANCE
+    if field == "house_number_cp":
+        return str(predicted).strip() == str(label).strip()
+    if field in text_reading.SLOTS:
+        read = strip_street_generic(str(predicted)) if field == "street" else str(predicted)
+        return normalize_match_key(read) == normalize_match_key(str(label))
     return predicted == label
 
 
+def _rate(hits: int, of: int) -> float | None:
+    return round(hits / of, 4) if of else None
+
+
 def score(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per field: precision where the model ANSWERED, answer rate, quote validity."""
+    """Per field: precision where the model ANSWERED, answer rate, quote validity. Per
+    location slot: answer rate, quote validity, agreement with a structured label; then the
+    town's register bind rate, the bazos stored-town agreement and the street bind rates."""
     per_field: dict[str, Any] = {}
     for field in FIELDS:
         labelled = [r for r in results if field in r["labels"]]
@@ -203,12 +318,48 @@ def score(results: list[dict[str, Any]]) -> dict[str, Any]:
             "quote_invalid": bad_quote,
             "passes_gate": bool(answered) and correct / len(answered) >= PRECISION_GATE,
         }
+    loc = [r for r in results if "location" in r]
+    slots: dict[str, Any] = {}
+    for slot in text_reading.SLOTS:
+        claimed = [r for r in loc if slot in r["claimed"]]
+        labelled = [r for r in loc if r["label_kind"] == "structured"
+                    and r["location_labels"].get(slot) and r["location"][slot]["value"]]
+        slots[slot] = {
+            "answered": len(claimed), "answer_rate": _rate(len(claimed), len(loc)),
+            "quote_valid": _rate(sum(slot in r["quoted"] for r in claimed), len(claimed)),
+            "structured_labelled": len(labelled),
+            "structured_agreement": _rate(sum(agrees(
+                slot, r["location"][slot]["value"], r["location_labels"][slot])
+                for r in labelled), len(labelled)),
+        }
+    towns = [r for r in loc if r["location"]["town"]["value"]]
+    stored = [r for r in towns if r["label_kind"] == "stored" and r["location_labels"]["town"]]
+    streets = [r for r in loc if r["location"]["street"]["value"]]
+    location = {
+        "n": len(loc),
+        "ad_kind": dict(Counter(str(r["location"]["ad_kind"]["value"]) for r in loc)),
+        "per_slot": slots,
+        "quote_validity": _rate(sum(len(r["quoted"]) for r in loc),
+                                sum(len(r["claimed"]) for r in loc)),
+        "town_binds": _rate(sum(bool(r["register"].get("level")) for r in towns), len(towns)),
+        "bazos_town_agreement": _rate(sum(agrees(
+            "town", r["location"]["town"]["value"], r["location_labels"]["town"])
+            for r in stored), len(stored)),
+        **{f"street_{k}": _rate(sum(bool(r["register"].get(k)) for r in streets), len(streets))
+           for k in ("binds_stored_town", "binds_text_town")},
+    }
+    measured = {"structured street agreement": (slots["street"]["structured_agreement"], .95),
+                "town binds": (location["town_binds"], .90),
+                "quote validity": (location["quote_validity"], .95),
+                **{f: (per_field[f]["precision"], PRECISION_GATE) for f in ("floor", "has_lift")}}
+    gates = {f"{k} >= {bar:.0%}": (v or 0) >= bar for k, (v, bar) in measured.items()}
     latencies = [r["ms"] for r in results if r.get("ms")]
     costs = [r["cost_usd"] for r in results]
     return {
         "n": len(results),
         "errors": sum(1 for r in results if r.get("error")),
         "per_field": per_field,
+        **({"location": location, "gates": gates} if loc else {}),
         "p50_ms": round(statistics.median(latencies)) if latencies else None,
         "usd_per_1k_adverts": round(1000 * sum(costs) / len(costs), 3) if costs else None,
         "api_cost_usd": round(sum(costs), 4),
@@ -216,6 +367,9 @@ def score(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 ARM_WORKERS = 8
+
+
+_CARRIED = ("source", "stratum", "label_kind", "location_labels", "stored", "advert_text")
 
 
 def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
@@ -235,20 +389,47 @@ def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[
             res = llm.call(
                 called_for=tx.CALLED_FOR, model=model, max_tokens=tx.MAX_TOKENS,
                 system=tx._SYSTEM_PROMPT, tools=[tool], tool_choice=tool["name"],
-                messages=[{"role": "user", "content": row["description"]}],
+                messages=[{"role": "user", "content": row["advert_text"]}],
             )
         payload = tx._tool_arguments(res) or {}
-        values, dropped = tx.merge_extraction(
-            payload, description=row["description"], fields=FIELDS)
-        return {
+        text = row["advert_text"]
+        values, dropped = tx.merge_extraction(payload, text=text, fields=FIELDS)
+        out = {
             "id": row["id"], "labels": row["labels"], "values": values,
             "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),
             "ms": int((time.monotonic() - started) * 1000),
         }
+        if "label_kind" in row:
+            block = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+            raw = {k: v for k, v in block.items() if isinstance(v, dict) and v.get("value")}
+            out.update({k: row[k] for k in _CARRIED}, register={},
+                       location=text_reading.read_location(payload, text),
+                       claimed=[k for k in text_reading.SLOTS if k in raw],
+                       quoted=[k for k in text_reading.SLOTS if k in raw
+                               and tx.quote_supports(text, raw[k].get("evidence_quote"))])
+        return out
     except Exception as exc:  # noqa: BLE001 — one advert must not end the arm
         LOG.warning("%s listing=%s failed: %s", model, row["id"], str(exc)[:200])
         return {"id": row["id"], "labels": row["labels"], "values": {},
                 "dropped": {}, "cost_usd": 0.0, "ms": None, "error": str(exc)[:300]}
+
+
+def _register(results: list[dict[str, Any]]) -> None:
+    """Annotate each location reading with its register facts, in ONE statement."""
+    rows = [r for r in results if "location" in r]
+    if not rows:
+        return
+    read = [(r["location"]["town"]["value"], r["location"]["street"]["value"]) for r in rows]
+    params = {"ids": [r["id"] for r in rows],
+              "towns": [normalize_match_key(t) if t else None for t, _ in read],
+              "streets": [normalize_match_key(strip_street_generic(s)) if s else None
+                          for _, s in read]}
+    columns = ("level", "name", "okres", "km", "binds_stored_town", "binds_text_town")
+    with db.connect() as conn, conn.cursor() as cur:
+        cur.execute(_REGISTER_SQL, params)
+        found = {row[0]: dict(zip(columns, row[1:])) for row in cur.fetchall()}
+    for r in rows:
+        r["register"] = found.get(r["id"], {})
 
 
 def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
@@ -263,7 +444,9 @@ def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
     tool = tx.extraction_tool(FIELDS)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         results = list(pool.map(lambda row: _extract_one(model, tool, row), panel))
-    return {"model": model, **score(results)}
+    _register(results)
+    return {"model": model, **score(results),
+            "readings": [r for r in results if "location" in r]}
 
 
 def _pod_is_gone(client: Any, pod_id: str) -> bool:
@@ -361,6 +544,20 @@ def summarise(report: dict[str, Any]) -> str:
             f"{arm['errors']} | "
             + (f"{pod['gpu']} @ ${pod['usd_per_hr']}/hr, ${pod['gpu_hours_usd']} "
                f"({pod['cloud_type']})" if pod else "-") + " |")
+    for arm in (a for a in report["arms"] if "location" in a):
+        loc = arm["location"]
+        lines += ["", f"## Location — {arm['model']}: {loc['n']} adverts, ad_kind "
+                  f"{loc['ad_kind']}", "", "| slot | answered | answer rate | quote valid | "
+                  "structured labelled | structured agreement |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: |"]
+        lines += [f"| {k} | {v['answered']} | {_pct(v['answer_rate'])} | "
+                  f"{_pct(v['quote_valid'])} | {v['structured_labelled']} | "
+                  f"{_pct(v['structured_agreement'])} |" for k, v in loc["per_slot"].items()]
+        lines += ["", f"Town binds in the register {_pct(loc['town_binds'])}; bazos town = "
+                  f"stored town {_pct(loc['bazos_town_agreement'])}; street binds in the "
+                  f"stored obec {_pct(loc['street_binds_stored_town'])}, in the text town's "
+                  f"obec {_pct(loc['street_binds_text_town'])}.", "", "Gates: " + "; ".join(
+                      f"{k} {'PASS' if ok else 'FAIL'}" for k, ok in arm["gates"].items())]
     lines += [
         "",
         "Caveats that do not go away with a bigger n: the panel is BROKER prose and the "
@@ -376,6 +573,39 @@ def _pct(value: float | None) -> str:
     return "-" if value is None else f"{value:.1%}"
 
 
+def review(report: dict[str, Any]) -> str:
+    """The sheet the operator pre-reads: 40 bazos readings (the trigger first, then md5
+    order) and up to 30 bazos town disagreements. One advert = one block."""
+    lines: list[str] = []
+    for arm in (a for a in report["arms"] if a.get("readings")):
+        bazos = sorted((r for r in arm["readings"] if r["label_kind"] == "stored"),
+                       key=lambda r: (r["id"] != TRIGGER_ID,
+                                      hashlib.md5(str(r["id"]).encode()).hexdigest()))
+        lines += [f"# Location review — {arm['model']}", "", "## (i) 40 bazos readings", ""]
+        for r in bazos[:40]:
+            title, _, body = r["advert_text"].partition("\n")
+            read = "; ".join(f'{k} "{c["value"]}" <- "{c["quote"]}"'
+                             for k, c in r["location"].items() if k != "ad_kind" and c["value"])
+            lines += [f"### {r['id']} ({r['stratum']}, ad_kind "
+                      f"{r['location']['ad_kind']['value']})", f"Headline: {title}",
+                      f"Text: {body[:300]}", f"Read: {read or '-'}",
+                      f"Stored: {r['stored']['obec_name'] or '-'} / "
+                      f"{r['location_labels']['street'] or '-'}", ""]
+        disagree = [r for r in bazos if r["location"]["town"]["value"]
+                    and r["location_labels"]["town"] and not agrees(
+                        "town", r["location"]["town"]["value"], r["location_labels"]["town"])]
+        lines += ["## (ii) Town disagreements", ""]
+        for r in disagree[:30]:
+            reg, town = r["register"], r["location"]["town"]
+            where = (f"{reg['level']} {reg['name']}, okres {reg['okres']}, "
+                     + (f"{reg['km']:.1f} km from the pin" if reg.get("km") is not None
+                        else "no pin") if reg.get("level") else "NOT IN THE REGISTER")
+            lines += [f"### {r['id']}", f"Stored: {r['stored']['obec_name']} (okres "
+                      f"{r['stored']['okres_name']})", f"Text: {town['value']} -> {where}",
+                      f'Quote: "{town["quote"]}"', ""]
+    return "\n".join(lines) + "\n"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -385,6 +615,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "(600 measured 1,207 structured rows; a thin category is not "
                          "redistributed, so the realised n is at or under 2 x this)")
     ap.add_argument("--bazos", type=int, default=300)
+    ap.add_argument("--location-rows", type=int, default=100,
+                    help="location half: md5 bazos rows (+ the trigger + ~10 %% per hard "
+                         "case) and this many per structured portal; 0 skips it")
     ap.add_argument("--out-dir", default="bakeoff")
     ap.add_argument("--oss-cloud", default="COMMUNITY", choices=("COMMUNITY", "SECURE"))
     ap.add_argument("--oss-max-price", type=float, default=1.00)
@@ -406,7 +639,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with db.connect() as conn:
-        panel = build_panel(conn, per_source=args.per_source, bazos=args.bazos)
+        panel = build_panel(conn, per_source=args.per_source, bazos=args.bazos,
+                            location_rows=args.location_rows)
         by_source: dict[str, int] = {}
         by_category: dict[str, int] = {}
         for row in panel:
@@ -438,7 +672,8 @@ def main() -> int:
         "arms": arms,
     }
     (out_dir / "bakeoff.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    (out_dir / "review.md").write_text(review(report), encoding="utf-8")
     summary = summarise(report)
     (out_dir / "bakeoff.md").write_text(summary, encoding="utf-8")
     print(summary)
