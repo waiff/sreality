@@ -1,0 +1,142 @@
+[
+{
+"lo": 343017,
+"hi": 535131,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 448367,
+"hi": 506095,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 520865,
+"hi": 13850718,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 522698,
+"hi": 18659091,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 16557693,
+"hi": 18692593,
+"stratum": "g2:control_adv_large_trial"
+},
+{
+"lo": 40303,
+"hi": 18611134,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 81778,
+"hi": 82563,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 158802,
+"hi": 170928,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 209238,
+"hi": 11302375,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 266325,
+"hi": 18739399,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 332152,
+"hi": 508769,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 490933,
+"hi": 492024,
+"stratum": "g2:control_adv_small_trial"
+},
+{
+"lo": 8018,
+"hi": 18563672,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 80738,
+"hi": 455692,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 80780,
+"hi": 10104550,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 93128,
+"hi": 546402,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 105737,
+"hi": 18675912,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 110428,
+"hi": 110501,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 117275,
+"hi": 18746478,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 142968,
+"hi": 333526,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 175821,
+"hi": 209519,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 194031,
+"hi": 17973016,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 219279,
+"hi": 506095,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 308503,
+"hi": 420861,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 519905,
+"hi": 12601662,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 531587,
+"hi": 12354773,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 18664564,
+"hi": 18692275,
+"stratum": "g2:control_cand_trial"
+},
+{
+"lo": 18788298,
+"hi": 18889333,
+"stratum": "g2:control_cand_trial"
+}
+]
