@@ -39,47 +39,66 @@ def test_the_lane_and_the_check_share_one_predicate() -> None:
 
 
 def test_the_selector_keys_on_listing_id_and_never_on_sreality_id() -> None:
-    sql = tx._DECLARED_SELECT_SQL
+    sql = tx.SELECT_INFLOW_SQL
     assert "sreality_id" not in sql
     assert "e.listing_id = l.id" in sql
     assert "e.extractor_version = %(version)s" in sql
 
 
-def test_the_selector_covers_every_extractable_cell_of_every_declared_portal() -> None:
-    """Over the DECLARED gates, because with every gate closed the live predicate is
-    `false` — which is the shipping state and the point of the wave."""
-    sql = tx._DECLARED_SELECT_SQL
-    declared = contract.gated_cells()
-    assert declared, "the contract declares no gated text cell at all"
-    for portal, fields in declared.items():
-        assert f"l.source = '{portal}'" in sql
-        for field in fields:
-            assert f"l.{field} IS NULL" in sql
-
-
 OPEN_GATES = {"bazos": ("floor", "has_lift")}
 
 
-def test_the_lane_extracts_exactly_the_open_gates() -> None:
-    """The lane's scope is the OPEN gates and nothing else: a closed gate is not asked
-    for, not billed, not written. The draft that extracted every gated cell and wrote
-    only the passed ones would have paid ~$113 for cache rows that, because a cache row
-    retires its listing, could never have become a column value. The W7 bake-off
-    (2026-09-22) opened floor + has_lift on bazos; the selector names those two columns."""
+def test_the_scope_is_the_open_gates_plus_the_llm_text_portals_and_names_no_portal() -> None:
+    """W1 (2026-09-30): the NULL arms are gone — a row is in scope because its PORTAL is, via
+    an open R7 gate or an active contract's `llm_text` entry read from the DB (rule 21)."""
     assert contract.extracted_cells() == OPEN_GATES
-    assert "WHERE false" not in tx.SELECT_INFLOW_SQL
-    for field in OPEN_GATES["bazos"]:
-        assert field in tx.SELECT_INFLOW_SQL
-    for field in ("condition", "building_type", "energy_rating", "has_parking"):
-        assert field not in tx.SELECT_INFLOW_SQL
+    for sql in (tx.SELECT_INFLOW_SQL, tx.ELIGIBLE_LAG_SQL):
+        assert "pe.extraction_method = 'llm_text'" in sql and "pc.is_active" in sql
+        assert "SELECT 'bazos'" in sql
+        assert "IS NULL OR" not in sql and "l.floor" not in sql and "l.has_lift" not in sql
+
+
+def test_a_delisted_advert_is_read_once_per_schema_and_an_active_one_on_every_change() -> None:
+    """Q1 (2026-09-30). The delisted arm is hash-free on purpose: a delisted row is not
+    re-fetched, and the hash would detoast ~100k adverts a pass."""
+    where = tx._eligible_where(OPEN_GATES)
+    arm = where[where.index("(l.is_active OR NOT EXISTS"):where.index("   AND NOT EXISTS")]
+    assert f"d.extractor_version LIKE '{tx.SCHEMA_VERSION}:%%'" in arm
+    assert "d.extracted -> 'error' IS NULL" in arm
+    assert "text_hash" not in arm
+    assert tx.SCHEMA_VERSION == "2"
+
+
+def test_the_advert_text_is_headline_newline_description_hashed_only_in_sql() -> None:
+    """`bazos_parser.ad_haystack`'s composition, spelled once in SQL; no Python twin."""
+    from scraper.bazos_parser import ad_haystack
+
+    assert ad_haystack("T", "D") == "T\nD"
+    assert tx._TEXT_EXPR == (
+        "coalesce(l.raw_json ->> 'title', '') || E'\\n' || coalesce(l.description, '')")
+    assert f"{tx._HASH_EXPR} AS text_hash" in tx.SELECT_INFLOW_SQL
+    assert not hasattr(tx, "text_hash")
+
+
+def test_the_lane_scope_unions_the_open_gates_with_the_llm_text_portals(monkeypatch) -> None:
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): assert sql == tx.LLM_TEXT_SOURCES_SQL
+        def fetchall(self): return [("idnes",)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    assert tx.lane_scope(_Conn()) == {"bazos": ("floor", "has_lift"), "idnes": ()}
 
 
 def test_the_hash_stays_out_of_the_index_condition() -> None:
     """`IS NOT DISTINCT FROM`, not `=`: a plain equality lets the planner make the hash an
-    index condition, which detoasts and hashes all ~50k descriptions every pass forever,
+    index condition, which detoasts and hashes every advert every pass forever,
     including the steady state where nothing is eligible."""
-    assert "text_hash IS NOT DISTINCT FROM" in tx._DECLARED_SELECT_SQL
-    assert "text_hash =" not in tx._DECLARED_SELECT_SQL
+    assert "text_hash IS NOT DISTINCT FROM" in tx.SELECT_INFLOW_SQL
+    assert "text_hash =" not in tx.SELECT_INFLOW_SQL
 
 
 def test_one_arm_newest_first_reaches_the_backlog() -> None:
@@ -114,25 +133,27 @@ def test_the_extractor_version_carries_the_model() -> None:
     assert "gpt-5-mini" in tx.extractor_version("gpt-5-mini")
 
 
-def test_the_extractor_version_carries_the_open_gate_set(monkeypatch) -> None:
-    """Without this, opening a gate would write NOTHING to the existing corpus: every one
-    of those listings already has a cache row at this version, and the anti-join retires
-    it for ever. The fingerprint is what re-opens them."""
-    closed = tx.extractor_version("m")
-    monkeypatch.setattr(contract, "extracted_cells",
-                        lambda: {"bazos": ("has_lift",)})
+def test_the_extractor_version_moves_with_the_prompt_and_the_schema_and_nothing_else(
+        monkeypatch) -> None:
+    """What was ASKED is what a cached answer is an answer from. Without the schema half,
+    opening a gate would write NOTHING to the existing corpus: every listing already has a
+    cache row at this version, and the anti-join retires it for ever."""
+    base = tx.extractor_version("m")
+    assert tx.extractor_version("m") == base
+    monkeypatch.setattr(contract, "extracted_cells", lambda: {"bazos": ("has_lift",)})
     one_open = tx.extractor_version("m")
-    monkeypatch.setattr(contract, "extracted_cells",
-                        lambda: {"bazos": ("has_balcony", "has_lift")})
-    two_open = tx.extractor_version("m")
-    assert len({closed, one_open, two_open}) == 3
+    monkeypatch.setattr(tx, "_SYSTEM_PROMPT", tx._SYSTEM_PROMPT + " ")
+    reprompted = tx.extractor_version("m")
+    assert len({base, one_open, reprompted}) == 3
+    assert reprompted.startswith(f"{tx.SCHEMA_VERSION}:")
 
 
 # --- the write ---------------------------------------------------------------
 
 
-def test_the_write_can_only_fill_a_null_and_marks_the_property() -> None:
+def test_the_write_can_only_fill_a_null_on_an_active_row_and_marks_the_property() -> None:
     sql = tx.write_sql(["floor", "has_lift"])
+    assert "AND l.is_active" in sql
     assert "floor = coalesce(l.floor, %(floor)s::integer)" in sql
     assert "has_lift = coalesce(l.has_lift, %(has_lift)s::boolean)" in sql
     assert "INSERT INTO dirty_properties" in sql
@@ -211,7 +232,7 @@ def test_a_passed_gate_writes_only_its_own_column(monkeypatch) -> None:
                         lambda: {"bazos": ("has_lift",)})
     conn = _FakeConn()
     written = tx.record_extraction(
-        conn, {"id": 7, "source": "bazos", "description": DESCRIPTION},
+        conn, {"id": 7, "source": "bazos", "is_active": True, "text_hash": "h"},
         values={"has_lift": False, "condition": "po_rekonstrukci"},
         extracted={}, model="m", version="v", llm_call_id=None, cost_usd=0.0,
     )
@@ -221,13 +242,26 @@ def test_a_passed_gate_writes_only_its_own_column(monkeypatch) -> None:
     assert "condition = coalesce" not in update_sql
     assert params["has_lift"] is False
     assert json.loads(conn.calls[1][1]["filled"]) == {"has_lift": False}
+    assert conn.calls[1][1]["text_hash"] == "h"
+
+
+def test_a_delisted_advert_is_read_but_never_filled(monkeypatch) -> None:
+    """Field capture's ruling on inactive rows stands: the reading is cached, no column."""
+    monkeypatch.setattr(contract, "extracted_cells", lambda: {"bazos": ("has_lift",)})
+    conn = _FakeConn()
+    written = tx.record_extraction(
+        conn, {"id": 7, "source": "bazos", "is_active": False, "text_hash": "h"},
+        values={"has_lift": True}, extracted={"location": {}}, model="m", version="v",
+        llm_call_id=None, cost_usd=0.0)
+    assert written == [] and len(conn.calls) == 1
+    assert json.loads(conn.calls[0][1]["filled"]) == {}
 
 
 def test_a_failed_attempt_is_recorded_so_it_is_not_re_billed_for_ever() -> None:
     """Rule #5's shape in the table that already exists: the deleted lane dropped a
     failure, so the same listing was re-selected and re-billed on every pass."""
     conn = _FakeConn()
-    tx.record_failure(conn, {"id": 7, "source": "bazos", "description": DESCRIPTION},
+    tx.record_failure(conn, {"id": 7, "source": "bazos", "text_hash": "h"},
                       error="the model returned no record_description_facts call",
                       model="m", version="v", cost_usd=0.00225)
     assert len(conn.calls) == 1
@@ -242,7 +276,7 @@ def test_a_failed_attempt_is_recorded_so_it_is_not_re_billed_for_ever() -> None:
 
 
 def test_the_selector_retires_a_listing_only_after_give_up_attempts() -> None:
-    sql = tx._DECLARED_SELECT_SQL
+    sql = tx.SELECT_INFLOW_SQL
     assert "e.extracted -> 'error' IS NULL" in sql
     assert f">= {tx.GIVE_UP_AFTER}" in sql
     assert tx.GIVE_UP_AFTER == 5
@@ -375,7 +409,7 @@ def test_a_null_value_is_silence_not_a_drop() -> None:
 
 
 def merge(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    return tx.merge_extraction(payload, description=DESCRIPTION, fields=FIELDS)
+    return tx.merge_extraction(payload, text=DESCRIPTION, fields=FIELDS)
 
 
 # --- the tool schema ---------------------------------------------------------
@@ -398,18 +432,23 @@ def test_floor_is_a_string_so_the_model_never_does_the_arithmetic() -> None:
 
 
 def test_every_field_demands_an_evidence_quote() -> None:
-    tool = tx.extraction_tool(tuple(tx._FIELD_SPEC))
-    for field, spec in tool["input_schema"]["properties"].items():
+    props = tx.extraction_tool(tuple(tx._FIELD_SPEC))["input_schema"]["properties"]
+    cells = {**props, **props["location"]["properties"]}
+    del cells["location"]
+    for field, spec in cells.items():
         assert spec["required"] == ["value", "evidence_quote"], field
         assert spec["additionalProperties"] is False
 
 
-def test_the_schema_covers_exactly_the_contract_and_nothing_else() -> None:
+def test_the_schema_is_the_contract_plus_the_location_block_for_every_portal() -> None:
+    """Every in-scope portal gets the location block — one in scope through `llm_text`
+    alone gets nothing else."""
     assert contract.gated_cells(), "nothing declared: this test would be vacuous"
-    for fields in contract.gated_cells().values():
+    for fields in (*contract.gated_cells().values(), ()):
         assert set(fields) <= set(tx._FIELD_SPEC)
-        tool = tx.extraction_tool(fields)
-        assert set(tool["input_schema"]["properties"]) == set(fields)
+        schema = tx.extraction_tool(fields)["input_schema"]
+        assert set(schema["properties"]) == {*fields, "location"}
+        assert "location" in schema["required"]
 
 
 def test_confidence_is_gone() -> None:
@@ -424,17 +463,15 @@ def test_confidence_is_gone() -> None:
 def test_a_pass_with_no_model_configured_claims_nothing(monkeypatch) -> None:
     """No hardcoded fallback: `LLMClient`'s own default is a claude id and this project
     does not use Anthropic models."""
-    monkeypatch.setattr(contract, "extracted_cells",
-                        lambda: {"bazos": ("has_lift",)})
+    monkeypatch.setattr(tx, "lane_scope", lambda conn: {"bazos": ("has_lift",)})
     monkeypatch.setattr(tx, "resolve_model", lambda conn: None)
     assert tx.run_pass(object()) == {"claimed": 0, "reason": "no_model"}
 
 
-def test_a_pass_with_no_open_gate_claims_nothing(monkeypatch) -> None:
-    """The shipping state: no gate is open, so there is nothing the lane may write and
-    therefore nothing it may pay for. Not even a query."""
-    monkeypatch.setattr(contract, "extracted_cells", dict)
-    assert tx.run_pass(object()) == {"claimed": 0, "reason": "no_open_gate"}
+def test_a_pass_with_an_empty_scope_claims_nothing(monkeypatch) -> None:
+    """No open gate and no `llm_text` entry: nothing the lane may read or pay for."""
+    monkeypatch.setattr(tx, "lane_scope", lambda conn: {})
+    assert tx.run_pass(object()) == {"claimed": 0, "reason": "empty_scope"}
 
 
 def test_the_called_for_is_the_one_the_cost_series_already_knows() -> None:

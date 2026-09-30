@@ -235,8 +235,8 @@ def default_mirror() -> MiniMirror:
         _unit(32, "obec", 535419, "Mladá Boleslav", "mlada boleslav",
               "k27.o3204.b535419", parent=31, lat=50.4114, lon=14.9030,
               psc_set=("29301",)),
-        # Kladno and its ČástObce Dubí — the dash-split line "Kladno - Dubí, Ke Křížku",
-        # which is the shape `bazos_parser._trailer_street_quarter` writes.
+        # Kladno and its ČástObce Dubí — the dash-split line "Kladno - Dubí, Ke Křížku"
+        # (a town, a quarter and a street in one string).
         _unit(33, "okres", 3201, "Kladno", "kladno", "k27.o3201", parent=30,
               lat=50.1477, lon=14.1028),
         _unit(34, "obec", 532053, "Kladno", "kladno", "k27.o3201.b532053", parent=33,

@@ -532,19 +532,6 @@ def test_the_street_entry_reads_the_sellers_headline_and_only_that():
     assert "fallback" not in entry.locator
 
 
-def test_the_parsers_own_street_field_is_deliberately_not_read():
-    """`scraper.bazos_parser.extract_street` scans the title AND THE DESCRIPTION and returns
-    the FIRST cue match, so its value is not the subject's: 29,697 of 50,529 (58.8 %) do not
-    appear in the title at all. The head of that distribution is boilerplate ("Energetická
-    třída" x527, "RK třída" x556, "DPH třída" x280) and the tail is proximity prose that binds
-    to REAL streets — "Kubánské náměstí" ten minutes away, "Fügnerova 450" where 450 is metres
-    and R1 would take it for a house number. Every bazos pin is declared blurred, so each of
-    those would MOVE the published point with nothing marked disputed."""
-    assert ENTRIES[STREET_ENTRY].locator["json_pointer"] != "/coords/street"
-    assert street_of({"id": "1", "coords": {"street": "Energetická třída"}}) is None
-    assert street_of({"id": "1", "coords": {"street": "ul. Jiráskova"}}) is None
-
-
 def test_the_head_title_and_the_description_are_deliberately_not_declared():
     """Both were measured and both lost. The `<head>` title is the same capped string with the
     okres and " | Bazoš.cz" appended; the description is populated on 93 % of rows and carries

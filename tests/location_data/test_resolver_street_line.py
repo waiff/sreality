@@ -55,9 +55,9 @@ def test_the_operators_title_binds_the_street_it_names():
     assert resolution.obec_kod == MLADA_BOLESLAV
 
 
-def test_the_parsers_own_reading_binds_the_same_street():
-    """`/coords/street` is the first surface and it is usually a bare name, which takes the
-    ordinary R2 path rather than the line binder. Same answer, one rung either way."""
+def test_a_bare_name_binds_the_same_street():
+    """A bare street name takes the ordinary R2 path rather than the line binder. Same
+    answer, one rung either way."""
     assert _line("Jiráskova").ulice_kod == 105
 
 
@@ -87,8 +87,8 @@ def test_the_official_generic_word_is_matched_and_so_is_its_absence():
 
 
 def test_a_dash_is_a_separator_and_the_last_segment_is_the_street():
-    """"Kladno - Dubí, Ke Křížku" is the shape `_trailer_street_quarter` writes: a town, a
-    quarter and a street in one string, on two different separators."""
+    """"Kladno - Dubí, Ke Křížku" is a composite line: a town, a quarter and a street in
+    one string, on two different separators."""
     bound = _bind("Kladno - Dubí, Ke Křížku", (KLADNO,))
     assert bound.street.code == 106
     assert _line("Kladno - Dubí, Ke Křížku", town="Kladno").street_name == "Ke Křížku"
