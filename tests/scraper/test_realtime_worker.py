@@ -1989,3 +1989,228 @@ def test_text_extract_is_free_while_every_gate_is_closed(
     monkeypatch.setattr(description_extraction.contract, "extracted_cells", lambda: {})
     assert rw._text_extract_sync() == {"claimed": 0, "reason": "no_open_gate"}
     assert not hasattr(description_extraction, "BACKLOG_EVERY_PASSES")
+
+
+# --- liveness: the 2026-09-29 freeze ----------------------------------------------------
+#
+# ceskereality answered 403 to everything; the shared rate ledger parked every caller up
+# to an hour; each abandoned probe/drain pass left one more thread asleep there; the
+# default executor filled; the heartbeat write and every interval read queued behind
+# them; the loop stayed alive, so nothing exited and Railway never restarted the worker.
+
+
+def _stuck_portal(source_to_block: str):
+    """A _run_*_sync fake that blocks inside one portal until released — the abandoned
+    pass's thread, still asleep in the ledger."""
+    entered, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def run(source: str, *_: Any) -> dict[str, Any]:
+        ran.append(source)
+        if source == source_to_block:
+            entered.set()
+            release.wait(10)
+        return _probe_agg()
+
+    return run, ran, entered, release
+
+
+def test_a_second_probe_pass_while_one_is_in_flight_is_skipped_and_counted(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    run, ran, entered, release = _stuck_portal("ceskereality")
+    monkeypatch.setattr(rw, "_run_probe_sync", run)
+    abandoned = threading.Thread(target=rw._probe_sync, args=(set(), asyncio.Event()))
+    abandoned.start()
+    state = rw._new_state()
+    try:
+        assert entered.wait(5)
+        asyncio.run(rw._probe_pass(asyncio.Event(), state))
+        probe = state["lanes"]["probe"]
+        assert probe["passes"] == 1
+        assert probe["last"] == {"previous_pass_running": True}
+        assert ran == ["bazos", "bezrealitky", "ceskereality"]  # no second thread started
+    finally:
+        release.set()
+        abandoned.join(5)
+    asyncio.run(rw._probe_pass(asyncio.Event(), state))  # the lock came back with the thread
+    assert state["lanes"]["probe"]["last"]["portals"] == len(rw.REALTIME_SOURCES)
+
+
+def test_a_second_drain_pass_while_one_is_in_flight_is_skipped_and_counted(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_drain_slice", lambda: 200)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_claimable_by_source", lambda: {"ceskereality": 7, "idnes": 5})
+    run, ran, entered, release = _stuck_portal("ceskereality")
+    monkeypatch.setattr(rw, "_run_drain_sync", lambda s, n: run(s) and _drain_agg())
+    abandoned = threading.Thread(
+        target=rw._drain_sync, args=(200, set(), asyncio.Event()))
+    abandoned.start()
+    state = rw._new_state()
+    try:
+        assert entered.wait(5)
+        asyncio.run(rw._drain_pass(asyncio.Event(), state))
+        drain = state["lanes"]["drain"]
+        assert drain["passes"] == 1
+        assert drain["last"] == {"previous_pass_running": True}
+        assert ran == ["ceskereality"]
+    finally:
+        release.set()
+        abandoned.join(5)
+    asyncio.run(rw._drain_pass(asyncio.Event(), state))
+    assert state["lanes"]["drain"]["last"]["sources"] == 2
+
+
+def test_probe_and_drain_count_a_refused_portal_and_move_on(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_read_drain_slice", lambda: 200)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_claimable_by_source", lambda: {"ceskereality": 7, "idnes": 5})
+    monkeypatch.setattr(rw, "_run_probe_sync", lambda s: _probe_agg(
+        budget_refused=int(s == "ceskereality")))
+    monkeypatch.setattr(rw, "_run_drain_sync", lambda s, n: _drain_agg(
+        budget_refused=int(s == "ceskereality")))
+    state = rw._new_state()
+    asyncio.run(rw._probe_pass(asyncio.Event(), state))
+    asyncio.run(rw._drain_pass(asyncio.Event(), state))
+    probe, drain = state["lanes"]["probe"]["last"], state["lanes"]["drain"]["last"]
+    assert (probe["portals"], probe["budget_refused"], probe["errors"]) == (
+        len(rw.REALTIME_SOURCES), 1, 0)
+    assert (drain["sources"], drain["budget_refused"], drain["errors"]) == (2, 1, 0)
+
+
+def test_watchdog_exits_once_no_beat_is_written(monkeypatch, caplog):
+    clock = [1000.0]
+    state = rw._new_state()
+    state["beat_ok_at"] = 1000.0
+    rw._record_pass_start(state, "probe")
+    dumps: list[dict[str, Any]] = []
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: dumps.append(kw))
+    exits: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
+    assert exits == [1]
+    assert clock[0] - 1000.0 == rw.LIVENESS_BOUND_SECONDS == 10 * rw.HEARTBEAT_INTERVAL_SECONDS
+    assert dumps == [{"all_threads": True}]
+    lines = [r.getMessage() for r in caplog.records if "WATCHDOG" in r.getMessage()]
+    assert len(lines) == 1 and "probe=" in lines[0]
+
+
+def test_watchdog_exits_even_when_writing_its_last_words_blocks(monkeypatch):
+    # A full stderr pipe is one way a process freezes; the exit must not wait on it.
+    monkeypatch.setattr(rw, "WATCHDOG_LAST_WORDS_SECONDS", 0.05)
+    blocked = threading.Event()
+    monkeypatch.setattr(
+        rw.faulthandler, "dump_traceback", lambda **kw: blocked.wait(5))
+    clock = [0.0]
+    state = rw._new_state()
+    state["beat_ok_at"] = 0.0
+    exits: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    try:
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
+        assert exits == [1]
+    finally:
+        blocked.set()
+
+
+def test_watchdog_stays_quiet_while_beats_flow(monkeypatch):
+    # Beats every 240 s -- slower than the 30 s cadence, inside the bound.
+    clock = [0.0]
+    state = rw._new_state()
+    state["beat_ok_at"] = 0.0
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: pytest.fail(
+        "a flowing heartbeat must never dump stacks"))
+    ticks: list[float] = []
+
+    class _Enough(Exception):
+        pass
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+        ticks.append(seconds)
+        if len(ticks) % 8 == 0:
+            state["beat_ok_at"] = clock[0]
+        if len(ticks) > 200:
+            raise _Enough
+
+    exits: list[int] = []
+    with pytest.raises(_Enough):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append)
+    assert exits == []
+
+
+def test_a_failed_beat_never_counts_as_one(monkeypatch):
+    class _Down(_FakeConn):
+        def cursor(self) -> Any:
+            raise RuntimeError("pooler down")
+
+    monkeypatch.setattr(rw.db, "connect", lambda: _Down())
+    state = rw._new_state()
+    state["beat_ok_at"] = 1.0
+    with pytest.raises(RuntimeError):
+        rw._beat_sync(state)
+    assert state["beat_ok_at"] == 1.0
+
+
+def test_the_heartbeat_writes_while_the_default_executor_is_saturated(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    conn = _FakeConn()
+    monkeypatch.setattr(rw.db, "connect", lambda: conn)
+    state = rw._new_state()
+    state["beat_ok_at"] = 0.0
+    release = threading.Event()
+
+    async def scenario() -> Any:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        # Every default-executor thread asleep, and more queued behind them.
+        stuck = [asyncio.ensure_future(asyncio.to_thread(release.wait, 10)) for _ in range(4)]
+        await asyncio.sleep(0.05)
+        try:
+            await asyncio.wait_for(rw._heartbeat_pass(state), timeout=2)
+            return await asyncio.wait_for(rw._settings(lambda: 42), timeout=2)
+        finally:
+            release.set()
+            await asyncio.gather(*stuck)
+
+    assert asyncio.run(scenario()) == 42
+    assert conn.calls and state["beat_ok_at"] > 0.0
+
+
+def test_lane_loop_keeps_its_default_when_the_interval_read_hangs(monkeypatch):
+    monkeypatch.setattr(rw, "SETTINGS_READ_TIMEOUT_SECONDS", 0.05)
+    release = threading.Event()
+
+    async def scenario() -> list[int]:
+        stop = asyncio.Event()
+        calls: list[int] = []
+
+        async def run_pass() -> None:
+            calls.append(1)
+            stop.set()
+
+        await rw._lane_loop(
+            "t", stop, lambda: release.wait(5) or 1, run_pass, rw._new_state(),
+            default_interval=300)
+        return calls
+
+    try:
+        assert asyncio.run(scenario()) == [1]
+    finally:
+        release.set()
+
+
+def test_the_watchdog_starts_with_the_worker():
+    src = inspect.getsource(rw._amain)
+    assert "target=_watchdog" in src and "daemon=True" in src

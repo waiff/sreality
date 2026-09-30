@@ -3605,6 +3605,24 @@ def fail_detail(
         )
 
 
+def release_claims(
+    conn: psycopg.Connection, source: str, native_ids: Iterable[str],
+) -> int:
+    """Hand claimed rows back untouched -- no attempts bump, no completion row -- when
+    the drain could not fetch them for a reason that is not theirs (the shared rate
+    ledger refused the run its slots)."""
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listing_detail_queue SET claimed_at = NULL "
+            "WHERE source = %s AND native_id = ANY(%s) AND claimed_at IS NOT NULL",
+            (source, ids),
+        )
+        return cur.rowcount or 0
+
+
 COMPLETION_RETENTION_DAYS = 7
 
 

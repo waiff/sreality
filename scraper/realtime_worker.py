@@ -97,7 +97,10 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              there is one writer at a time. An absent autodedup store skips with one
              warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
-             worker_heartbeats (migration 269) — the Health-page liveness hook.
+             worker_heartbeats (migration 269) — the Health-page liveness hook. It
+             writes on its own thread, never the executor lane work runs on, and a
+             watchdog thread exits the process (Railway restarts it) once no beat has
+             been written for LIVENESS_BOUND_SECONDS.
 
 SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
@@ -118,6 +121,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import faulthandler
 import importlib
 import logging
 import os
@@ -125,6 +129,7 @@ import signal
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -151,6 +156,21 @@ IMAGES_SLICE_DEFAULT = 500
 # shares the CDNs with images_fresh.yml.
 IMAGES_WORKERS = 8
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+# Ten missed beats. With no heartbeat WRITTEN for this long the watchdog exits the
+# process and Railway's restartPolicy ALWAYS starts a fresh one: long enough to ride
+# out a pooler blip (a failed connect retries 10 s later), short enough that a freeze
+# costs minutes instead of the 7 h 40 min of 2026-09-29, when the loop stayed alive
+# and nothing restarted it.
+LIVENESS_BOUND_SECONDS = 10 * HEARTBEAT_INTERVAL_SECONDS
+WATCHDOG_LAST_WORDS_SECONDS = 10.0
+# The liveness path's own threads. Lane work runs on asyncio's default executor
+# (min(32, cpu+4) threads); on 2026-09-29 threads asleep in ceskereality's shared rate
+# ledger filled it, and the heartbeat write and every lane's interval read queued
+# behind them. The heartbeat gets one thread nothing else uses; the per-pass settings
+# reads share a few, each bounded, so a hung read costs its lane a default value.
+_HEARTBEAT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rt-heartbeat")
+_SETTINGS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rt-settings")
+SETTINGS_READ_TIMEOUT_SECONDS = 30.0
 IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
 # Ceiling on ONE lane pass. The drain lane legitimately loops eight portals at
@@ -463,6 +483,17 @@ _PROXY_WARNED: set[str] = set()
 
 # log-once-per-process guard when R2 env vars are absent on the worker.
 _R2_WARNED: set[str] = set()
+
+# The probe and drain lanes' own mutual exclusion, the sold_comps lane's reason: a pass
+# abandoned at LANE_PASS_TIMEOUT_SECONDS keeps its thread, and without a lock every later
+# pass started another beside it. On 2026-09-29 one probe thread per abandoned pass
+# (eighteen by 23:15) plus drain threads, all asleep in ceskereality's shared rate
+# ledger, filled the executor. Each pass runs in ONE thread holding its lock, so a lane
+# leaks at most one; a pass that cannot take it is recorded as skipped.
+_PROBE_PASS_LOCK = threading.Lock()
+_PROBE_WEDGE_LOGGED = False
+_DRAIN_PASS_LOCK = threading.Lock()
+_DRAIN_WEDGE_LOGGED = False
 
 # Count-probe walk DISPATCH is double-gated — a token env var AND the
 # realtime_sreality_count_dispatch_enabled setting (default off) — so the lane
@@ -886,13 +917,13 @@ def _record_lane_failure(source: str, lane: str, exc: BaseException) -> None:
     CheckViolation on the latency-critical drain used to produce a log line and
     nothing else, forever. One shared function, not a second producer.
 
-    BLOCKING — callers must `await asyncio.to_thread(...)` it, like every other DB touch
-    in this file. `db.connect()` is `_connect_with_retry` (3 attempts, `time.sleep(10.0)`
-    between), and `is_transient_db_error` is true for every `OperationalError`, so on a
-    pooler outage a bare call sleeps ~20s per source ON THE EVENT LOOP. A drain pass
-    iterates all nine sources, and the 30s heartbeat lane is a sibling coroutine on the
-    same loop — i.e. the recorder would blind `worker_liveness` and `worker_lane_stall`
-    during exactly the DB incident it exists to record."""
+    BLOCKING — call it from the pass's own thread, never on the event loop, like every
+    other DB touch in this file. `db.connect()` is `_connect_with_retry` (3 attempts,
+    `time.sleep(10.0)` between), and `is_transient_db_error` is true for every
+    `OperationalError`, so on a pooler outage a bare call sleeps ~20s per source ON THE
+    EVENT LOOP. A drain pass iterates all nine sources, and the 30s heartbeat lane is a
+    sibling coroutine on the same loop — i.e. the recorder would blind `worker_liveness`
+    and `worker_lane_stall` during exactly the DB incident it exists to record."""
     try:
         with db.connect() as conn:
             portal_runner.record_failure_signature(conn, exc, source=source, lane=lane)
@@ -900,86 +931,146 @@ def _record_lane_failure(source: str, lane: str, exc: BaseException) -> None:
         LOG.warning("could not record %s lane failure for %s: %r", lane, source, rec_exc)
 
 
+async def _settings(read: Callable[[], Any]) -> Any:
+    """A per-pass settings read on the worker's settings threads, bounded by
+    SETTINGS_READ_TIMEOUT_SECONDS: never queued behind lane work on the default
+    executor, never awaited forever. A timeout raises like a failed read, so the
+    caller keeps its default."""
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(_SETTINGS_EXECUTOR, read), SETTINGS_READ_TIMEOUT_SECONDS)
+
+
+def _probe_sync(disabled: set[str], stop_event: asyncio.Event) -> dict[str, Any]:
+    """One probe pass over REALTIME_SOURCES, in ONE thread holding the lane's pass lock.
+    A portal whose shared rate budget refuses the probe is given up for this pass and
+    counted under `budget_refused`; the next portal still runs."""
+    global _PROBE_WEDGE_LOGGED
+
+    if not _PROBE_PASS_LOCK.acquire(blocking=False):
+        if not _PROBE_WEDGE_LOGGED:
+            _PROBE_WEDGE_LOGGED = True
+            LOG.warning(
+                "PROBE lane skipped: the previous pass was abandoned and its thread is "
+                "still probing")
+        return {"previous_pass_running": True}
+    _PROBE_WEDGE_LOGGED = False
+    try:
+        totals = {
+            "portals": 0, "new": 0, "enqueued": 0, "errors": 0, "skipped": 0,
+            "budget_refused": 0,
+        }
+        for source in REALTIME_SOURCES:
+            # is_set() is a plain attribute read, safe off the loop's thread.
+            if stop_event.is_set():
+                break
+            if source in disabled or _skip_for_proxy(source):
+                totals["skipped"] += 1
+                continue
+            try:
+                agg = _run_probe_sync(source)
+            except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
+                LOG.exception("PROBE lane source=%s failed", source)
+                _record_lane_failure(source, "probe", exc)
+                totals["errors"] += 1
+                continue
+            totals["portals"] += 1
+            totals["new"] += agg.get("listings_found_new", 0)
+            totals["enqueued"] += agg.get("listings_enqueued", 0)
+            totals["errors"] += agg.get("errors", 0)
+            totals["budget_refused"] += agg.get("budget_refused", 0)
+            LOG.info(
+                "PROBE lane source=%s pages=%d new=%d enqueued=%d "
+                "early_stopped=%d errors=%d budget_refused=%d",
+                source, agg.get("index_pages", 0), agg.get("listings_found_new", 0),
+                agg.get("listings_enqueued", 0), agg.get("early_stopped", 0),
+                agg.get("errors", 0), agg.get("budget_refused", 0),
+            )
+        return totals
+    finally:
+        _PROBE_PASS_LOCK.release()
+
+
 async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     disabled: set[str] = set()
     try:
-        disabled = await asyncio.to_thread(_read_disabled_sources)
+        disabled = await _settings(_read_disabled_sources)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("probe lane: failed to read disabled sources: %s", exc)
-    totals = {"portals": 0, "new": 0, "enqueued": 0, "errors": 0, "skipped": 0}
-    for source in REALTIME_SOURCES:
-        if stop_event.is_set():
-            break
-        if source in disabled or _skip_for_proxy(source):
-            totals["skipped"] += 1
-            continue
-        try:
-            agg = await asyncio.to_thread(_run_probe_sync, source)
-        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
-            LOG.exception("PROBE lane source=%s failed", source)
-            await asyncio.to_thread(_record_lane_failure, source, "probe", exc)
-            totals["errors"] += 1
-            continue
-        totals["portals"] += 1
-        totals["new"] += agg.get("listings_found_new", 0)
-        totals["enqueued"] += agg.get("listings_enqueued", 0)
-        totals["errors"] += agg.get("errors", 0)
-        LOG.info(
-            "PROBE lane source=%s pages=%d new=%d enqueued=%d "
-            "early_stopped=%d errors=%d",
-            source, agg.get("index_pages", 0), agg.get("listings_found_new", 0),
-            agg.get("listings_enqueued", 0), agg.get("early_stopped", 0),
-            agg.get("errors", 0),
-        )
-    _record_pass(state, "probe", totals)
+        LOG.warning("probe lane: failed to read disabled sources: %r", exc)
+    last = await asyncio.to_thread(_probe_sync, disabled, stop_event)
+    _record_pass(state, "probe", last)
+
+
+def _drain_sync(
+    slice_: int, disabled: set[str], stop_event: asyncio.Event,
+) -> dict[str, Any]:
+    """One drain pass, in ONE thread holding the lane's pass lock (see _probe_sync)."""
+    global _DRAIN_WEDGE_LOGGED
+
+    if not _DRAIN_PASS_LOCK.acquire(blocking=False):
+        if not _DRAIN_WEDGE_LOGGED:
+            _DRAIN_WEDGE_LOGGED = True
+            LOG.warning(
+                "DRAIN lane skipped: the previous pass was abandoned and its thread is "
+                "still draining")
+        return {"previous_pass_running": True}
+    _DRAIN_WEDGE_LOGGED = False
+    try:
+        counts = _claimable_by_source()
+        totals = {
+            "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
+            "budget_refused": 0,
+        }
+        for source in REALTIME_SOURCES:
+            if stop_event.is_set():
+                break
+            claimable = counts.get(source, 0)
+            if claimable <= 0:
+                continue
+            if source in disabled or _skip_for_proxy(source):
+                totals["skipped"] += 1
+                continue
+            try:
+                agg = _run_drain_sync(source, slice_)
+            except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
+                LOG.exception("DRAIN lane source=%s failed", source)
+                _record_lane_failure(source, "drain", exc)
+                totals["errors"] += 1
+                continue
+            totals["sources"] += 1
+            totals["new"] += agg.get("listings_scraped_new", 0)
+            totals["updated"] += agg.get("listings_updated", 0)
+            totals["gone"] += agg.get("listings_inactive", 0)
+            totals["errors"] += agg.get("errors", 0)
+            totals["budget_refused"] += agg.get("budget_refused", 0)
+            LOG.info(
+                "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d "
+                "budget_refused=%d",
+                source, claimable, agg.get("listings_scraped_new", 0),
+                agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
+                agg.get("errors", 0), agg.get("budget_refused", 0),
+            )
+        return totals
+    finally:
+        _DRAIN_PASS_LOCK.release()
 
 
 async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     slice_ = DRAIN_SLICE_DEFAULT
     try:
-        slice_ = await asyncio.to_thread(_read_drain_slice)
+        slice_ = await _settings(_read_drain_slice)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("drain lane: failed to read slice: %s", exc)
+        LOG.warning("drain lane: failed to read slice: %r", exc)
     if slice_ <= 0:
         LOG.debug("drain lane: slice<=0; skipping pass")
         return
     disabled: set[str] = set()
     try:
-        disabled = await asyncio.to_thread(_read_drain_disabled_sources)
+        disabled = await _settings(_read_drain_disabled_sources)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("drain lane: failed to read disabled sources: %s", exc)
-    counts = await asyncio.to_thread(_claimable_by_source)
-    totals = {
-        "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
-    }
-    for source in REALTIME_SOURCES:
-        if stop_event.is_set():
-            break
-        claimable = counts.get(source, 0)
-        if claimable <= 0:
-            continue
-        if source in disabled or _skip_for_proxy(source):
-            totals["skipped"] += 1
-            continue
-        try:
-            agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
-        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
-            LOG.exception("DRAIN lane source=%s failed", source)
-            await asyncio.to_thread(_record_lane_failure, source, "drain", exc)
-            totals["errors"] += 1
-            continue
-        totals["sources"] += 1
-        totals["new"] += agg.get("listings_scraped_new", 0)
-        totals["updated"] += agg.get("listings_updated", 0)
-        totals["gone"] += agg.get("listings_inactive", 0)
-        totals["errors"] += agg.get("errors", 0)
-        LOG.info(
-            "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d",
-            source, claimable, agg.get("listings_scraped_new", 0),
-            agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
-            agg.get("errors", 0),
-        )
-    _record_pass(state, "drain", totals)
+        LOG.warning("drain lane: failed to read disabled sources: %r", exc)
+    last = await asyncio.to_thread(_drain_sync, slice_, disabled, stop_event)
+    _record_pass(state, "drain", last)
 
 
 def _run_images_sync(max_downloads: int) -> dict[str, Any]:
@@ -994,9 +1085,9 @@ def _run_images_sync(max_downloads: int) -> dict[str, Any]:
 async def _images_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     slice_ = IMAGES_SLICE_DEFAULT
     try:
-        slice_ = await asyncio.to_thread(_read_images_slice)
+        slice_ = await _settings(_read_images_slice)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("images lane: failed to read slice: %s", exc)
+        LOG.warning("images lane: failed to read slice: %r", exc)
     if slice_ <= 0:
         LOG.debug("images lane: slice<=0; skipping pass")
         return
@@ -1182,7 +1273,7 @@ async def _count_probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
     agg = await asyncio.to_thread(_count_probe_sync)
     dispatched = False
     if agg["changed"]:
-        cooldown = float(await asyncio.to_thread(_read_count_probe_interval))
+        cooldown = float(await _settings(_read_count_probe_interval))
         try:
             disp = await asyncio.to_thread(
                 _maybe_dispatch_index_walk, agg["changed"], cooldown)
@@ -2086,13 +2177,65 @@ def _beat_sync(state: dict[str, Any]) -> None:
                 "started_at": state["started_at"],
                 "details": Jsonb(_lane_snapshot(state["lanes"])),
             })
+        state["beat_ok_at"] = time.monotonic()
     finally:
         with contextlib.suppress(Exception):
             conn.close()
 
 
 async def _heartbeat_pass(state: dict[str, Any]) -> None:
-    await asyncio.to_thread(_beat_sync, state)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_HEARTBEAT_EXECUTOR, _beat_sync, state)
+
+
+def _passes_in_flight(state: dict[str, Any]) -> str:
+    """The passes still running, longest first, for the watchdog's one line."""
+    snap = _lane_snapshot(dict(state["lanes"]))
+    running = sorted(
+        ((info["in_flight_s"], lane) for lane, info in snap.items()
+         if info.get("in_flight_s") is not None),
+        reverse=True,
+    )
+    return ", ".join(f"{lane}={secs:.0f}s" for secs, lane in running) or "none"
+
+
+def _watchdog(
+    state: dict[str, Any],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    exit_: Callable[[int], None] = os._exit,
+) -> None:
+    """Exit the process once no heartbeat has been WRITTEN for LIVENESS_BOUND_SECONDS.
+
+    Runs on its own daemon thread, so it needs neither the event loop nor an executor,
+    the two things a freeze takes down. os._exit, never sys.exit: a normal exit joins
+    every executor thread, and a thread asleep inside a portal call never returns."""
+    while True:
+        sleep(HEARTBEAT_INTERVAL_SECONDS)
+        silent = clock() - state["beat_ok_at"]
+        if silent < LIVENESS_BOUND_SECONDS:
+            continue
+
+        def last_words() -> None:
+            try:
+                lanes = _passes_in_flight(state)
+            except Exception as exc:  # noqa: BLE001 - naming lanes must never stop the exit
+                lanes = f"unreadable ({exc!r})"
+            LOG.critical(
+                "WATCHDOG no heartbeat written for %.0fs (bound %.0fs); passes in flight: "
+                "%s. Dumping every thread's stack to stderr and exiting so Railway "
+                "restarts the worker", silent, LIVENESS_BOUND_SECONDS, lanes,
+            )
+            faulthandler.dump_traceback(all_threads=True)
+
+        # Spoken from a helper thread and waited for briefly: if a blocked stderr is
+        # itself the freeze, the exit must still happen.
+        speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
+        speaker.start()
+        speaker.join(WATCHDOG_LAST_WORDS_SECONDS)
+        exit_(1)
+        return
 
 
 # --- the supervisor -----------------------------------------------------------
@@ -2127,9 +2270,9 @@ async def _lane_loop(
     while not stop_event.is_set():
         interval = default_interval
         try:
-            interval = float(await asyncio.to_thread(read_interval))
+            interval = float(await _settings(read_interval))
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("%s lane: failed to read interval: %s", name, exc)
+            LOG.warning("%s lane: failed to read interval: %r", name, exc)
 
         if interval <= 0:
             try:
@@ -2151,8 +2294,10 @@ async def _lane_loop(
             #
             # Honest limit: a pass that is blocked inside asyncio.to_thread keeps
             # running after the cancellation -- Python cannot kill a thread. This
-            # frees the LANE, and a leak shows up as repeated timeouts on the same
-            # lane, which is itself the diagnosis we currently lack.
+            # frees the LANE, not the thread: the seven lanes with a pass lock (probe,
+            # drain, location_resolve, location_intake_fast, sold_comps, text_extract,
+            # autodedup) leak at most one each, and the watchdog restarts the process
+            # if the heartbeat itself stops.
             await asyncio.wait_for(run_pass(), timeout=LANE_PASS_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             LOG.error(
@@ -2199,7 +2344,11 @@ async def _supervised(
 
 
 def _new_state() -> dict[str, Any]:
-    return {"started_at": datetime.now(timezone.utc), "lanes": {}}
+    # beat_ok_at starts at boot, so a worker that never writes a first beat exits too.
+    return {
+        "started_at": datetime.now(timezone.utc), "lanes": {},
+        "beat_ok_at": time.monotonic(),
+    }
 
 
 async def _amain() -> int:
@@ -2211,6 +2360,8 @@ async def _amain() -> int:
             loop.add_signal_handler(sig, stop_event.set)
 
     state = _new_state()
+    threading.Thread(
+        target=_watchdog, args=(state,), name="rt-watchdog", daemon=True).start()
     LOG.info(
         "realtime worker starting sources=%s probe_pages=%d",
         ",".join(REALTIME_SOURCES), PROBE_PAGES,

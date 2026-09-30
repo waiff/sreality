@@ -391,6 +391,43 @@ nothing else.
   photo-certified one after CLIP; sub-hour photo merges need the vision producer moved inline, which
   is an operator decision (D901, rule 7).
 
+**Liveness — the worker cannot freeze silently (2026-09-30).** From 2026-09-29 23:42 to 07:22 UTC
+the worker wrote no heartbeat and ran no lane, yet never exited. ceskereality answered 403 to
+every request; each 403 penalized the shared ledger and each retry leased a fresh batch, so
+`next_slot_at` ran an hour ahead and every caller slept in `RateLimiter.acquire` until it. The
+probe lane reached ceskereality (third in `REALTIME_SOURCES`) every pass; `_lane_loop` abandoned
+the pass at `LANE_PASS_TIMEOUT_SECONDS` but the thread slept on, and with no pass lock every pass
+added one (eighteen by 23:15, plus drain threads) until asyncio's default executor
+(min(32, cpu+4)) was full. The heartbeat write and every lane's interval read ran on that same
+executor, so they starved; the event loop stayed alive, so Railway's restart policy never fired.
+Four changes, each closing one link:
+- **The ledger never parks a caller.** A lease whose window starts more than `MAX_WAIT_S` (120 s)
+  out, or after the caller's deadline, is refused inside `_LEASE_SQL` WITHOUT moving the
+  frontier, and the limiter raises `RateBudgetUnavailable` on that acquire and every later one
+  (`limiter.refused` = `cap` | `deadline`). 120 s sits above a healthy frontier (at 1x one lease
+  per other in-flight caller, ≤ ~110 s for the slowest ledger portal) and equals the worker drain's
+  whole budget. The retry after a penalize leases ONE slot. Every portal's `fetch_detail` swallows
+  exceptions, so the runner reads the refusal off the limiter: the probe gives the portal up for the
+  pass (`budget_refused`, not an error), the drain hands its unfetched claims back untouched
+  (`db.release_claims`, no attempt spent) and stops, and a walk counts the category failed and
+  stops (every attempted category refused = rc 1, as any blocked portal). The drain's `max_seconds`
+  now reaches the limiter as its deadline.
+- **Probe and drain hold pass locks** like the five lanes that already did: each pass runs in ONE
+  thread, so a lane leaks at most one; a skipped pass records `previous_pass_running`.
+- **The liveness path has its own threads.** The heartbeat writes on a one-thread executor nothing
+  else uses; the per-pass settings reads (every lane's interval included) run on a four-thread
+  pool with a 30 s bound, falling back to the lane's default. A starved lane pool now shows as
+  `in_flight_s` in a heartbeat that keeps arriving, which `worker_lane_stall` reads.
+- **A watchdog that exits.** A daemon thread, independent of the loop and of every executor,
+  compares now with the last SUCCESSFUL beat; past `LIVENESS_BOUND_SECONDS` (300 s, ten beats) it
+  logs the passes in flight, `faulthandler`-dumps every thread's stack (from a helper thread it
+  waits on for at most 10 s, so a blocked stderr cannot hold the exit) and calls `os._exit(1)` —
+  never `sys.exit`, whose interpreter shutdown joins the stuck executor threads and hangs — so
+  Railway starts a fresh process. A database unreachable for five minutes restarts the worker too.
+Not done here, follow-ups: a per-portal circuit breaker (trip a portal that 403s everything
+instead of re-probing it each pass) and Health alerts on `budget_refused` / `portal_rate_state`
+running ahead.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup

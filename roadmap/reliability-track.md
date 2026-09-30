@@ -167,3 +167,15 @@ table, no migration and no routing decision — it changes only *when* the exist
 named. They are computed inside `workflow_failure_summary(int)` over `workflow_failures`
 — the GitHub workflow-run domain, not `pipeline_check_results`. The pipeline-check streak
 is read from its own table; the two domains stay separate.
+
+## 2026-09-30 — the realtime worker cannot freeze silently (shipped with this PR)
+
+The worker went silent 2026-09-29 23:42 → 07:22 UTC without exiting: ceskereality 403s pushed
+the shared rate ledger an hour ahead, abandoned probe/drain passes leaked a thread each into the
+default executor until it filled, and the heartbeat starved behind them while the loop lived on.
+Fixed in one PR: a watchdog thread that `os._exit(1)`s after 300 s without a written beat; pass
+locks on probe + drain; the heartbeat and settings reads on their own threads; the ledger refuses
+(never parks) a wait over 120 s or past the caller's deadline, and the retry after a 403 leases one
+slot. Detail: `docs/design/realtime-scrapers.md` § Liveness.
+- **Next:** a per-portal circuit breaker (stop re-probing a portal that 403s everything) and Health
+  alerts on `budget_refused` / `portal_rate_state.next_slot_at` running ahead.

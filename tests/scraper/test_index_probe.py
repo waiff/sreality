@@ -13,6 +13,7 @@ import pytest
 
 from scraper import db, portal_runner
 from scraper.maxima_main import MaximaPortal
+from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.portal import default_config
 from scraper.remax_main import RemaxPortal
 
@@ -186,6 +187,43 @@ def test_probe_all_categories_failed_returns_nonzero_rc():
     rc, agg = portal_runner.run_index_probe(p, dry_run=False)
     assert rc != 0
     assert agg["errors"] == 2
+
+
+def test_probe_gives_up_on_a_refused_source_without_counting_an_error():
+    # ceskereality's bespoke prober lets the shared ledger's refusal propagate; the
+    # probe stops asking that portal for this pass (the caller moves on to the next
+    # one) and counts it apart from errors.
+    p = _ProbePortal(categories=["A", "B", "C"])
+    asked: list[str] = []
+
+    def probe_category(category, conn, dry_run, limiter, probe_pages):
+        asked.append(category)
+        if category == "B":
+            limiter.refused = "cap"
+            raise RateBudgetUnavailable("fake: next shared slot 3600s away")
+        return ({"x"}, {"found_new": 1, "enqueued": 1}, 99, 1, False)
+
+    p.probe_category = probe_category
+    rc, agg = portal_runner.run_index_probe(p, dry_run=False)
+    assert asked == ["A", "B"]
+    assert (rc, agg["errors"], agg["budget_refused"]) == (0, 0, 1)
+    assert agg["listings_enqueued"] == 1
+
+
+def test_probe_reads_a_refusal_the_walk_swallowed():
+    # The generic walk swallows a fetch error per page, the refusal included, so the
+    # probe reads it off the limiter rather than waiting for an exception.
+    p = _ProbePortal(categories=["A", "B"])
+
+    def walk_category(c, conn, dry_run, limiter):
+        p.calls["walk"].append(c)
+        limiter.refused = "cap"
+        return (set(), {"found_new": 0, "enqueued": 0}, None, 0, False)
+
+    p.walk_category = walk_category
+    rc, agg = portal_runner.run_index_probe(p, dry_run=False)
+    assert p.calls["walk"] == ["A"]
+    assert (rc, agg["errors"], agg["budget_refused"]) == (0, 0, 1)
 
 
 def test_probe_requires_a_probe_seam():

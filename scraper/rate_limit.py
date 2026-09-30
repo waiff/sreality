@@ -33,6 +33,11 @@ class RateLimiter:
         self._recovery_factor = recovery_factor
         self._lock = threading.Lock()
         self._next_at = 0.0  # time.monotonic() reference
+        # Why the shared ledger (scraper/rate_ledger.py) stopped granting slots this run:
+        # "cap" (the portal's budget is unavailable) or "deadline" (the caller's own time
+        # ran out). Read by the runner, because every portal's fetch_detail turns the
+        # raised refusal into an ordinary "error" item. A local limiter never refuses.
+        self.refused: str | None = None
 
     def acquire(self) -> None:
         """Block until this thread's slot; sleep happens outside the lock."""
