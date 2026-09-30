@@ -2009,17 +2009,15 @@ def test_an_abandoned_text_extract_pass_is_never_overlapped(
         rw._TEXT_EXTRACT_PASS_LOCK.release()
 
 
-def test_text_extract_is_free_while_every_gate_is_closed(
+def test_text_extract_is_free_while_its_scope_is_empty(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """The contract decides the lane's scope, and with no gate open `run_pass` returns
-    before it opens a cursor — the state the lane SHIPPED in (the W7 bake-off has since
-    opened bazos floor + has_lift, so the closed contract is simulated here)."""
+    """The contract decides the lane's scope (open R7 gates + `llm_text` entries), and with
+    none `run_pass` returns before it selects anything."""
     from toolkit import description_extraction
 
     monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(description_extraction.contract, "extracted_cells", lambda: {})
-    assert rw._text_extract_sync() == {"claimed": 0, "reason": "no_open_gate"}
-    assert not hasattr(description_extraction, "BACKLOG_EVERY_PASSES")
+    monkeypatch.setattr(description_extraction, "lane_scope", lambda conn: {})
+    assert rw._text_extract_sync() == {"claimed": 0, "reason": "empty_scope"}
 
 
 # --- liveness: the 2026-09-29 freeze ----------------------------------------------------

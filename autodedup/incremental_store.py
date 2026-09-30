@@ -175,7 +175,16 @@ class MemoryStore:
         touched = {int(i) for row in rows for i in row["members"]}
         self.conflicts = [c for c in self.conflicts
                           if not (int(c["lo"]) in touched and int(c["hi"]) in touched)]
-        self.conflicts.extend(dict(conflict) for conflict in conflicts)
+        # `RT_CLOSURE_CONFLICT_APPEND_SQL`: a dissolved closure (E926) is re-read every pass
+        # its contradiction stands, so it is appended only when it differs from the newest
+        # record of its generation sharing an advert with it.
+        for conflict in map(dict, conflicts):
+            if conflict.get("must_link") and conflict == next(
+                    (held for held in reversed(self.conflicts)
+                     if held.get("must_link") and held["generation"] == conflict["generation"]
+                     and set(held["members"]) & set(conflict["members"])), None):
+                continue
+            self.conflicts.append(conflict)
 
     def must_not_link(self) -> set[tuple[int, int]]:
         return set(self.mnl)

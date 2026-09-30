@@ -106,6 +106,7 @@ from autodedup.incremental_sql import (
     RT_CELL_READ_SQL,
     RT_CELL_UPSERT_SQL,
     RT_CHANGED_LISTINGS_SQL,
+    RT_CLOSURE_CONFLICT_APPEND_SQL,
     RT_CLUSTER_DROP_SQL,
     RT_CLUSTER_MEMBERS_DROP_SQL,
     RT_CLUSTERS_TOUCHING_SQL,
@@ -717,7 +718,11 @@ class SqlStore:
             {"generation": self.generation, "cluster_key": key, "ids": ids}
             for key, ids in sorted(members_of.items())])
         self._run_many(CLUSTER_CONFLICT_INSERT_SQL,
-                       [_conflict_params(row, self.generation) for row in conflicts])
+                       [_conflict_params(row, self.generation) for row in conflicts
+                        if not row.get("must_link")])
+        self._run_many(RT_CLOSURE_CONFLICT_APPEND_SQL,
+                       [_conflict_params(row, self.generation) for row in conflicts
+                        if row.get("must_link")])
 
     def must_not_link(self) -> set[tuple[int, int]]:
         return {(int(row[0]), int(row[1]))
@@ -860,7 +865,8 @@ def _cluster_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
 
 
 def _conflict_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
-    """A refused union or a refused bridge, in the score lane's own row shape."""
+    """A refused union, a refused bridge or a dissolved closure (E926), in the score lane's
+    own row shape."""
     lo, hi = sorted((int(row["lo"]), int(row["hi"])))
     kind = str(row.get("kind") or "invariant")
     detail: dict[str, Any] = {
@@ -874,6 +880,8 @@ def _conflict_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
         detail["right_members"] = list(row.get("right_members") or ())
     else:
         detail["members"] = list(row.get("members") or ())
+    if row.get("must_link"):
+        detail["must_link"] = [list(pair) for pair in row["must_link"]]
     return {
         "kind": kind,
         "cluster_key_a": row.get("left_cluster"),

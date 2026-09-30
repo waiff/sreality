@@ -498,8 +498,10 @@ def write_run(store: MemoryStore, dataset: Dataset, fps: Mapping[int, Fingerprin
                 stored += 1
                 handle.write(_pair_line(row, fps, dataset, exploded))
     clusters = {key: sorted(members) for key, members in sorted(store.clusters.items())}
+    # A dissolved must-link closure (E926) refuses no EDGE, so it is not an edge conflict here.
     conflicts = [{k: v for k, v in c.items() if k not in ("kind", "generation")}
-                 for c in store.conflicts if c.get("kind") == "invariant"]
+                 for c in store.conflicts
+                 if c.get("kind") == "invariant" and not c.get("must_link")]
     bridges = [{k: v for k, v in c.items() if k not in ("kind", "generation")}
                for c in store.conflicts if c.get("kind") == "bridge"]
     of = {i: key for key, members in clusters.items() for i in members}

@@ -46,7 +46,8 @@ from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, s
 from autodedup.export import listing_digest, scrubbed_text
 from autodedup.harness import model_of_version
 from autodedup.model import hand_initialised
-from toolkit.property_identity import record_ruling
+from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
+from toolkit.property_identity import category_clash, record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
     reversal_message,
@@ -2185,6 +2186,10 @@ def verdict(
     re-resolved -- the new word is about the set the old one was about). It is accepted only while
     that row is still the newest on its key (409: ruled again since the page loaded). Every write
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
+
+    A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
+    rental, a flat and a commercial unit) is a 422 in the operator's words (E925), never a 409:
+    the rulings page reads every 409 as "ruled again since the page loaded".
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2208,13 +2213,6 @@ def verdict(
                 raise _bad("a pair verdict carries no cluster_key")
             if body.listing_lo >= body.listing_hi:
                 raise _bad("listing_lo must be smaller than listing_hi")
-            if not _fetch(
-                conn,
-                usql.PAIR_EXISTS_SQL,
-                {"listing_lo": body.listing_lo, "listing_hi": body.listing_hi},
-            ):
-                raise HTTPException(
-                    status_code=404, detail="one of the two adverts does not exist")
         try:
             with conn.transaction():
                 if body.supersedes is not None:
@@ -2222,6 +2220,16 @@ def verdict(
                     lo, hi = int(superseded["listing_lo"]), int(superseded["listing_hi"])
                 else:
                     lo, hi = int(body.listing_lo), int(body.listing_hi)
+                sides = _fetch(conn, usql.PAIR_CATEGORIES_SQL,
+                               {"listing_lo": lo, "listing_hi": hi})
+                if not sides:
+                    raise HTTPException(
+                        status_code=404, detail="one of the two adverts does not exist")
+                if body.verdict == "same" and (
+                        clash := category_clash(sides[0][:2], sides[0][2:])) is not None:
+                    raise HTTPException(status_code=422, detail=_SAME_REFUSED[clash[0]].format(
+                        a=_CATEGORY_LABELS.get(clash[1], clash[1]),
+                        b=_CATEGORY_LABELS.get(clash[2], clash[2])))
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2305,6 +2313,23 @@ def verdict(
         },
         "store_ready": True,
     }
+
+
+# E925: a `same` the merge chokepoint's category gate refuses; stored, it would be a must-link
+# the lane dissolves and re-seeds every pass, and a positive label. The pair page and the rulings
+# page print the detail as it is: the system's rule, not a claim about the property (an auction
+# and a sale of one flat ARE one flat), in the Browse filters' own Czech labels.
+_SAME_REFUSED: dict[str, str] = {
+    "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
+                     "nemovitosti, proto je nelze označit jako stejné.",
+    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
+                     "do jedné nemovitosti (jediná výjimka je dům a komerční objekt), proto je "
+                     "nelze označit jako stejné.",
+}
+_CATEGORY_LABELS: dict[str, str] = {
+    option.value: option.label_cs
+    for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)
+}
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
@@ -2965,8 +2990,10 @@ def _engine_reading(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pair_ruling(row: dict[str, Any], generation: str | None,
-                 history: list[dict[str, Any]]) -> dict[str, Any]:
+                 history: list[dict[str, Any]], dissolved: str | None = None) -> dict[str, Any]:
     out = {**row, **_engine_reading(row)}
+    if dissolved is not None:
+        out["why_not_merged"] = dissolved
     out["reasons"] = list(row.get("reasons") or [])
     out["generation"] = generation
     out["history"] = history
@@ -3056,6 +3083,54 @@ def rulings(
     }
 
 
+def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
+                        generation: str | None) -> dict[tuple[int, int], str]:
+    """E926: a standing `same` of the pair's own is a must-link (E910); when the engine holds its
+    adverts apart because the invariants dissolved the closure its rulings form, that is the
+    reason — the newest record naming both adverts, one statement a page."""
+    wanted = [r for r in page if r["verdict"] == "same" and r["status"] == "standing"
+              and r["source"] in ("pair", "browse_merge") and r["engine_view"] == "apart"]
+    if not wanted or generation is None:
+        return {}
+    ids = sorted({int(r[side]) for r in wanted for side in ("listing_lo", "listing_hi")})
+    records = _rows(usql.CONFLICT_COLUMNS, _fetch(conn, usql.DISSOLVED_CLOSURES_SQL,
+                                                  {"generation": generation, "ids": ids}))
+    out: dict[tuple[int, int], str] = {}
+    for r in wanted:
+        pair = (r["listing_lo"], r["listing_hi"])
+        for record in records:
+            if {int(pair[0]), int(pair[1])} <= {int(m) for m in record["detail"]["members"]}:
+                out[pair] = _dissolved_reason(record)
+                break
+    return out
+
+
+# The limbs that can refuse a closure (inside one, the spreads are not read), in the operator's
+# words: the first three are the engine's fixed rules, the last his own `different` ruling.
+_CLOSURE_REFUSED = {
+    "size": "spojují skupinu o {n} inzerátech, větší, než pevné pravidlo dovolí",
+    "category_type": "spojují prodej s pronájmem, což pevné pravidlo nedovolí",
+    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+                     "což pevné pravidlo nedovolí"),
+    "must_not_link": "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny",
+}
+DISSOLVED_PAIRS_SHOWN = 5
+
+
+def _dissolved_reason(record: dict[str, Any]) -> str:
+    """Why a closure of `same` rulings binds nothing, and the rulings that form it — the ones to
+    revisit (E926)."""
+    detail = record["detail"]
+    why = _CLOSURE_REFUSED.get(record["invariant"], "narážejí na pevné pravidlo ({limb})")
+    pairs = [f"{lo}–{hi}" for lo, hi in detail["must_link"]]
+    shown = ", ".join(pairs[:DISSOLVED_PAIRS_SHOWN])
+    if len(pairs) > DISSOLVED_PAIRS_SHOWN:
+        shown += " …"
+    return (f"vaše rozhodnutí „stejné“ "
+            f"{why.format(n=len(detail['members']), limb=record['invariant'])}, proto engine "
+            f"skupinu nesloučil (rozhodnutí „stejné“ v ní, celkem {len(pairs)}: {shown})")
+
+
 def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                   generation: str | None) -> list[dict[str, Any]]:
     """The page's rows with each key's whole history (one statement per page, never per row):
@@ -3072,6 +3147,7 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
         group_rows = (_rows(usql.VERDICT_COLUMNS,
                             _fetch(conn, usql.GROUP_RULING_HISTORY_SQL, {"keys": keys}))
                       if keys else [])
+        dissolved = _dissolved_closures(conn, page, generation)
         items = []
         for r in page:
             if r["source"] == "implied":
@@ -3082,7 +3158,8 @@ def _ruling_items(conn: Any, grain: str, page: list[dict[str, Any]],
                 history = [v for v in pair_rows
                            if (v["listing_lo"], v["listing_hi"])
                            == (r["listing_lo"], r["listing_hi"])]
-            items.append(_pair_ruling(r, generation, history))
+            items.append(_pair_ruling(r, generation, history,
+                                      dissolved.get((r["listing_lo"], r["listing_hi"]))))
         return items
     keys = sorted({int(r["cluster_key"]) for r in page if r["cluster_key"] is not None})
     group_rows = (_rows(usql.VERDICT_COLUMNS,

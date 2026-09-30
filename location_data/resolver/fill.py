@@ -22,13 +22,12 @@ with no fallback. The point is the registry's, so the granularity, the confidenc
 radius are all unchanged: the LEVEL is what tells a reader how coarse the position is, and
 `disputed` is never set by this path — a town centre is not a disagreement with anything.
 
-Four fields may fall back to a claim when the registry has none: `street_name`,
-`house_number_cp`, `house_number_co`, `psc`. Preserve-if-null, never overwrite — a claimed
-value that DISAGREES with the registry is not silently replaced, the registry simply wins
-where it has an answer (on a registry-bound row the official street form `nám. Budovatelů`
-beats the portal's `Budovatelů`). The ONE thing the registry does not get to respell is an
-OPERATOR correction, which is also the only survivorship rule that outlived the policy
-table: `bind.operator_fields` is the whole of it.
+ONE field may fall back to a claim when the registry has none: `psc`. The street and both
+house numbers are the REGISTER's or nothing — a house number is published only off a bound
+address point, and only a `č.p.` point publishes one (v5.5, D7: "Praha 8" used to become č.p. 8,
+and a cottage's č.ev. read as a č.p.); a č.ev. bind carries its `ruian_adm_kod` and no number.
+The ONE thing the registry does not get to respell is an OPERATOR correction, which is also the
+only survivorship rule that outlived the policy table: `bind.operator_fields` is the whole of it.
 
 `katastr_kod` (PR-B, v5.4) is ONE rule under the same contract: **the single KÚ of the BOUND
 registry entity, else NULL** — a KÚ (or a ZSJ inside one) on the bound unit's chain; the one
@@ -43,6 +42,7 @@ guess. Nothing else is NULL-masked specially: a foreign row loses it with every 
 from __future__ import annotations
 
 from location_data.resolver.bind import Constraints, operator_fields
+from location_data.resolver.normalize import TYP_CP
 from location_data.resolver.types import (
     AddressPoint,
     AdminUnit,
@@ -113,8 +113,8 @@ def fill(
         # it is coverage: a real street the mirror does not hold is dropped rather than
         # served as a name nothing can be joined to, filtered on, or de-duplicated by.
         street_name=(operator.get("street_name") or binding.street_name),
-        house_number_cp=operator.get("house_number_cp") or _cp(point, constraints, binding),
-        house_number_co=operator.get("house_number_co") or _co(point, constraints, binding),
+        house_number_cp=operator.get("house_number_cp") or _cp(point),
+        house_number_co=operator.get("house_number_co") or _co(point),
         psc=operator.get("psc")
         or (point.psc if point is not None and point.psc else constraints.psc),
         lat=lat,
@@ -204,26 +204,14 @@ def _registry_point(
     return None, None
 
 
-def _cp(point, constraints: Constraints, binding: Binding) -> str | None:
-    """The address point's, else the BIND's own, else the listing-wide claim.
-
-    The bind's own is the middle rung and it exists for one reason: a street bound out of one
-    segment of one line owns that segment's number and no other claim's (W18). Without it a
-    listing carrying `Nad Bořislavkou` and a separate line reading `Livornská 5` published
-    `Nad Bořislavkou 5` at `street_segment` grain."""
-    if point is not None and point.cislo_domovni is not None:
-        return str(point.cislo_domovni)
-    if binding.house_number_cp is not None:
-        return binding.house_number_cp
-    return str(constraints.cislo_domovni) if constraints.cislo_domovni is not None else None
-
-
-def _co(point, constraints: Constraints, binding: Binding) -> str | None:
-    """The orientation number keeps its letter: `40a` is a different door from `40`."""
-    if point is not None and point.cislo_orientacni is not None:
-        return f"{point.cislo_orientacni}{point.znak_orientacniho or ''}"
-    if binding.house_number_co is not None:
-        return binding.house_number_co
-    if constraints.cislo_orientacni is None:
+def _cp(point: AddressPoint | None) -> str | None:
+    if point is None or point.cislo_domovni is None or point.typ_so != TYP_CP:
         return None
-    return f"{constraints.cislo_orientacni}{constraints.znak_orientacniho or ''}"
+    return str(point.cislo_domovni)
+
+
+def _co(point: AddressPoint | None) -> str | None:
+    """The orientation number keeps its letter: `40a` is a different door from `40`."""
+    if point is None or point.cislo_orientacni is None:
+        return None
+    return f"{point.cislo_orientacni}{point.znak_orientacniho or ''}"

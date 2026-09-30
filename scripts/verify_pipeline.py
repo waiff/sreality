@@ -133,10 +133,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "acquisition_lag_fail_hours": 24,
     # The same shape one layer later (field-capture R8): how long a listing whose prose
     # the text lane has not read has been waiting. The lane runs every 5 minutes and its
-    # 20-minute SLO is for INFLOW; the backlog drains at ~1,000 rows a pass, so the first
-    # two days after the lane ships legitimately read tens of hours. Warn at 48h, fail at
-    # 168h — a week of a portal's prose unread is the lane being dead, which is the exact
-    # failure this instrument exists for and the one nothing else can see.
+    # 20-minute SLO is for INFLOW; a backlog drains at 500 rows a pass, and the age counts
+    # from first_seen_at, so a corpus re-read (a new SCHEMA_VERSION, prompt or model: ~31 h
+    # at W1) reads FAIL until it drains — expected. Warn at 48h, fail at 168h: a week of a
+    # portal's prose unread is the lane being dead, the failure nothing else can see.
     "text_extraction_lag_warn_hours": 48,
     "text_extraction_lag_fail_hours": 168,
     # Walk coverage against the portal's own advertised total. Healthy portals sit
@@ -2297,10 +2297,10 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
     from toolkit import description_extraction as text_lane
 
     model = text_lane.resolve_model(conn)
-    scope = attribute_contract.extracted_cells()
+    scope = text_lane.lane_scope(conn)
     if not scope or model is None:
-        # Not a failure and not a silence: the contract declaring no `text` cell with a
-        # gate IS the lane being off, and it is reported as that rather than as health.
+        # Not a failure and not a silence: no open gate and no `llm_text` entry IS the
+        # lane being off, and it is reported as that rather than as health.
         return {
             "check_key": "text_extraction_lag", "status": "ok", "value": 0,
             "details": {"scope": {k: list(v) for k, v in scope.items()},
@@ -2308,9 +2308,7 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
             "message": (
                 "The text lane has nothing open to it"
                 + ("" if scope else
-                   " (every contract gate is closed — "
-                   f"{sum(len(v) for v in attribute_contract.gated_cells().values())} "
-                   "field(s) await the W7 bake-off, and until one opens the lane extracts "
+                   " (no open contract gate and no `llm_text` entry — the lane reads "
                    "nothing and spends nothing)")
                 + ("" if model else f"; app_settings.{text_lane.MODEL_SETTING} is unset")
                 + " — no listing is eligible and none is waiting."

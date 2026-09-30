@@ -416,7 +416,7 @@ def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
     the 10,679 active orphans the 2026-09-11 audit measured. The row states "nothing to go
     on" so coverage can count it (rule 25)."""
     slice_ = drain._Slice(claims={}, sources={4242: "remax"})
-    item = drain._compute_one(4242, mm.context(), REGISTRY, slice_, dry_run=False)
+    item = drain._compute_one(4242, mm.context(), REGISTRY, slice_)
     assert item is not None
     assert item.listing_id == 4242 and item.source == "remax"
     assert item.country_status == "undetermined"
@@ -425,6 +425,20 @@ def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
     # ...and it is a WRITEABLE row, not a sentinel the upsert would reject.
     row = projection.build_listing_row(item)
     assert set(row) == set(projection.ROW_PARAMS)
+
+
+def test_the_dry_run_counts_what_a_rule_change_does_to_the_stored_row():
+    """`--dry-run` (v5.5) compares a re-resolution with the row it would replace, per portal:
+    town, part, numbers gained/lost, a move beyond 300 m, and the granularity by direction."""
+    from collections import Counter
+
+    new = core.resolve([mm.claim(1, "obec_name", value_text="Praha")], mm.context(),
+                       resolver_version="v", registry_version=REGISTRY)
+    counts: Counter[str] = Counter()
+    drain._tally(counts, (1, 599212, 490067, "8", "street", 50.3, 14.4), new)
+    drain._tally(counts, (2, 554782, None, None, "obec", new.lat, new.lon), new)
+    assert counts == Counter({"n": 2, "town": 1, "part": 1, "number_lost": 1,
+                              "moved_300m": 1, "granularity": 1, "street>obec": 1})
 
 
 # --------------------------------------------------- the claim projection, positionally

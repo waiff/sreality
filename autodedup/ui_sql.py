@@ -694,16 +694,33 @@ CONFLICT_COLUMNS: tuple[str, ...] = (
 
 # A conflict TOUCHES a cluster either by naming it or by naming one of its members — the
 # second arm is what surfaces the union an invariant refused, whose row carries the two
-# listings and no cluster key at all.
+# listings and no cluster key at all. A dissolved closure (E926) is not one: its two ends are
+# the closure's smallest and largest advert, a pair nobody ruled or scored (DISSOLVED_CLOSURES_SQL).
 CLUSTER_CONFLICTS_SQL = """
 SELECT
     cc.id, cc.kind, cc.cluster_key_a, cc.cluster_key_b, cc.listing_lo, cc.listing_hi,
     cc.invariant, cc.detail, cc.created_at
 FROM autodedup.cluster_conflicts cc
-WHERE cc.cluster_key_a = %(cluster_key)s::bigint
-   OR cc.cluster_key_b = %(cluster_key)s::bigint
-   OR cc.listing_lo = any(%(ids)s::bigint[])
-   OR cc.listing_hi = any(%(ids)s::bigint[])
+WHERE (cc.cluster_key_a = %(cluster_key)s::bigint
+       OR cc.cluster_key_b = %(cluster_key)s::bigint
+       OR cc.listing_lo = any(%(ids)s::bigint[])
+       OR cc.listing_hi = any(%(ids)s::bigint[]))
+  AND cc.detail -> 'must_link' IS NULL
+ORDER BY cc.created_at DESC, cc.id DESC
+"""
+
+# E926: the must-link closures a generation dissolved that name one of the given adverts — why a
+# standing `same` is not honoured. A record names its whole closure in `detail -> 'members'`.
+DISSOLVED_CLOSURES_SQL = """
+SELECT
+    cc.id, cc.kind, cc.cluster_key_a, cc.cluster_key_b, cc.listing_lo, cc.listing_hi,
+    cc.invariant, cc.detail, cc.created_at
+FROM autodedup.cluster_conflicts cc
+WHERE cc.kind = 'invariant'
+  AND cc.detail -> 'must_link' IS NOT NULL
+  AND cc.detail ->> 'generation' = %(generation)s::text
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(cc.detail -> 'members') AS m(id)
+               WHERE m.id::bigint = any(%(ids)s::bigint[]))
 ORDER BY cc.created_at DESC, cc.id DESC
 """
 
@@ -1586,11 +1603,13 @@ SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 # pair page opens on any two adverts, so the operator may rule any two that exist. The engine
 # stores no machine reject (Decision 7) and nothing at all outside its scope, and a duplicate it
 # MISSED is exactly the pair with no row: a guard that asked for a stored row refused the ruling
-# the operator most needs to give.
-PAIR_EXISTS_SQL = """
-SELECT 1
-WHERE (SELECT count(*) FROM public.listings l
-        WHERE l.id IN (%(listing_lo)s::bigint, %(listing_hi)s::bigint)) = 2
+# the operator most needs to give. One row when both exist, carrying what rule 15's category gate
+# reads (E925): a `same` the merge chokepoint could never carry out is refused at write time.
+PAIR_CATEGORIES_SQL = """
+SELECT a.category_type, a.category_main, b.category_type, b.category_main
+FROM public.listings a
+JOIN public.listings b ON b.id = %(listing_hi)s::bigint
+WHERE a.id = %(listing_lo)s::bigint
 """
 
 # ------------------------------------------------- the validation session (D6): how far in?

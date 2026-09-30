@@ -25,12 +25,11 @@ from typing import Any
 # geocode-skip cycle), and listings.geom updates on every upsert regardless of
 # snapshots; a genuine location change surfaces via locality/description.
 # street / house_number / zip are likewise NOT hashed — they are
-# extracted/derived (regex over the title+description for bazos, a comma-split
-# of the locality for idnes/maxima/remax), so backfilling or refining them must
-# never churn snapshots. published_at is NOT hashed either: it is portal
-# lifecycle metadata, not listing content — bazos re-stamps it on every bump /
-# TOP renewal, so hashing it would append a snapshot per seller promotion, and
-# backfills from already-stored raw must stay snapshot-free.
+# extracted/derived (e.g. a comma-split of the locality for idnes/maxima/remax),
+# so backfilling or refining them must never churn snapshots. published_at is
+# NOT hashed either: it is portal lifecycle metadata, not listing content — bazos
+# re-stamps it on every bump / TOP renewal, so hashing it would append a snapshot
+# per seller promotion, and backfills from already-stored raw must stay snapshot-free.
 _HASH_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
     "disposition", "locality", "district", "floor",

@@ -4997,6 +4997,14 @@
           "options": null
         },
         {
+          "name": "location_rows",
+          "description": "Location half: md5 bazos rows (+ listing 18909736 + ~10 % per hard case) and this many per structured portal (sreality, idnes, realitymix, ceskereality). 0 skips it.",
+          "required": false,
+          "type": "string",
+          "default": "100",
+          "options": null
+        },
+        {
           "name": "oss_cloud",
           "description": "RunPod cloud for an oss: arm. The default open candidates need an 80 GB card, which is SECURE.",
           "required": false,

@@ -62,6 +62,9 @@ The lease stays on the CALLER's connection and is taken exactly once: workers ar
 CLI:  python -m location_data.resolver.drain [--max-seconds N] [--batch-size N]
                                              [--listing-id N] [--dry-run]
 
+`--dry-run` (v5.5) takes no lease and no queue row: it re-resolves the fixed 1 % sample (or
+`--listing-id`) and counts, per portal, what the rules would change in the stored rows.
+
 The CLI has no `--workers`: the GitHub lane is the backstop, it is RTT-bound against a US
 runner rather than IO-bound beside the instance, and N runner connections into the session
 pooler is the wrong place to spend them. The Railway worker lane passes `workers=` instead.
@@ -76,6 +79,7 @@ import os
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +88,8 @@ import psycopg
 
 from location_data import loader_db
 from location_data.resolver import core, lease, projection, resolve_db
+from location_data.resolver.bind import REGISTRY_PIN_CONFLICT_M
+from location_data.resolver.geo import distance_between
 from location_data.resolver.types import Claim, ResolverContext
 from location_data.resolver.version import RESOLVER_VERSION
 from scraper import db
@@ -141,6 +147,18 @@ UPDATE dirty_locations
        last_error = %s,
        next_eligible_at = now() + make_interval(secs => %s)
  WHERE listing_id = %s AND enqueued_at <= %s
+"""
+
+# The dry run's rows: the fixed 1 % sample (`listing_id % 100 = 7`) by primary-key PROBES, 2.8 s
+# for all 9,201 (a `mod()` filter took 21.9 s per 250, 2026-09-30); hash order, so a run cut
+# short by its budget has still covered a spread of ids.
+_SAMPLE_SQL = """
+SELECT listing_id, obec_kod, cast_obce_kod, house_number_cp, granularity::text,
+       ST_Y(geom), ST_X(geom)
+  FROM listing_location
+ WHERE listing_id = ANY(coalesce(%s::bigint[], ARRAY(
+       SELECT generate_series(7, max(listing_id), 100) FROM listing_location)))
+ ORDER BY md5(listing_id::text)
 """
 
 _QUEUE_HEALTH_SQL = """
@@ -415,7 +433,6 @@ def run(
     *,
     batch_size: int = DEFAULT_BATCH,
     max_seconds: int = DEFAULT_MAX_SECONDS,
-    dry_run: bool = False,
     only_listing_id: int | None = None,
     workers: int = 1,
 ) -> DrainStats:
@@ -455,7 +472,7 @@ def run(
                     conn, [only_listing_id],
                     timeout_s=_prefetch_timeout_s(), restore_s=batch_timeout_s,
                 ),
-                stats, dry_run=dry_run,
+                stats,
             )
             stats.claimed = stats.resolved = 1
         stats.seconds = time.monotonic() - started
@@ -466,13 +483,12 @@ def run(
         _drain_loop(
             conn, ctx_base, cache, stats, registry_label=registry_label,
             batch_size=batch_size, batch_timeout_s=batch_timeout_s, deadline=deadline,
-            dry_run=dry_run,
         )
     else:
         _run_workers(
             workers=workers, registry_version_id=registry_version_id,
             registry_label=registry_label, cache=cache, stats=stats, batch_size=batch_size,
-            batch_timeout_s=batch_timeout_s, deadline=deadline, dry_run=dry_run,
+            batch_timeout_s=batch_timeout_s, deadline=deadline,
         )
     stats.seconds = time.monotonic() - started
     LOG.info(
@@ -502,7 +518,6 @@ def _drain_loop(
     batch_size: int,
     batch_timeout_s: int,
     deadline: float,
-    dry_run: bool,
     worker: int = 0,
 ) -> None:
     """ONE slice loop on ONE connection: claim, prefetch, warm, compute, write, repeat until
@@ -525,7 +540,7 @@ def _drain_loop(
         try:
             claimed = _run_batch(
                 conn, ctx, cache, stats, registry_label=registry_label,
-                batch_size=batch_size, batch_timeout_s=batch_timeout_s, dry_run=dry_run,
+                batch_size=batch_size, batch_timeout_s=batch_timeout_s,
                 tag=tag, worker=worker,
             )
         except Exception as exc:  # noqa: BLE001 - one slice, not the worker
@@ -563,7 +578,6 @@ def _run_batch(
     registry_label: str,
     batch_size: int,
     batch_timeout_s: int,
-    dry_run: bool,
     tag: str,
     worker: int,
 ) -> int | None:
@@ -603,9 +617,7 @@ def _run_batch(
         except Exception as exc:  # noqa: BLE001 - degrade to the lazy path, never die
             LOG.warning("WARM %sfailed, resolving with per-point lookups: %s", tag, exc)
         stats.warm_seconds += time.monotonic() - warm_started
-        _run_slice(
-            conn, rows, ctx, registry_label, slice_, stats, dry_run=dry_run,
-        )
+        _run_slice(conn, rows, ctx, registry_label, slice_, stats)
     _log_batch(stats, cache, ctx, len(rows), batch_before,
                time.monotonic() - batch_started, tag)
     return len(rows)
@@ -629,7 +641,6 @@ def _run_workers(
     batch_size: int,
     batch_timeout_s: int,
     deadline: float,
-    dry_run: bool,
 ) -> None:
     """N slice loops, N connections, ONE run cache and ONE lease (the caller's).
 
@@ -656,7 +667,7 @@ def _run_workers(
                 _drain_loop(
                     conn, ctx, cache, mine, registry_label=registry_label,
                     batch_size=batch_size, batch_timeout_s=batch_timeout_s,
-                    deadline=deadline, dry_run=dry_run, worker=index,
+                    deadline=deadline, worker=index,
                 )
                 LOG.info("DRAIN w%d queries %s", index, _query_stats(ctx).report())
                 return
@@ -712,8 +723,6 @@ def _run_slice(
     registry_label: str,
     slice_: _Slice,
     stats: DrainStats,
-    *,
-    dry_run: bool,
 ) -> None:
     """Optimistic: resolve the whole slice, then write it in two statements instead of seven
     per listing. On ANY failure the savepoint rolls the slice's writes back and the proven
@@ -729,19 +738,15 @@ def _run_slice(
         with conn.transaction():  # SAVEPOINT for the WHOLE slice
             core_started = time.monotonic()
             resolutions = [
-                item
+                _compute_one(listing_id, ctx, registry_label, slice_)
                 for listing_id in listing_ids
-                if (item := _compute_one(
-                    listing_id, ctx, registry_label, slice_, dry_run=dry_run,
-                )) is not None
             ]
             stats.core_seconds += time.monotonic() - core_started
-            if not dry_run:
-                write_started = time.monotonic()
-                _write_slice(conn, resolutions)
-                with conn.cursor() as cur:
-                    cur.execute(_DELETE_ROWS_SQL, (listing_ids, claimed_at))
-                stats.write_seconds += time.monotonic() - write_started
+            write_started = time.monotonic()
+            _write_slice(conn, resolutions)
+            with conn.cursor() as cur:
+                cur.execute(_DELETE_ROWS_SQL, (listing_ids, claimed_at))
+            stats.write_seconds += time.monotonic() - write_started
         stats.resolved += len(rows)
         return
     except Exception as exc:  # noqa: BLE001 - fall back to per-listing isolation
@@ -754,13 +759,9 @@ def _run_slice(
     for listing_id, attempts, enqueued_at in rows:
         try:
             with conn.transaction():  # SAVEPOINT: one bad row, one bad row
-                _resolve_one(
-                    conn, int(listing_id), ctx, registry_label, slice_, stats,
-                    dry_run=dry_run,
-                )
-                if not dry_run:
-                    with conn.cursor() as cur:
-                        cur.execute(_DELETE_ROW_SQL, (listing_id, enqueued_at))
+                _resolve_one(conn, int(listing_id), ctx, registry_label, slice_, stats)
+                with conn.cursor() as cur:
+                    cur.execute(_DELETE_ROW_SQL, (listing_id, enqueued_at))
             stats.resolved += 1
         except Exception as exc:  # noqa: BLE001 - the row must not poison the batch
             stats.failed += 1
@@ -818,18 +819,14 @@ def _resolve_one(
     registry_label: str,
     slice_: _Slice,
     stats: DrainStats,
-    *,
-    dry_run: bool,
 ) -> None:
     """ONE listing, compute + write — the `--listing-id` path and the slice fallback.
 
     It is `_write_slice` with a one-element slice, deliberately: two write paths would be two
     places for the same statement to drift apart."""
     core_started = time.monotonic()
-    item = _compute_one(listing_id, ctx, registry_label, slice_, dry_run=dry_run)
+    item = _compute_one(listing_id, ctx, registry_label, slice_)
     stats.core_seconds += time.monotonic() - core_started
-    if item is None:
-        return
     write_started = time.monotonic()
     _write_slice(conn, [item])
     stats.write_seconds += time.monotonic() - write_started
@@ -840,9 +837,7 @@ def _compute_one(
     ctx: ResolverContext,
     registry_label: str,
     slice_: _Slice,
-    *,
-    dry_run: bool,
-) -> Any | None:
+) -> Any:
     """The PURE half of a listing: the four steps. Writes nothing, so the whole slice can be
     computed before the first statement goes out."""
     claims = slice_.claims.get(listing_id, [])
@@ -851,7 +846,7 @@ def _compute_one(
         # "nothing to go on" (granularity unknown, no position, country undetermined), so
         # coverage is measurable and the nightly sweep does not re-enqueue it.
         LOG.info("RESOLVE no_claims listing_id=%s", listing_id)
-    resolution = core.resolve(
+    return core.resolve(
         claims,
         ctx,
         resolver_version=RESOLVER_VERSION,
@@ -859,14 +854,6 @@ def _compute_one(
         listing_id=listing_id,
         source=slice_.sources.get(listing_id, "unknown"),
     )
-    if dry_run:
-        LOG.info(
-            "RESOLVE dry listing_id=%s granularity=%s confidence=%s obec=%s disputed=%s",
-            listing_id, resolution.granularity, resolution.match_confidence,
-            resolution.obec_kod, resolution.disputed or "-",
-        )
-        return None
-    return resolution
 
 
 def _write_slice(conn: psycopg.Connection, resolutions: list[Any]) -> None:
@@ -885,6 +872,63 @@ def _write_slice(conn: psycopg.Connection, resolutions: list[Any]) -> None:
             resolution.listing_id, resolution.granularity, resolution.match_confidence,
             resolution.country_status, resolution.disputed or "-",
         )
+
+
+def dry_run(
+    conn: psycopg.Connection, *, batch_size: int = DEFAULT_BATCH,
+    max_seconds: int = DEFAULT_MAX_SECONDS, only_listing_id: int | None = None,
+) -> dict[str, Counter[str]]:
+    """Re-resolve the sample and compare each answer with the row it would replace. Writes
+    nothing, so it needs no lease and claims no queue row. A page that fails is counted and
+    skipped, and the deadline ends the loop, never the report."""
+    deadline = time.monotonic() + max_seconds
+    timeout_s = _batch_timeout_s()
+    with _bounded(conn, timeout_s) as cur:
+        registry_version_id, registry_label = resolve_db.current_registry_version(conn)
+        cur.execute(_SAMPLE_SQL, (None if only_listing_id is None else [only_listing_id],))
+        stored = cur.fetchall()
+    cache = resolve_db.RunCache()
+    ctx = _context(conn, registry_version_id, cache)
+    tally: dict[str, Counter[str]] = {"*": Counter(of=len(stored))}
+    for at in range(0, len(stored), batch_size):
+        rows = stored[at : at + batch_size]
+        if time.monotonic() >= deadline:
+            break
+        try:
+            with _bounded(conn, timeout_s):
+                slice_ = _prefetch(conn, [int(r[0]) for r in rows],
+                                   timeout_s=_prefetch_timeout_s(), restore_s=timeout_s)
+                with contextlib.suppress(Exception), conn.transaction():
+                    _warm(slice_, ctx, cache)
+                new = [_compute_one(int(r[0]), ctx, registry_label, slice_) for r in rows]
+        except Exception as exc:  # noqa: BLE001 - one page, never the report
+            tally["*"]["failed"] += len(rows)
+            LOG.warning("SAMPLE rows %d.. failed: %s", at, exc)
+            continue
+        for row, item in zip(rows, new):
+            _tally(tally.setdefault(item.source, Counter()), row, item)
+    for source, counts in sorted(tally.items()):
+        LOG.info("SAMPLE source=%s %s", source, " ".join(f"{k}={v}" for k, v in counts.items()))
+    return tally
+
+
+def _tally(counts: Counter[str], stored: Sequence[Any], new: Any) -> None:
+    """One stored row against its re-resolution, keys in report order. A granularity change
+    also counts under its own `old>new` key, so the report says which way the rows moved."""
+    _, obec_kod, part_kod, cp, granularity, lat, lon = stored
+    moved = distance_between(None if lat is None else (lat, lon),
+                             None if new.lat is None else (new.lat, new.lon))
+    counts.update({
+        "n": 1,
+        "town": new.obec_kod != obec_kod,
+        "part": new.cast_obce_kod != part_kod,
+        "number_gained": cp is None and new.house_number_cp is not None,
+        "number_lost": cp is not None and new.house_number_cp is None,
+        "moved_300m": moved is not None and moved > REGISTRY_PIN_CONFLICT_M,
+        "granularity": new.granularity != granularity,
+    })
+    if new.granularity != granularity:
+        counts[f"{granularity}>{new.granularity}"] += 1
 
 
 def _queue_health(conn: psycopg.Connection, timeout_s: int) -> tuple[int, float]:
@@ -982,13 +1026,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with open_connection() as conn:
+        if args.dry_run:
+            dry_run(conn, batch_size=args.batch_size, max_seconds=args.max_seconds,
+                    only_listing_id=args.listing_id)
+            return 0
         # The sweep ENQUEUES before the lease is even attempted. The lease guards the DRAIN
         # (claim, resolve, write); the enqueue is an idempotent insert whose only exclusion
         # need — the archive sweep's bulk writes into the same table — is the `location-batch`
         # Actions group this mode runs in. The Railway lane holds the drain lease ~94% of the
         # time, so an enqueue gated behind it ran on 2026-09-10 as a 20-second "DRAIN skipped"
         # success that enqueued nothing (run 34482389394).
-        if args.full_sweep and not args.dry_run:
+        if args.full_sweep:
             enqueue_full_sweep(conn, window=args.sweep_window)
         with lease.held(
             conn,
@@ -1000,14 +1048,13 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.info(
                     "DRAIN skipped: another run holds the %s lease%s", JOB_NAME,
                     " (the sweep above is enqueued; that holder drains it)"
-                    if args.full_sweep and not args.dry_run else "",
+                    if args.full_sweep else "",
                 )
                 return 0
             run(
                 conn,
                 batch_size=args.batch_size,
                 max_seconds=args.max_seconds,
-                dry_run=args.dry_run,
                 only_listing_id=args.listing_id,
             )
     return 0

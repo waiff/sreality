@@ -202,8 +202,8 @@ HEADLINE for that ad. Of 20,909 cued titles, 18,226 anchor to an obec and 14,659
 bind exactly; ~4,300 more cue-less titles carry a comma segment that folds to a register
 street. bazos hard-caps a title at 60 characters — 21,930 sit exactly on the cap, cut
 mid-word — and a truncated stem never binds. Three other surfaces were measured and left out:
-`raw_json.coords.street` is NOT subject-scoped (`extract_street` scans the title *and the
-description* and takes the first cue match, so 29,697 of its 50,529 values never appear in
+`raw_json.coords.street` (deleted 2026-09-30) was NOT subject-scoped (`extract_street` scanned
+the title *and the description* for the first cue match, so 29,697 of 50,529 values never appear in
 the title — boilerplate like "Energetická třída" and proximity prose that binds to real
 streets, which on a portal whose every pin is blurred would silently MOVE the point); the
 `<head>` title is the same capped string plus the okres and " | Bazoš.cz"; and the
@@ -3079,10 +3079,11 @@ portal's payload or its own page, and every other stamp is class E outright.
 **THE RESOLVER IS FOUR STEPS** (v5, `location_data/resolver/`), and one answer row:
 
 * **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key;
-  obec + street + čp/čo; a street inside the constraining obec; an obec / část obce by name; a PSČ
-  set; the pin's containing obec; the nearest obec within the 250 m sliver tolerance; last the okres
-  or kraj alone — resolving homonyms locally inside the constraining parent (PSČ, okres/kraj,
-  cadastral territory, qualifier, and only then the coordinate as a tie-break). The tail of that
+  obec + street + a typed čp/čev/čo (or a number inside the one bound část obce); a street; an obec /
+  část obce by name; a PSČ set; the pin's obec; the nearest obec within the 250 m sliver; last the
+  okres or kraj. A town name binds by the v5.5 TOWN RULE (obec/část/KÚ climbed to the obec, kept by
+  the PSČ, else by okres/kraj and — when a PSČ exists or the pin is declared precise — within 40 km
+  of the pin; a tie goes to the pin's obec, else the nearest). The tail of that
   chain is what keeps a border pin or a region-only listing from having no town at all, which rule 25
   does not allow: each answers at `low` confidence, and a sliver is NOT a dispute, because a polygon
   edge is not a disagreement. **The pin BIND reverse-geocodes from is the pin the row publishes** —
@@ -3126,8 +3127,10 @@ portal's payload or its own page, and every other stamp is class E outright.
   spelling; **the street is the REGISTER's or it is nothing** (W18) — an unbound claim text is no
   longer copied through preserve-if-null, because a `street_name` with `ulice_kod` NULL cannot be
   joined, filtered, compared across portals or de-duplicated on, and the 1,864 production rows in
-  that state included the hallucination class the rule exists to stop; čp / čo / psč still fall back
-  to a claim, preserve-if-null, and only an operator correction outranks the registry. It also fills
+  that state included the hallucination class the rule exists to stop; so is a house number (v5.5):
+  only a bound `č.p.` point publishes one, and only psč still falls back to a claim, preserve-if-null.
+  A street bound in a town the advert's town field names takes the část obce all its doors lie in
+  (Q3), else none. Only an operator correction outranks the registry. It also fills
   **the position: the portal pin when admissible, else the finest bound unit's point on surface** — the boundary's stored
   inscribed-circle centre, inside the polygon where `ST_Centroid` need not be, read off the same
   chain rather than as a tenth registry question. It WALKS that chain, because RÚIAN draws no polygon

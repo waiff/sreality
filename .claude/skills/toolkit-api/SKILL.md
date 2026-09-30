@@ -407,8 +407,8 @@ LLM + maps (FastAPI service + scoring jobs):
   scoring, and the agent under `provider='anthropic'`.
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
-- `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the bazos description
-  enrichment lane. (Rule 25 deleted the location free-text lane; no claim lane runs a model.)
+- `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the text lane (attributes
+  + a raw location reading, location reader W1); no claim lane runs a model.
 - `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model id.
   Read lazily by a lane pointed at qwen: an Actions secret there, Railway only to call it here.
 - `OSS_LLM_BASE_URL` / `OSS_LLM_API_KEY` — a self-hosted vLLM pod (`oss:<hf id>` ids, `provider='oss'`):
