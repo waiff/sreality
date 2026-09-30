@@ -3068,8 +3068,8 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 # listing_id (R2 Phase D, dirty_broker_listings_pkey) — see ingest_scraped_listing's
 # identical retarget above.
 _BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
-    INSERT INTO dirty_broker_listings (sreality_id, listing_id)
-    SELECT s.sid, l.id
+    INSERT INTO dirty_broker_listings (listing_id)
+    SELECT l.id
     FROM unnest(%s::bigint[]) AS s(sid)
     JOIN listings l ON l.sreality_id = s.sid
     ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()

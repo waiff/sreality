@@ -47,15 +47,20 @@ double count enshrined by a test, and two disagreeing CZ-count books (19/100 top
   LocationTypeahead's stay). The dedicated short-lock-budget API DB role is
   deliberately deferred (operator decision 2026-09-30) — propose after the sprint.
 
+- **W3 — broker maintenance on the rule-#20 shape** (migration 579): one
+  `recompute_brokers()` (single MATERIALIZED base CTE — ONE corpus walk replaces the
+  9-window loop's ~27; shared verbatim by the full sweep, the incremental and
+  api/broker_review), `run_incremental_pass` as THE incremental driver
+  (drain-until-empty + hourly-if-stale matview republish off the registry stamp — no
+  new setting, no pg_cron entry; concurrent refresh measured 85 s), a worker
+  `broker_maintenance` lane on the maintenance cadence with `broker_resolution.yml`
+  as the throttled backstop of the same driver, the property drain mirroring flips
+  into `dirty_broker_listings` (delist/revive reaches broker counts in minutes — the
+  gap the judge caught), and the sweep reduced to a thin reconcile that publishes
+  nothing. Dropped `dirty_broker_listings.sreality_id` (pre-approved; 576-row
+  ephemeral-queue snapshot taken before apply). Leaderboard freshness: ~24 h → ≤1 h.
+
 ## Next
-- **W3 — broker maintenance on the rule-#20 shape**: one `recompute_brokers()` (single
-  MATERIALIZED base CTE, one corpus walk replacing the 9-window loop, acceptance gate
-  <8 min measured before merge), worker-lane drain of `dirty_broker_listings` (~2 min
-  cadence), `broker_resolution.yml` stays as the throttled backstop, the daily sweep
-  becomes a thin reconcile, matview refresh moves to its own frequent cadence (host
-  chosen from W1's stamped `last_duration_ms`; worker lane if >~3 min — pg_cron is
-  measured congested). Adds the daily drift probe (stored vs recomputed counts).
-  Destructive (pre-approved, dump first): drop `dirty_broker_listings.sreality_id`.
 - **W4 — one count book**: matview rebuilt with exact grouping-set cells incl. national
   `cz` level, nested chips count once (operator-confirmed), `brokers_public` reads the
   cz cell, region_shares/outreach read cells directly, firm display names captured at

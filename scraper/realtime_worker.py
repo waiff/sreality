@@ -46,6 +46,17 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              lease row (migration 279 — pooler-proof CAS; a session advisory
              lock strands over the transaction pooler) — a concurrent caller
              skips.
+- broker_maintenance: every `realtime_maintenance_interval_seconds` (shared
+             with the maintenance lane — same cadence class, no new setting),
+             one drain-until-empty broker pass via scripts.resolve_brokers.
+             run_incremental_pass (THE same implementation broker_resolution.yml
+             runs; never forked). Attributes dirty listings to brokers,
+             recomputes only the affected brokers' rollups, and republishes the
+             leaderboard matview when its derived_artifacts stamp is older than
+             ~an hour — so broker numbers stop being a once-daily artifact of
+             the GH-throttled full sweep (Broker Unify W3). Safe beside the GH
+             cron + daily sweep: all callers serialize on broker_resolution_lock;
+             a concurrent caller skips.
 - location_resolve: every `realtime_location_resolve_interval_seconds`
              (default 15), one bounded pass of THE location resolver drain
              (location_data.resolver.drain.run — the same code
@@ -1245,6 +1256,43 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
     _record_pass(state, "maintenance", last)
 
 
+def _broker_maintenance_sync() -> dict[str, Any]:
+    """One drain-until-empty broker pass on the worker's own connection. Reuses
+    THE script implementation (never forks it); broker_resolution_lock inside
+    run_incremental_pass makes this safe beside the GH cron and the daily full
+    sweep — a concurrent caller returns skipped. Lazy import keeps
+    scripts.resolve_brokers off the worker's startup path."""
+    from scripts.resolve_brokers import run_incremental_pass
+
+    batch_size = _read_maintenance_batch_size()
+    conn = db.connect()
+    try:
+        return run_incremental_pass(conn, batch_size)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _broker_maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    stats = await asyncio.to_thread(_broker_maintenance_sync)
+    last = {
+        "skipped": bool(stats.get("skipped")),
+        "attributed": stats.get("attributed", 0),
+        "brokers": stats.get("brokers", 0),
+        "refreshed": bool(stats.get("refreshed")),
+    }
+    if last["skipped"]:
+        LOG.info("BROKER lane skipped (resolution lock held by cron or daily sweep)")
+    else:
+        LOG.info(
+            "BROKER lane attributed=%d brokers=%d refreshed=%s",
+            last["attributed"], last["brokers"], last["refreshed"],
+        )
+    _record_pass(state, "broker_maintenance", last)
+
+
 # estimation lane: claim ONE pending run atomically over the transaction pooler.
 # FOR UPDATE SKIP LOCKED (not a session advisory lock — unsound over the pooler,
 # the mig-279 lesson) flips pending->running + stamps claimed_at/worker in one
@@ -2242,6 +2290,11 @@ async def _amain() -> int:
         ("maintenance", lambda: _lane_loop(
             "maintenance", stop_event, _read_maintenance_interval,
             lambda: _maintenance_pass(stop_event, state),
+            state,
+            default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
+        ("broker_maintenance", lambda: _lane_loop(
+            "broker_maintenance", stop_event, _read_maintenance_interval,
+            lambda: _broker_maintenance_pass(stop_event, state),
             state,
             default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
         ("estimation", lambda: _lane_loop(

@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract/autodedup lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/broker-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract/autodedup lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -334,7 +334,15 @@ Lanes shipped so far:
   check that sees a market-wide count swing faster than a full index walk, feeding the delisting rails.
 - **Property-maintenance lane**, every 2 min (PR #716) — `run_incremental_pass` against `dirty_properties`
   (rule #20), far more often than the 5-min GH cron; serialized with it + the daily sweep by the lease-row
-  CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded.
+  CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded. Its
+  drain also mirrors each claimed property's attributed listings into `dirty_broker_listings`, so
+  delist/revive flips reach broker counts in minutes (Broker Unify W3).
+- **Broker-maintenance lane** (Broker Unify W3) — same cadence setting as property maintenance; calls
+  `scripts.resolve_brokers.run_incremental_pass` (THE driver `broker_resolution.yml` also runs, backstop-
+  only now): drain `dirty_broker_listings` until empty, attribute + recompute only the affected brokers
+  (one merged `recompute_brokers` statement), and republish `broker_region_type_stats` through the
+  migration-578 chokepoint when its `derived_artifacts` stamp is older than ~an hour. Serialized by
+  `broker_resolution_lock`; a concurrent caller skips.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
   deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run used
   to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one `pending`

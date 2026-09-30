@@ -443,8 +443,7 @@ def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
                         lambda c, extra="", params=None: linked.append(params["ids"]))
     monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
     monkeypatch.setattr(rb, "_auto_merge", lambda c, run_id: (0, 0, 0))
-    monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
-    monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
+    monkeypatch.setattr(rb, "recompute_brokers", lambda cur, bids: None)
     monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
 
     # the budget is already spent when the sweep starts, i.e. the worst real shape
@@ -482,8 +481,7 @@ def _stub_full_sweep(monkeypatch: Any, all_ids: list[int],
     monkeypatch.setattr(rb, "_link_listings_firm", lambda c, extra="", params=None: None)
     monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
     monkeypatch.setattr(rb, "_auto_merge", lambda c, run_id: merge_result)
-    monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
-    monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
+    monkeypatch.setattr(rb, "recompute_brokers", lambda cur, bids: None)
     monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
     return attributed
 
@@ -638,7 +636,7 @@ def test_cursor_is_written_before_the_failure_prone_tail(monkeypatch: Any) -> No
 
     conn = _ResilientConn("full")
     _stub_full_sweep(monkeypatch, [1, 2, 3, 4])
-    monkeypatch.setattr(rb, "_refresh_matview",
+    monkeypatch.setattr(rb, "_generate_merge_candidates",
                         lambda c: (_ for _ in ()).throw(RuntimeError("tail died")))
 
     with pytest.raises(RuntimeError):
@@ -1491,32 +1489,68 @@ def test_broker_rollup_writes_cz_counts_from_the_domestic_predicate() -> None:
     """D4: the leaderboard's stored counts. Two idnes syndication feeds carry ~26k
     foreign listings and ranked #1 and #2 nationally, 8x the busiest genuinely
     Czech broker, because these columns counted every attributed row."""
-    from scripts.resolve_brokers import _BROKER_ROLLUP, _DOMESTIC
+    from scripts.resolve_brokers import _RECOMPUTE_BROKERS, _DOMESTIC
 
-    sql = " ".join(_BROKER_ROLLUP.format(bscope="").split())
+    sql = " ".join(_RECOMPUTE_BROKERS.format(bscope="", mscope="").split())
     assert _DOMESTIC == "ll.obec_kod IS NOT NULL"
-    # The predicate is bound at import, not left for the caller to remember.
+    # The predicate is bound at import, not left for the caller to remember —
+    # W3 evaluates it ONCE, into base's `domestic` flag, and every cz_* count
+    # filters on that flag.
     assert "{domestic}" not in sql
+    assert f"({_DOMESTIC}) AS domestic" in sql
     for col in ("cz_listing_count", "cz_property_count",
                 "cz_active_listing_count", "cz_active_property_count"):
         assert f"{col} = coalesce(ls.cz_" in sql
-    assert sql.count(f"FILTER (WHERE {_DOMESTIC}") == 4
+    assert sql.count("FILTER (WHERE domestic)") == 2
+    assert sql.count("FILTER (WHERE domestic AND live)") == 2
     # ...and the unscoped columns still count everything (rule #3: scope, not delete).
     assert "listing_count = coalesce(ls.lc, 0)" in sql
     assert "active_property_count = coalesce(ls.apc, 0)" in sql
 
 
+def test_merged_recompute_keeps_every_output_of_the_old_pair() -> None:
+    """W3's parity rail: the ONE merged statement (recompute_brokers) must keep
+    producing everything the retired _BROKER_ROLLUP + _MEMBERSHIP_RECOMPUTE pair
+    wrote — losing an aggregate here would silently zero a served column on the
+    next reconcile. RED by: dropping any SET column, the membership upsert's
+    least/greatest carry, or the membership prune."""
+    from scripts.resolve_brokers import _RECOMPUTE_BROKERS
+
+    sql = " ".join(_RECOMPUTE_BROKERS.format(bscope="", mscope="").split())
+    # One corpus read feeds everything (the whole point of the merge).
+    assert sql.count("FROM listings l JOIN broker_identities bi") == 1
+    assert "WITH base AS MATERIALIZED" in sql
+    for fragment in (
+        # brokers.* rollup outputs
+        "display_name = il.display_name", "primary_email = il.email",
+        "primary_phone = pp.value", "primary_firm_id = pf.firm_id",
+        "source_count = ia.sc", "distinct_source_count = ia.dsc",
+        "first_seen_at = coalesce(ls.fseen, b.first_seen_at)",
+        "last_seen_at = coalesce(ls.lseen, b.last_seen_at)",
+        "stats_computed_at = now()",
+        "WHERE b.id = il.broker_id AND b.status = 'active'",
+        # membership upsert semantics (carry the earliest/latest sighting)
+        "INSERT INTO broker_firm_memberships",
+        "least(broker_firm_memberships.first_seen_at, EXCLUDED.first_seen_at)",
+        "greatest(broker_firm_memberships.last_seen_at, EXCLUDED.last_seen_at)",
+        # membership prune
+        "DELETE FROM broker_firm_memberships m",
+    ):
+        assert fragment in sql, f"merged recompute lost: {fragment}"
+
+
 def test_manual_merge_recompute_writes_the_cz_columns_too() -> None:
-    """api.broker_review imports the same constant for its post-merge recompute;
+    """api.broker_review calls the same recompute for its post-merge refresh;
     if it wrote only the unscoped counts, a merged broker's ranking would silently
     fall back to zero until the next daily sweep."""
-    from api.broker_review import _BROKER_ROLLUP as imported
+    from api.broker_review import recompute_brokers as imported
 
-    from scripts.resolve_brokers import _BROKER_ROLLUP
+    from scripts.resolve_brokers import _RECOMPUTE_BROKERS, recompute_brokers
 
-    assert imported is _BROKER_ROLLUP
-    assert "cz_active_property_count" in imported.format(
-        bscope="AND broker_id = ANY(%(bids)s)")
+    assert imported is recompute_brokers
+    assert "cz_active_property_count" in _RECOMPUTE_BROKERS.format(
+        bscope="AND broker_id = ANY(%(bids)s)",
+        mscope="m.broker_id = ANY(%(bids)s) AND")
 
 
 # --- the unified engine: inputs, kill switch, evidence, card hygiene ----------
