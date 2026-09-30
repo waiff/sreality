@@ -2246,11 +2246,18 @@ def _watchdog(
 
         # The backstop if the dump still holds the GIL (the join below and exit_ both
         # need it): the timer _exits and Railway's restartPolicy ALWAYS starts a new one.
-        arm_backstop(WATCHDOG_LAST_WORDS_SECONDS + 5)
-        speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
-        speaker.start()
-        speaker.join(WATCHDOG_LAST_WORDS_SECONDS)
-        exit_(1)
+        # Nothing before the exit may keep it from running: arming the timer or starting
+        # the speaker can itself fail (an exhausted fd table or thread limit at the
+        # moment of the wedge), and a watchdog that raised instead of exiting would leave
+        # the very freeze it exists to end.
+        try:
+            with contextlib.suppress(Exception):
+                arm_backstop(WATCHDOG_LAST_WORDS_SECONDS + 5)
+            speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
+            speaker.start()
+            speaker.join(WATCHDOG_LAST_WORDS_SECONDS)
+        finally:
+            exit_(1)
         return
 
 

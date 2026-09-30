@@ -2204,7 +2204,9 @@ if sys.argv[1] == "blocking":
 rw.WATCHDOG_LAST_WORDS_SECONDS = 1.0
 state = rw._new_state()
 state["beat_done_at"] = -1e9
-rw._watchdog(state, sleep=lambda s: None)
+# rc 3 = the watchdog's own exit; rc 1 = the faulthandler timer's _exit(1). Telling them
+# apart by the exit code, not by the clock, keeps the test honest on a slow runner.
+rw._watchdog(state, sleep=lambda s: None, exit_=lambda rc: os._exit(3))
 """
 
 
@@ -2212,21 +2214,26 @@ rw._watchdog(state, sleep=lambda s: None)
 def test_watchdog_exits_even_when_stderr_is_a_full_pipe(mode):
     # faulthandler writes holding the GIL, so a dump into a full pipe stops every thread,
     # the watchdog's join and os._exit included. A REAL full pipe, in a child process: as
-    # shipped the dump gets EAGAIN and the watchdog's os._exit(1) ends it; with the dump
-    # blocking anyway, the faulthandler timer armed before it does, _exit(1) from a thread
-    # that needs no GIL (a signal would not: as PID 1 the kernel drops SIGALRM's default).
+    # shipped the dump gets EAGAIN and the watchdog's own exit (rc 3 in the child) ends it;
+    # with the dump blocking anyway, the faulthandler timer armed before it does, _exit(1)
+    # from a thread that needs no GIL (a signal would not: as PID 1 the kernel drops
+    # SIGALRM's default). Each guard is pinned by its own exit code, so a broken primary
+    # guard cannot hide behind the backstop.
     started = time.monotonic()
     child = subprocess.Popen(
         [sys.executable, "-c", _FULL_STDERR_CHILD, mode],
         cwd=Path(__file__).resolve().parents[2],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        assert child.wait(timeout=60) == 1
+        rc = child.wait(timeout=60)
     finally:
         child.kill()
         child.stderr.close()
     if mode == "blocking":  # the timer, not the watchdog's own exit 1 s after the dump
+        assert rc == 1
         assert time.monotonic() - started >= 1.0 + 5
+    else:
+        assert rc == 3
 
 
 
@@ -2246,6 +2253,23 @@ def test_the_backstop_is_a_faulthandler_timer_that_exits_and_writes_off_stderr(m
         os.close(kw["file"])
     assert inspect.signature(rw._watchdog).parameters["arm_backstop"].default is (
         rw._arm_exit_backstop)
+
+
+def test_watchdog_exits_even_when_arming_the_backstop_fails(monkeypatch):
+    # An exhausted fd table or thread limit at the moment of the wedge makes the arm
+    # raise (os.open of /dev/null, or faulthandler's own thread). The exit is
+    # unconditional: a watchdog that raised instead would leave the freeze it exists to end.
+    _watchdog_off_the_terminal(monkeypatch)
+    state = rw._new_state()
+    state["beat_done_at"] = -1e9
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
+    exits: list[int] = []
+
+    def arm(seconds: float) -> None:
+        raise OSError(24, "Too many open files")
+
+    rw._watchdog(state, sleep=lambda s: None, exit_=exits.append, arm_backstop=arm)
+    assert exits == [1]
 
 
 def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog):
