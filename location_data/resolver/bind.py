@@ -355,22 +355,27 @@ def bind_towns(
     It replaces a ladder whose PSČ and pin steps ran only on a TIE: a single namesake 329 km
     away bound unchallenged (18841980), and a village the register holds as a část obce or a
     KÚ of another municipality bound nothing at all."""
-    towns: dict[int, tuple[AdminUnit, bool]] = {}
+    direct: dict[int, AdminUnit] = {}
+    climbed: set[int] = set()
     for key in keys:
         for unit in registry.admin_units_by_name(key, levels=levels):
-            town = obec_of(unit, registry)
-            # The obec matched AS an obec wins its slot: that row carries the `psc_set` a
-            # chain-climbed one does not.
-            if town is not None and (town.code not in towns or unit.level == "obec"):
-                towns[town.code] = (town, unit.level == "obec")
-    found = [towns[code] for code in sorted(towns)]
+            if unit.level == "obec":
+                direct.setdefault(unit.code, unit)
+                continue
+            # The ltree path names the obec for free; the chain is the fallback for a view
+            # that does not fill it. A common part name must not cost a round trip per match.
+            town = unit.obec_kod or getattr(obec_of(unit, registry), "code", None)
+            if town is not None:
+                climbed.add(town)
+    codes = sorted(set(direct) | climbed)
     if constraints.psc:
-        carrying = _carrying_psc([t for t, _ in found], constraints.psc, registry)
-        if carrying:
-            return narrow_towns(carrying, constraints, registry=registry,
+        carrying = _carrying_psc(codes, direct, constraints.psc, registry)
+        towns = [t for c in carrying if (t := direct.get(c) or _obec_by_code(c, registry))]
+        if towns:
+            return narrow_towns(towns, constraints, registry=registry,
                                 pin_is_precise=pin_is_precise,
-                                applied=["psc"] if len(found) > 1 else [])
-    reached = [t for t, is_obec in found if is_obec and _reaches(t, constraints.pin, registry)]
+                                applied=["psc"] if len(codes) > 1 else [])
+    reached = [t for _, t in sorted(direct.items()) if _reaches(t, constraints.pin, registry)]
     return narrow_towns(reached, constraints, registry=registry, pin_is_precise=pin_is_precise)
 
 
@@ -411,25 +416,31 @@ def narrow_towns(
 
 def _admits(town: AdminUnit, constraints: Constraints, registry: RegistryView) -> bool:
     """Steps 1-2 for the ONE town a composite line anchored on."""
-    if constraints.psc and _carrying_psc([town], constraints.psc, registry):
+    if constraints.psc and _carrying_psc([town.code], {town.code: town}, constraints.psc,
+                                         registry):
         return True
     return _reaches(town, constraints.pin, registry)
 
 
 def _carrying_psc(
-    towns: Sequence[AdminUnit], psc: str, registry: RegistryView
-) -> list[AdminUnit]:
+    codes: Sequence[int], direct: dict[int, AdminUnit], psc: str, registry: RegistryView
+) -> list[int]:
     """The towns whose delivery area includes the PSČ. A name-index obec row answers it off
     its own `psc_set`; a town climbed to from a part or a KÚ asks the address points."""
-    codes: set[int] | None = None
-    out: list[AdminUnit] = []
-    for town in towns:
-        if psc not in town.psc_set:
-            codes = set(registry.obec_codes_for_psc(psc)) if codes is None else codes
-            if town.code not in codes:
+    served: set[int] | None = None
+    out: list[int] = []
+    for code in codes:
+        if psc not in getattr(direct.get(code), "psc_set", ()):
+            served = set(registry.obec_codes_for_psc(psc)) if served is None else served
+            if code not in served:
                 continue
-        out.append(town)
+        out.append(code)
     return out
+
+
+def _obec_by_code(code: int, registry: RegistryView) -> AdminUnit | None:
+    chain = registry.admin_chain_by_code("obec", code)
+    return chain[0] if chain else None
 
 
 def _reaches(town: AdminUnit, pin: tuple[float, float] | None, registry: RegistryView) -> bool:
@@ -646,14 +657,16 @@ def bind(
 
     # ---- R1 WITHOUT a street (D7): the house number inside the ONE bound část obce, where a
     # č.p. (and a č.ev.) is unique by law — 475 of 478 sampled sreality numbers are, against
-    # 247 across the whole town. The pin must not contradict the point: absent, declared
-    # blurred, or within `REGISTRY_PIN_CONFLICT_M` of it, because `place()` moves the row to
-    # the point and nothing downstream would flag the move.
+    # 247 across the whole town. Only for a listing that names no street (809 of 814 of those
+    # rows): a number written after a street the register could not bind is that street's,
+    # often its č.o. The pin must not contradict the point — absent, declared blurred, or
+    # within `REGISTRY_PIN_CONFLICT_M` — because `place()` moves the row there unflagged.
     cast_parts = {u.unit_id: u for u in parts if u.level == "cast_obce"}
     part = next(iter(cast_parts.values())) if len(cast_parts) == 1 else None
     town = obec_of(part, registry) if part is not None else None
     if (town is not None and constraints.cislo_domovni is not None
-            and not any(c.target_kind in ("street", "address_point") for c in out)):
+            and not constraints.street_lines and not any(
+                c.target_kind == "address_point" for c in out)):
         points = registry.address_points_by_number(
             obec_kod=town.code, street_name_norm=None,
             cislo_domovni=constraints.cislo_domovni, typ_so=constraints.typ_so,

@@ -24,7 +24,7 @@
  * radius, so none of this applies above the point budget. */
 
 /* location_granularity_rank: building = 90, address_point = 100. Everything
- * below (street_segment 70, street 60, cast_obce 50, obec 40, okres 30 …) is a
+ * below (street 60, cast_obce 50, obec 40, okres 30 …) is a
  * position the resolver would not put a door on. */
 export const BUILDING_GRANULARITY_RANK = 90;
 

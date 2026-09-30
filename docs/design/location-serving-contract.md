@@ -38,9 +38,9 @@ and there is no second position column.
 
 **How well it is known — three axes, all NOT NULL.** `granularity` (enum `location_granularity`:
 `unknown` < `country` < `kraj` < `okres` < `obec` < `cast_obce_or_quarter` < `street` <
-`street_segment` < `parcel` < `building` < `address_point`), `match_confidence` (`low` < `medium` <
-`high` < `exact`, from how many INDEPENDENT fields agreed with the bound entity), and the radius
-above. **Compare granularity by rank, never by string or enum order** — `location_granularity_rank`
+`street_segment` (inert since resolver v5.5) < `parcel` < `building` < `address_point`),
+`match_confidence` (`low` < `medium` < `high` < `exact`, from how many INDEPENDENT fields agreed
+with the bound entity), and the radius above. **Compare granularity by rank, never by string or enum order** — `location_granularity_rank`
 in SQL, `location_data.resolver.types.GranularityRank` in Python. All three are NOT NULL because a
 NULL reads as "no gate" and fails open: a NULL radius makes both branches of the three-valued
 containment test evaluate NULL and the row drops out of `certain` AND `possible`.

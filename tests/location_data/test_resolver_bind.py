@@ -189,6 +189,96 @@ def test_a_shared_psc_with_nothing_to_break_the_tie_is_ambiguous_and_still_answe
     assert resolution.match_confidence == "low"
 
 
+# ------------------------------------------------------------- the v5.5 town rule (D4)
+
+
+def _town_mirror(*, with_zlate_hory_ku: bool = True) -> mm.MiniMirror:
+    """The W2 cases as the live register holds them (codes read 2026-09-30): Černotín is an
+    obec near Přerov AND a část obce (and, in the name index, a KÚ) of Dnešice; Hory is an
+    obec near Karlovy Vary AND a část obce and a KÚ of Oloví; "Zlaté Hory v Jeseníkách" is a
+    KÚ of Zlaté Hory, 329 km from that Hory. Towns with a point carry an address point too."""
+    mirror = mm.default_mirror()
+    towns = {557668: (60, "Dnešice", 49.6056, 13.2655, ("33401", "33443")),
+             513067: (63, "Černotín", 49.5271, 17.7717, ("75368",)),
+             560588: (64, "Oloví", 50.2436, 12.5595, ("35709", "35707")),
+             551651: (67, "Hory", 50.2100, 12.7800, ("36001",)),
+             597996: (68, "Zlaté Hory", 50.2639, 17.3958, ("79376",))}
+    for code, (uid, name, lat, lon, pscs) in towns.items():
+        mirror.units.append(mm._unit(uid, "obec", code, name, normalize.normalize_match_key(name),
+                                     f"b{code}", lat=lat, lon=lon, psc_set=pscs))
+        mirror.obec_polygons[code] = (lat, lon, 4000.0)
+        mirror.points.append(AddressPoint(kod_adm=uid, obec_unit_id=uid, obec_kod=code,
+                                          psc=pscs[-1], lat=lat, lon=lon))
+    parts = [(61, "cast_obce", 26778, "cernotin", 557668), (62, "katastralni_uzemi", 626775,
+             "cernotin", 557668), (65, "cast_obce", 111007, "hory", 560588),
+             (66, "katastralni_uzemi", 711004, "hory", 560588)]
+    if with_zlate_hory_ku:
+        parts.append((69, "katastralni_uzemi", 793191, "zlate hory v jesenikach", 597996))
+    for uid, level, code, key, town in parts:
+        mirror.units.append(mm._unit(uid, level, code, key, key, f"b{town}.x{code}",
+                                     parent=towns[town][0]))
+    return mirror
+
+
+def _bazos(town: str, psc: str, pin: tuple[float, float] | None = None):
+    claims = [mm.claim(1, "obec_name", value_text=town, source="bazos"),
+              mm.claim(2, "psc", value_text=psc, source="bazos")]
+    if pin is not None:
+        claims.append(mm.claim(3, "coordinate", lat=pin[0], lon=pin[1], source="bazos"))
+    return claims
+
+
+def test_a_village_the_register_holds_as_a_part_binds_the_town_its_psc_serves():
+    """Černotín is named; the only Černotín OBEC is near Přerov. At the část-obce and KÚ
+    levels it climbs to Dnešice, and PSČ 334 43 is Dnešice's — so Dnešice binds, from the
+    name, and the PSČ that discriminated counts as an agreeing field."""
+    binding = _bind(_bazos("Černotín", "33443", pin=(49.6100, 13.2700)), mirror=_town_mirror())
+    assert (binding.obec_kod, binding.rung) == (557668, "R4")
+    assert "psc" in binding.agreed
+
+
+def test_hory_binds_olovi_through_its_part_and_its_ku():
+    binding = _bind(_bazos("Hory", "35707"), mirror=_town_mirror())
+    assert (binding.obec_kod, binding.rung) == (560588, "R4")
+
+
+def test_18841980_heals_through_the_ku_level():
+    """The slug "zlaté-hory-v-jeseníkách" matches no obec. It split to a "Hory" 329 km away;
+    it IS the KÚ of Zlaté Hory, whose obec carries PSČ 793 76."""
+    claims = _bazos("zlaté-hory-v-jeseníkách", "79376", pin=(50.24194, 17.34158))
+    binding = _bind(claims, mirror=_town_mirror())
+    assert (binding.obec_kod, binding.rung) == (597996, "R4")
+
+
+def test_a_composite_anchor_out_of_reach_falls_through_to_the_psc():
+    """Without that KÚ the line anchors on "Hory": neither in the PSČ nor within 40 km of the
+    pin, so it is refused and the PSČ answers — at R6, an inference."""
+    claims = _bazos("zlaté-hory-v-jeseníkách", "79376", pin=(50.24194, 17.34158))
+    binding = _bind(claims, mirror=_town_mirror(with_zlate_hory_ku=False))
+    assert (binding.obec_kod, binding.rung) == (597996, "R6")
+
+
+def test_a_named_town_the_pin_cannot_reach_is_refused_unless_the_psc_vouches():
+    """No PSČ: a unique obec-level name 280 km from the pin is a namesake, not the town — the
+    pin's own town answers (R7). Within 40 km, or with no pin, the name binds as ever."""
+    praha, bilovec_pin = mm.claim(1, "obec_name", value_text="Praha"), (49.7573, 18.0158)
+    pin = mm.claim(2, "coordinate", lat=bilovec_pin[0], lon=bilovec_pin[1])
+    assert (_bind([praha, pin]).obec_kod, _bind([praha, pin]).rung) == (599212, "R7")
+    assert _bind([praha]).obec_kod == 554782
+    near = mm.claim(1, "obec_name", value_text="Bílovec")
+    assert (_bind([near, pin]).obec_kod, _bind([near, pin]).rung) == (599212, "R4")
+
+
+def test_a_name_that_binds_nothing_falls_through_to_the_part_then_the_psc():
+    """The `elif` is open (step 4): an unknown town name no longer leaves a PSČ unread."""
+    unknown = mm.claim(1, "obec_name", value_text="Neexistující")
+    binding = _bind([unknown, mm.claim(2, "psc", value_text="74301")])
+    assert (binding.obec_kod, binding.rung) == (599212, "R6")
+    resolution = _resolve([unknown, mm.claim(2, "cast_obce_name", value_text="Vokovice"),
+                           mm.claim(3, "psc", value_text="160 00")])
+    assert (resolution.obec_kod, resolution.cast_obce_kod) == (554782, 490067)
+
+
 # ------------------------------------------------ the pin BIND uses is the pin it publishes
 
 

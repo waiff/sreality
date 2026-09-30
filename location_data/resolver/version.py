@@ -75,17 +75,12 @@ from __future__ import annotations
 #      one KÚ — and never a pin's. Containment reads the `pip` pieces only (the authoritative
 #      fallback branch is gone). The bump re-queues the corpus so every row gets its KÚ; the
 #      MF view swap (migration 567) refuses to apply until the address-grain rows have one.
-# v5.5 = the plain-text location reader, W2 (operator rulings 2026-09-30, Q2-Q4). Four rules:
-#      * THE TOWN RULE (D4), every portal: a town name is looked up as an obec, a část obce
-#        and a KÚ, each match climbed to its obec, kept when the obec carries the listing's
-#        PSČ, else when it is an obec within 40 km of the pin; several left -> the one holding
-#        the pin, else the nearest (the lowest-id pick is gone); none left -> the composite
-#        line (same reach), the part-of-town names, then the PSČ;
-#      * house numbers are TYPED (D7): a č.ev. matches only a `č.ev.` point, a number with no
-#        street is looked up inside the one bound část obce when the pin agrees, and only a
-#        bound č.p. point publishes a number — the unbound `street_segment` rung is deleted;
-#      * a street bound inside a town the listing names carries the register's part of town
-#        when all its doors lie in one (Q3);
-#      * the dead claim types (`obec_code`, `homonym_qualifier`, `postal_town`,
-#        `quarter_name`, `mestsky_obvod_name`, `cadastral_territory_name`) are no longer read.
+# v5.5 = text-reader W2 (operator rulings 2026-09-30). THE TOWN RULE (D4): a town name is
+#      looked up as obec / část obce / KÚ, climbed to its obec, kept by the listing's PSČ, else
+#      as an obec within 40 km of the pin; a tie goes to the pin's obec, else the nearest (the
+#      lowest-id pick is gone); nothing left -> composite line (same test), part names, PSČ.
+#      House numbers are TYPED (D7): a č.ev. joins only a `č.ev.` point, a streetless number
+#      is looked up inside the one bound část, and only a bound č.p. publishes a number (the
+#      `street_segment` rung is deleted). A street in a named town carries the register's part
+#      when all its doors lie in one (Q3). Six dead claim types are no longer read.
 RESOLVER_VERSION = "resolver:v5.5"
