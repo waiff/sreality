@@ -231,7 +231,7 @@ not a bundled module — see `docs/architecture.md`); CI's `--check` guards drif
 **The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
 from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
-  `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, unseen ids are nominated
+  `--limit`), `reconcile_sightings` bumps `last_seen_at` on every still-listed id we hold, unseen ids are nominated
   for a page check (rule #3, 2026-09-07), new + price-changed ids are queued. The walk carries a
   **wall-clock deadline checked per PAGE** (`--max-seconds` → `run_index_walk` →
   `walk_category` → `portal.deadline_reached`); a deadline is a stop of OURS, so such a
@@ -445,19 +445,19 @@ purpose — the six ground = 1 portals stay +0.8..+1.1 until the operator has ru
 
 ## Reading the logs
 
-The scheduled pipeline logs in two halves. The shared `portal_runner` emits CATEGORY, VERIFY, RECONCILE,
-RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDEX + ENQUEUE come from each portal's own code (`walk_category`; sreality's per-page INDEX from its client).
+The scheduled pipeline logs in two halves. The shared `portal_runner` emits CATEGORY, ENQUEUE, VERIFY, RECONCILE,
+RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDEX / SPLIT / SLICE lines come from each portal's `walk_category`.
 
 **Index walk** (`index_walk.yml` and the per-portal walks):
 - `CATEGORY start cm=... ct=...` per category pair
 - `INDEX offset=N estates=M total=K` per search page (offset/limit paging; sreality)
 - `SPLIT cm=... ct=... result_size=N > T: walking D districts` when a sreality category exceeds
   the deep-pagination window and is walked per-district
-- `PLAN unchanged=N refetch=M` per category walk (per district when split) after diffing index
-  prices against the DB; `PLAN priority_retry=N` if any listings have prior failure rows
-  (sreality — the other portals go straight to ENQUEUE)
-- `ENQUEUE enqueued=N new=... changed=... priority=...` per category (sreality; the others log
-  `ENQUEUE source=<portal> new=... changed=... unchanged=... enqueued=...`) — ids handed to the drain
+- `PLAN priority_retry=N` (sreality only) — repriced re-sighted listings that still hold a
+  `listing_fetch_failures` row; they enqueue at FAILURE priority, ahead of CHANGED
+- `ENQUEUE source=<portal>[ cm=... ct=...] new=N changed=M unchanged=U enqueued=E` — ONE shape from
+  `portal_runner.reconcile_sightings`: per category (per district on sreality), per page in the bespoke
+  probes (`offset=` sreality, `page=` ceskereality; mmreality labels `sale= cat=`) — ids handed to the drain
 - `VERIFY cm=... ct=... subtype=... candidates=N queued=M deferred=K active=A` — rows nominated for
   a page check (rule #3); `VERIFY skipped ...: the walk did not reach the portal's end (our stop:
   ...)` when it may not, and `COVERAGE cm=... ct=...` WARNS when it nominates while short

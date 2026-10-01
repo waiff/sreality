@@ -204,7 +204,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     adapter. A detach that reactivates a property gives back its pipeline card and asset link; curation, dispatches and dismissals stay on the property left.
     Collections carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via `listing_detail_queue`** (migration 105).
-    Index-walk (`--index-only`) walks the full index, `touch_listings` + end-gated nomination (rule #3), and enqueues; detail-drain
+    Index-walk (`--index-only`) walks the full index, `portal_runner.reconcile_sightings` (touch + enqueue) + end-gated nomination (rule #3); detail-drain
     (`--drain-only`) claims a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes each flush in ONE `listing_write.write_listings` call.
     New rows land `property_id` NULL on every path (straggler-attach births the singleton, rule #15). Every portal runs this same split
     through the shared `portal_runner` on the source-generic queue.
@@ -215,10 +215,10 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 21. **Every portal runs through ONE shared framework (Phase 4: `portal_base` / `portal` / `portal_runner`, one
     source-generic `listing_detail_queue`); per-portal code is a client (fetch + pacing) + a parser + a `Portal`
     adapter + a config row (`PortalConfig`/`PortalLimits` = its politeness); shared code grows NO new portal-name
-    branch.** The parser emits the row's `source_url` — a stored fact read everywhere, reconstructed nowhere
-    (sreality: `scraper/sreality_url.py`). A walk that can't be proven complete nominates nothing; its
-    listings close only through gone detail fetches (rule #3). `supports_complete_walk` is posture. A per-portal
-    need is a `Portal` protocol seam, never an `if source ==`; seams + owed copies/branches: `docs/architecture.md` § rule 21.
+    branch.** Its `walk_category` pages + judges its end, then hands what it saw to ONE `portal_runner.reconcile_sightings`
+    (touch every sighted known row, enqueue new + repriced; CI rail). The parser emits `source_url` (stored, never rebuilt;
+    sreality: `scraper/sreality_url.py`). An unproven walk nominates nothing; its listings close only via gone fetches (rule #3);
+    `supports_complete_walk` is posture. A per-portal need is a `Portal` seam, never an `if source ==`; seams + owed: `docs/architecture.md` § rule 21.
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline` holds ≤1 card per property at one
     `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of a row at the entry stage. It has its OWN carrier in `PROPERTY_CARRIERS` (over
     `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property.

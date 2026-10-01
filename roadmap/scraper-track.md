@@ -5,6 +5,31 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### The sighting diff lives once — `portal_runner.reconcile_sightings` (2026-10-01, done)
+- **Moved:** the index-walk diff (clamp → `index_summary_native` → touch → `classify_index_sighting`
+  → enqueue) existed 11 times (8 crawler walk tails, sreality's `enqueue_only` block, both bespoke
+  probes); every one is now a `reconcile_sightings` call. The copied seams (`connect_index`,
+  `connect_drain`, `make_client`, `active_count`) and, after item 1, the AST-identical
+  `write_details` / `mark_gone` / `record_failure` sit on `PortalDefaults`; `_load_config` /
+  `_configure_logging` became `portal_runner.load_config` / `configure_logging`;
+  `claimable_count` ×9 + the worker's copy became `db.claimable_counts`. The never-read
+  `supports_complete_walk` attribute left the Protocol (the column stays: posture).
+- **Touch-all:** every sighted row we hold is touched whatever its index price (rule #4's wording,
+  rule #3's self-heal). bezrealitky, ceskereality, idnes, maxima, mmreality, realitymix, remax and
+  both probes used to touch unchanged rows only; bazos + the sreality walk already touched all
+  (sreality's lookup moves to `index_summary_native` / `touch_listings_by_id`; nomination keeps
+  `seen_key="sreality_id"`).
+- **Drift closed:** D2 (`price_change_min_pct` now honoured on bazos + sreality), D3 (the index-price
+  clamp now applies on ceskereality + realitymix); the worker's sreality lanes now honour
+  `shared_rate_limiter` (`portal_factory` dropped it). Log lines: ENQUEUE has one shape (logger
+  `scraper.portal_runner`); bazos/sreality ENQUEUE and the two `PROBE page` lines changed shape.
+- **Rails:** `test_no_portal_adapter_diffs_its_own_sightings` (`tests/scraper/test_portal.py`) and
+  `tests/scraper/test_walk_politeness_census.py` (each portal built with its own limits; walk /
+  probe / drain pace with them; the diff makes no HTTP request; every walk client gets the limiter).
+- **Next:** C2-2 delete sreality's dormant `_run_full` + `scrape.yml` (and the rail exemption);
+  C2-5 maxima/remax negative agenda cache; C2-3 uniform `Portal(config)` constructor (drops the
+  two `portal_factory` branches); C2-4 sreality per-page deadline.
+
 ### `scraper/db.py` still carries policy and a dead delist sweep (2026-10-01, owed)
 - **Owed:** presence-verified delisting (2026-09-07) left the absence sweep in `scraper/db.py` with
   no production caller — `mark_inactive`, `mark_inactive_native`, `mark_inactive_agenda`,
@@ -21,18 +46,16 @@ Independent of the analytical, UI, and map tracks.
   and the Gate-2 flag read — move each out when its area is next touched. (The broker-fingerprint
   diff and the singleton rollup with its lazy recompute import left with the one-writer chokepoint, below.)
 
-### Rule #21: hoist the shared walk tail + drain hooks into `portal_runner` (owed, 2026-10-01)
+### Rule #21: fold the shared-code portal-name branches (owed, 2026-10-01)
 - **Owed (rule #21 audit):** the framework is shared at the runner, not below it.
-  The index-walk tail (`index_summary(_native)` → `classify_index_sighting` →
-  `touch_listings(_by_id)` → `enqueue_detail` → `walk_reached_end`) is copied into all nine
-  adapters' `walk_category`; the drain hooks (`write_details` / `record_failure` / `mark_gone`,
-  plus `_configure_logging` / `_load_config`) are AST-identical in at least 7 of the 8 crawler
-  `*_main.py`; six portal-name branches sit in shared code (`db.detail_ref`, the two
+  ~~The index-walk tail and the identical drain hooks~~ (hoisted 2026-10-01, entry above; each
+  `walk_category` still assembles its own `walk_reached_end`, deliberately). Still owed: six
+  portal-name branches sit in shared code (`db.detail_ref`, the two
   `CASE WHEN %(source)s = 'sreality'` queue fills, `portal_factory.build_portal`'s bazos +
   sreality cases, `realtime_worker`'s `k != "bazos"`); and `scraper/main.py` (sreality's
-  module) owns the cross-portal `_run_image_downloads`. Next: hoist the walk tail + drain hooks
-  into `portal_runner` while pacing stays per-portal (client + `PortalLimits`), and fold each
-  branch into a `Portal` seam or config attribute. Inventory: `docs/architecture.md` § rule 21.
+  module) owns the cross-portal `_run_image_downloads`. Next: fold each branch into a `Portal`
+  seam or config attribute while pacing stays per-portal (client + `PortalLimits`).
+  Inventory: `docs/architecture.md` § rule 21.
 
 ### Rule #2: one snapshot implementation — one listing-write chokepoint (2026-10-01, done)
 - **Was owed:** the hash-and-append logic existed twice (`db.upsert_listing` row-at-a-time,
