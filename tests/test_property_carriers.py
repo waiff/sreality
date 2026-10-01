@@ -41,14 +41,23 @@ def _n(sql: str) -> str:
 
 # --- the census ---------------------------------------------------------------------------
 
-_REF = r"references\s+(?:public\.)?properties\s*\(\s*id\s*\)"
-_CREATE = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?([\w.]+)\s*\((.*)\)\s*$",
-                     re.S | re.I)
-_COLUMN_FK = re.compile(r"^\s*(\w+)\s+[^,]*?" + _REF, re.I | re.M)
+_REF = r"references\s+(?:public\.)?properties\b(?:\s*\(\s*id\s*\))?"
+_REFERS = re.compile(_REF, re.I)
+_CREATE = re.compile(
+    r"create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?([\w.]+)\s*\((.*)\)\s*$",
+    re.S | re.I)
 _ALTER = re.compile(r"alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([\w.]+)\s+(.*)$",
                     re.S | re.I)
-_ADD_FK = re.compile(r"add\s+column\s+(?:if\s+not\s+exists\s+)?(\w+)\s+[^,]*?" + _REF, re.I)
-_DROP_COLUMN = re.compile(r"drop\s+column\s+(?:if\s+exists\s+)?(\w+)", re.I)
+# A table constraint, in CREATE TABLE or after ALTER ... ADD: one column only (a composite key
+# is not read, so it fails the census below rather than passing it).
+_TABLE_FK = re.compile(r"(?:constraint\s+\w+\s+)?foreign\s+key\s*\(\s*(\w+)\s*\)\s*" + _REF,
+                       re.I)
+_COLUMN_FK = re.compile(
+    r"(?!(?:constraint|foreign|primary|unique|check|exclude|like)\b)(\w+)\s+.*?" + _REF,
+    re.I | re.S)
+_ADD = re.compile(r"add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?(.*)$", re.I | re.S)
+_DROP_COLUMN = re.compile(r"drop\s+(?:column\s+)?(?:if\s+exists\s+)?(?!constraint\b)(\w+)",
+                          re.I)
 _DROP_TABLE = re.compile(
     r"drop\s+table\s+(?:if\s+exists\s+)?([\w.,\s]+?)(?:\s+cascade|\s+restrict)?\s*$", re.I | re.S)
 
@@ -57,29 +66,69 @@ def _table(name: str) -> str:
     return name.lower().removeprefix("public.")
 
 
+def _elements(body: str) -> list[str]:
+    """A CREATE TABLE body or an ALTER action list, split at its top-level commas (a type,
+    default or key list holds its own)."""
+    out, depth, quoted, start = [], 0, False, 0
+    for i, ch in enumerate(body):
+        if ch == "'":
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(body[start:i].strip())
+            start = i + 1
+    out.append(body[start:].strip())
+    return out
+
+
+def _fk_column(element: str) -> str | None:
+    """The column a column definition or a table constraint points at `properties`, if any."""
+    if m := _TABLE_FK.match(element) or _COLUMN_FK.match(element):
+        return m.group(1).lower()
+    return None
+
+
 def foreign_keys_to_properties(root: Path = _MIGRATIONS) -> dict[tuple[str, str], str]:
     """(table, column) -> the migration that added it, for every column still referencing
-    `properties(id)` after replaying `migrations/*.sql` in order (510 skipped, as the replay
-    does: migrations.yml)."""
+    `properties` after replaying `migrations/*.sql` in order (510 skipped, as the replay does:
+    migrations.yml). A reference it cannot attribute to one column raises, naming the
+    migration, so a shape the parser does not model fails the census instead of passing it."""
     fks: dict[tuple[str, str], str] = {}
+    unread: list[str] = []
     for path in sorted(root.glob("*.sql")):
         if path.name.startswith("510_"):
             continue
         for statement in re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).split(";"):
             s = statement.strip()
             if m := _CREATE.match(s):
-                for col in _COLUMN_FK.findall(m.group(2)):
-                    fks[(_table(m.group(1)), col.lower())] = path.name
+                table, elements = _table(m.group(1)), _elements(m.group(2))
             elif m := _ALTER.match(s):
-                table = _table(m.group(1))
-                for col in _ADD_FK.findall(m.group(2)):
-                    fks[(table, col.lower())] = path.name
-                for col in _DROP_COLUMN.findall(m.group(2)):
-                    fks.pop((table, col.lower()), None)
+                table, elements = _table(m.group(1)), []
+                for action in _elements(m.group(2)):
+                    if d := _DROP_COLUMN.match(action):
+                        fks.pop((table, d.group(1).lower()), None)
+                    elif a := _ADD.match(action):
+                        elements.append(a.group(1))
             elif m := _DROP_TABLE.match(s):
                 for dropped in (_table(t.strip()) for t in m.group(1).split(",")):
                     for key in [k for k in fks if k[0] == dropped]:
                         del fks[key]
+                continue
+            else:
+                elements, table = [], ""
+            found = [c for c in map(_fk_column, elements) if c]
+            for col in found:
+                fks[(table, col)] = path.name
+            if len(_REFERS.findall(s)) > len(found):
+                unread.append(f"{path.name}: {' '.join(s.split())[:120]}")
+    if unread:
+        raise ValueError("the census cannot read these references to properties; teach "
+                         "foreign_keys_to_properties the shape:\n  " + "\n  ".join(unread))
     return fks
 
 
@@ -105,6 +154,43 @@ def test_the_census_sees_a_new_reference_and_a_dropped_table(tmp_path):
     assert foreign_keys_to_properties(tmp_path) == {("watch_list", "property_id"): "001_a.sql",
                                             ("listings", "twin_id"): "001_a.sql"}
 
+
+
+@pytest.mark.parametrize("sql, column", [
+    pytest.param("create table w (id bigint, property_id bigint references properties);",
+                 "property_id", id="references-without-(id)"),
+    pytest.param("alter table w add property_id bigint references public.properties(id);",
+                 "property_id", id="alter-add-without-COLUMN"),
+    pytest.param("alter table w add constraint w_fk foreign key (property_id) "
+                 "references properties(id) on delete cascade;",
+                 "property_id", id="alter-add-constraint-foreign-key"),
+    pytest.param("alter table w add foreign key (twin_id) references properties;",
+                 "twin_id", id="alter-add-unnamed-foreign-key"),
+    pytest.param("create table w (id bigint, twin_id bigint,\n"
+                 "  constraint w_fk foreign key (twin_id) references properties (id));",
+                 "twin_id", id="create-table-constraint-one-line"),
+    pytest.param("create table w (\n  id bigint,\n  twin_id bigint not null,\n"
+                 "  constraint w_fk\n    foreign key (twin_id)\n    references properties(id)\n);",
+                 "twin_id", id="create-table-constraint-multi-line"),
+    pytest.param("create table w (id bigint, price numeric(12, 2), twin_id bigint,\n"
+                 "  foreign key (twin_id) references properties);",
+                 "twin_id", id="create-table-unnamed-foreign-key"),
+])
+def test_the_census_reads_every_foreign_key_shape(tmp_path, sql, column):
+    (tmp_path / "001_a.sql").write_text(sql)
+    assert foreign_keys_to_properties(tmp_path) == {("w", column): "001_a.sql"}
+
+
+@pytest.mark.parametrize("sql", [
+    pytest.param("alter table w add constraint w_fk foreign key (account_id, property_id) "
+                 "references properties (account_id, id);", id="composite-key"),
+    pytest.param("do $$ begin alter table w add column property_id bigint "
+                 "references properties(id); end $$;", id="inside-a-do-block"),
+])
+def test_a_reference_the_census_cannot_read_fails_it(tmp_path, sql):
+    (tmp_path / "001_a.sql").write_text(sql)
+    with pytest.raises(ValueError, match="001_a.sql"):
+        foreign_keys_to_properties(tmp_path)
 
 # --- the list -----------------------------------------------------------------------------
 
