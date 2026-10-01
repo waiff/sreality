@@ -172,3 +172,19 @@ def test_parse_sreality_url_invalid_url_raises_before_fetch() -> None:
             conn=conn,
         )
     assert client.calls == []
+
+
+def test_parse_sreality_url_persists_through_the_one_writer(monkeypatch) -> None:
+    """persist=True writes the fetched detail via listing_write (rule 2), one write, keyed on
+    the listing's own id — and the spec's lat/lon assigned afterwards never reach it."""
+    calls: list[list[Any]] = []
+    monkeypatch.setattr(url_parser.listing_write, "write_listings",
+                        lambda _c, writes: calls.append(list(writes)) or [])
+    raw = _load_raw()
+    res = url_parser.parse_sreality_url(
+        "https://www.sreality.cz/detail/x/3292504140",
+        client=_StubClient(raw=raw), conn=_FakeConn(), persist=True,
+    )
+    [[w]] = calls
+    assert (w.source, w.source_id_native) == ("sreality", str(res["sreality_id"]))
+    assert "lat" in res["spec"] and "lat" not in w.row

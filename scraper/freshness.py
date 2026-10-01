@@ -2,12 +2,15 @@
 
 Looks up the current snapshot, refetches the listing from sreality,
 classifies the outcome, and writes an audit row to
-listing_freshness_checks. On 'updated' the new snapshot is written via
-db.upsert_listing; on 'gone' the listing is flipped to is_active=false.
+listing_freshness_checks. On 'updated' the payload is written through
+`listing_write.write_listings`, which, as any successful detail fetch, bumps
+`last_seen_at` (rule 4); the `unchanged` arm writes nothing and its signal is
+`listing_freshness_checks.checked_at`. On 'gone' the listing is flipped to
+is_active=false.
 
-Does NOT bump listings.last_seen_at. The cron index walk remains the
-sole driver of last_seen_at (architectural rule #4); a freshness check
-is a separate signal recorded in listing_freshness_checks.
+Residual race: a concurrent drain can write the same content between the
+pre-check and the write, so the writer reports `unchanged` while this check
+reports `updated`. Cosmetic (the audit row only), and possible before too.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import requests
 
-from scraper import db, hashing, parser
+from scraper import db, listing_write, parser
 from scraper.sreality_client import ListingGoneError, SrealityClient
 
 if TYPE_CHECKING:
@@ -52,7 +55,7 @@ def freshness_check(
     sreality_id: int,
 ) -> FreshnessResult:
     """Refetch one listing, classify, and audit. Never raises."""
-    prev = _fetch_prev_snapshot(conn, sreality_id)
+    prev = listing_write.latest_snapshot(conn, "sreality", str(sreality_id))
 
     try:
         raw = client.get_detail(sreality_id)
@@ -73,73 +76,34 @@ def freshness_check(
     try:
         row = parser.parse_listing(raw)
         images = parser.parse_images(raw)
-        new_hash = hashing.content_hash(raw)
+        w = listing_write.from_sreality(raw, row, images)
     except Exception as exc:
         return _record_fetch_error(conn, sreality_id, prev, exc)
 
-    if prev is not None and prev["content_hash"] == new_hash:
-        return _record_unchanged(conn, sreality_id, prev, new_hash)
+    if prev is not None and prev.content_hash == w.content_hash:
+        return _record_unchanged(conn, sreality_id, prev, w.content_hash)
 
     try:
-        db.upsert_listing(conn, row, raw, new_hash)
-        db.record_images(conn, sreality_id, images)
+        [o] = listing_write.write_listings(conn, [w])
     except Exception as exc:
         return _record_fetch_error(conn, sreality_id, prev, exc)
 
-    new_snap_id = _fetch_latest_snapshot_id(conn, sreality_id)
     what_changed = _diff_fields(prev, row, images)
     return _record_updated(
-        conn, sreality_id, prev, new_hash, new_snap_id, what_changed
+        conn, sreality_id, prev, o.content_hash, o.snapshot_id, what_changed
     )
 
 
-def _fetch_prev_snapshot(
-    conn: psycopg.Connection, sreality_id: int
-) -> dict[str, Any] | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, content_hash, raw_json
-            FROM listing_snapshots
-            WHERE sreality_id = %s
-            ORDER BY scraped_at DESC
-            LIMIT 1
-            """,
-            (sreality_id,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return {"id": row[0], "content_hash": row[1], "raw_json": row[2]}
-
-
-def _fetch_latest_snapshot_id(
-    conn: psycopg.Connection, sreality_id: int
-) -> int | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id FROM listing_snapshots
-            WHERE sreality_id = %s
-            ORDER BY scraped_at DESC
-            LIMIT 1
-            """,
-            (sreality_id,),
-        )
-        row = cur.fetchone()
-    return row[0] if row else None
-
-
 def _diff_fields(
-    prev: dict[str, Any] | None,
+    prev: listing_write.SnapshotRef | None,
     new_row: dict[str, Any],
     new_images: list[dict[str, Any]],
 ) -> list[str]:
     if prev is None:
         return []
     try:
-        prev_row = parser.parse_listing(prev["raw_json"])
-        prev_images = parser.parse_images(prev["raw_json"])
+        prev_row = parser.parse_listing(prev.raw_json)
+        prev_images = parser.parse_images(prev.raw_json)
     except Exception:
         return []
 
@@ -161,30 +125,30 @@ def _diff_fields(
 def _record_unchanged(
     conn: psycopg.Connection,
     sreality_id: int,
-    prev: dict[str, Any],
+    prev: listing_write.SnapshotRef,
     new_hash: str,
 ) -> FreshnessResult:
     _insert_log(
         conn, sreality_id, "unchanged",
-        prev_hash=prev["content_hash"], new_hash=new_hash, error=None,
+        prev_hash=prev.content_hash, new_hash=new_hash, error=None,
     )
     return _build_result(
         sreality_id, "unchanged",
-        prev_hash=prev["content_hash"], new_hash=new_hash,
+        prev_hash=prev.content_hash, new_hash=new_hash,
         what_changed=[], error=None,
-        snapshot_id=prev["id"],
+        snapshot_id=prev.id,
     )
 
 
 def _record_updated(
     conn: psycopg.Connection,
     sreality_id: int,
-    prev: dict[str, Any] | None,
+    prev: listing_write.SnapshotRef | None,
     new_hash: str,
     snapshot_id: int | None,
     what_changed: list[str],
 ) -> FreshnessResult:
-    prev_hash = prev["content_hash"] if prev else None
+    prev_hash = prev.content_hash if prev else None
     _insert_log(
         conn, sreality_id, "updated",
         prev_hash=prev_hash, new_hash=new_hash, error=None,
@@ -200,7 +164,7 @@ def _record_updated(
 def _record_gone(
     conn: psycopg.Connection,
     sreality_id: int,
-    prev: dict[str, Any] | None,
+    prev: listing_write.SnapshotRef | None,
 ) -> FreshnessResult:
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -208,7 +172,7 @@ def _record_gone(
             "WHERE sreality_id = %s",
             (sreality_id,),
         )
-    prev_hash = prev["content_hash"] if prev else None
+    prev_hash = prev.content_hash if prev else None
     _insert_log(
         conn, sreality_id, "gone",
         prev_hash=prev_hash, new_hash=None, error=None,
@@ -224,11 +188,11 @@ def _record_gone(
 def _record_fetch_error(
     conn: psycopg.Connection,
     sreality_id: int,
-    prev: dict[str, Any] | None,
+    prev: listing_write.SnapshotRef | None,
     exc: BaseException,
 ) -> FreshnessResult:
     msg = f"{type(exc).__name__}: {exc}"[:500]
-    prev_hash = prev["content_hash"] if prev else None
+    prev_hash = prev.content_hash if prev else None
     _insert_log(
         conn, sreality_id, "fetch_error",
         prev_hash=prev_hash, new_hash=None, error=msg,
