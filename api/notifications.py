@@ -4,7 +4,7 @@ Three responsibilities:
 
 1. CRUD over `notification_subscriptions` — the operator's saved
    filter specs. Each row holds a name + a `WatchdogFilterSpec` JSONB
-   blob mirroring (a subset of) `toolkit.ComparableFilters`.
+   blob whose field names are filter-registry ids (`toolkit/filter_registry.py`).
 
 2. The background matcher. A FastAPI lifespan-spawned asyncio task
    wakes every `notifications_matcher_interval_seconds`, walks listings
@@ -19,11 +19,12 @@ Three responsibilities:
    `BackgroundTasks` finish the work asynchronously so the UI returns
    immediately and polls for the yield to land.
 
-`WatchdogFilterSpec` is intentionally a separate, narrower model than
+`WatchdogFilterSpec` is intentionally a separate model from
 `ComparableFilters`: the watchdog matcher does NOT require a target
 lat/lng (district / disposition / price filters alone are useful), but
 DOES accept a spatial center + radius for "alert me about anything
-near X". `_build_match_clauses` renders it over `properties_public`
+near X", and it carries the city-quality filters rule 17 keeps off the
+cohort model. `_build_match_clauses` renders it over `properties_public`
 through the one filter compiler (`toolkit/filter_compiler.compile_filter_where`)
 that also renders every estimation cohort, so the matcher and the cohort
 tools cannot disagree on what a filter means.
