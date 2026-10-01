@@ -356,7 +356,6 @@ function SurvivorRedirect({ propertyId }: { propertyId: number }) {
     queryKey: mergedAdvertsKeys.origins(propertyId),
     queryFn: () => fetchPropertyOrigins(propertyId),
     enabled: isAdmin,
-    retry: false,
     staleTime: 60_000,
   });
   const survivor = q.data?.property_id;

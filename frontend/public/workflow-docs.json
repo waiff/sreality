@@ -48,40 +48,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
     },
     {
-      "filename": "apply_dirty_broker_listings_pk_swap.yml",
-      "name": "Apply dirty_broker_listings PK swap",
-      "description": "R2 Phase D — finalizes dirty_broker_listings's PK swap (sreality_id -> listing_id), deliberately deferred from PR #853's dual-write until the writer deploy was confirmed fully live (see scripts/apply_dirty_broker_listings_pk_swap.py). Must run BEFORE the matching writer-code deploy lands (ON CONFLICT (listing_id) needs the unique index this creates).",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "dry_run",
-          "description": "Report current state and exit",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "apply-dirty-broker-listings-pk-swap",
-      "cancelInProgress": false,
-      "timeoutMinutes": 30,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_dirty_broker_listings_pk_swap.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_dirty_broker_listings_pk_swap.yml"
-    },
-    {
       "filename": "apply_listings_pk_swap.yml",
       "name": "R2 GATE 1 — listings PK swap",
       "description": "The destructive step of the listing-identity refactor: swaps listings' PRIMARY KEY from sreality_id to the surrogate id (runbook § 6). Catalog-only — no table scan, no data rewrite — and reversible in place while zero NULL sreality_id rows exist (see scripts/apply_listings_pk_swap.py).",
@@ -777,7 +743,7 @@
     {
       "filename": "broker_resolution.yml",
       "name": "Broker resolution (incremental)",
-      "description": "Broker intelligence: the incremental identity resolver. Drains the dirty_broker_listings queue — new + content-changed listings enqueued at write time by the detail writers (rule #20), so there is no full-table straggler scan — attributes them to their per-source broker_identities, ensures their firms, attaches singleton canonical brokers, and recomputes ONLY the affected brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard matview (that is the daily full sweep's job). Source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate the broker tables at once.",
+      "description": "Broker intelligence: the THROTTLED BACKSTOP of the incremental identity resolver (Broker Unify W3). The primary host is the realtime worker's broker_maintenance lane; both call THE same driver, scripts.resolve_brokers.run_incremental_pass — drain the dirty_broker_listings queue until empty (new + content-changed listings enqueued at write time by the detail writers, plus delist/revive flips mirrored in by the property drain), attribute to per-source broker_identities, ensure firms, attach singleton canonical brokers, recompute ONLY the affected brokers' rollups + memberships (one merged statement), and republish the leaderboard matview CONCURRENTLY when its derived_artifacts stamp is older than ~an hour. So this cron matters exactly when the worker is down. O(changes); source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate at once.",
       "portal": null,
       "manual": true,
       "schedules": [
@@ -3769,7 +3735,7 @@
     {
       "filename": "resolve_brokers_full.yml",
       "name": "Broker resolution (full sweep + backfill)",
-      "description": "Broker intelligence: the daily full-sweep reconcile + the one-shot backfill. Re-attributes EVERY sreality listing from raw_json (keyset-batched so the raw_json scan never times out over the pooler), recomputes all rollups, rebuilds firm memberships + firm counts, runs the cross-source merge step, REFRESHes the leaderboard matview, and clears the dirty queue — the self-healing backstop for anything the */10 incremental pass missed. Runs after the property recompute (04:15) so property_id is fresh for property_count. mode=backfill is the same code path (the first population); dispatch it once after this lands on main. Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency group with the incremental job.",
+      "description": "Broker intelligence: the daily full-sweep RECONCILE + the one-shot backfill. Re-attributes a rotating lap of broker-bearing listings from raw_json (keyset-batched so the raw_json scan never times out over the pooler), recomputes ALL broker rollups + memberships in ONE merged statement (recompute_brokers(None), Broker Unify W3 — the old 9-window loop paid ~27 full index walks and 100+ min), rebuilds firm rollups, runs the cross-source merge step, generates candidates, and clears the dirty queue — the self-healing backstop for anything the incremental drain missed. It no longer publishes the leaderboard matview: that is the drain path's job (hourly-if-stale, worker lane + broker_resolution.yml), so serving freshness stopped depending on this job's length or its GH-cron-drifted start time. Nominally runs after the property recompute (04:15); in practice GH throttling drifts both into the same mid-morning window. mode=backfill is the same code path (the first population); dispatch it once after this lands on main. Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency group with the incremental job.",
       "portal": null,
       "manual": true,
       "schedules": [

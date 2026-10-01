@@ -169,7 +169,6 @@ function InspectorSection({ source }: { source: string }) {
         ? fetchInspector(submitted!)
         : fetchInspectorByNative(source, submitted!),
     enabled: submitted != null && submitted.trim() !== '',
-    retry: false,
   });
   const ins = inspector.data?.data ?? null;
   return (

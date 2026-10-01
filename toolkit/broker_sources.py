@@ -35,6 +35,7 @@ WITH src AS (
     {email_expr} AS email,
     {rating_expr} AS rating,
     {reviews_expr} AS reviews,
+    {agency_expr} AS agency,
     l.first_seen_at, l.last_seen_at
   FROM listings l
   WHERE l.source = '{source}' AND l.raw_json ? '{block}'
@@ -43,13 +44,13 @@ WITH src AS (
 ),
 agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
 latest AS (
-  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
   FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
 )
 INSERT INTO broker_identities
   (source, source_broker_id_native, display_name, email, rating, review_count,
-   first_seen_at, last_seen_at, attrs_computed_at)
-SELECT '{source}', a.uid, lt.name, lt.email, lt.rating, lt.reviews, a.fseen, a.lseen, now()
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT '{source}', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
 FROM agg a JOIN latest lt USING (uid)
 ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
   display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
@@ -60,6 +61,9 @@ ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
                       THEN EXCLUDED.rating ELSE broker_identities.rating END,
   review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
                       THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
   first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
   last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
   attrs_computed_at = now()
@@ -160,9 +164,13 @@ class BrokerSource:
     # blowing the statement timeout. sreality predates the fix and keeps the
     # inlined plan (NOT MATERIALIZED reproduces its direct join).
     materialize_chunk: bool = True
-    # The portal's agency/firm fields. Attribution never reads them (firms key off
+    # The portal's agency/firm fields. Firm LINKAGE never reads them (firms key off
     # email_domain); they exist so a firm swap re-enqueues the listing.
     firm_keys: tuple[str, ...] = ()
+    # A human-readable firm label worth CAPTURING onto broker_identities.agency_name
+    # (W4: _FIRM_DISPLAY_NAMES reads identities, not raw_json). Only idnes publishes
+    # one; the other portals' firm_keys are slugs/ids, not labels.
+    agency_label_key: str | None = None
 
     def fingerprint_keys(self) -> tuple[str, ...]:
         """The raw["broker"] keys whose change must re-enqueue the listing."""
@@ -176,6 +184,8 @@ class BrokerSource:
         cte_mode = "MATERIALIZED" if self.materialize_chunk else "NOT MATERIALIZED"
         out = [_IDENTITIES_TEMPLATE.format(
             name_key=self.name_key,
+            agency_expr=(f"nullif(l.raw_json->'{self.block}'->>'{self.agency_label_key}', '')"
+                         if self.agency_label_key else "NULL::text"),
             email_expr=(f"lower(nullif(l.raw_json->'{self.block}'->>'{self.email_key}', ''))"
                         if self.email_key else "NULL::text"),
             rating_expr=(f"nullif(l.raw_json->'{self.block}'->>'{self.rating_key}', '')::numeric"
@@ -228,6 +238,7 @@ BROKER_SOURCES: tuple[BrokerSource, ...] = (
     BrokerSource(
         source="idnes", block="broker", id_key="account_oid", name_key="name",
         email_key="email", phone_key="phone", firm_keys=("agency_name",),
+        agency_label_key="agency_name",
     ),
     # PHONE-ONLY: the site hides the broker email behind a form, so no email ->
     # no email_domain -> no firm linkage (an accepted gap).

@@ -45,7 +45,25 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS = _ROOT / "migrations"
 
-_FN_MIGRATION = _MIGRATIONS / "469_broker_leaderboard_subtype_filter.sql"
+def _latest_migration_defining(fn: str) -> Path:
+    """The HIGHEST-numbered migration that CREATE OR REPLACEs `fn` — i.e. the live
+    definition. This file used to pin migration 469 by name while migration 508 had
+    already superseded the body: the offline contract was validating a dead file, and
+    nothing checked the definition production actually runs (found in the 2026-09-30
+    Brokers-outage investigation). Resolving dynamically keeps the contract on the
+    live body without an edit here on every redefinition."""
+    pattern = re.compile(
+        rf"create\s+or\s+replace\s+function\s+(?:public\.)?{fn}\s*\(", re.IGNORECASE
+    )
+    hits = [
+        p for p in _MIGRATIONS.glob("*.sql")
+        if pattern.search(_strip_comments(p.read_text()))
+    ]
+    assert hits, f"no migration defines {fn}"
+    return max(hits, key=lambda p: int(re.match(r"(\d+)", p.name).group(1)))
+
+
+_FN_MIGRATION = _latest_migration_defining("broker_leaderboard")
 _OUTREACH = _ROOT / "api" / "outreach.py"
 
 
@@ -405,20 +423,38 @@ def test_combined_arms_are_gated_by_complementary_live_filter_conditions():
     )
 
 
-def test_every_fast_branch_arm_carries_the_full_fast_gate():
-    """Each of the four matview arms repeats the WHOLE gate. Missing the subtype half on
-    any one arm would let a subtype-only call fall through to the matview — which cannot
-    express subtype at all, so it would silently answer with UNFILTERED counts.
+def test_the_fast_branch_is_one_exact_cell_arm_carrying_the_full_gate():
+    """W4 collapsed the four per-level UNION ALL arms into ONE arm over exact cells:
+    the geo shapes are disjuncts of a single WHERE, the category filters resolve to a
+    cell (`coalesce(p_category_x, '*')` — the grouping-set rollup, computed exactly,
+    never summed), and nested chips are suppressed via admin_boundaries. A second
+    matview read appearing here means someone reintroduced a summing arm.
 
-    RED by: leaving `and p_subtypes is null` off any arm (or hoisting the gate into a CTE,
-    which would also defeat the plan-time pruning the whole design rests on).
+    RED by: adding another `from broker_region_type_stats` read, dropping the subtype
+    half of the gate (a subtype-only call would fall through to the matview, which
+    cannot express subtype, and answer with silently UNFILTERED counts), or replacing
+    an exact cell match with a `p_x is null or ...` range that sums cells again.
     """
     fast, _ = _branches(_fn_body())
-    arms = fast.lower().count("from broker_region_type_stats s")
-    gates = fast.lower().count(f"where {_FAST_GATE}")
-    assert arms == 4, f"expected the 4 geo arms, found {arms}"
+    low = fast.lower()
+    arms = low.count("from broker_region_type_stats s")
+    gates = low.count(f"where {_FAST_GATE}")
+    assert arms == 1, f"expected ONE exact-cell matview arm (W4), found {arms}"
     assert gates == arms, (
-        f"{arms} matview arms but only {gates} carry the full fast gate `{_FAST_GATE}`"
+        f"{arms} matview arm but {gates} full fast gate(s) `{_FAST_GATE}`"
+    )
+    assert "s.category_main = coalesce(p_category_main, '*')" in low, (
+        "the category_main filter must resolve to an exact cell ('*' rollup when unset)"
+    )
+    assert "s.category_type = coalesce(p_category_type, '*')" in low, (
+        "the category_type filter must resolve to an exact cell ('*' rollup when unset)"
+    )
+    assert "s.geo_level = 'cz'" in low, (
+        "the no-geo shape must read the national 'cz' cells, never sum regions"
+    )
+    assert low.count("not exists") == 2, (
+        "the okres and obec disjuncts must each suppress chips nested under a selected "
+        "parent (count-once, operator ruling 2026-09-30)"
     )
 
 

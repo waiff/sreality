@@ -36,7 +36,7 @@ allowlist from the same registry, so an onboarding can no longer half-land.
 Ranking is CZ-scoped (migration 396): `brokers.cz_*` counts only listings that
 resolved to a Czech obec, so the two idnes syndication feeds advertising ~26k
 Spanish/Croatian properties stay fully attributed but stop heading the leaderboard.
-Nothing is filtered out of the corpus — `_DOMESTIC` is a rollup predicate.
+Nothing is filtered out of the corpus; national/domestic cells live in the matview (W4).
 
 Identity keystone (toolkit.broker_resolver, rewritten 2026-08-20): merges are
 NAME-GATED and portal-agnostic — two identities unify when their name keys match
@@ -84,13 +84,11 @@ _AUTO_MERGE_ENABLED_KEY = "broker_auto_merge_enabled"
 _BROKER_SOURCES = BROKER_SOURCE_NAMES
 _ATTRIBUTION_SQL = attribution_statements()
 
-# Domestic = the listing resolved to a Czech obec. The resolver only ever writes a
-# RÚIAN obec, so a foreign pin lands outside every CZ boundary and `listing_location`
-# carries no obec for it (migration 501; the legacy geom-derived hierarchy went in
-# 508). Matches the split docs/design/media-integrity-architecture.md §Q4 already
-# committed the platform to, and the guard broker_region_type_stats applies at
-# refresh time — one definition of "foreign", not three.
-_DOMESTIC = "ll.obec_kod IS NOT NULL"
+# Domestic = the listing resolved to a Czech obec (a foreign pin lands outside
+# every CZ boundary, so listing_location carries no obec for it — migration
+# 501). Since W4 the predicate lives in EXACTLY one place, the
+# broker_region_type_stats matview (migration 580), whose 'cz' cells are the
+# ONE book for national counts — the rollup here stopped computing its own.
 
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
@@ -178,8 +176,25 @@ FROM (
 WHERE c.id = bi.id
 """
 
-_BROKER_ROLLUP = """
-WITH ident AS (
+# The ONE broker recompute (Broker Unify W3): the old _BROKER_ROLLUP +
+# _MEMBERSHIP_RECOMPUTE pair walked the linked-listings corpus separately —
+# and the full sweep ran the pair once per brokers.id window, so a daily
+# reconcile paid ~27 full walks of listings_broker_identity_idx (106 of the
+# 152 sweep minutes on 2026-09-30; the dense windows' Merge Join plans each
+# walked the WHOLE index). One statement, one MATERIALIZED base scan: the
+# listing-grain projection is read once and every aggregate — counts, primary
+# firm, memberships upsert AND prune — derives from it via data-modifying
+# CTEs (which run exactly once whether or not referenced).
+_RECOMPUTE_BROKERS = """
+WITH base AS MATERIALIZED (
+  SELECT bi.broker_id, l.broker_firm_id AS firm_id,
+         coalesce(l.property_id, -l.id) AS pkey,
+         (l.is_active AND l.last_seen_at > now() - interval '7 days') AS live,
+         l.first_seen_at, l.last_seen_at
+  FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
+  WHERE bi.broker_id IS NOT NULL {bscope}
+),
+ident AS (
   SELECT broker_id, source, display_name, email, last_seen_at
   FROM broker_identities WHERE broker_id IS NOT NULL {bscope}
 ),
@@ -191,35 +206,44 @@ ident_agg AS (
   SELECT broker_id, count(*) AS sc, count(DISTINCT source) AS dsc FROM ident GROUP BY broker_id
 ),
 lst AS (
-  SELECT bi.broker_id,
+  SELECT broker_id,
     count(*) AS lc,
-    count(DISTINCT coalesce(l.property_id, -l.id)) AS pc,
-    count(*) FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS alc,
-    count(DISTINCT coalesce(l.property_id, -l.id))
-      FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS apc,
-    count(*) FILTER (WHERE {domestic}) AS cz_lc,
-    count(DISTINCT coalesce(l.property_id, -l.id)) FILTER (WHERE {domestic}) AS cz_pc,
-    count(*) FILTER (WHERE {domestic}
-      AND l.is_active AND l.last_seen_at > now() - interval '7 days') AS cz_alc,
-    count(DISTINCT coalesce(l.property_id, -l.id)) FILTER (WHERE {domestic}
-      AND l.is_active AND l.last_seen_at > now() - interval '7 days') AS cz_apc,
-    min(l.first_seen_at) AS fseen, max(l.last_seen_at) AS lseen
-  FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  LEFT JOIN listing_location ll ON ll.listing_id = l.id
-  WHERE bi.broker_id IS NOT NULL {bscope}
-  GROUP BY bi.broker_id
+    count(DISTINCT pkey) AS pc,
+    count(*) FILTER (WHERE live) AS alc,
+    count(DISTINCT pkey) FILTER (WHERE live) AS apc,
+    min(first_seen_at) AS fseen, max(last_seen_at) AS lseen
+  FROM base GROUP BY broker_id
 ),
 pfirm AS (
-  SELECT DISTINCT ON (bi.broker_id) bi.broker_id, l.broker_firm_id AS firm_id
-  FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  WHERE bi.broker_id IS NOT NULL AND l.broker_firm_id IS NOT NULL {bscope}
-  ORDER BY bi.broker_id, l.last_seen_at DESC NULLS LAST
+  SELECT DISTINCT ON (broker_id) broker_id, firm_id
+  FROM base WHERE firm_id IS NOT NULL
+  ORDER BY broker_id, last_seen_at DESC NULLS LAST
 ),
 pphone AS (
   SELECT DISTINCT ON (bi.broker_id) bi.broker_id, ct.value
   FROM broker_identity_contacts ct JOIN broker_identities bi ON bi.id = ct.broker_identity_id
   WHERE ct.kind = 'phone' AND bi.broker_id IS NOT NULL {bscope}
   ORDER BY bi.broker_id, ct.last_seen_at DESC NULLS LAST
+),
+magg AS (
+  SELECT broker_id, firm_id,
+         min(first_seen_at) AS fseen, max(last_seen_at) AS lseen, count(*) AS lc
+  FROM base WHERE firm_id IS NOT NULL
+  GROUP BY broker_id, firm_id
+),
+mup AS (
+  INSERT INTO broker_firm_memberships (broker_id, firm_id, first_seen_at, last_seen_at, listing_count)
+  SELECT broker_id, firm_id, fseen, lseen, lc FROM magg
+  ON CONFLICT (broker_id, firm_id) DO UPDATE SET
+    first_seen_at = least(broker_firm_memberships.first_seen_at, EXCLUDED.first_seen_at),
+    last_seen_at = greatest(broker_firm_memberships.last_seen_at, EXCLUDED.last_seen_at),
+    listing_count = EXCLUDED.listing_count
+  RETURNING 1
+),
+mdel AS (
+  DELETE FROM broker_firm_memberships m
+  WHERE {mscope} NOT EXISTS (SELECT 1 FROM magg a WHERE a.broker_id = m.broker_id AND a.firm_id = m.firm_id)
+  RETURNING 1
 )
 UPDATE brokers b SET
   display_name = il.display_name,
@@ -232,10 +256,6 @@ UPDATE brokers b SET
   property_count = coalesce(ls.pc, 0),
   active_listing_count = coalesce(ls.alc, 0),
   active_property_count = coalesce(ls.apc, 0),
-  cz_listing_count = coalesce(ls.cz_lc, 0),
-  cz_property_count = coalesce(ls.cz_pc, 0),
-  cz_active_listing_count = coalesce(ls.cz_alc, 0),
-  cz_active_property_count = coalesce(ls.cz_apc, 0),
   first_seen_at = coalesce(ls.fseen, b.first_seen_at),
   last_seen_at = coalesce(ls.lseen, b.last_seen_at),
   stats_computed_at = now()
@@ -247,31 +267,25 @@ LEFT JOIN pphone pp ON pp.broker_id = il.broker_id
 WHERE b.id = il.broker_id AND b.status = 'active'
 """
 
-# Bound once, here, so every caller — including api.broker_review's per-broker
-# recompute after a manual merge/unmerge — writes the cz_* columns from the SAME
-# predicate without threading it through .format(). {bscope} stays open.
-_BROKER_ROLLUP = _BROKER_ROLLUP.replace("{domestic}", _DOMESTIC)
 
-_MEMBERSHIP_RECOMPUTE = """
-WITH agg AS (
-  SELECT bi.broker_id, l.broker_firm_id AS firm_id,
-         min(l.first_seen_at) AS fseen, max(l.last_seen_at) AS lseen, count(*) AS lc
-  FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  WHERE bi.broker_id IS NOT NULL AND l.broker_firm_id IS NOT NULL {bscope}
-  GROUP BY bi.broker_id, l.broker_firm_id
-),
-up AS (
-  INSERT INTO broker_firm_memberships (broker_id, firm_id, first_seen_at, last_seen_at, listing_count)
-  SELECT broker_id, firm_id, fseen, lseen, lc FROM agg
-  ON CONFLICT (broker_id, firm_id) DO UPDATE SET
-    first_seen_at = least(broker_firm_memberships.first_seen_at, EXCLUDED.first_seen_at),
-    last_seen_at = greatest(broker_firm_memberships.last_seen_at, EXCLUDED.last_seen_at),
-    listing_count = EXCLUDED.listing_count
-  RETURNING 1
-)
-DELETE FROM broker_firm_memberships m
-WHERE {mscope} NOT EXISTS (SELECT 1 FROM agg a WHERE a.broker_id = m.broker_id AND a.firm_id = m.firm_id)
-"""
+
+def recompute_brokers(cur: Any, broker_ids: list[int] | None) -> None:
+    """Recompute brokers.* rollups + firm memberships for `broker_ids`, or for
+    EVERY active broker when None (one corpus walk — the daily reconcile's
+    shape). The one orchestration shared by the full sweep, the incremental
+    drain and api.broker_review; callers own the transaction and any
+    statement_timeout lift."""
+    if broker_ids is None:
+        cur.execute(_RECOMPUTE_BROKERS.format(bscope="", mscope=""))
+        return
+    bids = sorted({int(b) for b in broker_ids})
+    if not bids:
+        return
+    cur.execute(
+        _RECOMPUTE_BROKERS.format(
+            bscope="AND broker_id = ANY(%(bids)s)",
+            mscope="m.broker_id = ANY(%(bids)s) AND"),
+        {"bids": bids})
 
 _FIRM_ROLLUP = """
 WITH mc AS (
@@ -299,16 +313,20 @@ WHERE f.id = ff.id
 # s.r.o."); franchise/aggregator domains (re-max.cz: 95 offices, century21.cz)
 # have no dominant label, so they stay NULL and the UI falls back to the domain
 # rather than mislabel the brand as one office.
+# W4: the label is read off broker_identities.agency_name — captured once at
+# attribution (idnes is the only portal publishing one; migration 580 backfilled
+# the column) and weighted by each identity's listing_count — instead of
+# re-reading every idnes raw_json from TOAST on every sweep (mean 200 s,
+# max 858 s measured). Same 60%-majority rule, same franchise guard.
 _FIRM_DISPLAY_NAMES = """
 WITH agency AS (
   SELECT bi.email_domain AS domain,
-         l.raw_json->'broker'->>'agency_name' AS name,
-         count(*) AS n
-  FROM listings l
-  JOIN broker_identities bi ON bi.id = l.broker_identity_id
-  WHERE l.source = 'idnes' AND bi.email_domain IS NOT NULL
-    AND coalesce(l.raw_json->'broker'->>'agency_name', '') <> ''
-  GROUP BY bi.email_domain, l.raw_json->'broker'->>'agency_name'
+         bi.agency_name AS name,
+         sum(greatest(bi.listing_count, 1)) AS n
+  FROM broker_identities bi
+  WHERE bi.source = 'idnes' AND bi.email_domain IS NOT NULL
+    AND coalesce(bi.agency_name, '') <> ''
+  GROUP BY bi.email_domain, bi.agency_name
 ),
 ranked AS (
   SELECT domain, name, n,
@@ -331,7 +349,7 @@ WHERE r.rk = 1 AND r.n::numeric / r.total >= 0.60
 # with the guard they served (a duplicated broker's own e-mail read as shared).
 #
 # firm_id: the firm behind the IDENTITY's own e-mail domain — deliberately not
-# coalesced with brokers.primary_firm_id. That column is not curated: _BROKER_ROLLUP
+# coalesced with brokers.primary_firm_id. That column is not curated: recompute_brokers
 # derives it DISTINCT ON (broker_id) ORDER BY last_seen_at, i.e. the firm of the
 # broker's most recent listing. Fed to path B it made the rarity test self-weakening
 # (merge two identities of one name at two firms and next sweep both report one
@@ -987,7 +1005,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     The merge unit is the broker, not the identity component, and the loser's WHOLE
     identity set moves — the same invariant api/broker_review.py::merge_brokers
     enforces. Retiring a broker while leaving it some identities would freeze their
-    rollups (_BROKER_ROLLUP only touches status='active'), hide them from the
+    rollups (recompute_brokers only touches status='active'), hide them from the
     dossier, and let the next sweep elect the merged_away broker as a survivor.
     Idempotent — a component already on one broker is skipped, so a re-run after a
     partial apply converges. Reversible via broker_merge_events, whose `reason`
@@ -1132,25 +1150,29 @@ def _affected(conn: Any, listing_ids: list[int]) -> list[int]:
         return [int(r[0]) for r in cur.fetchall()]
 
 
-def _max_id(conn: Any, table: str) -> int:
+# The leaderboard matview republishes from the DRAIN path (worker lane every
+# ~2 min + broker_resolution.yml as the throttled backstop), not from the daily
+# sweep — freshness stopped being coupled to a 1.5-3h job that GH cron drift
+# parks in working hours (Broker Unify W3). The derived_artifacts stamp is the
+# clock, so both hosts share one cadence with no new setting; the chokepoint
+# (migration 578) refreshes CONCURRENTLY (readers never block; measured 85 s),
+# stamps rows + duration in-DB, and skips (-1) when a refresh is in flight.
+_MATVIEW_REFRESH_AFTER = "55 minutes"
+
+
+def _maybe_refresh_matview(conn: Any) -> bool:
     with conn.cursor() as cur:
-        cur.execute(f"SELECT coalesce(max(id), 0) FROM {table}")
-        return int(cur.fetchone()[0])
-
-
-def _refresh_matview(conn: Any) -> None:
-    # Non-concurrent REFRESH inside a txn so SET LOCAL can lift the statement
-    # timeout — the matview aggregates the whole linked-listings corpus and
-    # CONCURRENTLY cannot run in a txn (so it can't get the raised timeout). A
-    # brief lock on a matview only the Brokers page reads, once per daily sweep,
-    # is the right tradeoff for reliability.
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
-        # Joins the refresh's own transaction, so the stamp commits if and only if the
-        # refresh did — this matview is otherwise unobservable (a non-concurrent REFRESH
-        # swaps the heap, zeroing pg_stat_user_tables).
-        db.stamp_derived_artifact(conn, "broker_region_type_stats")
+        cur.execute(
+            "SELECT last_succeeded_at IS NULL OR last_succeeded_at < now() - %s::interval "
+            "FROM derived_artifacts WHERE name = 'broker_region_type_stats'",
+            (_MATVIEW_REFRESH_AFTER,))
+        row = cur.fetchone()
+    if not row or not row[0]:
+        return False
+    rows = db.refresh_matview(
+        conn, "broker_region_type_stats", statement_timeout="0")
+    LOG.info("RESOLVE matview refreshed rows=%d", rows)
+    return True
 
 
 _CANDIDATE_BROKERS = """
@@ -1682,32 +1704,23 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto_merge: bool
             cur.execute(_IDENTITY_ROLLUP.format(extra=""))
 
     step(_identity_rollup, "resolve.identity_rollup", attempts=2)
-    # Broker rollup + membership: batched by brokers.id, which IS dense (~7 batches),
-    # so each batch commits independently (crash-safe) and the lock heartbeats on every
-    # batch ATTEMPT. The id-batch bounds MEMORY + lock granularity, NOT runtime: each batch
-    # still aggregates the cold listings corpus (the broker rollup joins listings ~3x
-    # for DISTINCT property/active counts), so a single batch's optimal-plan scan can
-    # legitimately exceed the 2-min pooler statement timeout once the corpus is large
-    # — that timeout is an app-query guardrail, wrong for this serialized once-daily
-    # reconcile. Lift it per batch, exactly as the firm rollup / matview / merge below
-    # already do; the job's real bounds are the advisory lock + the job timeout.
-    # (Shrinking the batch to dodge the 2-min wall would just move the wall — the cost
-    # is per-listing-read, not per-broker.)
-    def _broker_rollup_batch(c: Any, lo: int) -> None:
+
+    # Broker rollup + membership: ONE global statement (recompute_brokers, W3),
+    # like the identity rollup above — one MATERIALIZED walk of the linked
+    # corpus instead of the old per-brokers.id-window pair, whose dense windows
+    # each re-walked the whole listings_broker_identity_idx (~27 full walks,
+    # 106 of the 152 sweep minutes on 2026-09-30, and single 28–47-min
+    # heartbeat-less attempts against the 20-min lock staleness window — the
+    # 09-12 lock-loss abort). Timeout lifted for the same reason the identity
+    # rollup lifts it; the job's real bounds are the lock TTL + the job timeout,
+    # so if this statement ever nears _LOCK_STALE_MIN, split the WORK (scope the
+    # ids), never raise the TTL.
+    def _broker_rollup(c: Any) -> None:
         with c.transaction(), c.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = 0")
-            cur.execute(_BROKER_ROLLUP.format(
-                bscope="AND broker_id >= %(lo)s AND broker_id < %(hi)s"),
-                {"lo": lo, "hi": lo + batch_size})
-            cur.execute(_MEMBERSHIP_RECOMPUTE.format(
-                bscope="AND bi.broker_id >= %(lo)s AND bi.broker_id < %(hi)s",
-                mscope="m.broker_id >= %(lo)s AND m.broker_id < %(hi)s AND"),
-                {"lo": lo, "hi": lo + batch_size})
+            recompute_brokers(cur, None)
 
-    max_broker_id = step(lambda c: _max_id(c, "brokers"), "resolve.max_broker_id")
-    for lo in range(1, max_broker_id + 1, batch_size):
-        step(lambda c, lo=lo: _broker_rollup_batch(c, lo), "resolve.broker_rollup",
-             attempts=2)
+    step(_broker_rollup, "resolve.broker_rollup", attempts=2)
 
     # Global firm rollup aggregates the whole linked-listings corpus in one pass;
     # like the matview refresh, lift the statement timeout for this once-per-sweep
@@ -1721,7 +1734,6 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto_merge: bool
 
     step(_firm_rollup, "resolve.firm_rollup", attempts=2)
     LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
-    step(_refresh_matview, "resolve.matview", attempts=2)
     candidates = step(_generate_merge_candidates, "resolve.candidates", attempts=2)
     LOG.info("RESOLVE full merge candidates proposed=%d elapsed=%.1fs",
              candidates, time.monotonic() - t0)
@@ -1763,20 +1775,24 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
     with conn.cursor() as cur:
         cur.execute("SELECT now()")
         cutoff = cur.fetchone()[0]
-        cur.execute("INSERT INTO broker_resolution_runs (mode) VALUES ('incremental') RETURNING id")
-        run_id = int(cur.fetchone()[0])
         # Drain the work queue only. New + content-changed listings are enqueued
         # at write time by the detail writers (write_detail_batch / ingest_scraped_
-        # listing), so this is the complete set of listings whose broker block may
-        # need (re)attribution since the last pass. The claim is bounded by cutoff
-        # so a write mid-run survives to the next pass (dirty_properties, rule #20).
+        # listing) and the property drain mirrors delist/revive flips in (W3), so
+        # this is the complete set of listings whose broker numbers may need
+        # recomputing since the last pass. The claim is bounded by cutoff so a
+        # write mid-run survives to the next pass (dirty_properties, rule #20).
         cur.execute(_CLAIM_DIRTY, {"cutoff": cutoff, "limit": batch_size})
         claimed = {int(r[0]) for r in cur.fetchall()}
 
     if not claimed:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE broker_resolution_runs SET ended_at = now() WHERE id = %s", (run_id,))
+        # No ledger row for an empty pass: the worker lane calls this every
+        # couple of minutes, and broker_resolution_runs stays a record of passes
+        # that DID work, not a heartbeat table (worker_heartbeats owns that).
         return {"attributed": 0, "brokers": 0}, live()
+
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO broker_resolution_runs (mode) VALUES ('incremental') RETURNING id")
+        run_id = int(cur.fetchone()[0])
 
     # Everything below is idempotent (latest-wins upserts + scoped rollups) and the
     # claimed ids are held in PYTHON until the _DELETE_DIRTY at the end, so a replay
@@ -1800,9 +1816,7 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
             if bids:
                 cur.execute(_IDENTITY_ROLLUP.format(extra="AND broker_identity_id IN "
                             "(SELECT id FROM broker_identities WHERE broker_id = ANY(%(bids)s))"), {"bids": bids})
-                cur.execute(_BROKER_ROLLUP.format(bscope="AND broker_id = ANY(%(bids)s)"), {"bids": bids})
-                cur.execute(_MEMBERSHIP_RECOMPUTE.format(bscope="AND bi.broker_id = ANY(%(bids)s)",
-                            mscope="m.broker_id = ANY(%(bids)s) AND"), {"bids": bids})
+                recompute_brokers(cur, bids)
             cur.execute(_DELETE_DIRTY, {"ids": ids, "cutoff": cutoff})
             cur.execute(
                 "UPDATE broker_resolution_runs SET ended_at = now(), listings_attributed = %s, "
@@ -1812,6 +1826,44 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
 
     step(_rollups_and_finalize, "resolve.rollups")
     return {"attributed": len(ids), "brokers": len(bids)}, live()
+
+
+def run_incremental_pass(conn: Any, batch_size: int = 5000, *,
+                         reconnect: Callable[[], Any] | None = None) -> dict[str, Any]:
+    """THE incremental broker-maintenance driver (Broker Unify W3), shared by
+    broker_resolution.yml and the realtime worker's broker lane — mirrors
+    scripts.recompute_property_stats.run_incremental_pass. Skips cleanly when
+    another resolution run holds the lock, drains the dirty queue until empty
+    (not one slice per invocation — the one-slice shape left 2,300-row, 5 h+
+    backlogs between throttled GH runs), and finishes by republishing the
+    leaderboard matview when its registry stamp is older than
+    _MATVIEW_REFRESH_AFTER, so freshness rides whichever host is alive."""
+    if reconnect is None:
+        reconnect = db.connect
+    free, franchise, _auto_merge = _settings(conn)
+    holder = f"incremental-{uuid.uuid4()}"
+    if not _try_acquire_lock(conn, holder, "incremental"):
+        LOG.info("RESOLVE skip mode=incremental: lock held by another resolution run")
+        return {"skipped": True, "attributed": 0, "brokers": 0, "refreshed": False}
+    attributed = brokers = passes = 0
+    refreshed = False
+    try:
+        # Each inner pass claims up to batch_size ids at its own cutoff; a full
+        # claim means the queue may hold more. The cap is a runaway backstop
+        # (50 × 5,000 ids), far above any real backlog.
+        while True:
+            res, conn = _run_incremental(conn, free, franchise, batch_size,
+                                         holder, reconnect=reconnect)
+            attributed += res["attributed"]
+            brokers += res["brokers"]
+            passes += 1
+            if res["attributed"] < batch_size or passes >= 50:
+                break
+        refreshed = _maybe_refresh_matview(conn)
+    finally:
+        _release_lock(conn, holder, reconnect)
+    return {"skipped": False, "attributed": attributed, "brokers": brokers,
+            "passes": passes, "refreshed": refreshed}
 
 
 def main() -> int:
@@ -1856,33 +1908,38 @@ def main() -> int:
                      mode, len(free), len(franchise), auto_merge, dirty)
             return 0
 
-        # Pooler-safe mutual exclusion (migration 192). The incremental yields when the
-        # lock is held (its work is subsumed by whatever holds it); the full sweep waits,
-        # taking over only a stale (dead-holder) lock — it is the reconcile that must run.
-        holder = f"{mode}-{uuid.uuid4()}"
         if args.incremental:
-            if not _try_acquire_lock(conn, holder, mode):
-                LOG.info("RESOLVE skip mode=incremental: lock held by another resolution run")
-                return 0
-        elif not _acquire_lock_blocking(conn, holder, mode, started + _LOCK_WAIT_MAX_SECONDS):
+            # THE incremental driver (run_incremental_pass) owns the lock skip,
+            # the drain-until-empty loop and the stale-matview republish — the
+            # realtime worker's broker lane calls the same function, so this
+            # workflow entry is only its throttled GH backstop.
+            res = run_incremental_pass(conn, args.batch_size, reconnect=reconnect)
+            if not res.get("skipped"):
+                LOG.info(
+                    "RESOLVE incremental done attributed=%d brokers=%d passes=%d "
+                    "refreshed=%s elapsed=%.1fs",
+                    res["attributed"], res["brokers"], res.get("passes", 1),
+                    res.get("refreshed"), time.monotonic() - started)
+            return 0
+
+        # Pooler-safe mutual exclusion (migration 192). The full sweep waits,
+        # taking over only a stale (dead-holder) lock — it is the reconcile that
+        # must run (the incremental instead yields inside run_incremental_pass:
+        # its work is subsumed by whatever holds the lock).
+        holder = f"{mode}-{uuid.uuid4()}"
+        if not _acquire_lock_blocking(conn, holder, mode, started + _LOCK_WAIT_MAX_SECONDS):
             LOG.error("RESOLVE abort mode=full: could not acquire lock within %ds", _LOCK_WAIT_MAX_SECONDS)
             return 1
 
         try:
             # Rebind conn: a phase that rode out a pooler drop hands back a FRESH
             # connection, and the release below must run on the live one.
-            if args.incremental:
-                res, conn = _run_incremental(conn, free, franchise, args.batch_size,
-                                             holder, reconnect=reconnect)
-                LOG.info("RESOLVE incremental done attributed=%d brokers=%d elapsed=%.1fs",
-                         res["attributed"], res["brokers"], time.monotonic() - started)
-            else:
-                res, conn = _run_full(conn, free, franchise, auto_merge, args.batch_size,
-                                      deadline, holder, reconnect=reconnect)
-                LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d "
-                         "suppressed=%d elapsed=%.1fs",
-                         res["attached"], res["auto_merges"], res["queued"],
-                         res["suppressed"], time.monotonic() - started)
+            res, conn = _run_full(conn, free, franchise, auto_merge, args.batch_size,
+                                  deadline, holder, reconnect=reconnect)
+            LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d "
+                     "suppressed=%d elapsed=%.1fs",
+                     res["attached"], res["auto_merges"], res["queued"],
+                     res["suppressed"], time.monotonic() - started)
         finally:
             # `conn` is only rebound on a normal return, so on a raise it can be the
             # socket run_resilient already closed — hence the reconnect fallback.

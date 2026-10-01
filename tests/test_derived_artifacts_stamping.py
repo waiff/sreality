@@ -50,16 +50,30 @@ _SOURCE_TREES = ("api", "scraper", "toolkit", "scripts", "location_data", "migra
 # every name is verified somewhere. Keep this at zero entries if you possibly can.
 _DYNAMIC_STAMP_SITES = {
     "scripts/refresh_image_stats.py": (
-        "loops over the module-level _MVS tuple and stamps `mv`; every member of that "
-        "tuple is checked by test_the_image_stat_matview_tuple_is_registered below"
+        "loops over the module-level _MVS tuple through db.refresh_matview(conn, mv); "
+        "every member of that tuple is checked by "
+        "test_the_image_stat_matview_tuple_is_registered below, and the chokepoint "
+        "itself raises on an unregistered name"
+    ),
+    "migrations/578_matview_refresh_chokepoint.sql": (
+        "public.refresh_matview stamps its p_name parameter; the compensating check is "
+        "the function's own guard — it RAISEs before refreshing when p_name has no "
+        "derived_artifacts row (pinned offline by tests/test_matview_refresh_convention"
+        ".py), so a mistyped name can never stamp nothing silently"
     ),
 }
 
 # Python producers all pass the connection first, so the artifact name is argument two.
 # `def stamp_derived_artifact(conn: psycopg.Connection, name: str, ...)` does not match —
-# the annotation's `:` sits where this pattern requires a `,` — so the definition in
+# the annotation's `:` sits where this pattern requires a `,` — so a definition in
 # scraper/db.py is correctly not read as a call site.
 _PY_CALL = re.compile(r"stamp_derived_artifact\s*\(\s*conn\s*,\s*(?P<arg>[^,)]+)")
+
+# Since migration 578, Python matview producers publish through
+# scraper.db.refresh_matview(conn, name), and the STAMP happens inside the SQL
+# chokepoint. A refresh call is therefore stamp evidence for `name`, one level up —
+# same conn-first shape, same annotation-defeats-the-definition property.
+_PY_REFRESH_CALL = re.compile(r"refresh_matview\s*\(\s*conn\s*,\s*(?P<arg>[^,)]+)")
 
 # SQL call sites, in migration text and in `pg_proc.prosrc` alike. Anchored on `perform`
 # or `select` so that the CREATE FUNCTION signature, the COMMENT ON and the REVOKE in
@@ -162,20 +176,23 @@ def _repo_call_sites() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     dynamic: dict[str, list[str]] = {}
     for path in _source_files():
         text = path.read_text(encoding="utf-8")
-        if "stamp_derived_artifact" not in text:
+        if "stamp_derived_artifact" not in text and "refresh_matview" not in text:
             continue
         rel = path.relative_to(_REPO).as_posix()
         if rel in _RETIRED_MIGRATIONS:
             continue
         if path.suffix == ".sql":
             text = _drop_sql_comment_lines(text)
-        pattern = _SQL_CALL if path.suffix == ".sql" else _PY_CALL
-        for m in pattern.finditer(text):
-            arg = m.group("arg").strip()
-            if arg[:1] in {"'", '"'}:
-                literal.setdefault(rel, set()).add(arg.strip("'\""))
-            else:
-                dynamic.setdefault(rel, []).append(arg)
+        patterns = (
+            (_SQL_CALL,) if path.suffix == ".sql" else (_PY_CALL, _PY_REFRESH_CALL)
+        )
+        for pattern in patterns:
+            for m in pattern.finditer(text):
+                arg = m.group("arg").strip()
+                if arg[:1] in {"'", '"'}:
+                    literal.setdefault(rel, set()).add(arg.strip("'\""))
+                else:
+                    dynamic.setdefault(rel, []).append(arg)
     return literal, dynamic
 
 
@@ -315,8 +332,10 @@ def test_every_registry_row_is_stamped_by_something(registry, function_bodies):
     producers, one of the six inside `refresh_health_matviews`, or one of the three
     pre-441 inline `update derived_artifacts ... where name = '...'` blocks.
 
-    Three stamp shapes count, because three genuinely exist: the helper with a literal
-    name, `scripts/refresh_image_stats.py`'s loop over `_MVS`, and the inline UPDATE that
+    Four stamp shapes count, because four genuinely exist: a literal-name call of the
+    SQL stamp helper (migration text and catalog bodies), a literal-name
+    `db.refresh_matview(conn, ...)` call (the migration-578 chokepoint stamps inside),
+    `scripts/refresh_image_stats.py`'s loop over `_MVS`, and the inline UPDATE that
     `refresh_llm_cost_rollups` and both blue-green rebuilds keep (the rollup cannot use
     the helper — it must pass its own watermark as `complete_through`).
     """
