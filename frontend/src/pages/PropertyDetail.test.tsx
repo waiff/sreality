@@ -258,10 +258,10 @@ describe('<PropertyDetail> one property, one voice', () => {
     // The canonical advert's price, never the other portal's 5.2M.
     expect(h1.textContent).toContain(fmtCzk(5_000_000));
     expect(screen.getByText('Kolbenova, Praha 9')).toBeInTheDocument();
-    expect(queries.fetchProperty).toHaveBeenCalledWith(774);
+    expect(queries.fetchProperty).toHaveBeenCalledWith(774, expect.anything());
     // Photos and the price history are the canonical advert's own.
-    await waitFor(() => expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105054));
-    expect(queries.fetchSnapshotsForListings).toHaveBeenCalledWith([105054]);
+    await waitFor(() => expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105054, expect.anything()));
+    expect(queries.fetchSnapshotsForListings).toHaveBeenCalledWith([105054], expect.anything());
     // The price moves are the property's, as Browse filters on them.
     expect(screen.getByText('Price changes').nextSibling).toHaveTextContent('2');
     expect(screen.getByText('Days on market').nextSibling).toHaveTextContent('62');
@@ -309,10 +309,10 @@ describe('<AdvertRedirect> old advert addresses', () => {
     renderAt('/listing/idnes/6a147cfde222cf687509e018');
 
     await waitFor(() => expect(where()).toBe('/property/774?advert=105053'));
-    expect(queries.fetchAdvertProperty).toHaveBeenCalledWith({
-      source: 'idnes',
-      nativeId: '6a147cfde222cf687509e018',
-    });
+    expect(queries.fetchAdvertProperty).toHaveBeenCalledWith(
+      { source: 'idnes', nativeId: '6a147cfde222cf687509e018' },
+      expect.anything(),
+    );
     await screen.findByText('Sloučené inzeráty');
     expect(rowToggle('iDNES Reality')).toHaveAttribute('aria-expanded', 'true');
   });
@@ -323,7 +323,7 @@ describe('<AdvertRedirect> old advert addresses', () => {
     renderAt('/listing/-11876?run=9#estimations');
 
     await waitFor(() => expect(where()).toBe('/property/774?run=9&advert=105053#estimations'));
-    expect(queries.fetchAdvertProperty).toHaveBeenCalledWith({ srealityId: -11876 });
+    expect(queries.fetchAdvertProperty).toHaveBeenCalledWith({ srealityId: -11876 }, expect.anything());
   });
 
   it('sends the old ?property= form straight to the property, with no read', async () => {

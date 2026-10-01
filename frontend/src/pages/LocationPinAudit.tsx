@@ -349,11 +349,12 @@ export default function LocationPinAudit() {
 
   const list = useInfiniteList<PinAuditRow>({
     queryKey: ['pin-audit', 'list', filterKey, sort.field, sort.direction],
-    queryFn: async (cursor) => {
+    queryFn: async (cursor, signal) => {
       const page = await fetchPinAuditPage(
         filters,
         sort,
         cursor as KeysetCursor | null,
+        { signal },
       );
       return { rows: page.rows, nextCursor: page.nextCursor ?? undefined };
     },

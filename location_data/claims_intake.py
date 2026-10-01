@@ -52,9 +52,10 @@ THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
     page substrate adds `'odbl'` for realitymix's Nominatim-fallback pin and nothing else.
 
 WHAT IT WRITES, AND ONLY THAT
-  `location_claims` (append-only, deduped on `claim_fingerprint`), `dirty_locations`
-  (the resolver's queue, inside the same transaction), `location_claim_batches` (this
-  lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
+  `location_claims` (deduped on `claim_fingerprint`; the readings half also DELETEs the
+  claims a new reading supersedes), `dirty_locations` (the resolver's queue, inside the
+  same transaction), `location_claim_batches` (this lane's run ledger and cursor), and the
+  mined-version stamps on the bodies and readings it mined.
   Refusals — a class-E page pin, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. (`location_claim_observations`, `location_claim_absences`
   and `location_enrichment_state` were written by every lane and read by none: dropped, 498.)
@@ -685,7 +686,7 @@ _BODY_JOIN = """
     LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
     LEFT JOIN LATERAL (
         SELECT p.id, p.contract_version, p.page_kind::text AS page_kind,
-               encode(p.payload_sha256, 'hex') AS payload_sha256, p.first_observed_at
+               p.first_observed_at
         FROM portal_raw_payloads p
         WHERE p.source = l.source
           AND p.source_id_native = l.source_id_native
@@ -702,7 +703,7 @@ _BODY_JOIN = """
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            pb.id, (pb.contract_version IS DISTINCT FROM pc.version), pb.page_kind,
-           pb.payload_sha256, pb.first_observed_at, pc.version,
+           pb.first_observed_at, pc.version,
 """
 
 _FROM_LISTINGS = """
@@ -784,7 +785,6 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 _UNMINED_BODIES_SELECT = (
     _SELECT_COLUMNS
     .replace("l.raw_json", "NULL::jsonb")
-    .replace("pb.payload_sha256", "encode(p.payload_sha256, 'hex')")
     .replace("pb.page_kind", "p.page_kind::text")
     .replace("pb.id", "p.id")
     .replace("pb.contract_version", "p.contract_version")
@@ -880,12 +880,13 @@ _STAMP_MINED_SQL = """
 #
 # The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
 #
-# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 498). Nine of its inputs — page_kind,
-# extractor_id, extractor_version, value_norm, distance_m, travel_mode, target_text,
-# declared_confidence, legacy_source_column — are no longer STORED, but the readers still
-# compute them and they still enter the hash. That is what keeps 5 M existing fingerprints
-# valid: narrowing the tuple would re-dialect every one of them, and a re-dialected
-# fingerprint does not conflict, it inserts.
+# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 498). Eleven of its inputs —
+# source_id_native, page_kind, extractor_id, extractor_version, value_norm, shape,
+# distance_m, travel_mode, target_text, declared_confidence, legacy_source_column — are not
+# STORED, but the readers still compute them and they still enter the hash. That is what
+# keeps 5 M existing fingerprints valid: narrowing the tuple would re-dialect every one of
+# them, and a re-dialected fingerprint does not conflict, it inserts. The recordset below
+# carries the fingerprint's inputs and the stored columns, nothing else.
 _CLAIM_FINGERPRINT_SQL = """
     location_claim_fingerprint(
         t.listing_id, t.source, t.source_id_native,
@@ -902,7 +903,7 @@ _CLAIM_INSERT_CTES = f"""
     WITH input AS (
         SELECT * FROM jsonb_to_recordset(%(rows)s::jsonb) AS x(
             listing_id bigint, source text, source_id_native text,
-            snapshot_id bigint, snapshot_anchor text, first_observed_at timestamptz,
+            first_observed_at timestamptz,
             claim_type text, surface text, page_kind text, extraction_method text,
             extractor_id text, extractor_version text, contract_entry_id bigint,
             value_text text, value_num numeric, value_geom_wkt text, value_shape_wkt text,
@@ -910,10 +911,7 @@ _CLAIM_INSERT_CTES = f"""
             declared_precision_label text, declared_confidence text,
             declared_radius_m numeric, claim_confidence text,
             blur_evidence text, licence_class text,
-            legacy_source_column text, legacy_write_path_unknown boolean,
-            history_completeness text, subject_scoped boolean,
-            payload_id bigint, payload_sha256 text, evidence_quote text,
-            span_start integer, span_end integer, payload_scope_version text)
+            legacy_source_column text, subject_scoped boolean)
     ), typed AS (
         SELECT i.*,
                location_value_norm(i.value_text) AS value_norm,
@@ -1192,7 +1190,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     the tail — a column appended after it would be swallowed silently.
     """
     (listing_id, source, native, raw_json, last_seen_at,
-     body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
+     body_id, body_unmined, body_page_kind, body_first_observed,
      contract_version, snapshot_cursor) = record
     row = ListingRow(
         listing_id=int(listing_id),
@@ -1205,10 +1203,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     body: page_readers.ArchivedPayload | None = None
     if body_id is not None:
         body = page_readers.ArchivedPayload(
-            id=int(body_id), source=source,
-            source_id_native=row.source_id_native,
-            page_kind=body_page_kind,
-            payload_sha256=str(body_sha),
+            id=int(body_id), page_kind=body_page_kind,
             # 06 §6.6 Rule 1 + Rule 2: the BODY's own first observation, never now() and
             # never `last_observed_at` (which an unchanged refetch moves).
             first_observed_at=body_first_observed)

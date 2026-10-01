@@ -1592,7 +1592,7 @@ def test_a_later_retiring_merge_the_operator_undid_is_not_named(hand_into: int) 
 def test_a_merge_undone_and_then_redone_by_hand_is_noted_undone_by_the_dry_run_too() -> None:
     # g12 merged 200 (11) into 100 (10). The operator undid it on the merge ledger and later
     # merged 200 into 100 again by hand: `merged_into` is the same, but that is THEIR merge
-    # (its `merged_at` is not g12's `applied_at`). `unmerge_group` finds nothing live of g12,
+    # (its `merged_at` is not g12's `applied_at`). g12's detach loop finds nothing live of it,
     # so the dry run says "already undone" exactly as the live run then records it.
     db = FakeDb()
     _scope, calls = _applied_two(db)

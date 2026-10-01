@@ -549,13 +549,6 @@ def test_every_portal_gets_a_distinct_stable_stamp() -> None:
                       for source, register in _registers().items()}
 
 
-def test_the_scoped_document_carries_the_stamp_of_the_register_that_made_it() -> None:
-    scoped = _scoped("remax")
-
-    assert scoped.scope_version == REGISTERS["remax"].scope_version
-    assert scoped.source == "remax"
-
-
 # ------------------------------------------------------------------ robustness
 
 
@@ -722,100 +715,59 @@ def test_the_empty_register_scopes_nothing_and_still_stamps() -> None:
 
     assert scoped.nodes_removed == 0
     assert scoped.contains("SUBJECT")
-    assert scoped.scope_version.startswith(f"{SCOPER_VERSION}:maxima:")
+    assert scoped.register.scope_version.startswith(f"{SCOPER_VERSION}:maxima:")
 
 
-# ------------------------------------------------------------------ evidence spans
+# ------------------------------------------------------------------ shows: the html_regex gate
 
 
-def test_find_span_points_into_the_scoped_document() -> None:
-    """01 §4.2: a span is meaningless without the document it indexes into, and
-    migration 382 makes that document the SCOPED payload."""
-    scoped = _scoped("remax")
-
-    span = scoped.find_span("ulice Pod Slovany, Úvaly")
-    assert span is not None
-    start, end = span
-    # W2-6 put the real archived header block into this fixture, so the span indexes the
-    # UNCOLLAPSED source — the portal breaks that one line across two, with a tab run
-    # between them. The quote is the collapsed value and the span is where it was read;
-    # the two are the same text, not the same bytes (`_span_pattern`'s whole purpose).
-    quoted = scoped.html[start:end]
-    assert " ".join(quoted.split()) == "ulice Pod Slovany, Úvaly"
-    assert scoped.find_span("Oleška, okres Praha-východ") is None
-
-
-def test_find_span_tolerates_the_whitespace_a_text_read_collapses() -> None:
-    """The real page indents the header across four tabs and a newline."""
+def test_shows_tolerates_the_whitespace_a_text_read_collapses() -> None:
+    """The real page breaks the header line across two, with a tab run between them."""
     scoped = _scoped("remax", _ARCHIVED / "remax_detail.html")
+    header = scoped.css_first("h2.pd-header__address")
     quote = "ulice Pod Slovany, Úvaly"
 
-    span = scoped.find_span(quote)
-
-    assert scoped.html.find(quote) == -1
-    assert span is not None
-    assert " ".join(scoped.html[span[0]:span[1]].split()) == quote
+    assert quote not in header.html
+    assert scoped.shows(quote, within=header)
 
 
-def test_find_span_tolerates_the_entities_a_text_read_resolves() -> None:
-    """`&nbsp;` is six characters in the source and one in the quote.
-
-    Migration 382 refuses an evidence-bearing claim with no span
-    (`loc_claim_text_evidence`), so a quote crossing an `&nbsp;` or an `&amp;` —
-    which is most Czech agency names and every `190 00` PSČ on realitymix —
-    silently lost its evidence instead of recording it.
-    """
+def test_shows_tolerates_the_entities_a_text_read_resolves() -> None:
+    """`&nbsp;` is six characters in the source and one in the text read. Most Czech
+    agency names cross an `&amp;`, and every realitymix PSČ crosses an `&nbsp;`."""
     scoped = scope_html(
         "<html><body><p id='a'>Molík reality s.r.o. &amp; syn, Okružní 3407/11</p>"
         "<p id='b'>Praha&nbsp;9, 190&nbsp;00</p></body></html>",
         register=ScopeRegister.from_zones("realitymix", []))
 
     for selector in ("#a", "#b"):
-        quote = scoped.css_first(selector).text()
-        span = scoped.find_span(quote)
+        node = scoped.css_first(selector)
+        quote = node.text()
 
-        assert scoped.contains(quote), quote
-        assert span is not None, quote
-        assert scoped.html[span[0]:span[1]].startswith(quote.split()[0])
-        # 382 checks the quote against the payload the span indexes into; the
-        # source run is LONGER than the quote because the entities are spelled out.
-        assert span[1] - span[0] > len(quote)
+        assert quote not in node.html, quote
+        assert scoped.shows(quote, within=node), quote
 
 
-def test_find_span_finds_a_real_archived_quote_that_crosses_an_nbsp() -> None:
+def test_shows_a_real_archived_quote_that_crosses_an_nbsp() -> None:
     """Not a constructed fixture: `&nbsp;` is pervasive in the archive."""
     scoped = _scoped("realitymix", _ARCHIVED / "realitymix_detail.html")
     node = next(n for n in scoped.css("div, p, span, li")
                 if "\xa0" in n.text(deep=False) and 8 < len(n.text(deep=False).strip()) < 90)
     quote = node.text(deep=False).strip()
 
-    span = scoped.find_span(quote, within=node)
-
-    assert scoped.html.find(quote) == -1, "the source spells the NBSP as an entity"
-    assert span is not None
-    assert "&nbsp;" in scoped.html[span[0]:span[1]]
+    assert quote not in node.html, "the source spells the NBSP as an entity"
+    assert scoped.shows(quote, within=node)
 
 
-def test_find_span_can_be_anchored_to_the_node_the_claim_came_from() -> None:
-    """A span is evidence. Pointing it at the `<title>` is a wrong answer that
-    still passes 382's substring check, which is worse than no answer at all."""
+def test_shows_is_anchored_and_refuses_text_the_node_never_states_contiguously() -> None:
+    """The `<title>`'s words are not the header's, and `node.text()` joins across tags:
+    the header's text reads `… Úvaly mapa`, which no single run of its markup states."""
     scoped = _scoped("remax")
     header = scoped.css_first("h2.pd-header__address")
 
-    loose = scoped.find_span("Pod Slovany")
-    anchored = scoped.find_span("Pod Slovany", within=header)
-
-    assert loose is not None and anchored is not None and anchored != loose
-    assert _encloses(scoped, scoped.css_first("title"), loose), (
-        "unanchored, the first textual occurrence is the page title")
-    assert _encloses(scoped, header, anchored)
-    assert scoped.html[anchored[0]:anchored[1]] == "Pod Slovany"
-    assert scoped.find_span("Úvaly u Prahy", within=header) is None
-
-
-def _encloses(scoped: Any, node: Any, span: tuple[int, int]) -> bool:
-    offset = scoped.html.find(node.html)
-    return 0 <= offset <= span[0] and span[1] <= offset + len(node.html)
+    assert scoped.shows("Prodej bytu", within=scoped.css_first("title"))
+    assert not scoped.shows("Prodej bytu", within=header)
+    assert "Úvaly mapa" in " ".join(header.text().split())
+    assert not scoped.shows("Úvaly mapa", within=header)
 
 
 # ------------------------------------------------------------------ known gaps
@@ -924,7 +876,7 @@ def test_known_register_gaps_are_pinned_with_their_one_line_fix(
     assert closed.css(proposed) == []
     assert closed.is_complete
     assert closed.contains(subject)
-    assert closed.scope_version != shipped.scope_version
+    assert closed.register.scope_version != shipped.scope_version
 
 
 def test_the_gap_fix_keeps_the_subject_reachable() -> None:

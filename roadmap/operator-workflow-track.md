@@ -4,7 +4,32 @@
 
 User-facing features that don't fit the analytical, estimation, UI,
 map, or scraper tracks. Operator-scoped (single shared identity, no
-per-user accounts — matches today's bearer-token model).
+per-user accounts — matches today's bearer-token model) *(superseded:
+per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
+
+### Rule #18: an executed no-orphan merge test (owed, 2026-10-01)
+- **Owed:** every carrier's suite asserts only the SQL it emits (`tests/test_operator_state.py`,
+  `test_pipeline_identity.py`, `test_dismissal_identity.py`); the merge-ledger fake
+  (`tests/_property_ledger.py`) answers `[]` to that SQL, and CI's live merge tests
+  (`test_merge_safety_live.py`) run the carriers without asserting where rows land. Owed: a
+  CI-DB test that merges two properties each holding a row in every `_CARRIED_TABLES` table and
+  asserts every row lands on the survivor and none stays on the `merged_away` loser (origin:
+  Phase U2.6b below).
+
+### Rule #22: converge the kanban + extension pipeline copies (owed, 2026-10-01)
+- **Owed (not built):** the kanban's shape (drag to move, trash + two-step confirm to remove)
+  is sanctioned, but its code is a copy: `pages/Pipeline.tsx` re-implements
+  `usePipelineCard`'s move/remove as its own `move`/`remove` mutations (the hook binds
+  `property_id` at hook time; the board resolves it per drop/trash in page-level handlers), and
+  tints column headers + stage-editor swatches with its own `stageColor` (grey fallback)
+  instead of `stageAccent` (copper). The extension hand-copies the funnel SVG (forced: no
+  React) plus `stageBadge` and `stageAccent` (not forced: pure TS it could import from
+  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`). The kanban copy
+  already writes through `lib/pipelineCache`, so this is duplication, not a cache split.
+  Converge: a call-time `property_id` on the hook's move/remove, the board on `stageAccent`
+  (or its grey fallback recorded as deliberate), the extension importing `pipelineStage.ts`;
+  then rule #22 (CLAUDE.md + architecture) drops the exceptions (origin: Phase U-PIPE 3i
+  below).
 
 ### Phase U2.6: Collections + tags + notes (done)
 Operator watchlists, freeform coloured tags, and per-listing journal
@@ -74,7 +99,10 @@ pipeline (Phase U-PIPE) plugs into next.
   collision-collapse; APPEND moves all), so nothing orphans onto a
   merged_away property — invariant by construction. Unmerge/split are
   best-effort (state stays on the surviving/anchor property). Adding a
-  future property-anchored operator-state table = one registry line.
+  future property-anchored operator-state table = one registry line
+  *(superseded 2026-10-01: plus its `_CARRIED_TABLES` census entry, or
+  its own carrier for a single-valued table — rule #18; and see the
+  rule #18 owed entry at the top of this file)*.
 - API re-keyed to property grain: `/collections/{id}/properties`,
   `/properties/{id}/tags`, `/properties/{id}/notes`. Frontend Browse
   tag filter + CurationBlock + CollectionDetail operate on
@@ -614,7 +642,10 @@ any newly-scraped listings.
   estimation row that lives on the existing `/estimation/:id` page.
 - Backend: `api/notifications.py` owns the `WatchdogFilterSpec`
   Pydantic model, the SQL-clause renderer (mirrors
-  `_shared_filter_where` semantics), and the matcher loop spawned via
+  `_shared_filter_where` semantics — *superseded 2026-10-01: both now
+  compile from `toolkit/filter_compiler.py`; see the Rule 16 bullet
+  below*),
+  and the matcher loop spawned via
   FastAPI's lifespan context manager. `api/routes/notifications.py`
   exposes the standard bearer-gated CRUD + dispatch endpoints. The
   matcher reads its cadence and the watermark from `app_settings`
@@ -649,12 +680,15 @@ any newly-scraped listings.
 
 - Email / SMS / push channels. `notification_dispatches.channel` is
   CHECK-bounded to `'in_app'` only; a future migration adds the new
-  enum values and the dispatch worker grows a fan-out branch.
+  enum values and the dispatch worker grows a fan-out branch
+  *(superseded: email + Telegram deliver through the `channel_sends`
+  ledger, migration 207, not a widened `channel` — rule #16)*.
 - 5-minute scrape cadence (Shape A from the original proposal).
   Today's nightly cron still applies; the matcher loop honestly
   surfaces "no fresh listings" between scrapes. A new
   `.github/workflows/scrape_probe.yml` is a separate slice.
-- Per-user identity (one shared operator stays the model).
+- Per-user identity (one shared operator stays the model)
+  *(superseded: per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
 
 **Original brief (kept below as the design rationale)**
 

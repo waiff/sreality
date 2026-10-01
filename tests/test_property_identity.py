@@ -148,8 +148,8 @@ def test_merge_rejects_when_retired_not_active():
 
 
 def test_merge_rejects_sale_vs_rent_at_chokepoint():
-    # The operator/cluster merge paths call merge_properties directly (bypassing
-    # classify_pair); this final guard must refuse a sale↔rental merge.
+    # merge_properties re-checks the category itself ("the category gate no caller can
+    # route around"), whatever its caller checked: it must refuse a sale↔rental merge.
     conn = _FakeConn([
         (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
          [(10, "active", "prodej", "byt", None), (20, "active", "pronajem", "byt", None)]),

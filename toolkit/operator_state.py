@@ -10,11 +10,15 @@ state follows the property and can never orphan onto the merged_away loser.
 Unmerge and split are deliberately best-effort: operator state stays on the
 surviving / anchor property (the reactivated or detached side starts clean), so
 there is no lossy ledger to replay. Because every merge re-points here, no
-operator-state row can reference a merged_away property — the invariant holds by
-construction (asserted in tests).
+registry row can reference a merged_away property — the invariant holds by
+construction. tests/test_operator_state.py asserts only the SQL emitted; the
+row-level outcome is verified out-of-band, not by an executed test.
 
-`OPERATOR_STATE_TABLES` is the ONE place a property-anchored operator-state
-table is declared; a new one becomes merge-safe by adding a single line. Shapes:
+`OPERATOR_STATE_TABLES` declares every SET/APPEND-shaped property-anchored table;
+a new one of those shapes becomes merge-safe by adding a single line (plus its
+`_CARRIED_TABLES` entry in tests/api/test_property_anchored_write_census.py).
+The asset link, the pipeline (toolkit.pipeline_identity) and dismissals
+(toolkit.dismissal_identity) have their own carriers in `merge_properties`. Shapes:
   - "set":    rows unique on (dedup_cols, property_id); union onto the survivor,
               dropping retired rows that would collide with an existing survivor row.
   - "append": journal rows with no dedup key; every row moves to the survivor.

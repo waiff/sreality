@@ -1,7 +1,7 @@
 """A2: undo the old engine's merges in the apply scope's area before this engine merges there.
 
-TEMPORARY SCAFFOLDING, deleted in W5 (PLAN.md ledger A2) once the worker lane owns every grouping
-that is not an operator ruling. Lane mode `apply` with `retire_legacy=1` runs it BEFORE the plan
+TEMPORARY SCAFFOLDING, kept until W8 by the ordering rule of the W5 ONE LANE row in
+docs/design/autodedup/PROGRAM.md. Lane mode `apply` with `retire_legacy=1` runs it BEFORE the plan
 it applies, in the same dispatch and under the same `dry_run`, so no duplicate reappears in
 Browse between the undo and the engine's merges (decision 3). The mode refuses it with
 `listing_ids` (the step reads blocks only) and, before anything is undone, for a generation with

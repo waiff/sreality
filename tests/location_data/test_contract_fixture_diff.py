@@ -212,12 +212,12 @@ def bodies_for(source: str) -> dict[str, tuple[Body, ...]]:
 # generated column, included because a normalisation change is exactly the kind of silent
 # drift this gate exists to surface.
 _CLAIM_FIELDS = (
-    "claim_type", "surface", "page_kind", "extraction_method", "snapshot_anchor",
+    "claim_type", "surface", "page_kind", "extraction_method",
     "value_text", "value_norm", "value_num", "value_geom_wkt", "value_shape_wkt",
     "value_jsonb", "distance_m", "travel_mode", "target_text",
     "declared_precision_label", "declared_confidence", "declared_radius_m",
-    "claim_confidence", "blur_evidence", "licence_class", "history_completeness",
-    "subject_scoped", "legacy_source_column", "legacy_write_path_unknown",
+    "claim_confidence", "blur_evidence", "licence_class",
+    "subject_scoped", "legacy_source_column",
 )
 
 
@@ -301,10 +301,6 @@ def project_archived(read: Any) -> dict[str, Any]:
         "blur_evidence": claim.blur_evidence,
         "subject_scoped": claim.subject_scoped,
         "position_branch": read.position_branch,
-        "evidence_quote": claim.evidence_quote,
-        "evidence_span_len": (
-            None if claim.span_start is None or claim.span_end is None
-            else claim.span_end - claim.span_start),
     }
 
 
@@ -319,15 +315,12 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     register = ScopeRegister.from_zones(contract.source, contract.exclusion_zones)
     document = scope_html(path.read_bytes(), register=register)
     payload = ArchivedPayload(
-        id=1, source=contract.source, source_id_native=native, page_kind="detail",
-        payload_sha256="0" * 64, first_observed_at=_ARCHIVE_CLOCK,
-        body=path.read_bytes())
+        id=1, page_kind="detail", first_observed_at=_ARCHIVE_CLOCK, body=path.read_bytes())
     row = fx.listing(contract.source, {}, native=native)
     out: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda e: e.entry_id):
         for read in PAGE_READERS[entry.reader](entry, row, payload, document):
-            stamped = stamp_page_claim(read.claim, payload,
-                                          scope_version=document.scope_version)
+            stamped = stamp_page_claim(read.claim, payload)
             # The C6 licence ladder, applied exactly as the real lane applies it. Without
             # this the gate would show a green claim for a coordinate the lane REFUSES —
             # an entry id absent from ARCHIVED_COORDINATE_RULES — which is a false safety

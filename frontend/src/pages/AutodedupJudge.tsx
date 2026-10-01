@@ -170,7 +170,7 @@ export default function AutodedupJudge() {
   );
   const detailsQ = useQuery<Map<number, ListingPublic>, Error>({
     queryKey: mergedAdvertsKeys.listings(ids),
-    queryFn: () => fetchListingsForListingIds(ids),
+    queryFn: ({ signal }) => fetchListingsForListingIds(ids, { signal }),
     enabled: ids.length > 0,
     staleTime: 60_000,
   });

@@ -10,21 +10,16 @@ migrations job (`TEST_DATABASE_URL`); every test rolls back.
 from __future__ import annotations
 
 import itertools
-import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests._live_property import REQUIRED_DB, db_url
 from toolkit.property_identity import detach_listing, listing_origins, merge_property_set
 
-_DB_URL = os.environ.get("TEST_DATABASE_URL")
-
-pytestmark = pytest.mark.skipif(
-    not _DB_URL,
-    reason="TEST_DATABASE_URL not set — schema-replay test runs only in the CI DB job",
-)
+pytestmark = REQUIRED_DB
 
 OP = "ci-operator@replay.local"
 _SREALITY_IDS = itertools.count(9_200_000_001)
@@ -35,7 +30,7 @@ def cur():
     import psycopg
 
     conn = psycopg.connect(
-        _DB_URL,
+        db_url(),
         options="-c statement_timeout=20000 -c lock_timeout=5000"
         " -c idle_in_transaction_session_timeout=30000",
     )

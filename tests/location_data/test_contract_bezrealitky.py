@@ -318,4 +318,3 @@ def test_the_advert_description_is_never_a_claim_substrate(
     for emitted in claims.values():
         for claim in emitted:
             assert claim.value_text != description
-            assert claim.evidence_quote is None

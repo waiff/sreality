@@ -13,6 +13,7 @@ import type { MapySuggestion } from '@/lib/maps';
 import { CollapsibleGroup, ControlGroup, PickButton, Section } from '@/components/controls';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { pgRead } from '@/lib/pgRead';
 import {
   curationKeys,
   dismissalKeys,
@@ -144,7 +145,7 @@ function IncludeNoPriceToggle({
       'no-price-count',
       { ...filters, priceMin: null, priceMax: null, includeNoPrice: false },
     ],
-    queryFn: () => fetchNoPriceCount(filters),
+    queryFn: ({ signal }) => fetchNoPriceCount(filters, { signal }),
     enabled: hasBound,
     placeholderData: (prev) => prev,
     staleTime: 60_000,
@@ -243,7 +244,7 @@ function ShowDismissedToggle({
     const f = { ...filters, showDismissed };
     return {
       queryKey: ['browse-count', f],
-      queryFn: () => fetchBrowseCount(f),
+      queryFn: ({ signal }: { signal: AbortSignal }) => fetchBrowseCount(f, { signal }),
       enabled: hasAny,
       placeholderData: <T,>(prev: T) => prev,
       staleTime: 60_000,
@@ -764,14 +765,15 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
 function CityPopulationHint() {
   const { data } = useQuery<{ withPop: number; total: number }, Error>({
     queryKey: ['curated_cities_population_status'],
-    queryFn: async () => {
-      const total = await supabase
-        .from('curated_cities_public')
-        .select('*', { count: 'exact', head: true });
-      const withPop = await supabase
-        .from('curated_cities_public')
-        .select('*', { count: 'exact', head: true })
-        .not('population', 'is', null);
+    /* A hint, never an error: a failed read leaves `data` empty and the
+     * banner unrendered (`if (!data)` below). */
+    queryFn: async ({ signal }) => {
+      const head = () =>
+        supabase.from('curated_cities_public').select('*', { count: 'exact', head: true });
+      const [total, withPop] = await Promise.all([
+        pgRead(head(), { signal }),
+        pgRead(head().not('population', 'is', null), { signal }),
+      ]);
       return {
         withPop: withPop.count ?? 0,
         total:   total.count   ?? 0,

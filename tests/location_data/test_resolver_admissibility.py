@@ -294,7 +294,7 @@ def test_a_naive_and_an_aware_claim_set_resolve_identically():
             Claim(
                 id=i, listing_id=900001, source="sreality", claim_type=claim_type,
                 surface="api_json", extraction_method="portal_structured_field",
-                extractor_id="fx", licence_class="portal", observed_at=moment,
+                licence_class="portal", observed_at=moment,
                 value_text=value, subject_scoped=True,
             )
             for i, (claim_type, value) in enumerate(

@@ -12,9 +12,6 @@ on:
       - 'frontend/**'
       - '.github/workflows/frontend-build.yml'
   pull_request:
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/frontend-build.yml'
 
 jobs:
   build:

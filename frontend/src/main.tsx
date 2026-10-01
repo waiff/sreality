@@ -33,11 +33,16 @@ const queryClient = new QueryClient({
       staleTime: 60_000,
       gcTime: 5 * 60_000,
       refetchOnWindowFocus: false,
-      /* One more attempt ONLY when it can help: a network blip or a 502/503/504
-       * (the API answers a busy database with 503 db_busy). Never a 4xx, a 500
-       * or a transport-deadline timeout — those are deterministic, and the old
+      /* One more attempt ONLY when it can help: a network blip or a
+       * 502/503/504/520 (the API answers a busy database with 503 db_busy;
+       * 520 is Cloudflare in front of Supabase). Never a 4xx, a 500 or a
+       * transport-deadline timeout — those are deterministic, and the old
        * blanket `retry: 1` turned each of them into a double-length silent
-       * spinner (the 2026-09-30 Brokers hang was 2 × 120 s exactly this way). */
+       * spinner (the 2026-09-30 Brokers hang was 2 × 120 s exactly this way).
+       * ONE rule for both adapters: lib/api.ts and lib/pgRead.ts (every
+       * PostgREST read) both throw ApiError, and pgRead switches postgrest-js's
+       * own hidden retry off, so a busy or unreachable PostgREST read retries
+       * here exactly like a FastAPI one — and nowhere else. */
       retry: (failureCount, error) => failureCount < 1 && isTransientApiError(error),
     },
   },

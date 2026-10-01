@@ -5,6 +5,43 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### `scraper/db.py` still carries policy and a dead delist sweep (2026-10-01, owed)
+- **Owed:** presence-verified delisting (2026-09-07) left the absence sweep in `scraper/db.py` with
+  no production caller — `mark_inactive`, `mark_inactive_native`, `mark_inactive_agenda`,
+  `_delist_flip_allowed`, `_seen_without_nulls`, `portal_inactive_sweep_due`,
+  `record_portal_inactive_sweep` (~400 lines; called only from tests —
+  `tests/test_db_mark_inactive_null_safety.py`, `tests/test_delist_flip_cap.py`,
+  `tests/test_detail_queue.py` (the three `test_mark_inactive_*` cases) and
+  `tests/test_db_inactive_at.py` (the two `mark_inactive*` cases) — and `portal_inactive_sweep_due` /
+  `record_portal_inactive_sweep` from nothing at all; `portals.last_inactive_sweep_at` /
+  `inactive_sweep_min_interval_hours` are read only there). Delete them, and in the same change
+  delete the first two test files and trim those cases from the other two. The same
+  file also holds policy that belongs beside its callers (CLAUDE.md § Coding conventions): the
+  presence-check throttle (`enqueue_presence_checks`), the claim-batch reserves (`QUEUE_*_RESERVE`),
+  the Gate-2 flag read, the broker-fingerprint diff, and the singleton property rollup with its lazy
+  `scripts.recompute_property_stats` import — move each out when its area is next touched.
+
+### Rule #2: one snapshot implementation (owed, 2026-10-01)
+- **Owed:** the hash-and-append logic exists twice: `db.upsert_listing` (row-at-a-time: every
+  non-sreality ingest, sreality `--detail-only`, URL parse, freshness) and `_BATCH_SNAPSHOT_SQL` in
+  `db.write_detail_batch` (the sreality drain). They pick a listing's latest snapshot differently
+  (`ORDER BY scraped_at DESC` in `upsert_listing` vs `scraped_at DESC, id DESC` in `_BATCH_SNAPSHOT_SQL`). Fold
+  both onto one definition of "latest snapshot" plus one append statement, with a test that a
+  same-`scraped_at` tie resolves identically on both paths.
+
+### Rule #21: hoist the shared walk tail + drain hooks into `portal_runner` (owed, 2026-10-01)
+- **Owed (rule #21 audit):** the framework is shared at the runner, not below it.
+  The index-walk tail (`index_summary(_native)` → `classify_index_sighting` →
+  `touch_listings(_by_id)` → `enqueue_detail` → `walk_reached_end`) is copied into all nine
+  adapters' `walk_category`; the drain hooks (`write_details` / `record_failure` / `mark_gone`,
+  plus `_configure_logging` / `_load_config`) are AST-identical in at least 7 of the 8 crawler
+  `*_main.py`; six portal-name branches sit in shared code (`db.detail_ref`, the two
+  `CASE WHEN %(source)s = 'sreality'` queue fills, `portal_factory.build_portal`'s bazos +
+  sreality cases, `realtime_worker`'s `k != "bazos"`); and `scraper/main.py` (sreality's
+  module) owns the cross-portal `_run_image_downloads`. Next: hoist the walk tail + drain hooks
+  into `portal_runner` while pacing stays per-portal (client + `PortalLimits`), and fold each
+  branch into a `Portal` seam or config attribute. Inventory: `docs/architecture.md` § rule 21.
+
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
 - **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each
   held a private copy of a naive area regex that matched the FIRST bare digit run before an
@@ -230,6 +267,9 @@ Independent of the analytical, UI, and map tracks.
   seam (mmreality implements it; ceskereality exposes no machine-readable category list).
 - **Next:** watch the first walks' `VERIFY` lines and `delist_flip_refusals` deferrals; the
   ceskereality backlog (~40k) drains at 10% of each category per walk.
+- **Owed:** the retired absence sweep still ships in `scraper/db.py` with no production caller;
+  its deletion is tracked at the top of this file (`scraper/db.py` still carries policy and a dead
+  delist sweep).
 
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
@@ -408,14 +448,19 @@ branches in shared code. The lean/modular guardrail before onboarding portals 3+
 - **`portal_runner`** (`scraper/portal_runner.py`): one `run_index_walk` + one
   `run_detail_drain`, parameterized by a `Portal`. `SrealityPortal` /
   `BazosPortal` implement the seams; the entrypoints are thin delegators.
-  sreality stays byte-identical (the district-split is the one sanctioned hook);
-  bazos joins the queue/drain model (partial walks → never marks inactive).
+  sreality stays byte-identical (the district-split is the one sanctioned hook —
+  *superseded 2026-10-01: see the rule #21 owed entry at the top of this file and `docs/architecture.md` § rule 21's seam list*);
+  bazos joins the queue/drain model (partial walks → never marks inactive) *(superseded: bazos is
+  a complete-walk portal — a finished walk nominates its unseen rows for a page check, rule #3
+  since 2026-09-07 — and walks 22 multi-category scopes, migration 488)*.
 - Architectural rules #19 (shared split) + #21 (the framework + modularity).
   Pilot scope: bazos is single-category (the queue doesn't carry the category
-  parse_detail needs); multi-category bazos would encode it — deferred.
+  parse_detail needs); multi-category bazos would encode it — deferred *(superseded: the
+  detail's breadcrumb carries the category, so one queue covers every scope)*.
 After Phase 4 the limiter is each portal's polite fetch rate, not the DB or
 pipeline divergence — the healthy place to be. **Validated by onboarding
-bezrealitky (portal 3)** as a pure fetcher + parser + config row — a JSON-API
+bezrealitky (portal 3)** as a pure fetcher + parser + config row *(superseded 2026-10-01:
+it also carries its own `walk_category` and `Portal` adapter — see the rule #21 owed entry at the top of this file)* — a JSON-API
 portal that, because its detail JSON carries the category, walks many categories
 through the unchanged queue/drain (the multi-category limitation is per-portal,
 not a framework one). See the dated entry at the top of ## Done.

@@ -329,7 +329,7 @@ export default function BrowseExperience({
   /* Map tab fetches the map cohort (capped) + the paginated card slice. */
   const mapQuery = useQuery<MapResult, Error>({
     queryKey: ['map', filters],
-    queryFn: () => fetchListingsForMap(filters),
+    queryFn: ({ signal }) => fetchListingsForMap(filters, { signal }),
     placeholderData: (prev) => prev,
     enabled: mapVisible,
   });
@@ -395,7 +395,8 @@ export default function BrowseExperience({
   const psGrowthDatasetId = growthDatasetId ?? psDatasetsQuery.data?.[0]?.id ?? null;
   const psGrowthQuery = useQuery({
     queryKey: priceStatsKeys.growth(psGrowthDatasetId ?? -1, growthFrom, growthTo),
-    queryFn: () => fetchGrowth(psGrowthDatasetId as number, growthFrom, growthTo),
+    queryFn: ({ signal }) =>
+      fetchGrowth(psGrowthDatasetId as number, growthFrom, growthTo, { signal }),
     enabled: mapVisible && showGrowth && psGrowthDatasetId != null,
     staleTime: 60_000,
   });
@@ -403,7 +404,7 @@ export default function BrowseExperience({
   // growthFrom/growthTo), so dragging the window never re-fetches them.
   const psShapesQuery = useQuery({
     queryKey: priceStatsKeys.growthShapes(psGrowthDatasetId ?? -1),
-    queryFn: () => fetchGrowthShapes(psGrowthDatasetId as number),
+    queryFn: ({ signal }) => fetchGrowthShapes(psGrowthDatasetId as number, { signal }),
     enabled: mapVisible && showGrowth && psGrowthDatasetId != null,
     staleTime: Infinity,
     gcTime: Infinity,
@@ -424,7 +425,8 @@ export default function BrowseExperience({
 
   const psSeriesQuery = useQuery({
     queryKey: priceStatsKeys.obecSeries(psGrowthDatasetId ?? -1, growthFrom, growthTo),
-    queryFn: () => fetchSeries(psGrowthDatasetId as number, growthFrom, growthTo),
+    queryFn: ({ signal }) =>
+      fetchSeries(psGrowthDatasetId as number, growthFrom, growthTo, { signal }),
     enabled: mapVisible && showGrowth && growthChartOnHover && psGrowthDatasetId != null,
     staleTime: 60_000,
   });
@@ -435,8 +437,8 @@ export default function BrowseExperience({
 
   const cards = useInfiniteList<CardRow>({
     queryKey: ['cards', filters, sort],
-    queryFn: (cursor) =>
-      fetchListingsForCards(filters, sort, cursor as KeysetCursor | null),
+    queryFn: (cursor, signal) =>
+      fetchListingsForCards(filters, sort, cursor as KeysetCursor | null, { signal }),
     pageSize: CARD_PAGE_SIZE,
     /* `listing_id`, not `property_id`: in portal-mirror mode the rows are
      * listing-grain and 7,951 properties carry more than one active listing on
@@ -473,7 +475,7 @@ export default function BrowseExperience({
    * from a settled one, never silently pin the previous cohort's value. */
   const browseCountQuery = useQuery<CohortCount, Error>({
     queryKey: ['browse-count', filters],
-    queryFn: () => fetchBrowseCount(filters),
+    queryFn: ({ signal }) => fetchBrowseCount(filters, { signal }),
     placeholderData: (prev) => prev,
     staleTime: 60_000,
   });
@@ -591,8 +593,8 @@ export default function BrowseExperience({
 
   const table = useInfiniteList<TableRow>({
     queryKey: ['table', filters, sort],
-    queryFn: (cursor) =>
-      fetchListingsForTable(filters, sort, cursor as KeysetCursor | null),
+    queryFn: (cursor, signal) =>
+      fetchListingsForTable(filters, sort, cursor as KeysetCursor | null, { signal }),
     pageSize: TABLE_PAGE_SIZE,
     /* See the cards lane above — listing-grain rows need a listing-grain key. */
     getRowId: (r) => r.listing_id,
@@ -602,7 +604,7 @@ export default function BrowseExperience({
 
   const statsQuery = useQuery<BrowseStats, Error>({
     queryKey: ['stats', filters],
-    queryFn: () => fetchBrowseStats(filters),
+    queryFn: ({ signal }) => fetchBrowseStats(filters, { signal }),
     placeholderData: (prev) => prev,
     enabled: tab === 'stats',
   });

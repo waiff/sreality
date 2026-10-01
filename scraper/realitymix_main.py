@@ -1,14 +1,13 @@
 """Orchestrator for the realitymix.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.realitymix_main`. realitymix is a `Portal`
-(RealitymixPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages the HTML search results and enqueues new/price-changed ids
-into the shared `listing_detail_queue` (source='realitymix', migration 108), then
-a detail-drain that fetches each listing page, parses it to a `ScrapedListing`,
-and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1
-matching). No bespoke pipeline — only the per-portal fetcher (RealitymixClient) +
-parser (realitymix_parser) + config differ from sreality/idnes/ceskereality (the
-modularity rule in CLAUDE.md).
+(RealitymixPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` pages the HTML search results, diffs the ids and enqueues
+new/price-changed ones into the shared `listing_detail_queue`
+(source='realitymix', migration 108); the shared detail-drain fetches each
+listing page, parses it to a `ScrapedListing` (realitymix_parser, fetched by
+RealitymixClient), and ingests via `db.ingest_scraped_listing` (Tier-0
+idempotency; a first-seen row gets a singleton property, rule #15).
 
 Two deliberate differences from the ceskereality template:
 - The detail URL (`/detail/{obec}/{slug}-{id}.html`) does NOT encode the
@@ -20,7 +19,7 @@ Two deliberate differences from the ceskereality template:
   reverted #637: an arrow-trusting walk stops early on a throttled/degraded page.
   realitymix is nginx (not Cloudflare) and paginates reliably to the exact total
   with no deep-pagination cap, so a per-category walk can reach the portal's own
-  end → `supports_complete_walk` lets the runner nominate the rows the walk did
+  end → `walk_reached_end` lets the runner nominate the rows the walk did
   not see for a page check (rule #3), source-scoped (rule #15). Coordinates come
   straight from the page's `data-gps-lat/-lon`, so there is no geocoding step.
 """

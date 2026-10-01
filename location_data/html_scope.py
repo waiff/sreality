@@ -48,11 +48,9 @@ document (its text plus every attribute value), never against the serialisation.
 Comparing a decoded value to re-escaped markup is how a boundary silently opens:
 every remax coordinate contains a `"`, which the serialisation spells `&quot;`.
 
-`payload_scope_version` is what makes a scoping decision auditable after the fact:
-it hashes the portal's whole register block plus SCOPER_VERSION, so a claim
-written under one register can be told apart from the same claim written under
-another, and re-verified against the bytes that produced it (01 section 4.2 makes
-it NOT NULL on every evidence-bearing claim).
+`payload_scope_version` hashes the portal's whole register block plus
+SCOPER_VERSION: it is the identity of one scoping regime, and the extraction pool
+rebuilds its workers the moment it moves (`page_readers._worker_key`).
 
 PURE — no DB, no network, no clock. It runs per listing inside a batch drain.
 """
@@ -100,8 +98,8 @@ _SUBDOCUMENT_KEYS = frozenset({
 _WS_RE = re.compile("[\\s\u00a0\u200b]+")
 _WS_SPLIT_RE = re.compile("([\\s\u00a0\u200b]+)")
 
-# The serialisation an evidence span indexes into still carries entities, and the
-# quote it has to match came back decoded. One span search bridges the two.
+# A node's serialisation still carries entities, and the text `shows` has to
+# match came back decoded. One pattern bridges the two.
 _ENTITY_FORMS: dict[str, tuple[str, ...]] = {
     "&": ("&amp;", "&#38;"),
     "<": ("&lt;", "&#60;"),
@@ -109,7 +107,7 @@ _ENTITY_FORMS: dict[str, tuple[str, ...]] = {
     "\"": ("&quot;", "&#34;"),
     "'": ("&#39;", "&apos;", "&#x27;"),
 }
-_WS_SPAN_SOURCE = "(?:[\\s\u00a0\u200b]|&nbsp;|&#160;|&#xa0;)+"
+_WS_SOURCE = "(?:[\\s\u00a0\u200b]|&nbsp;|&#160;|&#xa0;)+"
 
 
 class ScopeError(ValueError):
@@ -205,10 +203,10 @@ class ScopeRegister:
 def payload_scope_version(
     source: str, raw_zones: Sequence[Mapping[str, Any]] | None,
 ) -> str:
-    """`location_claims.payload_scope_version` — the register block, hashed.
+    """The register block, hashed — the identity of one scoping regime.
 
-    Over the WHOLE block, not just the selectors: a claim has to resolve to the
-    register bytes that scoped it, and a register edit is already a
+    Over the WHOLE block, not just the selectors: a worker scoping by a stale
+    register must be told apart from a current one, and a register edit is already a
     `contract_version` bump (02 section 2.1.8), so there is no such thing as a
     free change to a `reason`. Canonical JSON, so the YAML parse and the
     `portal_contracts.exclusion_zones` jsonb round-trip hash identically.
@@ -303,10 +301,8 @@ def _narrowing_of(locator: Mapping[str, Any], qualifiers: Sequence[str]) -> str:
 class ScopedDocument:
     """What extraction is allowed to see, and the evidence of what was taken away.
 
-    `html` is THE scoped payload: `span_start` / `span_end` on a claim are
-    character offsets into it, which is what makes migration 382's "the quote is a
-    substring of the SCOPED payload" check repeatable. It is the payload, not the
-    search index — reachability runs over `_haystacks`, the decoded projection.
+    `html` is THE scoped payload, serialised. It is the payload, not the search
+    index — reachability runs over `_haystacks`, the decoded projection.
     """
 
     register: ScopeRegister
@@ -325,10 +321,6 @@ class ScopedDocument:
     @property
     def source(self) -> str:
         return self.register.source
-
-    @property
-    def scope_version(self) -> str:
-        return self.register.scope_version
 
     @property
     def is_complete(self) -> bool:
@@ -402,27 +394,13 @@ class ScopedDocument:
             value, register=self.register, degraded=not self.is_complete,
             reachable=self._haystacks, removed=self._removed_haystacks)
 
-    def find_span(
-        self, value: str, *, within: LexborNode | None = None,
-    ) -> tuple[int, int] | None:
-        """Character span of `value` in `html`, whitespace- and entity-tolerantly.
+    def shows(self, value: str, *, within: LexborNode) -> bool:
+        """Does `within`'s own serialisation state `value` contiguously?
 
-        `within` anchors the search to one node's own serialisation, so a quote
-        that also occurs in the `<title>` gets the span of the node the claim was
-        actually read from. An anchored miss is None, never a document-wide
-        second guess: a span pointing at the wrong occurrence still satisfies
-        382's substring check and is therefore worse than no span at all. Two
-        byte-identical siblings still resolve to the first — the anchor narrows
-        the search, it does not carry an offset lexbor never exposed.
+        Whitespace- and entity-tolerant, because `value` came out of `node.text()`.
+        Anchored only: the same words elsewhere in the page are not this node's.
         """
-        if within is None:
-            return _find_span(value, self.html)
-        fragment = getattr(within, "html", None) or ""
-        offset = self.html.find(fragment) if fragment else -1
-        if offset < 0:
-            return None
-        span = _find_span(value, fragment)
-        return (offset + span[0], offset + span[1]) if span else None
+        return _shows(value, getattr(within, "html", None) or "")
 
 
 def scope_html(
@@ -614,10 +592,6 @@ class ScopedPayload:
     @property
     def source(self) -> str:
         return self.register.source
-
-    @property
-    def scope_version(self) -> str:
-        return self.register.scope_version
 
     @property
     def is_complete(self) -> bool:
@@ -827,26 +801,21 @@ def _json_strings(data: Any) -> list[str]:
     return strings
 
 
-def _find_span(value: str, document: str) -> tuple[int, int] | None:
-    if not value or not document:
-        return None
-    start = document.find(value)
-    if start >= 0:
-        return start, start + len(value)
-    # The quote came out of `node.text()`, so its whitespace runs no longer look
-    # like the source's and its `&`, `"` and NBSP came back decoded; the span
-    # still has to point at the source.
-    match = re.search(_span_pattern(value), document)
-    return (match.start(), match.end()) if match else None
+def _shows(value: str, fragment: str) -> bool:
+    if not value or not fragment:
+        return False
+    # `node.text()` collapsed the source's whitespace runs and decoded its `&`, `"`
+    # and NBSP, so a plain substring test misses most real quotes.
+    return value in fragment or re.search(_source_pattern(value), fragment) is not None
 
 
-def _span_pattern(value: str) -> str:
+def _source_pattern(value: str) -> str:
     parts: list[str] = []
     for run in _WS_SPLIT_RE.split(value):
         if not run:
             continue
         parts.append(
-            _WS_SPAN_SOURCE if _WS_RE.fullmatch(run)
+            _WS_SOURCE if _WS_RE.fullmatch(run)
             else "".join(_char_pattern(char) for char in run)
         )
     return "".join(parts)

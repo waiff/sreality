@@ -1,12 +1,11 @@
 """Orchestrator for the bazos.cz crawler — on the shared portal framework (Phase 4).
 
-Runnable as `python -m scraper.bazos_main`. Bazos is now a `Portal` (BazosPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that stages raw
+Runnable as `python -m scraper.bazos_main`. Bazos is a `Portal` (BazosPortal)
+driven by the generic `scraper.portal_runner`. Its own `walk_category` stages raw
 pages and enqueues listings into the shared `listing_detail_queue` (source='bazos',
-migration 108), then a detail-drain that fetches + parses + ingests via
-`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
-pipeline — only the per-portal fetcher (BazosClient) + parser (bazos_parser) +
-config differ from sreality.
+migration 108); the shared detail-drain fetches (BazosClient) + parses
+(bazos_parser) + ingests via `db.ingest_scraped_listing` (Tier-0 idempotency; a
+first-seen row gets a singleton property, rule #15).
 
 Every scope pages to bazos's own last page, so a walk of it is provable-finished:
 `supports_complete_walk=True`, and a walk that REACHED THE END nominates the rows

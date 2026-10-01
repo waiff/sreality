@@ -51,8 +51,8 @@ export function useListingCovers(listingIds: readonly number[]): {
   );
   const q = useQuery({
     queryKey: hydrationKeys.covers(ids),
-    queryFn: async () => {
-      const byListing = await fetchListingCovers(ids);
+    queryFn: async ({ signal }) => {
+      const byListing = await fetchListingCovers(ids, { signal });
       const out = new Map<number, string>();
       for (const [listingId, image] of byListing) {
         out.set(listingId, imageSrc(image));
@@ -168,8 +168,8 @@ export function useListingPhotos(
   return useQueries({
     queries: buckets.map((ids) => ({
       queryKey: hydrationKeys.photos(ids, perId ?? 0),
-      queryFn: async () =>
-        (await fetchImagesForListingIds(ids, perId as number)) as PhotosByListingId,
+      queryFn: async ({ signal }: { signal: AbortSignal }) =>
+        (await fetchImagesForListingIds(ids, perId as number, { signal })) as PhotosByListingId,
       enabled,
       placeholderData: keepPreviousData,
       staleTime: DECORATION_STALE_MS,

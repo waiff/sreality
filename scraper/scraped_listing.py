@@ -4,7 +4,8 @@ One normalized shape every non-sreality portal scraper emits. It carries the
 cross-source identity (`source` + `source_id_native`, the Tier-0 idempotency
 key) plus the subset of `listings` columns the matcher and analytics read.
 `scraper.db.ingest_scraped_listing` turns one of these into a `listings` row
-(assigning a synthetic negative PK on first sight) and runs the Tier-1 matcher.
+(assigning a synthetic negative PK on first sight) and gives it a singleton property
+(rule #15: no insert-time matching).
 
 Sreality keeps its own JSON parse path (`scraper.parser` -> `upsert_listing`);
 this contract is for the HTML/crawler sources (bazos first).

@@ -100,13 +100,13 @@ export default function PropertyDetail() {
 
   const propertyQ = useQuery<PropertyPublic | null, Error>({
     queryKey: propertyKeys.row(propertyId),
-    queryFn: () => fetchProperty(propertyId as number),
+    queryFn: ({ signal }) => fetchProperty(propertyId as number, { signal }),
     enabled: propertyId != null,
     staleTime: 60_000,
   });
   const sourcesQ = useQuery<PropertySource[], Error>({
     queryKey: propertyKeys.sources(propertyId),
-    queryFn: () => fetchPropertySources(propertyId as number),
+    queryFn: ({ signal }) => fetchPropertySources(propertyId as number, { signal }),
     enabled: propertyId != null,
     staleTime: 60_000,
   });
@@ -114,7 +114,7 @@ export default function PropertyDetail() {
   // (migration 392) — see priceHistory.buildActiveWindows for how it's used.
   const statusEventsQ = useQuery<PropertyStatusEventPublic[], Error>({
     queryKey: ['property-status-events', propertyId],
-    queryFn: () => fetchPropertyStatusEvents(propertyId as number),
+    queryFn: ({ signal }) => fetchPropertyStatusEvents(propertyId as number, { signal }),
     enabled: propertyId != null,
     staleTime: 60_000,
   });
@@ -124,7 +124,7 @@ export default function PropertyDetail() {
   const advertId = property?.id ?? null;
   const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
     queryKey: ['snapshots', advertId],
-    queryFn: () => fetchSnapshotsForListings([advertId as number]),
+    queryFn: ({ signal }) => fetchSnapshotsForListings([advertId as number], { signal }),
     enabled: advertId != null,
     staleTime: 60_000,
   });
@@ -132,13 +132,13 @@ export default function PropertyDetail() {
   // observability) — sreality_id-keyed forever.
   const checksQ = useQuery<ListingFreshnessCheckPublic[], Error>({
     queryKey: ['freshness', property?.sreality_id],
-    queryFn: () => fetchFreshnessChecksByListing(property!.sreality_id!),
+    queryFn: ({ signal }) => fetchFreshnessChecksByListing(property!.sreality_id!, { signal }),
     enabled: property?.sreality_id != null,
     staleTime: 60_000,
   });
   const imagesQ = useQuery<ImagePublic[], Error>({
     queryKey: ['images', advertId],
-    queryFn: () => fetchImagesByListing(advertId as number),
+    queryFn: ({ signal }) => fetchImagesByListing(advertId as number, { signal }),
     enabled: advertId != null,
     staleTime: 5 * 60_000,
   });
@@ -316,7 +316,7 @@ export function AdvertRedirect() {
         : null;
   const q = useQuery({
     queryKey: ['advert-property', legacyId, source ?? null, nativeId ?? null],
-    queryFn: () => fetchAdvertProperty(key!),
+    queryFn: ({ signal }) => fetchAdvertProperty(key!, { signal }),
     enabled: key != null,
     staleTime: 60_000,
   });
