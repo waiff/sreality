@@ -188,6 +188,15 @@ def test_spec_ignores_retired_price_history_keys() -> None:
     assert "distinct_site_count_min" not in params
 
 
+def test_spec_model_dump_keeps_building_material_and_garden() -> None:
+    """create/update_subscription persist `model_dump()`. Merge f2d7b359 dropped these
+    fields from the model, so extra='ignore' discarded them on every save and the
+    watchdog matched wider than the Browse view it was made from."""
+    dumped = WatchdogFilterSpec(min_garden_area=100, building_material=["cihla"]).model_dump()
+    assert dumped["min_garden_area"] == 100
+    assert dumped["building_material"] == ["cihla"]
+
+
 def test_build_clauses_handles_price_and_area_bounds() -> None:
     spec = WatchdogFilterSpec(
         min_price_czk=15_000,
