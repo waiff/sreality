@@ -49,6 +49,7 @@ import { fetchListingsForListingIds } from '@/lib/queries';
 import type { ListingPublic } from '@/lib/types';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 import { useUrlFilters } from '@/lib/useUrlFilters';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 const PAGE_SIZE = 25;
 /* The payload names adverts by id only; the card's portal arrives with the facts read. */
@@ -140,12 +141,12 @@ export default function AutodedupJudge() {
   const [raw, setFilters] = useUrlFilters<JudgeFilterState>(JUDGE_FILTER_DEFAULTS);
   const filters = useMemo(() => sanitizeJudgeFilters(raw), [raw]);
   const blind = filters.blind !== '0';
-  const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const { overlay, submit, isPending } = useVerdictOverlay();
   const notes = useVerdictAnnotations();
   const query = useMemo(() => toQuery(filters), [filters]);
 
   const list = useInfiniteList<JudgedPair, JudgeListPage>({
-    queryKey: ['autodedup', 'judgements', query],
+    queryKey: autodedupKeys.judgements(query),
     queryFn: async (cursor) => {
       const res = await getAutodedupJudgements({ ...query, after: (cursor as string) ?? null });
       return {
@@ -323,7 +324,7 @@ export default function AutodedupJudge() {
                 judgement={revealed ? item.judgement : null}
                 blind={!revealed}
                 verdict={stored}
-                pending={pendingKey === key}
+                pending={isPending(key)}
                 eager={i < 2}
                 evidenceHref={pairHref(
                   item.listing_lo,

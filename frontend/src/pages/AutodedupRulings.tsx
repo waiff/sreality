@@ -76,6 +76,7 @@ import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
 import type { ListingPublic } from '@/lib/types';
 import { useUrlFilters } from '@/lib/useUrlFilters';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 const PAGE_SIZE = 25;
 const NOTE_MAX = 2000;
@@ -221,7 +222,7 @@ export default function AutodedupRulings() {
   const after = cursors[cursors.length - 1];
 
   const q = useQuery({
-    queryKey: ['autodedup', 'rulings', filterKey, after],
+    queryKey: autodedupKeys.rulings(filterKey, after),
     queryFn: () => getAutodedupRulings(toQuery(filters, after)),
     staleTime: 15_000,
   });
@@ -618,7 +619,7 @@ function CorrectionBar({
       setNote('');
     },
     /* Stale or not, the list re-reads: a 409 means someone ruled since. */
-    onSettled: () => qc.invalidateQueries({ queryKey: ['autodedup'] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: autodedupKeys.all }),
   });
   const conflict = write.error instanceof ApiError && write.error.status === 409;
 
@@ -761,12 +762,12 @@ function Consequence({ row }: { row: RulingPairRow }) {
       setArmed(null);
       setReason('');
       refreshAfterSplit(qc);
-      qc.invalidateQueries({ queryKey: ['autodedup'] });
+      qc.invalidateQueries({ queryKey: autodedupKeys.all });
     },
     onError: (e) => {
       if (e.message === STALE_PROPERTY || splitRefusal(e)?.code === 'stale') {
         refreshAfterSplit(qc);
-        qc.invalidateQueries({ queryKey: ['autodedup'] });
+        qc.invalidateQueries({ queryKey: autodedupKeys.all });
       }
     },
   });

@@ -15,8 +15,6 @@ import {
   archivePipelineStage,
   createPipelineStage,
   listCollections,
-  movePipelineCard,
-  removePipelineCard,
   reorderPipelineStages,
   updatePipelineStage,
 } from '@/lib/api';
@@ -28,13 +26,7 @@ import {
   matchesDistricts,
   pipelineKeys,
 } from '@/lib/queries';
-import { NO_ROLLBACK } from '@/lib/optimisticCache';
-import {
-  cachedStage,
-  dropCard,
-  placeCard,
-  revalidatePipeline,
-} from '@/lib/pipelineCache';
+import { usePipelineCard } from '@/lib/usePipelineCard';
 import { CardHydrationProvider } from '@/lib/hydration';
 import { useLegacyChipUpgrade } from '@/lib/useLegacyChipUpgrade';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
@@ -575,7 +567,6 @@ function Board({
   cityQuality: CityQualityByObec;
   size: PipelineCardSize;
 }) {
-  const qc = useQueryClient();
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(
     // distance:6 so a click on the card's link/select doesn't start a drag.
@@ -583,38 +574,11 @@ function Board({
     useSensor(KeyboardSensor),
   );
 
-  /* Optimistic: the card jumps to the new column instantly (Trello feel),
-   * rolled back on error, reconciled on settle — all through the shared cache
-   * policy (lib/pipelineCache), so a drag here repaints the Browse funnels and
-   * the listing header exactly like a click there repaints the board. The
-   * board's own copy patched `board` alone and invalidated `board` alone, which
-   * left every Browse funnel badging the pre-drag stage.
-   *
-   * Rollback rides `onSettled` rather than `onError` on purpose: a mutation
-   * that declares `onError` opts out of the app's global error toast
-   * (main.tsx), so a failed drag used to snap back with no explanation. */
-  const move = useMutation({
-    mutationFn: ({ propertyId, stageId }: { propertyId: number; stageId: number }) =>
-      movePipelineCard(propertyId, stageId),
-    onMutate: ({ propertyId, stageId }) => {
-      const stage = cachedStage(qc, stageId);
-      return stage ? placeCard(qc, propertyId, stage) : NO_ROLLBACK;
-    },
-    onSettled: (_d, err, _vars, rollback) => {
-      if (err) rollback?.();
-      revalidatePipeline(qc);
-    },
-  });
-
-  // Remove a property from the pipeline entirely (the trash action on a card).
-  const remove = useMutation({
-    mutationFn: (propertyId: number) => removePipelineCard(propertyId),
-    onMutate: (propertyId) => dropCard(qc, propertyId),
-    onSettled: (_d, err, _propertyId, rollback) => {
-      if (err) rollback?.();
-      revalidatePipeline(qc);
-    },
-  });
+  /* The drag (move) and the trash (remove) are the same writes every funnel
+   * makes — one hook, so a drag here repaints the Browse funnels and the
+   * listing header exactly like a click there repaints the board, and a failed
+   * one snaps back AND says why (rule #22). */
+  const { move, remove } = usePipelineCard();
 
   const activeCard = activeId
     ? cards.find((c) => `${CARD_PREFIX}${c.property_id}` === activeId) ?? null

@@ -1,14 +1,14 @@
 /* The hydration layer's two invariants.
  *
- * 1. Its cache keys must not collide with the pipeline's, because two live
- *    invalidations sweep by PREFIX: revalidatePipeline fires
- *    invalidateQueries(['pipeline','board']) after every card write, and the
- *    stage editor fires invalidateQueries(['pipeline']) wholesale. If a
- *    decoration key ever sat under either, every drag would refetch every
- *    thumbnail and every broker on the board — the split that makes the board
- *    fast would make it slower than the blocking chain it replaced. This is
- *    standing constraint 1 of the sprint, and it is cheap to violate by
- *    accident, so it is pinned here rather than trusted to review.
+ * 1. Its cache keys must not collide with any write's sweep, because
+ *    invalidations match by PREFIX: every pipeline card write re-reads
+ *    PIPELINE_REVALIDATE (members, board, dismissals — plus every Browse surface
+ *    when the cohort is pipeline-scoped), and the stage editor re-reads stages
+ *    and board. If a decoration key ever sat under one of those, every drag
+ *    would refetch every thumbnail and every broker on the board — the split
+ *    that makes the board fast would make it slower than the blocking chain it
+ *    replaced. This is standing constraint 1 of the sprint, and it is cheap to
+ *    violate by accident, so it is pinned here rather than trusted to review.
  *
  * 2. Keys are a property of the id SET, not of the array that arrived — so a
  *    re-sort or a re-render with the same cards is a cache hit.
@@ -16,7 +16,10 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { pipelineKeys } from '@/lib/queries';
+import { autodedupKeys } from '@/lib/autodedupKeys';
+import { browseKeys } from '@/lib/browseKeys';
+import { pipelineRevalidation } from '@/lib/pipelineCache';
+import { dismissalKeys, pipelineKeys } from '@/lib/queries';
 
 import type { ImagePublic } from '@/lib/types';
 
@@ -33,14 +36,17 @@ describe('hydration key namespace', () => {
   const decorationKeys = [
     hydrationKeys.covers([1, 2, 3]),
     hydrationKeys.brokers([1, 2, 3]),
+    hydrationKeys.photos([1, 2, 3], 6),
   ];
 
-  it('is disjoint from every pipeline invalidation prefix', () => {
+  it('is disjoint from every write sweep prefix', () => {
     const sweeps: ReadonlyArray<readonly unknown[]> = [
-      ['pipeline'],            // StageManager's wholesale invalidation
-      pipelineKeys.board,      // revalidatePipeline, after every card write
-      pipelineKeys.members,
-      pipelineKeys.stages,
+      ['pipeline'],                   // the pipeline namespace root itself
+      ...pipelineRevalidation(true),  // every card write, cohort-scoped (the widest)
+      pipelineKeys.stages,            // the stage editor, with the board
+      ...browseKeys.all,              // merge / split / link / dismissal
+      autodedupKeys.all,              // the rulings page's wholesale sweep
+      dismissalKeys.all,
     ];
     for (const key of decorationKeys) {
       for (const sweep of sweeps) {

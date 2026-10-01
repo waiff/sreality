@@ -18,92 +18,90 @@
  * duplication of what `members` already held for that property, and the two
  * had already drifted out of sync once on which columns they selected.)
  *
- * Patchers follow lib/optimisticCache's shape: hold, patch, return the rollback.
+ * Pure patch builders for useOptimisticWrite, which holds the same two caches
+ * it patches and rolls them back from `onSettled` (lib/usePipelineCard).
  */
 
-import type { QueryClient } from '@tanstack/react-query';
+import type { QueryClient, QueryKey } from '@tanstack/react-query';
 
 import { dismissalKeys, pipelineKeys, type PipelineMembers } from '@/lib/queries';
-import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
-import { holdQueries, type Rollback } from '@/lib/optimisticCache';
+import { browseKeys } from '@/lib/browseKeys';
+import { cachePatch, type CachePatch } from '@/lib/useOptimisticWrite';
 import type { PipelineBoardCard, PipelineStage } from '@/lib/types';
 
-const PIPELINE_CACHES = [
-  { queryKey: pipelineKeys.members },
-  { queryKey: pipelineKeys.board },
-];
+const MEMBERS = { queryKey: pipelineKeys.members, exact: true };
+const BOARD = { queryKey: pipelineKeys.board, exact: true };
 
 /* Show the property as sitting at `stage` — used for both "bookmarked into the
  * entry stage" and "moved to another stage".
  *
  * The board array is patched in place only when it already holds the card: a
- * board entry carries the property's display fields (price, photo, place) that
+ * board entry carries the property's display fields (price, place, area) that
  * a funnel click has no way to synthesise, so a NEW card reaches the board via
  * the revalidation instead of as a half-built row. */
-export async function placeCard(
-  qc: QueryClient,
-  property_id: number,
-  stage: PipelineStage,
-): Promise<Rollback> {
-  const rollback = await holdQueries(qc, PIPELINE_CACHES);
-
-  qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
-    if (!prev) return prev;
-    const next = new Map(prev);
-    next.set(property_id, {
-      property_id,
-      stage_id: stage.id,
-      stage_label: stage.label,
-      stage_color: stage.color,
-      stage_code: stage.code ?? null,
-      stage_position: stage.position,
-      is_terminal: stage.is_terminal,
-    });
-    return next;
-  });
-  qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (prev) =>
-    prev?.map((c) => (c.property_id === property_id ? { ...c, stage_id: stage.id } : c)),
-  );
-
-  return rollback;
+export function placeCard(property_id: number, stage: PipelineStage): CachePatch[] {
+  return [
+    cachePatch<PipelineMembers>(MEMBERS, (prev) => {
+      if (!prev) return prev;
+      const next = new Map(prev);
+      next.set(property_id, {
+        property_id,
+        stage_id: stage.id,
+        stage_label: stage.label,
+        stage_color: stage.color,
+        stage_code: stage.code ?? null,
+        stage_position: stage.position,
+        is_terminal: stage.is_terminal,
+      });
+      return next;
+    }),
+    cachePatch<PipelineBoardCard[]>(BOARD, (prev) =>
+      prev?.map((c) => (c.property_id === property_id ? { ...c, stage_id: stage.id } : c)),
+    ),
+  ];
 }
 
 /* Show the property as off the board. */
-export async function dropCard(
-  qc: QueryClient,
-  property_id: number,
-): Promise<Rollback> {
-  const rollback = await holdQueries(qc, PIPELINE_CACHES);
-
-  qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
-    if (!prev) return prev;
-    const next = new Map(prev);
-    next.delete(property_id);
-    return next;
-  });
-  qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (prev) =>
-    prev?.filter((c) => c.property_id !== property_id),
-  );
-
-  return rollback;
+export function dropCard(property_id: number): CachePatch[] {
+  return [
+    cachePatch<PipelineMembers>(MEMBERS, (prev) => {
+      if (!prev) return prev;
+      const next = new Map(prev);
+      next.delete(property_id);
+      return next;
+    }),
+    cachePatch<PipelineBoardCard[]>(BOARD, (prev) =>
+      prev?.filter((c) => c.property_id !== property_id),
+    ),
+  ];
 }
 
-/* Re-read the truth after any write, successful or not.
- *
- * `cohortScoped` is the caller's one knob: when Browse is scoped to the
+/* Re-read the truth after any write, successful or not. Dismissals are re-read
+ * too: adding a card lifts the caller's dismissal. */
+export const PIPELINE_REVALIDATE: readonly QueryKey[] = [
+  pipelineKeys.members,
+  pipelineKeys.board,
+  dismissalKeys.all,
+];
+
+/* `cohortScoped` is the caller's one knob: when Browse is scoped to the
  * pipeline, membership IS the cohort — un-bookmarking must drop the row from
  * the list — so the Browse read surfaces have to refetch too. With the scope
  * off, membership changes nothing about which properties match, and refetching
- * map + every loaded card page + count + stats on a funnel click is pure waste.
- * Dismissals are re-read too: adding a card lifts the caller's dismissal. */
+ * map + every loaded card page + count + stats on a funnel click is pure waste. */
+export function pipelineRevalidation(cohortScoped: boolean): readonly QueryKey[] {
+  return cohortScoped ? [...PIPELINE_REVALIDATE, ...browseKeys.all] : PIPELINE_REVALIDATE;
+}
+
+/* The same re-read for a write that is not a card write (a merge or split moves
+ * cards between properties — lib/mergedAdverts). */
 export function revalidatePipeline(
   qc: QueryClient,
   { cohortScoped = false }: { cohortScoped?: boolean } = {},
 ): void {
-  qc.invalidateQueries({ queryKey: pipelineKeys.members });
-  qc.invalidateQueries({ queryKey: pipelineKeys.board });
-  qc.invalidateQueries({ queryKey: dismissalKeys.all });
-  if (cohortScoped) invalidateBrowseQueries(qc);
+  for (const queryKey of pipelineRevalidation(cohortScoped)) {
+    void qc.invalidateQueries({ queryKey });
+  }
 }
 
 /* The stage a write lands on, read from the shared stage list already in cache.

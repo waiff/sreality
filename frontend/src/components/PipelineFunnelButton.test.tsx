@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import PipelineFunnelButton from './PipelineFunnelButton';
@@ -94,6 +94,41 @@ describe('<PipelineFunnelButton>', () => {
     await waitFor(() => expect(api.movePipelineCard).toHaveBeenCalledWith(42, 2));
     // The menu closes behind the write; the funnel is the tab stop again.
     await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+  });
+
+  /* The menu writes through its own hook instance; pending is per property and
+   * spans instances, so the funnel it closes onto stays busy until the move
+   * lands. Busy is aria-disabled, never `disabled`: the menu unmounts in the
+   * same commit, and its focus hand-back must land on the funnel, not <body>. */
+  it('stays busy but focusable after the menu closes, until the move it made settles', async () => {
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map([[42, MEMBER]]));
+    let resolve!: (v: Awaited<ReturnType<typeof api.movePipelineCard>>) => void;
+    vi.mocked(api.movePipelineCard).mockReturnValue(
+      new Promise((res) => {
+        resolve = res;
+      }),
+    );
+    renderButton();
+    const funnel = await screen.findByRole('button', { name: /V pipeline/ });
+    fireEvent.click(funnel);
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /For Call/ }));
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    await waitFor(() => expect(api.movePipelineCard).toHaveBeenCalledWith(42, 2));
+    expect(funnel).toHaveAttribute('aria-disabled', 'true');
+    expect(funnel).not.toBeDisabled();
+    expect(document.activeElement).toBe(funnel);
+
+    // A click while the move is in flight neither reopens the menu nor writes.
+    fireEvent.click(funnel);
+    await flush();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(api.movePipelineCard).toHaveBeenCalledTimes(1);
+    expect(api.addPipelineCard).not.toHaveBeenCalled();
+    expect(api.removePipelineCard).not.toHaveBeenCalled();
+
+    await act(async () => resolve({ property_id: 42, stage_id: 2, stage_key: 'call' }));
+    await waitFor(() => expect(funnel).not.toHaveAttribute('aria-disabled'));
+    expect(document.activeElement).toBe(funnel);
   });
 
   it('closes the menu on a second funnel click without writing', async () => {

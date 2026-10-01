@@ -225,7 +225,6 @@ export default function ImageTagDetailPanel({
       // screen, and each of those readouts has an open count that just moved.
       qc.invalidateQueries({ queryKey: NEW_DEDUP_CANDIDATES_KEY });
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const bulkSetMut = useMutation({
@@ -268,7 +267,6 @@ export default function ImageTagDetailPanel({
       // screen, and each of those readouts has an open count that just moved.
       qc.invalidateQueries({ queryKey: NEW_DEDUP_CANDIDATES_KEY });
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   /* Escape layering, the focus trap, initial + restored focus and the

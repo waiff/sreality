@@ -22,6 +22,7 @@ import {
   fetchNoPriceCount,
 } from '@/lib/queries';
 import { listCollections } from '@/lib/api';
+import { browseKeys } from '@/lib/browseKeys';
 import { FilterForm } from '@/components/FilterForm';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
@@ -141,10 +142,12 @@ function IncludeNoPriceToggle({
    * rest of the cohort"), so key on the cohort MINUS price — dragging the
    * price range never refetches it. Only fetched once a bound is set. */
   const countQuery = useQuery({
-    queryKey: [
-      'no-price-count',
-      { ...filters, priceMin: null, priceMax: null, includeNoPrice: false },
-    ],
+    queryKey: browseKeys.noPriceCount({
+      ...filters,
+      priceMin: null,
+      priceMax: null,
+      includeNoPrice: false,
+    }),
     queryFn: ({ signal }) => fetchNoPriceCount(filters, { signal }),
     enabled: hasBound,
     placeholderData: (prev) => prev,
@@ -243,7 +246,7 @@ function ShowDismissedToggle({
   const totalWith = (showDismissed: boolean) => {
     const f = { ...filters, showDismissed };
     return {
-      queryKey: ['browse-count', f],
+      queryKey: browseKeys.count(f),
       queryFn: ({ signal }: { signal: AbortSignal }) => fetchBrowseCount(f, { signal }),
       enabled: hasAny,
       placeholderData: <T,>(prev: T) => prev,

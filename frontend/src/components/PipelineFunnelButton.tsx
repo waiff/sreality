@@ -57,7 +57,8 @@ export default function PipelineFunnelButton({
   const badge = look ? stageBadge(look, stagesQ.data ?? []) : null;
   const accent = stageAccent(look);
 
-  const { add, pending } = usePipelineCard(property_id, { cohortScoped });
+  const { add, pending: pendingFor } = usePipelineCard({ cohortScoped });
+  const pending = pendingFor(property_id);
   const btnRef = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   /* Stable so the popover's positioning effect doesn't re-subscribe each render. */
@@ -88,9 +89,13 @@ export default function PipelineFunnelButton({
         onClick={() => {
           if (pending) return;
           if (inPipeline) setMenuOpen((v) => !v);
-          else add.mutate();
+          else add.mutate(property_id);
         }}
-        disabled={pending}
+        /* Busy, but never `disabled`: pending spans hook instances, so a write
+         * picked in the stage menu marks this funnel busy in the same commit
+         * that unmounts the menu — and the popover's focus hand-back can't land
+         * on a disabled button (focus would drop to <body>). */
+        aria-disabled={pending || undefined}
         aria-pressed={inPipeline}
         aria-haspopup={inPipeline ? 'menu' : undefined}
         aria-expanded={inPipeline ? menuOpen : undefined}
@@ -98,7 +103,7 @@ export default function PipelineFunnelButton({
         title={label}
         style={inPipeline ? { color: accent.fg, borderColor: accent.fg } : undefined}
         className={[
-          'flex h-6 items-center justify-center rounded-[var(--radius-xs)] border transition-colors disabled:opacity-60',
+          'flex h-6 items-center justify-center rounded-[var(--radius-xs)] border transition-colors aria-disabled:opacity-60',
           badge ? 'gap-0.5 px-1' : 'w-6',
           variant === 'overlay' ? 'backdrop-blur' : '',
           inPipeline

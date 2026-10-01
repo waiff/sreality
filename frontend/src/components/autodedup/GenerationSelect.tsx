@@ -24,6 +24,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import { getAutodedupGenerations, type AutodedupGenerationRollup } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 export interface GenerationVocabulary {
   items: AutodedupGenerationRollup[];
@@ -34,7 +35,7 @@ export interface GenerationVocabulary {
 
 export function useAutodedupGenerations(): GenerationVocabulary {
   const q = useQuery({
-    queryKey: ['autodedup', 'generations'],
+    queryKey: autodedupKeys.generations,
     queryFn: getAutodedupGenerations,
     /* The set of passes changes only when the lane rebuilds a clustering. */
     staleTime: 5 * 60_000,

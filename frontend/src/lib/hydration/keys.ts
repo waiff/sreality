@@ -2,14 +2,15 @@
  * shows but is not the card.
  *
  * They live in their own top-level namespace on purpose, and this is the single
- * load-bearing detail of the whole hydration layer. Two invalidations sweep by
- * PREFIX today: `revalidatePipeline` fires `invalidateQueries(['pipeline',
- * 'board'])` after every card write (lib/pipelineCache), and the board's stage
- * editor fires `invalidateQueries(['pipeline'])` wholesale. Nesting the
- * decorations under either prefix would mean every drag of every card refetched
- * every thumbnail and every broker on the board — turning the split that makes
- * the board fast into something slower than the blocking chain it replaced.
- * `hydration.test.ts` asserts the disjointness so it cannot regress by accident.
+ * load-bearing detail of the whole hydration layer. Invalidations sweep by
+ * PREFIX: every pipeline card write re-reads `PIPELINE_REVALIDATE` (members and
+ * board, lib/pipelineCache), and the board's stage editor re-reads stages and
+ * board. Nesting the decorations under any of those prefixes would mean every
+ * drag of every card refetched every thumbnail and every broker on the board —
+ * turning the split that makes the board fast into something slower than the
+ * blocking chain it replaced. `hydration.test.ts` asserts the disjointness from
+ * every write sweep (pipeline, Browse, autodedup, dismissals) so it cannot
+ * regress by accident.
  *
  * Keys are cohort-shaped, not per-id: one query for the whole visible id set,
  * so N cards cost one request, not N. `idsKey` makes that set order-independent
