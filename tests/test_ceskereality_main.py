@@ -784,13 +784,15 @@ def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):
     })
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
     stored = {  # 7000002 known at an OLD price -> changed; 7000001 unknown -> new
-        "7000002": {"sreality_id": -2, "price_czk": 3_900_000, "last_seen_at": None},
+        "7000002": {"id": 52, "sreality_id": -2, "price_czk": 3_900_000, "last_seen_at": None},
     }
     enqueued: list[tuple] = []
+    touched: list[int] = []
     monkeypatch.setattr(
         m.db, "index_summary_native",
         lambda _c, src, ids: {i: stored[i] for i in ids if i in stored})
-    monkeypatch.setattr(m.db, "touch_listings", lambda _c, pks: len(pks))
+    monkeypatch.setattr(
+        m.db, "touch_listings_by_id", lambda _c, pks: touched.extend(pks) or len(pks))
     monkeypatch.setattr(
         m.db, "enqueue_detail", lambda _c, src, entries: enqueued.extend(entries) or len(entries))
     portal = m.CeskerealityPortal(default_config("ceskereality"))
@@ -803,6 +805,7 @@ def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):
     assert by_id["7000001"][3] == m.db.QUEUE_PRIORITY_NEW
     assert by_id["7000002"][3] == m.db.QUEUE_PRIORITY_CHANGED
     assert by_id["7000002"][2] == 4_100_000     # refreshed observed price
+    assert touched == [52]                       # the repriced row is touched too (touch-all)
     # detail_ref is the absolute detail URL the drain fetches
     assert by_id["7000001"][1].startswith("https://www.ceskereality.cz/")
 

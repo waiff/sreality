@@ -3,8 +3,9 @@
 Runnable as `python -m scraper.ceskereality_main`. ceskereality is a `Portal`
 (CeskerealityPortal) driven by the generic `scraper.portal_runner`. Its own
 `walk_category` (and its bespoke `probe_category`, rule #21) pages the HTML
-search results and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='ceskereality', migration 108); the shared
+search results and hands its sightings to `portal_runner.reconcile_sightings`,
+which touches and enqueues into the shared `listing_detail_queue`
+(source='ceskereality', migration 108); the shared
 detail-drain fetches each listing page (CeskerealityClient), parses it to a
 `ScrapedListing` (ceskereality_parser), and writes via
 `listing_write.write_listings` (the one listing write; a first-seen row lands
@@ -56,7 +57,6 @@ from scraper.portal import (
     default_config,
     deadline_reached,
     load_portal_config,
-    classify_index_sighting,
     stop_is_portal_end,
     walk_is_complete,
     walk_reached_end,
@@ -135,10 +135,10 @@ class SliceResult:
         return stop_is_portal_end(self.stop)
 
 
-class CeskerealityPortal:
+class CeskerealityPortal(portal_runner.PortalDefaults):
     """ceskereality.cz as a Portal: the seams the generic runner needs, wrapping
-    the ceskereality client + parser. Operational scope (categories, complete-walk
-    capability) comes from the `portals` registry config."""
+    the ceskereality client + parser. Operational scope (categories, rates) comes
+    from the `portals` registry config."""
 
     source = SOURCE
     index_rate = 0.7
@@ -158,7 +158,6 @@ class CeskerealityPortal:
         max_pages: int | None = None,
         kraje: tuple[str, ...] | None = None,
     ) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         # A kraj subset to walk (for an ad-hoc one-kraj test); None = all 14.
@@ -166,7 +165,7 @@ class CeskerealityPortal:
         self._kraje = kraje
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
         # counts — the cross-slice nomination buffer (see presence_candidates).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
@@ -181,13 +180,6 @@ class CeskerealityPortal:
             CATEGORY_MAIN.get(category.get("category")),
             SALE_TYPE.get(category.get("sale_type")),
         )
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        conn = db.connect()
-        return conn
 
     def _archive_index_page(
         self, conn: Any, key: str, url: str, html: str, status: int,
@@ -602,38 +594,9 @@ class CeskerealityPortal:
         )
 
         seen = set(native_ids)
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (ref_map[n], price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
         )
         # A walk that reached the portal's end NOMINATES (rule #3); it no longer
         # delists, and since 2026-09-08 the verdict is STRUCTURAL: did every one
@@ -682,10 +645,7 @@ class CeskerealityPortal:
                 cat, sale_type, declared_sum, national,
             )
         result_size = national if national is not None else declared_sum
-        return (
-            seen, {"found_new": len(new_ids), "enqueued": enqueued}, result_size,
-            pages, reached_end,
-        )
+        return seen, counts, result_size, pages, reached_end
 
     def probe_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool,
@@ -720,43 +680,18 @@ class CeskerealityPortal:
                 total = parsed.total
             if not parsed.items:
                 break
-            rows = [
-                (it.source_id_native, detail_url(it.detail_path),
-                 index_price(it.price_text))
+            rows = {
+                it.source_id_native: (detail_url(it.detail_path), index_price(it.price_text))
                 for it in parsed.items if it.source_id_native not in seen
-            ]
-            seen.update(nid for nid, _, _ in rows)
-            existing = (
-                db.index_summary_native(conn, SOURCE, [nid for nid, _, _ in rows])
-                if conn is not None else {}
+            }
+            seen.update(rows)
+            page_counts = portal_runner.reconcile_sightings(
+                conn, SOURCE, rows, min_change_pct=self.price_change_min_pct,
+                label=f" cm={cat} ct={sale_type} page={page}",
             )
-            new_entries: list[tuple[str, str, int | None, int]] = []
-            changed_entries: list[tuple[str, str, int | None, int]] = []
-            unchanged_pks: list[int] = []
-            for nid, ref, price in rows:
-                prev = existing.get(nid)
-                verdict = classify_index_sighting(
-                    prev, price, self._price_change_min_pct,
-                )
-                if verdict == "new":
-                    new_entries.append((nid, ref, price, db.QUEUE_PRIORITY_NEW))
-                elif verdict == "changed":
-                    changed_entries.append(
-                        (nid, ref, price, db.QUEUE_PRIORITY_CHANGED))
-                else:
-                    unchanged_pks.append(prev["id"])
-            if conn is not None and unchanged_pks:
-                db.touch_listings_by_id(conn, unchanged_pks)
-            entries = changed_entries + new_entries
-            if conn is not None and entries:
-                enqueued += db.enqueue_detail(conn, SOURCE, entries)
-            found_new += len(new_entries)
-            LOG.info(
-                "PROBE page cm=%s ct=%s page=%d new=%d changed=%d unchanged=%d",
-                cat, sale_type, page, len(new_entries), len(changed_entries),
-                len(unchanged_pks),
-            )
-            if not new_entries or parsed.next_offset is None:
+            found_new += page_counts["found_new"]
+            enqueued += page_counts["enqueued"]
+            if not page_counts["found_new"] or parsed.next_offset is None:
                 break
         return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
 
@@ -803,16 +738,7 @@ class CeskerealityPortal:
             return None
         return db.presence_candidates(conn, SOURCE, cm, ct, group)
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> CeskerealityClient:
-        return CeskerealityClient(limiter=limiter)
-
     def fetch_detail(
         self, client: CeskerealityClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -862,14 +788,6 @@ class CeskerealityPortal:
         # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
         # have no sreality_id-keyed listing_fetch_failures row.
         pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'ceskereality' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
 
 
 def _load_config(dry_run: bool) -> PortalConfig:
