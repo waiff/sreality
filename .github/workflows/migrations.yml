@@ -70,18 +70,26 @@ jobs:
           # Install server + PostGIS + pgvector in ONE apt transaction so the
           # binary and every contrib .so land at the same (newest) 17.x minor —
           # a partial upgrade is what triggers "undefined symbol" on load.
-          # Check-Valid-Until=false: the base image is Debian BULLSEYE, and
-          # bullseye-security's Release file has now expired — apt refuses the
-          # whole repo and `apt-get update` exits 100, which took every
-          # migration-touching PR red on 2026-09-08 with nothing wrong in the
-          # diff. An expired Release file does not self-heal: the suite has
-          # simply stopped being republished. Ignoring the date is safe HERE
-          # specifically — this container lives for the minutes it takes to
-          # replay migrations against an empty database, serves no traffic and
-          # holds no data — and it is the narrow fix. The real one is a
-          # bookworm-based postgis tag, which also moves the PostGIS minor and
-          # so belongs in its own change, not in a CI unblock.
-          RUN apt-get -o Acquire::Check-Valid-Until=false update \
+          # The base image is Debian BULLSEYE, which is end-of-life, and every Debian
+          # postgis/postgis:17 tag is still built on it (17-3.5 too; the rest are
+          # alpine — checked 2026-10-01), so there is no newer tag to move to. Each
+          # step below exists because bullseye going stale took every
+          # migration-touching PR red with nothing wrong in the diff:
+          #  * 2026-09-08: bullseye-security's Release file expired and is no longer
+          #    republished, so apt refused the repo. Check-Valid-Until=false ignores
+          #    the date — safe HERE only because this container lives for the
+          #    minutes of one replay against an empty database and serves no traffic.
+          #  * 2026-10-01: PGDG removed bullseye-pgdg from apt.postgresql.org (404)
+          #    and froze it on apt-archive.postgresql.org — same signing key, and the
+          #    same final versions the last green run installed (17.11, PostGIS
+          #    3.5.2, pgvector 0.8.6). The sed repoints the image's pgdg source; the
+          #    grep fails the build if the sed matched nothing.
+          # Leaving bullseye means building FROM postgres:17-bookworm and installing
+          # PostGIS (3.6 there) from PGDG ourselves — its own change, not a CI unblock.
+          RUN sed -i 's#http://apt.postgresql.org/pub/repos/apt#https://apt-archive.postgresql.org/pub/repos/apt#' \
+                 /etc/apt/sources.list.d/pgdg.list \
+            && grep -q 'https://apt-archive.postgresql.org/pub/repos/apt' /etc/apt/sources.list.d/pgdg.list \
+            && apt-get -o Acquire::Check-Valid-Until=false update \
             && apt-get install -y --no-install-recommends \
                  postgresql-17 postgresql-17-postgis-3 postgresql-17-pgvector \
             && rm -rf /var/lib/apt/lists/*
