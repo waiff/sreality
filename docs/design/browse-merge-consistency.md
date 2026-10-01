@@ -447,7 +447,7 @@ that was just made**: it shows what looks like two separate active listings
 for a property the system just declared to be one. That's a direct, visible
 regression in the exact metric the entire dedup program (rules #15-16) exists to
 improve — perceived duplicate rate. Because the fix lives at the shared
-`merge_property_set`/`detach_listing` chokepoint,
+`merge_property_set`/`detach_listings` chokepoint,
 it closes this window for **every** merge path, including the much
 higher-volume Tier-2 automatic sweep, not just the rare manual click — a
 standing data-quality improvement market-wide, beyond the one reported bug.
