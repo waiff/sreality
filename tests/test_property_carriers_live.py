@@ -1,7 +1,9 @@
 """Every property-anchored row follows a merge and a detach, executed through the public
 writers (`merge_property_set`, `detach_listing`) against the replayed schema: one test per
-carrier, each over two accounts, each proving the retired property is left holding nothing.
-Runs in CI's migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
+carrier, each over two accounts, each proving the retired property is left holding nothing;
+then the live census — every foreign key to `properties` and every `%property_id%` column of the
+replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`). Runs in CI's
+migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
 
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from tests._live_property import (  # `cur` is the fixture
     _tag,
     cur,
 )
+from toolkit.property_carriers import NOT_CARRIED, carried_columns
 from toolkit.property_identity import detach_listing, merge_property_set
 
 pytestmark = REQUIRED_DB
@@ -344,3 +347,55 @@ def test_the_asset_link_follows_and_comes_back(cur, source, ledger):
     _detached(cur, advert, r, source=source)
     assert links() == {s: None, r: asset}
     assert logged(f"detach {group}") == [(s, "unlinked", ledger), (r, "linked", ledger)]
+
+
+# --- the census, over the replayed schema ---------------------------------------------------
+
+_HOW_TO_FIX = ("carry it (one `CurationTable(...)` line, or one `Carrier` class) or name it in "
+               "`NOT_CARRIED` with the reason a merge leaves it: toolkit/property_carriers.py")
+
+_FOREIGN_KEYS_SQL = """
+SELECT c.conrelid::regclass::text, a.attname
+FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+WHERE c.contype = 'f' AND c.confrelid = 'public.properties'::regclass
+"""
+
+# `*_next` tables exist only while a rebuild is in flight; other schemas (backups) are out.
+_PROPERTY_COLUMNS_SQL = """
+SELECT CASE WHEN c.table_schema = 'public' THEN c.table_name
+            ELSE c.table_schema || '.' || c.table_name END, c.column_name
+FROM information_schema.columns c
+JOIN information_schema.tables t USING (table_schema, table_name)
+WHERE t.table_type = 'BASE TABLE' AND c.table_schema IN ('public', 'autodedup')
+  AND c.column_name LIKE '%property_id%' AND c.table_name NOT LIKE '%\\_next'
+"""
+
+_ALL_COLUMNS_SQL = """
+SELECT CASE WHEN table_schema = 'public' THEN table_name
+            ELSE table_schema || '.' || table_name END, column_name
+FROM information_schema.columns WHERE table_schema IN ('public', 'autodedup')
+"""
+
+
+def _classified() -> set[tuple[str, str]]:
+    return set(carried_columns()) | set(NOT_CARRIED)
+
+
+def test_every_foreign_key_to_properties_is_classified(cur):
+    cur.execute(_FOREIGN_KEYS_SQL)
+    fks = {(str(t), str(c)) for t, c in cur.fetchall()}
+    _require(("listings", "property_id") in fks, f"the FK query found no listings link: {fks}")
+    unclassified = sorted(fks - _classified())
+    assert not unclassified, f"unclassified foreign keys {unclassified}; {_HOW_TO_FIX}"
+
+
+def test_every_property_id_column_is_classified(cur):
+    cur.execute(_PROPERTY_COLUMNS_SQL)
+    columns = {(str(t), str(c)) for t, c in cur.fetchall()}
+    _require(("listings", "property_id") in columns, f"the column query is broken: {columns}")
+    unclassified = sorted(columns - _classified())
+    assert not unclassified, f"unclassified property columns {unclassified}; {_HOW_TO_FIX}"
+    cur.execute(_ALL_COLUMNS_SQL)
+    existing = {(str(t), str(c)) for t, c in cur.fetchall()}
+    stale = sorted(_classified() - existing)
+    assert not stale, f"carried or NOT_CARRIED names a column the schema no longer has: {stale}"
