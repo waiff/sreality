@@ -88,7 +88,7 @@ extend to collections, tags, notes, or deal-pipeline stage moves:
 
 | Mutation | Chokepoint | Touches `properties`? | In `browse_projection`'s column list? | Affected |
 |---|---|---|---|---|
-| Merge (the operator's set, the AUTODEDUP apply path) | `merge_property_set` (through `merge_properties` per retired property) | Yes, one inline recompute per set | Yes (most columns) | **Yes** |
+| Merge (the operator's set, the AUTODEDUP apply path) | `merge_property_set` (through the private `_merge_pair` per retired property) | Yes, one inline recompute per set | Yes (most columns) | **Yes** |
 | Detach (one advert back; a group undo is a loop of them) | `detach_listing` | Yes, inline recompute of both properties | Yes | **Yes** |
 | Asset link/unlink | `link_properties`/`unlink_property` (`toolkit/asset_identity.py`) | Yes, `asset_id` only, no recompute | Yes — `p.asset_id` is the last column in `browse_projection` (migration 276 line 86) | **Yes, latent** (not the reported bug — Browse doesn't currently render `asset_id` on cards — but the same gap exists the moment it does; see Rollout) |
 | Dismiss (cluster/candidate), decision feedback, archive-reset | candidate-table writes only | No | — | No |
@@ -221,7 +221,7 @@ Called at the two recompute chokepoints — the whole change, so every current
 and future caller (including the Tier-2 auto-merge sweep) gets it for free:
 
 - `merge_property_set`, after the survivor's one recompute (W3 of the AUTODEDUP production
-  sprint moved it out of the per-pair `merge_properties`):
+  sprint moved it out of the per-pair step, then `merge_properties`, now the private `_merge_pair`):
   `sync_browse_list(conn, [survivor_id, *retired_ids])`
 - `detach_listing`, after recomputing the property the advert left and the one it returned to:
   `sync_browse_list(conn, [left_id, restored_id])`

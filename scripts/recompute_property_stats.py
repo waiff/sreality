@@ -256,8 +256,8 @@ _CLEAR_DIRTY_SWEPT_SQL = (
 
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
-# property drops out of the UPDATE and keeps stale columns -- merge_properties
-# sets the loser is_active=false explicitly, but this guards the general case
+# property drops out of the UPDATE and keeps stale columns -- the merge's retire
+# (`toolkit.property_identity._RETIRE_SQL`) sets the loser is_active=false, but this guards the general case
 # (a partially-failed merge, or any childless active property) so Browse never
 # shows a ghost active dot.
 _RECONCILE_CHILDLESS_SQL = """
@@ -292,7 +292,7 @@ def recompute_one(conn: Any, property_id: int) -> None:
     """Recompute one property's rollup + stats using the batch job's exact SQL.
 
     No transaction wrapper, so it nests inside a caller's open transaction
-    (e.g. the inline survivor recompute in toolkit.property_identity.merge_properties).
+    (e.g. the inline survivor recompute in toolkit.property_identity.merge_property_set).
     """
     with conn.cursor() as cur:
         cur.execute(_RECOMPUTE_ONE_SQL, {"pid": property_id})

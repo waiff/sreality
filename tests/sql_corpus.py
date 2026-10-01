@@ -12,7 +12,8 @@ Two layers:
   * import-resolve (opt-in): imports the handful of modules that build a
     `*_SQL`/`*_QUERY` constant by `.replace()`/f-string/concatenation — which AST
     cannot evaluate statically (e.g. `recompute_property_stats._RECOMPUTE_ONE_SQL`)
-    — and reads its RESOLVED value. The test suite already imports these modules,
+    — and reads its RESOLVED value; a tuple/list of strings counts each element
+    (`property_carriers.CARRIER_SQL`, the f-string carrier statements). The test suite already imports these modules,
     so this is safe under CI; a module that fails to import is reported by the
     caller, never silently dropped.
 
@@ -108,8 +109,16 @@ def discover(*, include_inline: bool = True, resolve_imports: bool = False) -> l
             except Exception:  # noqa: BLE001 — caller reports import failures
                 continue
             for attr in dir(mod):
-                if _is_sql_const_name(attr) and isinstance(getattr(mod, attr, None), str):
-                    add(SqlItem(f"{rel}::{attr}", attr, getattr(mod, attr), "resolved"))
+                if not _is_sql_const_name(attr):
+                    continue
+                value = getattr(mod, attr, None)
+                if isinstance(value, str):
+                    add(SqlItem(f"{rel}::{attr}", attr, value, "resolved"))
+                elif isinstance(value, (tuple, list)):
+                    # A built list of statements (`property_carriers.CARRIER_SQL`): each one.
+                    for i, s in enumerate(value):
+                        if isinstance(s, str):
+                            add(SqlItem(f"{rel}::{attr}[{i}]", attr, s, "resolved"))
 
     return items
 

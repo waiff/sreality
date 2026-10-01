@@ -18,9 +18,11 @@ import pytest
 
 import toolkit.property_identity as pi
 import toolkit.property_split as ps
-from tests._property_ledger import OP, T0, _Ledger
+from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit.property_identity import merge_property_set
 from toolkit.property_split import SplitRefused, split_property, undo_split
+
+pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
 OTHER = "someone.else@example.com"
 
@@ -40,7 +42,7 @@ def _split(db: _Ledger, separate: list[list[int]], *, adverts: list[int] | None 
 
 def _state(db: _Ledger) -> tuple:
     return (dict(db.listings), dict(db.props), [dict(e) for e in db.events],
-            [dict(r) for r in db.verdicts], dict(db.mnl))
+            [dict(r) for r in db.verdicts], dict(db.mnl), list(db.carried))
 
 
 def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:

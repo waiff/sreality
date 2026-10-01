@@ -41,7 +41,7 @@ SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
 
 # Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
-# so the merge_properties chokepoint hard-rejects a category_main mismatch. The ONE
+# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
 # sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and
 # commercial on another is the same real-world property) — irrespective of sub-type. Lives
 # here (pure, no heavy imports) so property_identity can share it without an import cycle.

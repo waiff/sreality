@@ -16,7 +16,7 @@ import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 /** Re-read collections after ANY collection write — one idiom per call site,
  * metadata included. The member map is in the list because a property-grain
  * add/remove, a collection DELETE (migration 202 cascades its memberships away)
- * and a merge (operator_state re-points collection_properties onto the
+ * and a merge (property_carriers re-points collection_properties onto the
  * survivor) each change it. Pass `collection_id` when the write names one
  * collection, so its own page refetches too.
  *

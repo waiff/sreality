@@ -56,31 +56,21 @@ pytestmark = pytest.mark.skipif(
 def _statements() -> list[tuple[str, str]]:
     """(name, sql) for every statement W5 moved onto the named measure."""
     from api.notifications import WatchdogFilterSpec, _build_match_clauses
-    from toolkit.comparables import ComparableFilters, TargetSpec, build_query
+    from toolkit.comparables import ComparableFilters, build_query
     from toolkit.neighborhoods import build_query as neighborhood_query
     from toolkit.transit_axis import build_corridor_query
     from toolkit.velocity import build_market_velocity_query
 
-    target = TargetSpec(lat=50.08, lng=14.42, area_m2=65.0, disposition="2+kk")
-    # Every ppm²-bearing branch ON, so the rendered statement is the widest one
-    # a caller can produce rather than the narrowest.
-    filters = ComparableFilters(
-        radius_m=1000,
-        min_price_per_m2=50_000,
-        max_price_per_m2=200_000,
-        min_price_czk=1_000_000,
-        max_price_czk=20_000_000,
-        # W21: the PLOT bounds render `plot_area_m2(...)` (migration 534), which has
-        # exactly the same coverage problem the per-m² measure had — assembled into a
-        # local, invisible to both corpus layers, and a 42883 if the function is not
-        # applied. Same gate, same reason.
-        min_estate_area=200,
-        max_estate_area=5_000,
-        category_main="byt",
-        category_type="prodej",
-        lifecycle="active",
-        max_age_days=30,
-    )
+    from tests.toolkit import test_filter_compiler_golden as gold
+
+    # The golden's "everything set" inputs (C4): every template and hook the filter
+    # compiler can emit, rendered once per statement, so PREPARE type-checks each of them
+    # against `listings` and `properties_public` — not only the per-m² and plot measures.
+    # A filter added to either model reaches this statement through the golden by itself.
+    everything = {c["name"]: c["input"] for c in gold.golden()}
+    target = gold.target("full")   # area_m2, disposition, floor and the subject's adverts
+    filters = ComparableFilters(**everything["listings:everything"])
+    assert filters.min_price_per_m2 is not None and filters.min_estate_area is not None
 
     out: list[tuple[str, str]] = [
         ("comparables.build_query", build_query(target, filters)[0]),
@@ -102,10 +92,9 @@ def _statements() -> list[tuple[str, str]]:
     # over the relation the matcher actually runs against (`properties_public`,
     # aliased `l` — api/notifications.py:1311) so the ppm² bound is resolved
     # against the same view in the test as in production.
-    where, _ = _build_match_clauses(
-        WatchdogFilterSpec(min_price_per_m2=50_000, max_price_per_m2=200_000,
-                           min_estate_area=200, max_estate_area=5_000)
-    )
+    spec = dict(everything["watchdog:everything"])
+    spec["districts"] = [{"name": "Praha", "context": None, "level": "obec", "id": 554782}]
+    where, _ = _build_match_clauses(WatchdogFilterSpec(**spec))
     out.append((
         "notifications._build_match_clauses",
         "SELECT l.property_id FROM properties_public l WHERE "

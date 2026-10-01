@@ -74,6 +74,8 @@ export interface FilterDef {
    *  reach it (an explicit "all" pill) — see FilterDef.nullable in
    *  toolkit/filter_registry.py. */
   nullable: boolean;
+  /** How a column-backed filter compiles everywhere (toolkit/filter_registry.sql_kind); null = hand-coded per surface. */
+  sql_kind: 'eq' | 'any' | 'enum_or_unknown' | 'gte' | 'lte' | null;
 }
 
 export interface FilterRegistryPayload {
@@ -135,7 +137,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "districts",
@@ -154,7 +157,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "radius_m",
@@ -179,7 +183,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "area_band_pct",
@@ -204,7 +209,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "disposition_match",
@@ -247,7 +253,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "floor_band",
@@ -270,7 +277,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "max_age_days",
@@ -295,7 +303,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "max_sold_age_days",
@@ -316,7 +325,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "lifecycle",
@@ -359,7 +369,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "status",
@@ -399,7 +410,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "recently_added_days",
@@ -451,7 +463,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "recently_changed_days",
@@ -503,7 +516,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "tom_days_min",
@@ -525,7 +539,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "tom_days_max",
@@ -547,7 +562,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "last_seen_min_days",
@@ -569,7 +585,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "last_seen_max_days",
@@ -591,7 +608,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "first_seen_min_days",
@@ -613,7 +631,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "first_seen_max_days",
@@ -635,7 +654,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "category_main",
@@ -691,7 +711,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "category_main_in",
@@ -737,7 +758,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "category_type",
@@ -789,7 +811,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": true
+      "nullable": true,
+      "sql_kind": "eq"
     },
     {
       "id": "category_sub_cb",
@@ -813,7 +836,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "dispositions",
@@ -924,7 +948,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "subtype",
@@ -1064,7 +1089,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "portals",
@@ -1129,7 +1155,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "condition_match",
@@ -1209,7 +1236,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "building_type_match",
@@ -1290,7 +1318,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "building_material",
@@ -1330,7 +1359,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "energy_rating_match",
@@ -1386,7 +1416,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "any"
     },
     {
       "id": "building_condition_level_min",
@@ -1415,7 +1446,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "buildingConditionLevelMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "apartment_condition_level_min",
@@ -1444,7 +1476,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "apartmentConditionLevelMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "building_condition_level_max",
@@ -1473,7 +1506,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "buildingConditionLevelMax"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "apartment_condition_level_max",
@@ -1502,7 +1536,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "apartmentConditionLevelMax"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "furnished",
@@ -1547,7 +1582,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "enum_or_unknown"
     },
     {
       "id": "ownership",
@@ -1597,7 +1633,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "enum_or_unknown"
     },
     {
       "id": "has_balcony",
@@ -1623,7 +1660,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "balcony"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "has_lift",
@@ -1649,7 +1687,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "lift"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "has_parking",
@@ -1675,7 +1714,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "parking"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "terrace",
@@ -1699,7 +1739,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "cellar",
@@ -1723,7 +1764,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "garage",
@@ -1747,7 +1789,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "eq"
     },
     {
       "id": "min_parking_lots",
@@ -1776,7 +1819,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "parking_lots_min",
         "parkingLotsMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "min_price_czk",
@@ -1807,7 +1851,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "price_min",
         "priceMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "max_price_czk",
@@ -1838,7 +1883,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "price_max",
         "priceMax"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "include_no_price",
@@ -1859,7 +1905,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "includeNoPrice"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "min_price_per_m2",
@@ -1890,7 +1937,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "price_per_m2_min",
         "pricePerM2Min"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_price_per_m2",
@@ -1921,7 +1969,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "price_per_m2_max",
         "pricePerM2Max"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "min_mf_gross_yield_pct",
@@ -1947,7 +1996,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "mf_gross_yield_pct_min",
         "mfGrossYieldPctMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_mf_gross_yield_pct",
@@ -1973,7 +2023,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "mf_gross_yield_pct_max",
         "mfGrossYieldPctMax"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "min_area_m2",
@@ -2000,7 +2051,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "area_min",
         "areaMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_area_m2",
@@ -2027,7 +2079,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "area_max",
         "areaMax"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "min_estate_area",
@@ -2057,7 +2110,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "estate_min"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_estate_area",
@@ -2087,7 +2141,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "estate_max"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "min_usable_area",
@@ -2118,7 +2173,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "usable_min"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_usable_area",
@@ -2149,7 +2205,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "usable_max"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "min_garden_area",
@@ -2177,7 +2234,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_garden_area",
@@ -2205,7 +2263,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "tags",
@@ -2223,7 +2282,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "collections",
@@ -2241,7 +2301,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "pipeline",
@@ -2259,7 +2320,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "with_estimates",
@@ -2279,7 +2341,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "withEstimates"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "show_dismissed",
@@ -2299,7 +2362,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "showDismissed"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "city_index_rules",
@@ -2318,7 +2382,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "min_city_population",
@@ -2343,7 +2408,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "minCityPopulation"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "max_city_population",
@@ -2368,7 +2434,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "maxCityPopulation"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "lte"
     },
     {
       "id": "near_pop_5km_min",
@@ -2393,7 +2460,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearPop5kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_pop_15km_min",
@@ -2418,7 +2486,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearPop15kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_jobs_5km_min",
@@ -2443,7 +2512,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearJobs5kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_jobs_15km_min",
@@ -2468,7 +2538,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearJobs15kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_youth_5km_min",
@@ -2493,7 +2564,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearYouth5kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_youth_15km_min",
@@ -2518,7 +2590,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearYouth15kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_overall_5km_min",
@@ -2543,7 +2616,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearOverall5kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "near_overall_15km_min",
@@ -2568,7 +2642,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "nearOverall15kmMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": "gte"
     },
     {
       "id": "price_change_count_min",
@@ -2591,7 +2666,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "priceChangeCountMin"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "price_change_window_days",
@@ -2634,7 +2710,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "priceChangeWindowDays"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "total_price_change_pct",
@@ -2655,7 +2732,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "totalPriceChangePct"
       ],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     },
     {
       "id": "include_unreliable",
@@ -2675,7 +2753,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "basis": null,
       "enum_values": null,
       "aliases": [],
-      "nullable": false
+      "nullable": false,
+      "sql_kind": null
     }
   ]
 };
