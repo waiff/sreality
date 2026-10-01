@@ -54,6 +54,7 @@ from api.location_filter import (
 )
 from location_data.claims_common import served_location_predicate
 from scraper import db as scraper_db
+from toolkit.filter_compiler import PROPERTIES_GRAIN, compile_filter_where
 from toolkit.measures import plot_area_sql
 
 if TYPE_CHECKING:
@@ -271,10 +272,58 @@ def _build_match_clauses(
     """Render the filter spec as parameterised WHERE clauses.
 
     The matcher prepends a watermark / window clause; this helper owns
-    the spec-derived part only. Keep column semantics aligned with
-    `toolkit/comparables._shared_filter_where` so Browse / Watchdog
-    can never disagree on what a filter means.
+    the spec-derived part only. Spec-derived clauses come from
+    `compile_filter_where(…, PROPERTIES_GRAIN)`; only the served predicate,
+    circle and place chips are rendered here.
     """
+    # THE CONSUMER RULE (W5, operator ruling 2026-09-13), unconditional and first.
+    # Browse inherits it from `browse_projection` (migration 512); the matcher cannot,
+    # because it reads `properties_public` — a DETAIL-by-id surface that deliberately
+    # keeps serving an unresolved listing to a direct link. So the ONE definition is
+    # rendered here instead, keyed on the property's display listing, which is what
+    # `properties_public.listing_id` is. Without it a watchdog would fire on a listing
+    # nobody can find in Browse, and "matches" would mean two different things.
+    where: list[str] = [served_location_predicate("l.listing_id")]
+    params: dict[str, Any] = {}
+
+    if (
+        spec.lat is not None
+        and spec.lng is not None
+        and spec.radius_m is not None
+    ):
+        # properties_public projects lat/lng (ST_Y/ST_X of the geom); it does
+        # not expose the raw geom column, so build the target point from
+        # lat/lng rather than referencing l.geom.
+        where.append("l.lat IS NOT NULL")
+        where.append("l.lng IS NOT NULL")
+        where.append(
+            "ST_DWithin("
+            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
+            "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
+            "%(radius_m)s)"
+        )
+        params["lat"] = spec.lat
+        params["lng"] = spec.lng
+        params["radius_m"] = spec.radius_m
+
+    if spec.districts:
+        # Delegates to the shared builder (`api.location_filter`) so Browse,
+        # Stats, the map and the Watchdog can never disagree on what a place
+        # chip means (rule 16): `<level>_id = any(codes)`, nothing else.
+        d_where, d_params = district_where(spec.districts, alias="l")
+        where.extend(d_where)
+        params.update(d_params)
+
+    compiled, compiled_params = compile_filter_where(dict(spec), PROPERTIES_GRAIN)
+    where.extend(compiled)
+    params.update(compiled_params)
+    return where, params
+
+
+def _build_match_clauses_legacy(
+    spec: WatchdogFilterSpec,
+) -> tuple[list[str], dict[str, Any]]:
+    """The hand-coded body, kept for ONE commit as the C4 oracle's reference."""
     # THE CONSUMER RULE (W5, operator ruling 2026-09-13), unconditional and first.
     # Browse inherits it from `browse_projection` (migration 512); the matcher cannot,
     # because it reads `properties_public` — a DETAIL-by-id surface that deliberately
@@ -1468,6 +1517,9 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     total_lookback_inserted = 0
     total_listings_in_window = 0
     cursors_advanced = 0
+    # A spec that cannot even be rendered mutes its watchdog every pass; counted, so the
+    # loop's INFO line says so instead of one LOG per subscription nobody reads.
+    failed = 0
 
     for sub_id, raw_spec, cursor_ts, channels in sub_rows:
         try:
@@ -1478,6 +1530,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "matcher: subscription %s has invalid filter_spec: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
         # One failing subscription must not zero the whole feed. The
@@ -1589,10 +1642,12 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             LOG.exception(
                 "matcher: subscription %s failed, skipping: %s", sub_id, exc,
             )
+            failed += 1
             continue
 
     return {
         "subscriptions_evaluated": len(sub_rows),
+        "subscriptions_failed": failed,
         "matches_inserted": total_inserted,
         "gate_lookback_inserted": total_lookback_inserted,
         "listings_in_window": total_listings_in_window,
@@ -1659,6 +1714,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
     if not drops:
         return {
             "subscriptions_evaluated": 0,
+            "subscriptions_failed": 0,
             "price_drops_in_window": 0,
             "changes_inserted": 0,
         }
@@ -1676,6 +1732,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
         sub_rows = cur.fetchall()
 
     total_inserted = 0
+    failed = 0
     for sub_id, raw_spec, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
@@ -1685,6 +1742,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "change matcher: subscription %s has invalid filter_spec: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
         try:
@@ -1726,10 +1784,12 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "change matcher: subscription %s failed, skipping: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
     return {
         "subscriptions_evaluated": len(sub_rows),
+        "subscriptions_failed": failed,
         "price_drops_in_window": len(drops),
         "changes_inserted": total_inserted,
     }
@@ -2122,7 +2182,8 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
 
         try:
             stats = await asyncio.to_thread(_match_once_in_thread)
-            if stats.get("matches_inserted", 0) > 0:
+            if (stats.get("matches_inserted", 0) > 0
+                    or stats.get("subscriptions_failed", 0) > 0):
                 LOG.info("notification matcher: %s", stats)
             else:
                 LOG.debug("notification matcher: %s", stats)
@@ -2139,7 +2200,8 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
             try:
                 cstats = await asyncio.to_thread(_match_changes_in_thread)
                 last_change_run = time.monotonic()
-                if cstats.get("changes_inserted", 0) > 0:
+                if (cstats.get("changes_inserted", 0) > 0
+                        or cstats.get("subscriptions_failed", 0) > 0):
                     LOG.info("notification change matcher: %s", cstats)
                 else:
                     LOG.debug("notification change matcher: %s", cstats)

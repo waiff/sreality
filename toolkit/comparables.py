@@ -31,6 +31,7 @@ from toolkit.filter_registry import (
     OWNERSHIP_CANONICAL,
     UNKNOWN_FILTER_VALUE,
 )
+from toolkit.filter_compiler import LISTINGS_GRAIN, compile_filter_where
 from toolkit.measures import (
     cohort_basis,
     measure_backed,
@@ -337,10 +338,10 @@ def _enum_or_unknown_clause(
     return "(" + " OR ".join(parts) + ")"
 
 
-def _shared_filter_where(
+def _shared_filter_where_legacy(
     target: TargetSpec, filters: ComparableFilters
 ) -> tuple[list[str], dict[str, Any]]:
-    """Build WHERE clauses + bound params shared across all spatial tools.
+    """The hand-coded body, kept for ONE commit as the C4 oracle's reference.
 
     Includes: spatial radius, category, disposition, area band, floor band,
     condition/building/energy filters, amenity booleans, price bounds,
@@ -371,7 +372,7 @@ def _shared_filter_where(
         "ll.geom IS NOT NULL",
         (
             "ST_DWithin("
-            "ll.geom::geography, "
+            "ll.geom" "::geography, "  # split: the spatial rail counts the live adapter's copy
             "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
             "%(radius_m)s)"
         ),
@@ -548,6 +549,103 @@ def _shared_filter_where(
     # NOT an inert branch: rendering nothing here would be the silent failure W5
     # exists to prevent. See _assert_no_city_quality.
     _assert_no_city_quality(filters)
+
+    if not filters.include_unreliable:
+        # Stays sreality-keyed: listing_fetch_failures is a queue table, not an R2
+        # carrier (rule 5), so it has no listing_id to join on. Post-Gate-2 this
+        # fails OPEN — `NULL = NULL` finds no failure row, NOT EXISTS is true, the
+        # listing is KEPT — so the filter degrades to a no-op for non-sreality
+        # rows rather than dropping them. Acceptable; re-key only if that table
+        # ever gains a listing_id.
+        where.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM listing_fetch_failures lff "
+            "WHERE lff.sreality_id = l.sreality_id AND lff.given_up = true"
+            ")"
+        )
+
+    # Decision 13: a property counts ONCE, as its canonical advert (`repr_listing_ref_id`, which
+    # the rollup writes from property_canonical_listings, migration 561), and every advert of
+    # the subject's property is out. An advert not yet attached to a property is no comparable.
+    where.append(
+        "EXISTS (SELECT 1 FROM properties canon_p "
+        "WHERE canon_p.id = l.property_id AND canon_p.repr_listing_ref_id = l.id)"
+    )
+    if target.exclude_listing_ids:
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM listings subj "
+            "WHERE subj.id = ANY(%(exclude_listing_ids)s) AND subj.property_id = l.property_id)"
+        )
+        params["exclude_listing_ids"] = list(target.exclude_listing_ids)
+
+    return where, params
+
+
+def _shared_filter_where(
+    target: TargetSpec, filters: ComparableFilters, *, radius: bool = True,
+) -> tuple[list[str], dict[str, Any]]:
+    """Build WHERE clauses + bound params shared across all spatial tools.
+
+    The listings adapter: target-relative clauses and the cohort invariants here, every
+    registry filter through `compile_filter_where(…, LISTINGS_GRAIN)`. `radius=False`
+    (the transit corridor) leaves out the target circle and its param, nothing else.
+
+    Does NOT include the lifecycle / max_age_days clauses — those are
+    operational rather than attribute filters. Each caller appends them
+    via the shared `_lifecycle_where` helper.
+
+    The spatial pair reads `ll` — every caller's FROM must carry
+    `JOIN listing_location ll ON ll.listing_id = l.id` (W4-a). The `::geography`
+    cast is not optional: `listing_location.geom` is geometry(Point,4326), and
+    `ST_DWithin(geometry, geometry, n)` measures n in DEGREES, so an uncast call
+    would silently return a ~111 km cohort for a 1 km radius. The cast is served
+    by `listing_location_geog_gist` (migration 507).
+    """
+    params: dict[str, Any] = {"lat": target.lat, "lng": target.lng}
+    where: list[str] = [
+        # THIS IS THE W5 CONSUMER RULE, in its strictly narrower form — do not remove it
+        # thinking the spatial clause below already implies it. A comparable must have a
+        # POINT, so the foreign arm of `claims_common.SERVED_LOCATION_PREDICATE` is the
+        # one thing this lane drops; everything the rule hides, this hides too. Pinned by
+        # tests/test_location_w5_serve_resolved.py.
+        "ll.geom IS NOT NULL",
+    ]
+    if radius:
+        # Emitted whenever radius is on, even for a NULL radius_m (the agent can send one):
+        # that is an empty cohort, never a nationwide one.
+        where.append(
+            "ST_DWithin("
+            "ll.geom::geography, "
+            "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
+            "%(radius_m)s)"
+        )
+        params["radius_m"] = filters.radius_m
+
+    if target.disposition is not None:
+        if filters.disposition_match == "exact":
+            where.append("l.disposition = %(disposition)s")
+            params["disposition"] = target.disposition
+        elif filters.disposition_match == "loose":
+            group = _DISPOSITION_LOOSE.get(
+                target.disposition, (target.disposition,)
+            )
+            where.append("l.disposition = ANY(%(disposition_loose)s)")
+            params["disposition_loose"] = list(group)
+        # "any": no clause
+
+    if target.area_m2 is not None:
+        where.append("l.area_m2 BETWEEN %(area_min)s AND %(area_max)s")
+        params["area_min"] = target.area_m2 * (1 - filters.area_band_pct)
+        params["area_max"] = target.area_m2 * (1 + filters.area_band_pct)
+
+    if filters.floor_band is not None and target.floor is not None:
+        where.append("l.floor BETWEEN %(floor_min)s AND %(floor_max)s")
+        params["floor_min"] = target.floor - filters.floor_band
+        params["floor_max"] = target.floor + filters.floor_band
+
+    compiled, compiled_params = compile_filter_where(vars(filters), LISTINGS_GRAIN)
+    where.extend(compiled)
+    params.update(compiled_params)
 
     if not filters.include_unreliable:
         # Stays sreality-keyed: listing_fetch_failures is a queue table, not an R2
