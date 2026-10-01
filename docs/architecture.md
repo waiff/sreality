@@ -1315,7 +1315,7 @@ renumber.** Navigate by area:
     AUTODEDUP legacy-retire lane (`autodedup/legacy_retire.py`, `mode=apply` with
     `retire_legacy=1`; the autodedup PROGRAM.md D7 carve-out), which reads them only to find
     which of those merges to undo and feeds nothing it reads to the engine. The other ledger
-    reads (`detach_listing`, `GET /properties/{id}/origins`, and the merge ledger
+    reads (`detach_listings`, `GET /properties/{id}/origins`, and the merge ledger
     `GET /properties/merges`, which lists `'auto'` groups beside the rest and returns their
     `source` for display) are source-blind link mechanics. The operator owns all merge/no-merge logic in the rebuild; thresholds, weights and
     rules are not to be invented.
@@ -1334,17 +1334,23 @@ renumber.** Navigate by area:
     `properties_changed` (`scripts/recompute_property_stats.py`, the dirty drain's own
     after-step: the scoped rollup, the Browse row, the broker queue) runs ONCE over the survivor
     and the retired, so `brokers.property_count` follows on the broker drain's cadence, not at
-    the daily broker sweep. `detach_listing` is the ONE split and the ONE undo, per advert: back
+    the daily broker sweep. `detach_listings` is the ONE split and the ONE undo, set-shaped: one
+    transaction locks every property its steps will lock, up front in id order, then re-plans
+    each advert in the caller's order (so it sees the call's earlier adverts) and sends it back
     to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
     property if merged away INTO that merge's survivor (else the advert stays:
     `origin_moved_on`, read under the lock) and then running every carrier's inverse in REVERSE
     list order (the pipeline card and the carried asset link come back), stamping its ledger
-    rows `undone_at`/`undone_by` (never deleted), then `properties_changed` once over both. An
-    advert NO standing merge moved (an ingest-time grouping, ~15.9k `native_multi` properties)
+    rows `undone_at`/`undone_by` (never deleted). Then, for the operator, the rulings ONCE
+    (`_rule_detached`: each moved advert `different` from every advert still on the property it
+    left after ALL moves, never from another that moved in the call), then `properties_changed`
+    ONCE over every property left and reached. `detach_listing` is its one-advert adapter, kept
+    for the engine's per-advert undo loops below. An unknown advert refuses the whole set before
+    anything moves; an empty set is a no-op. An advert NO standing merge moved (an ingest-time grouping, ~15.9k `native_multi` properties)
     is, while ANOTHER such own advert stays, a BIRTH through the one birth path (`split_native`,
     the operator's only: any other source answers `propose_only`, decision 9): the property
     locked first and the plan re-read under the lock, then the advert unlinked and born by
-    `scraper.db.create_singleton_properties` and both brought current (`properties_changed`);
+    `scraper.db.create_singleton_properties` (both brought current by the call's one after-step);
     ONE ledger row records it in the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
     property left, `retired` = `prev` = the new record) written already undone by the split (no
     migration) — so the new record IS the advert's origin, and a later merge of the two
@@ -1388,9 +1394,12 @@ renumber.** Navigate by area:
     joined by the one merge when they landed apart; two units that would go home to one origin,
     or an origin already holding another unit's or an unnamed advert, is a 409 before any write),
     the rest stays, ruled one property when `keep_together`; ONE transaction (5 s lock / 25 s
-    statement, the lane's bounds), composing `detach_listing` + `merge_property_set` +
+    statement, the lane's bounds), composing ONE `detach_listings` call over its movers (a
+    refusal names every advert that cannot leave) + `merge_property_set` per joined unit +
     `record_rulings` (+ `restore_must_not_link`, so a guard/model/llm veto on a pair it rules
-    `same` stays the machine's) and writing no statement of its own. Its refusals
+    `same` stays the machine's; no detach in the call rules a pair inside one unit, so it writes
+    nothing today — follow-up F1 deletes it) and writing no statement of its own: M movers and
+    J joined units cost 1 + J `properties_changed`, not M + J. Its refusals
     (`{code, message, ids}`: 400 `invalid`, 404, 409 `stale` / `reverses_rulings` /
     `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing; its response names
     where each unit sits (`units[].property_id`), which unit keeps the record (`record_kept_by`:

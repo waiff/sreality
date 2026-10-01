@@ -1,10 +1,11 @@
 """Two writers for the canonical `properties` parent (rule 15, decisions 8 and 17).
 
 `merge_property_set` merges an active set into its oldest record under one lock and one gate;
-`detach_listing` moves one advert back to its ledger origin, or (the operator only) a native
-advert to a new record through the one birth path — a group undo is a loop of it. Both carry
+`detach_listings` moves a set of adverts back to their ledger origins, or (the operator only) a
+native advert to a new record through the one birth path, under one lock taken up front;
+`detach_listing` is its one-advert adapter for the engine's per-advert undo callers. Both carry
 every property-anchored operator-state row through `toolkit.property_carriers.PROPERTY_CARRIERS`
-and finish with `properties_changed` once (rollup, Browse row, broker queue). Callers:
+and finish with `properties_changed` once per call (rollup, Browse row, broker queue). Callers:
 `api.property_merge` and `toolkit.property_split` (the operator), `autodedup.apply` and
 `autodedup.reconcile` (merge, inside `app_settings.autodedup_apply_scope`),
 `autodedup.apply.unapply` and `autodedup.legacy_retire` (detach). `source='operator'` is also a
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -27,7 +28,7 @@ from toolkit import property_carriers as carriers
 from toolkit.property_carriers import MergeSource  # re-exported: callers read it from here
 from toolkit.room_taxonomy import category_main_compatible
 
-# The `detach_listing` outcomes that move the advert: back to its origin, or to a new record.
+# The `detach_listings` outcomes that move the advert: back to its origin, or to a new record.
 MOVED = frozenset({"detached", "split_native"})
 
 
@@ -489,9 +490,11 @@ def _plan_detaches(
 
 def detach_outcomes(
     conn: psycopg.Connection, listing_ids: list[int], *, merge_group_id: str | None = None,
+    source: MergeSource = "operator",
 ) -> dict[int, str]:
-    """The `outcome` `detach_listing` would answer for each advert now, read-only: what a bulk
-    undo's dry run reports, and (in `MOVED`) whether a split would move it."""
+    """The `outcome` `detach_listings` would answer for each advert now, read-only: what a bulk
+    undo's dry run reports, and (in `MOVED`) whether a split would move it. A native advert
+    answers `propose_only` to any source but the operator's, as the writer does (decision 9)."""
     ids = sorted({int(i) for i in listing_ids})
     if not ids:
         return {}
@@ -500,8 +503,14 @@ def detach_outcomes(
         cur.execute(_STATUS_SQL, {"ids": sorted(
             {t for _at, out, _u, t in plans.values() if out == "detached"})})
         state = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
-    return {lid: "origin_moved_on" if out == "detached" and _origin_gone(state.get(t), undo)
-            else out for lid, (_at, out, undo, t) in plans.items()}
+    answers: dict[int, str] = {}
+    for lid, (_at, outcome, undo, target) in plans.items():
+        if outcome == "detached" and _origin_gone(state.get(target), undo):
+            outcome = "origin_moved_on"
+        elif outcome == "split_native" and source != "operator":
+            outcome = "propose_only"
+        answers[lid] = outcome
+    return answers
 
 
 def _split_native(
@@ -531,6 +540,157 @@ def _split_native(
     return "split_native", [(int(row_id), group, current, born)], born
 
 
+class _Detached(NamedTuple):
+    """One advert's answer inside a `detach_listings` call."""
+
+    listing_id: int
+    outcome: str
+    left: int | None  # the property it sat on
+    target: int | None  # where it went: its origin or a new record (`left` when it stayed)
+    undo: tuple[carriers.Hop, ...]
+    reactivated: bool
+
+
+def _lock_set(
+    conn: psycopg.Connection, plans: Iterable[tuple[int | None, str, list[tuple], int | None]],
+    source: MergeSource,
+) -> None:
+    """Every property the call's per-advert steps lock, taken up front in id order (the order
+    every writer locks in): the advert's property and its origin for a detach, the property for
+    the operator's native split. The steps' own locks then re-enter these."""
+    ids: set[int] = set()
+    for current, outcome, _undo, target in plans:
+        if outcome == "detached":
+            ids |= {int(current), int(target)}
+        elif outcome == "split_native" and source == "operator":
+            ids.add(int(current))
+    if ids:
+        lock_properties(conn, sorted(ids))
+
+
+def _detach_one(
+    conn: psycopg.Connection, listing_id: int, *, at: int | None, decided_by: str,
+    source: MergeSource, merge_group_id: str | None,
+) -> _Detached:
+    """ONE advert off its property, re-planned here so it sees the call's earlier adverts (a
+    sibling born or gone home, an origin already reactivated); `at` is where the call's plan
+    found it, so an advert moved before the call's lock stays (`moved_since`). No rulings, no
+    after-step: the set writer does both once."""
+    plan = _plan_detaches(conn, [listing_id], merge_group_id).get(listing_id)
+    if plan is None:
+        raise MergeError(f"listing {listing_id} not found")
+    current, outcome, undo, target = plan
+    if current != at:
+        current, outcome, undo, target = at, "moved_since", [], at
+    reactivated = False
+    if outcome == "split_native":
+        outcome, undo, target = _split_native(
+            conn, listing_id, int(current), decided_by=decided_by,
+        ) if source == "operator" else ("propose_only", [], current)
+    if outcome == "detached":
+        # The merge's lock order, properties before the advert; the origin's state is read
+        # under the lock, and the advert moves only if it still sits where the ledger was read.
+        with conn.cursor() as cur:
+            cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({current, target})})
+            locked = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+            if _origin_gone(locked.get(target), undo):
+                outcome, undo, target = "origin_moved_on", [], current
+            else:
+                cur.execute(_MOVE_ADVERT_SQL, (target, listing_id, current))
+                if not cur.rowcount:
+                    outcome, undo, target = "moved_since", [], current
+    hops = tuple(carriers.Hop(int(m[0]), str(m[1]), int(m[2]), int(m[3])) for m in undo)
+    if outcome == "detached":
+        with conn.cursor() as cur:
+            cur.execute(_UNDO_SQL, (decided_by, [h.event_id for h in hops]))
+            cur.execute(_REACTIVATE_SQL, {"pid": target})
+            reactivated = (cur.rowcount or 0) == 1
+            if reactivated:
+                step = carriers.DetachStep(int(target), int(current), hops, source)
+                for carrier in reversed(carriers.PROPERTY_CARRIERS):
+                    carrier.on_detach(cur, step)
+    return _Detached(listing_id, outcome, current, target, hops, reactivated)
+
+
+def _rule_detached(
+    conn: psycopg.Connection, moved: list[_Detached], *, decided_by: str, reason: str | None,
+) -> int:
+    """Each moved advert `different` from every advert still on the property it left after ALL
+    moves (decision 8); never two adverts that moved in this call."""
+    movers, ruled = {m.listing_id for m in moved}, 0
+    for left in sorted({int(m.left) for m in moved}):
+        with conn.cursor() as cur:
+            cur.execute(_STAYING_SQL, (left,))
+            staying = {int(r[0]) for r in cur.fetchall()} - movers
+        note = f"operator detach from {left}" + (f": {reason}" if reason else "")
+        for m in (m for m in moved if m.left == left):
+            ruled += record_rulings(conn, {(min(m.listing_id, s), max(m.listing_id, s))
+                                           for s in staying},
+                                    verdict="different", decided_by=decided_by, note=note)
+    return ruled
+
+
+def detach_listings(
+    conn: psycopg.Connection,
+    listing_ids: Sequence[int],
+    *,
+    decided_by: str,
+    reason: str | None = None,
+    source: MergeSource = "operator",
+    merge_group_id: str | None = None,
+) -> dict[str, Any]:
+    """Split a SET of adverts off their properties, in the caller's order, in ONE transaction: a
+    merged one back to its ORIGIN (with `merge_group_id`, to where it sat before that merge, only
+    while it is the newest to move it); if that merge retired the origin it is reactivated and
+    every carrier's inverse runs, in reverse `PROPERTY_CARRIERS` order (its pipeline card and
+    asset link come back; curation, dispatches and dismissals stay on the property left, rules
+    18, 22). A native one (no standing merge moved it), while another own advert stays, goes to
+    a NEW record (`split_native`: the operator only, never group-scoped; any other source answers
+    `propose_only`, decision 9); no carrier runs. Idempotent, each `outcome` saying why nothing
+    moved. Every property the steps lock is locked first, in id order. `source='operator'` rules
+    each moved advert "different" from every advert left where it was, never from another that
+    moved (`_rule_detached`); then `properties_changed` ONCE over every property left and reached.
+    An unknown advert refuses the set before anything moves; an empty set is a no-op. Callers:
+    `toolkit.property_split`; `autodedup.apply.unapply` and `autodedup.legacy_retire` through
+    `detach_listing`."""
+    ids = list(dict.fromkeys(int(i) for i in listing_ids))
+    done: list[_Detached] = []
+    ruled = 0
+    if ids:
+        with conn.transaction():
+            plans = _plan_detaches(conn, ids, merge_group_id)
+            if missing := [lid for lid in ids if lid not in plans]:
+                raise MergeError(f"listing {missing[0]} not found")
+            _lock_set(conn, plans.values(), source)
+            done = [_detach_one(conn, lid, at=plans[lid][0], decided_by=decided_by,
+                                source=source, merge_group_id=merge_group_id) for lid in ids]
+            moved = [d for d in done if d.outcome in MOVED]
+            if source == "operator" and moved:
+                ruled = _rule_detached(conn, moved, decided_by=decided_by, reason=reason)
+            properties_changed(conn, [p for d in moved for p in (d.left, d.target)])
+
+    return {
+        "data": {
+            "adverts": [{
+                "listing_id": d.listing_id,
+                "detached": d.outcome in MOVED,
+                "outcome": d.outcome,
+                "left_property_id": d.left,
+                "restored_property_id": d.target,
+                "reactivated": d.reactivated,
+                "merge_group_ids": sorted({h.group for h in d.undo}),
+            } for d in done],
+            "rulings_written": ruled,
+        },
+        "metadata": {
+            "tool": "detach_listings",
+            "source": source,
+            "decided_by": decided_by,
+            "queried_at": _now_iso(),
+        },
+    }
+
+
 def detach_listing(
     conn: psycopg.Connection,
     listing_id: int,
@@ -540,77 +700,22 @@ def detach_listing(
     source: MergeSource = "operator",
     merge_group_id: str | None = None,
 ) -> dict[str, Any]:
-    """Split ONE advert off its property: a merged one back to its ORIGIN (with `merge_group_id`,
-    to where it sat before that merge, only while it is the newest to move it); if that merge
-    retired the origin it is reactivated and every carrier's inverse runs, in reverse
-    `PROPERTY_CARRIERS` order (its pipeline card and asset link come back; curation, dispatches
-    and dismissals stay on the property left, rules 18, 22). A native one (no standing merge
-    moved it), while another own advert stays, goes to a NEW record (`split_native`: the
-    operator only, never group-scoped; any other source answers `propose_only`, decision 9); no
-    carrier runs. Idempotent, the `outcome` saying why nothing moved. `source='operator'` rules
-    it "different" from every advert that stays. Callers: `toolkit.property_split`,
-    `autodedup.apply.unapply` and `autodedup.legacy_retire`."""
-    with conn.transaction():
-        plan = _plan_detaches(conn, [int(listing_id)], merge_group_id).get(int(listing_id))
-        if plan is None:
-            raise MergeError(f"listing {listing_id} not found")
-        current, outcome, undo, target = plan
-        reactivated, ruled = False, 0
-        if outcome == "split_native":
-            assert current is not None
-            outcome, undo, target = _split_native(
-                conn, int(listing_id), current, decided_by=decided_by,
-            ) if source == "operator" else ("propose_only", [], current)
-        if outcome == "detached":
-            # The merge's lock order, properties before the advert; the origin's state is read
-            # under the lock, and the advert moves only if it still sits where the ledger was read.
-            with conn.cursor() as cur:
-                cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({current, target})})
-                locked = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
-                if _origin_gone(locked.get(target), undo):
-                    outcome, undo, target = "origin_moved_on", [], current
-                else:
-                    cur.execute(_MOVE_ADVERT_SQL, (target, listing_id, current))
-                    if not cur.rowcount:
-                        outcome, undo, target = "moved_since", [], current
-        if outcome == "detached":
-            assert current is not None and target is not None
-            hops = tuple(carriers.Hop(int(m[0]), str(m[1]), int(m[2]), int(m[3])) for m in undo)
-            with conn.cursor() as cur:
-                cur.execute(_UNDO_SQL, (decided_by, [h.event_id for h in hops]))
-                cur.execute(_REACTIVATE_SQL, {"pid": target})
-                reactivated = (cur.rowcount or 0) == 1
-                if reactivated:
-                    step = carriers.DetachStep(int(target), int(current), hops, source)
-                    for carrier in reversed(carriers.PROPERTY_CARRIERS):
-                        carrier.on_detach(cur, step)
-        if outcome in MOVED:
-            if source == "operator":
-                with conn.cursor() as cur:
-                    cur.execute(_STAYING_SQL, (current,))
-                    staying = {int(r[0]) for r in cur.fetchall()}
-                ruled = record_rulings(
-                    conn, {(min(listing_id, s), max(listing_id, s)) for s in staying},
-                    verdict="different", decided_by=decided_by,
-                    note=f"operator detach from {current}" + (f": {reason}" if reason else ""),
-                )
-            properties_changed(conn, [current, target])
-
+    """`detach_listings` for ONE advert, in the per-advert payload (`survivor_property_id` = the
+    property it left): the adapter the engine's injected per-advert `detach=` callers
+    (`autodedup.apply.unapply`, `autodedup.legacy_retire`) and their fakes still take."""
+    out = detach_listings(conn, [listing_id], decided_by=decided_by, reason=reason,
+                          source=source, merge_group_id=merge_group_id)
+    (advert,) = out["data"]["adverts"]
     return {
         "data": {
-            "listing_id": int(listing_id),
-            "detached": outcome in MOVED,
-            "outcome": outcome,
-            "survivor_property_id": current,
-            "restored_property_id": target,
-            "reactivated": reactivated,
-            "merge_group_ids": sorted({str(m[1]) for m in undo}),
-            "rulings_written": ruled,
+            "listing_id": advert["listing_id"],
+            "detached": advert["detached"],
+            "outcome": advert["outcome"],
+            "survivor_property_id": advert["left_property_id"],
+            "restored_property_id": advert["restored_property_id"],
+            "reactivated": advert["reactivated"],
+            "merge_group_ids": advert["merge_group_ids"],
+            "rulings_written": out["data"]["rulings_written"],
         },
-        "metadata": {
-            "tool": "detach_listing",
-            "source": source,
-            "decided_by": decided_by,
-            "queried_at": _now_iso(),
-        },
+        "metadata": {**out["metadata"], "tool": "detach_listing"},
     }

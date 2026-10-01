@@ -175,10 +175,10 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     coarse `condition_assessment`.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows land
     `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge chokepoint,
-    two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listing`) — it re-points `listings.property_id`,
-    soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to its origin or a refusal, e.g. `moved_since`; a group undo
-    loops it — no replay), carries every property-anchored operator-state row through ONE ordered list, `PROPERTY_CARRIERS` (rule #18), brings every touched
-    property current through ONE after-step, `properties_changed`, which the dirty drain shares, and enforces **category compatibility** (`CategoryClash`:
+    two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listings`, set-shaped) — it re-points `listings.property_id`,
+    soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
+    call, a group undo loops its one-advert adapter `detach_listing` — no replay), carries every property-anchored operator-state row through ONE ordered list,
+    `PROPERTY_CARRIERS` (rule #18), brings every touched property current once per call (`properties_changed`, the dirty drain's after-step), and enforces **category compatibility** (`CategoryClash`:
     sale≠rent, flat≠house — except the sanctioned **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
     the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open
