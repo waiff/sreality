@@ -361,9 +361,9 @@ def test_sreality_probe_category_never_archives(
             return [{"hash_id": 7, "price_czk": 1}]
 
     monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _Client())
-    monkeypatch.setattr(scraper_main.db, "index_summary", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(scraper_main.db, "enqueue_detail", lambda *a, **k: 1)
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(scraper_main.db, "touch_listings_by_id", lambda *a, **k: None)
     conn = _FakeConn()
 
     scraper_main.SrealityPortal().probe_category(

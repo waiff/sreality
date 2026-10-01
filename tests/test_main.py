@@ -185,6 +185,14 @@ def patched_db(monkeypatch):
         lambda _conn, _ids: (calls["touch_listings"].append(list(_ids)) or 0),
     )
     monkeypatch.setattr(
+        scraper_main.db, "index_summary_native",
+        lambda _conn, _src, _ids: (calls["index_summary"].append(set(_ids)) or {}),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "touch_listings_by_id",
+        lambda _conn, _ids: (calls["touch_listings"].append(list(_ids)) or 0),
+    )
+    monkeypatch.setattr(
         scraper_main.db, "active_failure_ids", lambda _conn, _ids: set(),
     )
     # Rule #3 (2026-09-07): the combined run nominates unseen rows for a page
@@ -820,7 +828,7 @@ def test_split_cap_counts_only_fetches_not_unchanged(monkeypatch):
 
     def fake_walk_category(
         client, conn, cat_limit, dry_run, budget, district_cap, workers,
-        enqueue_only=False,
+        enqueue_only=False, **_kw,
     ):
         caps_seen.append(district_cap)
         # Each district: 300 unchanged (touched, NOT fetched) + 10 real fetches.
@@ -1090,13 +1098,13 @@ def test_walk_category_enqueue_assigns_priorities(monkeypatch):
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
     # (1,2): ids 12000..12004, idx price 10000..10004.
     monkeypatch.setattr(
-        scraper_main.db, "index_summary",
-        lambda _c, ids: {
-            12000: {"price_czk": 10000, "last_seen_at": None},  # same price -> unchanged
-            12001: {"price_czk": 999, "last_seen_at": None},    # diff price -> changed
+        scraper_main.db, "index_summary_native",
+        lambda _c, _src, ids: {
+            "12000": {"id": 1, "price_czk": 10000, "last_seen_at": None},  # same price -> unchanged
+            "12001": {"id": 2, "price_czk": 999, "last_seen_at": None},    # diff price -> changed
         },
     )
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, ids: 0)
+    monkeypatch.setattr(scraper_main.db, "touch_listings_by_id", lambda _c, ids: 0)
     monkeypatch.setattr(scraper_main.db, "active_failure_ids", lambda _c, ids: {12001})
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -1218,7 +1226,7 @@ def test_detail_drain_dry_run_does_not_claim(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): return None
         def execute(self, sql, params=None): pass
-        def fetchone(self): return (7,)
+        def fetchall(self): return [("sreality", 7)]
 
     class _CountConn:
         def __enter__(self): return self

@@ -39,8 +39,8 @@ import argparse
 import logging
 
 from scraper import db, portal_runner
-from scraper.main import SrealityPortal
 from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal_factory import build_portal
 
 LOG = logging.getLogger(__name__)
 SOURCE = "sreality"
@@ -64,12 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     config = _load_config(args.dry_run)
-    portal = SrealityPortal(index_rate=config.limits.index_rate)
-    # The DB column is the source of truth for delisting (so it stays consistent
-    # with the derived Health posture badge); the class default is the safe
-    # fallback for the legacy main._run_full path that doesn't load config.
-    portal.supports_complete_walk = config.supports_complete_walk
-    portal.shared_rate_limiter = config.limits.shared_rate_limiter
+    portal = build_portal(SOURCE, config)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers

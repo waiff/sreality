@@ -69,7 +69,10 @@ def build_portal(source: str, config: PortalConfig) -> Any:
         # index_rate, not a PortalConfig, and builds its own category list).
         from scraper import main as sreality_main
 
-        return sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
+        portal = sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
+        portal.shared_rate_limiter = config.limits.shared_rate_limiter
+        portal.price_change_min_pct = config.limits.price_change_min_pct
+        return portal
     mod_name, cls_name = PORTAL_CLASSES[source]
     cls = getattr(importlib.import_module(mod_name), cls_name)
     return cls(config)
