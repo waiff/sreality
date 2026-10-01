@@ -67,7 +67,7 @@ describe('useBorderCases', () => {
     const { result } = harness([1, 2]);
     await waitFor(() => expect(result.current.has(2)).toBe(true));
     expect(result.current.has(1)).toBe(false);
-    expect(read()).toHaveBeenCalledWith([1, 2]);
+    expect(read()).toHaveBeenCalledWith([1, 2], expect.anything());
   });
 
   it('requests only never-seen ids, and never blanks a flag it already holds', async () => {
@@ -84,7 +84,7 @@ describe('useBorderCases', () => {
     expect(result.current.has(2)).toBe(true);
 
     await waitFor(() => expect(read()).toHaveBeenCalledTimes(2));
-    expect(read()).toHaveBeenLastCalledWith([3]);
+    expect(read()).toHaveBeenLastCalledWith([3], expect.anything());
     await act(async () => {
       next.resolve(new Set([3]));
     });

@@ -179,7 +179,7 @@ export default function Datasets() {
 
   const growthQ = useQuery<PriceStatGrowthRow[], Error>({
     queryKey: priceStatsKeys.growth(activeId ?? -1, from, to),
-    queryFn: () => fetchGrowth(activeId as number, from, to),
+    queryFn: ({ signal }) => fetchGrowth(activeId as number, from, to, { signal }),
     enabled: activeId != null,
     staleTime: 60_000,
   });
@@ -189,7 +189,7 @@ export default function Datasets() {
   // dragging from/to never re-fetches them.
   const shapesQ = useQuery<PriceStatGrowthShape[], Error>({
     queryKey: priceStatsKeys.growthShapes(activeId ?? -1),
-    queryFn: () => fetchGrowthShapes(activeId as number),
+    queryFn: ({ signal }) => fetchGrowthShapes(activeId as number, { signal }),
     enabled: activeId != null,
     staleTime: Infinity,
     gcTime: Infinity,
@@ -199,7 +199,7 @@ export default function Datasets() {
   // as greyed n/a rows + counted in the infopanel completeness breakdown.
   const noDataQ = useQuery<NoDataObec[], Error>({
     queryKey: priceStatsKeys.noData(activeId ?? -1),
-    queryFn: () => fetchNoData(activeId as number),
+    queryFn: ({ signal }) => fetchNoData(activeId as number, { signal }),
     enabled: activeId != null,
     staleTime: 60_000,
   });
@@ -359,7 +359,7 @@ export default function Datasets() {
   // Live scrape status for this dataset — polls while a run is in progress.
   const runQ = useQuery<PriceStatRun | null, Error>({
     queryKey: priceStatsKeys.latestRun(activeId ?? -1),
-    queryFn: () => fetchLatestRun(activeId as number),
+    queryFn: ({ signal }) => fetchLatestRun(activeId as number, { signal }),
     enabled: activeId != null,
     // Poll fast while running; after a dispatch keep polling (slower) for ~10
     // min so we catch the run once CI spins it up.
@@ -400,7 +400,7 @@ export default function Datasets() {
 
   const seriesQ = useQuery({
     queryKey: priceStatsKeys.obecSeries(activeId ?? -1, from, to),
-    queryFn: () => fetchSeries(activeId as number, from, to),
+    queryFn: ({ signal }) => fetchSeries(activeId as number, from, to, { signal }),
     enabled: activeId != null && chartOnHover,
     staleTime: 60_000,
   });

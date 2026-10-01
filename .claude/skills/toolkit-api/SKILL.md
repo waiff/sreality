@@ -253,9 +253,9 @@ never raw exception text. Route-owned refusals (property_split's 409) stay.
 `frontend/src/lib/api.ts` is the ONE transport (uploads + blob downloads, no raw `fetch()` beside
 it): `REQUEST_DEADLINE_MS` (130 s) sits above the server's 120 s budget and under Railway's ~300 s
 close — keep that ordering — a deadline abort (`ApiError.kind === 'timeout'`) is NEVER retried;
-react-query retries once only on `isTransientApiError` (network or 502/503/504). The extension
-duplicates the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 message-port loss
-no fetch deadline sees.
+react-query retries once only on `isTransientApiError` (network or 502/503/504/520). PostgREST reads
+use its twin `lib/pgRead.ts` (20 s, same ApiError, library retry off). The extension duplicates
+the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 port loss no fetch sees.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 

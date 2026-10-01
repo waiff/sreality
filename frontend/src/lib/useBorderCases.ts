@@ -64,9 +64,9 @@ export function useBorderCases(imageIds: ReadonlyArray<number>): BorderCaseStore
   // carries flagged ids only, so on its own it can't say which ids are settled.
   const readQ = useQuery({
     queryKey: ['border-cases', missing.join(',')],
-    queryFn: async () => ({
+    queryFn: async ({ signal }) => ({
       requested: missing,
-      flagged: await fetchBorderCasesByImageIds(missing),
+      flagged: await fetchBorderCasesByImageIds(missing, { signal }),
     }),
     enabled: missing.length > 0,
   });

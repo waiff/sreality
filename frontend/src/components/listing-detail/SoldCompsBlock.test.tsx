@@ -443,8 +443,8 @@ describe('<SoldCompsBlock> query plumbing', () => {
     renderBlock('dum');
 
     await waitFor(() => expect(comps).toHaveBeenCalled());
-    expect(comps).toHaveBeenCalledWith(LAT, LNG, 1000, { category_main_in: ['dum'] });
-    expect(coverage).toHaveBeenCalledWith(LAT, LNG);
+    expect(comps).toHaveBeenCalledWith(LAT, LNG, 1000, { category_main_in: ['dum'] }, expect.anything());
+    expect(coverage).toHaveBeenCalledWith(LAT, LNG, expect.anything());
   });
 
   it('re-asks the server when the radius changes — no client-side narrowing', async () => {
@@ -454,7 +454,7 @@ describe('<SoldCompsBlock> query plumbing', () => {
     await user.click(await screen.findByRole('button', { name: '3 km' }));
 
     await waitFor(() =>
-      expect(comps).toHaveBeenCalledWith(LAT, LNG, 3000, { category_main_in: ['byt'] }),
+      expect(comps).toHaveBeenCalledWith(LAT, LNG, 3000, { category_main_in: ['byt'] }, expect.anything()),
     );
   });
 
@@ -488,6 +488,7 @@ describe('<SoldCompsBlock> query plumbing', () => {
         LNG,
         1000,
         expect.objectContaining({ max_sold_age_days: 730 }),
+        expect.anything(),
       ),
     );
   });

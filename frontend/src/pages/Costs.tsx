@@ -58,7 +58,7 @@ const TOKEN_KEYS = [
 export default function Costs() {
   const { data, isLoading, error, dataUpdatedAt } = useQuery({
     queryKey: ['llm-cost-daily'],
-    queryFn: () => fetchLlmCostDaily(35),
+    queryFn: ({ signal }) => fetchLlmCostDaily(35, { signal }),
     refetchInterval: 5 * 60_000,
   });
 
@@ -97,7 +97,7 @@ function Body({ rows }: { rows: LlmCostDailyRow[] }) {
   // Hour grain is fetched lazily, only once the operator flips the toggle.
   const hourlyQuery = useQuery({
     queryKey: ['llm-cost-hourly'],
-    queryFn: () => fetchLlmCostHourly(CHART_HOURS + 1),
+    queryFn: ({ signal }) => fetchLlmCostHourly(CHART_HOURS + 1, { signal }),
     enabled: grain === 'hour',
     refetchInterval: 5 * 60_000,
   });

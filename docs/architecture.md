@@ -590,6 +590,30 @@ rules. Identify which one a task belongs to before you start.
   reach for `.limit()` + `capped` only when the rows themselves are the point AND the
   read is ordered. Two lanes still read the map unbounded on purpose: the portal mirror
   (`listing_feed_public` has no matview twin) and the `?map=legacy` bisect hatch.
+- **Every PostgREST read is awaited through `frontend/src/lib/pgRead.ts`** — the
+  supabase-js twin of `lib/api.ts`'s `send()`, and another ESLint-enforced chokepoint
+  (destructuring `data`, `error` or `count` straight off an awaited builder call is banned;
+  `supabase.auth.*` is exempt; `const r = await q; if (r.error)` still slips through).
+  It owns four things the 51 hand-rolled `const { data, error } = await …; if (error)
+  throw error` copies it replaced had none of: a per-request deadline (`PG_DEADLINE_MS`
+  = 20 s, above the 8 s `authenticated` statement_timeout plus PostgREST's own pool wait,
+  so it fires only on a stalled transport; a read with a cheaper fallback passes
+  `deadlineMs`, as the Browse count's 2.5 s exact arm does), React Query's `signal`
+  (fetchers take a trailing `{ signal }`; a cancelled query aborts its request), an
+  `ApiError` with the wire status (55P03/40P01 → 503; 57014 → `kind: 'timeout'`, never
+  retried, with PostgREST's message kept verbatim for the Browse banners — deliberately
+  unlike the API, which answers 57014 as a retried 503 `db_busy`), and `.retry(false)` on
+  every builder so `main.tsx`'s `isTransientApiError` (network, 502/503/504, and
+  Cloudflare's 520) is the ONE retry rule for both adapters. postgrest-js otherwise
+  re-sends a GET/HEAD up to 3× (1/2/4 s backoff) on a 503, a 520 or a network error; the
+  single `main.tsx` retry after 1 s replaces that — fewer attempts on a long outage, by
+  choice. Every count read is `head: true`, sent as an HTTP HEAD whose error has no body,
+  so no SQLSTATE reaches a count: a server 57014 there is a plain 500, and only the 2.5 s
+  client budget earns the Browse estimate. A caller abort rethrows `signal.reason`, never
+  an `ApiError`. There is no tolerant mode: the few reads that must never fail the page
+  (the agenda gate in `lib/auth.tsx`, the population hint in `Filters.tsx`) handle the
+  rejection at the call site — the agenda gate still rethrows a transient failure, since
+  its result is cached for the whole session; prefilters stay fail-loud.
 - **All code-splitting goes through `frontend/src/lib/lazyChunk.ts`**, never React's bare
   `lazy` (ESLint bans it outside that file — the SPA's second such chokepoint after
   `fetchAllRows`). Every deploy rotates every hashed chunk filename (measured: 30 of 30

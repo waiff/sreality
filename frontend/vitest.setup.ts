@@ -48,6 +48,25 @@ if (typeof window.matchMedia !== 'function') {
   });
 }
 
+// jsdom 25 has AbortSignal.timeout but not AbortSignal.any, which every
+// browser the SPA targets ships and both read adapters use to combine React
+// Query's signal with their own deadline (lib/api.ts send(), lib/pgRead.ts).
+if (typeof (AbortSignal as { any?: unknown }).any !== 'function') {
+  (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any = (
+    signals,
+  ) => {
+    const ctrl = new AbortController();
+    for (const s of signals) {
+      if (s.aborted) {
+        ctrl.abort(s.reason);
+        break;
+      }
+      s.addEventListener('abort', () => ctrl.abort(s.reason), { once: true });
+    }
+    return ctrl.signal;
+  };
+}
+
 afterEach(() => {
   cleanup();
 });

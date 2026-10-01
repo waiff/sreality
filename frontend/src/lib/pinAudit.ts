@@ -26,6 +26,7 @@
  */
 
 import { supabase } from '@/lib/supabase';
+import { pgRead, type PgReadOptions } from '@/lib/pgRead';
 import {
   applyKeyset,
   nextCursorFrom,
@@ -205,19 +206,27 @@ export function summaryRowMatches(
  * label alone when this throws. */
 export const PIN_AUDIT_TOTAL_KEY = ['pin-audit', 'total'] as const;
 
-export const fetchPinAuditTotal = async (): Promise<number> => {
-  const { count, error } = await supabase
-    .from(PIN_AUDIT_RELATION)
-    .select(TIEBREAK, { count: 'exact', head: true })
-    .eq('state', 'unresolved');
-  if (error) throw error;
+export const fetchPinAuditTotal = async (
+  { signal }: PgReadOptions = {},
+): Promise<number> => {
+  const { count } = await pgRead(
+    supabase
+      .from(PIN_AUDIT_RELATION)
+      .select(TIEBREAK, { count: 'exact', head: true })
+      .eq('state', 'unresolved'),
+    { signal },
+  );
   return count ?? 0;
 };
 
-export const fetchPinAuditSummary = async (): Promise<PinAuditSummaryRow[]> => {
-  const { data, error } = await supabase.rpc('location_pin_audit_summary');
-  if (error) throw error;
-  return (data ?? []) as PinAuditSummaryRow[];
+export const fetchPinAuditSummary = async (
+  { signal }: PgReadOptions = {},
+): Promise<PinAuditSummaryRow[]> => {
+  const { data } = await pgRead<PinAuditSummaryRow[] | null>(
+    supabase.rpc('location_pin_audit_summary'),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export interface PinAuditPage {
@@ -229,6 +238,7 @@ export const fetchPinAuditPage = async (
   f: PinAuditFilters,
   sort: SortSpec,
   cursor: KeysetCursor | null,
+  { signal }: PgReadOptions = {},
 ): Promise<PinAuditPage> => {
   const base = supabase
     .from(PIN_AUDIT_RELATION)
@@ -240,9 +250,8 @@ export const fetchPinAuditPage = async (
     cursor,
     TIEBREAK,
   ) as unknown as typeof base;
-  const { data, error } = await keyed.limit(PIN_AUDIT_PAGE_SIZE);
-  if (error) throw error;
-  const rows = (data ?? []) as unknown as PinAuditRow[];
+  const { data } = await pgRead<PinAuditRow[] | null>(keyed.limit(PIN_AUDIT_PAGE_SIZE), { signal });
+  const rows = data ?? [];
   return {
     rows,
     nextCursor: nextCursorFrom(

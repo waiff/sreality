@@ -138,13 +138,16 @@ export class ApiError extends Error {
 
 /* The ONE retry policy question: is this worth one more attempt? Network blips
  * and gateway/busy answers (502/503/504 — the API classifies a lock-blocked or
- * cancelled DB read as 503 db_busy) are; a deadline timeout is not (the caller
- * already waited the full budget once), and neither is any 4xx or 500 (they are
- * deterministic — retrying re-runs the same failure and doubles the wait). */
+ * cancelled DB read as 503 db_busy — and 520, Cloudflare's "unknown origin
+ * error" in front of Supabase's REST endpoint, which postgrest-js itself
+ * retried before pgRead switched its retry off) are; a deadline timeout is not
+ * (the caller already waited the full budget once), and neither is any 4xx or
+ * 500 (they are deterministic — retrying re-runs the same failure and doubles
+ * the wait). */
+const TRANSIENT_STATUSES = new Set([502, 503, 504, 520]);
 export const isTransientApiError = (err: unknown): boolean =>
   err instanceof ApiError &&
-  (err.kind === 'network' ||
-    (err.kind === 'http' && (err.status === 502 || err.status === 503 || err.status === 504)));
+  (err.kind === 'network' || (err.kind === 'http' && TRANSIENT_STATUSES.has(err.status)));
 
 export type QueryScalar = string | number | boolean;
 /* An array value is serialized as REPEATED params (ids=1&ids=2) — the shape a

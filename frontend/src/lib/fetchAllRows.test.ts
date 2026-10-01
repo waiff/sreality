@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { PostgrestError, PostgrestSingleResponse } from '@supabase/supabase-js';
 
 import {
   FetchAllOverflowError,
@@ -16,6 +17,27 @@ import {
   type OrderSpec,
   type PageBuilder,
 } from './fetchAllRows';
+import type { PgBuilder } from './pgRead';
+
+/* One page's answer, shaped like the builder pgRead awaits: a thenable that
+ * also takes `.retry()` and `.abortSignal()` (recorded into `signals`). */
+const reply = (
+  envelope: PostgrestSingleResponse<unknown>,
+  signals?: AbortSignal[],
+): PgBuilder & { abortSignal(s: AbortSignal): unknown } => {
+  const b = {
+    then: <A = PostgrestSingleResponse<unknown>, B = never>(
+      onF?: ((v: PostgrestSingleResponse<unknown>) => A | PromiseLike<A>) | null,
+      onR?: ((e: unknown) => B | PromiseLike<B>) | null,
+    ) => Promise.resolve(envelope).then(onF, onR),
+    retry: () => b,
+    abortSignal: (s: AbortSignal) => {
+      signals?.push(s);
+      return b;
+    },
+  };
+  return b;
+};
 
 interface Row extends Record<string, unknown> {
   id: number;
@@ -31,10 +53,11 @@ const makeRows = (n: number): Row[] =>
 function fakeServer(rows: Row[], { clamp = Infinity, exactCount = false } = {}) {
   const orderCalls: OrderSpec[][] = [];
   const rangeCalls: Array<[number, number]> = [];
-  const build = (): PageBuilder<Row> => {
+  const signals: AbortSignal[] = [];
+  const build = (): PageBuilder => {
     const applied: OrderSpec[] = [];
     orderCalls.push(applied);
-    const builder: PageBuilder<Row> = {
+    const builder: PageBuilder = {
       order(column, opts) {
         applied.push({ column, ascending: opts?.ascending });
         return builder;
@@ -43,16 +66,22 @@ function fakeServer(rows: Row[], { clamp = Infinity, exactCount = false } = {}) 
         rangeCalls.push([from, to]);
         const asked = to - from + 1;
         const data = rows.slice(from, from + Math.min(asked, clamp));
-        return Promise.resolve({
-          data,
-          error: null,
-          ...(exactCount ? { count: rows.length } : {}),
-        });
+        return reply(
+          {
+            success: true,
+            data,
+            error: null,
+            count: exactCount ? rows.length : null,
+            status: 200,
+            statusText: 'OK',
+          },
+          signals,
+        );
       },
     };
     return builder;
   };
-  return { build, orderCalls, rangeCalls };
+  return { build, orderCalls, rangeCalls, signals };
 }
 
 const opts = { relation: 'test', orderBy: [{ column: 'id' }], key: ['id'] as const };
@@ -125,17 +154,35 @@ describe('fetchAllRows', () => {
     ).rejects.toThrow(/missing from orderBy/);
   });
 
-  it('propagates a page error verbatim', async () => {
-    const build = (): PageBuilder<Row> => {
-      const b: PageBuilder<Row> = {
+  it('fails the whole read on a page error, as an ApiError carrying the PostgREST body', async () => {
+    const build = (): PageBuilder => {
+      const b: PageBuilder = {
         order: () => b,
-        range: () => Promise.resolve({ data: null, error: { message: 'boom' } }),
+        range: () =>
+          reply({
+            success: false,
+            data: null,
+            error: { message: 'boom' } as PostgrestError,
+            count: null,
+            status: 500,
+            statusText: '',
+          }),
       };
       return b;
     };
     await expect(
       fetchAllRows<Row>({ ...opts, build, expectMax: 100 }),
-    ).rejects.toEqual({ message: 'boom' });
+    ).rejects.toMatchObject({ name: 'ApiError', kind: 'http', status: 500, body: { message: 'boom' } });
+  });
+
+  it("hands every page the caller's signal", async () => {
+    const srv = fakeServer(makeRows(2500), { exactCount: true });
+    const ctrl = new AbortController();
+    await fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 10_000, signal: ctrl.signal });
+    expect(srv.signals).toHaveLength(3);
+    expect(srv.signals.some((s) => s.aborted)).toBe(false);
+    ctrl.abort();
+    expect(srv.signals.every((s) => s.aborted)).toBe(true);
   });
 
   describe('exact-count fast path (W2b)', () => {

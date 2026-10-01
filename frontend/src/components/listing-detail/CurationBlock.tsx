@@ -213,7 +213,7 @@ function TagsRow({ property_id }: { property_id: number }) {
 
   const membershipQ = useQuery({
     queryKey: curationKeys.propertyTags(property_id),
-    queryFn: () => fetchPropertyTagIds(property_id),
+    queryFn: ({ signal }) => fetchPropertyTagIds(property_id, { signal }),
     staleTime: 30_000,
   });
 

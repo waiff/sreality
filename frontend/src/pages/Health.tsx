@@ -136,7 +136,7 @@ export default function Health() {
 function Body({ data }: { data: HealthSummary }) {
   const scrapeRunsQuery = useQuery<ScrapeRun[], Error>({
     queryKey: ['scrape-runs', 14],
-    queryFn: () => fetchRecentScrapeRuns(14),
+    queryFn: ({ signal }) => fetchRecentScrapeRuns(14, { signal }),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -323,7 +323,7 @@ function PortalLedger() {
   const checkResults = useQueries({
     queries: activeSources.map((src) => ({
       queryKey: ['scraper-health-checks', src],
-      queryFn: () => fetchScraperHealthChecks(src),
+      queryFn: ({ signal }) => fetchScraperHealthChecks(src, { signal }),
       refetchInterval: 60_000,
       staleTime: 30_000,
     })),
@@ -1019,7 +1019,7 @@ function CategoryTable({
   // the hourly/daily portal-vs-DB trend series. Already sorted by active desc.
   const trendsQuery = useQuery({
     queryKey: ['category-trends', source],
-    queryFn: () => fetchCategoryTrends(source),
+    queryFn: ({ signal }) => fetchCategoryTrends(source, { signal }),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -1704,7 +1704,7 @@ function WorkflowFailureLine({ r, chronic }: { r: WorkflowFailureSummaryRow; chr
 function WorkflowFailuresCard() {
   const q = useQuery<WorkflowFailureSummaryRow[], Error>({
     queryKey: ['workflow-failure-summary', 168],
-    queryFn: () => fetchWorkflowFailureSummary(168),
+    queryFn: ({ signal }) => fetchWorkflowFailureSummary(168, { signal }),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
