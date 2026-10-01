@@ -43,7 +43,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from scraper import db, hashing, image_storage, media, parser, portal_runner
+from scraper import db, image_storage, listing_write, media, parser, portal_runner
 from scraper.portal import (
     PortalLimits,
     StopReason,
@@ -657,7 +657,7 @@ def _run_detail_only(
     raw = client.get_detail(sreality_id)
     row = parser.parse_listing(raw)
     images = parser.parse_images(raw)
-    h = hashing.content_hash(raw)
+    w = listing_write.from_sreality(raw, row, images)
 
     cm_text = row.get("category_main") or "?"
     ct_text = row.get("category_type") or "?"
@@ -665,7 +665,7 @@ def _run_detail_only(
     if dry_run:
         LOG.info(
             "DRY-RUN id=%d hash=%s images=%d price=%s area=%s",
-            sreality_id, h[:8], len(images),
+            sreality_id, w.content_hash[:8], len(images),
             row.get("price_czk"), row.get("area_m2"),
         )
         LOG.info("RUN done pages=0 new=0 updated=0 unchanged=0 errors=0")
@@ -674,10 +674,10 @@ def _run_detail_only(
     counts = {"new": 0, "updated": 0, "unchanged": 0}
     new_imgs = 0
     with db.connect() as conn:
-        result = db.upsert_listing_with_property(conn, row, raw, h)
-        counts[result] = 1
-        LOG.info("DETAIL id=%d %s", sreality_id, result)
-        new_imgs = db.record_images(conn, sreality_id, images)
+        [o] = listing_write.write_listings(conn, [w])
+        counts[o.result] = 1
+        LOG.info("DETAIL id=%d %s", sreality_id, o.result)
+        new_imgs = o.images_inserted
         if new_imgs:
             LOG.info("IMAGE id=%d inserted=%d", sreality_id, new_imgs)
     LOG.info(
@@ -1056,12 +1056,15 @@ class SrealityPortal:
         return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        writes = []
         for it in items:
-            if it.payload is not None:
-                it.payload.discovery_seq = it.discovery_seq
-                it.payload.discovered_at = it.discovered_at
-                _record_detail_fetch(conn, it.payload, it.observation_id)
-        return db.write_detail_batch(conn, [it.payload for it in items])
+            fr = it.payload
+            _record_detail_fetch(conn, fr, it.observation_id)
+            if fr.kind == "ok":
+                writes.append(listing_write.from_sreality(
+                    fr.raw, fr.row, fr.images or [],
+                    discovery_seq=it.discovery_seq, discovered_at=it.discovered_at))
+        return listing_write.tally(listing_write.write_listings(conn, writes))
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
         sid = int(native_id)
@@ -1102,7 +1105,7 @@ def _run_detail_drain(
 ) -> tuple[int, dict[str, Any]]:
     """Sreality detail-drain via the generic portal_runner (Phase 4): claim from
     listing_detail_queue, fetch on a worker pool, write batched via
-    write_detail_batch. Records run_type='detail' with index_pages=0."""
+    listing_write.write_listings. Records run_type='detail' with index_pages=0."""
     return portal_runner.run_detail_drain(
         SrealityPortal(), max_claims, dry_run, detail_workers, detail_rate,
         run_id=run_id,
@@ -1595,19 +1598,12 @@ class FetchResult:
     row: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
     images: list[dict[str, Any]] | None = None
-    content_hash: str | None = None
     error: BaseException | None = None
     source: str | None = None  # "fetch" | "parse" for kind == "error"
-    # Set post-hoc by SrealityPortal.write_details from the owning DrainItem
-    # (migration 368) — not known at fetch time, which runs before the claim's
-    # discovery_seq is looked up. See db.DetailResult.discovery_seq.
-    discovery_seq: int | None = None
-    # Likewise the claim's enqueued_at (migration 444) — when the walk first saw it.
-    discovered_at: datetime | None = None
 
 
 def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:
-    """Worker: fetch + parse + hash one listing. No DB I/O. Never raises.
+    """Worker: fetch + parse one listing. No DB I/O. Never raises.
 
     Runs on a pool thread, so it must touch neither the psycopg connection
     nor any shared mutable state. Returns everything _write_result needs.
@@ -1631,13 +1627,10 @@ def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:
     try:
         row = parser.parse_listing(raw)
         images = parser.parse_images(raw)
-        h = hashing.content_hash(raw)
     except Exception as exc:
         return FetchResult(sid, "error", error=exc, source="parse")
 
-    return FetchResult(
-        sid, "ok", row=row, raw=raw, images=images, content_hash=h
-    )
+    return FetchResult(sid, "ok", row=row, raw=raw, images=images)
 
 
 def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
@@ -1654,21 +1647,22 @@ def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
         return ("errors", 0)
 
     if dry_run:
+        w = listing_write.from_sreality(
+            fr.raw or {}, fr.row or {"sreality_id": fr.sid}, fr.images or [])
         LOG.info(
             "DRY-RUN id=%d hash=%s images=%d price=%s",
-            fr.sid, (fr.content_hash or "")[:8],
+            fr.sid, w.content_hash[:8],
             len(fr.images or []), (fr.row or {}).get("price_czk"),
         )
         return ("unchanged", 0)
 
     try:
-        result = db.upsert_listing_with_property(conn, fr.row, fr.raw, fr.content_hash)
-        LOG.info("DETAIL id=%d %s", fr.sid, result)
-        new_imgs = db.record_images(conn, fr.sid, fr.images)
-        if new_imgs:
-            LOG.info("IMAGE id=%d inserted=%d", fr.sid, new_imgs)
-        _clear_failure(conn, fr.sid)
-        return (result, new_imgs)
+        [o] = listing_write.write_listings(
+            conn, [listing_write.from_sreality(fr.raw, fr.row, fr.images or [])])
+        LOG.info("DETAIL id=%d %s", fr.sid, o.result)
+        if o.images_inserted:
+            LOG.info("IMAGE id=%d inserted=%d", fr.sid, o.images_inserted)
+        return (o.result, o.images_inserted)
     except Exception as exc:
         LOG.exception("DETAIL id=%d db error: %s", fr.sid, exc)
         _record_failure(conn, fr.sid, "db", exc)

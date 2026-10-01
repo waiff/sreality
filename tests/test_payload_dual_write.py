@@ -254,11 +254,11 @@ def test_sreality_detail_archives_the_unwrapped_untrimmed_estate_json(
     from scraper import main as scraper_main
     from scraper.portal_runner import DrainItem
 
-    monkeypatch.setattr(scraper_main.db, "write_detail_batch", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_main.listing_write, "write_listings", lambda *a, **k: [])
     raw = {"name": "Byt 3+1", "locality": {"value": "Praha"}, "_embedded": {"x": [1]}}
     conn = _FakeConn()
     items = [
-        DrainItem("1", "ok", scraper_main.FetchResult(1, "ok", raw=raw)),
+        DrainItem("1", "ok", scraper_main.FetchResult(1, "ok", row={"sreality_id": 1}, raw=raw)),
         DrainItem("2", "gone", scraper_main.FetchResult(2, "gone")),
         DrainItem("3", "error", scraper_main.FetchResult(3, "error", source="fetch")),
     ]
