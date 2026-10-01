@@ -30,12 +30,15 @@ import pytest
 from location_data import contracts
 from location_data.claims_intake import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    READERS,
     Claim,
     IntakeResult,
     ListingRow,
     extract_listing,
+    reading_entries,
     value_norm_mirror,
 )
+from location_data.text_reading import Reading
 from location_data.page_readers import (
     PAGE_READERS,
     ArchivedPayload,
@@ -340,9 +343,32 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     return out
 
 
+# The READINGS arm (W3): a reading entry reads the text lane's stored answer, never a body,
+# so its fixture is a FROZEN READING (`<portal>_readings.json`: the block + the advert text).
+# No model runs here; V1–V4 and the typed numbers are what it pins, as listing -> entry -> value
+# (an entry is one claim type; surface, method and licence are pinned in `test_text_reading`).
+def score_readings(contract: contracts.PortalContract) -> dict[str, dict[str, str]]:
+    path = _W2 / f"{contract.source}_readings.json"
+    entries = reading_entries(fx.entries_for(contract.source))
+    out: dict[str, dict[str, str]] = {}
+    for item in json.loads(path.read_text(encoding="utf-8")) if path.exists() else []:
+        row = fx.listing(contract.source, {}, native=item["listing"])
+        reading = Reading(1, item["extracted"], item["advert_text"])
+        out[item["listing"]] = {c.extractor_id: c.value_text for entry in entries
+                                for c in READERS[str(entry.reader)].fn(entry, row, reading)}
+    return out
+
+
+def _reading_rows(golden: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"listing": listing, "extractor_id": entry, "value_text": value}
+            for listing, claims in golden.get("reading_claims", {}).items()
+            for entry, value in claims.items()]
+
+
 def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
     declared = contract_regression_ids(contract)
     bodies = bodies_for(contract.source)
+    readings = score_readings(contract)
     scored = [score(contract.source, listing_id, body)
               for listing_id in sorted(bodies)
               for body in bodies[listing_id]]
@@ -353,6 +379,7 @@ def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
         "listings_without_a_fixture_body": [i for i in declared if i not in bodies],
         "fixtures": scored,
         "archived_claims": score_archived(contract),
+        **({"reading_claims": readings} if readings else {}),
     }
 
 
@@ -471,6 +498,8 @@ def diff_golden(golden: dict[str, Any], actual: dict[str, Any]) -> list[str]:
                            golden.get("archived_claims", []),
                            actual.get("archived_claims", []),
                            "extractor_id", "claim_type")
+    lines += _diff_section("reading claim", _reading_rows(golden), _reading_rows(actual),
+                           "listing", "extractor_id")
 
     old = {_fixture_key(f): f for f in golden.get("fixtures", [])}
     new = {_fixture_key(f): f for f in actual.get("fixtures", [])}

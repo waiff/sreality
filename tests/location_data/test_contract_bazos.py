@@ -1,4 +1,4 @@
-"""bazos@7 — the slim contract, driven through the shipped readers over real bodies.
+"""bazos@8 — the slim contract, driven through the shipped readers over real bodies.
 
 Every assertion runs `contracts.load_all()`'s own entries (never a test-built one) against
 bodies this repo already holds: the genuine capture
@@ -6,13 +6,11 @@ bodies this repo already holds: the genuine capture
 `tests/fixtures/location_w2/bazos_detail.html` the fixture-diff golden scores, and the three
 Lokalita layouts recorded in `tests/scraper/test_bazos_parser.py`.
 
-THE ONE FACT THIS FILE EXISTS TO PIN: bazos' town anchor states the OKRES in its text and
-the obec in its href, so the town is read from the href and never from the text. The capture
-is the proof — its anchor reads "Nový Jičín" while the ad is in Frenštát pod Radhoštěm.
-
-W18 adds the second: the STREET, which this portal publishes in prose and nowhere else. It
-is read behind a CUE word and it is never trusted on its own — the register is the gate, and
-the resolver drops a street that does not bind. The section at the bottom is that entry's.
+THE FACT THIS FILE PINS: bazos' town anchor states the OKRES in its text and the post
+office's obec and PSČ in its href, so the PSČ is read from the href and never from the text.
+The capture is the proof — its anchor reads "Nový Jičín" while the ad is in Frenštát pod
+Radhoštěm. v8 (W3) reads the town, part, street and numbers from the text lane's stored
+reading instead (`test_text_reading.py`); the href's obec slug and the headline claim leave.
 """
 
 from __future__ import annotations
@@ -27,17 +25,13 @@ import pytest
 
 import tests.scraper.test_bazos_parser as bp
 from location_data import contracts
-from location_data.claims_common import (
-    ARCHIVED_COORDINATE_RULES,
-    IntakeRefused,
-    apply_transforms,
-)
+from location_data.claims_common import ARCHIVED_COORDINATE_RULES, IntakeRefused
 from location_data.claims_intake import (
-    DEFAULT_MAX_CLAIM_VALUE_BYTES,
     READERS,
+    SUBSTRATE_READING,
     Entry,
     ListingRow,
-    extract_listing,
+    payload_entries,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from location_data.page_readers import (
@@ -46,9 +40,7 @@ from location_data.page_readers import (
     _licensed_coordinate,
     stamp_page_claim,
 )
-from location_data.resolver.normalize import normalize_match_key
 from tests.location_data import claim_intake_fixtures as fx
-from tests.location_data.mini_mirror import MiniMirror, _unit
 
 _ROOT = Path(__file__).resolve().parents[2]
 _ARCHIVED = _ROOT / "tests" / "fixtures" / "portal_html" / "bazos_detail.html"
@@ -60,7 +52,6 @@ FETCHED_AT = datetime(2026, 9, 5, 6, 0, tzinfo=UTC)
 # instead of quietly re-teaching this file whatever the new page says.
 NATIVE = "222916664"
 LIVE_OBEC = "frenštát-pod-radhoštěm"          # the href slug, percent-decoded
-LIVE_TOWN = "Frenštát pod Radhoštěm"          # what that slug IS, per the ad's og:title
 LIVE_OKRES_ANCHOR_TEXT = "Nový Jičín"         # the anchor's TEXT — the okres, not the town
 LIVE_PSC = "74401"
 OBEC_SLUG_ENCODED = "fren%C5%A1t%C3%A1t-pod-radho%C5%A1t%C4%9Bm"
@@ -70,15 +61,15 @@ CONTRACT_LABEL = "approximate_location"
 
 CONTRACT = {c.source: c for c in contracts.load_all()}["bazos"]
 ENTRIES = {e.entry_id: e for e in fx.entries_for("bazos")}
-TOWN_ENTRY = "bzs.det.obec_slug"
-STREET_ENTRY = "bzs.det.street_cue"
-ENTRY_IDS = {TOWN_ENTRY, "bzs.det.psc", "bzs.det.blur_hint", "bzs.det.link_pin",
-             STREET_ENTRY}
-FIRING = (TOWN_ENTRY, "bzs.det.psc", "bzs.det.blur_hint")
-# The operator's own ad (2026-09-16, native 223293822, listing 18667956): obec Mladá
-# Boleslav 535419, PSČ 29301, an approximate pin at 50.416394,14.916 — and a street stated
-# in the title and stated nowhere else on the page.
-OPERATOR_TITLE = "Prodej bytu 3+1 s lodžií, 86 m2, ul. Jiráskova, Mladá Boleslav"
+PSC_ENTRY = "bzs.det.psc"
+PAGE_IDS = {PSC_ENTRY, "bzs.det.blur_hint", "bzs.det.link_pin"}
+READING_SLOTS = {"bzs.txt.town": ("obec_name", "town"),
+                 "bzs.txt.part_of_town": ("cast_obce_name", "part_of_town"),
+                 "bzs.txt.street": ("street_name", "street"),
+                 "bzs.txt.house_number_cp": ("house_number_cp", "house_number_cp"),
+                 "bzs.txt.house_number_co": ("house_number_co", "house_number_co")}
+ENTRY_IDS = PAGE_IDS | set(READING_SLOTS)
+FIRING = (PSC_ENTRY, "bzs.det.blur_hint")
 
 
 # ------------------------------------------------------------------ harness
@@ -123,57 +114,48 @@ def claim_of(entry_id: str, doc: ScopedDocument | None = None) -> Any:
 
 # ------------------------------------------------------------------ the contract shape
 
-def test_the_contract_is_bazos_at_version_7():
-    assert (CONTRACT.source, CONTRACT.version) == ("bazos", 7)
+def test_the_contract_is_bazos_at_version_8():
+    assert (CONTRACT.source, CONTRACT.version) == ("bazos", 8)
 
 
-def test_the_entry_ids_are_exactly_the_five_this_version_ships():
+def test_the_entry_ids_are_exactly_the_eight_this_version_ships():
     assert {e.entry_id for e in CONTRACT.entries} == ENTRY_IDS
 
 
-def test_the_retired_street_ids_are_not_resurrected():
-    """W1-c deleted `bzs.det.street_text` (an inert regex) and `bzs.det.mm_trailer`, and
-    before them @3 carried an LLM street that never ran. Entry ids are permanent and are
-    never reused (02 §2.1.8), so W18's street is a NEW id — reusing one of those would
-    silently re-point the provenance of every claim ever written under it."""
+def test_the_retired_ids_are_not_resurrected():
+    """Entry ids are permanent and never reused (02 §2.1.8): reusing one would re-point the
+    provenance of every claim ever written under it. W3 retired the href's obec slug and the
+    headline street; W1-c the inert regex and the trailer."""
     ids = {e.entry_id for e in CONTRACT.entries}
-    assert "bzs.det.street_text" not in ids
-    assert "bzs.det.mm_trailer" not in ids
+    for retired in ("bzs.det.obec_slug", "bzs.det.street_cue", "bzs.det.street_text",
+                    "bzs.det.mm_trailer"):
+        assert retired not in ids, retired
 
 
 def test_one_entry_per_claim_type_and_the_town_is_among_them():
     types = [e.claim_type for e in CONTRACT.entries]
     assert sorted(types) == sorted(set(types))
     assert set(types) == {"obec_name", "psc", "precision_declaration", "coordinate",
-                          "street_name"}
+                          "street_name", "cast_obce_name", "house_number_cp",
+                          "house_number_co"}
     assert contracts.MANDATORY_CLAIM_TYPE in types
 
 
-def test_the_town_entry_reads_the_town_anchors_href():
-    """The whole ruling in one assertion: the carrier is the ATTRIBUTE, not the node's text.
-    `decode: percent` is what makes the value join — the encoded slug normalises to a run of
-    hex bytes that matches no gazetteer row."""
-    entry = ENTRIES[TOWN_ENTRY]
-    assert entry.claim_type == "obec_name"
-    assert entry.reader == "html_attr_regex"
-    assert entry.locator["attr"] == "href"
-    assert entry.locator["decode"] == "percent"
-    assert entry.locator["group"] == "obec"
-    # v4's prior, kept (W1-c R3): the resolver reads `default_granularity` off the
-    # projection and a NULL there is a town claim that states nothing about its own grain.
-    assert entry.precision_map["prior"]["granularity"] == "obec"
+def test_the_reading_entries_read_one_slot_each_of_the_stored_reading():
+    """W3: the town, part, street and numbers are the text lane's reading, one entry per claim
+    type; the č.p. entry falls back to the č.ev. slot (emitted "č.ev. N", typed by S1)."""
+    for entry_id, (claim_type, slot) in READING_SLOTS.items():
+        entry = ENTRIES[entry_id]
+        assert (entry.claim_type, entry.locator["slot"]) == (claim_type, slot), entry_id
+        assert (entry.surface, entry.extraction_method) == ("description", "llm_text")
+        assert READERS[entry.reader].substrate == SUBSTRATE_READING
+    assert ENTRIES["bzs.txt.house_number_cp"].locator["fallback"] == [{"slot": "house_number_ev"}]
+    assert ENTRIES["bzs.txt.town"].precision_map["prior"]["granularity"] == "obec"
 
 
-def test_the_four_page_entries_run_on_the_page_lane_and_the_street_on_the_payload_one():
-    """Rule 25 leaves ONE lane over two substrates, and bazos now uses both. The town, the
-    PSČ, the blur marker and the pin are page facts — they exist only in the Lokalita row's
-    markup. The STREET is not: it is read off the stored payload's headline (`/title`), the
-    one place the seller names it; the parser's own street miner is deleted (location reader
-    W1) and the text lane's plain-text reading replaces this entry at @8 (W3)."""
-    page = {e for e in ENTRY_IDS if e != STREET_ENTRY}
-    assert {ENTRIES[e].reader for e in page} <= set(PAGE_READERS)
-    assert ENTRIES[STREET_ENTRY].reader in READERS
-    assert ENTRIES[STREET_ENTRY].reader not in PAGE_READERS
+def test_the_three_page_entries_run_on_the_page_lane():
+    """The PSČ, the blur marker and the pin exist only in the Lokalita row's markup."""
+    assert {ENTRIES[e].reader for e in PAGE_IDS} <= set(PAGE_READERS)
     assert {e.page_kind for e in ENTRIES.values()} == {"detail"}
 
 
@@ -211,55 +193,30 @@ def test_the_capture_is_still_scrubbed_of_the_sellers_identity():
 
 # ------------------------------------------------------------------ per-entry extraction
 
-def test_the_town_and_the_psc_come_off_one_href_on_the_live_capture():
+def test_the_psc_comes_off_the_town_anchors_href_on_the_live_capture():
+    """The selector also matches the live category link; only the `/<5 digits>/` tail — the
+    PATTERN, not the selector — picks the node (`html_attr_regex` vs `html_attr`)."""
     doc = document()
-    town, psc = claim_of(TOWN_ENTRY, doc), claim_of("bzs.det.psc", doc)
-    assert (town.claim_type, town.value_text) == ("obec_name", LIVE_OBEC)
+    assert len(doc.css("a[href*='/inzeraty/']")) > 1
+    psc = claim_of(PSC_ENTRY, doc)
     assert (psc.claim_type, psc.value_text) == ("psc", LIVE_PSC)
-    assert town.licence_class == "portal" and town.blur_evidence == "none"
-    assert "%C5" not in town.value_text
+    assert psc.licence_class == "portal" and psc.blur_evidence == "none"
 
 
-def test_the_claimed_town_is_the_ads_town_and_not_its_okres():
-    """The regression this version is a fix for, stated as the thing a reader can check.
-
-    The capture's own `og:title` names both places — "… Frenštát pod Radhoštěm, Školská
-    čtvrť - Nový Jičín" — and the okres is the half the anchor TEXT publishes. The claim has
-    to normalise onto the TOWN."""
-    claimed = claim_of(TOWN_ENTRY).value_text
-    assert normalize_match_key(claimed) == normalize_match_key(LIVE_TOWN)
-    assert normalize_match_key(claimed) != normalize_match_key(LIVE_OKRES_ANCHOR_TEXT)
-    head = _ARCHIVED.read_text(encoding="utf-8")
-    assert f"{LIVE_TOWN}, Školská čtvrť - {LIVE_OKRES_ANCHOR_TEXT}" in head
-
-
-def test_the_town_and_psc_come_off_the_body_the_golden_scores():
-    """The hand-written page the fixture-diff gate scores, kept in step with the contract:
-    its town anchor is `/inzeraty/praha-8/18600/`, the obvod spelling the pattern folds."""
-    doc = scoped(_GOLDEN_BODY.read_bytes())
-    assert claim_of(TOWN_ENTRY, doc).value_text == "praha"
-    assert claim_of("bzs.det.psc", doc).value_text == "18600"
-
-
-@pytest.mark.parametrize("body,town,psc", [
-    (bp.LIVE_LOKALITA_DETAIL_HTML, "plzen", "32600"),   # live 3-cell, slug `plzen-26`
-])
-def test_the_live_lokalita_layout_yields_the_town_and_the_psc(body, town, psc):
-    doc = scoped(body)
-    assert claim_of(TOWN_ENTRY, doc).value_text == town
-    assert claim_of("bzs.det.psc", doc).value_text == psc
+def test_the_psc_comes_off_the_body_the_golden_scores_and_the_live_layout():
+    assert claim_of(PSC_ENTRY, scoped(_GOLDEN_BODY.read_bytes())).value_text == "18600"
+    assert claim_of(PSC_ENTRY, scoped(bp.LIVE_LOKALITA_DETAIL_HTML)).value_text == "32600"
 
 
 @pytest.mark.parametrize("body", [bp.DETAIL_HTML, bp.DOHODOU_DETAIL_HTML])
 def test_the_two_cell_layouts_carry_no_town_and_the_name_entries_stay_silent(body):
     """MEASURED, not assumed, and the size of the W1-c R6 escalation: the 2-cell Lokalita
     shapes recorded in `tests/scraper/test_bazos_parser.py` carry no
-    `/inzeraty/<slug>/<psc5>/` anchor, so the two entries that read it — the TOWN and the
-    PSČ — are silent. Their cell text names a place, but on the live layout that same text
-    is the OKRES, so a text read would buy coverage here by publishing a wrong town
-    everywhere else. Silence is the correct answer until a real body of that layout is
-    captured; both constants above are hand-authored and that file records them as having
-    diverged from live.
+    `/inzeraty/<slug>/<psc5>/` anchor, so the entry that reads it — the PSČ — is silent.
+    Their cell text names a place, but on the live layout that same text is the OKRES, so a
+    text read would buy coverage here by publishing a wrong town everywhere else. Silence is
+    the correct answer until a real body of that layout is captured; both constants above are
+    hand-authored and that file records them as having diverged from live.
 
     The PIN is a different carrier and is NOT silent: where the layout still writes the maps
     anchor (`DETAIL_HTML` does, `DOHODOU_DETAIL_HTML` does not), `bzs.det.link_pin` reads it,
@@ -267,8 +224,7 @@ def test_the_two_cell_layouts_carry_no_town_and_the_name_entries_stay_silent(bod
     coverage the pattern arm bought — before it the entry was inert on every layout."""
     doc = scoped(body)
     assert doc.css("a[href*='/inzeraty/']") == []
-    for entry_id in (TOWN_ENTRY, "bzs.det.psc"):
-        assert run(ENTRIES[entry_id], doc) == [], entry_id
+    assert run(ENTRIES[PSC_ENTRY], doc) == []
     has_map_link = doc.css_first("a[href*='/place/']") is not None
     pin = run(ENTRIES["bzs.det.link_pin"], doc)
     assert bool(pin) is has_map_link
@@ -277,66 +233,11 @@ def test_the_two_cell_layouts_carry_no_town_and_the_name_entries_stay_silent(bod
     assert run(ENTRIES["bzs.det.blur_hint"], doc) == []
 
 
-def test_a_numbered_postal_district_is_folded_to_the_city_it_belongs_to():
-    """R4: a numbered obvod is never the town. RÚIAN has no obec "Praha 8", so claiming the
-    portal's spelling verbatim is a town-coverage hole that reads as a portal publishing no
-    town — the resolver binds a town ONLY through an exact
-    `admin_units_by_name(..., levels=('obec',))` lookup."""
-    mirror = MiniMirror(units=[
-        _unit(900, "obec", 554782, "Praha", "praha", "k19.o1100.ob554782"),
-        _unit(901, "obec", 554791, "Plzeň", "plzen", "k32.o3202.ob554791"),
-    ])
-    praha = claim_of(TOWN_ENTRY, scoped(_GOLDEN_BODY.read_bytes())).value_text
-    plzen = claim_of(TOWN_ENTRY, scoped(bp.LIVE_LOKALITA_DETAIL_HTML)).value_text
-    assert mirror.admin_units_by_name(normalize_match_key(praha), levels=("obec",))
-    assert mirror.admin_units_by_name(normalize_match_key(plzen), levels=("obec",))
-    for unfolded in ("praha-8", "plzen-26", "Praha 8"):
-        assert not mirror.admin_units_by_name(
-            normalize_match_key(unfolded), levels=("obec",))
-
-
-def test_the_okres_label_can_never_become_a_big_city_town():
-    """The hazard this carrier retires. On an OKRES label a fold would manufacture a big-city
-    town out of a rural district — "Brno-venkov" -> "Brno", 30 km of villages claimed as the
-    city. bazos publishes exactly those 76 labels as the anchor's TEXT, so the rail is that
-    the entry reads the HREF: a page whose anchor text is "Brno-venkov" claims the href's own
-    obec.
-
-    TWO rails, and W9 rebuilt the second as a LEVEL test instead of a list of names: the
-    entry declares no transform at all now, and `resolver.composite` refuses any line whose
-    whole string matches an okres or a kraj before it will split anything."""
-    assert apply_transforms("Brno-venkov", ENTRIES[TOWN_ENTRY].transform) == "Brno-venkov"
-    body = ('<html><body><table><tr><td>Lokalita:</td><td>'
-            '<a href="https://www.google.com/maps/place/49.30,16.62/@49.30,16.62,12z" '
-            'title="Přibližná lokalita" rel="nofollow">664 51</a> '
-            '<a href="https://reality.bazos.cz/inzeraty/slapanice/66451/">Brno-venkov</a>'
-            "</td></tr></table></body></html>")
-    assert claim_of(TOWN_ENTRY, scoped(body)).value_text == "slapanice"
-
-
-def test_the_pattern_and_not_the_selector_picks_the_node():
-    """THE behaviour that separates `html_attr_regex` from `html_attr`: the selector matches
-    the live category link too, and only the `/<5 digits>/` tail tells them apart."""
-    doc = document()
-    assert len(doc.css("a[href*='/inzeraty/']")) > 1
-    assert claim_of(TOWN_ENTRY, doc).value_text != "prodej-byt"
-
-
 def test_a_slug_without_the_five_digit_tail_is_not_an_obec():
     body = ('<html><body><a href="https://reality.bazos.cz/inzeraty/prodej-byt/">x</a>'
             '<a href="https://reality.bazos.cz/inzeraty/frenstat-pod-radhostem/">y</a>'
             "</body></html>")
-    assert run(ENTRIES[TOWN_ENTRY], scoped(body)) == []
-
-
-def test_the_two_slug_entries_read_one_node_and_quote_it_identically():
-    """One href, two entries, two claims — which is why `group` is contract data and never
-    "the only group". Reading both facts off one node is also what keeps them consistent: a
-    PSČ and a town from different carriers could disagree about which place the ad is in."""
-    doc = document()
-    town, psc = claim_of(TOWN_ENTRY, doc), claim_of("bzs.det.psc", doc)
-    assert town.evidence_quote == psc.evidence_quote
-    assert (town.span_start, town.span_end) == (psc.span_start, psc.span_end)
+    assert run(ENTRIES[PSC_ENTRY], scoped(body)) == []
 
 
 def test_the_psc_is_normalised_to_the_five_digit_shape():
@@ -375,8 +276,8 @@ def test_a_reworded_marker_stops_asserting_instead_of_restating():
             "Nový Jičín</a></td></tr></table></body></html>")
     doc = scoped(body)
     assert run(ENTRIES["bzs.det.blur_hint"], doc) == []
-    # ... while the town entry, which asks a different question of the same row, still reads.
-    assert claim_of(TOWN_ENTRY, doc).value_text == "kopřivnice"
+    # ... while the PSČ entry, which asks a different question of the same row, still reads.
+    assert claim_of(PSC_ENTRY, doc).value_text == "74221"
 
 
 def test_an_unlisted_label_is_recorded_without_asserting_declared_blur():
@@ -401,11 +302,10 @@ def test_every_claim_resolves_a_span_that_indexes_its_own_quote(entry_id):
 
 def test_a_page_without_a_lokalita_row_claims_nothing_at_all():
     """A miss on this portal is silence, not a wrong answer: every PAGE entry addresses the
-    town anchor or the map link beside it, so a page carrying neither yields no claim. The
-    street entry is not among them — it reads `raw_json`, not the body."""
+    town anchor or the map link beside it, so a page carrying neither yields no claim."""
     doc = scoped('<html><body><h1 class="nadpisdetail">Prodej bytu 2+1</h1>'
                  '<div class="popisdetail">Bez lokality.</div></body></html>')
-    for entry_id in ENTRY_IDS - {STREET_ENTRY}:
+    for entry_id in PAGE_IDS:
         assert run(ENTRIES[entry_id], doc) == [], entry_id
 
 
@@ -420,10 +320,10 @@ def test_the_pin_is_licensable_only_through_the_id_the_ladder_names():
     assert rule.entry_id in ENTRY_IDS
     assert rule.geocoded_licence_class is None      # bazos has no geocoded map branch
 
-    coordinate = replace(claim_of(TOWN_ENTRY), claim_type="coordinate",
+    coordinate = replace(claim_of(PSC_ENTRY), claim_type="coordinate",
                          value_geom_wkt="POINT(18.210526 49.539246)")
     licensed, reason = _licensed_coordinate(
-        coordinate, row(), ENTRIES[TOWN_ENTRY], "portal_pin")
+        coordinate, row(), ENTRIES[PSC_ENTRY], "portal_pin")
     assert licensed is None and reason == "unrecognised_archived_coordinate_locator"
 
     licensed, reason = _licensed_coordinate(
@@ -487,123 +387,7 @@ def test_an_href_the_pattern_does_not_match_is_silence_not_an_exception():
 
 # ------------------------------------------------------------------ the payload half
 
-@pytest.mark.parametrize("raw_json", [fx.BAZOS_LINK, fx.BAZOS_STREET_GEOCODE,
-                                      fx.BAZOS_LOCALITY_GEOCODE])
-def test_the_payload_half_claims_the_street_and_nothing_else(raw_json):
-    """`raw_json.locality_text` is the string `scraper.bazos_parser._locality` lifts out of
-    the Lokalita CELL — the okres label on the live layout ("Nový Jičín" for an ad in Frenštát
-    pod Radhoštěm). v4 typed it `postal_town` precisely because it is not the obec (it
-    "disagrees with the geo-derived obec on 57.0% of rows"; BAZOS_LINK says Hodonín at
-    696 81, which is Bzenec), and `postal_town` is not one of R1's eleven types — so that
-    string still has no claim type and the town is still claimed from the page.
-
-    What DOES come off the payload is the street, and only the street."""
-    result = extract_listing(
-        fx.listing("bazos", raw_json, native=str(raw_json["id"])), fx.entries_for("bazos"),
-        max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
-    assert {c.claim_type for c in result.claims} <= {"street_name"}
-    assert [c.extractor_id for c in result.claims] in ([], [STREET_ENTRY])
-    assert "locality_text" in raw_json, "the town is on the row, claimed from the page"
-
-
-# ------------------------------------------------------------------ the street (W18)
-
-def street_of(raw_json: dict) -> str | None:
-    """The street this contract claims for one `listings.raw_json`, through the real lane."""
-    result = extract_listing(
-        fx.listing("bazos", raw_json, native=str(raw_json.get("id", "1"))),
-        fx.entries_for("bazos"), max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
-    streets = [c.value_text for c in result.claims if c.claim_type == "street_name"]
-    assert len(streets) <= 1, "one claim type, one carrier — never two streets from one row"
-    return streets[0] if streets else None
-
-
-def test_the_street_entry_reads_the_sellers_headline_and_only_that():
-    """ONE surface, and the measurement is why (2026-09-16). `/title` IS `h1.nadpisdetail`
-    verbatim (`scraper/bazos_parser.py:485`) — the seller's own headline for THIS ad, which is
-    what makes it subject-scoped."""
-    entry = ENTRIES[STREET_ENTRY]
-    assert entry.claim_type == "street_name"
-    assert entry.reader == "scalar"
-    assert entry.extraction_method == "portal_structured_field"
-    assert entry.transform == ("street_token",)
-    assert entry.guards == ()
-    assert entry.locator["json_pointer"] == "/title"
-    assert "fallback" not in entry.locator
-
-
-def test_the_head_title_and_the_description_are_deliberately_not_declared():
-    """Both were measured and both lost. The `<head>` title is the same capped string with the
-    okres and " | Bazoš.cz" appended; the description is populated on 93 % of rows and carries
-    a cue on 48 %, but its FIRST cue is prose ("500 m od ulice …") and binds exactly on only
-    19 %. Recorded here so the next wave starts from the number rather than the idea."""
-    assert ENTRIES[STREET_ENTRY].locator["json_pointer"] == "/title"
-    assert not any(e.locator.get("css") == "title" for e in ENTRIES.values())
-    assert street_of({"id": "1", "description": "Byt v ulici Jasná."}) is None
-
-
-def test_the_headline_is_claimed_whole_and_split_by_the_binder():
-    """A title is a LINE, and this layer does not cut a street out of it: it states what the
-    portal wrote and the resolver splits it inside the anchoring obec. Cutting here would be
-    the string work the operator ruled out — and a cue-anchored regex would miss the ~4,300
-    cue-less titles whose comma segment is a register street."""
-    assert street_of({"id": "1", "title": OPERATOR_TITLE}) == OPERATOR_TITLE
-    assert street_of({"id": "1", "title": "Prodej bytu 3+1, Kladno - Dubí, Ke Křížku"}) == (
-        "Prodej bytu 3+1, Kladno - Dubí, Ke Křížku")
-
-
-def test_a_bare_name_in_a_title_keeps_everything_but_the_leading_wrapper():
-    """The whole normalisation, on the shape that has no separator to split. Only the LEADING
-    `ulice`/`ul.` comes off: the register holds `Nová ulice` ×8, `Husova ulice`, `V Ulici` and
-    `I. ulice`…`IX. ulice`, and the matcher's exact key is taken from the STORED value, so
-    stripping a trailing generic word here would destroy the only key those can bind by. Both
-    ends are folded in the matcher, which keeps the unfolded form beside the stripped one."""
-    assert street_of({"id": "1", "title": "ul. Jiráskova"}) == "Jiráskova"
-    assert street_of({"id": "1", "title": "v ulici Nádražní"}) == "Nádražní"
-    assert street_of({"id": "1", "title": "Livornské ulici"}) == "Livornské ulici"
-    assert street_of({"id": "1", "title": "Nová ulice"}) == "Nová ulice"
-
-
-def test_the_generic_word_comes_off_and_the_official_one_stays():
-    """`ulice`/`ul.` mean nothing and go — EXCEPT where the register spells them into the name
-    (`Nová ulice` x8, `V Ulici`, `Na Ulici`, `I. ulice`…`IX. ulice`), where the unfolded form
-    survives as a match key of its own. `náměstí`, `třída`, `nábřeží` and `sídliště` are part
-    of the official name and are never touched; 215 titles bind only because one survived."""
-    assert street_of({"id": "1", "title": "náměstí Míru"}) == "náměstí Míru"
-    assert street_of({"id": "1", "title": "třída Václava Klementa"}) == "třída Václava Klementa"
-    assert street_of({"id": "1", "title": "Na Ulici"}) == "Na Ulici"
-    assert street_of({"id": "1", "title": "Husova ulice"}) == "Husova ulice"
-
-
-def test_a_row_with_no_title_claims_no_street():
-    assert street_of({"id": "1", "coords": {"source": "link"}}) is None
-    assert street_of({"id": "1", "title": ""}) is None
-
-
-def test_the_hallucinated_street_of_220870847_is_still_claimed_and_never_published():
-    """The division of labour, in one test. A CLAIM states what the portal wrote — so the
-    headline is claimed whole and the evidence stays auditable. PUBLICATION is the register's
-    call, and `Nový` is not a street of Hořice, so resolver v5.2 drops it. The old fix was a
-    morphology guess in the extractor, which is what refused the real `28. října`."""
-    assert street_of({"id": "220870847", "title": "Nový 2 pokojový byt"}) == (
-        "Nový 2 pokojový byt")
-    assert street_of(fx.BAZOS_STREET_GEOCODE) is None   # that fixture carries no title
-
-
-def test_a_geo_name_or_a_digit_string_is_refused_before_it_reaches_the_register():
-    """`street_token` judges ONE name — an `okres …` qualifier, a digits-only token, a foreign
-    script. It does NOT judge a line: on "Kladno - Dubí, Ke Křížku" the dash is a separator,
-    so the per-segment place test lives in the binder, inside the anchoring obec."""
-    assert apply_transforms("okres Beroun", ENTRIES[STREET_ENTRY].transform) is None
-    assert apply_transforms("12345", ENTRIES[STREET_ENTRY].transform) is None
-    assert apply_transforms("ул. Ленина", ENTRIES[STREET_ENTRY].transform) is None
-    # And the one thing it does NOT do: judge whether the token looks like a Czech street.
-    assert apply_transforms("Nový", ENTRIES[STREET_ENTRY].transform) == "Nový"
-    assert apply_transforms("28. října 12", ENTRIES[STREET_ENTRY].transform) == "28. října 12"
-
-
-def test_an_area_in_the_headline_is_not_a_foreign_script():
-    """bazos 223894449: `²` is a superscript digit, not a letter of another script."""
-    title = "Prodej bytu 3+1 60.91 m² Štefánikova, Hradec Králové"
-    assert street_of({"id": "223894449", "title": title}) == title
-    assert street_of({"id": "1", "title": "Квартира 45 m², ул. Ленина"}) is None
+def test_the_payload_half_claims_nothing_for_bazos():
+    """v8 has no payload entry: W18's headline street is the reading's now, and
+    `raw_json.locality_text` (the Lokalita cell, the okres on the live layout) was never one."""
+    assert payload_entries(fx.entries_for("bazos")) == []

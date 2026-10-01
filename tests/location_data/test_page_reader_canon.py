@@ -5,7 +5,7 @@ has a genuinely archived page in `tests/fixtures/portal_html/` that is the subst
 because the pinned `tests/fixtures/location_w2/*.html` fixtures are hand-written "modelled on
 the contract" pages and a selector that works on one of those proves the shape, not the
 population. The branches a single archived body cannot carry (a Circle geometry, an empty
-`features` array, a percent-encoded slug, a foreign pin) are built as small in-test HTML
+`features` array, a foreign pin) are built as small in-test HTML
 strings from the values the recon measured — never as new fixture files, since nothing scores
 those.
 
@@ -296,8 +296,7 @@ def test_html_regex_emits_no_claim_when_the_match_has_no_locatable_span(monkeypa
 
 def _slug_entry(group: str, **overrides: Any) -> Entry:
     locator = {"reader": "html_attr_regex", "css": "a[href*='/inzeraty/']", "attr": "href",
-               "pattern": "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/",
-               "group": group, "decode": "percent"}
+               "pattern": "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/", "group": group}
     locator.update(overrides.pop("locator", {}))
     return entry("bazos", locator, claim_type=overrides.pop("claim_type", "obec_name"),
                  extraction_method="url_slug_parse", surface="url_slug", **overrides)
@@ -330,40 +329,6 @@ def test_html_attr_regex_reads_a_second_group_of_the_same_href():
     claim = one(read("html_attr_regex", pinned("bazos"),
                      _slug_entry("psc", claim_type="psc", transform=("psc_normalise",))))
     assert claim.value_text == "18600"
-
-
-def test_html_attr_regex_percent_decodes_when_the_contract_says_so():
-    """`ho%C5%99ice-v-podkrkono%C5%A1%C3%AD` normalises through `location_value_norm` to
-    `ho c5 99ice v podkrkono c5 a1 c3 ad`, which joins to no gazetteer row; the decoded form
-    normalises to `horice v podkrkonosi`, which does. Values are the live capture recorded
-    for ad 222223928."""
-    body = ('<html><body><table class="listadvalues"><tr><td>'
-            '<a href="https://reality.bazos.cz/inzeraty/'
-            'ho%C5%99ice-v-podkrkono%C5%A1%C3%AD/50801/">Jičín</a>'
-            "</td></tr></table></body></html>")
-    document = scoped("bazos", body)
-    claim = one(read("html_attr_regex", document, _slug_entry("obec_slug")))
-    assert claim.value_text == "hořice-v-podkrkonoší"
-    assert "%C5" not in claim.value_text
-    # And the QUOTE is the node's serialisation, because the decoded slug appears nowhere in
-    # the body — the same call `html_point_attrs` makes about an assembled "lat,lon".
-    assert span_text(document, claim) == claim.evidence_quote
-
-
-def test_html_attr_regex_without_the_decode_leaves_the_slug_encoded():
-    """Opt-in, and visibly so: percent-decoding is a property of a URL substrate, not of
-    every attribute a pattern may be run over."""
-    body = ('<html><body><a href="/inzeraty/ho%C5%99ice/50801/">x</a></body></html>')
-    claim = one(read("html_attr_regex", scoped("bazos", body),
-                     _slug_entry("obec_slug", locator={"decode": "none"})))
-    assert claim.value_text == "ho%C5%99ice"
-
-
-def test_html_attr_regex_refuses_an_unimplemented_decode():
-    with pytest.raises(IntakeRefused) as excinfo:
-        read("html_attr_regex", pinned("bazos"),
-             _slug_entry("obec_slug", locator={"decode": "rot13"}))
-    assert "rot13" in str(excinfo.value)
 
 
 def test_html_attr_regex_reads_the_zoom_token_from_the_maps_anchor():
@@ -1278,12 +1243,11 @@ def test_every_archive_reader_may_be_stamped_with_the_surface_the_lane_stamps():
         assert "archived_html" in contracts.READER_CONTRACTS[name].substrates, name
 
 
-def test_no_archive_reader_claims_a_method_the_lane_cannot_evidence():
-    """`llm_text` needs a model and a prompt version this lane has no way to supply, and
-    `assert_evidence_complete` refuses such a claim before the write — so no DOM reader may
-    declare it."""
-    for name in PAGE_READERS:
-        assert "llm_text" not in contracts.READER_CONTRACTS[name].methods, name
+def test_llm_text_is_the_reading_substrates_and_no_archive_readers():
+    """W3: a model's answer reaches a claim only as the text lane's stored reading, whose row
+    is its evidence (value, quote, model, text hash); a DOM reader never declares it."""
+    declaring = {n for n, spec in contracts.READER_CONTRACTS.items() if "llm_text" in spec.methods}
+    assert declaring == {"text_reading"} and not declaring & set(PAGE_READERS)
 
 
 # One representative entry per canonical reader, in the shape a portal activation will write
@@ -1311,7 +1275,7 @@ CANONICAL_ENTRIES: dict[str, dict[str, Any]] = {
         "source": "bazos", "id": "bzs.det.obec_slug", "locator_kind": "url_slug",
         "extraction_method": "url_slug_parse", "claim_type": "obec_name",
         "locator": {"reader": "html_attr_regex", "css": "a[href*='/inzeraty/']",
-                    "attr": "href", "decode": "percent",
+                    "attr": "href",
                     "pattern": "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/",
                     "group": "obec_slug"},
     },

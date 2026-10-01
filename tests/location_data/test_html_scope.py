@@ -257,7 +257,7 @@ def test_bazos_podobne_inzeraty_and_footer_go_with_the_subject_intact() -> None:
         assert not excluded_zone_admits(scoped, decoy), decoy
 
     assert scoped.contains("Sokolovská 234")
-    assert scoped.contains("/inzeraty/praha-8/18600/")   # bzs.det.obec_slug
+    assert scoped.contains("/inzeraty/praha-8/18600/")   # bzs.det.psc
     assert scoped.contains("okres Praha")                # bzs.det.okres_text
     assert scoped.css_first("a[href*='/place/']").attributes["title"] == "Přibližná lokalita"
     assert excluded_zone_admits(scoped, "Sokolovská 234")

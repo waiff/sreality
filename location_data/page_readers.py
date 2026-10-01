@@ -1,9 +1,9 @@
 """The 14 readers that mine a STORED PAGE BODY, plus the machinery to fetch one.
 
-The hourly lane (`location_data.claims_intake`) reads two substrates: `listings.raw_json`
-(its own readers) and the latest `portal_raw_payloads.body` for the listing (these). They
-live here, in a module that does NOT import the lane, because the lane imports them —
-everything both halves share is `location_data.claims_common`.
+The hourly lane (`location_data.claims_intake`) reads three substrates: `listings.raw_json`
+(its own readers), the latest `portal_raw_payloads.body` for the listing (these) and the text
+lane's stored reading (`location_data.text_reading`). They live here, in a module that does
+NOT import the lane, because the lane imports them — what they share is `claims_common`.
 
 A reader takes `(entry, row, payload, scoped_document)` and returns `PageRead`s; the lane
 owns the scan, the R2 fetch, the hash gate and the write. The exclusion-zone scoping
@@ -26,7 +26,6 @@ from datetime import datetime
 from math import cos, hypot, isfinite, radians
 from multiprocessing.context import BaseContext
 from typing import Any, Protocol
-from urllib.parse import unquote
 
 import psycopg
 
@@ -80,12 +79,10 @@ ARCHIVE_BLUR_EVIDENCE = frozenset({"none", "declared"})
 GEOCODED_LICENCE_CLASS = "odbl"
 ARCHIVE_EMITTABLE_LICENCE_CLASSES = EMITTABLE_LICENCE_CLASSES | {GEOCODED_LICENCE_CLASS}
 
-# 01 §4.2's `loc_claim_text_evidence` names these two methods; every other method may carry
-# evidence but is not required to. `llm_text` additionally has to satisfy
-# `loc_claim_llm_model` — a model assertion that cannot name the model that made it is not
-# evidence — which is why `LLM_METHOD` is checked separately below rather than folded in.
-EVIDENCE_METHODS = frozenset({"llm_text", "regex_text"})
-LLM_METHOD = "llm_text"
+# 01 §4.2's `loc_claim_text_evidence` named this method; every other method may carry evidence
+# but is not required to. (`llm_text` is the reading substrate's, never a page reader's: its
+# evidence is the reading row itself — value, quote, model, text hash.)
+EVIDENCE_METHODS = frozenset({"regex_text"})
 
 # Which branch of a portal's detail map a coordinate was read from. The READER states this;
 # it is never inferred from what the reader happened to stamp on the claim. Inferring it
@@ -93,13 +90,11 @@ LLM_METHOD = "llm_text"
 # one: a Nominatim-fallback reader that simply forgets to say so inherits the entry's
 # `licence_class: portal` default and a republished OSM position is filed as first-party,
 # with nothing anywhere to catch it. A required argument cannot be forgotten quietly.
-# The substrate unescapes a reader may be told to apply before it reads. Both are opt-in
-# contract data and both are named, never inferred: `percent` is a URL property (a
-# percent-encoded slug normalises to a gazetteer-unjoinable string), `js_string` is a
-# script property (maxima ships its map config as a JS string literal). A name outside the
-# set is refused rather than ignored — silently not decoding is how a claim's value stops
-# joining to anything with no error anywhere.
-_ATTR_DECODERS = frozenset({"none", "percent"})
+# The substrate unescape a reader may be told to apply before it reads: opt-in contract data,
+# named, never inferred — `js_string` is a script property (maxima ships its map config as a JS
+# string literal). A name outside the set is refused rather than ignored: silently not decoding
+# is how a claim's value stops joining to anything with no error anywhere. (`percent` left with
+# bazos' town slug, its one user, in W3.)
 _JSON_DECODERS = frozenset({"none", "js_string"})
 
 POSITION_BRANCH_PORTAL_PIN = "portal_pin"
@@ -411,10 +406,9 @@ def _read_html_attr_regex(
 ) -> list[PageRead]:
     """One capture group of a pattern run over a URL-bearing ATTRIBUTE of a DOM node.
 
-    The carrier for a fact a portal publishes ONLY in a link: bazos names the true
-    municipality nowhere on the page except the town-listings anchor's href
-    (`/inzeraty/<obec-slug>/<psc5>/`), while that anchor's visible TEXT is the okres — the
-    defect that put 29,546 active rows onto 90 distinct `locality` values.
+    The carrier for a fact a portal publishes ONLY in a link: bazos' PSČ sits in the
+    town-listings anchor's href (`/inzeraty/<slug>/<psc5>/`), while that anchor's visible TEXT
+    is the okres — the defect that put 29,546 active rows onto 90 distinct `locality` values.
 
     ALL matching nodes are considered, in document order, and the PATTERN is the
     discriminator — not `css_first`. That is the whole reason this is not `html_attr`: a
@@ -424,27 +418,16 @@ def _read_html_attr_regex(
     transform that then nulls the value yields no claim rather than a scan for a more
     agreeable neighbour.
 
-    `decode: percent` unescapes the attribute before matching, and it is opt-in because it
-    is a property of a URL substrate rather than of every attribute: on a percent-encoded
-    slug `ho%C5%99ice-v-podkrkono%C5%A1%C3%AD` normalises through `location_value_norm` to
-    `ho c5 99ice v podkrkono c5 a1 c3 ad`, which joins to no gazetteer row, while the decoded
-    form normalises to `horice v podkrkonosi`, which does.
-
     The QUOTE is the node's own serialisation, for the same reason `html_point_attrs` quotes
-    `node.html`: a decoded slug appears nowhere in the body and a bare `12` or `50801` would
-    resolve to some other digit run, while the opening tag carries the whole URL."""
+    `node.html`: a bare `12` or `50801` would resolve to some other digit run, while the
+    opening tag carries the whole URL."""
     compiled, group = _entry_pattern(entry, "html_attr_regex")
     attribute = _entry_attr(entry, "html_attr_regex")
-    decode = str(entry.locator.get("decode") or "none")
-    if decode not in _ATTR_DECODERS:
-        raise IntakeRefused(
-            f"{entry.source}:{entry.entry_id} declares decode={decode!r}; "
-            f"`html_attr_regex` implements {sorted(_ATTR_DECODERS)}")
     for node in document.css(_entry_css(entry)):
         raw = _text(node.attributes.get(attribute))
         if raw is None:
             continue
-        match = compiled.search(unquote(raw) if decode == "percent" else raw)
+        match = compiled.search(raw)
         if match is None:
             continue
         value = apply_transforms(_text(match.group(group)), entry.transform)
@@ -1099,7 +1082,7 @@ def _evidenced_optional(
     An `evidence_quote` is a promise the payload contains that text — 01 §4.2 pairs it with
     `payload_sha256` for exactly that reason. A value this reader cannot point at has no
     honest quote, and asserting one anyway is worse than asserting none:
-    `assert_evidence_complete` REQUIRES the evidence set only for `llm_text`/`regex_text`, so
+    `assert_evidence_complete` REQUIRES the evidence set only for `regex_text`, so
     a `map_widget_parse` claim may legally carry a value with no span."""
     if quote is None:
         return _base(
@@ -1610,17 +1593,6 @@ def assert_evidence_complete(claim: Claim) -> None:
             f"{claim.extractor_id} produced an evidence quote with no payload_sha256; "
             f"01 §4.2's loc_claim_evidence_payload is D7's rule that a span is meaningless "
             f"without the document it indexes into")
-    if claim.extraction_method == LLM_METHOD:
-        unattributed = [
-            name for name, value in (("model", claim.model),
-                                     ("prompt_version", claim.prompt_version))
-            if value is None
-        ]
-        if unattributed:
-            raise IntakeRefused(
-                f"{claim.extractor_id} produced an llm_text claim without "
-                f"{', '.join(unattributed)}; 01 §4.2's loc_claim_llm_model refuses a model "
-                f"assertion that cannot name the model that made it")
 
 
 def assert_stampable(claim: Claim) -> None:
@@ -1650,7 +1622,7 @@ def stamp_page_claim(
             f"payload {payload.id} carries page_kind='{FORBIDDEN_PAGE_KIND}'; C10 keeps the "
             f"page's own kind on the claim and leaves that enum member unused")
     # W1-c R5 (the `precision_declaration` label + blur axis) is stamped in
-    # `claims_common._base`, the one funnel BOTH substrates' readers build a claim through,
+    # `claims_common._base`, the one funnel EVERY substrate's readers build a claim through,
     # so a page reader and a payload reader cannot answer it differently.
     return replace(
         claim,

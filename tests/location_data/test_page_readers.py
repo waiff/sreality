@@ -156,54 +156,13 @@ def test_a_regex_text_claim_with_no_evidence_at_all_is_refused_before_the_write(
     assert "rx.det.street" in message, "the refusal must name the extractor, not a constraint"
 
 
-def test_an_llm_text_claim_is_held_to_the_same_rule():
-    with pytest.raises(IntakeRefused):
-        assert_evidence_complete(raw_claim(archive_entry(extraction_method="llm_text")))
-
-
-def _llm_claim(**overrides: Any) -> Claim:
-    kwargs: dict[str, Any] = {
-        "evidence_quote": "Krymská", "span_start": 10, "span_end": 17,
-        "payload_scope_version": "html_scope@1:remax:deadbeefdeadbeef",
-        "payload_sha256": "ab" * 32, "subject_scoped": True,
-        "model": "claude-x", "prompt_version": "loc_mine@1",
-    }
-    kwargs.update(overrides)
-    return raw_claim(archive_entry(extraction_method="llm_text"), **kwargs)
-
-
-def test_an_llm_text_claim_must_name_the_model_that_made_it():
-    """`loc_claim_llm_model` is the SECOND CHECK an evidence-bearing claim faces, and it
-    binds `llm_text` alone. Before this, `Claim` could spell an `llm_text` claim that
-    satisfied every Python guard and then violated the constraint — taking the whole batch
-    with it, once, in production, on whoever built the LLM lane."""
-    required = _evidence_columns_in_check("loc_claim_llm_model")
-    assert required == {"model", "prompt_version"}
-
-    assert_evidence_complete(_llm_claim())
-    for column in sorted(required):
-        with pytest.raises(IntakeRefused, match=column):
-            assert_evidence_complete(_llm_claim(**{column: None}))
-
-
 def test_a_regex_text_claim_needs_no_model():
-    """The CHECK names `llm_text` and nothing else: a deterministic regex has no model to
-    attribute, and demanding one would make the archived readers unbuildable."""
+    """A deterministic regex has no model to attribute; `llm_text` is the reading
+    substrate's, never a page reader's (W3), so the page lane checks no model at all."""
     assert_evidence_complete(raw_claim(
         archive_entry(extraction_method="regex_text"),
         evidence_quote="Krymská", span_start=10, span_end=17,
         payload_scope_version="v", payload_sha256="ab" * 32, subject_scoped=True))
-
-
-def test_the_model_columns_reach_the_row_dict_but_no_longer_the_table():
-    """W1-b dropped both columns (migration 498) — no lane emits an `llm_text` claim, so
-    the CHECK that forced them was guarding a shape nothing writes. They stay on the
-    `Claim` and in the recordset that parses it, because the READERS still carry the
-    evidence discipline in Python; they simply have nowhere to land."""
-    recordset = claims_intake._CLAIM_WRITE_SQL.split("), typed AS")[0]
-    for column in ("model", "prompt_version"):
-        assert column in recordset, column
-        assert f"d.{column}" not in claims_intake._CLAIM_WRITE_SQL, column
 
 
 def test_a_degenerate_span_is_refused():

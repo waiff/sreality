@@ -469,12 +469,12 @@ def test_the_claims_select_maps_onto_claim_positionally():
         "id", "listing_id", "source", "claim_type", "surface", "extraction_method",
         "licence_class", "first_observed_at", "value_text", "value_num", "st_y", "st_x",
         "value_jsonb", "declared_precision_label", "declared_radius_m", "blur_evidence",
-        "claim_confidence", "subject_scoped",
+        "subject_scoped",
     ], labels
 
     row = (11, 22, "sreality", "street_name", "api_json", "portal_structured_field",
            "portal", mm._T0, "Dlouhá", 3.5, 50.1, 14.4, {"k": "v"}, "exact_address",
-           25.0, "declared", "high", True)
+           25.0, "declared", True)
     assert len(row) == len(labels)
     claim = resolve_db._claim(row)
 
@@ -488,7 +488,7 @@ def test_the_claims_select_maps_onto_claim_positionally():
     assert claim.value_jsonb == {"k": "v"}
     assert claim.declared_precision_label == "exact_address"
     assert claim.declared_radius_m == 25.0
-    assert (claim.blur_evidence, claim.claim_confidence) == ("declared", "high")
+    assert claim.blur_evidence == "declared"
     assert claim.subject_scoped is True
     # The six the pure core never read keep their names and their defaults (W1-b).
     assert (claim.extractor_id, claim.declared_confidence, claim.page_kind) == ("", None, "none")

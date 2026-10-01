@@ -138,7 +138,7 @@ _CLAIM_COLUMNS = """id, listing_id, source, claim_type::text, surface::text,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_Y(value_geom) END,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_X(value_geom) END,
        value_jsonb, declared_precision_label, declared_radius_m,
-       blur_evidence::text, claim_confidence::text, subject_scoped"""
+       blur_evidence::text, subject_scoped"""
 
 
 def _claims_sql(listing_filter: str, order_by: str) -> str:
@@ -574,7 +574,7 @@ def _claim(row: Sequence[Any]) -> Claim:
         lon=None if row[11] is None else float(row[11]),
         value_jsonb=row[12] or {}, declared_precision_label=row[13],
         declared_radius_m=None if row[14] is None else float(row[14]),
-        blur_evidence=row[15], claim_confidence=row[16], subject_scoped=row[17],
+        blur_evidence=row[15], subject_scoped=row[16],
     )
 
 

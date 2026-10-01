@@ -89,7 +89,9 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   composed and hashed once in SQL), its scope is the open-gate portals ∪ those whose active
   contract declares `llm_text`, and every call also returns a `location` block
   (`location_data/text_reading.py`: ad_kind, town, part of town, street, č.p./č.o./č.ev., each
-  quoted) stored RAW in `listing_description_enrichments.extracted` — nothing mines it until W3.
+  quoted) stored RAW in `listing_description_enrichments.extracted`. **W3**: the hourly claim lane
+  mines the CURRENT reading (reader `text_reading`, V1–V4) into bazos@8's claims, superseding the
+  listing's older claims of those types, stamped `mined_contract_version` (mig 578); no model call.
   The cache is keyed `(listing_id, text_hash, extractor_version)` (migration 552),
   `extractor_version` being `'<schema>:<prompt + schema hash>:<model>'` — a model swap re-attempts,
   a price-only snapshot never re-bills, and **a prompt edit or a gate opening re-reads the corpus**

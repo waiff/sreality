@@ -295,6 +295,20 @@ def _stefanikova(*parts: tuple[int, int], town: bool = True, street: str = "Šte
     """18909736 (§7): Hradec Králové and Štefánikova (127329), whose real doors all lie in
     Moravské Předměstí while the advert says Třebeš, with its declared-approximate pin 720 m
     off. `town=False`: the advert names no town, only the PSČ and the part supply one."""
+    claims = [mm.claim(2, "cast_obce_name", value_text="Třebeš", source="bazos"),
+              mm.claim(3, "street_name", value_text=street, source="bazos")]
+    if town:
+        claims.append(mm.claim(1, "obec_name", value_text="Hradec Králové", source="bazos"))
+    return _resolve(claims + _stefanikova_page(), mirror=_stefanikova_mirror(*parts))
+
+
+def _stefanikova_page():
+    return [mm.claim(4, "psc", value_text="50011", source="bazos"),
+            mm.claim(5, "coordinate", lat=50.1933, lon=15.8371, source="bazos",
+                     declared_precision_label="approximate_location")]
+
+
+def _stefanikova_mirror(*parts: tuple[int, int]):
     mirror = mm.default_mirror()
     mirror.units += [mm._unit(70, "obec", 569810, "Hradec Králové", "hradec kralove",
                               "b569810", lat=50.2092, lon=15.8328, psc_set=("50011",)),
@@ -311,14 +325,26 @@ def _stefanikova(*parts: tuple[int, int], town: bool = True, street: str = "Šte
                                    street_name_norm="stefanikova", cislo_domovni=800 + i,
                                    cast_obce_unit_id=unit, cast_obce_kod=kod)
                       for i, (unit, kod) in enumerate(parts)]
-    claims = [mm.claim(2, "cast_obce_name", value_text="Třebeš", source="bazos"),
-              mm.claim(3, "street_name", value_text=street, source="bazos"),
-              mm.claim(4, "psc", value_text="50011", source="bazos"),
-              mm.claim(5, "coordinate", lat=50.1933, lon=15.8371, source="bazos",
-                       declared_precision_label="approximate_location")]
-    if town:
-        claims.append(mm.claim(1, "obec_name", value_text="Hradec Králové", source="bazos"))
-    return _resolve(claims, mirror=mirror)
+    return mirror
+
+
+def test_18909736_from_its_stored_reading_publishes_stefanikova_in_moravske_predmesti():
+    """W3's acceptance: the reading the pilot took off the advert, through bazos@8's reading
+    entries (V1–V4), then the resolver — Štefánikova / Hradec Králové / Moravské Předměstí,
+    the register's part and not the advert's Třebeš (Q3), no number (none is stated)."""
+    from tests.location_data.test_text_reading import TRIGGER, _claims, _payload
+
+    text = _claims(_payload("offer", street=("Štefánikova", "v ulici Štefánikova"),
+                            town=("Hradec Králové", "v Hradci Králové"),
+                            part_of_town=("Třebeš", "části Třebše")), TRIGGER)
+    claims = [mm.claim(i, t, value_text=v, source="bazos", surface="description",
+                       extraction_method="llm_text")
+              for i, (t, v) in enumerate(sorted(text.items()), start=10)]
+    resolution = _resolve(claims + _stefanikova_page(),
+                          mirror=_stefanikova_mirror(*[(71, 409871)] * 3))
+    assert (resolution.street_name, resolution.obec_name, resolution.cast_obce_name) == (
+        "Štefánikova", "Hradec Králové", "Moravské Předměstí")
+    assert (resolution.granularity, resolution.house_number_cp) == ("street", None)
 
 
 def test_a_street_in_the_named_town_carries_the_registers_part_not_the_adverts():

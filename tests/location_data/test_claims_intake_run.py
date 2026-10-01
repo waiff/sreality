@@ -247,15 +247,6 @@ def test_the_selections_carry_no_listings_column_the_lane_cannot_read():
         _row_from_record(_RECORD[:-1])
 
 
-def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():
-    """`claim_confidence` is a `match_confidence` column (migration 382), and the resolver's
-    survivorship reads it. Binding it as bare text would fail the INSERT; leaving it out of
-    the recordset would silently drop 06 §6.1.1's cap."""
-    one = " ".join(_CLAIM_WRITE_SQL.split())
-    assert "claim_confidence text" in one
-    assert "d.claim_confidence::match_confidence" in one
-
-
 def test_the_lane_has_no_watermark_left_to_read():
     """W1-a2 deleted the time-based floor outright. No SQL constant in this module may ask
     a `location_claim_batches` timestamp where the scan should start — the cursor is the
@@ -580,8 +571,9 @@ def test_a_run_always_has_a_budget_even_when_the_caller_forgets_one():
 
 
 def test_the_registry_is_one_and_matches_the_contract_record_exactly():
-    """ONE registry, 21 readers: the 7 that read `listings.raw_json` and the 14 that read
-    the stored page body. `ARCHIVE_ONLY_READERS` / `LLM_ONLY_READERS` were name-only mirrors
+    """ONE registry, 22 readers: the 7 that read `listings.raw_json`, the 14 that read the
+    stored page body and W3's one that reads the stored reading. `ARCHIVE_ONLY_READERS` /
+    `LLM_ONLY_READERS` were name-only mirrors
     of registries this module could not import; there is nothing left to mirror, so a name
     that is not in `READERS` is a deploy error again — one question, one answer.
 
@@ -589,12 +581,13 @@ def test_the_registry_is_one_and_matches_the_contract_record_exactly():
     (`legacy_text_column`, `geom_column`, `coords_stamp_quality`)."""
     from location_data import contracts, page_readers
 
-    assert len(claims_intake.READERS) == 21
+    assert len(claims_intake.READERS) == 22
     assert set(claims_intake.READERS) == set(contracts.READER_CONTRACTS)
     payload_readers = {n for n, r in claims_intake.READERS.items()
                        if r.substrate == claims_intake.SUBSTRATE_PAYLOAD}
     page = {n for n, r in claims_intake.READERS.items()
             if r.substrate == claims_intake.SUBSTRATE_ARCHIVED_HTML}
     assert len(payload_readers) == 7 and page == set(page_readers.PAGE_READERS)
+    assert claims_intake.READERS["text_reading"].substrate == claims_intake.SUBSTRATE_READING
     assert not hasattr(claims_intake, "ARCHIVE_ONLY_READERS")
     assert not hasattr(claims_intake, "LLM_ONLY_READERS")
