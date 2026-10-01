@@ -193,7 +193,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` + `collection_monitor` (property-grain; `dedupe_key`
     `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot; a `monitor_since` anchor so a change predating membership never fires) and `system_health`
     (**NOT** property-grain — no listing, no subscription; verify_pipeline checks + `ops_incidents`, migration 462). **Delivery is separate from detection**:
-    in-app = the row itself; external = the `channel_sends` ledger. A merge re-points them (#18), collapsing a twin: the one delete.
+    in-app = the row itself; external = the `channel_sends` ledger. A merge re-points them (#18), collapsing a twin: the merge's one delete.
 17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).
