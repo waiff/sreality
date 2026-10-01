@@ -28,20 +28,19 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   dispatch collapse keeps its sends (PR 4), a chained detach restores one card (PR 5),
   the engine's undo on the set form (PR 6).
 
-### Rule #22: converge the kanban + extension pipeline copies (owed, 2026-10-01)
-- **Owed (not built):** the kanban's shape (drag to move, trash + two-step confirm to remove)
-  is sanctioned, but its code is a copy: `pages/Pipeline.tsx` re-implements
-  `usePipelineCard`'s move/remove as its own `move`/`remove` mutations (the hook binds
-  `property_id` at hook time; the board resolves it per drop/trash in page-level handlers), and
-  tints column headers + stage-editor swatches with its own `stageColor` (grey fallback)
-  instead of `stageAccent` (copper). The extension hand-copies the funnel SVG (forced: no
-  React) plus `stageBadge` and `stageAccent` (not forced: pure TS it could import from
-  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`). The kanban copy
-  already writes through `lib/pipelineCache`, so this is duplication, not a cache split.
-  Converge: a call-time `property_id` on the hook's move/remove, the board on `stageAccent`
-  (or its grey fallback recorded as deliberate), the extension importing `pipelineStage.ts`;
-  then rule #22 (CLAUDE.md + architecture) drops the exceptions (origin: Phase U-PIPE 3i
-  below).
+### Rule #22: converge the kanban + extension pipeline copies (partly done, 2026-10-01)
+- **Done (2026-10-01):** the kanban's move/remove no longer re-implement the hook —
+  `pages/Pipeline.tsx` calls `const { move, remove } = usePipelineCard()` and passes the
+  `property_id` per call (the hook takes it at call time now), so one instance serves the
+  whole board's drops and trashes (see "One optimistic-write hook" under Phase U-PIPE below).
+  The kanban's shape (drag to move, own trash + two-step confirm to remove) stays sanctioned.
+- **Owed (not built):** the board tints column headers + stage-editor swatches with its own
+  `stageColor` (grey fallback) instead of `stageAccent` (copper) — converge, or record the
+  grey fallback as deliberate. The extension hand-copies the funnel SVG (forced: no React)
+  plus `stageBadge` and `stageAccent` (not forced: pure TS it could import from
+  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`) — import it. Then
+  rule #22 (CLAUDE.md + architecture) drops the remaining exceptions (origin: Phase U-PIPE
+  3i below).
 
 ### Phase U2.6: Collections + tags + notes (done)
 Operator watchlists, freeform coloured tags, and per-listing journal
@@ -392,6 +391,25 @@ to advance a deal without opening the listing page. It now opens a shared menu.
   pre-drag stage; and the board's rollback lived in `onError`, which opts a
   mutation out of the app's global error toast (`main.tsx`) — a failed drag
   snapped back with no explanation. Rollback now rides `onSettled`.
+- **One optimistic-write hook** (done, 2026-10-01): `lib/useOptimisticWrite`
+  (hold → patch → rollback in `onSettled` → revalidate; per-key `pendingFor`
+  from one pending index per MutationCache, so a write re-renders only the
+  rows that asked about its key — a Browse hover no longer scans the
+  MutationCache once per hook per row) replaces `lib/optimisticCache` and
+  every hand-rolled copy — the kanban's own `move`/`remove` (now
+  `usePipelineCard` with the id per call), dismissals, border cases, the
+  autodedup verdict overlay, the Settings toggles, the training-set marks,
+  the preset reorder, the exam-review edits. 23 toast-only `onError`s deleted
+  (the global toast already said it); `lib/browseKeys` / `lib/autodedupKeys` /
+  `trainingSetKeys` factories feed both readers and sweeps. Side fixes: a
+  failed filter-visibility toggle and a failed preset reorder now say why; a
+  failed dismissal re-reads the lists and a failed training-set mark its row
+  page (no resurrected neighbour, no erased move or note); the funnel and the
+  header pill stay busy while their menu writes (`aria-disabled`, never
+  `disabled`, so the menu's focus hand-back still lands on them); the no-price
+  count is now a Browse surface — merges, splits/links, cohort-scoped
+  collection and pipeline writes, and dismissals re-read it (it went stale
+  before).
 - **Badge projections fixed.** `fetchPipelineStages` never selected `code` and
   `fetchPropertyPipeline` never selected `stage_code`, though migration 377
   exposes both: the same property badged "9" on a card and "5" in its own

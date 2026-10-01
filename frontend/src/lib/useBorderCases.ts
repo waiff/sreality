@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 
 import { deleteBorderCase, setBorderCase } from '@/lib/api';
 import { fetchBorderCasesByImageIds } from '@/lib/queries';
+import { useOptimisticWrite } from '@/lib/useOptimisticWrite';
 
 /* The "Border case" flag (migration 310) for a WHOLE grid of images — the one
  * read path, write path and stability policy behind every labeling surface
@@ -22,16 +23,15 @@ import { fetchBorderCasesByImageIds } from '@/lib/queries';
  * 2. **A toggle patches this store, never invalidates.** A refetch would
  *    re-render the whole grid the operator is working through tile by tile.
  * 3. **A read that lands after a click cannot resurrect what it replaced.** No
- *    cancellation is needed for that (which is how `pipelineCache` does it, and
- *    would here throw away every OTHER image in the same batch): settling an id
+ *    cancellation is needed for that (which is how a query-cache patch does it,
+ *    and would here throw away every OTHER image in the same batch): settling an id
  *    — by reading it back OR by writing it — drops it out of `missing`, which
  *    changes the query key this hook observes, so the older read's result is
  *    never merged. `known` only ever grows, so a settled id can never re-enter.
  *
- * Writes are optimistic and roll back from `onSettled`, never `onError` — the
- * app's global MutationCache.onError (main.tsx) is the only "the write failed"
- * feedback, and it deliberately stays silent for a mutation that defines its
- * own onError (rule #22's cache policy, same idiom as `pipelineCache`).
+ * Writes go through lib/useOptimisticWrite (rule #22's write policy): the flag
+ * paints on the click, rolls back from `onSettled` (never `onError`, which
+ * would silence the global error toast), and pending is per image.
  */
 export type BorderCaseStore = {
   /** Is this image flagged? False for an id whose state hasn't loaded yet. */
@@ -50,11 +50,9 @@ type Resolved = { known: ReadonlySet<number>; flagged: ReadonlySet<number> };
 const EMPTY: Resolved = { known: new Set(), flagged: new Set() };
 
 type Toggle = { imageId: number; next: boolean };
-type Rollback = () => void;
 
 export function useBorderCases(imageIds: ReadonlyArray<number>): BorderCaseStore {
   const [resolved, setResolved] = useState<Resolved>(EMPTY);
-  const [pending, setPending] = useState<ReadonlySet<number>>(new Set());
 
   const missing = useMemo(
     () => [...new Set(imageIds)].filter((id) => !resolved.known.has(id)),
@@ -98,48 +96,36 @@ export function useBorderCases(imageIds: ReadonlyArray<number>): BorderCaseStore
     });
   }, []);
 
-  const release = useCallback((imageId: number) => {
-    setPending((prev) => {
-      if (!prev.has(imageId)) return prev;
-      const rest = new Set(prev);
-      rest.delete(imageId);
-      return rest;
-    });
-  }, []);
-
-  /* ONE mutation instance for the whole grid: its observer only ever reflects
-   * the most recent call, so per-image in-flight state is tracked here instead
-   * (the same reason the Labeling page keeps its own pendingRowKeys). */
-  const { mutate } = useMutation<unknown, Error, Toggle, Rollback>({
-    mutationFn: ({ imageId, next }: Toggle) =>
+  /* ONE mutation instance for the whole grid; its observer only reflects the
+   * most recent call, so per-image in-flight state is the hook's `pendingFor`. */
+  const { mutate, pendingFor } = useOptimisticWrite({
+    mutationKey: ['write', 'border-case'],
+    mutationFn: ({ imageId, next }: Toggle): Promise<unknown> =>
       next ? setBorderCase(imageId) : deleteBorderCase(imageId),
-    onMutate: ({ imageId, next }) => {
-      setPending((prev) => new Set(prev).add(imageId));
+    patch: ({ imageId, next }) => {
       apply(imageId, next);
       return () => apply(imageId, !next);
     },
-    onSettled: (_data, error, { imageId }, rollback) => {
-      if (error) rollback?.();
-      release(imageId);
-    },
+    pendingKey: ({ imageId }) => imageId,
   });
 
   const toggle = useCallback(
     (imageId: number) => {
-      if (pending.has(imageId)) return;
+      if (pendingFor(imageId)) return;
       mutate({ imageId, next: !resolved.flagged.has(imageId) });
     },
-    // `mutate` is referentially stable in React Query v5, so this callback (and
-    // the store object below it) only changes when the state a tile renders does.
-    [mutate, pending, resolved.flagged],
+    // `mutate` is referentially stable in React Query v5 and `pendingFor`
+    // changes only with the in-flight set, so this callback (and the store
+    // object below it) only changes when the state a tile renders does.
+    [mutate, pendingFor, resolved.flagged],
   );
 
   return useMemo(
     () => ({
       has: (imageId: number) => resolved.flagged.has(imageId),
-      isPending: (imageId: number) => pending.has(imageId),
+      isPending: pendingFor,
       toggle,
     }),
-    [resolved.flagged, pending, toggle],
+    [resolved.flagged, pendingFor, toggle],
   );
 }

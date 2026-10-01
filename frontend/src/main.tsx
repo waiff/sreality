@@ -1,30 +1,18 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
-import { MutationCache, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import { AuthProvider } from './lib/auth';
-import { ApiError, isTransientApiError } from './lib/api';
-import { pushToast } from './lib/toast';
+import { isTransientApiError } from './lib/api';
+import { createMutationCache } from './lib/mutationCache';
 import { applyTheme, readStoredTheme } from './lib/theme';
 import './styles/globals.css';
 
 applyTheme(readStoredTheme());
 
-/* App-wide mutation-failure surfacing: any mutation that does NOT define its
- * own onError gets its error toasted here, so no write ever fails silently
- * (e.g. a refused merge returning HTTP 409). Mutations with their own onError
- * own their messaging and are left untouched — no double-surfacing. */
-const mutationCache = new MutationCache({
-  onError: (error, _variables, _context, mutation) => {
-    if (mutation.options.onError) return;
-    const message =
-      error instanceof ApiError || error instanceof Error
-        ? error.message
-        : 'Something went wrong';
-    pushToast('err', message);
-  },
-});
+/* The global "a write failed" toast — see lib/mutationCache. */
+const mutationCache = createMutationCache();
 
 const queryClient = new QueryClient({
   mutationCache,

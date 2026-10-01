@@ -11,7 +11,8 @@
  * The chips are drag-reorderable (each carries a grip handle). Order is
  * operator-controlled and server-persisted via `position` (migration 198):
  * a drag optimistically rewrites the cached order, then PUTs the full id-list
- * to /filter-presets/reorder, rolling back to the server's truth on error.
+ * to /filter-presets/reorder through lib/useOptimisticWrite — a failure snaps
+ * the chips back AND says why (the global toast), then re-reads the list.
  *
  * The whole bar hides when the API base URL isn't configured (presets need the
  * service to read or write). */
@@ -59,6 +60,7 @@ import {
   type PresetSpec,
 } from '@/lib/filters';
 import type { FilterPreset, TagColor } from '@/lib/types';
+import { cachePatch, useOptimisticWrite } from '@/lib/useOptimisticWrite';
 import PresetSaveModal from '@/components/PresetSaveModal';
 import PipelineMark from '@/components/PipelineMark';
 
@@ -181,12 +183,19 @@ export default function PresetBar({
     },
   });
 
-  /* Persist a new order. The drag already wrote the optimistic order into the
-   * cache; adopt the server's canonical list on success, roll back on error. */
-  const reorderMut = useMutation({
-    mutationFn: (ids: string[]) => reorderFilterPresets(ids),
+  /* Persist a new order: the chips move on the drop, the server's canonical
+   * list is adopted on success, and a failure rolls back from `onSettled`. */
+  const reorderMut = useOptimisticWrite({
+    mutationKey: ['write', 'filter-presets', 'reorder'],
+    mutationFn: (reordered: FilterPreset[]) => reorderFilterPresets(reordered.map((p) => p.id)),
+    patch: (reordered) => [
+      cachePatch<PresetsResponse>({ queryKey: filterPresetKeys.all, exact: true }, (prev) =>
+        prev && { ...prev, data: reordered },
+      ),
+    ],
+    // The PUT answers with the canonical list, so only a failure needs a re-read.
+    revalidate: (_reordered, failed) => (failed ? [filterPresetKeys.all] : []),
     onSuccess: (res) => qc.setQueryData(filterPresetKeys.all, res),
-    onError: invalidate,
   });
 
   const sensors = useSensors(
@@ -202,11 +211,7 @@ export default function PresetBar({
     const oldIndex = presets.findIndex((p) => p.id === dragged.id);
     const newIndex = presets.findIndex((p) => p.id === over.id);
     if (oldIndex < 0 || newIndex < 0) return;
-    const reordered = arrayMove(presets, oldIndex, newIndex);
-    qc.setQueryData<PresetsResponse>(filterPresetKeys.all, (prev) =>
-      prev ? { ...prev, data: reordered } : prev,
-    );
-    reorderMut.mutate(reordered.map((p) => p.id));
+    reorderMut.mutate(arrayMove(presets, oldIndex, newIndex));
   };
 
   const errMsg = (e: unknown): string | null =>

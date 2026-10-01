@@ -93,6 +93,7 @@ import {
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 import { useUrlFilters } from '@/lib/useUrlFilters';
 import { portalLabel } from '@/lib/portals';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 const PAGE_SIZE = 20;
 const DEFAULT_MIN_SCORE = '0.2';
@@ -260,7 +261,7 @@ export default function AutodedupResidual() {
   const filters = useMemo(() => sanitizeResidualFilters(urlFilters), [urlFilters]);
   const view = viewOf(filters.view);
   const grouped = view === 'groups';
-  const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const { overlay, submit, isPending } = useVerdictOverlay();
   /* The candidate save is its own endpoint, so it gets its own overlay — one
    * shared overlay keyed by two different kinds of key would flip a pair badge
    * from a card's save. Everything the operator sees is the same hook. */
@@ -278,7 +279,7 @@ export default function AutodedupResidual() {
   const [candidateSplits, setCandidateSplits] = useState<Record<string, SplitState>>({});
 
   const list = useInfiniteList<AutodedupResidualRow, ResidualPage>({
-    queryKey: ['autodedup', 'residual', filters],
+    queryKey: autodedupKeys.residual(filters),
     queryFn: async (cursor) => {
       const res = await getAutodedupResidual(
         toResidualQuery(filters, (cursor as string | null) ?? null),
@@ -299,7 +300,7 @@ export default function AutodedupResidual() {
   });
 
   const cards = useInfiniteList<AutodedupCandidate, CandidatePage>({
-    queryKey: ['autodedup', 'candidates', filters],
+    queryKey: autodedupKeys.candidates(filters),
     queryFn: async (cursor) => {
       const res = await getAutodedupCandidates(
         toCandidateQuery(filters, (cursor as string | null) ?? null),
@@ -374,7 +375,7 @@ export default function AutodedupResidual() {
             candidateNotes.annotationOf(`candidate:${key}`, null),
           ),
         ),
-      pending: candidates.pendingKey === key,
+      pending: candidates.isPending(key),
       annotation: candidateNotes.annotationOf(`candidate:${key}`, null),
       setAnnotation: (next) => candidateNotes.setAnnotation(`candidate:${key}`, next),
       error: candidates.splitErrors[key],
@@ -584,7 +585,7 @@ export default function AutodedupResidual() {
                 judgement={hidden ? null : row.judgement}
                 blind={hidden}
                 verdict={stored}
-                pending={pendingKey === key}
+                pending={isPending(key)}
                 eager={i < 2}
                 evidenceHref={pairHref(row.listing_lo, row.listing_hi, generation ?? '', blind)}
                 annotation={notes.annotationOf(key, stored)}

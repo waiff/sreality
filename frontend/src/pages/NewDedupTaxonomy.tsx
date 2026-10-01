@@ -64,6 +64,7 @@ import {
   NEW_DEDUP_TAG_IMAGES_KEY,
   newDedupImageTagsKey,
   newDedupPositiveImagesKey,
+  trainingSetKeys,
 } from '@/lib/newDedupKeys';
 import type { ImagePublic } from '@/lib/types';
 
@@ -214,12 +215,11 @@ export default function NewDedupTaxonomy() {
       setNewDedupTagRouting(vars.tagId, vars.categories),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY });
-      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      qc.invalidateQueries({ queryKey: trainingSetKeys.heads });
       pushToast('ok', res.data.routing_categories?.length
         ? `Head for ${res.data.routing_categories.join(', ')}`
         : 'No longer a head');
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const absorbMut = useMutation({
@@ -233,7 +233,6 @@ export default function NewDedupTaxonomy() {
           ? `${res.data.absorbed.length} of ${res.data.requested} absorbed — the rest were another tag's or already absorbed`
           : `${res.data.absorbed.length} notes absorbed`);
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   /* ONE fetch per tag, always the distance order — "Newest first" is a
@@ -389,9 +388,8 @@ export default function NewDedupTaxonomy() {
       if (vars.tagId === selectedTagId) loadForm(res.data);
       pushToast('ok', `Saved v${res.data.version}.`);
     },
-    // Own onError, so main.tsx's MutationCache doesn't also toast it. The draft
-    // is deliberately left intact — a failed save must never eat the writing.
-    onError: (err: Error) => pushToast('err', err.message),
+    // The draft is deliberately left intact on failure — a failed save must
+    // never eat the writing; the global toast (lib/mutationCache) says why.
   });
 
   const selectTag = (id: number) => {
@@ -600,7 +598,6 @@ export default function NewDedupTaxonomy() {
       // exactly ONE definition — server-side. Never re-derived here.
       qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY });
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
   const putBackPending = useMemo(
     () =>
@@ -763,7 +760,6 @@ export default function NewDedupTaxonomy() {
         qc.invalidateQueries({ queryKey: newDedupPositiveImagesKey(vars.tagId) });
       invalidateAnnotationReads();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   // --- deleting a tag -------------------------------------------------------

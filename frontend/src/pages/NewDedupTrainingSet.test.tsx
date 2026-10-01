@@ -2,13 +2,14 @@
  * The property that matters most is the operator's: the training set changes
  * only when they change it — nothing moves in or out of it on its own. */
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import NewDedupTrainingSet from './NewDedupTrainingSet';
 import * as api from '@/lib/api';
+import { trainingSetKeys } from '@/lib/newDedupKeys';
 
 vi.mock('@/lib/api');
 vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
@@ -36,11 +37,12 @@ const RESERVE_ROWS = [
 
 function renderPage(entries = ['/new-dedup/training-set']) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={entries}><NewDedupTrainingSet /></MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, qc };
 }
 
 const lastQuery = () => vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
@@ -488,6 +490,87 @@ describe('<NewDedupTrainingSet> changing a mark', () => {
     const tile = await screen.findByTestId('training-tile-11');
     await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
     await waitFor(() => expect(tile).toHaveAttribute('data-state', 'positive'));
+  });
+
+  /* The rollback is the snapshot, not a hand-written reverse patch: the reason
+   * a left-out row carried and the exact tray counts come back. The heads
+   * re-read is held open so only the rollback can restore the counts. */
+  it('a failed change restores the row and the counts exactly', async () => {
+    let reject!: (e: Error) => void;
+    vi.mocked(api.setNewDedupTagAnnotation).mockReturnValue(
+      new Promise((_res, rej) => { reject = rej; }) as never);
+    vi.mocked(api.listTrainingSetHeads)
+      .mockResolvedValueOnce({ data: HEADS as never })
+      .mockReturnValue(new Promise(() => {}));
+    const leftOut = { ...ROWS[0], state: 'excluded', excluded_reason: 'blurry', in_training: false };
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: [leftOut] as never, counts: HEADS[0] as never, limit: 50, offset: 0 },
+    });
+    const user = userEvent.setup();
+    const { qc } = renderPage(['/new-dedup/training-set?set=excluded']);
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^positive 11$/ }));
+    expect(screen.getByTestId('tray-count-excluded')).toHaveTextContent('1');
+    expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('301');
+
+    await act(async () => reject(new Error('boom')));
+    await waitFor(() => expect(tile).toHaveAttribute('data-state', 'excluded'));
+    expect(screen.getByTestId('tray-count-excluded')).toHaveTextContent('2');
+    expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('300');
+    const page = qc.getQueryData<{ data: { rows: Array<{ image_id: number; excluded_reason: string | null }> } }>(
+      trainingSetKeys.rows(42, 'excluded', 0, 50));
+    expect(page?.data.rows.find((r) => r.image_id === 11)?.excluded_reason).toBe('blurry');
+  });
+
+  it('a change that fails after the operator moved on restores the page it was made on', async () => {
+    let reject!: (e: Error) => void;
+    vi.mocked(api.setNewDedupTagAnnotation).mockReturnValue(
+      new Promise((_res, rej) => { reject = rej; }) as never);
+    const user = userEvent.setup();
+    const { qc } = renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await user.click(screen.getByRole('button', { name: /Training negative/ }));
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 42, state: 'negative', in_training: true, limit: 50, offset: 0 },
+    ));
+
+    await act(async () => reject(new Error('boom')));
+    type Page = { data: { rows: Array<{ image_id: number; state: string }> } };
+    const stateOf = (tray: string) => qc.getQueryData<Page>(trainingSetKeys.rows(42, tray, 0, 50))
+      ?.data.rows.find((r) => r.image_id === 11)?.state;
+    await waitFor(() => expect(stateOf('positive')).toBe('positive'));
+  });
+  /* The rollback restores the whole page as it was at the click. A move that
+   * landed on a neighbour meanwhile must survive it — the failed mark re-reads
+   * the page, as a failed dismissal re-reads the Browse lists. */
+  it('a failed mark does not undo a move made on another tile while it was in flight', async () => {
+    let reject!: (e: Error) => void;
+    vi.mocked(api.setNewDedupTagAnnotation).mockReturnValue(
+      new Promise((_res, rej) => { reject = rej; }) as never);
+    // The server's rows: a move really moves.
+    const admitted = new Map(ROWS.map((r) => [r.image_id, r.in_training]));
+    vi.mocked(api.listTrainingSet).mockImplementation(async () => ({
+      data: { rows: ROWS.map((r) => ({ ...r, in_training: admitted.get(r.image_id) })) as never,
+              counts: HEADS[0] as never, limit: 50, offset: 0 },
+    }));
+    vi.mocked(api.setTrainingMembership).mockImplementation(async (t, ids, into) => {
+      for (const id of ids) admitted.set(id, into);
+      return { data: { tag_id: t, in_training: into, moved: ids, requested: ids.length } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    const tile11 = await screen.findByTestId('training-tile-11');
+    const tile12 = screen.getByTestId('training-tile-12');
+    await user.click(within(tile11).getByRole('button', { name: /^negative 11$/ }));
+    await user.click(within(tile12).getByTestId('move-12'));
+    await waitFor(() => expect(within(tile12).getByTestId('move-12')).toHaveTextContent('move to training'));
+
+    await act(async () => reject(new Error('boom')));
+    await waitFor(() => expect(tile11).toHaveAttribute('data-state', 'positive'));
+    await waitFor(() =>
+      expect(within(screen.getByTestId('training-tile-12')).getByTestId('move-12'))
+        .toHaveTextContent('move to training'));
   });
 });
 

@@ -1827,7 +1827,7 @@ renumber.** Navigate by area:
     property-grain filter cannot narrow the list and leave the panel above it counting the whole
     market. A membership write invalidates the Browse reads only when membership IS the cohort
     (`revalidateCollections`' `cohortScoped`, passed by the Browse card alone — the mirror of
-    `revalidatePipeline`'s knob).
+    `pipelineRevalidation`'s knob).
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
@@ -1911,13 +1911,14 @@ renumber.** Navigate by area:
     sticky "Vrátit" toast (each new dismissal replaces the last) restores; it keeps working after
     the dismissed card has unmounted. The dismissal leaves every cached Browse list that hides
     dismissed properties at once and those lists are NOT refetched (a triage run must not re-read
-    every loaded page per click); counts, Stats and the map re-read, and a restore re-reads the
-    lists. State is one query per property filled by `fetchIsDismissed`, which answers every call
+    every loaded page per click); counts, Stats and the map re-read, and a restore — or a FAILED
+    dismissal, whose rollback would otherwise resurrect a neighbour dismissed meanwhile — re-reads
+    the lists. State is one query per property filled by `fetchIsDismissed`, which answers every call
     made in the same task with ONE read of the view (≤ 200 ids per URL) — never a whole-set read,
     since the dismissed set only grows. The control is absent while the property is in the
-    caller's pipeline, and a pipeline write re-reads dismissal state (`add_card` lifts it). The
-    cancel-snapshot-restore step is `lib/optimisticCache.holdQueries`, shared with
-    `lib/pipelineCache`. The Chrome extension's panel carries the same verb ("Skrýt" / "Skryto",
+    caller's pipeline, and a pipeline write re-reads dismissal state (`add_card` lifts it). Both
+    writes go through `lib/useOptimisticWrite` (the rule-22 write policy below), keyed off
+    `lib/browseKeys`. The Chrome extension's panel carries the same verb ("Skrýt" / "Skryto",
     ink not copper), its state riding on `POST /listings/lookup` as `dismissed` (RLS-only, like
     the pipeline and collection state beside it) and its writes on the same `/dismissals` routes.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
@@ -2189,7 +2190,8 @@ renumber.** Navigate by area:
     by value in vanilla TS (separate territory, no React import) and also hand-copies
     `stageBadge` / `stageAccent` into `content.ts` — pure TS it could import from
     `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand` and `lib/mfReference`.
-    Converging both is owed (`roadmap/operator-workflow-track.md` § Rule #22 owed entry).
+    The kanban's shape is sanctioned (its writes already go through `usePipelineCard`); its grey
+    `stageColor` and the extension's copies are owed (`roadmap/operator-workflow-track.md` § Rule #22).
     **TENANCY NOTE — stated here once, for rule #18 as well.** Pipeline MEMBERSHIP has exactly ONE
     definition: `current_account_ids()`, the database's own membership function, on every surface —
     the extension's `POST /listings/lookup` included, which takes no account argument and whose SQL
@@ -2223,17 +2225,34 @@ renumber.** Navigate by area:
     popovers (`absolute` inside their own container) would be clipped to the photo and every click
     inside one would navigate. Fixed coordinates off the anchor rect, flip up when the panel would
     overflow the viewport, reposition on scroll, close when the anchor scrolls out of sight.
-    **Every pipeline write shares one cache policy** (`lib/pipelineCache`): TWO caches hold "where
+    **Every pipeline write shares one cache patch** (`lib/pipelineCache`): TWO caches hold "where
     is this property" — `members` (the account's whole card set, keyed by `property_id`; read by
     the Browse funnels, the table rows, the listing header and the pipeline scope alike) and
     `board` (the kanban's own ordered array) — and each surface used to patch only the one it
     could see, so a kanban drag left every Browse funnel badging the pre-drag stage. It was three
     until W3: a per-property `card(id)` cache duplicated a single row of `members`, so every
     write had a third shape to patch and every listing header paid its own read; collapsing it
-    into `members` made the chokepoint smaller, which is the only sanctioned direction for it. Optimistic patch in `onMutate`, rollback +
-    revalidate in `onSettled` — deliberately NOT `onError`, because the global `MutationCache.onError`
-    (`main.tsx`) stays silent for any mutation that defines its own, which is why a failed board drag
-    used to snap back with no explanation.
+    into `members` made the chokepoint smaller, which is the only sanctioned direction for it.
+    `lib/pipelineCache` holds the pure patches (`placeCard` / `dropCard`), the re-read list
+    (`PIPELINE_REVALIDATE`, widened to Browse by `pipelineRevalidation` when the cohort is
+    pipeline-scoped; `revalidatePipeline` for a merge or split, which move cards between
+    properties) and the stage lookup `cachedStage`; the **write policy is ONE hook,
+    `lib/useOptimisticWrite`**, shared by
+    every optimistic write in the SPA (pipeline, dismissals, the border-case flag, the autodedup
+    verdict overlay, the admin toggles, the training-set marks, the preset reorder, the exam-review
+    edits): HOLD (cancel in-flight reads of
+    exactly the queries it patches, snapshot them) → patch → write → on failure roll back FROM
+    `onSettled`, BEFORE the re-read → revalidate. Deliberately NOT `onError`, because the global
+    `MutationCache.onError` (`lib/mutationCache`) stays silent for any mutation that defines its
+    own — which is why a failed board drag used to snap back with no explanation. A site may still
+    declare `onError`, but only to show its OWN message (inline text, the split's 409 prompt): the
+    hook hands it no context, so it cannot roll back. Pending is per key (`pendingFor`), answered
+    from ONE pending index per MutationCache (one cache subscription, O(1) per event), so every
+    instance sharing a `mutationKey` agrees — the funnel stays busy while the stage menu it opened
+    is still writing — and a write re-renders only the instances that asked about its key. Browse
+    mounts five of these hooks per card and every render of each tells the MutationCache its
+    options changed, so a per-instance cache subscription (the first cut used `useMutationState`)
+    made one hover cost rows × rows × retained writes (`useOptimisticWrite.test.tsx` pins it).
     **The board's read is STRUCTURAL ONLY; decorations load through `lib/hydration`** (hydration
     sprint W1). `fetchPipelineBoard` used to await six serialized cross-origin round trips inside one
     promise — pipeline rows, a guaranteed-empty pagination tail, properties, every image of every
@@ -2247,10 +2266,11 @@ renumber.** Navigate by area:
     the cover comes from `listing_cover_public` (migration 416), which reduces to one row per
     listing BEFORE the CLIP-tag lateral instead of after. Three rules hold this
     in place. (1) **Decoration keys live in their own top-level `['hydration', …]` namespace** — never
-    under `['pipeline']` — because `revalidatePipeline` invalidates `['pipeline','board']` after every
-    card write and the stage editor sweeps `['pipeline']` wholesale, so a nested decoration key would
-    refetch every thumbnail and broker on the board on every drag, making the split slower than the
-    chain it replaced (`lib/hydration/hydration.test.ts` pins the disjointness). (2) **Decorations
+    under `['pipeline']` — because every card write re-reads `['pipeline','board']` and
+    `['pipeline','members']` (`PIPELINE_REVALIDATE`) and the stage editor re-reads stages + board, so a
+    nested decoration key would refetch every thumbnail and broker on the board on every drag, making
+    the split slower than the chain it replaced (`lib/hydration/hydration.test.ts` pins the
+    disjointness from every write sweep — pipeline, Browse, autodedup, dismissals). (2) **Decorations
     reach `CardFace` by context, not props**, because it renders twice — in-column and inside the
     `DragOverlay` — and props would let those two mount points drift. (3) **Enrichment isolation is
     now structural**: a failed broker read cannot affect the board because it is not on the board's
@@ -2270,12 +2290,11 @@ renumber.** Navigate by area:
     stage" everywhere but the board (the operator's `color`, copper when unset); the board's
     column headers and stage-editor swatch still use their own `stageColor`
     (`pages/Pipeline.tsx`), which falls back to grey. The stage editor exposes `code` as a 4-char
-    box whose placeholder IS the ordinal, so "empty = automatic" is visible. Card writes from the
-    Browse funnels, the table rows and the listing header (add/remove/move) go through one hook,
-    `lib/usePipelineCard.ts`; the kanban re-implements move/remove inline in `pages/Pipeline.tsx`,
-    because the hook binds `property_id` at hook time while the board resolves it per drop/trash
-    in page-level handlers. Both write through `lib/pipelineCache`, which owns the invalidation
-    policy for every surface.
+    box whose placeholder IS the ordinal, so "empty = automatic" is visible. Card writes
+    (add/remove/move) from EVERY surface — the Browse funnels, the table rows, the listing header
+    and the kanban's drag and trash — go through one hook, `lib/usePipelineCard.ts`; the property
+    id travels with each call, so one instance serves a whole board. It writes over
+    `lib/useOptimisticWrite`; `lib/pipelineCache` holds the patches and the re-read list.
     **Browse can be SCOPED to the pipeline** (`ListingFilters.pipeline`, `?pipeline=any` or
     `?pipeline=<stage ids>`, registry id `pipeline`, BROWSE agenda only): a property-grain id
     allowlist resolved from `property_pipeline_public` by `resolvePipelinePrefilter` and AND'd

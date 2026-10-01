@@ -55,6 +55,7 @@ import {
 import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
 import type { ListingPublic } from '@/lib/types';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 
@@ -195,7 +196,7 @@ export default function AutodedupProposedSplits() {
   const [cursors, setCursors] = useState<Array<number | null>>([null]);
   const after = cursors[cursors.length - 1];
   const q = useQuery({
-    queryKey: ['autodedup', 'proposed-splits', after],
+    queryKey: autodedupKeys.proposedSplitsPage(after),
     queryFn: () => getProposedSplits({ after, limit: PAGE_SIZE }),
     staleTime: 30_000,
   });

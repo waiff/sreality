@@ -21,3 +21,15 @@ export const newDedupPositiveImagesKey = (tagId: number) => [
   'positive-images',
   tagId,
 ];
+
+/* The training-set page's keys, shared with the taxonomy page (a routing change
+ * there re-reads the heads here). Note `heads` and `locate` are their own roots,
+ * so the `all` prefix sweeps the row pages only. */
+export const trainingSetKeys = {
+  all: ['training-set'] as const,
+  heads: ['training-set-heads'] as const,
+  locate: (tagId: number | null, imageId: number | null) =>
+    ['training-set-locate', tagId, imageId] as const,
+  rows: (tagId: number | null, tray: string, offset: number, n: number) =>
+    ['training-set', tagId, tray, offset, n] as const,
+};

@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import PipelineToggle from './PipelineToggle';
@@ -95,6 +95,36 @@ describe('<PipelineToggle>', () => {
     fireEvent.click(await screen.findByRole('button', { name: /V pipeline/ }));
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /Nabídka/ }));
     await waitFor(() => expect(api.movePipelineCard).toHaveBeenCalledWith(42, 3));
+  });
+
+  /* The menu's write marks the pill busy as the menu unmounts; busy is
+   * aria-disabled, so the popover's focus hand-back still lands on the pill. */
+  it('keeps focus on the busy pill after a move, and ignores clicks until it settles', async () => {
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(MEMBERS);
+    let resolve!: (v: Awaited<ReturnType<typeof api.movePipelineCard>>) => void;
+    vi.mocked(api.movePipelineCard).mockReturnValue(
+      new Promise((res) => {
+        resolve = res;
+      }),
+    );
+    renderToggle();
+    const pill = await screen.findByRole('button', { name: /V pipeline/ });
+    fireEvent.click(pill);
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Nabídka/ }));
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    expect(pill).toHaveAttribute('aria-disabled', 'true');
+    expect(pill).not.toBeDisabled();
+    expect(document.activeElement).toBe(pill);
+
+    fireEvent.click(pill);
+    await flush();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(api.movePipelineCard).toHaveBeenCalledTimes(1);
+    expect(api.removePipelineCard).not.toHaveBeenCalled();
+
+    await act(async () => resolve({ property_id: 42, stage_id: 3, stage_key: 'offer' }));
+    await waitFor(() => expect(pill).not.toHaveAttribute('aria-disabled'));
+    expect(document.activeElement).toBe(pill);
   });
 
   it('removes only after the menu confirm', async () => {

@@ -27,6 +27,7 @@ import Dialog from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { fmtCount } from '@/lib/format';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 import { fmtScore } from '@/components/autodedup/EvidenceChips';
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import MemberRow from '@/components/autodedup/MemberRow';
@@ -51,7 +52,7 @@ export default function CandidateDialog({
   onClose: () => void;
 }) {
   const detail = useQuery({
-    queryKey: ['autodedup', 'candidate', candidateKey, generation],
+    queryKey: autodedupKeys.candidate(candidateKey, generation),
     queryFn: () => getAutodedupCandidate(candidateKey, generation),
   });
   const data = detail.data?.data ?? null;
