@@ -51,7 +51,7 @@ def _record(listing_id: int, body_id: int | None, unmined: bool) -> tuple[Any, .
         listing_id, "sreality", f"n{listing_id}", dict(SREALITY_POST_CUTOVER),
         BASE_TS + timedelta(minutes=listing_id),
         body_id, unmined, "detail" if body_id else None,
-        "ab" * 32 if body_id else None, BASE_TS if body_id else None, ACTIVE_VERSION,
+        BASE_TS if body_id else None, ACTIVE_VERSION,
         None,
     )
 

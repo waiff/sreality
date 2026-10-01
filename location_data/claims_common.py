@@ -65,23 +65,6 @@ DEFAULT_MAX_CLAIM_VALUE_BYTES = 2 * 1024 * 1024
 # has exactly one storable lineage, and the guard is asserted at write time.
 EMITTABLE_LICENCE_CLASSES = frozenset({"portal"})
 
-# 06 §6.2.2, applied by the loader as a per-source constant: sreality is the only portal
-# whose location changes ever appended a snapshot; mmreality/bezrealitky have a payload
-# per snapshot but hash-excluded coordinates; the six slim-dict portals have locality-text
-# history only. Without the marker "a chart of locality-string changes reads as a chart of
-# coordinate changes".
-HISTORY_COMPLETENESS: dict[str, str] = {
-    "sreality": "full",
-    "mmreality": "payload_only",
-    "bezrealitky": "payload_only",
-    "bazos": "locality_text_only",
-    "idnes": "locality_text_only",
-    "ceskereality": "locality_text_only",
-    "realitymix": "locality_text_only",
-    "remax": "locality_text_only",
-    "maxima": "locality_text_only",
-}
-
 
 @dataclass(frozen=True, slots=True)
 class CoordinateRule:
@@ -268,11 +251,9 @@ class Claim:
     extractor_id: str
     extractor_version: str
     contract_entry_id: int
-    snapshot_anchor: str
     first_observed_at: datetime
     blur_evidence: str
     licence_class: str
-    history_completeness: str
     value_text: str | None = None
     value_num: float | None = None
     value_geom_wkt: str | None = None
@@ -286,31 +267,15 @@ class Claim:
     declared_radius_m: float | None = None
     subject_scoped: bool | None = None
     legacy_source_column: str | None = None
-    legacy_write_path_unknown: bool = False
     # NULL on every claim this lane writes since W3 deleted the headline's `low` (only the
     # operator writes one, 'exact'); the column goes with a later, destructive migration.
     claim_confidence: str | None = None
-    # D7 evidence, filled by the PAGE readers and checked by `assert_evidence_complete`; no
-    # column stores it since migration 498 — the stored reading row is the text lane's audit.
-    payload_id: int | None = None
-    payload_sha256: str | None = None
-    evidence_quote: str | None = None
-    span_start: int | None = None
-    span_end: int | None = None
-    payload_scope_version: str | None = None
-    # NULL on every claim the one lane writes: both its substrates are latest-wins (the
-    # listing's `raw_json`, the listing's newest stored body), so there is no snapshot to
-    # anchor to. The column stays because `loc_claim_anchor` (01 §4.2) pairs it with
-    # `snapshot_anchor` and rows written by the deleted snapshot re-mine still carry it.
-    snapshot_id: int | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
             "listing_id": self.listing_id,
             "source": self.source,
             "source_id_native": self.source_id_native,
-            "snapshot_id": self.snapshot_id,
-            "snapshot_anchor": self.snapshot_anchor,
             "first_observed_at": self.first_observed_at.isoformat(),
             "claim_type": self.claim_type,
             "surface": self.surface,
@@ -334,15 +299,7 @@ class Claim:
             "blur_evidence": self.blur_evidence,
             "licence_class": self.licence_class,
             "legacy_source_column": self.legacy_source_column,
-            "legacy_write_path_unknown": self.legacy_write_path_unknown,
-            "history_completeness": self.history_completeness,
             "subject_scoped": self.subject_scoped,
-            "payload_id": self.payload_id,
-            "payload_sha256": self.payload_sha256,
-            "evidence_quote": self.evidence_quote,
-            "span_start": self.span_start,
-            "span_end": self.span_end,
-            "payload_scope_version": self.payload_scope_version,
         }
         return row
 
@@ -882,7 +839,7 @@ def value_norm_mirror(value: str | None) -> str | None:
 # ------------------------------------------------------------------ claim stamping
 
 def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
-    """Every claim is stamped identically: contract identity, anchor, blur, licence.
+    """Every claim is stamped identically: contract identity, blur, licence.
 
     `blur_evidence` and `licence_class` are always passed explicitly — 06 §6.6 rule 7:
     letting the column default fire stamps "no blur observed" onto the rows that carry a
@@ -899,13 +856,9 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
         "extractor_id": entry.entry_id,
         "extractor_version": entry.extractor_version,
         "contract_entry_id": entry.id,
-        # Every substrate is latest-wins, so there is one anchor. `unanchored_legacy` went
-        # with the `listings`-column readers (W1-c).
-        "snapshot_anchor": "unanchored_latest_fetch",
         "first_observed_at": row.observed_at,
         "blur_evidence": entry.default_blur_evidence,
         "licence_class": entry.default_licence_class,
-        "history_completeness": HISTORY_COMPLETENESS[row.source],
         "subject_scoped": entry.subject_scope.get("subject_scoped", True),
     }
     fields.update(overrides)

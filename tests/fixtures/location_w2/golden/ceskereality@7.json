@@ -47,9 +47,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Nádražní 1067, České Budějovice",
-      "evidence_span_len": 31
+      "position_branch": null
     },
     {
       "extractor_id": "cr.det.address_street",
@@ -66,9 +64,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Nádražní 1067, České Budějovice",
-      "evidence_span_len": 31
+      "position_branch": null
     },
     {
       "extractor_id": "cr.det.city_okres",
@@ -85,9 +81,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "České Budějovice (okres České Budějovice)",
-      "evidence_span_len": 41
+      "position_branch": null
     },
     {
       "extractor_id": "cr.det.data_city",
@@ -104,9 +98,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "České Budějovice (okres České Budějovice)",
-      "evidence_span_len": 41
+      "position_branch": null
     },
     {
       "extractor_id": "cr.det.page_pin",
@@ -123,9 +115,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": "portal_pin",
-      "evidence_quote": "<input class=\"f-base\" type=\"text\" id=\"driving_calculator_from\" value=\"Nádražní 1067, České Budějovice\" readonly=\"\" data-coord-lat=\"48.9745\" data-coord-lng=\"14.4744\" data-city=\"České Budějovice (okres České Budějovice)\">",
-      "evidence_span_len": 219
+      "position_branch": "portal_pin"
     }
   ]
 }

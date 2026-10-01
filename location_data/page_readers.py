@@ -61,9 +61,8 @@ from scraper.remax_parser import parse_dms_pair
 LOG = logging.getLogger("location_data.page_readers")
 
 
-# C9 / C10 / C4, as constants so a reader cannot spell one of them differently.
+# C9 / C10, as constants so a reader cannot spell one of them differently.
 ARCHIVE_SURFACE = "archived_html"
-ARCHIVE_ANCHOR = "unanchored_latest_fetch"
 FORBIDDEN_PAGE_KIND = "archive"
 
 # 06 §6.6 Rule 7: the two values a migration may write. `'detected'` / `'both'` belong to
@@ -78,11 +77,6 @@ ARCHIVE_BLUR_EVIDENCE = frozenset({"none", "declared"})
 # is separable by a single predicate for the attribution query, and nothing else widens.
 GEOCODED_LICENCE_CLASS = "odbl"
 ARCHIVE_EMITTABLE_LICENCE_CLASSES = EMITTABLE_LICENCE_CLASSES | {GEOCODED_LICENCE_CLASS}
-
-# 01 §4.2's `loc_claim_text_evidence` named this method; every other method may carry evidence
-# but is not required to. (`llm_text` is the reading substrate's, never a page reader's: its
-# evidence is the reading row itself — value, quote, model, text hash.)
-EVIDENCE_METHODS = frozenset({"regex_text"})
 
 # Which branch of a portal's detail map a coordinate was read from. The READER states this;
 # it is never inferred from what the reader happened to stamp on the claim. Inferring it
@@ -101,14 +95,6 @@ POSITION_BRANCH_PORTAL_PIN = "portal_pin"
 POSITION_BRANCH_PORTAL_GEOCODED = "portal_geocoded"
 POSITION_BRANCHES = frozenset({POSITION_BRANCH_PORTAL_PIN, POSITION_BRANCH_PORTAL_GEOCODED})
 
-# The archived body is one fetch, not a series: pre-W2a `portal_raw_pages` was latest-wins
-# (`ON CONFLICT DO UPDATE SET html`) and every body older than the last fetch is simply
-# gone, and the post-W2a append-on-change store only starts accumulating from 2026-08. So
-# "how much of this listing's history does this substrate carry" is honestly 'none' — the
-# per-source `HISTORY_COMPLETENESS` answers a question about a different substrate, and the
-# claim's own re-sighting series is gone (rule 25: nobody read it).
-ARCHIVE_HISTORY_COMPLETENESS = "none"
-
 
 class BodyStore(Protocol):
     """The one R2 operation this lane needs — a GET, where `payloads.ObjectStore` is the
@@ -121,14 +107,10 @@ class BodyStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ArchivedPayload:
-    """One `portal_raw_payloads` row: the body plus everything a claim mined from it must
-    cite. `payload_sha256` is hex text all the way through — `Claim.to_row()` rides a
-    `jsonb_to_recordset`, which has no bytea literal, and the write SQL decodes it."""
+    """One `portal_raw_payloads` row: the body plus the page kind and first observation a
+    claim mined from it is stamped with (`stamp_page_claim`)."""
     id: int
-    source: str
-    source_id_native: str
     page_kind: str
-    payload_sha256: str
     first_observed_at: datetime
     body: bytes | None = None
 
@@ -193,43 +175,21 @@ def _entry_css(entry: Entry) -> str:
     return css
 
 
-def _evidenced(
-    entry: Entry, row: ListingRow, document: ScopedDocument, *,
-    value: str, within: Any, quote: str | None = None, **overrides: Any,
-) -> Claim:
-    """A DOM claim carrying migration 382's evidence set.
-
-    `subject_scoped` comes from the CONTRACT (`subject_scope.subject_scoped`), never from
-    the reader: whether a node is the subject's own is a per-portal fact the entry declares
-    and the scoper enforces, and a reader that decided it for itself would be re-litigating
-    D7 once per portal. `find_span` is entity- and whitespace-tolerant and returns None
-    rather than guessing — a span pointing at the wrong occurrence of a common street name
-    still satisfies the CHECK's substring test, which makes it worse than no span.
-
-    `quote` exists because for some readers the VALUE is not a substring of the body. A
-    coordinate assembled from two separate attributes has a readable value ("lat,lon") that
-    appears nowhere in the HTML, so quoting it produces an unlocatable span — a claim
-    asserting evidence it cannot point at. Those readers pass the node's own serialisation,
-    which does contain both attributes and is genuinely findable. Default stays
-    `quote = value`, which is correct wherever the value was lifted verbatim."""
-    quote = value if quote is None else quote
-    span = document.find_span(quote, within=within)
+def _page_claim(entry: Entry, row: ListingRow, *, value: str, **overrides: Any) -> Claim:
+    """A page claim. `subject_scoped` comes from the CONTRACT (`subject_scope.subject_scoped`),
+    never from the reader: whether a node is the subject's own is a per-portal fact the entry
+    declares and the scoper enforces, and a reader that decided it for itself would be
+    re-litigating D7 once per portal."""
     return _base(
-        entry, row,
-        value_text=value,
-        evidence_quote=quote,
-        span_start=span[0] if span else None,
-        span_end=span[1] if span else None,
-        subject_scoped=bool(entry.subject_scope.get("subject_scoped", True)),
-        **overrides,
-    )
+        entry, row, value_text=value,
+        subject_scoped=bool(entry.subject_scope.get("subject_scoped", True)), **overrides)
 
 
 @page_reader("html_text")
 def _read_html_text(
     entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
 ) -> list[PageRead]:
-    """Text of the FIRST node matching the entry's selector, as one evidenced claim.
+    """Text of the FIRST node matching the entry's selector, as one claim.
 
     First-match, not all-matches, and that is the whole point on this substrate: remax's
     contamination class is a page where the subject's address and a neighbour's are both
@@ -242,30 +202,15 @@ def _read_html_text(
     node = document.css_first(_entry_css(entry))
     if node is None:
         return []
-    raw = _text(node.text())
-    value = apply_transforms(raw, entry.transform)
+    value = apply_transforms(_text(node.text()), entry.transform)
     if value is None:
         return []
-    return [PageRead(_evidenced(entry, row, document, value=value, within=node,
-                                   quote=_transformed_quote(raw, value)))]
+    return [PageRead(_page_claim(entry, row, value=value))]
 
 
-# The same alphabet `html_scope` collapses and matches spans with: `\s` already covers
-# NBSP, the zero-width space it does not, and a scrubbed archive body carries both.
+# The same alphabet `html_scope` collapses with: `\s` already covers NBSP, the zero-width
+# space it does not, and a scrubbed archive body carries both.
 _OWN_TEXT_WS_RE = re.compile("[\\s\\u00a0\\u200b]+")
-
-
-def _transformed_quote(raw: str | None, value: str) -> str | None:
-    """The literal a transformed value was read FROM, or None to quote the value itself.
-
-    `_evidenced` defaults the quote to the value, which is right whenever the value was
-    lifted verbatim. With a transform it is not: the claimed value is a NORMALISED form, and
-    `find_span` would then anchor on whatever occurrence of that shorter string comes first
-    inside the node — measured on the ceskereality fixture, a `data-city` transformed to
-    `České Budějovice` resolved its span into the node's `value="Nádražní 1067, České
-    Budějovice"` attribute rather than into `data-city`. A span pointing at a different
-    attribute is worse than no span. No-op for every entry without a transform."""
-    return None if raw is None or raw == value else raw
 
 
 @page_reader("html_own_text")
@@ -283,9 +228,7 @@ def _read_html_own_text(
 
     Whitespace is collapsed in the same act and for the same reason: the portal breaks one
     address line across source lines, so both reads carry a 15-tab run that is not part of
-    the value the page states. `find_span` matches whitespace runs entity- and NBSP-
-    tolerantly, so the collapsed value still resolves to the REAL span in the source — the
-    evidence span is then LONGER than the quote, which is correct, not a defect."""
+    the value the page states."""
     node = document.css_first(_entry_css(entry))
     if node is None:
         return []
@@ -293,8 +236,7 @@ def _read_html_own_text(
     value = apply_transforms(raw, entry.transform)
     if value is None:
         return []
-    return [PageRead(_evidenced(entry, row, document, value=value, within=node,
-                                   quote=_transformed_quote(raw, value)))]
+    return [PageRead(_page_claim(entry, row, value=value))]
 
 
 @page_reader("html_attr")
@@ -308,12 +250,10 @@ def _read_html_attr(
     node = document.css_first(_entry_css(entry))
     if node is None:
         return []
-    raw = _text(node.attributes.get(attribute))
-    value = apply_transforms(raw, entry.transform)
+    value = apply_transforms(_text(node.attributes.get(attribute)), entry.transform)
     if value is None:
         return []
-    return [PageRead(_evidenced(entry, row, document, value=value, within=node,
-                                   quote=_transformed_quote(raw, value)))]
+    return [PageRead(_page_claim(entry, row, value=value))]
 
 
 def _entry_attr(entry: Entry, reader: str) -> str:
@@ -375,15 +315,10 @@ def _read_html_regex(
     Karlovy Vary - ČESKÉREALITY.cz inzerce realit` — and that title is the only place the
     diacritics survive on a portal whose `listings.street` is 97.9% ASCII-folded.
 
-    The EVIDENCE QUOTE is the WHOLE MATCH, not the captured value. `regex_text` is an
-    evidence-bearing method (01 §4.2), a bare street name occurs in several places on a
-    portal page, and `find_span` takes the first occurrence within the node — so quoting the
-    match keeps the span pointing at the pattern that actually produced the value, and keeps
-    `document.html[span] == evidence_quote` true, which quoting only the group could not.
-
-    A match whose span cannot be located yields NO claim: `assert_evidence_complete` refuses
-    a span-less `regex_text` claim and that refusal aborts the whole batch — one page is
-    never worth thousands of good ones."""
+    A match the scoped body cannot show yields NO claim: the WHOLE match, not the captured
+    value, must be stated inside the node's own serialisation (`ScopedDocument.shows`,
+    entity- and whitespace-tolerant). `node.text()` concatenates across tags, so a pattern
+    can match text the page never states contiguously; this gate keeps such a match out."""
     compiled, group = _entry_pattern(entry, "html_regex")
     node = document.css_first(_entry_css(entry))
     if node is None:
@@ -394,10 +329,9 @@ def _read_html_regex(
     value = apply_transforms(_text(match.group(group)), entry.transform)
     if value is None:
         return []
-    claim = _evidenced(entry, row, document, value=value, within=node, quote=match.group(0))
-    if claim.span_start is None or claim.span_end is None:
+    if not document.shows(match.group(0), within=node):
         return []
-    return [PageRead(claim)]
+    return [PageRead(_page_claim(entry, row, value=value))]
 
 
 @page_reader("html_attr_regex")
@@ -416,11 +350,7 @@ def _read_html_attr_regex(
     so "the first node matching the selector" is the wrong node about as often as the right
     one. The first node whose attribute MATCHES wins; once one matches it is the node, and a
     transform that then nulls the value yields no claim rather than a scan for a more
-    agreeable neighbour.
-
-    The QUOTE is the node's own serialisation, for the same reason `html_point_attrs` quotes
-    `node.html`: a bare `12` or `50801` would resolve to some other digit run, while the
-    opening tag carries the whole URL."""
+    agreeable neighbour."""
     compiled, group = _entry_pattern(entry, "html_attr_regex")
     attribute = _entry_attr(entry, "html_attr_regex")
     for node in document.css(_entry_css(entry)):
@@ -433,8 +363,7 @@ def _read_html_attr_regex(
         value = apply_transforms(_text(match.group(group)), entry.transform)
         if value is None:
             return []
-        return [PageRead(_evidenced(entry, row, document, value=value, within=node,
-                                       quote=node.html or raw))]
+        return [PageRead(_page_claim(entry, row, value=value))]
     return []
 
 
@@ -449,13 +378,13 @@ def _read_html_marker(
     contain (idnes' "Nemovitost nemá přesnou adresu…" disclaimer), or a selector plus an
     attribute that must be present (bazos' maps-anchor `title="Přibližná lokalita"`).
 
-    The claim's VALUE is the contract's canonical label and its EVIDENCE is the portal's own
-    text or attribute — two different fields for exactly this case, so a portal that rewords
-    its sentence stops matching instead of silently restating a different fact under the same
-    label. This reader states the label only; `_base` derives the blur axis from that
-    label's membership in the entry's `precision_cap.blurred_labels` (W1-c R5), so
-    recalibrating which label means "blurred" is a contract version bump and never a code
-    change (06 §6.6 rule 7 — the axis is written explicitly, never defaulted).
+    The claim's VALUE is the contract's canonical label, never the portal's own text or
+    attribute, so a portal that rewords its sentence stops matching instead of silently
+    restating a different fact under the same label. This reader states the label only;
+    `_base` derives the blur axis from that label's membership in the entry's
+    `precision_cap.blurred_labels` (W1-c R5), so recalibrating which label means "blurred"
+    is a contract version bump and never a code change (06 §6.6 rule 7 — the axis is written
+    explicitly, never defaulted).
 
     No transform: normalising a label the contract itself wrote would break the membership
     test that decides the blur axis."""
@@ -485,22 +414,13 @@ def _read_html_marker(
         values = [_text(node.attributes.get(name)) for name in names]
         if any(value is None for value in values):
             return []
-        # One attribute quotes its own value, which is genuinely findable; a PAIR has no
-        # single literal to quote (the fact is that both are there), so the node's own
-        # serialisation is the honest evidence — the same call `html_point_attrs` makes.
-        evidence = str(values[0]) if len(values) == 1 else (node.html or str(label))
-        haystack = str(values[0]) if len(values) == 1 else " ".join(str(v) for v in values)
+        haystack = " ".join(str(v) for v in values)
     else:
-        evidence = _text(node.text()) or node.html or str(label)
-        haystack = evidence
-    if contains is not None:
-        if collapse_ws(contains) not in collapse_ws(haystack):
-            return []
-        evidence = contains
-    claim = _evidenced(
-        entry, row, document, value=str(label), within=node, quote=evidence,
-        declared_precision_label=str(label))
-    return [PageRead(claim)]
+        haystack = _text(node.text()) or node.html or str(label)
+    if contains is not None and collapse_ws(contains) not in collapse_ws(haystack):
+        return []
+    return [PageRead(_page_claim(
+        entry, row, value=str(label), declared_precision_label=str(label)))]
 
 
 @page_reader("html_point_dms")
@@ -528,10 +448,7 @@ def _read_html_point_dms(
     lat, lon = parse_dms_pair(raw)
     if lat is None or lon is None:
         return []
-    claim = _evidenced(
-        entry, row, document, value=raw, within=node,
-        value_geom_wkt=point_wkt(lat, lon),
-    )
+    claim = _page_claim(entry, row, value=raw, value_geom_wkt=point_wkt(lat, lon))
     return [PageRead(claim, position_branch=str(branch))]
 
 
@@ -608,7 +525,7 @@ def _read_html_point_attrs(
     An optional `locator.pattern` with named `lat`/`lon` groups lifts the two decimals out
     of the attribute text instead of parsing it whole (`_point_pattern_halves`), which is
     how bazos' one-attribute `google.com/maps/place/<lat>,<lon>` href is read. Same ordered
-    pair, same guard, same evidence — only the step from attribute to decimal changes.
+    pair, same guard — only the step from attribute to decimal changes.
 
     **The CZ-bbox guard is genuinely evaluated here**, and that is the difference from
     `html_point_dms`. That reader gets the envelope for free inside `parse_dms_pair` and
@@ -651,15 +568,8 @@ def _read_html_point_attrs(
         return []
     if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
         return []
-    claim = _evidenced(
-        entry, row, document, value=f"{raw_lat},{raw_lon}", within=node,
-        # The node's own serialisation, NOT the value: "lat,lon" is assembled by this
-        # reader and appears nowhere in the HTML, so quoting it would leave a claim
-        # asserting evidence it cannot point at. The opening tag carries both attributes
-        # and is genuinely findable in the scoped body.
-        quote=node.html or f"{raw_lat},{raw_lon}",
-        value_geom_wkt=point_wkt(lat, lon),
-    )
+    claim = _page_claim(
+        entry, row, value=f"{raw_lat},{raw_lon}", value_geom_wkt=point_wkt(lat, lon))
     return [PageRead(claim, position_branch=branch)]
 
 
@@ -693,28 +603,6 @@ SUBJECT_MISS_FAIL = "fail"
 # rejects are EXACT 5-dp shares in the stored corpus (119 idnes rows on 49.19186,16.61109)
 # while the page publishes 8 dp, so equality on the raw value would match nothing.
 _REJECT_POINT_DP = 5
-
-# A coordinate array as it is WRITTEN in a JSON source — the slice an evidence span points
-# at. Matched against the parsed pair rather than trusted positionally, so a re-serialised
-# quote can never claim a position the body does not contain.
-_COORD_ARRAY_RE = re.compile(r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]")
-_JSON_MEMBER_WS = r"[ \t\r\n]*"
-_JSON_SCALAR_RE = re.compile(r"(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)")
-
-
-@dataclass(frozen=True, slots=True)
-class EmbeddedDocument:
-    """One JSON document a page carries, plus the two things an evidence span needs.
-
-    `source` is the JSON text AS WRITTEN in the body — that is what a span indexes into, and
-    a quote rebuilt by `json.dumps` is a different document. `verbatim` says whether that
-    text is still the literal JSON: after a `js_string` decode it is not (the body spells
-    `\\"zoom\\"`), so a member slice computed against the decoded form would not resolve and
-    the readers fall back to quoting the captured source itself."""
-    node: Any
-    source: str
-    data: Any
-    verbatim: bool
 
 
 def _decode_js_string(raw: str) -> str:
@@ -750,8 +638,8 @@ def _decode_js_string(raw: str) -> str:
         return text
 
 
-def embedded_documents(entry: Entry, document: ScopedDocument) -> list[EmbeddedDocument]:
-    """Every JSON document this entry's locator addresses, in document order.
+def embedded_documents(entry: Entry, document: ScopedDocument) -> list[Any]:
+    """Every JSON document this entry's locator addresses, parsed, in document order.
 
     A malformed CONTRACT is an `IntakeRefused` naming the entry; a malformed PAGE is simply
     not in the list. One portal changing shape must not abort a batch of thousands, and an
@@ -786,7 +674,7 @@ def embedded_documents(entry: Entry, document: ScopedDocument) -> list[EmbeddedD
             raise IntakeRefused(
                 f"{entry.source}:{entry.entry_id} declares a script_match that captures "
                 f"nothing; it must carry a `(?P<config>…)` group (or one positional group)")
-    found: list[EmbeddedDocument] = []
+    found: list[Any] = []
     for node in document.css(_entry_css(entry)):
         raw = node.attributes.get(attribute) if attribute else node.text()
         if not raw or not raw.strip():
@@ -801,16 +689,16 @@ def embedded_documents(entry: Entry, document: ScopedDocument) -> list[EmbeddedD
             if source is None:
                 continue
         try:
-            data = json.loads(_decode_js_string(source) if decode == "js_string" else source)
+            found.append(
+                json.loads(_decode_js_string(source) if decode == "js_string" else source))
         except (ValueError, TypeError):
             continue
-        found.append(EmbeddedDocument(node, source, data, decode != "js_string"))
     return found
 
 
 def _subject_object(
-    entry: Entry, row: ListingRow, documents: list[EmbeddedDocument],
-) -> tuple[EmbeddedDocument, Any] | None:
+    entry: Entry, row: ListingRow, documents: list[Any],
+) -> tuple[Any, Any] | None:
     """(the document, the object this entry reads out of it), or None when there is nothing.
 
     Without `locator.match` this is simply the first parsed document, narrowed by
@@ -837,7 +725,7 @@ def _subject_object(
         if not documents:
             return None
         head = documents[0]
-        found = json_pointer(head.data, str(pointer)) if pointer else head.data
+        found = json_pointer(head, str(pointer)) if pointer else head
         return None if found is None else (head, found)
     if not isinstance(match, Mapping) or not match.get("json_pointer"):
         raise IntakeRefused(
@@ -869,8 +757,8 @@ def _subject_object(
     key = str(match["json_pointer"])
     seen = 0
     for candidate_document in documents:
-        found = (json_pointer(candidate_document.data, str(pointer)) if pointer
-                 else candidate_document.data)
+        found = (json_pointer(candidate_document, str(pointer)) if pointer
+                 else candidate_document)
         if found is None:
             continue
         pool = found if isinstance(found, list) else [found]
@@ -889,150 +777,6 @@ def _subject_object(
     raise SubjectNotFound(
         f"{entry.entry_id}: none of the {seen} candidate object(s) on this {row.source} "
         f"body carries {key}=={wanted!r}; on_miss=fail")
-
-
-def _json_value_end(source: str, start: int) -> int | None:
-    """End offset of the JSON value beginning at `start`. String-aware brace/bracket
-    matching, so a `{` inside a string cannot unbalance an object."""
-    if start >= len(source):
-        return None
-    char = source[start]
-    if char == '"':
-        index = start + 1
-        while index < len(source):
-            if source[index] == "\\":
-                index += 2
-                continue
-            if source[index] == '"':
-                return index + 1
-            index += 1
-        return None
-    if char in "{[":
-        depth, index, in_string = 0, start, False
-        while index < len(source):
-            current = source[index]
-            if in_string:
-                if current == "\\":
-                    index += 2
-                    continue
-                if current == '"':
-                    in_string = False
-            elif current == '"':
-                in_string = True
-            elif current in "{[":
-                depth += 1
-            elif current in "}]":
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-            index += 1
-        return None
-    found = _JSON_SCALAR_RE.match(source, start)
-    return found.end() if found else None
-
-
-def _json_member_source(source: str, pointer: str) -> tuple[str, str] | None:
-    """`("key":value, value)` AS SPELLED IN THE SOURCE at an RFC 6901 object pointer.
-
-    This is what makes an evidence span possible on this substrate at all. mmreality
-    JSON-escapes accents, so the DECODED value ("Křižíkova") is not a substring of the scoped
-    payload while its source form (`"street":"K\\u0159i\\u017e\\u00edkova"`) is — modulo the
-    `"` -> `&quot;` the attribute serialisation applies, which `ScopedDocument.find_span`
-    already bridges.
-
-    The KEY is included on purpose: the bare escaped value also occurs in `title`,
-    `location` and `slug`, and `find_span` returns the first occurrence within the anchor
-    node — a span pointing at the wrong occurrence still satisfies migration 382's substring
-    CHECK, which html_scope's own docstring calls worse than no span.
-
-    Object members only. Each segment is matched as `"segment"` followed by optional
-    whitespace and `:`, searched forward from the previous segment's value start, so a parent
-    key always precedes its child and a key name occurring as a VALUE cannot match (a value
-    is not followed by a colon). None on any miss; callers state their own fallback."""
-    if not pointer or pointer == "/":
-        return None
-    key_start = value_start = -1
-    position = 0
-    for token in pointer.lstrip("/").split("/"):
-        token = token.replace("~1", "/").replace("~0", "~")
-        found = re.compile(
-            '"' + re.escape(token) + '"' + _JSON_MEMBER_WS + ":" + _JSON_MEMBER_WS
-        ).search(source, position)
-        if found is None:
-            return None
-        key_start, value_start, position = found.start(), found.end(), found.end()
-    end = _json_value_end(source, value_start)
-    if end is None:
-        return None
-    return source[key_start:end], source[value_start:end]
-
-
-def _pointer_parent(first: str, second: str) -> str:
-    """Longest common RFC 6901 prefix of two pointers ('' when they share no segment)."""
-    left = first.lstrip("/").split("/")
-    right = second.lstrip("/").split("/")
-    shared: list[str] = []
-    for a, b in zip(left, right):
-        if a != b:
-            break
-        shared.append(a)
-    return "/" + "/".join(shared) if shared else ""
-
-
-def _pointer_leaf(pointer: str) -> str:
-    return pointer.rstrip("/").rpartition("/")[2]
-
-
-def _json_literals(value: Any) -> tuple[str, ...]:
-    """Both spellings a portal may use for one value: `"Křižíkova"` and its `\\uXXXX`
-    escape. mmreality serves the second, idnes the first, and a quote has to match the
-    document rather than the parser's preference."""
-    plain = json.dumps(value, ensure_ascii=False)
-    escaped = json.dumps(value, ensure_ascii=True)
-    return (plain,) if plain == escaped else (plain, escaped)
-
-
-def _json_quote(entry_document: EmbeddedDocument, pointer: str, value: Any) -> str:
-    """The narrowest slice of the document's SOURCE that carries this value.
-
-    Ladder, narrowest first: the member at the pointer (only meaningful while the source is
-    the literal JSON), then `"leaf": <literal>` anywhere in it, then the literal alone, then
-    the captured document itself. The last rung is not a cop-out — for a `js_string` config
-    it is exactly what maxima's spec asks for, since the decoded member text appears nowhere
-    in the body while the captured literal does."""
-    if pointer and entry_document.verbatim:
-        member = _json_member_source(entry_document.source, pointer)
-        if member is not None:
-            return member[0]
-    leaf = _pointer_leaf(pointer or "")
-    for literal in _json_literals(value):
-        if leaf:
-            found = re.search(re.escape(f'"{leaf}"') + r"\s*:\s*" + re.escape(literal),
-                              entry_document.source)
-            if found:
-                return found.group(0)
-        if literal in entry_document.source:
-            return literal
-    return entry_document.source
-
-
-def _coordinate_source_quote(source: str, lon: float, lat: float) -> str | None:
-    """The coordinate array AS WRITTEN, so the span points at what was read.
-
-    The value a coordinate reader states ("lat,lon") is assembled and appears nowhere in the
-    body. `html_point_attrs` solves that by quoting the node's own serialisation, but this
-    node can be a 13 KB map config: an evidence quote rides in the same jsonb array as the
-    claim and is counted by `archived_claim_value_bytes`, so quoting the blob would put tens
-    of KB on every coordinate claim of the portal. The array literal is ~26 characters,
-    verbatim, and genuinely findable."""
-    for found in _COORD_ARRAY_RE.finditer(source):
-        try:
-            first, second = float(found.group(1)), float(found.group(2))
-        except ValueError:
-            continue
-        if first == lon and second == lat:
-            return found.group(0)
-    return None
 
 
 def _rejected_point(entry: Entry, lat: float, lon: float) -> bool:
@@ -1073,26 +817,6 @@ def _rejected_point(entry: Entry, lat: float, lon: float) -> bool:
     return False
 
 
-def _evidenced_optional(
-    entry: Entry, row: ListingRow, document: ScopedDocument, *,
-    value: str, within: Any, quote: str | None, **overrides: Any,
-) -> Claim:
-    """`_evidenced`, except that a quote the scoped body cannot show is DROPPED.
-
-    An `evidence_quote` is a promise the payload contains that text — 01 §4.2 pairs it with
-    `payload_sha256` for exactly that reason. A value this reader cannot point at has no
-    honest quote, and asserting one anyway is worse than asserting none:
-    `assert_evidence_complete` REQUIRES the evidence set only for `regex_text`, so
-    a `map_widget_parse` claim may legally carry a value with no span."""
-    if quote is None:
-        return _base(
-            entry, row, value_text=value,
-            subject_scoped=bool(entry.subject_scope.get("subject_scoped", True)),
-            **overrides)
-    return _evidenced(entry, row, document, value=value, within=within, quote=quote,
-                      **overrides)
-
-
 @page_reader("json_scalar")
 def _read_json_scalar(
     entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
@@ -1108,17 +832,14 @@ def _read_json_scalar(
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
-    found_document, obj = subject
+    _, obj = subject
     pointer = str(entry.locator.get("json_pointer") or "")
     found = json_pointer(obj, pointer) if pointer else obj
     value = apply_transforms(_text(found), entry.transform)
     if value is None:
         return []
     number = _number(found) if entry.locator.get("value_kind") == "num" else None
-    claim = _evidenced_optional(
-        entry, row, document, value=value, within=found_document.node,
-        quote=_json_quote(found_document, pointer, found), value_num=number)
-    return [PageRead(claim)]
+    return [PageRead(_page_claim(entry, row, value=value, value_num=number))]
 
 
 @page_reader("json_regex")
@@ -1130,24 +851,15 @@ def _read_json_regex(
     mmreality's `ul. <Street>` inside `originalTitle`: `raw_json.street` is populated on 1/12
     sampled rows while the title carries the street on 5/12.
 
-    The regex runs over the DECODED string — a pattern must not have to know the portal's
-    escaping — while the QUOTE is the member's SOURCE slice, because the decoded capture is
-    not a substring of the scoped payload and a quote that cannot be located is a claim
-    asserting evidence it cannot point at. The member and not the capture alone: the escaped
-    street also occurs in `title`, `location` and `slug`, and `find_span` takes the first
-    occurrence.
-
-    FIRST match only, and a missing span emits nothing rather than raising: `regex_text` is
-    evidence-bearing, so a span-less claim would reach `assert_evidence_complete` and take
-    the whole batch with it."""
+    The regex runs over the DECODED string: a pattern must not have to know the portal's
+    escaping. FIRST match only."""
     compiled, group = _entry_pattern(entry, "json_regex")
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
-    found_document, obj = subject
+    _, obj = subject
     pointer = str(entry.locator.get("json_pointer") or "")
-    member = json_pointer(obj, pointer) if pointer else obj
-    text = _text(member)
+    text = _text(json_pointer(obj, pointer) if pointer else obj)
     if text is None:
         return []
     match = compiled.search(text)
@@ -1156,11 +868,7 @@ def _read_json_regex(
     value = apply_transforms(_text(match.group(group)), entry.transform)
     if value is None:
         return []
-    claim = _evidenced(entry, row, document, value=value, within=found_document.node,
-                       quote=_json_quote(found_document, pointer, member))
-    if claim.span_start is None or claim.span_end is None:
-        return []
-    return [PageRead(claim)]
+    return [PageRead(_page_claim(entry, row, value=value))]
 
 
 @page_reader("json_bool")
@@ -1187,17 +895,14 @@ def _read_json_bool(
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
-    found_document, obj = subject
+    _, obj = subject
     pointer = str(entry.locator.get("json_pointer") or "")
     found = json_pointer(obj, pointer) if pointer else obj
     if not isinstance(found, bool):
         return []
     label = str(labels["true" if found else "false"])
-    claim = _evidenced_optional(
-        entry, row, document, value=label, within=found_document.node,
-        quote=_json_quote(found_document, pointer, found),
-        declared_precision_label=label, value_num=1.0 if found else 0.0)
-    return [PageRead(claim)]
+    return [PageRead(_page_claim(entry, row, value=label, declared_precision_label=label,
+                                 value_num=1.0 if found else 0.0))]
 
 
 @page_reader("json_point")
@@ -1225,7 +930,7 @@ def _read_json_point(
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
-    found_document, obj = subject
+    _, obj = subject
     feature = entry.locator.get("feature")
     lat_pointer = entry.locator.get("lat_pointer")
     lon_pointer = entry.locator.get("lon_pointer")
@@ -1238,18 +943,10 @@ def _read_json_point(
             return []
         raw_lon, raw_lat = _text(pair[0]), _text(pair[1])
         lat, lon = _number(pair[1]), _number(pair[0])
-        quote = (_coordinate_source_quote(found_document.source, lon, lat)
-                 if lat is not None and lon is not None else None)
-        quote = quote or _json_quote(found_document, str(feature), geometry)
     elif lat_pointer and lon_pointer:
         raw_lat = _text(json_pointer(obj, str(lat_pointer)))
         raw_lon = _text(json_pointer(obj, str(lon_pointer)))
         lat, lon = _number(raw_lat), _number(raw_lon)
-        parent = _pointer_parent(str(lat_pointer), str(lon_pointer))
-        member = (_json_member_source(found_document.source, parent)
-                  if parent and found_document.verbatim else None)
-        quote = member[0] if member else _json_quote(
-            found_document, str(lat_pointer), json_pointer(obj, str(lat_pointer)))
     else:
         raise IntakeRefused(
             f"{entry.source}:{entry.entry_id} uses `json_point` but names neither a "
@@ -1263,9 +960,8 @@ def _read_json_point(
         return []
     if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
         return []
-    claim = _evidenced_optional(
-        entry, row, document, value=f"{raw_lat},{raw_lon}", within=found_document.node,
-        quote=quote, value_geom_wkt=point_wkt(lat, lon))
+    claim = _page_claim(
+        entry, row, value=f"{raw_lat},{raw_lon}", value_geom_wkt=point_wkt(lat, lon))
     return [PageRead(claim, position_branch=branch)]
 
 
@@ -1396,7 +1092,7 @@ def _read_json_geometry(
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
-    found_document, feature = subject
+    config, feature = subject
     floor = entry.locator.get("reject_zoom_at_or_below")
     if floor is not None:
         try:
@@ -1405,7 +1101,7 @@ def _read_json_geometry(
             raise IntakeRefused(
                 f"{entry.source}:{entry.entry_id} declares "
                 f"reject_zoom_at_or_below={floor!r}, which is not a number") from None
-        zoom = _number(json_pointer(found_document.data,
+        zoom = _number(json_pointer(config,
                                     str(entry.locator.get("zoom_pointer") or "/zoom")))
         if zoom is not None and zoom <= zoom_floor:
             return []
@@ -1414,23 +1110,20 @@ def _read_json_geometry(
         return []
     if not guard_admits(entry, GUARD_CZ_BBOX, (geometry.lat, geometry.lon)):
         return []
-    pointer = str(entry.locator.get("then") or "")
-    quote = _json_quote(found_document, pointer, feature)
     # 06 §6.6 rule 7 lets exactly one thing set this, and a Circle is it: the portal is
     # drawing its own imprecision, the one sanctioned case where blur rides on the
     # coordinate rather than on a separate declaration.
     blur = "declared" if geometry.kind == "Circle" else entry.default_blur_evidence
     if coordinate:
-        claim = _evidenced_optional(
-            entry, row, document, value=f"{geometry.lat!r},{geometry.lon!r}",
-            within=found_document.node, quote=quote,
+        claim = _page_claim(
+            entry, row, value=f"{geometry.lat!r},{geometry.lon!r}",
             value_geom_wkt=point_wkt(geometry.lat, geometry.lon),
             declared_precision_label=geometry.kind.lower(), blur_evidence=blur)
         return [PageRead(claim, position_branch=branch)]
     if geometry.shape_wkt is None:
         return []
-    claim = _evidenced_optional(
-        entry, row, document, value=geometry.kind, within=found_document.node, quote=quote,
+    claim = _page_claim(
+        entry, row, value=geometry.kind,
         value_shape_wkt=geometry.shape_wkt,
         declared_radius_m=(None if geometry.radius_m is None
                            else round(geometry.radius_m, 1)),
@@ -1526,8 +1219,8 @@ def _read_json_breadcrumb(
             f"offset moves with the category path, so the anchor is contract data")
     anchors = {str(slug).strip().lower() for slug in slugs}
     offset = BREADCRUMB_LEVELS[str(level)]
-    for found_document in embedded_documents(entry, document):
-        for block in _jsonld_blocks(found_document.data):
+    for data in embedded_documents(entry, document):
+        for block in _jsonld_blocks(data):
             if block.get("@type") != wanted:
                 continue
             items = _breadcrumb_items(block)
@@ -1540,8 +1233,7 @@ def _read_json_breadcrumb(
             value = apply_transforms(items[anchor + offset][0], entry.transform)
             if value is None:
                 return []
-            return [PageRead(_evidenced(entry, row, document, value=value,
-                                           within=found_document.node))]
+            return [PageRead(_page_claim(entry, row, value=value))]
     return []
 
 
@@ -1561,40 +1253,6 @@ def page_entries(entries: list[Entry], page_kind: str) -> list[Entry]:
     ]
 
 
-def assert_evidence_complete(claim: Claim) -> None:
-    """Migration 382's two evidence CHECKs, enforced BEFORE the write.
-
-    The CHECK must never be the first line of defence. A batch is one transaction, so one
-    malformed claim rolls back every good claim beside it, and `new row violates check
-    constraint "loc_claim_text_evidence"` names the constraint rather than the extractor
-    that produced the row. Raising here names the entry."""
-    if claim.extraction_method in EVIDENCE_METHODS:
-        missing = [
-            name for name, value in (
-                ("evidence_quote", claim.evidence_quote),
-                ("span_start", claim.span_start),
-                ("span_end", claim.span_end),
-                ("payload_scope_version", claim.payload_scope_version),
-                ("subject_scoped", claim.subject_scoped),
-            ) if value is None
-        ]
-        if missing:
-            raise IntakeRefused(
-                f"{claim.extractor_id} produced an {claim.extraction_method} claim without "
-                f"{', '.join(missing)}; 01 §4.2's loc_claim_text_evidence requires the "
-                f"whole set (a span is only meaningful against a named scoped document)")
-        if claim.span_end <= claim.span_start:
-            raise IntakeRefused(
-                f"{claim.extractor_id} produced span_end={claim.span_end} <= "
-                f"span_start={claim.span_start}; loc_claim_text_evidence requires "
-                f"span_end > span_start")
-    if claim.evidence_quote is not None and claim.payload_sha256 is None:
-        raise IntakeRefused(
-            f"{claim.extractor_id} produced an evidence quote with no payload_sha256; "
-            f"01 §4.2's loc_claim_evidence_payload is D7's rule that a span is meaningless "
-            f"without the document it indexes into")
-
-
 def assert_stampable(claim: Claim) -> None:
     """The two axes 06 §6.6 rules 6 and 7 forbid this lane to default or widen."""
     if claim.blur_evidence not in ARCHIVE_BLUR_EVIDENCE:
@@ -1609,10 +1267,8 @@ def assert_stampable(claim: Claim) -> None:
             f"(06 §6.6 rule 6)")
 
 
-def stamp_page_claim(
-    claim: Claim, payload: ArchivedPayload, *, scope_version: str,
-) -> Claim:
-    """C9 + C10 + C4 + 06 §6.6 rules 1/2, applied to whatever the reader returned.
+def stamp_page_claim(claim: Claim, payload: ArchivedPayload) -> Claim:
+    """C9 + C10 + 06 §6.6 rules 1/2, applied to whatever the reader returned.
 
     `Claim` is frozen, so this is `dataclasses.replace`, never a mutation. The reader owns
     the VALUE; this owns where the value came from — and that split is what keeps the three
@@ -1624,17 +1280,8 @@ def stamp_page_claim(
     # W1-c R5 (the `precision_declaration` label + blur axis) is stamped in
     # `claims_common._base`, the one funnel EVERY substrate's readers build a claim through,
     # so a page reader and a payload reader cannot answer it differently.
-    return replace(
-        claim,
-        surface=ARCHIVE_SURFACE,
-        page_kind=payload.page_kind,
-        snapshot_anchor=ARCHIVE_ANCHOR,
-        first_observed_at=payload.first_observed_at,
-        history_completeness=ARCHIVE_HISTORY_COMPLETENESS,
-        payload_id=payload.id,
-        payload_sha256=payload.payload_sha256,
-        payload_scope_version=scope_version,
-    )
+    return replace(claim, surface=ARCHIVE_SURFACE, page_kind=payload.page_kind,
+                   first_observed_at=payload.first_observed_at)
 
 
 def _licensed_coordinate(
@@ -1662,21 +1309,6 @@ def _licensed_coordinate(
     return replace(claim, licence_class=verdict.licence_class), verdict.reason
 
 
-def archived_claim_value_bytes(claim: Claim) -> int:
-    """`claim_value_bytes` PLUS the evidence quote, and the quote counts on purpose.
-
-    W1's cap exists so one claim array cannot exceed Postgres's 256 MB jsonb limit, and
-    `claim_value_bytes` measures the value columns because on W1's substrate they are the
-    only unbounded ones. `evidence_quote` rides in the SAME `jsonb_to_recordset` array
-    (`Claim.to_row()`), it is NULL on every W1 claim, and on this substrate it is a span of
-    an HTML body 41-245 KB long — so leaving it out would exempt the one field most likely
-    to blow the bound from the bound written to stop it."""
-    total = claim_value_bytes(claim)
-    if claim.evidence_quote is not None:
-        total += len(claim.evidence_quote.encode("utf-8"))
-    return total
-
-
 def _refuse_oversized_archived(
     row: ListingRow, claim: Claim, *, max_value_bytes: int,
 ) -> str | None:
@@ -1687,7 +1319,7 @@ def _refuse_oversized_archived(
     again, while a stored body is immutable and content-addressed, so re-reading it yields
     the same oversized value forever. What fixes this is a narrower locator or a transform
     in the contract — a reviewed change, not a retry."""
-    size = archived_claim_value_bytes(claim)
+    size = claim_value_bytes(claim)
     if size <= max_value_bytes:
         return None
     LOG.warning("PAGE oversized value refused listing_id=%d source=%s "
@@ -1741,8 +1373,7 @@ def extract_page(
             result.refuse(f"subject_not_found:{row.source}")
             continue
         for read in reads:
-            claim = stamp_page_claim(
-                read.claim, payload, scope_version=document.scope_version)
+            claim = stamp_page_claim(read.claim, payload)
             if claim.claim_type != "coordinate" and read.position_branch is not None:
                 raise IntakeRefused(
                     f"{entry.entry_id} declared position_branch="
@@ -1755,7 +1386,6 @@ def extract_page(
                     result.refuse(reason)
                     continue
             assert_stampable(claim)
-            assert_evidence_complete(claim)
             refused = _refuse_oversized_archived(
                 row, claim, max_value_bytes=max_value_bytes)
             if refused is not None:
@@ -2043,7 +1673,7 @@ _EXCLUSION_ZONES_SQL = """
 
 def load_registers(conn: psycopg.Connection) -> dict[str, ScopeRegister]:
     """One exclusion-zone register per active contract. The register is CONTRACT DATA (02
-    §2.1.4) and its hash is the `payload_scope_version` every claim carries, so it is read
+    §2.1.4) and its hash keys the extraction pool's cached scoper, so it is read
     from `portal_contracts` here rather than re-parsed from the YAML on disk: a lane must
     scope by the register that is deployed, not by the one in the working tree."""
     registers: dict[str, ScopeRegister] = {}

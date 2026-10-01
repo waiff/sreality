@@ -398,7 +398,7 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
     for name, spec in READER_CONTRACTS.items():
         assert spec.reads_stored_body == (name in PAGE_READERS), name
     # The same no-helper rule as the W1 scan, for the same reason: a helper evaluating
-    # guards on a reader's behalf would let the table lie. `_evidenced` and `_entry_css` are
+    # guards on a reader's behalf would let the table lie. `_page_claim` and `_entry_css` are
     # shared, and neither may touch the two entry points.
     reader_names = {fn.name for fn in bodies.values()} | {"apply_transforms", "guard_admits"}
     for node in _ARCHIVE_AST.body:

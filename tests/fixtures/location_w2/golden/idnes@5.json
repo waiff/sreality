@@ -20,9 +20,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "\"listing_localityCityArea\":\"Šumburk nad Desnou\"",
-      "evidence_span_len": 47
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.kraj",
@@ -39,9 +37,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "\"listing_localityRegion\":\"Liberecký kraj\"",
-      "evidence_span_len": 41
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.no_exact_disclaimer",
@@ -58,9 +54,7 @@
       "licence_class": "portal",
       "blur_evidence": "declared",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti.",
-      "evidence_span_len": 64
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.obec",
@@ -77,9 +71,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "\"listing_localityCity\":\"Tanvald\"",
-      "evidence_span_len": 32
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.okres",
@@ -96,9 +88,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Na Balkáně, Tanvald - Šumburk nad Desnou, okres Jablonec nad Nisou",
-      "evidence_span_len": 66
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.street",
@@ -115,9 +105,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Na Balkáně, Tanvald - Šumburk nad Desnou, okres Jablonec nad Nisou",
-      "evidence_span_len": 66
+      "position_branch": null
     },
     {
       "extractor_id": "id.det.subject_feature",
@@ -134,9 +122,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": "portal_pin",
-      "evidence_quote": "[15.31331632, 50.74437214]",
-      "evidence_span_len": 26
+      "position_branch": "portal_pin"
     }
   ]
 }

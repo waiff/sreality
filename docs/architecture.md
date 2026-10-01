@@ -2970,8 +2970,12 @@ measures DEGREES — `tests/test_one_place_predicate.py` pins both halves.
 **ONE EVIDENCE TABLE.** `location_claims` is the evidence — what a payload asserted, with a
 surface, an extraction method, a licence class and a `claim_fingerprint` (migration 386's IMMUTABLE
 `location_claim_fingerprint()`, computed in SQL so no second transcription of the definition can
-drift; it still takes all 23 inputs, of which 12 are stored). **19 columns**, migration 498's KEPT
-list. TWO producers insert claims, both `ON CONFLICT (claim_fingerprint) DO NOTHING`: the intake lane
+drift; it still takes all 23 inputs, of which 12 are stored columns — the other 11, e.g. `page_kind`,
+`extractor_id`, `value_norm`, `legacy_source_column`, are computed per claim, hashed and not kept).
+**19 columns**: identity, the contract entry, five typed value slots, the declared-precision trio,
+the fingerprint. A claim carries nothing else: the page lane's evidence quote, span, payload hash and
+scope version, and the anchor and history markers, followed their columns (migration 498) out of
+`Claim`. TWO producers insert claims, both `ON CONFLICT (claim_fingerprint) DO NOTHING`: the intake lane
 below and `location_data/operator_corrections.py` (an operator claim carries no contract entry, so no
 DELETE below ever reaches one). A claim is never UPDATEd, but the table is not append-only: three
 paths DELETE contract claims. A wrong VALUE is superseded — the readings half deletes the listing's

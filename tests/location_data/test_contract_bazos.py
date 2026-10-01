@@ -56,7 +56,6 @@ LIVE_OKRES_ANCHOR_TEXT = "Nový Jičín"         # the anchor's TEXT — the okr
 LIVE_PSC = "74401"
 OBEC_SLUG_ENCODED = "fren%C5%A1t%C3%A1t-pod-radho%C5%A1t%C4%9Bm"
 DECOY_HREF = "https://reality.bazos.cz/inzeraty/prodej-byt/"
-PORTAL_WORDING = "Přibližná lokalita"
 CONTRACT_LABEL = "approximate_location"
 
 CONTRACT = {c.source: c for c in contracts.load_all()}["bazos"]
@@ -95,8 +94,7 @@ def row() -> ListingRow:
 
 def payload() -> ArchivedPayload:
     return ArchivedPayload(
-        id=9001, source="bazos", source_id_native=NATIVE, page_kind="detail",
-        payload_sha256="ab" * 32, first_observed_at=FETCHED_AT,
+        id=9001, page_kind="detail", first_observed_at=FETCHED_AT,
         body=_ARCHIVED.read_bytes())
 
 
@@ -109,7 +107,7 @@ def claim_of(entry_id: str, doc: ScopedDocument | None = None) -> Any:
     doc = document() if doc is None else doc
     reads = run(ENTRIES[entry_id], doc)
     assert len(reads) == 1, f"{entry_id}: expected one read, got {len(reads)}"
-    return stamp_page_claim(reads[0].claim, payload(), scope_version=doc.scope_version)
+    return stamp_page_claim(reads[0].claim, payload())
 
 
 # ------------------------------------------------------------------ the contract shape
@@ -246,16 +244,15 @@ def test_the_psc_is_normalised_to_the_five_digit_shape():
     assert claim.value_text.isdigit() and len(claim.value_text) == 5
 
 
-def test_blur_hint_claims_the_contracts_label_and_quotes_the_portals_words():
+def test_blur_hint_claims_the_contracts_label():
     """The portal TELLS YOU its pin is approximate. The VALUE is this contract's canonical
-    label and the EVIDENCE is bazos' own wording — two fields for exactly this case, so a
-    reword stops asserting instead of silently restating a different fact. R5: the page
-    readers stamp `declared_precision_label` = the value for this claim type."""
+    label, never bazos' own wording, so a reword stops asserting instead of silently
+    restating a different fact. R5: the page readers stamp `declared_precision_label` = the
+    value for this claim type."""
     claim = claim_of("bzs.det.blur_hint")
     assert claim.claim_type == "precision_declaration"
     assert claim.value_text == CONTRACT_LABEL
     assert claim.declared_precision_label == CONTRACT_LABEL
-    assert claim.evidence_quote == PORTAL_WORDING
     assert claim.blur_evidence == "declared"
 
 
@@ -291,13 +288,8 @@ def test_an_unlisted_label_is_recorded_without_asserting_declared_blur():
 
 
 @pytest.mark.parametrize("entry_id", FIRING)
-def test_every_claim_resolves_a_span_that_indexes_its_own_quote(entry_id):
-    """A claim asserting evidence it cannot point at is worse than one with no span."""
-    doc = document()
-    claim = claim_of(entry_id, doc)
-    assert claim.span_start is not None and claim.span_end > claim.span_start
-    assert doc.html[claim.span_start:claim.span_end] == claim.evidence_quote
-    assert claim.subject_scoped is True
+def test_every_firing_claim_is_subject_scoped(entry_id):
+    assert claim_of(entry_id).subject_scoped is True
 
 
 def test_a_page_without_a_lokalita_row_claims_nothing_at_all():

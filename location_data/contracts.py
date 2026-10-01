@@ -101,11 +101,9 @@ EXTRACTION_METHODS = frozenset({
     "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse", "regex_text",
     "llm_text", "registry_derived", "operator_manual",
 })
-# TWELVE, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1).
-# `precision_declaration` stays a type of its own: the four-step resolver (W2) reads it beside
-# the pin in `resolver/bind.py` instead of folding it onto the coordinate claim. The other 28
-# enum labels are not "declared ahead for a later wave" — they were
-# entries nothing resolved, which is the state this wave exists to end. The ones with a
+# TWELVE, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1). The
+# other 28 enum labels are not "declared ahead for a later wave" — they were entries
+# nothing resolved, which is the state this wave exists to end. The ones with a
 # live reader but no resolver (`uncertainty_geometry`, `map_zoom`, `blur_hint`,
 # `obec_code`, `portal_admin_id`, `postal_town`, …) go with them; a portal fact worth
 # claiming re-enters through one of the twelve.
@@ -201,9 +199,8 @@ _MAP_METHOD = frozenset({"map_widget_parse"})
 _EMBEDDED_JSON_SURFACES = frozenset({"embedded_json", "map_config", "archived_html"})
 _SLUG_SURFACES = _DOM_SURFACES | {"url_slug"}
 _JSONLD_SURFACES = frozenset({"jsonld", "archived_html"})
-# `regex_text` is EVIDENCE-BEARING (01 §4.2's `loc_claim_text_evidence`), so it is not
-# folded into `_DOM_METHOD`: an entry may not silently swap a method whose claims carry no
-# mandatory span for one whose claims do.
+# `regex_text` says the value is a pattern's capture group: only the regex readers may stamp
+# it (`html_attr_regex` may instead call a link's capture `url_slug_parse`).
 _REGEX_METHOD = frozenset({"regex_text"})
 _SLUG_METHOD = frozenset({"url_slug_parse"})
 _BREADCRUMB_METHOD = frozenset({"breadcrumb_parse"})
@@ -350,8 +347,8 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         locator_keys=frozenset({"css", "attr", "pattern", "group"}),
         consults_transforms=True,
         reads_stored_body=True),
-    # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker and
-    # its EVIDENCE is the portal's own text or attribute. `consults_transforms` is FALSE
+    # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker,
+    # never the portal's own text. `consults_transforms` is FALSE
     # deliberately — normalising a label the contract itself wrote is a no-op with a failure
     # mode, since blur is decided by that label's membership of `precision_cap.blurred_labels`.
     "html_marker": ReaderContract(

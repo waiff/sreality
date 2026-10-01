@@ -60,9 +60,8 @@ class _Cursor:
         return [p["rows"].obj for sql, p in self.executed if table in sql]
 
 
-# The fields below that migration 498 dropped from the TABLE (source_id_native, page_kind,
-# extractor_id, extractor_version, snapshot_anchor, history_completeness) are still spelled
-# here on purpose: the readers compute them and the fingerprint still hashes them.
+# source_id_native, page_kind, extractor_id and extractor_version are not columns since
+# migration 498, but the fingerprint still hashes them, so a claim still carries them.
 def _claim(listing_id: int, *, value_text: str | None = None,
            value_jsonb: object | None = None, claim_type: str = "street_name") -> Claim:
     return Claim(
@@ -70,8 +69,7 @@ def _claim(listing_id: int, *, value_text: str | None = None,
         claim_type=claim_type, surface="api_json", page_kind="detail",
         extraction_method="portal_structured_field", extractor_id="sr.det.street",
         extractor_version="contract:sreality@1", contract_entry_id=1000,
-        snapshot_anchor="unanchored_latest_fetch", first_observed_at=OBSERVED_AT,
-        blur_evidence="none", licence_class="portal", history_completeness="full",
+        first_observed_at=OBSERVED_AT, blur_evidence="none", licence_class="portal",
         value_text=value_text, value_jsonb=value_jsonb)
 
 
