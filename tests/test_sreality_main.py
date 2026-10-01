@@ -5,7 +5,7 @@ resolving limits CLI > portals registry > baked default, and recording an
 non-destructive drain finalize (PR #403 semantics).
 
 The portal seams themselves (district-split walk, enqueue priorities,
-mark_inactive completeness gate, batched drain writes, gone/error routing) are
+nomination completeness gate, batched drain writes, gone/error routing) are
 covered by tests/test_main.py against scraper.main.SrealityPortal — the same
 object this entrypoint drives.
 """
