@@ -6,7 +6,8 @@ substrates, and operator input). A correction is an appended
 `extraction_method='operator_manual'`, `licence_class='operator'`,
 `claim_confidence='exact'` - never an UPDATE of anything: a wrong correction
 is superseded by a newer one (S7 breaks operator-vs-operator ties by recency),
-and the claim spine stays append-only.
+and no DELETE reaches it: supersession, `--retract` and the retire script
+delete only claims that carry a `contract_entry_id`, which an operator claim never does.
 
 Two deliberate choices, both learned from the intake lane:
 

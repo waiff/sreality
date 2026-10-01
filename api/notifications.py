@@ -24,9 +24,12 @@ Three responsibilities:
 lat/lng (district / disposition / price filters alone are useful), but
 DOES accept a spatial center + radius for "alert me about anything
 near X". `_build_match_clauses` converts the spec into parameterised
-SQL — reusing the same column semantics as
-`toolkit/comparables._shared_filter_where` so the matcher can never
-disagree with Browse on what a filter means.
+SQL by hand, against `properties_public`; it shares no clause builder
+with Browse (rule 16): parity tests pin field ids, the per-m²/plot
+measure and place chips; curated-city rules agree through the one SQL
+function `curated_cities_matching()` (only this side is test-pinned);
+every other clause is kept in step by hand (compiling it from the
+registry is owed: roadmap/operator-workflow-track.md, rule #16 entry).
 """
 
 from __future__ import annotations
@@ -197,8 +200,8 @@ class WatchdogFilterSpec(BaseModel):
     max_city_population: int | None = None
     near_city_proximity: dict[str, Any] | None = None
     # Fast polygon-edge proximity (migration 142). Precomputed columns on
-    # properties_public; `>= value`. Same definition as Browse (lockstep via
-    # toolkit.comparables._city_quality_clauses).
+    # properties_public; `>= value`. Browse filters the same columns (registry
+    # `pg_column`); this side renders them in `_city_quality_clauses`.
     near_pop_5km_min: int | None = None
     near_pop_15km_min: int | None = None
     near_jobs_5km_min: float | None = None
@@ -271,9 +274,9 @@ def _build_match_clauses(
     """Render the filter spec as parameterised WHERE clauses.
 
     The matcher prepends a watermark / window clause; this helper owns
-    the spec-derived part only. Keep column semantics aligned with
-    `toolkit/comparables._shared_filter_where` so Browse / Watchdog
-    can never disagree on what a filter means.
+    the spec-derived part only. Hand-written, not compiled from the
+    registry: a filter change must land here and in Browse
+    (`registryQueryBuilder.ts` / `queries.ts`) alike (rule 16).
     """
     # THE CONSUMER RULE (W5, operator ruling 2026-09-13), unconditional and first.
     # Browse inherits it from `browse_projection` (migration 512); the matcher cannot,
@@ -408,7 +411,7 @@ def _build_match_clauses(
         params["garage"] = spec.garage
 
     # furnished / ownership: multi-select with the `__unknown__` sentinel.
-    # Reuse the exact Browse helper so the two surfaces can't disagree.
+    # Same helper `_shared_filter_where` uses for comparables.
     from toolkit.comparables import _enum_or_unknown_clause
     from toolkit.filter_registry import (
         FURNISHED_CANONICAL,
@@ -466,8 +469,10 @@ def _build_match_clauses(
         where.append(f"l.total_price_change_pct {op} %(total_price_change_pct)s")
         params["total_price_change_pct"] = spec.total_price_change_pct
 
-    # Phase QUAL — city quality predicates. Delegated to the same helper
-    # `_shared_filter_where` calls so Browse and Watchdog stay in lockstep.
+    # Phase QUAL — city quality predicates. This matcher is the helper's only caller
+    # (`_shared_filter_where` raises on these fields). Browse agrees through the SQL,
+    # not the helper: both evaluate rules via `curated_cities_matching()` and read the
+    # same precomputed `home_obec_pop` / `near_*` columns.
     from toolkit.comparables import ComparableFilters, _city_quality_clauses
     cq_filters = ComparableFilters(
         city_index_rules=spec.city_index_rules,

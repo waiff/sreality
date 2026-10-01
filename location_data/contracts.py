@@ -102,8 +102,9 @@ EXTRACTION_METHODS = frozenset({
     "llm_text", "registry_derived", "operator_manual",
 })
 # TWELVE, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1).
-# Eleven after W2: `precision_declaration` folds onto the pin claim when the resolver is
-# rewritten. The other 28 enum labels are not "declared ahead for a later wave" — they were
+# `precision_declaration` stays a type of its own: the four-step resolver (W2) reads it beside
+# the pin in `resolver/bind.py` instead of folding it onto the coordinate claim. The other 28
+# enum labels are not "declared ahead for a later wave" — they were
 # entries nothing resolved, which is the state this wave exists to end. The ones with a
 # live reader but no resolver (`uncertainty_geometry`, `map_zoom`, `blur_hint`,
 # `obec_code`, `portal_admin_id`, `postal_town`, …) go with them; a portal fact worth

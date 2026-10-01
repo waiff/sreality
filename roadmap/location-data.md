@@ -1118,7 +1118,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
   lane's third substrate (reader `text_reading`, V1–V4; hourly, first), bazos@8 claims town/part/
   street/numbers from it (`obec_slug`, `street_cue` and the percent decoder gone), a mined reading
   supersedes the listing's older claims of its types (stamp: mig 581), v5.6 drops the separator split
-  and the `low` gate. Rollout: 578 → merge → readings, then bodies (~1 day) → re-resolve; never
+  and the `low` gate. Rollout: 581 → merge → readings, then bodies (~1 day) → re-resolve; never
   dispatch `location_claims_retire.yml` while text-less delisted rows hold @7 towns.
   **Rule 25 ruling (operator, 2026-09-30):** W1 (+354) and W2 (+182) were waived on the promise that
   the program nets ≤ 0 after W3; W3 alone is −42 and the program closes at **+494** (pilot tooling
@@ -1126,6 +1126,14 @@ component is slimmed twice — each wave rewrites one component and slims its st
   ≈ 150). The operator accepted +494 as the cost of a new capability and its safeguards; R3 fuzzy
   street matching is kept for reading claims (40 of 42 pilot streets exact, the one near-miss
   right); the `percent` decoder deletion stands.
+- **Owed — two copies the subtraction mandate still carries** (rules-wording audit, 2026-10-01; rule 25
+  now reads as practised: a net-positive location PR says why in its body, and the operator rules on
+  it). `operator_corrections.py`'s write is its own transcription of the 18-column claim INSERT, the
+  23-argument `location_claim_fingerprint()` call and the enqueue CTE beside
+  `claims_intake._CLAIM_INSERT_CTES` — one fingerprint function, two copies of its argument list.
+  And `claims_intake.extract_listing` keeps a sreality-only branch, the `sreality_payload_shape:`
+  refusal that sized W4's refetch cohort (closed 2026-09-10); `verify_pipeline` carries its own SQL
+  mirror of the shape test.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

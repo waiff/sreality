@@ -1,4 +1,4 @@
-"""A2 (temporary, deleted in W5): the old engine's merges undone in the apply scope's blocks.
+"""A2 (temporary, deleted in W8): the old engine's merges undone in the apply scope's blocks.
 
 Over test_apply's stateful fake (`FakeDb`, whose `location` is `listing_location`), extended with
 the area and the three reads the retire step runs. Its detach mimics the toolkit's contract

@@ -166,9 +166,9 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         "title": "Undo the engine's merges",
         "approach": (
             "Every live merge group one generation, one apply run or one time window applied, "
-            "undone newest-first through unmerge_group and marked undone in "
-            "autodedup.applied_merges - a group a later engine merge builds on waits for that "
-            "one; dry_run=1 lists them."
+            "undone newest-first, each as a loop of detach_listing over the adverts its merge "
+            "moved, and marked undone in autodedup.applied_merges - a group a later engine "
+            "merge builds on waits for that one; dry_run=1 lists them."
         ),
         "tools": [
             "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",

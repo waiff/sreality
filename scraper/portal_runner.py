@@ -288,8 +288,8 @@ def run_index_walk(
     run_id: int | None = None,
     max_seconds: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Walk every category, touch + (optionally) mark_inactive, and enqueue
-    new/price-changed ids. No detail fetch — the drain consumes the queue.
+    """Walk every category, touch + enqueue new/price-changed ids, and nominate
+    a finished walk's unseen rows (rule #3). No detail fetch — the drain consumes the queue.
 
     When run_id is supplied, index_pages is committed per category (bump) so
     Health liveness survives a SIGKILL before finalize. When max_seconds is
