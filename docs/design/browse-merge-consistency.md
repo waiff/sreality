@@ -249,13 +249,20 @@ never a half-dropped one, and never duplicating work (the fresh rebuild already
 read the post-merge state from `browse_projection`). No deadlock risk (single
 relation, one lock direction).
 
-**Volume note for the future auto-merge sweep:** each patch is two indexed
-statements (PK on `browse_list_pk`), not a scan. Merging 3+ properties into one
-survivor re-patches the survivor's row once per retired id in the loop —
-idempotent, slightly wasteful, not worth optimizing for operator-scale merges
-(2-5 properties). If the Tier-2 sweep's volume ever makes it material, batch one
-`sync_browse_list` call after the loop — a micro-optimization deferred until
-there's a number to justify it.
+**[as-built] The wait can outlast the swap, and the caller's `properties` locks wait with it.**
+The rebuild's `DROP TABLE browse_list` runs with `lock_timeout` 0
+(`migrations/522_location_w13_rebuild_budgets.sql`), so it queues for `ACCESS EXCLUSIVE`
+behind any in-flight `browse_list` reader (the API role lets a read run 120 s), and a patch
+queues behind it. The patch runs inside its caller's transaction after the recompute, so that
+caller's `properties` row locks are held for the whole wait, and a merge or split of one of
+those properties waits too: the autodedup lane gives up at its 5 s `lock_timeout` and records
+`failed`, a split answers its busy 409. The dirty drain bounds its own slice with
+`SET LOCAL lock_timeout = '5s'` (`_DRAIN_LOCK_TIMEOUT`, drain only; the full sweep and the
+straggler attach keep the session default): a patch that times out unwinds only its savepoint
+and the next rebuild carries the row; a recompute that times out rolls the slice back and the
+next pass replays it. That bounds the tail rather than removing it — a merge queued behind a
+slice already waiting can still lose its own 5 s. The identity writers inherit their caller's
+`lock_timeout`.
 
 **Concurrency safety (verify in review, not expected to be an issue):** the
 patch is plain DML against the table currently named `browse_list`. The

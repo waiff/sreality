@@ -308,13 +308,17 @@ def recompute_one(conn: Any, property_id: int) -> None:
 
 # Every advert of these properties that a broker is attributed to, queued for the broker drain
 # (Broker Unify W3): `brokers.property_count` / `active_property_count` key on the advert's
-# property, so a recompute, a merge or a detach changes them. ON CONFLICT bumps marked_at, as the
-# detail writers' enqueue does.
+# property, so a recompute, a merge or a detach changes them. Stamped clock_timestamp(), not
+# now(): this runs inside the writer's (or the slice's) transaction, whose now() is its START.
+# A broker pass whose cutoff falls inside that transaction would otherwise read the pre-move
+# listings.property_id and then, once we commit, its `marked_at <= cutoff` dequeue would still
+# match our re-stamp and drop it — that broker's counts stale until the daily sweep. Statement
+# time narrows the window to the gap between this statement and the commit.
 _MIRROR_BROKER_DIRTY_SQL = (
-    "INSERT INTO dirty_broker_listings (listing_id) "
-    "SELECT l.id FROM listings l "
+    "INSERT INTO dirty_broker_listings (listing_id, marked_at) "
+    "SELECT l.id, clock_timestamp() FROM listings l "
     "WHERE l.property_id = ANY(%(ids)s) AND l.broker_identity_id IS NOT NULL "
-    "ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()"
+    "ON CONFLICT (listing_id) DO UPDATE SET marked_at = clock_timestamp()"
 )
 
 
@@ -332,7 +336,11 @@ def properties_changed(conn: Any, property_ids: Iterable[int]) -> None:
     rebuild, and a patch committed while a rebuild is in flight (~26% of wall-clock) lands on the
     doomed table and is superseded silently. A full drain slice (2000 ids, only after a backlog;
     the live depth is a couple of dozen) costs ~100-270 ms of ROW EXCLUSIVE on `browse_list`, the
-    lock the rebuild's drop waits behind.
+    lock the rebuild's drop waits behind. That is the uncontended cost. The rebuild's drop runs
+    with lock_timeout 0, so it queues behind any in-flight `browse_list` reader (up to 120 s on
+    the API role), and the patch queues behind it while the caller still holds these
+    properties' row locks; a merge or split of one of them waits too. The drain bounds that wait
+    (`_DRAIN_LOCK_TIMEOUT`); the identity writers inherit their caller's lock_timeout.
     """
     ids = sorted({int(p) for p in property_ids if p is not None})
     if not ids:
@@ -441,6 +449,16 @@ def _bind_pending_estimation_listing_ids(conn: Any, *, limit: int = 5000) -> int
         return cur.rowcount or 0
 
 
+# The drain slice's ceiling on any one lock wait. Its Browse patch can queue behind a */15
+# rebuild's swap, holding the slice's `properties` row locks (properties_changed's docstring),
+# and the slice is mostly recently-dirtied properties — the ones the autodedup lane (5 s
+# lock_timeout) and a split (5 s, busy 409) are likeliest to touch. A patch that times out
+# unwinds only its savepoint and the next rebuild carries the row; a recompute that times out
+# rolls the slice back and the next pass replays it. Drain only: the full sweep and the
+# straggler attach share `_bounded` and keep the session default.
+_DRAIN_LOCK_TIMEOUT = "5s"
+
+
 def _drain_dirty(
     conn: Any, batch_size: int, cutoff: Any,
     renew: Any = None,
@@ -448,10 +466,10 @@ def _drain_dirty(
     """Bring every property queued at/before `cutoff` current, one claimed slice at a time.
 
     Each slice runs `properties_changed` (recompute, Browse patch, broker queue) in ONE
-    `_bounded` transaction, then dequeues: a crash between the two replays the slice, and every
-    statement is idempotent. Always terminates -- only rows with marked_at <= cutoff are
-    claimable, the delete removes the claimed ones, and a row re-dirtied mid-run moves past the
-    cutoff.
+    `_bounded` transaction under `_DRAIN_LOCK_TIMEOUT`, then dequeues: a crash between the two
+    replays the slice, and every statement is idempotent. Always terminates -- only rows with
+    marked_at <= cutoff are claimable, the delete removes the claimed ones, and a row re-dirtied
+    mid-run moves past the cutoff.
 
     `renew` (a zero-arg callable) is invoked once per claimed slice so a long
     drain — e.g. the backlog after a maintenance freeze, or the nine-portal
@@ -469,6 +487,8 @@ def _drain_dirty(
             break
         ids = [int(r[0]) for r in claimed]
         with _bounded(conn):
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL lock_timeout = '{_DRAIN_LOCK_TIMEOUT}'")
             properties_changed(conn, ids)
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})

@@ -166,7 +166,7 @@ def test_attach_stragglers_births_and_recomputes_them_in_one_transaction() -> No
     assert conn.executed[birth][1] == {"ids": [11, 12]}
     assert conn.executed[recompute][1] == {"ids": [101, 102]}
     assert not any("ST_DWithin" in s or "INSERT INTO dirty_properties" in s
-                   or "source_id_native" in s for s in order)
+                   or "source_id_native" in s or "lock_timeout" in s for s in order)
 
 
 def test_attach_without_stragglers_writes_nothing():
@@ -250,9 +250,9 @@ class _DrainConn:
         return _Txn()
 
 
-# One drain slice, in order: the after-step inside ONE bounded transaction (the Browse patch in
-# its own savepoint), then the dequeue outside it.
-_SLICE = ("BEGIN", "SET LOCAL statement_timeout", "WITH batch AS",
+# One drain slice, in order: the after-step inside ONE bounded transaction under the drain's own
+# lock-wait ceiling (the Browse patch in its own savepoint), then the dequeue outside it.
+_SLICE = ("BEGIN", "SET LOCAL statement_timeout", "SET LOCAL lock_timeout", "WITH batch AS",
           "BEGIN", "DELETE FROM browse_list", "INSERT INTO browse_list", "COMMIT",
           "INSERT INTO dirty_broker_listings", "COMMIT", "DELETE FROM dirty_properties")
 
@@ -269,8 +269,10 @@ def test_drain_dirty_recomputes_each_batch_then_terminates():
     assert conn.recomputed == [[7, 8], [9]]
     # deletes are scoped to the claimed ids and the run cutoff
     assert conn.deleted == [([7, 8], "CUTOFF"), ([9], "CUTOFF")]
-    # each slice: recompute under the raised ceiling, Browse patch, broker queue, then dequeue
+    # each slice: recompute under the raised ceiling and the 5 s lock wait, Browse patch, broker
+    # queue, then dequeue
     assert _steps(conn.executed) == list(_SLICE) * 2
+    assert "SET LOCAL lock_timeout = '5s'" in _sqls(conn)
     assert [p for s, p in conn.executed if s.startswith("INSERT INTO dirty_broker_listings")] == [
         {"ids": [7, 8]}, {"ids": [9]}]
     assert [p for s, p in conn.executed if s.startswith("DELETE FROM browse_list")] == [
@@ -287,7 +289,17 @@ def test_properties_changed_recomputes_then_patches_then_queues_brokers():
     assert len(conn.executed) == 4
     assert [p for _s, p in conn.executed] == [{"ids": [3, 9]}, ([3, 9],), ([3, 9],),
                                                {"ids": [3, 9]}]
-    assert not any("statement_timeout" in s or "dirty_properties" in s for s in _sqls(conn))
+    assert not any("statement_timeout" in s or "lock_timeout" in s or "dirty_properties" in s
+                   for s in _sqls(conn))
+
+
+def test_the_broker_mirror_stamps_statement_time_not_transaction_start():
+    """Inside a merge's transaction now() is its start, which a concurrent broker pass's cutoff
+    can follow; its `marked_at <= cutoff` dequeue would then drop the re-stamp."""
+    from scripts.recompute_property_stats import _MIRROR_BROKER_DIRTY_SQL as sql
+
+    assert "now()" not in sql
+    assert sql.count("clock_timestamp()") == 2
 
 
 def test_properties_changed_with_no_ids_runs_nothing():
@@ -575,6 +587,8 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
     ceilings = [s for s, _ in conn.executed if "SET LOCAL statement_timeout" in s]
     recomputes = [s for s, _ in conn.executed if "WITH batch AS" in s]
     assert len(ceilings) == len(recomputes) == 2
+    # ...and keeps the session's lock wait: only the drain slice bounds its own
+    assert not any("lock_timeout" in s for s in _sqls(conn))
 
 
 def test_the_full_sweep_patches_no_browse_row(monkeypatch: Any) -> None:

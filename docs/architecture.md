@@ -2074,7 +2074,8 @@ renumber.** Navigate by area:
     layer was removed in the 2026-08 cutoff, rule #15.) Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
     mutate `properties` concurrently. Inline merge/detach run `properties_changed` (the drain's
-    own after-step: scoped recompute, Browse patch, broker queue) directly, and enqueue nothing.
+    own after-step: scoped recompute, Browse patch, broker queue) directly, and never enqueue
+    `dirty_properties`.
     A residual of removing the
     inline singleton rollup: a crawler change confined to unhashed columns (`area_basis`,
     `published_at`, `source_url`, which feed `price_per_m2_source_listing_id`) reaches its
