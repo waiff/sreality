@@ -19,9 +19,9 @@ What stays sreality-specific lives behind the Portal seams, unchanged:
 - the batched prepared writes (listing_write.write_listings on the session pooler)
   behind SrealityPortal.write_details — at sreality volume (~15k details/day)
   per-row ingest would forfeit the Phase-1 prepared-statement win;
-- ListingGoneError -> immediate single-listing inactive flip + failure-row
-  clear, and listing_fetch_failures bookkeeping, behind mark_gone /
-  record_failure.
+- ListingGoneError -> the runner's single-listing inactive flip
+  (db.mark_listing_inactive, which also clears the failure row), and
+  listing_fetch_failures bookkeeping behind record_failure.
 
 scraper.main keeps the legacy CLI (scrape.yml's instant-revert fallback) and
 the image-download phase used by images.yml / images_fresh.yml — neither moves

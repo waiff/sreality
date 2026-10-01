@@ -17,7 +17,7 @@ district-split lives inside its `walk_category`, not here — justified in revie
   rate-limited pool, write in batches via the portal's writer, route gone→inactive
   and error→failure. Records run_type='detail'.
 - run_index_probe: the newest-first delta probe (Wave C-2 of the real-time
-  program) — first index page(s) only, diff + enqueue, NEVER mark_inactive,
+  program) — first index page(s) only, diff + enqueue, NEVER nominates,
   NO scrape_runs row.
 - run_phase: the scrape_runs lifecycle around one of the two loops above —
   open the row, run the phase, and record how it ENDED. Lifted here from nine
@@ -603,7 +603,7 @@ def run_index_probe(
     overlap; enqueue_detail is idempotent on (source, native_id)); a portal
     whose default order is NOT newest-first overrides probe_category instead.
 
-    NEVER calls mark_inactive: a page-capped walk cannot prove a delisting
+    NEVER nominates: a page-capped walk cannot prove a delisting
     (rule #3) — and the cap also makes every walk report reached_end=False, the
     same second rail the --max-pages gate uses.
 

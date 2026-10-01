@@ -398,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
-    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    # page(s) only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)

@@ -11,7 +11,7 @@ are set; otherwise the phase is a no-op).
 
 Run with:
     python -m scraper.main                       # full run
-    python -m scraper.main --limit 10            # cap to 10 listings; mark-inactive skipped
+    python -m scraper.main --limit 10            # cap to 10 listings; nomination skipped
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
@@ -22,8 +22,8 @@ Run with:
     python -m scraper.main --image-workers 16            # tune concurrency
 
 `--limit` is production-safe: the limited scrape upserts what it sees,
-but it does NOT mark unseen listings inactive — that inference is only
-valid when the entire sreality index has been walked.
+but it does NOT nominate unseen listings for a page check — that inference
+is only valid when the entire sreality index has been walked.
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ SUSPICIOUS_STOP_THRESHOLD = 0.30
 # already category-agnostic. drazba (auction) and podil (fractional-ownership
 # sale) are their OWN search slices (category_type_cb=3/4 are valid filters,
 # each returns a few dozen-to-low-hundred results nationally). Without them
-# those listings get no complete index walk, so mark_inactive never runs for
+# those listings get no complete index walk, so nomination never runs for
 # them (it is scoped per (source, category_main, category_type)) and a delisted
 # auction/share stays is_active=true forever — see the stuck-active backlog the
 # missing slices left behind. pozemek (land) and ostatni (other) close the same
@@ -417,7 +417,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help=(
             "cap number of index entries processed. With this flag the "
-            "scrape skips mark-inactive: a partial index view cannot "
+            "scrape skips nomination: a partial index view cannot "
             "determine which listings have left sreality."
         ),
     )
@@ -596,7 +596,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--index-only",
         action="store_true",
         help=(
-            "Phase 2: walk the index, touch + mark_inactive, and enqueue "
+            "Phase 2: walk the index, touch + nominate (rule #3), and enqueue "
             "new/price-changed ids into listing_detail_queue. No detail "
             "fetch — the detail-drain (--drain-only) consumes the queue."
         ),
@@ -616,7 +616,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help=(
             "Wall-clock budget for the index walk. On expiry the walk stops "
-            "cleanly and reports the category INCOMPLETE, so mark_inactive is "
+            "cleanly and reports the category INCOMPLETE, so nomination is "
             "suppressed (rule #3) rather than the job being SIGKILLed by the "
             "CI timeout with nothing recorded."
         ),
@@ -768,7 +768,7 @@ def _run_full(
             except Exception as exc:
                 # A category's walk failing (e.g. sreality throttling that
                 # outlasts the retries) must not kill the whole run. Record it
-                # as incomplete — the sweep is skipped (no false delisting) and
+                # as incomplete — nomination is skipped (no false delisting) and
                 # the remaining categories still walk and finalize.
                 LOG.exception(
                     "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
@@ -959,7 +959,7 @@ class SrealityPortal(portal_runner.PortalDefaults):
         page returns zero new ids, exactly like ceskereality's probe; capped at
         PROBE_MAX_PAGES regardless of the caller's probe_pages as defense in
         depth. Diff + enqueue only; always complete=False so the caller can
-        never be tempted into a delisting sweep (rule #3) off a partial walk.
+        never be tempted into nominating (rule #3) off a partial walk.
         """
         cm, ct = category
         cm_text, ct_text = self.category_labels(category)
@@ -1090,7 +1090,7 @@ def _walk_category_split(
     split only reached ~86%, below the completeness bar). We probe the
     national total and, if over the threshold, walk each district separately
     and union — every district is well under the cap, so the union is complete
-    and mark_inactive can run.
+    and nomination can run.
 
     Returns (seen_ids, counts, result_size, pages_fetched, reached_end). For a
     split walk `reached_end` requires EVERY one of the 77 districts to have been
@@ -1104,7 +1104,7 @@ def _walk_category_split(
     cm_text = parser.CATEGORY_MAIN[category_main]
     ct_text = parser.CATEGORY_TYPE[category_type]
 
-    # --limit runs are partial by definition and never mark_inactive, so
+    # --limit runs are partial by definition and never nominate, so
     # there's no reason to split them.
     result_size: int | None = None
     if cat_limit is None:

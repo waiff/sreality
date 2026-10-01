@@ -891,7 +891,7 @@ def touch_listings_by_id(
     a synthetic negative today and NULL once Gate 2 flips), so a sreality_id-keyed
     touch would match nothing — starving rule #4's last_seen_at signal for every
     unchanged portal row. Separate function (not a parametrized key column) to
-    mirror the mark_inactive / mark_inactive_native split and stay discoverable by
+    mirror the touch_listings split and stay discoverable by
     the SQL-correctness gate.
     """
     ids = list(listing_ids)
@@ -1250,7 +1250,7 @@ def active_count(
     """Current active-listing count for one (source, category_main, category_type).
 
     `scope_subtype=True` narrows to `subtype` (NULL-safe) so the count matches a
-    subtype-scoped `mark_inactive_native` sweep (bazos fine sections)."""
+    subtype-scoped `presence_candidates` nomination (bazos fine sections)."""
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
     params: list[Any] = [source, category_main, category_type]
     if scope_subtype:

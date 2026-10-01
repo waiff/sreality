@@ -51,7 +51,7 @@ CZ_COUNTRY_ID = 112
 
 # The search endpoint refuses offsets past its deep-pagination window with
 # HTTP 422. We stop the walk cleanly when we hit it (the completeness guard
-# in main.py then declines to mark_inactive for that truncated slice); large
+# in main.py then declines to nominate for that truncated slice); large
 # categories are walked per-district so each slice stays under the window.
 CAP_STATUSES: frozenset[int] = frozenset({422})
 
@@ -59,7 +59,7 @@ CAP_STATUSES: frozenset[int] = frozenset({422})
 # large category never retrieves the whole set. Categories whose total
 # exceeds SPLIT_THRESHOLD are walked once per DISTRICT (okres) instead — each
 # okres is well under the cap (the largest, Praha=okres 47, is ~5k; every
-# other okres is <1k), so the union is complete and mark_inactive can run.
+# other okres is <1k), so the union is complete and nomination can run.
 # DISTRICT_IDS is the 77 okresy. Okres 47 already covers ALL of Praha (it
 # equals locality_region_id=10's total and is a strict superset of the
 # 5001..5022 Praha sub-district codes), so those sub-codes are deliberately
