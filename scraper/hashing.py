@@ -90,10 +90,6 @@ def digest(doc: Mapping[str, Any]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def content_hash(raw: dict[str, Any]) -> str:
-    return digest(sreality_hash_doc(raw))
-
-
 def sreality_hash_doc(raw: dict[str, Any]) -> dict[str, Any]:
     """sreality's hash document: the wire payload minus its volatile keys."""
     out = deepcopy(raw)

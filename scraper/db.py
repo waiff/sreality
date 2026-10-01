@@ -1,12 +1,6 @@
-"""Database I/O for the Sreality tracker.
+"""Database I/O for listings lifecycle, the detail queue, images and run bookkeeping.
 
-Reads SUPABASE_DB_URL, upserts into listings, appends a row to
-listing_snapshots only when the content hash changes, inserts new
-image URLs, and at end of run marks unseen listings inactive.
-
-Each listing's writes happen in one transaction so a partial failure
-cannot leave the listings / listing_snapshots / images tables out of
-sync for that listing.
+The listing content write is scraper/listing_write.py.
 """
 
 from __future__ import annotations
@@ -22,15 +16,13 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, TypeVar
 
 import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper import media
 from scraper.attribute_contract import CONTRACT
-from scraper.scraped_listing import ScrapedListing
-from toolkit.broker_sources import BROKER_FINGERPRINT_KEYS, BROKER_SOURCE_NAMES
 
 LOG = logging.getLogger(__name__)
 
@@ -59,8 +51,6 @@ def _jsonb_dumps(obj: Any) -> str:
 # estimation subject spec, a trace step, a building proposal — survives a
 # DB-native Decimal/datetime sneaking in, instead of raising at write time.
 set_json_dumps(_jsonb_dumps)
-
-UpsertResult = Literal["new", "updated", "unchanged"]
 
 LISTING_COLUMNS: tuple[str, ...] = (
     "category_main",
@@ -101,10 +91,9 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "source_url",
 )
 
-# Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
-# column spec for the batched detail-drain write (write_detail_batch). Kept in
-# lockstep with LISTING_COLUMNS by the assertion below so a new scraper column
-# can't silently break the batch path.
+# Postgres type for each LISTING_COLUMN: the jsonb_to_recordset column spec of
+# scraper/listing_write.py. Kept in lockstep with LISTING_COLUMNS by the assertion
+# below so a new scraper column can't silently break the write.
 _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "category_main": "text",
     "category_type": "text",
@@ -207,8 +196,8 @@ def detail_ref(source: str, source_url: str | None) -> str | None:
 
 @lru_cache(maxsize=None)
 def _listing_update_set_sql(source: str) -> str:
-    """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
-    upsert, so preserve-if-null semantics can never drift between the two write paths."""
+    """The ONE ON CONFLICT SET builder, rendered into scraper/listing_write.py's per-source
+    upsert (and read by reparse), so preserve-if-null semantics live in one place."""
     preserved = _preserved_columns(source)
     return ",\n          ".join(
         (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in preserved
@@ -544,219 +533,9 @@ def refresh_matview(
         return int(cur.fetchone()[0])
 
 
-@lru_cache(maxsize=None)
-def _upsert_listing_sql(source: str) -> str:
-    """The per-item upsert statement. ONE fixed text per source (the contract decides
-    which columns preserve, so the nine portals get nine statements), built once per
-    source instead of once per listing on the eight portals that write one at a time."""
-    column_list = ", ".join(LISTING_COLUMNS)
-    placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
-    update_set = _listing_update_set_sql(source)
-
-    return f"""
-        INSERT INTO listings (
-            sreality_id, last_seen_at, is_active,
-            {column_list},
-            source, source_id_native, raw_json, discovery_seq,
-            discovered_at
-        )
-        VALUES (
-            %(sreality_id)s, now(), true,
-            {placeholders},
-            -- The FULL natural key (migration 091) is stamped inline at INSERT, not
-            -- healed afterward: non-sreality callers pass source + the portal's native
-            -- id in the row; sreality (no row values) falls back to 'sreality' +
-            -- sreality_id::text. `source` MUST be set here, not only by the post-insert
-            -- UPDATE — its column default is 'sreality', so an insert that set only
-            -- source_id_native would transiently be ('sreality', <native_id>) and could
-            -- collide with a real sreality row on the UNIQUE(source, source_id_native)
-            -- index, which ON CONFLICT (sreality_id) does not arbitrate (unique_violation
-            -- → the whole ingest aborts and the portal drain wedges).
-            %(source)s,
-            %(source_id_native)s,
-            %(raw_json)s,
-            %(discovery_seq)s,
-            %(discovered_at)s
-        )
-        -- Arbiter is the natural key, not sreality_id (R2 Phase D). Safe because
-        -- (a) listings_source_native_uidx is a full (non-partial) unique index, so
-        -- arbiter inference always succeeds, and (b) neither sreality_id nor source
-        -- appears in the SET clause below (_listing_update_set_sql excludes both,
-        -- source_id_native is COALESCE-healed separately) — a conflict on this
-        -- arbiter can never rewrite the frozen surrogate-adjacent identity columns.
-        ON CONFLICT (source, source_id_native) DO UPDATE SET
-          last_seen_at = now(),
-          is_active = true,
-          inactive_at = NULL,
-          {update_set},
-          -- Heal a legacy NULL natural key on any refetch, but never overwrite a
-          -- set one (preserve-if-null).
-          source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
-          raw_json = EXCLUDED.raw_json,
-          -- Set-once (migration 368): a listing's discovery_seq is a first-discovery
-          -- fact, never regenerated by a later refetch — same COALESCE-preserve shape
-          -- as source_id_native above, just favoring the STORED value over the
-          -- incoming one (a refetch's discovery_seq is a fresh, unrelated queue draw,
-          -- not a correction).
-          discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
-          -- Set-once for the same reason (migration 444): discovered_at is when the
-          -- WALK first saw this listing. A refetch carries a fresh queue draw, which is
-          -- a later re-sighting, never a correction to the first one.
-          discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)
-        RETURNING xmax = 0 AS inserted, id
-    """
-
-
-def upsert_listing(
-    conn: psycopg.Connection,
-    row: dict[str, Any],
-    raw_json: dict[str, Any],
-    content_hash: str,
-) -> UpsertResult:
-    """Upsert listings, append snapshot if content_hash differs from last.
-
-    Returns 'new' for first insert, 'updated' if a snapshot was appended,
-    'unchanged' if the listing already exists with this content_hash.
-    """
-    sreality_id = row["sreality_id"]
-    raw_jsonb = Jsonb(raw_json)
-    source = row.get("source") or "sreality"
-    upsert_sql = _upsert_listing_sql(source)
-
-    params: dict[str, Any] = {
-        "sreality_id": sreality_id,
-        "raw_json": raw_jsonb,
-        # The natural-key pair, stamped inline (see the INSERT comment). sreality's
-        # native id IS its sreality_id; non-sreality callers (ingest) put their
-        # source + portal id in the row so the pair is written atomically.
-        "source": source,
-        "source_id_native": row.get("source_id_native") or str(sreality_id),
-        # The queue-assigned discovery-order value (migration 368), threaded in by
-        # ingest_scraped_listing / the sreality batch path; None for callers outside
-        # the queue-driven drain (e.g. a manual --detail-only fetch) — NULL is correct
-        # there, it just means "no discovery-order signal for this row".
-        "discovery_seq": row.get("discovery_seq"),
-        # When the index walk first SAW it (migration 444), carried from the claimed
-        # queue row. NULL outside the queue-driven drain, same as discovery_seq.
-        "discovered_at": row.get("discovered_at"),
-    }
-    for col in LISTING_COLUMNS:
-        params[col] = row.get(col)
-    params["price_czk"] = sane_price_czk(params["price_czk"])
-    sane_listing_numerics(params)
-
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(upsert_sql, params)
-        result = cur.fetchone()
-        inserted = bool(result[0]) if result else False
-        # The surrogate of the row we just wrote, read back in-transaction so the
-        # snapshot below can carry it (R2 dual-write). On the ON CONFLICT arm the
-        # INSERT's sequence default is evaluated and discarded, and `id` is not in
-        # LISTING_COLUMNS so the DO UPDATE never rewrites it — RETURNING always
-        # yields the persisted row's stable id, new or existing.
-        listing_id = result[1] if result else None
-
-        # Rekeyed onto listing_id (R2 Phase C): listing_id is already resolved
-        # above, and listing_snapshots_listing_id_scraped_at_idx (mig 333) mirrors
-        # the legacy (sreality_id, scraped_at) composite so this stays a single
-        # index lookup on the hot per-write path.
-        cur.execute(
-            """
-            SELECT content_hash FROM listing_snapshots
-            WHERE listing_id = %s
-            ORDER BY scraped_at DESC
-            LIMIT 1
-            """,
-            (listing_id,),
-        )
-        prev = cur.fetchone()
-        unchanged = prev is not None and prev[0] == content_hash
-
-        if not unchanged:
-            cur.execute(
-                """
-                INSERT INTO listing_snapshots
-                    (sreality_id, listing_id, price_czk, content_hash, raw_json)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (sreality_id, listing_id, params["price_czk"], content_hash, raw_jsonb),
-            )
-
-    if inserted:
-        return "new"
-    return "unchanged" if unchanged else "updated"
-
-
-def upsert_listing_with_property(
-    conn: psycopg.Connection,
-    row: dict[str, Any],
-    raw_json: dict[str, Any],
-    content_hash: str,
-) -> UpsertResult:
-    """upsert_listing + maintain the listing's canonical `properties` parent.
-
-    The listing write and its property linkage commit in one transaction so a
-    partial failure can't leave a listing unlinked. New listings become their
-    own singleton property (`_ensure_property`); cross-listing grouping is
-    out-of-band, never the insert path.
-    """
-    sreality_id = row["sreality_id"]
-    with conn.transaction():
-        result = upsert_listing(conn, row, raw_json, content_hash)
-        # Property linkage keys on the surrogate id (like the portal path), not on
-        # sreality_id. For sreality the natural sreality_id is always present and
-        # uniquely identifies the row, so it's the safe lookup back to the surrogate.
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM listings WHERE sreality_id = %s", (sreality_id,))
-            listing_id = int(cur.fetchone()[0])
-        _ensure_property(conn, listing_id)
-    return result
-
-
-# Sources whose listings carry a broker block that scripts.resolve_brokers
-# attributes. A content-changed listing of one of these is enqueued into
-# dirty_broker_listings so the incremental resolver re-attributes it within its
-# cadence (it has no full-table straggler scan); a missed source degrades
-# gracefully to daily-sweep-only attribution rather than breaking. Both this set
-# and the fingerprint allowlist below are DERIVED from the one registry that also
-# generates the resolver's SQL, so onboarding a portal can no longer half-land.
-# sreality flows through write_detail_batch (which enqueues directly), not this
-# path, but is in the set so it reads as the full broker-attributed source list.
-BROKER_ATTRIBUTED_SOURCES = frozenset(BROKER_SOURCE_NAMES)
-
-# Every attribution-relevant key the HTML portals put in raw["broker"]: the
-# per-broker key (account_oid on idnes, broker_id elsewhere), the contacts, and
-# the firm key (agency_name on idnes, agency_slug on ceskereality/remax,
-# agency_id on realitymix). An allowlist, not a hash of the whole block, so a
-# parser adding an incidental field can't churn the queue.
-_BROKER_FINGERPRINT_KEYS: tuple[str, ...] = BROKER_FINGERPRINT_KEYS
-
-_STORED_BROKER_BLOCK_SQL = "SELECT raw_json->'broker' FROM listings WHERE id = %s"
-
-
-def _stored_broker_block(conn: psycopg.Connection, listing_id: int) -> Any:
-    with conn.cursor() as cur:
-        cur.execute(_STORED_BROKER_BLOCK_SQL, (listing_id,))
-        row = cur.fetchone()
-    return row[0] if row else None
-
-
-def _broker_fingerprint(block: Any) -> tuple[str | None, ...]:
-    """The attribution-relevant identity of a raw["broker"] block.
-
-    Total by construction — a portal that emits a list, a string or a missing block
-    yields the empty fingerprint rather than raising, because this runs inside the
-    live ingest transaction and must never abort an otherwise-valid listing."""
-    if not isinstance(block, dict):
-        return ()
-    return tuple(
-        None if block.get(k) is None else str(block[k]).strip()
-        for k in _BROKER_FINGERPRINT_KEYS
-    )
-
-
-# The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the
-# nextval draw below is unconditional until an operator explicitly opts in.
+# The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the listing
+# writer's first-sight nextval draw (scraper/listing_write.py) stays on until an
+# operator explicitly opts in.
 # app_settings-backed (not env/process-cached) so the always-on realtime
 # worker and cron drains pick up a flip on their very next batch, not after a
 # restart.
@@ -788,134 +567,6 @@ def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
     return _app_settings_flag(conn, GATE2_NULL_SREALITY_ID_SETTING)
 
 
-def ingest_scraped_listing(
-    conn: psycopg.Connection, listing: ScrapedListing,
-    discovery_seq: int | None = None,
-    discovered_at: datetime | None = None,
-) -> tuple[int, UpsertResult]:
-    """Write a non-sreality ScrapedListing through the same matcher path.
-
-    `discovery_seq` is the claimed queue row's enqueue-time sequence value
-    (migration 368; see claim_detail_batch / DrainItem.discovery_seq) — passed
-    through so upsert_listing can stamp listings.discovery_seq on first insert.
-    None for callers outside the queue-driven drain (e.g. a manual re-ingest).
-
-    Returns `(listing_id, result)` — the row's SURROGATE `listings.id` (never the
-    legacy sreality_id, which is a synthetic negative today and NULL for new rows
-    once Gate 2 flips) so the caller can attribute images / further writes to the
-    right row, plus the upsert result.
-
-    Tier 0: (source, source_id_native) is the idempotency key — a re-fetch reuses
-    the existing row and updates in place; first sight draws a fresh negative
-    sreality_id from `synthetic_listing_id_seq` for the legacy column only (the
-    sign-check rail), UNLESS the `gate2_null_sreality_id_enabled` app_settings
-    flag is on, in which case it writes NULL instead (the actual Gate-2 flip,
-    still off by default — see `_gate2_null_sreality_id_enabled`). Identity is
-    carried on the surrogate `id`, resolved back out of the natural key
-    (validated present + unique, migration 314) — every follow-up write keys on
-    it, so nothing depends on a sreality_id that may be NULL. The listing write +
-    source identity + Tier-1 property matching commit in one transaction.
-
-    A write of a broker-attributed source enqueues the row into
-    dirty_broker_listings (the incremental resolver's sole feed — same role
-    write_detail_batch plays for sreality) when its CONTENT changed or when only its
-    broker block did, so e.g. new idnes listings are attributed within the
-    resolver's cadence, not only by the daily full sweep.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, sreality_id FROM listings "
-            "WHERE source = %s AND source_id_native = %s",
-            (listing.source, listing.source_id_native),
-        )
-        found = cur.fetchone()
-    if found is not None:
-        # Re-fetch: reuse the persisted surrogate. Its legacy sreality_id (whatever
-        # it is now — synthetic negative pre-flip, NULL after) is fed back to to_row
-        # only to fill the INSERT's sreality_id column; upsert's ON CONFLICT never
-        # rewrites it, so the value is inert on this path.
-        listing_id: int | None = int(found[0])
-        legacy_sreality_id: int | None = found[1]
-        # Read BEFORE the upsert overwrites raw_json, and only for the sources whose
-        # brokers are attributed — elsewhere it would buy a raw_json detoast per
-        # ingest for nothing. First sight needs no read: it enqueues on result anyway.
-        stored_broker = (
-            _stored_broker_block(conn, listing_id)
-            if listing.source in BROKER_ATTRIBUTED_SOURCES else None
-        )
-    else:
-        stored_broker = None
-        listing_id = None  # sequence-generated in the INSERT; resolved post-upsert
-        if _gate2_null_sreality_id_enabled(conn):
-            legacy_sreality_id = None
-        else:
-            with conn.cursor() as cur:
-                cur.execute("SELECT nextval('synthetic_listing_id_seq')")
-                legacy_sreality_id = int(cur.fetchone()[0])
-
-    row = listing.to_row(legacy_sreality_id)
-    # Carry the FULL natural key (source + native id) into the INSERT so it is stamped
-    # atomically. Both matter: source_id_native for the NOT NULL invariant, and source
-    # because its column default is 'sreality' — inserting only source_id_native would
-    # transiently write ('sreality', <native_id>) and could collide with a real sreality
-    # row on the UNIQUE(source, source_id_native) index (ON CONFLICT (sreality_id) does
-    # not arbitrate it → unique_violation → drain wedge). source_url rides the shared
-    # column registry like every other parsed column (LISTING_COLUMNS).
-    row["source"] = listing.source
-    row["source_id_native"] = listing.source_id_native
-    row["discovery_seq"] = discovery_seq
-    row["discovered_at"] = discovered_at
-    with conn.transaction():
-        result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
-        if listing_id is None:
-            # First sight: the surrogate was just minted by the INSERT's sequence
-            # default. Read it back on the natural key (never on sreality_id).
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM listings "
-                    "WHERE source = %s AND source_id_native = %s",
-                    (listing.source, listing.source_id_native),
-                )
-                listing_id = int(cur.fetchone()[0])
-        _ensure_property(conn, listing_id)
-        if result != "unchanged":
-            # Enqueue for the incremental maintenance pass (rule 20), the counterpart
-            # of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL: the singleton mirror
-            # above refreshes the price inline, its history and `browse_list` are that
-            # pass's. Set-based off the surrogate so a listing not yet attached to a
-            # property is skipped, not crashed on.
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO dirty_properties (property_id) "
-                    "SELECT property_id FROM listings "
-                    "WHERE id = %s AND property_id IS NOT NULL "
-                    "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
-                    (listing_id,),
-                )
-        # The second arm is INDEPENDENT of the content hash on purpose. The four
-        # HTML portals hash a fixed field allowlist (ScrapedListing._HASH_FIELDS)
-        # that excludes raw_json, so a page whose ONLY change is its broker block
-        # computes result == 'unchanged' and used to never enqueue — those portals
-        # could not re-attribute a broker change at all. Folding the broker fields
-        # into the content hash instead would append a listing_snapshots row for a
-        # pure attribution change, which rule 2 reserves for CONTENT changes.
-        if listing.source in BROKER_ATTRIBUTED_SOURCES and (
-            result != "unchanged"
-            or _broker_fingerprint(stored_broker) != _broker_fingerprint(
-                listing.raw.get("broker") if isinstance(listing.raw, dict) else None)
-        ):
-            with conn.cursor() as cur:
-                # Keyed on the surrogate (dirty_broker_listings_pkey is listing_id;
-                # its sreality_id column is legacy/nullable). The upsert above ran
-                # first in this same transaction, so the row is already present.
-                cur.execute(
-                    "INSERT INTO dirty_broker_listings (listing_id) VALUES (%s) "
-                    "ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()",
-                    (listing_id,),
-                )
-    return listing_id, result
-
-
 # THE one way a property is born (rule 15): a bare row naming its one advert, linked in the same
 # statement; `scripts.recompute_property_stats` fills every other column from that advert.
 # `is_active` rides along only so the status-history trigger (migration 392) logs the advert's
@@ -941,75 +592,6 @@ def create_singleton_properties(
     with conn.cursor() as cur:
         cur.execute(NEW_SINGLETONS_SQL, {"ids": sorted({int(i) for i in listing_ids})})
         return [int(r[0]) for r in cur.fetchall()]
-
-
-def _ensure_property(conn: psycopg.Connection, listing_id: int) -> None:
-    """Link the listing to its property, or refresh the one it has; keyed on the surrogate
-    `listings.id`, inside the caller's transaction. First sight: a new singleton (no insert-time
-    matching, rule 15) and the rollup's own recompute. Linked: `_cheap_property_rollup`."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT property_id FROM listings WHERE id = %s", (listing_id,))
-        found = cur.fetchone()
-    if found and found[0] is not None:
-        _cheap_property_rollup(conn, listing_id)
-        return
-    from scripts.recompute_property_stats import recompute_one  # it imports this module
-
-    recompute_one(conn, create_singleton_properties(conn, [listing_id])[0])
-
-
-def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
-    """Re-scrape rollup for one property: counts + lifecycle always; the display columns are
-    mirrored from this child only while the property is a singleton (its one advert IS its
-    canonical advert). A multi-advert property's canonical fields and price history are the
-    dirty-set recompute's (rule 20). Kept until the full recompute is measured no slower here
-    (the W4 latency gate)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE properties p SET
-                source_count        = agg.cnt,
-                distinct_site_count = agg.dcnt,
-                last_seen_at        = agg.last_seen,
-                is_active           = agg.active,
-                current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk      ELSE p.current_price_czk END,
-                area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2         ELSE p.area_m2 END,
-                price_per_m2_source_listing_id = CASE WHEN agg.cnt = 1
-                    THEN price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
-                    ELSE p.price_per_m2_source_listing_id END,
-                disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition     ELSE p.disposition END,
-                category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main   ELSE p.category_main END,
-                category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type   ELSE p.category_type END,
-                has_balcony         = CASE WHEN agg.cnt = 1 THEN l.has_balcony     ELSE p.has_balcony END,
-                has_parking         = CASE WHEN agg.cnt = 1 THEN l.has_parking     ELSE p.has_parking END,
-                has_lift            = CASE WHEN agg.cnt = 1 THEN l.has_lift        ELSE p.has_lift END,
-                building_type       = CASE WHEN agg.cnt = 1 THEN l.building_type   ELSE p.building_type END,
-                condition           = CASE WHEN agg.cnt = 1 THEN l.condition       ELSE p.condition END,
-                ownership           = CASE WHEN agg.cnt = 1 THEN l.ownership       ELSE p.ownership END,
-                furnished           = CASE WHEN agg.cnt = 1 THEN l.furnished       ELSE p.furnished END,
-                terrace             = CASE WHEN agg.cnt = 1 THEN l.terrace         ELSE p.terrace END,
-                cellar              = CASE WHEN agg.cnt = 1 THEN l.cellar          ELSE p.cellar END,
-                garage              = CASE WHEN agg.cnt = 1 THEN l.garage          ELSE p.garage END,
-                category_sub_cb     = CASE WHEN agg.cnt = 1 THEN l.category_sub_cb ELSE p.category_sub_cb END,
-                subtype             = CASE WHEN agg.cnt = 1 THEN l.subtype         ELSE p.subtype END,
-                estate_area         = CASE WHEN agg.cnt = 1 THEN l.estate_area     ELSE p.estate_area END,
-                usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
-                garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,
-                parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END,
-                source              = CASE WHEN agg.cnt = 1 THEN l.source          ELSE p.source END,
-                energy_rating       = CASE WHEN agg.cnt = 1 THEN l.energy_rating   ELSE p.energy_rating END,
-                building_condition_level  = CASE WHEN agg.cnt = 1 THEN l.building_condition_level  ELSE p.building_condition_level END,
-                apartment_condition_level = CASE WHEN agg.cnt = 1 THEN l.apartment_condition_level ELSE p.apartment_condition_level END
-            FROM listings l
-            JOIN LATERAL (
-                SELECT count(*) AS cnt, count(DISTINCT source) AS dcnt,
-                       max(last_seen_at) AS last_seen, bool_or(is_active) AS active
-                FROM listings WHERE property_id = l.property_id
-            ) agg ON true
-            WHERE p.id = l.property_id AND l.id = %s
-            """,
-            (listing_id,),
-        )
 
 
 def mark_properties_dirty(
@@ -1039,19 +621,15 @@ def mark_properties_dirty(
 
 def record_images(
     conn: psycopg.Connection,
-    sreality_id: int | None,
+    listing_id: int,
     images: Iterable[dict[str, Any]],
-    *,
-    listing_id: int | None = None,
 ) -> int:
     """Insert any image rows that don't already exist. Returns newly inserted count.
 
-    Two call shapes resolve the surrogate FK (`images.listing_id`) two ways:
-    sreality's own callers pass their always-present `sreality_id` and the row is
-    looked up from it; the portal chokepoint (`record_media`) passes the resolved
-    surrogate `listing_id` directly (post-Gate-2 a portal row's sreality_id is
-    NULL, so it can never be the FK). Either way `images.listing_id` is non-NULL,
-    which is what the ON CONFLICT (listing_id, sequence) arbiter needs to dedupe.
+    Keyed on the surrogate `listings.id`, so `images.listing_id` is non-NULL, which is
+    what the ON CONFLICT (listing_id, sequence) arbiter needs to dedupe. A fetched
+    payload's media are written by scraper/listing_write.py; this serves the heals
+    (scripts/reextract.py via record_media).
     """
     # De-dupe non-null sequences within this batch: sreality occasionally
     # returns two images sharing one `order`, and ON CONFLICT DO UPDATE raises
@@ -1086,26 +664,16 @@ def record_images(
     #
     # The arbiter is listing_id (R2 Phase C, images_listing_id_sequence_key), so it
     # MUST be non-NULL — a NULL listing_id never conflicts, so it would spawn an
-    # unbounded duplicate row on every refetch. The FK is therefore always carried
-    # explicitly: the caller either hands us the resolved surrogate (`listing_id=`,
-    # the portal path) or its sreality_id, from which we look the surrogate up
-    # inline. images.sreality_id mirrors the listing's own (legacy negative today,
-    # NULL after the Gate-2 flip) so the two never disagree. The DB backstop for the
-    # non-NULL invariant is images_listing_id_present_check (migration 350).
-    if listing_id is not None:
-        values_sql = ", ".join(
-            "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
-        )
-        flat: list[Any] = [
-            v for url, seq in kept for v in (listing_id, listing_id, url, seq)
-        ]
-    else:
-        values_sql = ", ".join(
-            "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
-        )
-        flat = [
-            v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
-        ]
+    # unbounded duplicate row on every refetch. images.sreality_id mirrors the
+    # listing's own (legacy negative today, NULL after the Gate-2 flip) so the two
+    # never disagree. The DB backstop for the non-NULL invariant is
+    # images_listing_id_present_check (migration 350).
+    values_sql = ", ".join(
+        "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (listing_id, listing_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
         sql = f"""
             INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
@@ -1124,16 +692,13 @@ def record_images(
 
 def record_videos(
     conn: psycopg.Connection,
-    sreality_id: int | None,
+    listing_id: int,
     videos: Iterable[dict[str, Any]],
-    *,
-    listing_id: int | None = None,
 ) -> int:
     """Insert video-media rows into listing_videos. Returns newly inserted count.
 
     Mirrors record_images (same de-dupe + URL-refresh-where-not-downloaded upsert,
-    same two FK-resolution shapes — `listing_id=` for the portal chokepoint, else
-    looked up from sreality_id) but writes the non-image sibling table. We capture
+    keyed on the surrogate `listings.id`) but writes the non-image sibling table. We capture
     the URL only — bytes are NOT downloaded today (storage_path stays NULL), keeping
     the image pool free of large video fetches; a future isolated video drain can
     fill them in.
@@ -1153,20 +718,12 @@ def record_videos(
     if not kept:
         return 0
 
-    if listing_id is not None:
-        values_sql = ", ".join(
-            "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
-        )
-        flat: list[Any] = [
-            v for url, seq in kept for v in (listing_id, listing_id, url, seq)
-        ]
-    else:
-        values_sql = ", ".join(
-            "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
-        )
-        flat = [
-            v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
-        ]
+    values_sql = ", ".join(
+        "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (listing_id, listing_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
         sql = f"""
             INSERT INTO listing_videos (sreality_id, listing_id, source_url, sequence)
@@ -1187,19 +744,18 @@ def record_media(
 ) -> int:
     """Split a portal's ordered media URLs into images + videos and record each.
 
-    The single ingest chokepoint every portal calls instead of hand-rolling the
-    enumerate-then-record incantation: images land in `images`, videos in
+    The media split for a payload-free heal (scripts/reextract.py); a fetched payload's
+    media go through scraper/listing_write.py. Images land in `images`, videos in
     `listing_videos`, with each item's sequence = its original gallery position
     (so a leading video leaves a sequence gap, never renumbering the photos).
     Returns the number of newly inserted image rows (what the portals log).
 
-    `listing_id` is the SURROGATE `listings.id` (as returned by
-    ingest_scraped_listing), carried straight into the child rows' FK — never a
-    sreality_id, which is NULL for a post-Gate-2 portal row.
+    `listing_id` is the SURROGATE `listings.id`, carried straight into the child
+    rows' FK — never a sreality_id, which is NULL for a post-Gate-2 portal row.
     """
     image_rows, video_rows = media.split_media_rows(media_urls)
-    new_images = record_images(conn, None, image_rows, listing_id=listing_id)
-    record_videos(conn, None, video_rows, listing_id=listing_id)
+    new_images = record_images(conn, listing_id, image_rows)
+    record_videos(conn, listing_id, video_rows)
     return new_images
 
 
@@ -2904,11 +2460,11 @@ def active_failure_ids(
         return {row[0] for row in cur.fetchall()}
 
 
-# --- Phase 2: needs-detail queue + batched detail-drain writes --------------
+# --- Phase 2: needs-detail queue --------------------------------------------
 #
 # The index-walk enqueues new / price-changed ids into listing_detail_queue;
 # the detail-drain claims a bounded slice, fetches, and writes them in batches
-# via write_detail_batch. The queue is the "what to fetch" signal;
+# via scraper/listing_write.py. The queue is the "what to fetch" signal;
 # listing_fetch_failures stays the Health-visible give-up ledger.
 
 # Two service classes, not one ranking. ACQUISITION (QUEUE_PRIORITY_NEW) is a
@@ -2942,255 +2498,6 @@ QUEUE_VERIFY_RESERVE = 0.2
 QUEUE_ACQUISITION_RESERVE = 0.5
 
 _QUEUE_ENQUEUE_CHUNK = 1000
-
-
-class DetailResult(Protocol):
-    """The subset of scraper.main.FetchResult that write_detail_batch reads.
-
-    Duck-typed so db.py needn't import main (which imports db). Only 'ok'
-    results are passed to write_detail_batch.
-    """
-
-    row: dict[str, Any] | None
-    raw: dict[str, Any] | None
-    images: list[dict[str, Any]] | None
-    content_hash: str | None
-    # The claimed queue row's enqueue-time sequence value (migration 368),
-    # attached by the runner after claim (see portal_runner.DrainItem), read here
-    # by write_detail_batch. Not set by fetch_detail itself — it has nothing to
-    # do with fetch/parse, only with when the id was originally discovered.
-    discovery_seq: int | None
-    # Companion to discovery_seq (migration 444): the same claimed row's
-    # enqueued_at, i.e. when the walk first SAW this id.
-    discovered_at: datetime | None
-
-
-# jsonb_to_recordset keeps the SQL text fixed-shape (the column-type spec is a
-# literal; only the single jsonb param varies), so psycopg3 can prepare the plan
-# once on the session pooler — the same prepared-statement win as Phase 1, now
-# for the whole batch in one round-trip.
-_BATCH_RECORD_SPEC = ", ".join(
-    f"{c} {_LISTING_COLUMN_PGTYPE[c]}" for c in LISTING_COLUMNS
-)
-_BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
-# One shared builder with upsert_listing — preserve-if-null (see
-# _PRESERVE_IF_NULL_COLUMNS and the contract-driven _preserved_columns) applies
-# identically to both write paths. This one is sreality's because the batched drain is
-# sreality-only; the assertion in tests/scraper/test_listing_write_preserve.py renders
-# both paths for all nine portals and compares them.
-_BATCH_UPDATE_SET = _listing_update_set_sql("sreality")
-
-_BATCH_UPSERT_SQL = f"""
-    INSERT INTO listings (
-        sreality_id, last_seen_at, is_active,
-        {", ".join(LISTING_COLUMNS)},
-        source_id_native, raw_json, discovery_seq,
-        discovered_at
-    )
-    SELECT
-        j.sreality_id, now(), true,
-        {_BATCH_SELECT_COLS},
-        -- sreality-only path: its native id IS sreality_id. Stamped inline so the
-        -- drain (the primary sreality write path since the cadence split) no longer
-        -- leaves the (source, source_id_native) natural key NULL — the hole that
-        -- accumulated 396 NULL sreality rows before this fix.
-        j.sreality_id::text,
-        j.raw_json,
-        j.discovery_seq,
-        j.discovered_at
-    FROM jsonb_to_recordset(%s::jsonb) AS j(
-        sreality_id bigint, {_BATCH_RECORD_SPEC},
-        raw_json jsonb,
-        discovery_seq bigint, discovered_at timestamptz
-    )
-    -- Arbiter is the natural key, not sreality_id (R2 Phase D) — see upsert_listing's
-    -- identical retarget for the full safety argument. `source` isn't in this
-    -- INSERT's column list (this path is sreality-only, so it always takes the
-    -- 'sreality' column DEFAULT) — Postgres materializes defaults before evaluating
-    -- the arbiter, so the conflict check still sees the right value.
-    ON CONFLICT (source, source_id_native) DO UPDATE SET
-      last_seen_at = now(),
-      is_active = true,
-      inactive_at = NULL,
-      {_BATCH_UPDATE_SET},
-      source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
-      raw_json = EXCLUDED.raw_json,
-      -- Set-once (migrations 368 + 444) — same shape as upsert_listing's identical clause.
-      discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
-      discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)
-    RETURNING (xmax = 0) AS inserted
-"""
-
-# Snapshot-on-change, set-based: insert a snapshot for exactly the listings
-# whose content_hash differs from their latest (or that have none yet). raw_json
-# is read back from the listings row just upserted in the same txn, so the large
-# raw payload isn't sent twice. IS DISTINCT FROM handles the no-prior-snapshot
-# case (latest NULL → distinct → one snapshot for a brand-new listing).
-_BATCH_SNAPSHOT_SQL = """
-    INSERT INTO listing_snapshots (sreality_id, listing_id, price_czk, content_hash, raw_json)
-    SELECT j.sreality_id, l.id, j.price_czk, j.content_hash, l.raw_json
-    FROM jsonb_to_recordset(%s::jsonb)
-        AS j(sreality_id bigint, price_czk integer, content_hash text)
-    JOIN listings l ON l.sreality_id = j.sreality_id
-    LEFT JOIN LATERAL (
-        -- Rekeyed onto listing_id (R2 Phase C, same rule-2 guard as upsert_listing):
-        -- l.id is already joined, and listing_snapshots_listing_id_scraped_at_idx
-        -- (mig 333) mirrors the legacy composite.
-        SELECT content_hash FROM listing_snapshots s
-        WHERE s.listing_id = l.id
-        ORDER BY s.scraped_at DESC, s.id DESC
-        LIMIT 1
-    ) latest ON true
-    WHERE latest.content_hash IS DISTINCT FROM j.content_hash
-    RETURNING sreality_id
-"""
-
-# Phase 3: enqueue the changed listings' properties as dirty so the incremental
-# maintenance job recomputes only them. New listings (property_id NULL) are
-# skipped here -- the job's straggler-attach phase resolves them instead.
-_BATCH_DIRTY_FROM_SIDS_SQL = """
-    INSERT INTO dirty_properties (property_id)
-    SELECT DISTINCT property_id FROM listings
-    WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
-    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-"""
-
-# Broker intelligence (phase 1): a content change can alter a listing's broker
-# block (it is part of the content hash), so enqueue the changed listings for
-# re-attribution by scripts.resolve_brokers --incremental. This is the sreality
-# feed of the incremental resolver (idnes feeds the same queue via
-# ingest_scraped_listing); the resolver has no full-table straggler scan. A
-# brand-new listing is a content change (no prior snapshot), so it lands here
-# too. Anything missed is reconciled by the daily full sweep.
-# The JOIN onto listings is the R2 dual-write handle for listing_id, same reasoning
-# as _BATCH_IMAGES_SQL below: the batch upsert ran first in this same transaction,
-# so every sid already has its row (and surrogate id) visible here. Arbiter is
-# listing_id (R2 Phase D, dirty_broker_listings_pkey) — see ingest_scraped_listing's
-# identical retarget above.
-_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
-    INSERT INTO dirty_broker_listings (listing_id)
-    SELECT l.id
-    FROM unnest(%s::bigint[]) AS s(sid)
-    JOIN listings l ON l.sreality_id = s.sid
-    ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()
-"""
-
-# The JOIN onto listings is the R2 dual-write handle: the batch upsert above ran
-# first in this same transaction, so every j.sreality_id already has its row (and
-# therefore its surrogate id) visible here. Resolving the id in SQL — rather than
-# zipping a RETURNING back to Python — is deliberate: INSERT ... SELECT RETURNING
-# order is unspecified, so a positional zip could silently misalign ids to rows.
-_BATCH_IMAGES_SQL = """
-    INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
-    SELECT j.sreality_id, l.id, j.sreality_url, j.sequence
-    FROM jsonb_to_recordset(%s::jsonb)
-        AS j(sreality_id bigint, sreality_url text, sequence integer)
-    JOIN listings l ON l.sreality_id = j.sreality_id
-    -- Arbiter is listing_id (R2 Phase C, images_listing_id_sequence_key) — see
-    -- record_images for why sreality_id was never safe here.
-    ON CONFLICT (listing_id, sequence) DO UPDATE SET
-        sreality_url = EXCLUDED.sreality_url,
-        download_attempts = 0,
-        last_error = NULL,
-        unavailable_reason = NULL
-    WHERE images.storage_path IS NULL
-    RETURNING (xmax = 0) AS inserted
-"""
-
-
-def write_detail_batch(
-    conn: psycopg.Connection,
-    results: Sequence[DetailResult],
-) -> dict[str, int]:
-    """Write a batch of successful detail fetches in ONE transaction.
-
-    Set-based: one multi-row listings upsert, one snapshot-on-change insert
-    (changed -> exactly one snapshot, unchanged -> none), one images upsert,
-    one failure-clear. Collapses the per-listing round-trips into ~4 per batch.
-
-    Does NOT run the Tier-1 property matcher — new listings land with
-    property_id NULL and are matched asynchronously by recompute_property_stats
-    (Phase 2 deferral). Returns counts {new, updated, unchanged, images_discovered}.
-    """
-    n = len(results)
-    if n == 0:
-        return {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
-
-    listing_objs: list[dict[str, Any]] = []
-    snapshot_objs: list[dict[str, Any]] = []
-    image_objs: list[dict[str, Any]] = []
-    ok_ids: list[int] = []
-    seen_img: set[tuple[int, int]] = set()
-
-    for r in results:
-        row = r.row or {}
-        sid = int(row["sreality_id"])
-        ok_ids.append(sid)
-        price_czk = sane_price_czk(row.get("price_czk"))
-        obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
-        obj["price_czk"] = price_czk
-        sane_listing_numerics(obj)
-        obj["sreality_id"] = sid
-        obj["raw_json"] = r.raw or {}
-        obj["discovery_seq"] = r.discovery_seq
-        obj["discovered_at"] = r.discovered_at
-        listing_objs.append(obj)
-        snapshot_objs.append({
-            "sreality_id": sid,
-            "price_czk": price_czk,
-            "content_hash": r.content_hash,
-        })
-        for img in r.images or []:
-            url = img.get("url")
-            if not url:
-                continue
-            # Backstop (mirrors record_images): keep non-image URLs out of the
-            # photo pipeline. sreality has no video media today, so this never
-            # fires for the drain — it's defense-in-depth for a future schema shift.
-            if not media.is_image_url(url):
-                continue
-            seq = img.get("sequence")
-            if seq is not None:
-                key = (sid, seq)
-                if key in seen_img:
-                    continue
-                seen_img.add(key)
-            image_objs.append(
-                {"sreality_id": sid, "sreality_url": url, "sequence": seq}
-            )
-
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(_BATCH_UPSERT_SQL, (Jsonb(listing_objs),))
-        new = sum(1 for (inserted,) in cur.fetchall() if inserted)
-
-        cur.execute(_BATCH_SNAPSHOT_SQL, (Jsonb(snapshot_objs),))
-        changed_sids = [int(r[0]) for r in cur.fetchall()]
-        snapshots = len(changed_sids)
-
-        images_discovered = 0
-        if image_objs:
-            cur.execute(_BATCH_IMAGES_SQL, (Jsonb(image_objs),))
-            images_discovered = sum(1 for (ins,) in cur.fetchall() if ins)
-
-        cur.execute(
-            "DELETE FROM listing_fetch_failures WHERE sreality_id = ANY(%s)",
-            (ok_ids,),
-        )
-
-        if changed_sids:
-            cur.execute(_BATCH_DIRTY_FROM_SIDS_SQL, (changed_sids,))
-            cur.execute(_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL, (changed_sids,))
-
-    # snapshots == new + updated (a brand-new listing always gets one snapshot);
-    # the rest were content-identical touches.
-    updated = max(0, snapshots - new)
-    unchanged = n - new - updated
-    return {
-        "new": new,
-        "updated": updated,
-        "unchanged": unchanged,
-        "images_discovered": images_discovered,
-    }
 
 
 def enqueue_detail(

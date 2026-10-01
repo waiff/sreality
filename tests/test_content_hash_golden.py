@@ -1,7 +1,9 @@
 """Golden content-hash digests (rule 2): the snapshot-on-change decision compares
 against hashes already stored in listing_snapshots, so moving the hash code must
 leave every digest byte-identical — a drift would append one spurious snapshot per
-refetched row. These three values were computed on the pre-chokepoint functions."""
+refetched row. These three values were computed on the pre-chokepoint functions
+(hashing.content_hash, ScrapedListing.content_hash); the writer's adapters must
+reproduce them byte-for-byte."""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from scraper import bazos_parser, hashing
+from scraper import bazos_parser, listing_write, parser
 from scraper.scraped_listing import ScrapedListing
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -31,11 +33,12 @@ def _hand_built() -> ScrapedListing:
 
 def test_sreality_wire_payload_digest_is_pinned() -> None:
     raw = json.loads((FIXTURES / "sample_listing.json").read_text("utf-8"))
-    assert hashing.content_hash(raw) == SREALITY_DIGEST
+    w = listing_write.from_sreality(raw, parser.parse_listing(raw), parser.parse_images(raw))
+    assert w.content_hash == SREALITY_DIGEST
 
 
 def test_hand_built_scraped_listing_digest_is_pinned() -> None:
-    assert _hand_built().content_hash() == SCRAPED_DIGEST
+    assert listing_write.from_scraped(_hand_built()).content_hash == SCRAPED_DIGEST
 
 
 def test_bazos_parsed_fixture_digest_is_pinned() -> None:
@@ -44,4 +47,4 @@ def test_bazos_parsed_fixture_digest_is_pinned() -> None:
         html, source_url="https://reality.bazos.cz/inzerat/219122924/x.php",
         category_main="byt", category_type="prodej",
     )
-    assert listing.content_hash() == BAZOS_DIGEST
+    assert listing_write.from_scraped(listing).content_hash == BAZOS_DIGEST

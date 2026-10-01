@@ -8,6 +8,7 @@ broker anchor + data-fk_rk agency id, and the st.realitymix.cz/i/…/nab_ galler
 
 from __future__ import annotations
 
+from scraper.hashing import digest
 from scraper.realitymix_parser import (
     _category_from_slug,
     category_from_breadcrumb,
@@ -345,10 +346,10 @@ def test_mapbearing_listing_keeps_rich_data_address_locality():
 def test_content_hash_and_to_row_bridge_to_ingest():
     a = parse_detail(BYT_HTML, source_url=_BYT_URL)
     b = parse_detail(BYT_HTML, source_url=_BYT_URL)
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
-    row = a.to_row(-7)
-    assert row["sreality_id"] == -7
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
+    row = a.listing_columns()
+    assert "sreality_id" not in row
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 5_290_000
     assert row["area_m2"] == 66.0

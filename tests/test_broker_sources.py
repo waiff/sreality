@@ -301,13 +301,15 @@ def test_write_contacts_is_opt_out_so_a_forgotten_flag_still_writes_contacts() -
     assert {c.source for c in BROKER_SOURCES if not c.write_contacts} == {"mmreality"}
 
 
-def test_scraper_db_derives_both_registries_from_this_module() -> None:
+def test_the_listing_writer_derives_its_registries_from_this_module() -> None:
     """The half-landed-onboarding guard: before this, a new portal had to be added
     to three hand-maintained lists in two files."""
-    from scraper import db
+    from scraper import listing_write
 
-    assert db.BROKER_ATTRIBUTED_SOURCES == frozenset(BROKER_SOURCE_NAMES)
-    assert db._BROKER_FINGERPRINT_KEYS == BROKER_FINGERPRINT_KEYS
+    assert listing_write.BROKER_SOURCE_NAMES is BROKER_SOURCE_NAMES
+    assert listing_write.BROKER_FINGERPRINT_KEYS is BROKER_FINGERPRINT_KEYS
+    assert listing_write.BROKER_FINGERPRINTED_SOURCES == frozenset(
+        c.source for c in BROKER_SOURCES if c.block == "broker")
 
 
 # --- schema check (CI's replayed-schema job only) ---------------------------

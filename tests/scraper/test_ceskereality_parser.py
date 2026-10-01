@@ -16,6 +16,7 @@ from scraper.ceskereality_parser import (
     parse_detail,
     parse_index,
 )
+from scraper.hashing import digest
 
 _DETAIL_URL = (
     "https://www.ceskereality.cz/prodej/byty/byty-1-1/praha/"
@@ -254,11 +255,11 @@ def test_parse_detail_street_from_slug_when_no_jsonld_address():
 def test_parse_detail_content_hash_and_bridges_to_ingest():
     a = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej")
     b = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej")
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
 
-    row = a.to_row(-7)
-    assert row["sreality_id"] == -7
+    row = a.listing_columns()
+    assert "sreality_id" not in row
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 6_999_000
     assert row["area_m2"] == 41.0

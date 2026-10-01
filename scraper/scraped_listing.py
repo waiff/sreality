@@ -1,19 +1,16 @@
-"""The shared ScrapedListing ingestion contract (multi-portal dedup).
+"""The shared ScrapedListing ingestion contract (the eight crawler portals).
 
 One normalized shape every non-sreality portal scraper emits. It carries the
-cross-source identity (`source` + `source_id_native`, the Tier-0 idempotency
-key) plus the subset of `listings` columns the matcher and analytics read.
-`scraper.db.ingest_scraped_listing` turns one of these into a `listings` row
-(assigning a synthetic negative PK on first sight) and runs the Tier-1 matcher.
+cross-source identity (`source` + `source_id_native`, the natural key) plus the
+subset of `listings` columns analytics read. `listing_write.from_scraped` turns
+one of these into a write; grouping is out-of-band (rule 15).
 
-Sreality keeps its own JSON parse path (`scraper.parser` -> `upsert_listing`);
-this contract is for the HTML/crawler sources (bazos first).
+Sreality keeps its own JSON parse path (`scraper.parser` -> `listing_write.from_sreality`);
+this contract is for the HTML/crawler sources.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -22,8 +19,8 @@ from typing import Any
 # semantics of sreality's content hash: identity (source ids, url) is NOT
 # hashed; the displayed/analytical content is. lat/lon are deliberately NOT
 # hashed: coords are derived/geocoded data prone to oscillation (the
-# geocode-skip cycle), and listings.geom updates on every upsert regardless of
-# snapshots; a genuine location change surfaces via locality/description.
+# geocode-skip cycle), and W4-c dropped geom (a pin rides raw_json as a claim);
+# a genuine location change surfaces via locality/description.
 # street / house_number / zip are likewise NOT hashed — they are
 # extracted/derived (e.g. a comma-split of the locality for idnes/maxima/remax),
 # so backfilling or refining them must never churn snapshots. published_at is
@@ -139,14 +136,3 @@ class ScrapedListing:
         """The `listings` column values this contract carries; the rest default to NULL."""
         return {k: getattr(self, k) for k in _LISTING_FIELDS}
 
-    def content_hash(self) -> str:
-        from scraper.hashing import digest
-        return digest(self.hash_doc())
-
-    def to_row(self, sreality_id: int | None) -> dict[str, Any]:
-        """The dict scraper.db.upsert_listing consumes. Listing columns this
-        contract doesn't carry default to NULL via upsert_listing's row.get.
-        `sreality_id` is None once the Gate-2 flip-writer (scraper.db's
-        `gate2_null_sreality_id_enabled` app_settings flag) is turned on for a
-        first-sight non-sreality row — NULL, not a synthetic negative."""
-        return {**self.listing_columns(), "sreality_id": sreality_id}
