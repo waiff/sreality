@@ -465,7 +465,8 @@ def main() -> int:
     hashed = tuple(c for c in fields if c in HASHED_COLUMNS)
     if hashed and not args.dry_run and not args.allow_snapshot_deferral:
         # sreality is the one portal whose drain hashes the RAW payload
-        # (scraper/main.py) instead of the parsed fields (scraper/db.write_details), so
+        # (listing_write.from_sreality: hashing.sreality_hash_doc) instead of the parsed fields
+        # (listing_write.from_scraped: ScrapedListing.hash_doc), so
         # its consequence is the opposite of every other portal's and has to be said.
         consequence = (
             "sreality hashes the RAW payload, which this heal does not touch, so NO "

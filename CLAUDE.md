@@ -209,7 +209,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     New rows land `property_id` NULL on every path (straggler-attach births the singleton, rule #15). Every portal runs this same split
     through the shared `portal_runner` on the source-generic queue.
 20. **Property maintenance is dirty-set incremental, not full-table.** Every child-changing write (content change, revival,
-    delist, column heal) enqueues `property_id` into `dirty_properties` (migration 106) in its own transaction (census-ledgered exceptions); `property_maintenance.yml` (`--incremental`, `*/5`)
+    delist, column heal) enqueues `property_id` into `dirty_properties` (migration 106) in its own transaction (exceptions: the census ledger, and a crawler change confined to unhashed columns, which waits for the daily sweep — architecture § rule 20); `property_maintenance.yml` (`--incremental`, `*/5`)
     attaches new singletons + recomputes only queued properties (O(changes)); the daily full sweep (04:15) is
     the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
 21. **Every portal runs through ONE shared framework (Phase 4: `portal_base` / `portal` / `portal_runner`, one
