@@ -1117,7 +1117,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
   W2 (#1650): resolver v5.5, the town rule and typed numbers. W3 (#1654): the reading is the claim
   lane's third substrate (reader `text_reading`, V1–V4; hourly, first), bazos@8 claims town/part/
   street/numbers from it (`obec_slug`, `street_cue` and the percent decoder gone), a mined reading
-  supersedes the listing's older claims of its types (stamp: mig 578), v5.6 drops the separator split
+  supersedes the listing's older claims of its types (stamp: mig 581), v5.6 drops the separator split
   and the `low` gate. Rollout: 578 → merge → readings, then bodies (~1 day) → re-resolve; never
   dispatch `location_claims_retire.yml` while text-less delisted rows hold @7 towns.
   **Rule 25 ruling (operator, 2026-09-30):** W1 (+354) and W2 (+182) were waived on the promise that

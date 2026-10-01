@@ -1,6 +1,6 @@
 """The readings half (W3), EXECUTED against the replayed schema — CI's migrations lane
 (`TEST_DATABASE_URL`); every test rolls back; locally it skips. Only a real database shows which
-reading is CURRENT (the hash in SQL, migration 578's stamp, the lane's version) and what the one
+reading is CURRENT (the hash in SQL, migration 581's stamp, the lane's version) and what the one
 write deletes, so each trace the stamp exists for is walked: a headline that reverts (A -> B -> A),
 a model rolled back (M1 -> M2 -> M1), a contract bump, a delisted text never read, a wanted ad.
 """

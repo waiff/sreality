@@ -959,7 +959,7 @@ _CLAIM_WRITE_SQL = (_CLAIM_INSERT_CTES + _ENQUEUE_CTE.format(changed="ins") + ""
 
 # THE READINGS HALF (W3, final-plan D1/D5). A listing's CURRENT reading is its successful
 # location reading of its CURRENT advert text (hashed by the text lane's own SQL), at the lane's
-# `extractor_version` if one exists, else the newest. The stamp (migration 578) says the listing
+# `extractor_version` if one exists, else the newest. The stamp (migration 581) says the listing
 # was CHECKED at `<source>@<version>`: plain on the reading it MINED, with '~' on one of another
 # text (on all, when the current text is unread: its claims stay). No cursor, no index (§10):
 # `unsettled` reads the table once, hash-free; a listing is hashed only when its preferred reading
@@ -1835,8 +1835,8 @@ def drain_readings(
         return
     with conn.cursor() as cur:
         cur.execute(_STAMP_COLUMN_SQL)
-        if cur.fetchone() is None:  # merged ahead of migration 578: only this half waits
-            LOG.warning("INTAKE readings half skipped: migration 578 is not applied")
+        if cur.fetchone() is None:  # merged ahead of migration 581: only this half waits
+            LOG.warning("INTAKE readings half skipped: migration 581 is not applied")
             return
     stamps = [f"{s}@{entries[0].contract_version}" for s, entries in scope.items()]
     types = {s: sorted({e.claim_type for e in entries}) for s, entries in scope.items()}
