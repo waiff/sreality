@@ -661,7 +661,7 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   (`autodedup/judge.py` `DIGEST_ATTRS`) still shows it as "usable area".
 
 **A figure in the plot box is not always a plot (general ruling 3, 2026-09-30; operator answers 2026-10-01; PR #1668,
-heal = migration 582 in PR #1669).** Not our scraping: on 14 of 14 live pages the portal itself prints one figure in
+heal = migration 583 in PR #1669).** Not our scraping: on 14 of 14 live pages the portal itself prints one figure in
 the plot box and the floor-area box, and every `estate_area` key map was right (ceskereality 1,383 of 3,023 active
 komerční plots, idnes 651, realitymix 427, mmreality 53; plus ceskereality's 3,185 active flat "plots" — the doubled
 floor figure, the placeholder 1 or the building's parcel). The missing rule is one function, `scraper.area.stated_plot`,

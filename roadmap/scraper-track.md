@@ -128,7 +128,7 @@ Independent of the analytical, UI, and map tracks.
   ("zastavěná plocha" / mmreality's `builtUpArea`) with no column to hold it — a schema question,
   not a parser fix; bazos gains no side columns (its free text carries no labelled parcel); and
   the unverified-key census across the nine portals is still unwritten.
-- **W22 (2026-10-01, PR #1668; heal = migration 582, PR #1669) — a figure in the plot box is
+- **W22 (2026-10-01, PR #1668; heal = migration 583, PR #1669) — a figure in the plot box is
   not always a plot.** General ruling 3 (2026-09-30) + the operator's flat answers: on 14 of 14
   live pages the portal itself printed one figure in the plot box and the floor-area box
   (ceskereality 1,383 komerční + 3,185 flats, idnes 651, realitymix 427, mmreality 53 active

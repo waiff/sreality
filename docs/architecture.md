@@ -2289,7 +2289,7 @@ renumber.** Navigate by area:
     cover its whole parcel). The contract cells stay `structured` with a note only — `none` /
     `text` would make the column preserve-if-null (`db._preserved_columns`) and freeze every
     stored echo. Each affected LIVE row clears at its next detail fetch with one genuine
-    snapshot; a STORED echo clears only by migration 582 (PR #1669, destructive, the 573
+    snapshot; a STORED echo clears only by migration 583 (PR #1669, destructive, the 573
     pattern: byt = every stored plot, komerční = the equality rule, active AND inactive),
     because `scripts/reparse.py` never blanks. Named residual: the reverse case (idnes
     19082282, a campsite's 8 616 m² land typed into the usable box) keeps the wrong area and
