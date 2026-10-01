@@ -2,10 +2,10 @@
 
 The fake below STORES what the apply path writes and serves it back, dispatching on the SQL
 constant itself (the `fake_pg` idiom): a statement this file does not know raises. The set merge
-and the per-advert detach it hands the apply path mimic the toolkit's contract — the oldest
+and the set detach it hands the apply path mimic the toolkit's contract — the oldest
 record survives, one asset link is carried and two refuse (two linked units, too, for the
-engine), re-point, soft-retire, refuse a category mismatch, move one advert back off the ledger
-(the toolkit's own `_detach_plan` and `_origin_gone`; a dry run reads the real
+engine), re-point, soft-retire, refuse a category mismatch, move each advert back off the ledger
+in order (the toolkit's own `_detach_plan` and `_origin_gone`; a dry run reads the real
 `detach_outcomes` over the fake ledger) —
 inside nested transactions that roll back on an exception, so a group's atomicity is
 observable here.
@@ -19,7 +19,7 @@ import typing
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -375,37 +375,44 @@ class FakeDb:
         return merge
 
     def detach(self, calls: list[str | None]) -> Any:
-        def detach(conn: "FakeDb", listing_id: int, *, decided_by: str, reason: str | None = None,
-                   source: str = "operator", merge_group_id: str | None = None
-                   ) -> dict[str, Any]:
+        """The toolkit's set detach, faked: one call (one `calls` entry) per set, each advert
+        re-planned in the caller's order inside one transaction."""
+        def detach(conn: "FakeDb", listing_ids: Sequence[int], *, decided_by: str,
+                   reason: str | None = None, source: str = "operator",
+                   merge_group_id: str | None = None) -> dict[str, Any]:
             calls.append(merge_group_id)
+            adverts = []
             with conn.transaction():
-                current = conn.listings[listing_id]["property_id"]
-                moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
-                         for e in conn.events if e["listing"] == listing_id and not e["undone"]]
-                here = [lid for lid, row in conn.listings.items() if row["property_id"] == current]
-                merged = {e["listing"] for e in conn.events if not e["undone"]}
-                outcome, undo, target = _detach_plan(current, moves, merge_group_id,
-                                                     (len(here), len(set(here) - merged)))
-                if outcome == "detached" and _origin_gone(
-                        (conn.properties[target]["status"],
-                         conn.properties[target]["merged_into"]), undo):
-                    outcome = "origin_moved_on"
-                if outcome == "detached":
-                    conn.listings[listing_id]["property_id"] = target
-                    for e in (e for e in conn.events if e["id"] in {m[0] for m in undo}):
-                        e["undone"] = True
-                    back = conn.properties[target]
-                    if back["status"] == "merged_away":
-                        back.update(status="active", merged_into=None, merged_at=None)
-            return {"data": {"detached": outcome == "detached", "outcome": outcome}}
+                for listing_id in dict.fromkeys(listing_ids):
+                    current = conn.listings[listing_id]["property_id"]
+                    moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
+                             for e in conn.events if e["listing"] == listing_id and not e["undone"]]
+                    here = [lid for lid, row in conn.listings.items()
+                            if row["property_id"] == current]
+                    merged = {e["listing"] for e in conn.events if not e["undone"]}
+                    outcome, undo, target = _detach_plan(current, moves, merge_group_id,
+                                                         (len(here), len(set(here) - merged)))
+                    if outcome == "detached" and _origin_gone(
+                            (conn.properties[target]["status"],
+                             conn.properties[target]["merged_into"]), undo):
+                        outcome = "origin_moved_on"
+                    if outcome == "detached":
+                        conn.listings[listing_id]["property_id"] = target
+                        for e in (e for e in conn.events if e["id"] in {m[0] for m in undo}):
+                            e["undone"] = True
+                        back = conn.properties[target]
+                        if back["status"] == "merged_away":
+                            back.update(status="active", merged_into=None, merged_at=None)
+                    adverts.append({"listing_id": listing_id, "detached": outcome == "detached",
+                                    "outcome": outcome})
+            return {"data": {"adverts": adverts}}
         return detach
 
     def undo_group(self, merge_group_id: str) -> None:
-        """The operator takes one merge apart by hand: every advert it moved, detached."""
-        detach = self.detach([])
-        for e in [e for e in self.events if e["merge_group_id"] == merge_group_id]:
-            detach(self, e["listing"], decided_by="operator", merge_group_id=merge_group_id)
+        """The operator takes one merge apart by hand: every advert it moved, in one detach."""
+        self.detach([])(self, [e["listing"] for e in self.events
+                               if e["merge_group_id"] == merge_group_id],
+                        decided_by="operator", merge_group_id=merge_group_id)
 
 
 def _pair_group(db: FakeDb, key: int, lids: list[int], pids: list[int], *,
@@ -976,7 +983,9 @@ def test_the_default_merge_and_undo_are_the_toolkits_one_merge_and_one_undo() ->
     assert inspect.signature(A.apply_plan).parameters["merge"].default \
         is property_identity.merge_property_set
     assert inspect.signature(A.unapply).parameters["detach"].default \
-        is property_identity.detach_listing
+        is property_identity.detach_listings
+    # legacy_retire resolves its `detach=None` default to its module's name at call time
+    assert A.legacy_retire.detach_listings is property_identity.detach_listings
     assert A.MERGE_SOURCE in typing.get_args(property_identity.MergeSource)
 
 
@@ -1416,7 +1425,7 @@ def test_a_group_the_operator_partly_detached_is_undone_or_blocked_as_its_dry_ru
     scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
     _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
     A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
-    db.detach([])(db, 11, decided_by="operator")
+    db.detach([])(db, [11], decided_by="operator")
     if built_on:
         db.prop(700)
         db.listing(70, 700)
@@ -1610,7 +1619,7 @@ def test_a_later_retiring_merge_the_operator_undid_is_not_named(hand_into: int) 
 def test_a_merge_undone_and_then_redone_by_hand_is_noted_undone_by_the_dry_run_too() -> None:
     # g12 merged 200 (11) into 100 (10). The operator undid it on the merge ledger and later
     # merged 200 into 100 again by hand: `merged_into` is the same, but that is THEIR merge
-    # (its `merged_at` is not g12's `applied_at`). g12's detach loop finds nothing live of it,
+    # (its `merged_at` is not g12's `applied_at`). g12's detach finds nothing live of it,
     # so the dry run says "already undone" exactly as the live run then records it.
     db = FakeDb()
     _scope, calls = _applied_two(db)
@@ -1890,11 +1899,11 @@ def test_an_unapply_that_crashes_mid_run_still_publishes_what_it_undid(
     undo = db.detach([])
     seen: list[str] = []
 
-    def detach_or_crash(conn: FakeDb, listing_id: int, **kw: Any) -> dict[str, Any]:
+    def detach_or_crash(conn: FakeDb, listing_ids: list[int], **kw: Any) -> dict[str, Any]:
         seen.append(kw["merge_group_id"])
         if len(seen) == 2:
             raise RuntimeError("canceling statement due to statement timeout")
-        return undo(conn, listing_id, **kw)
+        return undo(conn, listing_ids, **kw)
 
     original = A.unapply
     monkeypatch.setattr(A, "unapply", lambda conn, gen, **kw: original(

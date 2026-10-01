@@ -30,13 +30,15 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   reach `brokers.property_count` on the broker drain's cadence instead of the daily sweep.
   PR 3: set-shaped `detach_listings` — one lock up front, each advert re-planned in order,
   rulings once (movers vs stayers, never between two movers), one after-step per call;
-  `detach_listing` is its one-advert adapter; the split detaches its movers in ONE call
+  the split detaches its movers in ONE call
   (1 + J recomputes for J joined units, was M + J) and its `restore_must_not_link` is proven
   to write nothing (deleted in follow-up F1). PR 4: the dispatch collapse keeps its sends —
   `Dispatches` re-points a collapsed row's `channel_sends` onto the kept twin first, so a
   delivered alert no longer aborts the merge (`channel_sends_check`; live test 3b un-xfailed).
-- **Next:** a chained detach restores one card (PR 5), the engine's undo on the set form and
-  `detach_listing` deleted (PR 6).
+  PR 6: the engine's undo on the set form — `unapply` and `legacy_retire` detach each group in ONE
+  `detach_listings` call (the injected `detach=` takes the set); the one-advert adapter is deleted.
+- **Next:** a chained detach restores one card (PR 5, draft #1681 — needs an operator decision:
+  best-effort card identity inferred from the ledgers, or a stable card id via an additive migration).
   After PR 2 deploys, `dirty_broker_listings` depth steps up after merges (the fix
   working); `property_sweep_last_complete` should stay fresh.
 

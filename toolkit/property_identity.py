@@ -2,14 +2,14 @@
 
 `merge_property_set` merges an active set into its oldest record under one lock and one gate;
 `detach_listings` moves a set of adverts back to their ledger origins, or (the operator only) a
-native advert to a new record through the one birth path, under one lock taken up front;
-`detach_listing` is its one-advert adapter for the engine's per-advert undo callers. Both carry
-every property-anchored operator-state row through `toolkit.property_carriers.PROPERTY_CARRIERS`
-and finish with `properties_changed` once per call (rollup, Browse row, broker queue). Callers:
-`api.property_merge` and `toolkit.property_split` (the operator), `autodedup.apply` and
-`autodedup.reconcile` (merge, inside `app_settings.autodedup_apply_scope`),
-`autodedup.apply.unapply` and `autodedup.legacy_retire` (detach). `source='operator'` is also a
-ruling (decision 8); an engine merge or undo never is.
+native advert to a new record through the one birth path, under one lock taken up front. Both
+carry every property-anchored operator-state row through
+`toolkit.property_carriers.PROPERTY_CARRIERS` and finish with `properties_changed` once per call
+(rollup, Browse row, broker queue). Callers: `api.property_merge` and `toolkit.property_split`
+(the operator), `autodedup.apply` and `autodedup.reconcile` (merge, inside
+`app_settings.autodedup_apply_scope`), `autodedup.apply.unapply` and `autodedup.legacy_retire`
+(detach, one call per group). `source='operator'` is also a ruling (decision 8); an engine merge
+or undo never is.
 """
 
 from __future__ import annotations
@@ -651,8 +651,8 @@ def detach_listings(
     each moved advert "different" from every advert left where it was, never from another that
     moved (`_rule_detached`); then `properties_changed` ONCE over every property left and reached.
     An unknown advert refuses the set before anything moves; an empty set is a no-op. Callers:
-    `toolkit.property_split`; `autodedup.apply.unapply` and `autodedup.legacy_retire` through
-    `detach_listing`."""
+    `toolkit.property_split`; `autodedup.apply.unapply` and `autodedup.legacy_retire`, one call
+    per group."""
     ids = list(dict.fromkeys(int(i) for i in listing_ids))
     done: list[_Detached] = []
     ruled = 0
@@ -690,32 +690,3 @@ def detach_listings(
         },
     }
 
-
-def detach_listing(
-    conn: psycopg.Connection,
-    listing_id: int,
-    *,
-    decided_by: str,
-    reason: str | None = None,
-    source: MergeSource = "operator",
-    merge_group_id: str | None = None,
-) -> dict[str, Any]:
-    """`detach_listings` for ONE advert, in the per-advert payload (`survivor_property_id` = the
-    property it left): the adapter the engine's injected per-advert `detach=` callers
-    (`autodedup.apply.unapply`, `autodedup.legacy_retire`) and their fakes still take."""
-    out = detach_listings(conn, [listing_id], decided_by=decided_by, reason=reason,
-                          source=source, merge_group_id=merge_group_id)
-    (advert,) = out["data"]["adverts"]
-    return {
-        "data": {
-            "listing_id": advert["listing_id"],
-            "detached": advert["detached"],
-            "outcome": advert["outcome"],
-            "survivor_property_id": advert["left_property_id"],
-            "restored_property_id": advert["restored_property_id"],
-            "reactivated": advert["reactivated"],
-            "merge_group_ids": advert["merge_group_ids"],
-            "rulings_written": out["data"]["rulings_written"],
-        },
-        "metadata": {**out["metadata"], "tool": "detach_listing"},
-    }

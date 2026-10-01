@@ -19,6 +19,6 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
-  Until then the brake is interval 0, then `unapply` (E927: a `detach_listing` loop per group);
+  Until then the brake is interval 0, then `unapply` (E927: one `detach_listings` call per group);
   the commit that deletes the modes must name what replaces it. `legacy_retire` rides on batch
   `mode=apply` (`retire_legacy=1`), so the same commit must also say where it runs until W8.

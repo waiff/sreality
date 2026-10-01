@@ -177,7 +177,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge chokepoint,
     two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listings`, set-shaped) — it re-points `listings.property_id`,
     soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
-    call, a group undo loops its one-advert adapter `detach_listing` — no replay), carries every property-anchored operator-state row through ONE ordered list,
+    call, and so is a group undo (`merge_group_id=`) — no replay), carries every property-anchored operator-state row through ONE ordered list,
     `PROPERTY_CARRIERS` (rule #18), brings every touched property current once per call (`properties_changed`, the dirty drain's after-step), and enforces **category compatibility** (`CategoryClash`:
     sale≠rent, flat≠house — except the sanctioned **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
