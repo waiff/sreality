@@ -131,10 +131,17 @@ class ScrapedListing:
                 f"{self.source}/{self.source_id_native}: source_url is required"
             )
 
+    def hash_doc(self) -> dict[str, Any]:
+        """The crawlers' hash document: the 28 _HASH_FIELDS, unhashed (hashing.digest hashes it)."""
+        return {k: getattr(self, k) for k in _HASH_FIELDS}
+
+    def listing_columns(self) -> dict[str, Any]:
+        """The `listings` column values this contract carries; the rest default to NULL."""
+        return {k: getattr(self, k) for k in _LISTING_FIELDS}
+
     def content_hash(self) -> str:
-        payload = {k: getattr(self, k) for k in _HASH_FIELDS}
-        blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        from scraper.hashing import digest
+        return digest(self.hash_doc())
 
     def to_row(self, sreality_id: int | None) -> dict[str, Any]:
         """The dict scraper.db.upsert_listing consumes. Listing columns this
@@ -142,6 +149,4 @@ class ScrapedListing:
         `sreality_id` is None once the Gate-2 flip-writer (scraper.db's
         `gate2_null_sreality_id_enabled` app_settings flag) is turned on for a
         first-sight non-sreality row — NULL, not a synthetic negative."""
-        row: dict[str, Any] = {k: getattr(self, k) for k in _LISTING_FIELDS}
-        row["sreality_id"] = sreality_id
-        return row
+        return {**self.listing_columns(), "sreality_id": sreality_id}

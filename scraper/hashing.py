@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -83,14 +84,18 @@ _ATTACHMENT_URL_PREFIX = "sdn_"
 _ATTACHMENT_URL_SUFFIX = "_attachment_url"
 
 
+def digest(doc: Mapping[str, Any]) -> str:
+    """THE content hash (rule 2): sha256 of canonical JSON. Each adapter supplies its document."""
+    blob = json.dumps(doc, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def content_hash(raw: dict[str, Any]) -> str:
-    """sha256 of canonical JSON with volatile fields stripped."""
-    stripped = _strip_volatile(raw)
-    canonical = json.dumps(stripped, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return digest(sreality_hash_doc(raw))
 
 
-def _strip_volatile(raw: dict[str, Any]) -> dict[str, Any]:
+def sreality_hash_doc(raw: dict[str, Any]) -> dict[str, Any]:
+    """sreality's hash document: the wire payload minus its volatile keys."""
     out = deepcopy(raw)
     for key in VOLATILE_TOP_KEYS:
         out.pop(key, None)
