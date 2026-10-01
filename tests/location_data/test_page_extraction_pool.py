@@ -47,8 +47,7 @@ def _task(index: int, *, source: str = "remax",
         listing_id=index, source=source, source_id_native=str(400000 + index),
         raw_json={}, observed_at=FETCHED_AT)
     payload = page_readers.ArchivedPayload(
-        id=9000 + index, source=source, source_id_native=row.source_id_native,
-        page_kind="detail", payload_sha256=f"{index:064d}", first_observed_at=FETCHED_AT,
+        id=9000 + index, page_kind="detail", first_observed_at=FETCHED_AT,
         body=body if body is not None else
         f"<html><body><div id='subject'>Krymska {index}</div></body></html>".encode())
     return row, payload

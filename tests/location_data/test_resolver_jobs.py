@@ -490,9 +490,6 @@ def test_the_claims_select_maps_onto_claim_positionally():
     assert claim.declared_radius_m == 25.0
     assert claim.blur_evidence == "declared"
     assert claim.subject_scoped is True
-    # The six the pure core never read keep their names and their defaults (W1-b).
-    assert (claim.extractor_id, claim.declared_confidence, claim.page_kind) == ("", None, "none")
-    assert (claim.snapshot_id, claim.distance_m, claim.target_text) == (None, None, None)
 
     # A NULL geometry must not become 0.0 — the resolver's `has_position` reads both.
     assert resolve_db._claim(row[:10] + (None, None) + row[12:]).has_position is False

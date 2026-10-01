@@ -1126,6 +1126,15 @@ component is slimmed twice — each wave rewrites one component and slims its st
   ≈ 150). The operator accepted +494 as the cost of a new capability and its safeguards; R3 fuzzy
   street matching is kept for reading claims (40 of 42 pilot streets exact, the one near-miss
   right); the `percent` decoder deletion stands.
+- **Claim fields 498 dropped, deleted from Python** (2026-10-01): `Claim` loses the ten fields no
+  column stores and no fingerprint hashes (`snapshot_id/_anchor`, `history_completeness`,
+  `legacy_write_path_unknown`, `payload_id/_sha256`, `evidence_quote`, `span_start/_end`,
+  `payload_scope_version`), with `assert_evidence_complete`, the quote builders, the quote's share
+  of the size cap, `HISTORY_COMPLETENESS` and the scan's payload-hash column; the resolver `Claim`
+  loses its six unselected fields. All 23 fingerprint inputs kept; goldens re-blessed (keys only).
+  `html_regex` keeps its locatable-match gate, narrowed from `find_span` to `ScopedDocument.shows`;
+  `json_regex` (no live entry) loses its. Also gone: the `scope_version` pass-throughs and
+  `ArchivedPayload.source/source_id_native` (nothing read them). Net −1,067 lines.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
