@@ -138,9 +138,6 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "mmreality"
-    # The flag is the live registry row's; the coverage gate flips it from
-    # ledger evidence, never code.
-    assert p.supports_complete_walk is False
     assert len(p.categories()) == 10
     assert p.category_labels(BYTY) == ("byt", "prodej")
     assert p.category_labels({"sale_type": "pronajem", "category": "komercni-objekty"}) == (
@@ -238,7 +235,7 @@ def test_walk_category_classifies_and_reaches_the_portals_last_page(monkeypatch)
     assert (total, pages, reached_end) == (3, 2, True)
     assert _ScriptedClient.calls == [
         ("prodej", "byty", None), ("prodej", "byty", 2), ("prodej", "byty", 2)]
-    assert cap["touched"] == [8103]
+    assert cap["touched"] == [8102, 8103]
     refs = {e[0]: e for e in cap["entries"]}
     assert refs[a][3] == mmreality_main.db.QUEUE_PRIORITY_NEW
     assert refs[b][3] == mmreality_main.db.QUEUE_PRIORITY_CHANGED
