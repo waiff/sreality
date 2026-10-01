@@ -1,5 +1,6 @@
-"""Tests for the Phase-2 needs-detail queue + batched detail-drain writes
-(scraper.db).
+"""Tests for the Phase-2 needs-detail queue, the write-boundary numeric guards and
+the run counters (scraper.db). The listing write itself is scraper/listing_write.py
+(tests/test_listing_write.py offline, tests/test_listing_write_live.py executed).
 
 Hermetic: a scripted fake conn matches each executed statement against
 (predicate -> rows) pairs and records every execution, so the tests assert the
@@ -10,10 +11,7 @@ out-of-band via the Supabase MCP.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
-
-from psycopg.types.json import Jsonb
 
 from scraper import db
 
@@ -79,116 +77,6 @@ def _find(executed, needle: str) -> tuple[str, Any] | None:
     return next((e for e in executed if needle in e[0]), None)
 
 
-def _result(sid: int, *, price: int, content_hash: str, images=None, discovery_seq=None,
-            discovered_at=None):
-    row = {"sreality_id": sid, "price_czk": price}
-    return SimpleNamespace(
-        row=row, raw={"id": sid}, content_hash=content_hash, images=images or [],
-        discovery_seq=discovery_seq,
-        discovered_at=discovered_at,
-    )
-
-
-# --- write_detail_batch -----------------------------------------------------
-
-
-def test_write_detail_batch_tallies_new_updated_unchanged():
-    """new = #(xmax=0); snapshots rowcount = new+updated; unchanged = rest."""
-    conn = _FakeConn([
-        # 1 inserted + 2 conflicted-updated
-        (lambda s: "INSERT INTO listings (" in s, [(True,), (False,), (False,)]),
-        # 2 snapshots inserted (the new one + one changed) -> rowcount 2
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,), (0,)]),
-        # 1 image inserted
-        (lambda s: "INSERT INTO images" in s, [(True,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    results = [
-        _result(1, price=100, content_hash="h1", images=[{"url": "a", "sequence": 0}]),
-        _result(2, price=200, content_hash="h2"),
-        _result(3, price=300, content_hash="h3"),
-    ]
-    counts = db.write_detail_batch(conn, results)
-    assert counts == {"new": 1, "updated": 1, "unchanged": 1, "images_discovered": 1}
-
-    # All four statements ran, in order, on one transaction.
-    kinds = [e[0] for e in conn.executed]
-    assert any("INSERT INTO listings (" in k for k in kinds)
-    assert any("jsonb_to_recordset" in k for k in kinds)
-    assert any("INSERT INTO listing_snapshots" in k for k in kinds)
-    assert any("DELETE FROM listing_fetch_failures" in k for k in kinds)
-    # The listings upsert carries one jsonb array of all three rows.
-    upsert = _find(conn.executed, "INSERT INTO listings (")
-    listing_objs = upsert[1][0].obj
-    assert len(listing_objs) == 3
-    assert {o["sreality_id"] for o in listing_objs} == {1, 2, 3}
-    # Snapshot payload is the lean 3-field shape (raw_json read back from listings).
-    snap = _find(conn.executed, "INSERT INTO listing_snapshots")
-    assert set(snap[1][0].obj[0]) == {"sreality_id", "price_czk", "content_hash"}
-
-
-def test_write_detail_batch_dedupes_images_per_listing_sequence():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
-        (lambda s: "INSERT INTO images" in s, [(True,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    # Same (sid, sequence=0) twice -> one image obj; a NULL-sequence one is kept.
-    results = [_result(1, price=100, content_hash="h1", images=[
-        {"url": "a", "sequence": 0},
-        {"url": "b", "sequence": 0},
-        {"url": "c", "sequence": None},
-    ])]
-    db.write_detail_batch(conn, results)
-    img = _find(conn.executed, "INSERT INTO images")
-    image_objs = img[1][0].obj
-    assert len(image_objs) == 2
-    assert image_objs[0] == {"sreality_id": 1, "sreality_url": "a", "sequence": 0}
-    assert image_objs[1] == {"sreality_id": 1, "sreality_url": "c", "sequence": None}
-
-
-def test_write_detail_batch_carries_discovery_seq_into_listing_obj():
-    """discovery_seq (migration 368) rides through write_detail_batch onto the
-    jsonb payload untouched -- it's a queue-assigned value, not something derived
-    from the fetch/parse result."""
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,), (True,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,), (0,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    results = [
-        _result(1, price=100, content_hash="h1", discovery_seq=501),
-        _result(2, price=200, content_hash="h2", discovery_seq=None),
-    ]
-    db.write_detail_batch(conn, results)
-    upsert = _find(conn.executed, "INSERT INTO listings (")
-    listing_objs = upsert[1][0].obj
-    by_sid = {o["sreality_id"]: o["discovery_seq"] for o in listing_objs}
-    assert by_sid == {1: 501, 2: None}
-    assert "discovery_seq" in upsert[0]
-    # Set-once: a later write must never clobber a stored discovery_seq.
-    assert "discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)" in upsert[0]
-
-
-def test_write_detail_batch_empty_is_noop():
-    conn = _FakeConn([])
-    assert db.write_detail_batch(conn, []) == {
-        "new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0,
-    }
-    assert conn.executed == []
-
-
-def test_write_detail_batch_skips_image_insert_when_no_images():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(False,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, []),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    db.write_detail_batch(conn, [_result(1, price=100, content_hash="h1")])
-    assert _find(conn.executed, "INSERT INTO images") is None
-
-
 def test_sane_price_czk_clamps_overflow_to_none():
     assert db.sane_price_czk(None) is None
     assert db.sane_price_czk(5_000_000) == 5_000_000
@@ -202,21 +90,6 @@ def test_sane_price_czk_drops_low_placeholders():
     assert db.sane_price_czk(0) is None
     assert db.sane_price_czk(1) is None
     assert db.sane_price_czk(2) == 2  # boundary: the smallest kept price
-
-
-def test_write_detail_batch_nulls_overflow_price():
-    # A single >int4 price must not crash the jsonb_to_recordset cast of a ~100-row
-    # batch; it's clamped to NULL in BOTH the listings upsert and the snapshot.
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    db.write_detail_batch(conn, [_result(1, price=2_147_483_647, content_hash="h1")])
-    upsert = _find(conn.executed, "INSERT INTO listings (")
-    assert upsert[1][0].obj[0]["price_czk"] is None
-    snap = _find(conn.executed, "INSERT INTO listing_snapshots")
-    assert snap[1][0].obj[0]["price_czk"] is None
 
 
 def test_sane_listing_numerics_clamps_int4_and_numeric_overflow():
@@ -280,30 +153,6 @@ def test_sane_listing_numerics_leaves_text_bool_and_none_untouched():
 def test_numeric_abs_max_covers_every_numeric_column():
     numeric_cols = {c for c, t in db._LISTING_COLUMN_PGTYPE.items() if t == "numeric"}
     assert set(db._NUMERIC_ABS_MAX) == numeric_cols
-
-
-def test_write_detail_batch_nulls_overflow_int4_column():
-    # A garbled portal integer > int4 max must not crash the batch's
-    # jsonb_to_recordset ::integer cast; it clamps to NULL in the upsert.
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    row = {
-        "sreality_id": 1,
-        "price_czk": 100,
-        "category_sub_cb": 3_000_000_000,
-        "parking_lots": 2_500_000_000,
-    }
-    res = SimpleNamespace(
-        row=row, raw={"id": 1}, content_hash="h1", images=[], discovery_seq=None,
-        discovered_at=None,
-    )
-    db.write_detail_batch(conn, [res])
-    obj = _find(conn.executed, "INSERT INTO listings (")[1][0].obj[0]
-    assert obj["category_sub_cb"] is None
-    assert obj["parking_lots"] is None
 
 
 # --- scrape_run counters (crash-survivable) ---------------------------------
@@ -535,36 +384,6 @@ def test_reclaim_stale_claims_releases_old_claims_and_prunes_ledger():
 # --- Phase 3: dirty-property enqueue ----------------------------------------
 
 
-def test_write_detail_batch_enqueues_dirty_for_changed_listings():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,), (False,)]),
-        # both listings changed -> RETURNING sreality_id gives both ids
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(1,), (2,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-        (lambda s: "INSERT INTO dirty_properties" in s, []),
-    ])
-    db.write_detail_batch(conn, [
-        _result(1, price=100, content_hash="h1"),
-        _result(2, price=200, content_hash="h2"),
-    ])
-    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
-    assert dirty is not None
-    sql, params = dirty
-    assert "FROM listings" in sql and "property_id IS NOT NULL" in sql
-    assert "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()" in sql
-    assert params == ([1, 2],)
-
-
-def test_write_detail_batch_no_dirty_when_nothing_changed():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(False,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, []),  # no content change
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    db.write_detail_batch(conn, [_result(1, price=100, content_hash="h1")])
-    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
-
-
 def test_mark_properties_dirty_drops_null_and_uses_unnest():
     conn = _FakeConn([(lambda s: "INSERT INTO dirty_properties" in s, [(10,)])])
     db.mark_properties_dirty(conn, [10, None, 10])
@@ -683,53 +502,3 @@ def test_touch_listings_by_id_keys_on_surrogate_not_sreality_id():
     assert bulk is not None
     assert "listings.id = u.id" in bulk[0]
     assert "listings.sreality_id" not in bulk[0]
-
-
-# --- the area_basis stamp actually reaches the DB on BOTH write paths ---------
-#
-# The parsers are the only place the basis is decided, and both write paths build
-# their SQL from LISTING_COLUMNS at import time — so a column dropped from that
-# tuple, or a row shape that never carries the key, is a silent NULL in every
-# consumer while every parser test stays green. These two pin the wiring.
-
-
-def test_write_detail_batch_carries_area_basis_into_listings_and_not_the_snapshot():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
-        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
-        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
-    ])
-    result = SimpleNamespace(
-        row={"sreality_id": 7, "price_czk": 3_190_000, "area_m2": 70.0,
-             "area_basis": "usable"},
-        raw={"id": 7}, content_hash="h7", images=[], discovery_seq=None,
-        discovered_at=None,
-    )
-    db.write_detail_batch(conn, [result])
-
-    upsert = _find(conn.executed, "INSERT INTO listings (")
-    assert "area_basis" in upsert[0]
-    assert upsert[1][0].obj[0]["area_basis"] == "usable"
-    assert upsert[1][0].obj[0]["area_m2"] == 70.0
-    # The snapshot is price history, not provenance: area_basis is out of every
-    # content hash precisely so stamping it appends no snapshot (rule 2).
-    snap = _find(conn.executed, "INSERT INTO listing_snapshots")
-    assert "area_basis" not in snap[0]
-
-
-def test_upsert_listing_carries_area_basis():
-    conn = _FakeConn([
-        (lambda s: "INSERT INTO listings (" in s, [(True, 42)]),
-        (lambda s: "SELECT content_hash FROM listing_snapshots" in s, []),
-        (lambda s: "INSERT INTO listing_snapshots" in s, []),
-    ])
-    db.upsert_listing(
-        conn,
-        {"sreality_id": 7, "price_czk": 3_190_000, "area_m2": 70.0,
-         "area_basis": "usable"},
-        {"id": 7},
-        "h7",
-    )
-    upsert = _find(conn.executed, "INSERT INTO listings (")
-    assert "area_basis" in upsert[0]
-    assert upsert[1]["area_basis"] == "usable"

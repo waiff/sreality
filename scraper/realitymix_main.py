@@ -6,8 +6,9 @@ Runnable as `python -m scraper.realitymix_main`. realitymix is a `Portal`
 new/price-changed ones into the shared `listing_detail_queue`
 (source='realitymix', migration 108); the shared detail-drain fetches each
 listing page, parses it to a `ScrapedListing` (realitymix_parser, fetched by
-RealitymixClient), and ingests via `db.ingest_scraped_listing` (Tier-0
-idempotency; a first-seen row gets a singleton property, rule #15).
+RealitymixClient), and writes via `listing_write.write_listings` (the one
+listing write; a first-seen row lands `property_id` NULL and the
+straggler-attach births its singleton, rule #15).
 
 Two deliberate differences from the ceskereality template:
 - The detail URL (`/detail/{obec}/{slug}-{id}.html`) does NOT encode the
@@ -31,7 +32,7 @@ import logging
 from math import ceil
 from typing import Any
 
-from scraper import db, portal_runner
+from scraper import db, listing_write, portal_runner
 from scraper.portal import (
     PortalConfig,
     StopReason,
@@ -374,27 +375,22 @@ class RealitymixPortal:
         )
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
-        for it in items:
-            p = it.payload
-            page_id = db.upsert_portal_raw_page(
+        pages = [
+            db.upsert_portal_raw_page(
                 conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=p["url"], page_kind="detail",
-                html=p["html"], http_status=p["status"],
-                # W2a-0 churn instrument: this whole write_details is replayed on
-                # a transient pooler drop, so the counter bump inside needs the
-                # item's per-fetch token to make the replay a no-op.
-            )
-            pk, result = db.ingest_scraped_listing(
-                conn, p["listing"], discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = p["listing"].raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
+                source_url=it.payload["url"], page_kind="detail",
+                html=it.payload["html"], http_status=it.payload["status"])
+            for it in items
+        ]
+        outcomes = listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ])
+        for page_id in pages:
             db.mark_portal_page_parsed(conn, page_id)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
+        return listing_write.tally(outcomes)
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
         # Keyed on the native id directly (not a sreality_id round-trip): post-Gate-2

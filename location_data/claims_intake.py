@@ -646,9 +646,10 @@ _LEGACY_WATERMARK_SQL = """
 """
 
 # THE LAG, a correctness rail. `listing_snapshots.id` is a bigserial — allocated at INSERT,
-# visible at COMMIT — and `write_detail_batch` writes N of them in one transaction across
-# the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
+# visible at COMMIT — and `listing_write.write_listings` writes N of them in one transaction
+# across the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
 # never looks back. Standing 15 minutes back keeps the window below every in-flight
+# transaction; its snapshot `scraped_at` is `statement_timestamp()`, stamped late in the
 # transaction. The seed takes the same predicate, or a cold start would jump over them.
 #
 # A PARAMETER SINCE W7-a, not a widened default: the fast schedule trades the rail for

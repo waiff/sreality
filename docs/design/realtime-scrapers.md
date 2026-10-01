@@ -71,7 +71,8 @@ settings-paced asyncio-loop pattern — matcher/outbox). It runs, as continuous 
 5. **Notification producers, event-driven**: matcher woken per new-property batch (also
    fixes the cursor-vs-attach race), price-drop detection moved to write time (the drain
    already computes the price diff), sreality singleton-property creation inlined into
-   `write_detail_batch` (every other portal already creates it inline).
+   `write_detail_batch` (every other portal already creates it inline). — *superseded 2026-10:
+   every portal lands NULL; the straggler-attach births + browse-syncs (`scraper/listing_write.py`).*
 
 **Cold lane — GitHub Actions keeps** the delay-tolerant heavy work it does well and for
 free: full reconcile index walks (completeness + delisting evidence), image/CLIP backfills,

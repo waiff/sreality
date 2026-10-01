@@ -63,7 +63,12 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
     raise SystemExit(143)
 
 
-_STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL"
+# One attach handles at most this many births (a pass, or one turn of the full sweep's loop):
+# all nine portals land new rows NULL, so a backlog after a worker freeze must not birth,
+# recompute and browse-sync everything in one transaction. No ORDER BY, so the planner keeps
+# listings_property_id_idx; NEW_SINGLETONS_SQL sorts the ids anyway.
+STRAGGLER_BATCH = 2000
+_STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL LIMIT %(limit)s"
 
 _RECOMPUTE_BATCH_SQL = """
     WITH batch AS (
@@ -324,19 +329,21 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
         yield lo, lo + batch_size
 
 
-def _attach_stragglers(conn: Any) -> int:
-    """Give every property_id-NULL listing its own singleton property, recomputed at birth.
+def _attach_stragglers(conn: Any, limit: int = STRAGGLER_BATCH) -> int:
+    """Give up to `limit` property_id-NULL listings their own singleton, recomputed and browse-synced at birth.
     No cross-listing matching happens here, ever (CLAUDE.md rule 15)."""
     # Birth, link and first recompute in ONE transaction: a replay after a failure (db.
     # run_resilient replays this op) finds the stragglers still unlinked, never a linked bare
-    # row that Browse could show before its recompute.
+    # row that Browse could show before its recompute. The browse patch is best-effort in its
+    # own savepoint (sync_browse_list), so it can never abort the birth.
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute(_STRAGGLERS_SQL)
+            cur.execute(_STRAGGLERS_SQL, {"limit": limit})
             stragglers = [int(r[0]) for r in cur.fetchall()]
         born = db.create_singleton_properties(conn, stragglers) if stragglers else []
         if born:
             _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": born})
+            sync_browse_list(conn, born)
     return len(born)
 
 
@@ -809,7 +816,13 @@ def main() -> int:
             # own, and nothing has been done yet when it fails.
             _wait_lease(conn, holder, _LEASE_TTL)
             # attempts=2, like sweep.batch: a doomed attach reds in ~4 min instead of ~8.
-            attached = step(_attach_stragglers, "sweep.attach", attempts=2)
+            # Bounded batches until one comes back short: each is its own transaction.
+            attached = 0
+            while True:
+                batch = step(_attach_stragglers, "sweep.attach", attempts=2)
+                attached += batch
+                if batch < STRAGGLER_BATCH:
+                    break
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
             budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)

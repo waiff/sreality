@@ -6,8 +6,9 @@ name: "Scraping: M&M Reality scraper (pilot)"
 # estate object (a Vue `:property` prop): the index walk pages the mixed-category
 # /nemovitosti/ results and enqueues new/price-changed ids into
 # listing_detail_queue, then the detail drain fetches each listing page, decodes
-# its :property JSON to a ScrapedListing, and ingests through
-# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+# its :property JSON to a ScrapedListing, and writes via
+# listing_write.write_listings (the one listing write; new rows land property_id
+# NULL and the straggler-attach births the singleton).
 #
 # RESIDENTIAL EGRESS: mmreality's Cloudflare edge HARD-403s our datacenter
 # (GitHub-Actions) IP on the first request — it ingested ZERO listings across its

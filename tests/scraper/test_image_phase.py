@@ -403,20 +403,18 @@ def test_record_images_dedupes_duplicate_sequence():
         {"url": "//a/n2.jpg", "sequence": None},  # two nulls: both kept
     ]
     scraper_db.record_images(_Conn(), 999, imgs)
-    # 4 flat values per row: (sreality_id, sreality_id-for-listing_id, url, sequence)
+    # 4 flat values per row: (listing_id-for-sreality_id, listing_id, url, sequence)
     seqs = captured["params"][3::4]
     assert seqs.count(1) == 1   # deduped
     assert seqs.count(2) == 1
     assert seqs.count(None) == 2  # nulls preserved
     assert "//a/1.jpg" in captured["params"]       # first of the dup kept
     assert "//a/1b.jpg" not in captured["params"]  # second dropped
-    # sreality path resolves the FK from sreality_id (the row is always present).
-    assert "(SELECT id FROM listings WHERE sreality_id = %s)" in captured["sql"]
 
 
 def test_record_images_portal_path_carries_surrogate_fk():
-    """THE Gate-2 fix: a portal write passes the resolved surrogate directly
-    (listing_id=), so images.listing_id is NEVER resolved from a sreality_id that
+    """THE Gate-2 fix: the caller passes the resolved surrogate directly, so
+    images.listing_id is NEVER resolved from a sreality_id that
     is NULL post-Gate-2. A NULL listing_id never conflicts on (listing_id,
     sequence), so the old sreality_id-subquery path spawned an unbounded duplicate
     row (and orphan R2 bytes) on every refetch of every portal listing."""
@@ -437,7 +435,7 @@ def test_record_images_portal_path_carries_surrogate_fk():
             return nullcontext()
 
     imgs = [{"url": "//a/1.jpg", "sequence": 0}]
-    scraper_db.record_images(_Conn(), None, imgs, listing_id=8201)
+    scraper_db.record_images(_Conn(), 8201, imgs)
     # The FK column is carried in directly; sreality_id is mirrored FROM the
     # surrogate (matching listings.sreality_id) — never the reverse.
     assert "SELECT sreality_id FROM listings WHERE id = %s" in captured["sql"]

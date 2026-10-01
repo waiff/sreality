@@ -17,10 +17,15 @@ import pytest
 import requests
 
 from scraper import main as scraper_main
+from scraper.listing_write import WriteOutcome
 from scraper.portal import walk_is_complete
 from scraper.sreality_client import ListingGoneError
 
 _FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _outcome(w: Any, result: str) -> WriteOutcome:
+    return WriteOutcome(w.source, w.source_id_native, 1, result, 1, w.content_hash, 0)  # type: ignore[arg-type]
 
 
 def test_extract_id_and_price_from_real_search_result():
@@ -544,11 +549,12 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     monkeypatch.setattr(scraper_main.db, "active_failure_ids", lambda _c, _ids: set())
 
     writes: dict[str, list] = {"upsert": [], "gone": [], "fail": []}
-    monkeypatch.setattr(
-        scraper_main.db, "upsert_listing_with_property",
-        lambda _c, row, raw, h: (writes["upsert"].append(h) or "new"),
-    )
-    monkeypatch.setattr(scraper_main.db, "record_images", lambda _c, sid, imgs: 0)
+
+    def _write_listings(_c, ws):
+        writes["upsert"].extend(w.content_hash for w in ws)
+        return [_outcome(w, "new") for w in ws]
+
+    monkeypatch.setattr(scraper_main.listing_write, "write_listings", _write_listings)
     monkeypatch.setattr(
         scraper_main.db, "mark_listing_inactive",
         lambda _c, sid: writes["gone"].append(sid),
@@ -567,7 +573,7 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
                 sid, "error", error=RuntimeError("boom"), source="fetch"
             )
         return scraper_main.FetchResult(
-            sid, "ok", row={"price_czk": 1}, raw={}, images=[], content_hash="h" * 8
+            sid, "ok", row={"sreality_id": sid, "price_czk": 1}, raw={}, images=[]
         )
 
     monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
@@ -603,8 +609,10 @@ def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
     monkeypatch.setattr(
         scraper_main.db, "active_failure_ids", lambda _c, ids: {s for s in ids if s >= 100}
     )
-    monkeypatch.setattr(scraper_main.db, "upsert_listing", lambda _c, r, raw, h: "updated")
-    monkeypatch.setattr(scraper_main.db, "record_images", lambda _c, s, i: 0)
+    monkeypatch.setattr(
+        scraper_main.listing_write, "write_listings",
+        lambda _c, ws: [_outcome(w, "updated") for w in ws],
+    )
     monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, s: None)
 
     fetched: list[int] = []
@@ -612,7 +620,7 @@ def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
     def fake_fetch(_client, sid):
         fetched.append(sid)
         return scraper_main.FetchResult(
-            sid, "ok", row={"price_czk": 9}, raw={}, images=[], content_hash="h" * 8
+            sid, "ok", row={"sreality_id": sid, "price_czk": 9}, raw={}, images=[]
         )
 
     monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
@@ -1112,7 +1120,7 @@ def test_walk_category_enqueue_assigns_priorities(monkeypatch):
 def _make_fr(sid: int, kind: str):
     if kind == "ok":
         return scraper_main.FetchResult(
-            sid, "ok", row={"sreality_id": sid}, raw={}, images=[], content_hash="h",
+            sid, "ok", row={"sreality_id": sid}, raw={}, images=[],
         )
     return scraper_main.FetchResult(sid, kind, source="fetch")
 
@@ -1142,11 +1150,11 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
         lambda _client, sid: _make_fr(sid, fetch_kind(sid)),
     )
 
-    def _write(_c, buf):
-        captured["write"].append(sorted(fr.sid for fr in buf))
-        return {"new": len(buf), "updated": 0, "unchanged": 0, "images_discovered": 0}
+    def _write(_c, writes):
+        captured["write"].append(sorted(int(w.source_id_native) for w in writes))
+        return [_outcome(w, "new") for w in writes]
 
-    monkeypatch.setattr(scraper_main.db, "write_detail_batch", _write)
+    monkeypatch.setattr(scraper_main.listing_write, "write_listings", _write)
     monkeypatch.setattr(
         scraper_main.db, "complete_detail",
         lambda _c, _src, ids, outcome="written": captured["complete"].append(sorted(ids)),

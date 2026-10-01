@@ -65,8 +65,8 @@ Every write obeys the standing heal rules (R9):
     exactly ONE genuine snapshot, spread over the normal cadence — deferred, never skipped.
     An inactive row is never refetched, so the heal is the only write it gets, and its
     column and its last snapshot disagree from then on. **sreality is the exception, and
-    it is the biggest portal**: it hashes the RAW payload (`scraper.hashing.content_hash`,
-    `scraper/main.py`), which a column heal never touches, so no snapshot is EVER appended
+    it is the biggest portal**: it hashes the RAW payload (`scraper.hashing.sreality_hash_doc`,
+    `scraper/listing_write.py`), which a column heal never touches, so no snapshot is EVER appended
     there — column and history diverge permanently, live rows included. That is the
     asymmetry `docs/architecture.md` already records for the W17 land heal's 44,237 rows.
     `--allow-snapshot-deferral` is required for a hashed column so that is an explicit
@@ -363,7 +363,7 @@ def _merged(produced: dict[str, Any], stored: dict[str, Any],
     """What this seam would write: the re-derive at column scale, never blanking a row.
 
     `sane_price_czk` + `sane_listing_numerics` are the SAME boundary functions
-    `upsert_listing` runs, so a value the column cannot hold becomes absent here exactly as
+    `listing_write` runs, so a value the column cannot hold becomes absent here exactly as
     it would on a live detail write — never a 22003 that aborts the batch.
     """
     obj = dict(produced)
@@ -465,7 +465,8 @@ def main() -> int:
     hashed = tuple(c for c in fields if c in HASHED_COLUMNS)
     if hashed and not args.dry_run and not args.allow_snapshot_deferral:
         # sreality is the one portal whose drain hashes the RAW payload
-        # (scraper/main.py) instead of the parsed fields (scraper/db.write_details), so
+        # (listing_write.from_sreality: hashing.sreality_hash_doc) instead of the parsed fields
+        # (listing_write.from_scraped: ScrapedListing.hash_doc), so
         # its consequence is the opposite of every other portal's and has to be said.
         consequence = (
             "sreality hashes the RAW payload, which this heal does not touch, so NO "

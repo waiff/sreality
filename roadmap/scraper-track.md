@@ -18,16 +18,8 @@ Independent of the analytical, UI, and map tracks.
   delete the first two test files and trim those cases from the other two. The same
   file also holds policy that belongs beside its callers (CLAUDE.md § Coding conventions): the
   presence-check throttle (`enqueue_presence_checks`), the claim-batch reserves (`QUEUE_*_RESERVE`),
-  the Gate-2 flag read, the broker-fingerprint diff, and the singleton property rollup with its lazy
-  `scripts.recompute_property_stats` import — move each out when its area is next touched.
-
-### Rule #2: one snapshot implementation (owed, 2026-10-01)
-- **Owed:** the hash-and-append logic exists twice: `db.upsert_listing` (row-at-a-time: every
-  non-sreality ingest, sreality `--detail-only`, URL parse, freshness) and `_BATCH_SNAPSHOT_SQL` in
-  `db.write_detail_batch` (the sreality drain). They pick a listing's latest snapshot differently
-  (`ORDER BY scraped_at DESC` in `upsert_listing` vs `scraped_at DESC, id DESC` in `_BATCH_SNAPSHOT_SQL`). Fold
-  both onto one definition of "latest snapshot" plus one append statement, with a test that a
-  same-`scraped_at` tie resolves identically on both paths.
+  and the Gate-2 flag read — move each out when its area is next touched. (The broker-fingerprint
+  diff and the singleton rollup with its lazy recompute import left with the one-writer chokepoint, below.)
 
 ### Rule #21: hoist the shared walk tail + drain hooks into `portal_runner` (owed, 2026-10-01)
 - **Owed (rule #21 audit):** the framework is shared at the runner, not below it.
@@ -41,6 +33,18 @@ Independent of the analytical, UI, and map tracks.
   module) owns the cross-portal `_run_image_downloads`. Next: hoist the walk tail + drain hooks
   into `portal_runner` while pacing stays per-portal (client + `PortalLimits`), and fold each
   branch into a `Portal` seam or config attribute. Inventory: `docs/architecture.md` § rule 21.
+
+### Rule #2: one snapshot implementation — one listing-write chokepoint (2026-10-01, done)
+- **Was owed:** the hash-and-append logic existed twice (`db.upsert_listing` row-at-a-time,
+  `_BATCH_SNAPSHOT_SQL` in `db.write_detail_batch`), picking a listing's latest snapshot differently.
+- **Shipped:** one listing-write chokepoint (`scraper/listing_write.py`): 4 writers → 1, one
+  latest-snapshot order, NULL-land on all nine. `write_listings` owns the upsert, media, failure
+  clear, snapshot-on-change (`scraped_at DESC, id DESC`, stamped `statement_timestamp()`; the live
+  suite pins an exact `scraped_at` tie resolving on `id`) and the dirty marks in one transaction; a
+  census (`tests/scraper/test_listing_write_census.py`) ledgers every other `UPDATE listings`
+  outside `scraper/db.py` (its docstring names its blind spots). **Next:** the reader-side latest-snapshot copies (toolkit freshness / comparables / summaries /
+  building_extraction / condition_markers / condition_scoring) move onto
+  `listing_write.latest_snapshot`; unifying the two hash documents is an operator-gated data event.
 
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
 - **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each

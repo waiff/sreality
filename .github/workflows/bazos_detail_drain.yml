@@ -5,8 +5,9 @@ name: "Scraping: Bazos detail drain"
 # sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos',
 # enqueued by bazos_index_walk.yml), fetches each ad's detail page on a
 # rate-limited worker pool, parses it (the real category comes off the page
-# breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency +
-# Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain
+# breadcrumb), and writes via listing_write.write_listings (the one listing write;
+# new rows land property_id NULL and the straggler-attach births the singleton).
+# Records run_type='detail' (index_pages=0). The drain
 # records image-URL rows; the shared images.yml job downloads the bytes to R2.
 #
 # Bounded by a wall-clock budget (--max-seconds, default 2400 = 40 min, safely

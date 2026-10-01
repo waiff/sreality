@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from scraper import db, hashing, parser
+from scraper import listing_write, parser
 
 if TYPE_CHECKING:
     import psycopg
@@ -63,9 +63,7 @@ def parse_sreality_url(
 
     if persist:
         try:
-            content_hash = hashing.content_hash(raw)
-            db.upsert_listing(conn, spec, raw, content_hash)
-            db.record_images(conn, sreality_id, images)
+            listing_write.write_listings(conn, [listing_write.from_sreality(raw, spec, images)])
         except Exception:
             LOG.exception(
                 "parse_sreality_url: persist failed for id=%s; "

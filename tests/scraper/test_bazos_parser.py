@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from scraper.bazos_parser import _resolve_coords, parse_detail, parse_index
+from scraper.hashing import digest
 
 INDEX_HTML = """
 <!DOCTYPE html><html><body>
@@ -361,17 +362,20 @@ def test_parse_detail_content_hash_stable():
     url = "https://reality.bazos.cz/inzerat/219122924/x.php"
     a = parse_detail(DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej")
     b = parse_detail(DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej")
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
 
 
-def test_parsed_listing_bridges_into_ingest_contract():
-    # The seam db.ingest_scraped_listing relies on: to_row(pk) must yield a
-    # listings-row dict carrying the synthetic PK and the parsed fields.
+def test_parsed_listing_bridges_into_the_one_writer():
+    # listing_write.from_scraped(listing) carries the parsed fields; the writer, not
+    # the contract, owns sreality_id (Gate 2 mints or leaves it NULL).
+    from scraper import listing_write
+
     url = "https://reality.bazos.cz/inzerat/219122924/x.php"
     listing = parse_detail(DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej")
-    row = listing.to_row(-5)
-    assert row["sreality_id"] == -5
+    w = listing_write.from_scraped(listing)
+    row = w.row
+    assert (w.source, w.source_id_native, w.sreality_id) == ("bazos", "219122924", None)
     assert row["category_main"] == "byt"
     assert row["category_type"] == "prodej"
     assert row["price_czk"] == 5_499_000

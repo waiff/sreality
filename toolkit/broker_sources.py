@@ -295,6 +295,11 @@ BROKER_FINGERPRINT_KEYS: tuple[str, ...] = tuple(sorted(
     {k for cfg in BROKER_SOURCES if cfg.block == "broker" for k in cfg.fingerprint_keys()}
 ))
 
+# The sources whose broker block sits at raw["broker"], outside their content hash — the
+# listing writer diffs the stored vs incoming fingerprint for exactly these.
+BROKER_FINGERPRINTED_SOURCES: frozenset[str] = frozenset(
+    c.source for c in BROKER_SOURCES if c.block == "broker")
+
 
 def attribution_statements() -> tuple[str, ...]:
     """Every source's attribution SQL, in registry order, `{sel}` unresolved."""

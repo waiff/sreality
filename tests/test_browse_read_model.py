@@ -124,10 +124,15 @@ def test_the_incremental_maintenance_pass_patches_what_it_recomputed():
     assert drain.index("sync_browse_list") < drain.index("_DELETE_DIRTY_SQL"), (
         "dequeue last, so a crash between the two replays both (each is idempotent)"
     )
-    # The daily full sweep must NOT patch: it recomputes every property, and the
-    # wholesale rebuild is already that job's read-model half. One call site, in the
-    # dirty-set drain.
+    # The daily full sweep's batch recompute must NOT patch: it recomputes every property,
+    # and the wholesale rebuild is already that job's read-model half. Two call sites: the
+    # dirty-set drain, and the straggler attach for exactly the properties it bore (bounded
+    # at STRAGGLER_BATCH, after their birth recompute) — every new listing on all nine
+    # portals lands NULL, so a birth would otherwise wait for the rebuild.
     calls = [ln for ln in inspect.getsource(rps).splitlines()
              if "sync_browse_list(" in ln and not ln.lstrip().startswith("#")
              and not ln.startswith("from ")]
-    assert calls == ["        sync_browse_list(conn, ids)"], calls
+    assert calls == ["            sync_browse_list(conn, born)",
+                     "        sync_browse_list(conn, ids)"], calls
+    attach = inspect.getsource(rps._attach_stragglers)
+    assert attach.index("_RECOMPUTE_SCOPED_SQL") < attach.index("sync_browse_list(conn, born)")

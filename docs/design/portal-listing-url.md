@@ -92,6 +92,7 @@ All verified 2026-09-10/11 against the live API/site and the code at `origin/mai
   columns only from `LISTING_COLUMNS`; the realtime worker's sreality lane runs through the same
   `portal_runner` → `write_detail_batch`. `scraper/freshness.py` and `scraper/url_parser.py` (pasted-URL
   persist) also go through `parse_listing` → `upsert_listing`.
+  *Both write paths are now `listing_write.write_listings` (2026-10).*
 - **Content hashes ignore identity.** sreality hashes `raw_json`; crawlers hash `_HASH_FIELDS`, which
   deliberately omits `source_url`. Writing or backfilling the column appends **zero** `listing_snapshots`
   rows (rule #2 holds). No trigger on `listings` fires on it (both triggers are `UPDATE OF geom …`).
@@ -122,6 +123,7 @@ All verified 2026-09-10/11 against the live API/site and the code at `origin/mai
                                          ▼
                  LISTING_COLUMNS (source_url: text, preserve-if-null)
                  upsert_listing ─┬─ write_detail_batch     ← ONE write contract
+                 (both are now listing_write.write_listings, 2026-10)
                                  ▼
                         listings.source_url  ◄──── scripts/reconcile_source_url.py
                                  │                  (fill history from typed columns;

@@ -16,7 +16,7 @@ What stays sreality-specific lives behind the Portal seams, unchanged:
   per-(cm,ct) presence nomination) inside SrealityPortal.walk_category. The
   count (INDEX_MIN_COMPLETENESS, 0.995) still triggers the national fallback
   and reports coverage; since 2026-09-08 it gates nothing;
-- the batched prepared writes (db.write_detail_batch on the session pooler)
+- the batched prepared writes (listing_write.write_listings on the session pooler)
   behind SrealityPortal.write_details — at sreality volume (~15k details/day)
   per-row ingest would forfeit the Phase-1 prepared-statement win;
 - ListingGoneError -> immediate single-listing inactive flip + failure-row

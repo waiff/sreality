@@ -127,10 +127,10 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 1. **Migrations are append-only.** Never edit an existing numbered file; schema changes go in a new
    `NNN_*.sql`, applied via the Supabase MCP. Additive = autonomous; destructive = pause for OK +
    pg_dump. Prune dead schema with a new forward migration, not by editing history. (see `database` skill)
-2. **Snapshots on content change only.** Every write of portal-observed content into `listings` computes the content hash and
-   appends a `listing_snapshots` row when it differs from that listing's latest snapshot. Exempt (no snapshot): writers of
-   derived/enrichment/link/lifecycle columns, and heals of our own reading of an already-stored page (`scripts/reparse.py`).
-   Required: ONE implementation — today two (`db.upsert_listing`, `db.write_detail_batch`) pick "latest" differently (owed: `roadmap/scraper-track.md`).
+2. **Snapshots on content change only.** A fetched payload reaches `listings` ONLY via `scraper/listing_write.py`
+   `write_listings`, which appends a `listing_snapshots` row iff its content hash differs from the latest (`scraped_at
+   DESC, id DESC`). Payload-free writes never snapshot (derived/enrichment/link/lifecycle columns; `scripts/reparse.py` heals of
+   a stored page); each outside `scraper/db.py`'s lifecycle writers is ledgered in `tests/scraper/test_listing_write_census.py`.
 3. **Never delete; delist via `is_active=false`.** History is sacred. **Since 2026-09-07 index absence
    NOMINATES, the page DECIDES** (`portal_runner._queue_presence_checks`); **since 2026-09-08 the gate is
    STRUCTURAL, not numeric** — a walk that REACHED THE PORTAL'S END (`scraper.portal.walk_reached_end`:
@@ -145,14 +145,14 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
    touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
    path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.
-5. **Failed detail fetches are tracked, not dropped** — `listing_fetch_failures(sreality_id, attempts,
-   last_error, given_up)`; failures jump to the front of the refetch queue; `given_up` after 5 attempts;
-   the row is deleted on success.
+5. **Failed detail fetches are tracked, not dropped** — every portal's `listing_detail_queue` row counts `attempts`
+   (`given_up` after 5); sreality also keeps `listing_fetch_failures(sreality_id, …)` (re-enqueued at
+   `QUEUE_PRIORITY_FAILURE`), deleted inside the successful write's transaction (`listing_write`).
 6. **Images download to Cloudflare R2** (bytes, not just URLs). `images` tracks per-image state
    (`storage_path`, `download_attempts`); a separate phase after the scrape, no-op without R2 env vars.
 7. **No new dependencies without justification.** Prefer the stdlib; each `pyproject.toml` entry needs a reason.
-8. **Latest-wins + snapshot history.** `listings` is current state; every portal-published change (subject to rule 2's
-   exemptions) appends a `listing_snapshots` row. Estimates capture the `snapshot_id` of each comparable (retrospective audit)
+8. **Latest-wins + snapshot history.** `listings` is current state; every content-hash change (rule #2) appends a
+   `listing_snapshots` row. Estimates capture the `snapshot_id` of each comparable (retrospective audit)
    — don't build as-of semantics into live queries.
 9. **`listing_freshness_checks` is append-only + ephemeral** (rows >30d safe to delete; no auto-prune).
    It's observability + throttling, not history — the history table is `listing_snapshots`.
@@ -173,8 +173,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `listing_condition_scores` cache (keyed `(sreality_id, snapshot_id)`) are written together by
     `score_listing_condition` in one latest-wins transaction. Filter on the derived columns, not the
     coarse `condition_assessment`.
-15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows get a
-    singleton property).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge
+15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows land
+    `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge
     chokepoint, two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listing`) — it re-points
     `listings.property_id`, soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to its origin or a refusal,
     e.g. `moved_since`; a group undo loops it — no replay), carries every property-anchored operator-state row through ONE ordered list, `PROPERTY_CARRIERS`
@@ -205,11 +205,11 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     Collections carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via `listing_detail_queue`** (migration 105).
     Index-walk (`--index-only`) walks the full index, `touch_listings` + end-gated nomination (rule #3), and enqueues; detail-drain
-    (`--drain-only`) claims a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes via the portal's `write_details` — sreality batched via
-    `write_detail_batch` (new rows land `property_id` NULL, attached by maintenance, rule #20), the other eight via `ingest_scraped_listing`
-    (a singleton property at insert, rule #15). Every portal runs this same split through the shared `portal_runner` on the source-generic queue.
-20. **Property maintenance is dirty-set incremental, not full-table.** Child-changing writers enqueue
-    `property_id` into `dirty_properties` (migration 106); `property_maintenance.yml` (`--incremental`, `*/5`)
+    (`--drain-only`) claims a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes each flush in ONE `listing_write.write_listings` call.
+    New rows land `property_id` NULL on every path (straggler-attach births the singleton, rule #15). Every portal runs this same split
+    through the shared `portal_runner` on the source-generic queue.
+20. **Property maintenance is dirty-set incremental, not full-table.** Every child-changing write (content change, revival,
+    delist, column heal) enqueues `property_id` into `dirty_properties` (migration 106) in its own transaction (exceptions: the census ledger, and a crawler change confined to unhashed columns, which waits for the daily sweep — architecture § rule 20); `property_maintenance.yml` (`--incremental`, `*/5`)
     attaches new singletons + recomputes only queued properties (O(changes)); the daily full sweep (04:15) is
     the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
 21. **Every portal runs through ONE shared framework (Phase 4: `portal_base` / `portal` / `portal_runner`, one
