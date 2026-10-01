@@ -21,7 +21,7 @@ from typing import Any, TypeVar
 import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
-from scraper import media
+from scraper import delist_policy, media
 from scraper.attribute_contract import CONTRACT
 
 LOG = logging.getLogger(__name__)
@@ -1046,9 +1046,9 @@ def enqueue_presence_checks(
     """Queue nominated rows for a page check, bounded per walk. Returns
     (queued, deferred).
 
-    The bound is the old flip cap (`app_settings.delist_flip_cap`: fraction of
-    the scope's active rows, only above min_rows), repurposed. It no longer
-    refuses anything -- every closure is now page-verified -- it throttles: a
+    The bound is `delist_policy.verify_budget` over `app_settings.delist_flip_cap`
+    (a fraction of the scope's active rows, only above min_rows). It refuses
+    nothing -- every closure is page-verified -- it throttles: a
     walk that nominates more than its share queues the oldest-unseen share now
     and leaves the rest for the next walk, so a broken walk (240 of 4,771
     collected) cannot flood the drain with thousands of fetches, and a real
@@ -1060,44 +1060,39 @@ def enqueue_presence_checks(
     total = len(candidates)
     if total == 0:
         return 0, 0
-    fraction, min_rows, overrides = _delist_cap(conn)
-    limit = total
-    if active_rows >= min_rows:
-        cap = max(1, int(active_rows * fraction))
-        if total > cap:
-            permit = _delist_override_permits(
-                overrides, source=source, category_main=category_main,
-                category_type=category_type, subtype=subtype, candidates=total,
-            )
-            if permit is not None:
-                LOG.warning(
-                    "VERIFY OVERRIDE source=%s cm=%s ct=%s candidates=%d cap=%d "
-                    "-- operator override in force until %s (%s)",
-                    source, category_main, category_type, total, cap,
-                    permit.get("until"), permit.get("reason", "no reason given"),
+    budget = delist_policy.verify_budget(
+        _delist_cap_setting(conn), source=source, category_main=category_main,
+        category_type=category_type, subtype=subtype, nominated=total,
+        active_rows=active_rows, now=datetime.now(timezone.utc),
+    )
+    if budget.override is not None:
+        LOG.warning(
+            "VERIFY OVERRIDE source=%s cm=%s ct=%s candidates=%d cap=%d "
+            "-- operator override in force until %s (%s)",
+            source, category_main, category_type, total, budget.cap,
+            budget.override.get("until"), budget.override.get("reason", "no reason given"),
+        )
+    elif budget.deferred:
+        LOG.warning(
+            "VERIFY DEFERRED source=%s cm=%s ct=%s candidates=%d active=%d cap=%d "
+            "-- queuing the %d oldest-unseen now, the rest next walk",
+            source, category_main, category_type, total, active_rows, budget.cap, budget.queue,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO delist_flip_refusals
+                        (source, category_main, category_type, subtype,
+                         candidates, active_rows, cap)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (source, category_main, category_type, subtype,
+                     total, active_rows, budget.cap),
                 )
-            else:
-                limit = cap
-                LOG.warning(
-                    "VERIFY DEFERRED source=%s cm=%s ct=%s candidates=%d active=%d cap=%d "
-                    "-- queuing the %d oldest-unseen now, the rest next walk",
-                    source, category_main, category_type, total, active_rows, cap, cap,
-                )
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            INSERT INTO delist_flip_refusals
-                                (source, category_main, category_type, subtype,
-                                 candidates, active_rows, cap)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (source, category_main, category_type, subtype,
-                             total, active_rows, cap),
-                        )
-                except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks the queue
-                    LOG.warning("presence checks: could not record the deferral: %s", exc)
-    batch = list(candidates)[:limit]
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks the queue
+            LOG.warning("presence checks: could not record the deferral: %s", exc)
+    batch = list(candidates)[:budget.queue]
     queued = enqueue_detail(
         conn, source,
         [(nid, ref, price, QUEUE_PRIORITY_VERIFY) for nid, ref, price in batch],
@@ -1125,110 +1120,19 @@ def enqueue_presence_checks(
             """,
             {"source": source, "verify": QUEUE_PRIORITY_VERIFY, "rearm": PRESENCE_REARM_PER_WALK},
         )
-    return queued, total - limit
+    return queued, budget.deferred
 
 
-# --- the delisting flip cap (migration 451) ---------------------------------
-#
-# mark_inactive never had a ceiling: it flips every unseen active row of a
-# category in one statement, however many that is. That was survivable only
-# because the completeness gate kept the dangerous cases from running -- a
-# coincidence, not a safety property, and the coincidence ends every time we
-# repair a portal's walk. Fixing coverage is the SAME EVENT as authorising the
-# mass flip it unblocks.
-#
-# CALIBRATED AGAINST 60 DAYS OF REAL SWEEPS, not guessed. Over 11,763 sweeps
-# that flipped at least one row, the per-sweep share of a category is p95=1.8%,
-# p99=3.4%, and then the tail jumps straight to 86%: routine churn and genuine
-# incidents are two separate populations, and the gap between them is where the
-# ceiling belongs. At 2% the breaker would have tripped 446 times in 60 days --
-# on ordinary sreality and idnes rental churn -- which is not a breaker, it is
-# an outage generator. At 10% it trips on exactly the four real events in that
-# window (realitymix dum/prodej at 86%, ceskereality komercni/prodej at 30% and
-# 13.7%, sreality pozemek/podil at 18.7%).
-#
-# min_rows is a floor on CATEGORY SIZE, not on the ceiling. It is 2,000 because
-# the small categories are the churny ones: sreality pozemek/drazba holds ~600
-# live rows and legitimately turns over 6-39% of them in a sweep (auctions end
-# on a date), as does idnes dum/pronajem at ~630. Policing those is noise.
-_DELIST_CAP_DEFAULTS = {"fraction": 0.10, "min_rows": 2000}
-
-
-def _delist_cap(conn: psycopg.Connection) -> tuple[float, int, list[dict[str, Any]]]:
-    """Operator-tunable ceiling from app_settings, falling back to the baked
-    defaults so a settings hiccup can never REMOVE the guard.
-
-    Also returns the operator's release valve (`overrides`): see
-    `_delist_override_permits`. The valve lives in the SAME setting as the cap
-    so there is one knob to read, one to audit, and no second mechanism that
-    can drift out of step with the first.
-    """
-    fraction = float(_DELIST_CAP_DEFAULTS["fraction"])
-    min_rows = int(_DELIST_CAP_DEFAULTS["min_rows"])
-    overrides: list[dict[str, Any]] = []
+def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
+    """Raw app_settings.delist_flip_cap; None on a read error (the policy then uses its defaults)."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT value FROM app_settings WHERE key = 'delist_flip_cap'")
             row = cur.fetchone()
-        if row and isinstance(row[0], dict):
-            fraction = float(row[0].get("fraction", fraction))
-            min_rows = int(row[0].get("min_rows", min_rows))
-            raw = row[0].get("overrides")
-            if isinstance(raw, list):
-                overrides = [o for o in raw if isinstance(o, dict)]
-    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the cap
+    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the throttle
         LOG.warning("delist cap: falling back to defaults (%s)", exc)
-        return (float(_DELIST_CAP_DEFAULTS["fraction"]),
-                int(_DELIST_CAP_DEFAULTS["min_rows"]), [])
-    return fraction, min_rows, overrides
-
-
-def _delist_override_permits(
-    overrides: list[dict[str, Any]],
-    *,
-    source: str,
-    category_main: str | None,
-    category_type: str | None,
-    subtype: str | None,
-    candidates: int,
-) -> dict[str, Any] | None:
-    """The operator's release valve for a breaker that has latched.
-
-    A refusal does not clear itself: the unswept rows keep aging, so the next
-    sweep proposes MORE and is refused again. That is correct breaker
-    behaviour -- an auto-reclosing breaker defeats the purpose -- but a breaker
-    with no reset is a permanent stall, so the operator needs a way to say "I
-    verified this one, let it through" that does not mean "raise the ceiling
-    everywhere".
-
-    An override is therefore SCOPED (it names the source, and may name the
-    category), BOUNDED (`max_rows` is a hard row count, so even a wildcard
-    override cannot authorise an unbounded flip), and EXPIRING (`until` is
-    required and must still be in the future). Anything missing, unparseable or
-    already expired is IGNORED -- the valve fails shut, like the cap it
-    releases.
-    """
-    for o in overrides:
-        try:
-            if o.get("source") != source:
-                continue
-            for key, actual in (("category_main", category_main),
-                                ("category_type", category_type),
-                                ("subtype", subtype)):
-                want = o.get(key)
-                if want is not None and want != actual:
-                    break
-            else:
-                until = datetime.fromisoformat(str(o["until"]).replace("Z", "+00:00"))
-                if until.tzinfo is None:
-                    until = until.replace(tzinfo=timezone.utc)
-                if until <= datetime.now(timezone.utc):
-                    continue
-                if candidates <= int(o["max_rows"]):
-                    return o
-        except Exception as exc:  # noqa: BLE001 - a malformed valve stays shut
-            LOG.warning("delist cap: ignoring malformed override %r (%s)", o, exc)
-    return None
+        return None
+    return row[0] if row else None
 
 
 def mark_listing_inactive(
@@ -2083,11 +1987,12 @@ QUEUE_PRIORITY_FAILURE = 2
 # is priority DESC, and 0 is "new"), so a backlog of checks can never delay a
 # brand-new listing. Negative on purpose: smallint, no CHECK, and GREATEST() on
 # re-enqueue means a row already queued as new keeps its place. -2, not -1:
-# -1 was the location-data refetch lane (deleted 2026-09-11) and the gap is kept
-# so a presence check can never inherit a slot something else sorted above.
+# -1 was the location-data refetch lane (deleted 2026-09-11; the lane itself now
+# enqueues at VERIFY) and the gap is kept so a presence check can never inherit a
+# slot something else sorted above.
 QUEUE_PRIORITY_VERIFY = -2
-# How many given-up queue rows a walk re-arms per source (see
-# enqueue_presence_checks): 50 x 5 attempts is a bounded retry budget per walk.
+# How many given-up queue rows each nominating scope with candidates re-arms,
+# source-wide (see enqueue_presence_checks): 50 x 5 attempts per such scope.
 PRESENCE_REARM_PER_WALK = 50
 # Share of each claim batch reserved for presence checks (see claim_detail_batch).
 QUEUE_VERIFY_RESERVE = 0.2

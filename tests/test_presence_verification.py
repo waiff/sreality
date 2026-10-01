@@ -12,6 +12,7 @@ operator override still lifting it, the deferral recorded).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from scraper import db
@@ -170,6 +171,27 @@ def test_a_malformed_cap_setting_still_throttles():
     queued, deferred = db.enqueue_presence_checks(
         conn, "idnes", "byt", "prodej", _cands(5_000), active_rows=30_000)
     assert queued == 3_000 and deferred == 2_000
+
+
+def test_a_settings_read_failure_cannot_disarm_the_throttle(caplog):
+    """A knob that fails open is not a knob, it is a hole: an unreadable setting
+    means the baked defaults, never 'no cap'."""
+    class _ExplodingCur(_Cur):
+        def execute(self, sql: str, params: Any = None) -> None:
+            if "FROM app_settings" in sql:
+                raise RuntimeError("pooler said no")
+            super().execute(sql, params)
+
+    class _Exploding(_Conn):
+        def cursor(self) -> _Cur:
+            return _ExplodingCur(self)
+
+    conn = _Exploding()
+    with caplog.at_level(logging.WARNING, logger="scraper.db"):
+        queued, deferred = db.enqueue_presence_checks(
+            conn, "idnes", "byt", "prodej", _cands(5_000), active_rows=30_000)
+    assert (queued, deferred) == (3_000, 2_000)
+    assert any("delist cap: falling back to defaults" in r.getMessage() for r in caplog.records)
 
 
 def test_nothing_to_nominate_touches_nothing():
