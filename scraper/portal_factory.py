@@ -1,8 +1,10 @@
 """One place that turns a source name into a Portal (or client) instance.
 
-Two callers need the same table and the same two constructor exceptions: the
-realtime worker, to run a lane, and the coverage gate, to ask a portal what its
-declared categories canonicalise to. A second copy of that table is a second
+Every caller that turns a source into a Portal needs the same table and the same
+two constructor exceptions: the realtime worker, to run a lane; the coverage
+gate, to ask a portal what its declared categories canonicalise to; and the
+sreality entrypoint, to build its portal from config. `portal_runner` reads the
+client table to make a portal's client. A second copy of either table is a second
 thing to get wrong, and the thing it would get wrong is not cosmetic — the gate
 mis-counting a portal's categories is what kept ceskereality permanently parked.
 

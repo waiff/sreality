@@ -446,7 +446,7 @@ purpose — the six ground = 1 portals stay +0.8..+1.1 until the operator has ru
 ## Reading the logs
 
 The scheduled pipeline logs in two halves. The shared `portal_runner` emits CATEGORY, ENQUEUE, VERIFY, RECONCILE,
-RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDEX / SPLIT / SLICE lines come from each portal's `walk_category`.
+RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDEX / SPLIT / SLICE lines come from each portal's `walk_category` (sreality's per-page INDEX from its client).
 
 **Index walk** (`index_walk.yml` and the per-portal walks):
 - `CATEGORY start cm=... ct=...` per category pair

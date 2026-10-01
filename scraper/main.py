@@ -924,7 +924,7 @@ class SrealityPortal(portal_runner.PortalDefaults):
     source = "sreality"
     price_change_min_pct = 0.0  # instance reads from config (portal_factory)
     index_rate = DEFAULT_DETAIL_RATE  # baked floor; instance reads from config
-    shared_rate_limiter = False  # instance reads from config (sreality_main)
+    shared_rate_limiter = False  # instance reads from config (portal_factory)
 
     def __init__(self, index_rate: float = DEFAULT_DETAIL_RATE) -> None:
         self.index_rate = index_rate

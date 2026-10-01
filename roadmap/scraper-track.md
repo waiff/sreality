@@ -10,7 +10,8 @@ Independent of the analytical, UI, and map tracks.
   → enqueue) existed 11 times (8 crawler walk tails, sreality's `enqueue_only` block, both bespoke
   probes); every one is now a `reconcile_sightings` call. The copied seams (`connect_index`,
   `connect_drain`, `make_client`, `active_count`) and, after item 1, the AST-identical
-  `write_details` / `mark_gone` / `record_failure` sit on `PortalDefaults`; `_load_config` /
+  `write_details` / `mark_gone` / `record_failure` sit on `PortalDefaults` (follow-up F1 pulled
+  forward as a pure move: byte-identical bodies, no DRAIN-line change); `_load_config` /
   `_configure_logging` became `portal_runner.load_config` / `configure_logging`;
   `claimable_count` ×9 + the worker's copy became `db.claimable_counts`. The never-read
   `supports_complete_walk` attribute left the Protocol (the column stays: posture).
@@ -22,7 +23,13 @@ Independent of the analytical, UI, and map tracks.
 - **Drift closed:** D2 (`price_change_min_pct` now honoured on bazos + sreality), D3 (the index-price
   clamp now applies on ceskereality + realitymix); the worker's sreality lanes now honour
   `shared_rate_limiter` (`portal_factory` dropped it). Log lines: ENQUEUE has one shape (logger
-  `scraper.portal_runner`); bazos/sreality ENQUEUE and the two `PROBE page` lines changed shape.
+  `scraper.portal_runner`); bazos/sreality ENQUEUE and the two `PROBE page` lines changed shape;
+  the registry-fallback WARNING is now `load_portal_config failed source=…` (logger
+  `scraper.portal_runner`) on all 9 `*_main` entrypoints, as the worker already logged it.
+- **Watch (sreality parity):** the walk + probe now look sreality up by `source_id_native`; a row
+  whose `source_id_native` ≠ `sreality_id::text` reads as new on every sighting — `found_new` and the
+  NEW queue grow, and the probe stops early less often, so the worker's `PROBE done pages=` per pass rises
+  toward `PROBE_MAX_PAGES` (more sreality requests). Pre-merge parity count must be 0.
 - **Rails:** `test_no_portal_adapter_diffs_its_own_sightings` (`tests/scraper/test_portal.py`) and
   `tests/scraper/test_walk_politeness_census.py` (each portal built with its own limits; walk /
   probe / drain pace with them; the diff makes no HTTP request; every walk client gets the limiter).
