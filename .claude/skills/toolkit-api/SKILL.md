@@ -30,7 +30,7 @@ it (`api/`). They do not apply to the scraper.
    }
    ```
 3. **Every tool excludes `given_up = true` listings** from `listing_fetch_failures` by
-   default. An `include_unreliable: bool = False` parameter overrides. Every cohort (`_shared_filter_where`: comparables, velocity, the transit corridor) also counts a property ONCE, as its canonical advert (`properties.repr_listing_ref_id`, migration 561), and leaves out every advert of the subject's property via `TargetSpec.exclude_listing_ids` / `TargetIn.exclude_listing_ids` (the ONE exclusion, decision 13: any advert of the subject names its whole property; the sreality-keyed `exclude_ids` is gone, a frozen spec's copy is history and never re-read).
+   default. An `include_unreliable: bool = False` parameter overrides. Every cohort (`_shared_filter_where`, the listings adapter over `toolkit/filter_compiler.compile_filter_where`: comparables, velocity, the transit corridor) also counts a property ONCE, as its canonical advert (`properties.repr_listing_ref_id`, migration 561), and leaves out every advert of the subject's property via `TargetSpec.exclude_listing_ids` / `TargetIn.exclude_listing_ids` (the ONE exclusion, decision 13: any advert of the subject names its whole property; the sreality-keyed `exclude_ids` is gone, a frozen spec's copy is history and never re-read).
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval 'X days'`
    (default 7).** Don't trust `is_active` alone — a listing not seen for 30 days is
    functionally inactive.

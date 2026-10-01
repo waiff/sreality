@@ -1460,10 +1460,19 @@ renumber.** Navigate by area:
     Adding heads is a new version, never an edit, and `activate` is a separate step from `score`
     so no consumer ever reads a half-scored version. Nothing has been promoted or scored yet.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
-    in `notification_subscriptions` (migration 056); the background matcher in
-    `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
-    (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
-    helper), so the two surfaces can never disagree on what a filter means.
+    in `notification_subscriptions` (migration 056). The definition is the filter registry,
+    rendered per relation. `toolkit/filter_compiler.compile_filter_where` compiles every
+    column-backed FilterDef from its derived `sql_kind` and every irregular one from ONE hook
+    table. It does this for the Watchdog matcher (`properties_public`, adapter
+    `api/notifications._build_match_clauses`, which adds the served predicate, the circle and
+    the place chips) and for every estimation cohort (`listings`, adapter
+    `toolkit/comparables._shared_filter_where`: comparables, velocity, the transit corridor).
+    Browse is not compiled in Python. Its TS auto-dispatch is pinned to the same generated
+    `sql_kind` (vitest + `tests/fixtures/filter_sql_kinds.json`). Its hand-coded half and the
+    two browse RPCs agree per shared predicate only (place plan, rule-23 measures,
+    `curated_cities_matching()`, served predicate). Open divergences: center+radius is a circle
+    in Python and a bounding square in Browse (M3); `tom_days` reaches Stats but not the Browse
+    list (M4).
     **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
     and the collection monitor alert only on the canonical advert's own steps scraped after it
     became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert
@@ -1582,15 +1591,17 @@ renumber.** Navigate by area:
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
     on next upload needs no migration; each upload appends a `source_revision` and the latest
-    is the default query target. Filtering goes through the shared `_city_quality_clauses`
-    helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
+    is the default query target. On the Watchdog, population and `near_*` compile as plain
+    bounds and `city_index_rules` as one hook in `toolkit/filter_compiler`. Browse resolves
+    `curated_cities_matching()` to `obec_ids_filter`. On any listings-grain compile the agenda
+    gate raises `rule 17 violation`. The filters are **agenda-gated to
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
     deliberately never sees them, preserving deterministic estimate semantics. **Curated-city
     *membership* (which city, if any, a property falls in) resolves through ONE SQL function,
     `curated_cities_matching()` (migration 436), to an `obec_id` allowlist** — `curated_cities
     .admin_boundary_id` already IS the obec's RÚIAN code, so membership is equality on a code
-    every consumer already carries, and `browse_stats_properties`, `_city_quality_clauses` and
-    the SPA prefilter cannot drift on the containment test the way they once did (one evaluated
+    every consumer already carries, and `browse_stats_properties`, the compiler's
+    `city_index_rules` hook and the SPA prefilter cannot drift on the containment test the way they once did (one evaluated
     radius-only and silently disagreed with the other two's boundary-aware version on
     edge-of-city listings). It was previously PRECOMPUTED onto `properties.home_city_id`
     (migration 375, `recompute_home_city()`, a daily job measured at 680 MB of buffer traffic
@@ -2433,9 +2444,10 @@ renumber.** Navigate by area:
     label: that would copy the headline into a second column on 32k rows, leave every future
     portal to remember the rule, and make the data lie in order to spare the reader a function
     call. Live readers moved:
-    `toolkit.comparables._shared_filter_where` (comparables + velocity + the transit corridor)
-    and the watchdog matcher `api/notifications._build_match_clauses` — rule 16's two sites,
-    and there the SQL is textually identical, because neither relation publishes a plot column.
+    `toolkit/filter_compiler.compile_filter_where` for both of its relations (the `listings`
+    cohorts and the Watchdog's `properties_public`). The plot spelling is declared once in
+    `FilterGrain.exprs`, and is textually identical because neither relation publishes a plot
+    column.
 
     **On the SPA the same measure has to BE a column, and getting that wrong is a silent
     no-op** (migration 535, caught in review). `registryQueryBuilder.applyRegistryFilters` is

@@ -626,6 +626,24 @@ any newly-scraped listings.
   price, when it fired, the watchdog name, an "estimation" column
   that streams the yield once the background task completes, and a
   per-row "Run estimation" button.
+- ✅ Rule 16: one filter compiler, `toolkit/filter_compiler.py`; the Watchdog + every
+  cohort compile the registry (`sql_kind` + one hook table; Browse's TS pinned to the same
+  `sql_kind`); −12 dead `ComparableFilters` fields; `subscriptions_failed` in the matcher
+  stats (cleanup/filter-compiler, C4 PR 1).
+
+**Next (filter definition, tracked from C4)**
+
+- M1: the Watchdog drops `building_material` and `min/max_garden_area` (lost by merge
+  f2d7b359; `extra='ignore'`) — `fix/watchdog-dropped-filters`, C4 PR 2.
+- M2: the agent advertises 10 COMPARABLES ids that `_FCR_OVERRIDE_FIELDS` drops — changes
+  agent cohorts, needs an operator ruling, own PR.
+- The agent's null `category_type` path (`api/agent.py`) — same posture as M2.
+- M3: center+radius is a circle in Python and a bounding square in Browse.
+- M4: `tom_days` reaches Stats but not the Browse list.
+- M7: integer area params in the browse RPCs. M11: canonical-advert row vs property rollup.
+- Browse's TS dispatch switches to `sql_kind` (drops `isMinId`/`isMaxId` + the duplicated
+  dispatch).
+- The NEIGHBORHOOD agenda over-declares ~30 filters `toolkit/neighborhoods.py` never reads.
 
 **What's deferred**
 

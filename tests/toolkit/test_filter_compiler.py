@@ -200,9 +200,7 @@ def test_the_hooks_are_exactly_the_irregular_filters_no_adapter_renders() -> Non
 
 def test_every_model_field_is_partitioned() -> None:
     """Together with the test above, this makes both LookupError paths unreachable."""
-    # The city fields + near_city_proximity leave ComparableFilters in the next commit.
-    leaving = {f.id for f in fr.all_filters() if f.category == fr.CATEGORY_CITY_QUALITY}
-    assert _comparable_fields() - leaving - set(RETIRED_FILTERS) <= (
+    assert _comparable_fields() <= (
         _ids(fr.Agenda.COMPARABLES) | LISTINGS_GRAIN.caller_renders)
     assert _spec_fields() <= (
         _ids(fr.Agenda.WATCHDOG) | PROPERTIES_GRAIN.caller_renders | set(RETIRED_FILTERS))

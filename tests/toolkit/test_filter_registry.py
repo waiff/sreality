@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from toolkit import filter_compiler
 from toolkit import filter_registry as fr
 
 
@@ -26,9 +27,7 @@ from toolkit import filter_registry as fr
 # A retired filter must not be offerable to any agenda; the code paths raise on a
 # non-null value rather than silently ignoring it (silently ignoring a retired filter
 # WIDENS the cohort). W7 removes the fields themselves.
-_RETIRED_BUT_DESERIALISABLE = {
-    "near_city_proximity",   # W5 / migration 436: 0 UI widgets, 0 presets, 0 subscriptions
-}
+_RETIRED_BUT_DESERIALISABLE = set(filter_compiler.RETIRED_FILTERS)
 
 
 def test_registry_is_nonempty() -> None:
