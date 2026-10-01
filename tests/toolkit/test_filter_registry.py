@@ -157,47 +157,43 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
 # --- parity with hand-written classes (today's source of truth) -----------
 
 
-def test_comparable_filters_fields_covered_by_registry() -> None:
-    """Every ComparableFilters field exists in the registry under the
-    same id."""
+def _agenda_ids(*agendas: fr.Agenda) -> set[str]:
+    return {f.id for a in agendas for f in fr.filters_for_agenda(a)}
+
+
+def test_comparable_filters_fields_equal_the_cohort_agendas() -> None:
+    """ComparableFilters carries exactly the filters the cohort agendas declare, both
+    ways: a field no agenda declares would raise at compile, and a declared filter
+    without a field can never reach a cohort."""
     from toolkit.comparables import ComparableFilters
 
-    registry_ids = set(fr.REGISTRY.keys())
-    for f in dc_fields(ComparableFilters):
-        if f.name in _RETIRED_BUT_DESERIALISABLE:
-            continue
-        assert f.name in registry_ids, (
-            f"ComparableFilters.{f.name} has no entry in REGISTRY — "
-            f"add it to toolkit/filter_registry.py"
-        )
+    fields = {f.name for f in dc_fields(ComparableFilters)}
+    declared = _agenda_ids(fr.Agenda.COMPARABLES, fr.Agenda.ESTIMATION, fr.Agenda.VELOCITY)
+    assert fields == declared, (
+        f"declared but not on ComparableFilters: {sorted(declared - fields)}; "
+        f"on ComparableFilters but not declared: {sorted(fields - declared)}"
+    )
 
 
-def test_watchdog_filter_spec_fields_covered_by_registry() -> None:
-    """Every WatchdogFilterSpec field exists in the registry.
+def test_watchdog_filter_spec_fields_equal_the_watchdog_agenda() -> None:
+    """WatchdogFilterSpec carries exactly the WATCHDOG agenda, both ways.
 
-    Pydantic field names match the registry ids 1:1 (Watchdog uses
-    `min_price_czk`, `min_area_m2`, etc., same as the canonical
-    naming).
+    A declared filter missing from the spec is not an error anywhere else: pydantic's
+    extra='ignore' drops the key on save, and the watchdog silently matches wider than
+    the Browse view it was made from (merge f2d7b359 lost three filters that way).
+    lat/lng/radius_m are the sub-fields of the composite `location` filter.
     """
     from api.notifications import WatchdogFilterSpec
 
-    registry_ids = set(fr.REGISTRY.keys())
-    for name in WatchdogFilterSpec.model_fields:
-        # `dispositions`, `districts`, lat/lng/radius_m are watchdog
-        # specifics; lat/lng/radius_m are sub-fields of the composite
-        # `location` filter, so allow them.
-        if name in _RETIRED_BUT_DESERIALISABLE:
-            continue
-        if name in {"lat", "lng", "radius_m"}:
-            assert "location" in registry_ids, (
-                "WatchdogFilterSpec uses a center+radius spatial "
-                "filter but the registry has no 'location' entry"
-            )
-            continue
-        assert name in registry_ids, (
-            f"WatchdogFilterSpec.{name} has no entry in REGISTRY — "
-            f"add it to toolkit/filter_registry.py"
-        )
+    declared = _agenda_ids(fr.Agenda.WATCHDOG)
+    assert "location" in declared
+    spec = (set(WatchdogFilterSpec.model_fields) - {"lat", "lng", "radius_m"}
+            - _RETIRED_BUT_DESERIALISABLE)
+    declared -= {"location"}
+    assert spec == declared, (
+        f"declared WATCHDOG but not on WatchdogFilterSpec: {sorted(declared - spec)}; "
+        f"on WatchdogFilterSpec but not declared: {sorted(spec - declared)}"
+    )
 
 
 def test_browse_agenda_includes_location() -> None:

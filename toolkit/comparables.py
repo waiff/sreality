@@ -9,9 +9,9 @@ How to add a filter
 Declare a FilterDef in toolkit/filter_registry.py. A column-backed bound, list or flag compiles
 from its derived `sql_kind` (toolkit/filter_compiler.py, and Browse's TS auto-dispatch); anything
 else needs one `_HOOKS` entry there. Add the field to the consumer model (ComparableFilters /
-WatchdogFilterSpec) and to `_filters_used`. tests/toolkit/test_filter_compiler.py checks both
-directions (every model field is a registry id; every agenda id has a model field, today's
-known gaps M1/M2 pinned by name), so a missing field fails CI instead of being dropped.
+WatchdogFilterSpec) and to `_filters_used`. tests/toolkit/test_filter_registry.py pins each
+model's fields EQUAL to its agendas (WatchdogFilterSpec == WATCHDOG; ComparableFilters ==
+COMPARABLES|ESTIMATION|VELOCITY), so a missing field fails CI instead of being dropped.
 """
 
 from __future__ import annotations
@@ -100,6 +100,8 @@ class ComparableFilters:
     max_estate_area: float | None = None
     min_usable_area: float | None = None
     max_usable_area: float | None = None
+    min_garden_area: float | None = None
+    max_garden_area: float | None = None
     min_parking_lots: int | None = None
     # Derived condition scores (migrations 072/073). NULL rows are filtered
     # out by the `>= N` / `<= N` comparison — that's intentional: "show me
@@ -422,6 +424,8 @@ def _filters_used(
         "max_estate_area": filters.max_estate_area,
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
+        "min_garden_area": filters.min_garden_area,
+        "max_garden_area": filters.max_garden_area,
         "min_parking_lots": filters.min_parking_lots,
         "building_condition_level_min": filters.building_condition_level_min,
         "building_condition_level_max": filters.building_condition_level_max,

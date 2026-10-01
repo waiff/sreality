@@ -1269,10 +1269,9 @@ export interface WatchdogFilterSpec {
   price_change_count_min: number | null;
   price_change_window_days: 30 | 90 | 365 | null;
   total_price_change_pct: number | null;
-  // Added with migration 060 / PR 2: backend now honours these,
-  // matching the Browse sidebar filter set. The Watchdog form
-  // surfaces them in a later PR — until then, API callers can set
-  // them directly through POST/PUT /notifications/subscriptions.
+  // Restored in fix/watchdog-dropped-filters (lost by merge f2d7b359):
+  // the matcher honours them as Browse does, and an equality test pins
+  // the Python spec to the WATCHDOG agenda so a filter can't drop again.
   building_material: Array<'cihla' | 'panel' | 'smisena' | 'ostatni'> | null;
   min_garden_area: number | null;
   max_garden_area: number | null;

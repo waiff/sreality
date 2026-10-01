@@ -2781,3 +2781,8 @@ export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni", "jine"] as
  * above — but every listing surface renders it after the price, and the
  * stored slug ('za mesic') is not the word a Czech page should show. */
 export const PRICE_UNIT_LABELS: Record<string, string> = {"za nemovitost": "celkem", "za mesic": "za měsíc"};
+
+/* building_material bucket -> the building_type values it matches. The one
+ * expansion is toolkit.filter_registry.building_material_values; Browse reads
+ * it from here, so Browse and the Watchdog match the same rows (rule 16). */
+export const BUILDING_MATERIAL_BUCKETS: Record<string, readonly string[]> = {"cihla": ["cihla"], "panel": ["panel"], "smisena": ["smisena"], "ostatni": ["skelet", "drevo", "kamen", "montovana", "nizkoenergeticka", "modularni", "ocelova", "roubena", "jina"]};

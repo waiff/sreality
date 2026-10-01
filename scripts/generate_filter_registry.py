@@ -157,6 +157,14 @@ def _render_constants() -> str:
                          ensure_ascii=False)
             + ";",
             "",
+            "/* building_material bucket -> the building_type values it matches. The one",
+            " * expansion is toolkit.filter_registry.building_material_values; Browse reads",
+            " * it from here, so Browse and the Watchdog match the same rows (rule 16). */",
+            "export const BUILDING_MATERIAL_BUCKETS: Record<string, readonly string[]> = "
+            + json.dumps({o.value: fr.building_material_values([o.value])
+                          for o in fr.BUILDING_MATERIAL_OPTIONS})
+            + ";",
+            "",
         ]
     )
 

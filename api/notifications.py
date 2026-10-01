@@ -150,6 +150,12 @@ class WatchdogFilterSpec(BaseModel):
     max_usable_area: float | None = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
+    # Lost by merge f2d7b359 (extra='ignore' then dropped them on every save); now pinned
+    # by an equality test against the WATCHDOG agenda. A blob saved before that merge
+    # holds `building_material` as one scalar bucket, which `_wrap_bare_str` lifts.
+    building_material: list[str] | None = None
+    min_garden_area: float | None = None
+    max_garden_area: float | None = None
 
     # Tri-state amenities (None = don't care).
     has_balcony: bool | None = None
@@ -210,7 +216,7 @@ class WatchdogFilterSpec(BaseModel):
     near_overall_15km_min: float | None = None
 
     @field_validator(
-        "furnished", "ownership", "category_main_in", mode="before"
+        "furnished", "ownership", "category_main_in", "building_material", mode="before"
     )
     @classmethod
     def _wrap_bare_str(cls, v: Any) -> Any:
