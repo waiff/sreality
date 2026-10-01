@@ -20,7 +20,7 @@ from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import legacy_retire as L
 from tests.autodedup.test_apply import GEN, FakeDb
-from tests.test_detach_listing import _Ledger
+from tests._property_ledger import _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit.property_identity import (
     _detach_plan,
     _origin_gone,
@@ -276,6 +276,7 @@ def test_the_live_run_detaches_newest_first_in_ledger_order_and_writes_no_ruling
     assert out["counts"]["properties_reactivated"] == 3
 
 
+@pytest.mark.usefixtures("ledger_carriers")
 def test_the_arguments_it_passes_write_no_ruling_through_the_real_detach() -> None:
     db = _Ledger({1: 10, 2: 20})
     group = merge_property_set(db, [10, 20], source="auto", reason="legacy")["data"][

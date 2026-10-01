@@ -1,7 +1,7 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
 record survives, one asset link rides onto it and two refuse, ONE group and ONE recompute per
-set, the operator's cards ruled "same"; and migration 560's copy. Over tests/_property_ledger's
-stateful fake."""
+set, every carrier walked per retired property, the operator's cards ruled "same"; and migration
+560's copy. Over tests/_property_ledger's stateful fake, each carrier recorded at the seam."""
 
 from __future__ import annotations
 
@@ -12,9 +12,13 @@ from pathlib import Path
 import pytest
 
 import toolkit.property_identity as pi
-from tests._property_ledger import OP, T0, _Ledger
+from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from tests.test_detach_listing import _appended
-from toolkit.property_identity import AssetLinkConflict, MergeError
+from toolkit import property_carriers as carriers
+from toolkit.property_carriers import MergeStep
+from toolkit.property_identity import AssetLinkConflict, CategoryClash, MergeError
+
+pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
 MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "560_one_merge_one_undo.sql"
 
@@ -71,8 +75,9 @@ def test_a_set_whose_members_clash_is_refused_though_the_survivor_is_unknown(cat
     """The survivor's stored category is recomputed once, after the whole set: a NULL there
     must not let a sale and a rent (or a flat and a house) through, pair by pair."""
     db = _Ledger({1: 3, 2: 7, 3: 9}, cats=cats)
-    with pytest.raises(MergeError, match=clash):
+    with pytest.raises(CategoryClash, match=clash) as refused:
         _merge(db, [3, 7, 9])
+    assert refused.value.field == clash
     assert db.events == [] and db.listings == {1: 3, 2: 7, 3: 9}
     sanctioned = _Ledger({1: 3, 2: 7, 3: 9},
                          cats={3: ("prodej", None), 7: ("prodej", "dum"), 9: ("prodej", "komercni")})
@@ -94,20 +99,62 @@ def test_the_survivor_is_recomputed_once_for_the_whole_set():
     assert db.sql("status = 'merged_away'") == [(1, 2), (1, 3), (1, 4)]
 
 
+class _RefuseNine:
+    name, columns, sql = "refuse_nine", (), ()
+
+    def on_merge(self, cur, step):
+        if step.retired == 9:
+            raise MergeError("a carrier refused 9")
+
+    def on_detach(self, cur, step):
+        return None
+
+
 def test_a_refusal_on_a_later_pair_rolls_the_whole_set_back(monkeypatch):
-    chokepoint = pi.merge_properties
-
-    def refuse_nine(conn, **kw):
-        if kw["retired_id"] == 9:
-            raise MergeError("category_main mismatch (byt vs dum)")
-        return chokepoint(conn, **kw)
-
-    monkeypatch.setattr(pi, "merge_properties", refuse_nine)
+    """7 merges in full, then a carrier aborts 9's: nothing of the set stands, 7's included."""
+    monkeypatch.setattr(carriers, "PROPERTY_CARRIERS",
+                        (_RefuseNine(), *carriers.PROPERTY_CARRIERS))
     db = _Ledger({1: 3, 2: 7, 3: 9})
-    with pytest.raises(MergeError):
+    with pytest.raises(MergeError, match="refused 9"):
         _merge(db, [3, 7, 9])
+    assert any(step.retired == 7 for s, step in db.log if s.startswith("carrier:"))
     assert db.listings == {1: 3, 2: 7, 3: 9} and db.events == []
+    assert db.carried == [] and db.changed == [] and db.props == {3: "active", 7: "active",
+                                                                     9: "active"}
     assert db.sql("WITH batch AS") == []
+
+
+def test_each_retired_property_walks_every_carrier_then_retires():
+    """Per retired id, ascending: the ledger, the re-point, every carrier in list order with one
+    `MergeStep`, then that id's retire; never a delete of a property."""
+    db = _Ledger({1: 3, 2: 7, 3: 9, 4: 9})
+    out = _merge(db, [9, 3, 7])
+    group = out["merge_group_id"]
+    names = [c.name for c in carriers.PROPERTY_CARRIERS]
+    seen = [(s, p) for s, p in db.log if s.startswith(("INSERT INTO property_merge_events",
+                                                         "UPDATE listings SET property_id",
+                                                         "SELECT asset_id FROM properties",
+                                                         "carrier:", "UPDATE properties SET"))]
+    expected = []
+    for rid in (7, 9):
+        step = MergeStep(3, rid, group, "autodedup")
+        expected += ["ledger", "repoint", *names, f"retire {rid}"]
+        assert [e for e in db.carried if e[2].retired == rid] == [
+            ("merge", name, step) for name in names if name != "asset_link"]
+    labels = []
+    for s, p in seen:
+        if s.startswith("INSERT INTO property_merge_events"):
+            labels.append("ledger")
+        elif s.startswith("UPDATE listings SET property_id"):
+            labels.append("repoint")
+        elif s.startswith("SELECT asset_id FROM properties"):
+            labels.append("asset_link")
+        elif s.startswith("carrier:"):
+            labels.append(s.removeprefix("carrier:"))
+        else:
+            labels.append(f"retire {p[1]}")
+    assert labels == expected
+    assert db.sql("DELETE FROM properties") == []
 
 
 def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
