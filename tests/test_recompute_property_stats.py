@@ -125,7 +125,8 @@ def _find(conn: _FakeConn, needle: str) -> tuple[str, Any] | None:
     return next((e for e in conn.executed if needle in e[0]), None)
 
 
-_STRAGGLERS = (lambda s: s == "SELECT id FROM listings WHERE property_id IS NULL", [(11,), (12,)])
+_STRAGGLERS = (lambda s: s == "SELECT id FROM listings WHERE property_id IS NULL LIMIT %(limit)s",
+               [(11,), (12,)])
 _BORN = (lambda s: "INSERT INTO properties" in s, [(101,), (102,)])
 
 
@@ -171,6 +172,28 @@ def test_attach_without_stragglers_writes_nothing():
     conn = _FakeConn()
     assert _attach_stragglers(conn) == 0
     assert not any("INSERT INTO properties" in s or "WITH batch AS" in s for s in _sqls(conn))
+
+
+def test_attach_is_bounded_and_browse_syncs_its_births(monkeypatch: Any) -> None:
+    """All nine portals land new rows NULL, so one attach must take a bounded slice (a backlog
+    after a worker freeze would otherwise birth, recompute and browse-sync everything in one
+    transaction), and the births reach Browse on this lane's cadence, not the next rebuild."""
+    import scripts.recompute_property_stats as rps
+
+    synced: list[list[int]] = []
+    monkeypatch.setattr(rps, "sync_browse_list", lambda _c, ids: synced.append(list(ids)))
+    conn = _FakeConn([
+        (lambda s: s.startswith("SELECT id FROM listings WHERE property_id IS NULL"), [(11,)]),
+        (lambda s: "INSERT INTO properties" in s, [(101,)]),
+    ])
+
+    assert _attach_stragglers(conn, limit=1) == 1
+
+    select = _find(conn, "SELECT id FROM listings WHERE property_id IS NULL")
+    assert select is not None and select[1] == {"limit": 1}
+    assert "ORDER BY" not in select[0]
+    assert synced == [[101]]
+    assert rps.STRAGGLER_BATCH == 2000
 
 
 class _DrainCur:
@@ -285,6 +308,18 @@ def test_full_mode_skips_the_dirty_drain(monkeypatch: Any) -> None:
     """The daily full sweep recomputes every property instead of draining the queue."""
     calls = _run_main(monkeypatch, [])
     assert calls == ["attach"]
+
+
+def test_full_sweep_attaches_bounded_batches_until_one_comes_back_short(monkeypatch: Any) -> None:
+    import scripts.recompute_property_stats as rps
+
+    sizes = iter([rps.STRAGGLER_BATCH, rps.STRAGGLER_BATCH, 7])
+    calls = _run_main(monkeypatch, [])
+    assert calls == ["attach"]          # an empty backlog is one pass
+    monkeypatch.setattr(rps, "_attach_stragglers", lambda c, **k: calls.append("attach") or next(sizes))
+    calls.clear()
+    assert rps.main() == 0
+    assert calls == ["attach", "attach", "attach"]
 
 
 def test_every_resolved_sql_constant_has_valid_placeholders():
