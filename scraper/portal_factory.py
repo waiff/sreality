@@ -62,7 +62,7 @@ def build_portal(source: str, config: PortalConfig) -> Any:
         portal = bazos_main.BazosPortal(categories=scopes)
         portal.index_rate = config.limits.index_rate
         portal.shared_rate_limiter = config.limits.shared_rate_limiter
-        portal.supports_complete_walk = config.supports_complete_walk
+        portal.price_change_min_pct = config.limits.price_change_min_pct
         return portal
     if source == "sreality":
         # Also predates the config-taking constructor (main.SrealityPortal takes

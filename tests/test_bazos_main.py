@@ -97,10 +97,9 @@ def test_main_rejects_unmapped_scope(monkeypatch):
 # --- BazosPortal seams ------------------------------------------------------
 
 
-def test_portal_complete_walk_and_per_scope_labels():
+def test_portal_per_scope_labels():
     p = _portal([_BYT_SALE, _BYT_RENT])
     assert p.source == "bazos"
-    assert p.supports_complete_walk is True
     assert p.categories() == [_BYT_SALE, _BYT_RENT]
     # labels come from each scope dict, not a fixed instance attr
     assert p.category_labels(_BYT_SALE) == ("byt", "prodej")
@@ -278,7 +277,6 @@ def test_walk_category_page_capped_is_not_an_end(monkeypatch):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page1]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     p = BazosPortal(categories=[_BYT_SALE], max_pages=1)
     _seen, _counts, result_size, _pages, reached_end = p.walk_category(
@@ -303,7 +301,6 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     return _portal().walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
@@ -386,7 +383,6 @@ def _walk(monkeypatch, pages, *, client=None):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     result = _portal().walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
