@@ -1144,7 +1144,11 @@ renumber.** Navigate by area:
     `source_trust_rank`, then the most recently seen, then the lowest id. ONE RULE PER FIELD:
     every advert field (price and ITS OWN `listing_price_steps` history, area with no fallback,
     layout, category, subtype, source, condition with both derived levels -- rule #14 --,
-    furnished) is the canonical advert's, and `repr_listing_ref_id` names it for every read model
+    furnished) is the canonical advert's -- with one fold: when the adverts state more than one
+    deal type (only a share sale `podil` with a sale `prodej` can, rule #15) the property reads
+    the class representative, `prodej`, through `room_taxonomy.deal_class_sql` (operator ruling
+    2026-10-01, autodedup E927 N8), so it stays in Browse's Prodej cohort and every `prodej`
+    watchdog -- and `repr_listing_ref_id` names it for every read model
     (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
     energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
     in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row

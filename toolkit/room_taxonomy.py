@@ -62,6 +62,13 @@ def crosses_deal_type(a: str | None, b: str | None) -> bool:
     return a is not None and b is not None and a != b and deal_class_of(a) == deal_class_of(b)
 
 
+def deal_class_sql(expr: str) -> str:
+    """`deal_class_of` spelled in SQL over a column expression, for the one rollup
+    (`scripts.recompute_property_stats`): the class table is never copied into SQL by hand."""
+    whens = " ".join(f"WHEN '{raw}' THEN '{cls}'" for raw, cls in _DEAL_CLASS.items())
+    return f"CASE {expr} {whens} ELSE {expr} END"
+
+
 # Cross-category merge compatibility. A flat ≠ a house (by default), so the merge_properties
 # chokepoint hard-rejects a category_main mismatch. The ONE
 # sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and

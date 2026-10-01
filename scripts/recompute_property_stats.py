@@ -8,9 +8,14 @@
    is its own: price and ITS price history (`listing_price_steps`, migration 559: no other
    advert's steps count), area (no fallback), layout, category, subtype, source, condition with
    both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through which the read
-   models take place, floor, description, photos, broker and link. Every physical fact (building
-   type, ownership, energy rating, amenities, estate/usable/garden area, parking) is the first
-   non-empty value in the same order. Lifecycle: any advert active, min/max seen, newest snapshot.
+   models take place, floor, description, photos, broker and link. The one fold is the deal
+   type: when the adverts state more than one, the property reads the deal CLASS representative
+   (`room_taxonomy.deal_class_sql`, the one class table) -- a share sale (`podil`) with a sale
+   (`prodej`) reads Prodej, not Podíl (operator ruling 2026-10-01, autodedup E927 N8); rule 15
+   admits no other mix, and a property of share adverts alone still reads `podil`. Every
+   physical fact (building type, ownership, energy rating, amenities, estate/usable/garden
+   area, parking) is the first non-empty value in the same order. Lifecycle: any advert active,
+   min/max seen, newest snapshot.
    `repr_since` is stamped when the canonical advert changes (the price alerts start there).
 
 Batched by property-id range so each statement stays well under the
@@ -55,6 +60,7 @@ from typing import Any
 
 from scraper import db
 from toolkit.browse_read_model import sync_browse_list
+from toolkit.room_taxonomy import deal_class_sql
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -65,7 +71,7 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
 
 _STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL"
 
-_RECOMPUTE_BATCH_SQL = """
+_RECOMPUTE_BATCH_SQL = f"""
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
@@ -88,6 +94,7 @@ _RECOMPUTE_BATCH_SQL = """
         bool_or(k.is_active)       AS is_active,
         count(*)                   AS source_count,
         count(distinct k.source)   AS distinct_site_count,
+        count(distinct k.category_type) AS deal_type_count,
         min(k.first_seen_at)       AS first_seen_at,
         max(k.last_seen_at)        AS last_seen_at,
         (array_agg(k.has_lift ORDER BY k.canonical_rank) FILTER (WHERE k.has_lift IS NOT NULL))[1] AS has_lift,
@@ -159,7 +166,7 @@ _RECOMPUTE_BATCH_SQL = """
       repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
       repr_listing_ref_id = c.id,
       category_main       = c.category_main,
-      category_type       = c.category_type,
+      category_type       = CASE WHEN r.deal_type_count > 1 THEN {deal_class_sql('c.category_type')} ELSE c.category_type END,
       category_sub_cb     = c.category_sub_cb,
       subtype             = c.subtype,
       disposition         = c.disposition,

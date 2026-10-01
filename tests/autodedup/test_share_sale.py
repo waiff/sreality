@@ -27,7 +27,12 @@ from autodedup.indistinguishable import distinguishing_facts
 from autodedup.settings import Settings
 from tests.autodedup.whole_cohort import build_index
 from toolkit.property_identity import category_clash
-from toolkit.room_taxonomy import category_type_compatible, crosses_deal_type, deal_class_of
+from toolkit.room_taxonomy import (
+    category_type_compatible,
+    crosses_deal_type,
+    deal_class_of,
+    deal_class_sql,
+)
 
 SETTINGS = Settings()
 
@@ -55,6 +60,21 @@ def test_a_share_sale_is_in_the_sale_class_and_nothing_else_moves() -> None:
     assert deal_class_of("podil") == "prodej"
     assert [deal_class_of(t) for t in ("prodej", "pronajem", "drazba", None)] == [
         "prodej", "pronajem", "drazba", None]
+
+
+def test_the_sql_spelling_of_the_class_is_deal_class_of() -> None:
+    """The rollup (`scripts.recompute_property_stats`, N8) reads the class in SQL: every WHEN of
+    the rendered CASE is a class-table entry and every entry that moves a type is a WHEN, so the
+    SQL and `deal_class_of` cannot drift."""
+    import re
+
+    sql = deal_class_sql("x.category_type")
+    assert sql.startswith("CASE x.category_type WHEN ")
+    assert sql.endswith(" ELSE x.category_type END")
+    pairs = re.findall(r"WHEN '([a-z]+)' THEN '([a-z]+)'", sql)
+    assert pairs and all(deal_class_of(raw) == cls != raw for raw, cls in pairs)
+    assert {raw for raw, _ in pairs} == {
+        t for t in ("prodej", "pronajem", "drazba", "podil") if deal_class_of(t) != t}
 
 
 @pytest.mark.parametrize(("a", "b", "compatible", "crosses"), [
