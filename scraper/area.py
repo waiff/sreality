@@ -64,12 +64,20 @@ an `m²` and so
 read "5 870 m²" as 870. The fixed grammar is idnes's — proven in production since its
 own truncation incident — WIDENED here to the separators the other portals emit: the
 narrow no-break space and the thin space idnes never had to handle.
+
+`stated_plot` is the third rule, for the PLOT column: a flat never carries one, and a
+commercial unit's "plot" that merely repeats its floor figure is not a plot (general
+ruling 3, 2026-09-30; the operator's flat answers, 2026-10-01). It runs at the contract
+boundary — `ScrapedListing.__post_init__` for the eight portals that cross it, and
+sreality's `parse_listing` itself — so the declined value reaches the content hash the
+way every other refused measure does.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 
 # The separators a Czech portal renders between a number's digit groups: ordinary
 # space, NBSP, narrow NBSP, thin space, and the zero-width joiners idnes emits
@@ -272,3 +280,54 @@ def derive_headline_area(
         if value and low <= value < high:
             return value, basis
     return None, None
+
+
+# A flat never carries a parcel of its own (operator, 2026-10-01). On production every
+# flat "plot" the hand-read opened was the floor figure again (ceskereality: 987 of its
+# 3,185 active flat plots), the placeholder 1, or the whole building's parcel — never
+# the unit's land; the reference portal, sreality, publishes none on a flat at all.
+PLOT_FREE_CATEGORIES: frozenset[str] = frozenset({"byt"})
+
+# A commercial unit's plot that equals its usable measure, or a headline the page
+# LABELLED an interior measure, is the floor area typed into the plot box (general
+# ruling 3, 2026-09-30: 1,383 ceskereality, 651 idnes, 427 realitymix, 53 mmreality
+# active rows; on all 14 live pages opened the portal itself prints one figure in the
+# plot box and the floor-area box). NOT compared: a title / prose fallback (`unknown` —
+# "Prodej areálu 3 400 m²" IS the site, and the real parcel would be dropped),
+# zastavěná plocha (a building may really cover its whole parcel), and a house's plot
+# (the operator kept the dum rule as it is: a garage's parcel really is its footprint).
+PLOT_ECHO_CATEGORIES: frozenset[str] = frozenset({"komercni"})
+PLOT_ECHO_BASES: frozenset[str] = frozenset({"usable", "floor", "total"})
+
+# The scale the side columns store (numeric(9,1)): two figures that read back equal ARE
+# equal, whatever their float tails; half up, as Postgres rounds on the write.
+_SIDE_AREA_QUANTUM = Decimal("0.1")
+
+
+def _at_side_scale(value: float) -> Decimal:
+    return Decimal(str(value)).quantize(_SIDE_AREA_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def stated_plot(
+    category_main: str | None,
+    plot: float | None,
+    *,
+    usable: float | None = None,
+    headline: float | None = None,
+    headline_basis: str | None = None,
+) -> float | None:
+    """The parcel a page STATES, or None when the figure in its plot box is not one:
+    never on a byt; on komerční not when it equals, at column scale, the usable measure
+    or a headline whose basis is a labelled interior measure (PLOT_ECHO_BASES). Every
+    other category keeps its plot unchanged."""
+    if plot is None or category_main in PLOT_FREE_CATEGORIES:
+        return None
+    if category_main not in PLOT_ECHO_CATEGORIES:
+        return plot
+    stated = _at_side_scale(plot)
+    if usable is not None and _at_side_scale(usable) == stated:
+        return None
+    if (headline is not None and headline_basis in PLOT_ECHO_BASES
+            and _at_side_scale(headline) == stated):
+        return None
+    return plot

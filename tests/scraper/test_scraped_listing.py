@@ -93,3 +93,24 @@ def test_source_url_lands_in_to_row_and_is_required():
     import pytest
     with pytest.raises(ValueError):
         _listing(source_url="")
+
+
+def test_a_plot_that_is_the_floor_area_is_declined_before_the_content_hash():
+    """The ONE call site of `scraper.area.stated_plot` for every portal that crosses this
+    contract (rule 21): a komerční "plot" equal to the usable measure, and ANY plot on a
+    byt, is absence — absence in the HASH too, so the row and its newest snapshot agree
+    (rules 2/8) instead of a NULL landing after the hash at the write boundary."""
+    echo = _listing(category_main="komercni", area_m2=10.0, area_basis="usable",
+                    usable_area=10.0, estate_area=10.0)
+    assert echo.estate_area is None
+    assert echo.to_row(-5)["estate_area"] is None
+    assert echo.content_hash() == replace(echo, estate_area=None).content_hash()
+    assert _listing(category_main="byt", area_m2=59.0, area_basis="usable",
+                    usable_area=59.0, estate_area=64.0).estate_area is None
+    parcel = _listing(category_main="komercni", area_m2=852.0, area_basis="total",
+                      estate_area=6841.0)
+    assert parcel.estate_area == 6841.0
+    assert parcel.content_hash() != replace(parcel, estate_area=None).content_hash()
+    house = _listing(category_main="dum", area_m2=210.0, area_basis="usable",
+                     usable_area=210.0, estate_area=80.0)
+    assert house.estate_area == 80.0

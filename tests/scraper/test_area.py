@@ -395,3 +395,62 @@ def test_bazos_mechova_cellar_is_not_the_flat():
     areas = areas_from_text(haystack, category_main="byt", category_type="prodej",
                             disposition=disposition)
     assert (areas.area_m2, areas.area_basis) == (None, None)
+
+
+def test_a_plot_that_is_the_floor_area_is_not_a_plot():
+    """General ruling 3 (2026-09-30) + the operator's answers of 2026-10-01. On 14 of 14
+    live pages opened, the portal itself printed one figure in the plot box AND the
+    floor-area box: idnes 19082281, a 10 m² cellar with a 10 m² "plot"; realitymix
+    8710333, "Plocha 852" = "Plocha parcely 852" (basis total, no užitná); ceskereality
+    19052081, a 34 m² flat with a 34 m² "plot". The rule is one function on every portal
+    (rule 21): a flat NEVER carries a plot; a komerční plot equal to the usable measure or
+    to a LABELLED headline is the floor area again; everything else keeps its plot."""
+    from scraper.area import stated_plot
+
+    # hits
+    assert stated_plot("komercni", 10.0, usable=10.0, headline=10.0,
+                       headline_basis="usable") is None
+    assert stated_plot("komercni", 852.0, usable=None, headline=852.0,
+                       headline_basis="total") is None
+    assert stated_plot("komercni", 72.0, usable=None, headline=72.0,
+                       headline_basis="floor") is None
+    assert stated_plot("byt", 34.0, usable=34.0, headline=34.0, headline_basis="usable") is None
+    # ... and a flat's "plot" goes whatever it holds: the near-floor figure beside the
+    # užitná (ceskereality_b1, 64 against 59), the placeholder 1, the whole building's
+    # parcel (3,470 on a 71 m² flat) — none is the unit's own land.
+    assert stated_plot("byt", 64.0, usable=59.0, headline=59.0, headline_basis="usable") is None
+    assert stated_plot("byt", 1.0, usable=45.0, headline=45.0, headline_basis="usable") is None
+    assert stated_plot("byt", 3470.0, usable=71.0, headline=71.0,
+                       headline_basis="usable") is None
+    assert stated_plot("byt", 905.0) is None
+
+    # misses
+    assert stated_plot("dum", 80.0, usable=210.0, headline=210.0,
+                       headline_basis="usable") == 80.0            # idnes_detail: a footprint
+    assert stated_plot("dum", 92.0, usable=92.0, headline=92.0,
+                       headline_basis="usable") == 92.0            # a house's rule is unchanged
+    assert stated_plot("pozemek", 1400.0, headline=1400.0, headline_basis="plot") == 1400.0
+    assert stated_plot("komercni", 327.0, usable=960.0, headline=960.0,
+                       headline_basis="usable") == 327.0           # mmreality 945419: = built-up
+    assert stated_plot("komercni", 3400.0, usable=None, headline=3400.0,
+                       headline_basis="unknown") == 3400.0         # title: the site itself
+    assert stated_plot("komercni", 12.6, usable=10.0, headline=10.0,
+                       headline_basis="usable") == 12.6
+    assert stated_plot("komercni", 6841.0, usable=None, headline=852.0,
+                       headline_basis="total") == 6841.0
+    assert stated_plot("ostatni", 30.0, usable=30.0, headline=30.0,
+                       headline_basis="usable") == 30.0
+    assert stated_plot(None, 30.0, usable=30.0, headline=30.0, headline_basis="usable") == 30.0
+    assert stated_plot("komercni", None, usable=30.0) is None
+    assert stated_plot("komercni", 100.0) == 100.0
+
+
+def test_the_plot_equality_is_read_at_column_scale():
+    """numeric(9,1) rounds half up on the write, so two figures that READ BACK equal are
+    equal (100.04 and 100.0) while 100.05 reads back 100.1 and is not."""
+    from scraper.area import stated_plot
+
+    assert stated_plot("komercni", 100.0, usable=100.04) is None
+    assert stated_plot("komercni", 100.04, usable=100.0) is None
+    assert stated_plot("komercni", 100.0, usable=100.05) == 100.0
+    assert stated_plot("komercni", 100.05, usable=100.0) == 100.05

@@ -641,3 +641,48 @@ def test_a_room_rental_under_a_five_room_disposition_keeps_the_room_s_size() -> 
         html.replace("<dt>Užitná plocha</dt><dd>12 m<sup>2</sup></dd>", ""),
         source_url=url, category_main="byt", category_type="pronajem")
     assert (title_only.area_m2, title_only.area_basis) == (12.0, "unknown")
+
+
+def test_a_commercial_plot_that_repeats_the_uzitna_row_is_not_a_plot():
+    """General ruling 3, on two live pages read 2026-09-30 (scrubbed): idnes 19082281, a
+    cellar in a Plzeň block of flats whose `<dl>` prints "Plocha pozemku 10 m²" beside
+    "Užitná plocha 10 m²" (its prose says 18,1 m²), and 19087892, a Halenkov tenement
+    with 980 / 980 and a 348 m² built-up area. Three unrelated agencies on the four live
+    komerční pages, so it is the idnes form, not one feed. The page's statement stays in
+    raw_json; the column reads absence."""
+    from pathlib import Path
+
+    from scraper.area import parse_area_text
+
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "portal_html"
+    for name, url, figure in (
+        ("idnes_komercni_echo_cellar.html",
+         "https://reality.idnes.cz/detail/prodej/komercni-nemovitost/plzen-jablonskeho/"
+         "6abbb9dbb5589f1c7e09c5e2/", 10.0),
+        ("idnes_komercni_echo_tenement.html",
+         "https://reality.idnes.cz/detail/prodej/komercni-nemovitost/halenkov/"
+         "6abc9e6e5372f99c050b9547/", 980.0),
+    ):
+        listing = parse_detail((fixtures / name).read_text(encoding="utf-8"),
+                               source_url=url, category_main="komercni",
+                               category_type="prodej")
+        assert (listing.usable_area, listing.area_m2, listing.area_basis) == (
+            figure, figure, "usable"), name
+        assert parse_area_text(listing.raw["params"]["plocha pozemku"]) == figure, name
+        assert listing.estate_area is None, name
+
+
+def test_a_house_whose_plot_is_its_footprint_keeps_it():
+    """The control: `portal_html/idnes_detail.html`, a Tanvald terraced house — Užitná
+    210, Zastavěná 80, Plocha pozemku 80. A house's rule is unchanged (the operator's
+    2026-10-01 answer), and an 80 m² parcel under a 210 m² house is real."""
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[1] / "fixtures" / "portal_html"
+            / "idnes_detail.html").read_text(encoding="utf-8")
+    listing = parse_detail(
+        html, source_url="https://reality.idnes.cz/detail/prodej/dum/tanvald/6ab1deadbeefdeadbeef0001/",
+        category_main="dum", category_type="prodej",
+    )
+    assert (listing.usable_area, listing.area_m2, listing.area_basis) == (210.0, 210.0, "usable")
+    assert listing.estate_area == 80.0

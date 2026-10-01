@@ -544,3 +544,62 @@ def test_a_room_rental_under_a_five_room_disposition_keeps_the_room_s_size():
         source_url=_DETAIL_URL, category_main="byt", category_type="pronajem",
     )
     assert (title_only.area_m2, title_only.area_basis) == (14.0, "unknown")
+
+
+_KOMERCNI_URL = (
+    "https://www.ceskereality.cz/prodej/komercni-prostory/restaurace/praha/"
+    "prodej-restaurace-10-m2-svehlova-3904070.html"
+)
+
+
+def _with_plot_cells(uzitna: str, pozemku: str) -> str:
+    cell = '<div class="i-info"><span class="i-info__title">{}</span>' \
+           '<span class="i-info__value"> {} </span></div>'
+    return DETAIL_HTML.replace(
+        cell.format("Plocha užitná", "41 m²"),
+        cell.format("Plocha užitná", uzitna) + cell.format("Plocha pozemku", pozemku),
+    )
+
+
+def test_a_commercial_plot_that_repeats_the_uzitna_cell_is_not_a_plot():
+    """General ruling 3. ceskereality is the largest cell — 1,383 of its 3,023 active
+    komerční plots equal the užitná measure (2026-09-30) — and the one portal whose live
+    pages refused the readers (403), so the echo is pinned on the spec cells its stored
+    pages render: one figure under "Plocha užitná" and "Plocha pozemku" (19049187, a
+    10 m² restaurant). The page's statement stays in raw_json; the column reads absence.
+    A site parcel stated beside the floor area (3 400 m² on a 1 200 m² areál) stays."""
+    from scraper.area import parse_area_text
+
+    echo = parse_detail(_with_plot_cells("10 m²", "10 m²"), source_url=_KOMERCNI_URL,
+                        category_main="komercni", category_type="prodej")
+    assert (echo.area_m2, echo.area_basis, echo.usable_area) == (10.0, "usable", 10.0)
+    assert echo.estate_area is None
+    assert parse_area_text(echo.raw["params"]["plocha pozemku"]) == 10.0
+
+    areal = parse_detail(_with_plot_cells("1 200 m²", "3 400 m²"), source_url=_KOMERCNI_URL,
+                         category_main="komercni", category_type="prodej")
+    assert (areal.usable_area, areal.estate_area) == (1200.0, 3400.0)
+
+
+def test_a_flat_never_carries_a_plot_so_the_b1_control_loses_its_64():
+    """The operator's answer of 2026-10-01 (a flat NEVER carries a plot). The W2a
+    refetch control `ceskereality_b1.html` — a 2+1 in Ostrov whose spec list states
+    "Plocha pozemku 64 m²" beside "Plocha užitná 59 m²" — kept its 64 under the equality
+    rule alone (the figure is the obytná measure, not an echo); under the flat rule it
+    loses it, and that is the intended move: on this portal 3,185 active flats carry a
+    "plot" that is a doubled floor figure, the placeholder 1 or the building's parcel."""
+    from pathlib import Path
+
+    from scraper.area import parse_area_text
+
+    html = (Path(__file__).resolve().parents[1] / "fixtures" / "location_w2a_refetch"
+            / "ceskereality_b1.html").read_text(encoding="utf-8")
+    listing = parse_detail(
+        html,
+        source_url="https://www.ceskereality.cz/prodej/byty/byty-2-1/ostrov/"
+                   "prodej-bytu-2-1-59-m2-majova-3861311.html",
+        category_main="byt", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis, listing.usable_area) == (59.0, "usable", 59.0)
+    assert parse_area_text(listing.raw["params"]["plocha pozemku"]) == 64.0
+    assert listing.estate_area is None

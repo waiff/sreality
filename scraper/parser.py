@@ -16,7 +16,7 @@ from typing import Any
 from unicodedata import combining, normalize
 
 from scraper import sreality_url, vocabulary
-from scraper.area import derive_headline_area
+from scraper.area import derive_headline_area, stated_plot
 from scraper.attribute_contract import floor_convention, source_label, source_value, source_values
 from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.published import iso_date
@@ -94,6 +94,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     read = partial(source_value, SOURCE, params=raw)
     label = partial(source_label, SOURCE, params=raw)
     estate_area = _numeric_or_none(raw.get("estate_area"))
+    usable = _numeric_or_none(raw.get("usable_area"))
     # `parking_lots` is the BOOLEAN and `parking` the count — the payload's names are the
     # opposite way round from the columns'. All three arms are the property's own (R11).
     lots_flag, garage_flag, parking_count = source_values(SOURCE, "has_parking", raw)
@@ -102,9 +103,13 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     )
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=_numeric_or_none(raw.get("usable_area")),
+        usable=usable,
         plot=estate_area,
     )
+    # This row never crosses ScrapedListing (sreality hashes the raw payload), so the
+    # plot rule is called here — the same rule, not a second copy of it (rule 21).
+    estate_area = stated_plot(category_main, estate_area, usable=usable,
+                              headline=area_m2, headline_basis=area_basis)
 
     return {
         "sreality_id": sreality_id,
