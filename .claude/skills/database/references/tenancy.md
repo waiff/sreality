@@ -79,7 +79,7 @@ The **only** table where the primary key itself changed, not just an added/scope
 column. Explicitly **gated** — its header states it must apply in the same deploy window
 as, and strictly after, the matching Python rewrite (`api/pipeline.py`'s
 `ON CONFLICT (account_id, property_id)` in add/move, `toolkit/pipeline_identity.py`'s
-account-partitioned reconcile/unmerge). Applying it before the Python ships is a hard
+account-partitioned merge/detach carriers). Applying it before the Python ships is a hard
 outage: old code's `ON CONFLICT (property_id)` can no longer infer against the new
 composite unique index (`42P10`), and every `property_pipeline_events` INSERT that
 doesn't stamp `account_id` hits a `NOT NULL` violation.
@@ -161,8 +161,8 @@ cannot be got wrong, because there is nothing at the route to get wrong.
 
 **3. An explicit `account_id = %s` predicate belongs ONLY on a service-role connection.**
 There, RLS is off (BYPASSRLS) and the predicate is the SOLE gate rather than a second opinion
-about a caller the database has already scoped. The live sites: `toolkit/pipeline_identity.py`
-(the merge/detach reconcilers, which run inside `merge_properties`' and `detach_listing`'s service-role transactions
+about a caller the database has already scoped. The live sites: `toolkit/property_carriers.py` and `toolkit/pipeline_identity.py`
+(the carriers, which run inside `merge_property_set`'s and `detach_listing`'s service-role transactions
 and must partition every join between the retired and survivor sides), `api/estimation_runs.py`
 (service-role child runs from `building_runs`), and the Stripe webhook (no caller identity at
 all — the HMAC over the raw body is the auth). On a tenant connection the same predicate is the

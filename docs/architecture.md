@@ -1323,17 +1323,20 @@ renumber.** Navigate by area:
     chokepoint. `merge_property_set` is the ONE merge (operator and engine alike): it refuses a
     non-active property, a category clash between ANY two members, two DIFFERENT asset links,
     or (the engine only) two linked units of one asset (`AssetLinkConflict`), keeps the OLDEST
-    record (`first_seen_at`, then the lowest id — decision 17, `survivor_of`), merges the rest
-    through `merge_properties` under ONE `merge_group_id` in one transaction, and recomputes the
-    survivor and patches Browse (`sync_browse_list`) once. `merge_properties` row-locks both,
-    gates on `status='active'`, re-points `listings.property_id`, writes one
-    `property_merge_events` row per moved advert, CARRIES the one asset link onto the survivor,
-    carries operator state (rule #18), the pipeline (rule #22) and dismissals, and soft-retires
-    the loser (`merged_away`). `detach_listing` is the ONE split and the ONE undo, per advert:
-    back to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
-    property with its pipeline card and carried asset link if merged away INTO that merge's
-    survivor (else the advert stays: `origin_moved_on`, read under the lock), stamping its ledger
-    rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
+    record (`first_seen_at`, then the lowest id — decision 17, `survivor_of`), and merges the
+    rest under ONE `merge_group_id` in one transaction. One lock covers the whole set (id order)
+    and one gate (`_gate_set`) refuses it, the category clash a typed `CategoryClash`; then each
+    retired property goes through the private `_merge_pair`: one `property_merge_events` row per
+    advert it holds, the `listings.property_id` re-point, every carrier in `PROPERTY_CARRIERS`
+    order (`toolkit/property_carriers.py`: the one asset link, collections, tags, notes,
+    dispatches, the pipeline, dismissals — rules 18, 22, decision 17), and the soft-retire
+    (`merged_away`). The survivor is then recomputed and Browse patched (`sync_browse_list`)
+    once, and an operator merge rules the ticked cards "same". `detach_listing` is the ONE split
+    and the ONE undo, per advert: back to its ORIGIN (the `prev_property_id` of its oldest live
+    ledger row), reactivating that property if merged away INTO that merge's survivor (else the
+    advert stays: `origin_moved_on`, read under the lock) and then running every carrier's
+    inverse in REVERSE list order (the pipeline card and the carried asset link come back),
+    stamping its ledger rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
     merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) is, while ANOTHER
     such own advert stays, a BIRTH through the one birth path (`split_native`, the operator's
     only: any other source answers `propose_only`, decision 9): the property locked first and
@@ -1344,8 +1347,9 @@ renumber.** Navigate by area:
     migration) — so the new record IS the advert's origin, and a later merge of the two
     (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
     property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
-    detach, `unapply` loop included, can leave an active property with no advert. Operator
-    state, the pipeline card and the asset link stay on the property left (rules 18, 22).
+    detach, `unapply` loop included, can leave an active property with no advert. No carrier
+    runs on a native split: operator state, the pipeline card and the asset link stay on the
+    property left (rules 18, 22).
     Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
     undo covers both kinds. A group comes apart as a
     loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
@@ -1546,8 +1550,9 @@ renumber.** Navigate by area:
     take back the operator's own "různé" (409 `reverses_rulings`), **Přesto uložit**
     (`confirm_retract`). Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
-    nothing from `property_merge_events`. Undo restores listings and pipeline cards;
-    collections, tags and notes stay on the survivor (rule #18: a detach or split is best-effort).
+    nothing from `property_merge_events`. Undo restores listings, pipeline cards and the carried
+    asset link; collections, tags, notes, dispatches and dismissals stay on the property left
+    (rule #18).
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
@@ -1659,10 +1664,10 @@ renumber.** Navigate by area:
     on every scrape and a merge alone sent false alerts. Each row carries provenance
     (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) and producer-stamped
     `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
-    Rows are re-pointed onto the survivor on a property merge by the operator-state reconciler
-    (rule #18, `toolkit/operator_state.py`, collapse key `(subscription_id, collection_id,
-    change_kind, trigger_snapshot_id)`, NULL-safe) so they never orphan onto a `merged_away`
-    property. **Delivery and detection are SEPARATE:** in-app delivery is the event row itself
+    Rows are carried onto the survivor by `PROPERTY_CARRIERS`' `notification_dispatches` entry
+    (rule #18, `toolkit/property_carriers.py`, collapse key `(subscription_id, collection_id,
+    change_kind, trigger_snapshot_id)`, NULL-safe — the table's one delete) so they never orphan
+    onto a `merged_away` property. **Delivery and detection are SEPARATE:** in-app delivery is the event row itself
     (`channel='in_app'`); external channels (email/Telegram, Sprint N) deliver via a dedicated
     `channel_sends` ledger draining `target_channels` — NOT a `channel`-column widen. (The old
     migration-057 comment claiming a new channel was "a one-line ALTER" was **false**: migration
@@ -1749,21 +1754,19 @@ renumber.** Navigate by area:
     tag_id)`, `property_notes(property_id, body, origin_listing_id)`, migration 202 — was
     listing-grain on `sreality_id` pre-202). A tag, collection membership, or note is a fact
     about the real-world property, not one portal's advert, so it is keyed on `property_id`
-    and **follows the property across a merge** (a detach leaves it where it is, best-effort). `toolkit/operator_state.py`
-    (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the registry of every SET/APPEND-shaped
-    property-anchored table — collections, tags, notes, AND `notification_dispatches`) re-points that
-    state onto the survivor inside the `merge_properties` transaction (SET tables union with
-    collision-collapse; APPEND tables move every row). The registry is one of FOUR carriers that
-    transaction runs, in a fixed order: the asset link (inline `_CARRY_ASSET_LINK_SQL`), the registry,
-    the pipeline (`toolkit/pipeline_identity.reconcile_pipeline_on_merge`, rule #22), then dismissals
-    (`toolkit/dismissal_identity.reconcile_dismissals_on_merge`, AFTER the pipeline so a live card
-    lifts its account's dismissal). `merge_properties` is the only writer that retires a property, so
-    no carried row can orphan onto a `merged_away` one — the invariant holds by construction. No
-    executed test asserts it: each carrier's hermetic suite checks only the SQL it emits, the
-    merge-ledger fake (`tests/_property_ledger.py`) answers `[]` to the registry, pipeline and
-    dismissal SQL, and CI's live merge tests (`tests/test_merge_safety_live.py`) run the carriers
-    without asserting where the rows land; the row-level outcome was verified out-of-band (the
-    executed test is owed: `roadmap/operator-workflow-track.md` § Rule #18 owed entry). **That
+    and **follows the property across a merge** (a detach leaves it where it is, best-effort).
+    `toolkit/property_carriers.py` (`PROPERTY_CARRIERS`, the one ordered list; `NOT_CARRIED` +
+    the census) carries that state inside the merge transaction, in a fixed order: the asset link;
+    collections, tags, notes AND `notification_dispatches` as `CurationTable`s (SET tables union
+    with collision-collapse; APPEND tables move every row); the pipeline (rule #22); then
+    dismissals, AFTER the pipeline so a live card lifts its account's dismissal. The private
+    `_merge_pair` (one per retired property of a `merge_property_set`) is the only writer that
+    retires a property, and it runs every carrier before the retire, so no operator-state row can
+    orphan onto a `merged_away` property — by construction, and executed: CI's live suite
+    (`tests/test_property_carriers_live.py`, one test per carrier through the public writers)
+    proves the retired property is left holding nothing, and a census over the migrations (and
+    over the replayed schema) fails on any column naming a property that is neither carried nor
+    named in `NOT_CARRIED` with its reason. **That
     invariant has a second half, on the WRITE side: a caller-supplied `property_id` is resolved to
     the active survivor (`toolkit.property_identity.resolve_active_property_id`) before EVERY
     property-anchored write — the remove and edit halves included, not just the INSERT.** 426fa575
@@ -1778,13 +1781,12 @@ renumber.** Navigate by area:
     (it CREATES survivors) and `properties.asset_id` (a column on the property row: the merge carries it
     onto the survivor, but a link or an unlink names one row). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
     commit message is not one. Adding a
-    new SET/APPEND-shaped property-anchored table = one registry line plus its `_CARRIED_TABLES`
-    entry in the write census (a hard-coded tuple: a table missing from it has unguarded write
-    routes, silently); a table whose collision must not DELETE (history, like dismissals) or that is
-    single-valued (like the pipeline) needs its own carrier called from `merge_properties`, and the
-    same census entry. Unmerge/split are deliberately
-    **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
-    side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
+    new property-anchored operator-state table = one `CurationTable(...)` line, or one adapter when
+    its collision must not DELETE (history, like dismissals) or it is single-valued (like the
+    pipeline); the write census's `_CARRIED_TABLES` derives from the carried columns, so there is
+    no second list to keep. A detach is deliberately **best-effort** for these rows: state stays on
+    the surviving/anchor property and the reactivated/detached side starts clean (the operator
+    re-curates — nothing is destroyed, it is on the survivor).
     Notes carry `origin_listing_id` as display provenance only ("written while viewing this
     advert"), never as a grouping key. Writes flow through the FastAPI service (property-grain
     routes `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
@@ -1882,11 +1884,10 @@ renumber.** Navigate by area:
     and keeps its dismissal: until 2026-09-21 ANY card blocked dismissing, so a deal the
     operator had "Passed" on stayed in Browse forever with no way to hide it (29 "Passed" + 15
     "Lost" cards at the time), while the 409's own advice — "close the deal there instead" —
-    hid nothing. The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision
-    there DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it
-    across a merge after the pipeline reconciler: a colliding active row is lifted (`merge`),
-    every row re-points, and a survivor holding that account's LIVE card lifts the dismissal
-    (`pipeline`). Unmerge is best-effort, as for the registry tables.
+    hid nothing. The row is carried by the `Dismissals` adapter in `PROPERTY_CARRIERS`, after
+    `Pipeline` — a SET collapse would DELETE history — so a colliding active row is lifted
+    (`merge`), every row re-points, and a survivor holding that account's LIVE card lifts the
+    dismissal (`pipeline`). A detach leaves them on the property left.
     **Browse hides dismissed properties by default, server-side (migration 537).** Every other
     Browse prefilter is an id ALLOWLIST sent as `.in(...)` in the GET URL; a dismissed set is an
     exclusion that grows without bound, so it never leaves the database. Each Browse relation has
@@ -2168,8 +2169,8 @@ renumber.** Navigate by area:
     just the entry stage** (`pipeline_stages.is_entry`), not a separate flag: presence of a
     `property_pipeline` row == the property is in the pipeline. Single-valued-ness is why it
     can't live at advert grain (unlike the m2m curation of rule #18) — so it gets its OWN
-    merge reconciler, `toolkit/pipeline_identity.reconcile_pipeline_on_merge`, called in the
-    `merge_properties` transaction alongside the curation carry: it snapshots BOTH sides'
+    carrier, the `Pipeline` entry of `PROPERTY_CARRIERS` (over `toolkit/pipeline_identity.py`),
+    in the merge transaction: it snapshots BOTH sides'
     pre-merge cards to the append-only `property_pipeline_events` ledger, then keeps the
     most-advanced stage on the survivor — **TERMINAL-AWARE**: a live (non-terminal) stage
     always beats a closed/terminal one, so a merge never buries a live deal under `lost`/`won`;
