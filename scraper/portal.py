@@ -442,9 +442,9 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "bazos": PortalConfig(
         source="bazos",
-        # The index reports a total, so a full walk of the configured scope is
-        # provable-complete; the per-walk completeness guard + the 12h sweep
-        # throttle (migration 113) keep delisting inference safe.
+        # The index reports a total, so a full walk of the configured scope can
+        # reach the portal's end; it then nominates its unseen rows for a page
+        # check (rule #3).
         supports_complete_walk=True,
         # Every bazos property section × sale + rent (migration 488 closed the gap
         # migration 160 deferred: pozemek/zahrada/garaz/ostatni were never walked,
@@ -534,8 +534,9 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # pairs a category with its agenda; walk_category walks that agenda once
         # (cached) and keeps the id-prefix slice for its category. Complete-walk
         # via AGENDA-GRAIN delisting: maxima reports a per-AGENDA total, so the
-        # sweep flips the whole agenda (af ≡ category_type) once it's fully walked
-        # (db.presence_candidates, category_main=None), not the per-(cm,ct) slice. See maxima_main.
+        # walk nominates the whole agenda's (af ≡ category_type) unseen rows once it
+        # reaches the agenda's end (db.presence_candidates, category_main=None),
+        # not the per-(cm,ct) slice. See maxima_main.
         supports_complete_walk=True,
         categories=[
             {"category_main": "byt",      "category_type": "prodej",   "af": 1},
@@ -560,8 +561,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # URL. Each descriptor pairs a category with its offer-type flag;
         # walk_category walks that agenda once (cached) and keeps the
         # title-derived slice for its category. Complete-walk via AGENDA-GRAIN
-        # delisting: remax reports a per-AGENDA total, so the sweep flips the whole
-        # agenda (sale ≡ category_type) once it's fully walked
+        # delisting: remax reports a per-AGENDA total, so the walk nominates the whole
+        # agenda's (sale ≡ category_type) unseen rows once it reaches the agenda's end
         # (db.presence_candidates, category_main=None), not the title-derived per-(cm,ct) slice. See
         # remax_main.
         supports_complete_walk=True,

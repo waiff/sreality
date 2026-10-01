@@ -935,7 +935,7 @@ def test_one_row_per_kraj_not_per_subtype(monkeypatch):
 
 def test_a_kraj_is_exhausted_only_if_every_part_is(monkeypatch):
     """Fourteen good subtypes and one that failed is not 93% of a kraj — it is a
-    kraj with a hole, and mark_inactive would read the hole as 'these are gone'."""
+    kraj with a hole, and nomination would read the hole as 'these went unseen'."""
     written = _record(monkeypatch, [
         _sr("praha", "exhausted", subtype="byty-2-1"),
         _sr("praha", "ceiling", subtype="byty-3-1"),
