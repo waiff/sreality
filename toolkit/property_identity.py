@@ -689,4 +689,3 @@ def detach_listings(
             "queried_at": _now_iso(),
         },
     }
-

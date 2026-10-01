@@ -268,7 +268,7 @@ def test_the_dry_run_counts_reproduce_the_probe_and_write_nothing() -> None:
     assert out["undone_by"] == STAMP and out["category_types"] == ["prodej"]
 
 
-def test_the_live_run_detaches_newest_first_in_ledger_order_and_writes_no_ruling() -> None:
+def test_the_live_run_detaches_each_group_in_one_call_newest_first_and_writes_no_ruling() -> None:
     db = RetireDb()
     older = _intact_pair(db, 100, 200, 1)
     db.advert(10, 300)
@@ -276,8 +276,16 @@ def test_the_live_run_detaches_newest_first_in_ledger_order_and_writes_no_ruling
     db.advert(11, 510)
     newer = db.merged(300, 520, 510)                   # ledger order 12, then 11
     calls: list[dict[str, Any]] = []
+    sets: list[tuple[str | None, list[int]]] = []
+    base = db.detach_recording(calls)
+
+    def detach(conn: RetireDb, lids: Sequence[int], **kw: Any) -> dict[str, Any]:
+        sets.append((kw["merge_group_id"], list(lids)))
+        return base(conn, lids, **kw)
+
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
-                          detach=db.detach_recording(calls))
+                          detach=detach)
+    assert sets == [(newer, [12, 11]), (older, [2])]   # one call per group, all its movers
     assert [(c["listing_id"], c["merge_group_id"]) for c in calls] == [
         (12, newer), (11, newer), (2, older)]
     assert {(c["decided_by"], c["source"]) for c in calls} == {(STAMP, L.LEGACY_SOURCE)}

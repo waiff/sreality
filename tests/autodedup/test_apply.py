@@ -1217,6 +1217,28 @@ def test_unapply_undoes_a_generation_newest_first_and_a_later_apply_may_redo_it(
     assert [g.reasons for g in later.groups] == [[]]
 
 
+def test_unapply_undoes_a_group_in_one_set_detach_over_every_advert_its_merge_moved() -> None:
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    merged: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(merged))
+    calls: list[str | None] = []
+    sets: list[list[int]] = []
+    base = db.detach(calls)
+
+    def detach(conn: FakeDb, listing_ids: Sequence[int], **kw: Any) -> dict[str, Any]:
+        sets.append(list(listing_ids))
+        return base(conn, listing_ids, **kw)
+
+    result = A.unapply(db, GEN, dry_run=False, detach=detach)
+    assert calls == [merged[0]["merge_group_id"]] and sets == [[11, 12]]
+    assert result["counts"]["undone"] == 1 and result["counts"]["listings_moved_back"] == 2
+    assert {lid: row["property_id"] for lid, row in db.listings.items()} == {
+        10: 100, 11: 200, 12: 300}
+
+
 def test_unapply_picks_groups_by_generation_run_and_time_window() -> None:
     db = FakeDb()
     db.live_scope()
