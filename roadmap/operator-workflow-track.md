@@ -7,15 +7,6 @@ map, or scraper tracks. Operator-scoped (single shared identity, no
 per-user accounts — matches today's bearer-token model) *(superseded:
 per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
 
-### Rule #16: the Watchdog matcher compiles from the filter registry (owed, 2026-10-01)
-- **Owed:** only Browse compiles from `toolkit/filter_registry.py` today;
-  `api/notifications._build_match_clauses` hand-writes ~40 clauses against
-  `properties_public`. Parity tests pin only field ids, the per-m² / plot measure and the
-  place-chip plan; curated-city rules agree because both sides evaluate the one SQL function
-  `curated_cities_matching()` (only the matcher side is test-pinned,
-  `tests/test_city_quality_obec_key.py`); every other clause is kept in step with Browse by
-  hand. Compile the matcher from the registry (origin: Phase U2.7 below).
-
 ### Rule #18: an executed no-orphan merge test (done, 2026-10-01)
 - **Done:** `tests/test_property_carriers_live.py` (PR 0 #1664, extended by the
   `PROPERTY_CARRIERS` PR) merges and detaches through the public writers, one test per
@@ -663,9 +654,9 @@ any newly-scraped listings.
   estimation row that lives on the existing `/estimation/:id` page.
 - Backend: `api/notifications.py` owns the `WatchdogFilterSpec`
   Pydantic model, the SQL-clause renderer (mirrors
-  `_shared_filter_where` semantics — *superseded 2026-10-01: that helper
-  is not a Watchdog–Browse helper; see the rule #16 owed entry at the top
-  of this file*),
+  `_shared_filter_where` semantics — *superseded 2026-10-01: both now
+  compile from `toolkit/filter_compiler.py`; see the Rule 16 bullet
+  below*),
   and the matcher loop spawned via
   FastAPI's lifespan context manager. `api/routes/notifications.py`
   exposes the standard bearer-gated CRUD + dispatch endpoints. The
@@ -678,6 +669,25 @@ any newly-scraped listings.
   price, when it fired, the watchdog name, an "estimation" column
   that streams the yield once the background task completes, and a
   per-row "Run estimation" button.
+- ✅ Rule 16: one filter compiler, `toolkit/filter_compiler.py`; the Watchdog + every
+  cohort compile the registry (`sql_kind` + one hook table; Browse's TS pinned to the same
+  `sql_kind`); −12 dead `ComparableFilters` fields; `subscriptions_failed` in the matcher
+  stats (cleanup/filter-compiler, C4 PR 1).
+
+**Next (filter definition, tracked from C4)**
+
+- M1: the Watchdog drops `building_material` and `min/max_garden_area` (lost by merge
+  f2d7b359; `extra='ignore'`) — `fix/watchdog-dropped-filters`, C4 PR 2; the fix empties the
+  set pinned in `test_every_registry_filter_has_a_model_field`.
+- M2: the agent advertises 10 COMPARABLES ids that `_FCR_OVERRIDE_FIELDS` drops — changes
+  agent cohorts, needs an operator ruling, own PR.
+- The agent's null `category_type` path (`api/agent.py`) — same posture as M2.
+- M3: center+radius is a circle in Python and a bounding square in Browse.
+- M4: `tom_days` reaches Stats but not the Browse list.
+- M7: integer area params in the browse RPCs. M11: canonical-advert row vs property rollup.
+- Browse's TS dispatch switches to `sql_kind` (drops `isMinId`/`isMaxId` + the duplicated
+  dispatch).
+- The NEIGHBORHOOD agenda over-declares ~30 filters `toolkit/neighborhoods.py` never reads.
 
 **What's deferred**
 

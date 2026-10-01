@@ -425,7 +425,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
    * NULL or non-canonical value, which the plain `.in()` auto-dispatch can't
    * express — so they're hand-coded here as an `.or(in.(…),is.null,not.in.(…))`
    * clause. Mirrors browse_stats_properties + the watchdog matcher (the
-   * shared toolkit.comparables._enum_or_unknown_clause). */
+   * shared toolkit.filter_compiler._enum_or_unknown_clause). */
   const enumOrUnknown = (
     col: string, values: string[], canonical: readonly string[],
   ): string | null => {
