@@ -174,19 +174,19 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `score_listing_condition` in one latest-wins transaction. Filter on the derived columns, not the
     coarse `condition_assessment`.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows land
-    `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge
-    chokepoint, two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listing`) — it re-points
-    `listings.property_id`, soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to its origin or a refusal,
-    e.g. `moved_since`; a group undo loops it — no replay), carries every property-anchored operator-state row through ONE ordered list, `PROPERTY_CARRIERS`
-    (rule #18), re-syncs the browse read model, and enforces **category compatibility** (`CategoryClash`: sale≠rent, flat≠house — except the sanctioned
-    **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the operator, or by the AUTODEDUP engine
-    (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split): the worker's autodedup lane
-    reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open operator decision,
-    `roadmap/autodedup.md`); until then the brake is interval 0, then `mode=unapply` — its only detach besides `retire_legacy=1` (until W8: undoes the
-    removed engine's `source='auto'` merges in the scope's area, the only code that selects that output by source).** **The old automatic decision
-    engine was REMOVED wholesale (2026-08 "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers (pHash, CLIP, `/labeling`) stay live; the
-    rebuild is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`). **Never resurrect or consult the removed engine's code or design
-    docs**; the operator owns the apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
+    `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge chokepoint,
+    two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listing`) — it re-points `listings.property_id`,
+    soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to its origin or a refusal, e.g. `moved_since`; a group undo
+    loops it — no replay), carries every property-anchored operator-state row through ONE ordered list, `PROPERTY_CARRIERS` (rule #18), brings every touched
+    property current through ONE after-step, `properties_changed`, which the dirty drain shares, and enforces **category compatibility** (`CategoryClash`:
+    sale≠rent, flat≠house — except the sanctioned **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
+    operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
+    the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open
+    operator decision, `roadmap/autodedup.md`); until then the brake is interval 0, then `mode=unapply` — its only detach besides `retire_legacy=1` (until W8:
+    undoes the removed engine's `source='auto'` merges in the scope's area, the only code that selects that output by source).** **The old automatic decision
+    engine was REMOVED wholesale (2026-08 "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers (pHash, CLIP, `/labeling`) stay live; the rebuild
+    is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`). **Never resurrect or consult the removed engine's code or design docs**; the
+    operator owns the apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"**, rendered per relation: the Watchdog + every cohort compile
     the registry in `toolkit/filter_compiler.compile_filter_where`; Browse's TS + RPCs are pinned per shared predicate only
     (`sql_kind`, place plan, rule-23 measures, served predicate). `notification_dispatches` = the append-only event table,
@@ -211,7 +211,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 20. **Property maintenance is dirty-set incremental, not full-table.** Every child-changing write (content change, revival,
     delist, column heal) enqueues `property_id` into `dirty_properties` (migration 106) in its own transaction (exceptions: the census ledger, and a crawler change confined to unhashed columns, which waits for the daily sweep — architecture § rule 20); `property_maintenance.yml` (`--incremental`, `*/5`)
     attaches new singletons + recomputes only queued properties (O(changes)); the daily full sweep (04:15) is
-    the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
+    the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group. Merge/detach/split recompute inline through the drain's own after-step (`properties_changed`: rollup, Browse row, broker queue) and never enqueue `dirty_properties`.
 21. **Every portal runs through ONE shared framework (Phase 4: `portal_base` / `portal` / `portal_runner`, one
     source-generic `listing_detail_queue`); per-portal code is a client (fetch + pacing) + a parser + a `Portal`
     adapter + a config row (`PortalConfig`/`PortalLimits` = its politeness); shared code grows NO new portal-name

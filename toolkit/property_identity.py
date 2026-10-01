@@ -3,11 +3,12 @@
 `merge_property_set` merges an active set into its oldest record under one lock and one gate;
 `detach_listing` moves one advert back to its ledger origin, or (the operator only) a native
 advert to a new record through the one birth path — a group undo is a loop of it. Both carry
-every property-anchored operator-state row through `toolkit.property_carriers.PROPERTY_CARRIERS`,
-then recompute and patch Browse. Callers: `api.property_merge` and `toolkit.property_split` (the
-operator), `autodedup.apply` and `autodedup.reconcile` (merge, inside
-`app_settings.autodedup_apply_scope`), `autodedup.apply.unapply` and `autodedup.legacy_retire`
-(detach). `source='operator'` is also a ruling (decision 8); an engine merge or undo never is.
+every property-anchored operator-state row through `toolkit.property_carriers.PROPERTY_CARRIERS`
+and finish with `properties_changed` once (rollup, Browse row, broker queue). Callers:
+`api.property_merge` and `toolkit.property_split` (the operator), `autodedup.apply` and
+`autodedup.reconcile` (merge, inside `app_settings.autodedup_apply_scope`),
+`autodedup.apply.unapply` and `autodedup.legacy_retire` (detach). `source='operator'` is also a
+ruling (decision 8); an engine merge or undo never is.
 """
 
 from __future__ import annotations
@@ -21,9 +22,8 @@ from psycopg.types.json import Jsonb
 
 from autodedup import ui_sql as usql
 from scraper.db import create_singleton_properties
-from scripts.recompute_property_stats import recompute_one
+from scripts.recompute_property_stats import properties_changed
 from toolkit import property_carriers as carriers
-from toolkit.browse_read_model import sync_browse_list
 from toolkit.property_carriers import MergeSource  # re-exported: callers read it from here
 from toolkit.room_taxonomy import category_main_compatible
 
@@ -368,7 +368,8 @@ def merge_property_set(
 ) -> dict[str, Any]:
     """Merge an active SET into its oldest record under ONE group, in one transaction: one lock
     over every member in id order, one gate (`_gate_set`), then each retired property through
-    `_merge_pair`. `source='operator'` rules the canonical adverts "same"."""
+    `_merge_pair`. `source='operator'` rules the canonical adverts "same"; then
+    `properties_changed` once over the survivor and the retired."""
     ids = sorted({int(p) for p in property_ids})
     if len(ids) < 2:
         raise MergeError("need at least two distinct properties")
@@ -391,12 +392,11 @@ def merge_property_set(
                     cur, carriers.MergeStep(survivor, rid, group, source), reason=reason,
                     confidence=confidence, markers=markers,
                 )
-        recompute_one(conn, survivor)
-        sync_browse_list(conn, [survivor, *retired])
         ruled = record_rulings(
             conn, pairs, verdict="same", decided_by=str(decided_by),
             note=f"operator merge {group}",
         ) if pairs else 0
+        properties_changed(conn, [survivor, *retired])
 
     return {
         "data": {
@@ -594,9 +594,7 @@ def detach_listing(
                     verdict="different", decided_by=decided_by,
                     note=f"operator detach from {current}" + (f": {reason}" if reason else ""),
                 )
-            for pid in (current, target):
-                recompute_one(conn, pid)
-            sync_browse_list(conn, [current, target])
+            properties_changed(conn, [current, target])
 
     return {
         "data": {

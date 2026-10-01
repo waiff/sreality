@@ -1326,19 +1326,22 @@ renumber.** Navigate by area:
     advert it holds, the `listings.property_id` re-point, every carrier in `PROPERTY_CARRIERS`
     order (`toolkit/property_carriers.py`: the one asset link, collections, tags, notes,
     dispatches, the pipeline, dismissals — rules 18, 22, decision 17), and the soft-retire
-    (`merged_away`). The survivor is then recomputed and Browse patched (`sync_browse_list`)
-    once, and an operator merge rules the ticked cards "same". `detach_listing` is the ONE split
-    and the ONE undo, per advert: back to its ORIGIN (the `prev_property_id` of its oldest live
-    ledger row), reactivating that property if merged away INTO that merge's survivor (else the
-    advert stays: `origin_moved_on`, read under the lock) and then running every carrier's
-    inverse in REVERSE list order (the pipeline card and the carried asset link come back),
-    stamping its ledger rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
-    merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) is, while ANOTHER
-    such own advert stays, a BIRTH through the one birth path (`split_native`, the operator's
-    only: any other source answers `propose_only`, decision 9): the property locked first and
-    the plan re-read under the lock, then the advert unlinked and born by
-    `scraper.db.create_singleton_properties` and both recomputed; ONE ledger row records it in
-    the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
+    (`merged_away`). Then an operator merge rules the ticked cards "same", and
+    `properties_changed` (`scripts/recompute_property_stats.py`, the dirty drain's own
+    after-step: the scoped rollup, the Browse row, the broker queue) runs ONCE over the survivor
+    and the retired, so `brokers.property_count` follows on the broker drain's cadence, not at
+    the daily broker sweep. `detach_listing` is the ONE split and the ONE undo, per advert: back
+    to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
+    property if merged away INTO that merge's survivor (else the advert stays:
+    `origin_moved_on`, read under the lock) and then running every carrier's inverse in REVERSE
+    list order (the pipeline card and the carried asset link come back), stamping its ledger
+    rows `undone_at`/`undone_by` (never deleted), then `properties_changed` once over both. An
+    advert NO standing merge moved (an ingest-time grouping, ~15.9k `native_multi` properties)
+    is, while ANOTHER such own advert stays, a BIRTH through the one birth path (`split_native`,
+    the operator's only: any other source answers `propose_only`, decision 9): the property
+    locked first and the plan re-read under the lock, then the advert unlinked and born by
+    `scraper.db.create_singleton_properties` and both brought current (`properties_changed`);
+    ONE ledger row records it in the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
     property left, `retired` = `prev` = the new record) written already undone by the split (no
     migration) — so the new record IS the advert's origin, and a later merge of the two
     (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
@@ -2044,7 +2047,9 @@ renumber.** Navigate by area:
     the worker's maintenance lane) and the job is **O(changes)**, not O(all properties). Reaching
     **Browse** is a second step, because `browse_projection` reads `properties` and Browse reads
     the `browse_list` snapshot: since field-capture W6 the drain patches `browse_list` for exactly
-    the ids it recomputed (`sync_browse_list`), so a change usually no longer waits for the `*/15`
+    the ids it recomputed — each slice runs `properties_changed` (recompute, `sync_browse_list`,
+    and the broker queue for their attributed adverts) in ONE transaction under the 10-min
+    ceiling, then dequeues — so a change usually no longer waits for the `*/15`
     wholesale rebuild — which was a measured mean of 11.7 min, worst 36.6 (94 rebuilds / 24 h,
     2026-09-21). A fast path, not a guarantee: the rebuild snapshots `browse_projection` at its
     start and renames the new table in at its end, so a patch committed inside that window is
@@ -2068,8 +2073,10 @@ renumber.** Navigate by area:
     hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
-    mutate `properties` concurrently. Inline merge/detach still call `recompute_one` directly
-    (they keep the survivor current without waiting for the cron). A residual of removing the
+    mutate `properties` concurrently. Inline merge/detach run `properties_changed` (the drain's
+    own after-step: scoped recompute, Browse patch, broker queue) directly, and never enqueue
+    `dirty_properties`.
+    A residual of removing the
     inline singleton rollup: a crawler change confined to unhashed columns (`area_basis`,
     `published_at`, `source_url`, which feed `price_per_m2_source_listing_id`) reaches its
     property only at the daily sweep, and an unchanged, non-reactivating refetch no longer
