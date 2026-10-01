@@ -52,9 +52,6 @@ _STATEMENT = {
 # case name -> why it cannot select a strict, non-empty subset. Empty on purpose.
 _EXEMPT_NON_VACUITY: dict[str, str] = {}
 
-# Column-backed filters whose SQL is not a plain `<column> <op> value`.
-_HOOKED = frozenset({"building_material", "min_price_czk", "max_price_czk"})
-
 _CASES = [
     c for c in (gold.golden() if gold.GOLDEN_PATH.exists() else [])
     if c["grain"] in _STATEMENT and "raises" not in c
@@ -142,7 +139,7 @@ def cohort(conn) -> dict[str, set[int]]:
 
 def _regular_single(case: dict[str, Any]) -> bool:
     f = fr.REGISTRY.get(case.get("filter", ""))
-    if f is None or f.pg_column is None or f.id in _HOOKED:
+    if f is None or fr.sql_kind(f) is None:
         return False
     value = case["input"].get(f.id)
     return value is not None and value != []
