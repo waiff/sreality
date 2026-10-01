@@ -1,6 +1,6 @@
 ---
 name: toolkit-api
-description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, the two-gate auth split (require_token shared-secret vs. require_admin/verify_jwt real Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
+description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, the two-gate auth split (require_token shared-secret vs. require_admin/verify_jwt real Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic, Gemini, OpenAI, Qwen, OSS), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
 ---
 
 # Toolkit & API
@@ -16,7 +16,7 @@ it (`api/`). They do not apply to the scraper.
 
 1. **Tools return facts, not opinions.** No "recommended price", no "this looks like a good
    deal." Tools return data + provenance. Reasoning happens at the agent layer.
-2. **Standard envelope on every tool's return value:**
+2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `asset_identity` / `property_identity` / `location_quality` still omit `data_freshness`):
    ```python
    {
      "data": ...,
@@ -104,22 +104,22 @@ it (`api/`). They do not apply to the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
 8. **Two auth gates coexist by design: `require_token` (shared secret) and
    `require_admin`/`verify_jwt` (real identity, JWT-only since 2026-08-04).** Baseline:
-   every endpoint except `/health` requires `Authorization: Bearer <token>` when
-   `API_TOKEN` is set (no-op when unset, for local dev); `/health` stays open for Railway
+   a `require_token` route needs `Authorization: Bearer <API_TOKEN>` and fails CLOSED (`503`
+   when `API_TOKEN` is unset, unless `API_AUTH_OPTIONAL=1` for local dev); `/health` stays open for Railway
    healthchecks. `/admin/*` (Settings-page surface: skills, `app_settings`, agent tool
    inventory) is bearer-gated like every other write surface — it was historically exempt
    on the theory that the private Railway URL was the perimeter, but that URL ships
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
    of the token: `/admin/*`, `/properties/merge*`, `/properties/assets/*`, `/labeling/*`,
-   `/outreach/*`, `/broker-review/*`,
-   `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
+   `/outreach/*`, `/broker-review/*`, `/autodedup/*`, `/new-dedup/*`,
+   `/skill-refinements/*`, `/location/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
-   `/pipeline/*`, `/collections` (GET), `/estimations` create/detail/scenario, notes,
+   `/pipeline/*`, `/collections`, `/tags`, `/estimations` create/detail/scenario, notes,
    `/listings/lookup` (**RLS-ONLY**: it takes no account argument and its SQL carries no account predicate — `current_account_ids()` must stay the ONE membership definition, the same one the SPA reads; a second, explicitly-bound one is what broke the extension 2026-07-23→09-11), and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
-   identity without the admin claim; every other route is still `require_token`-only (a
-   shared secret, no identity — `POST /collections`, tags, buildings, manual estimates,
-   filter-presets). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
+   identity without the admin claim (`GET /estimations{,/latest-by-listing}` take `account_scope`);
+   most other routes are still `require_token`-only (a shared secret, no identity — buildings,
+   manual estimates, filter-presets, estimation preview/feedback/trace payload). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
    broker E2E review): the leaderboard returned up to 2000 brokers' unmasked email +
    phone behind the bundle-extractable token. Every `/brokers/*` envelope now runs
    through `toolkit.brokers.apply_pii_policy`, which swaps any contact column for
@@ -193,14 +193,14 @@ it (`api/`). They do not apply to the scraper.
     seed `INSERT` in a new migration, apply.
 11. **LLM provider is pluggable; `llm_calls.provider` records which backend served each call.**
     `api/providers/` defines a `CompletionProvider` Protocol with neutral message / tool /
-    completion types; `anthropic`, `gemini`, `openai` and (since W2-10) `qwen` are wired up
+    completion types; `anthropic`, `gemini`, `openai`, `qwen` (W2-10) and `oss` (`oss:` ids) are wired up
     (default `anthropic`). `provider_for_model` derives the backend from the model id
     prefix, so a lane that only knows its `app_settings` model routes without threading a
     provider argument. Adding a provider is a new file implementing the same Protocol,
-    registered in `api/dependencies.py:_build_providers` — AND, separately, in each cron
-    script's own provider map: no script under `scripts/` uses `get_providers()`, and a
-    model whose provider is unregistered raises in `LLMClient.call` BEFORE the try/except
-    that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
+    registered in `api/dependencies.py:_build_providers` — AND, separately, in every hand-built provider map (`scraper/main.py`,
+    the condition scripts, `scripts/bakeoff_text_extraction.py`, `autodedup/judge_lane.py`, `toolkit/vision_batch.py`,
+    `toolkit/description_extraction.py`; the API, the worker and `smoke_agent.py` use `get_providers()`), and a model whose
+    provider is unregistered raises in `LLMClient.call` BEFORE the try/except that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
     invisible to `llm_errors` and `llm_burn_rate` alike. `LLMClient` is the audit orchestrator — every call
     writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
     tag. An unmapped model id records `cost_usd=0` rather than raising — silent, not loud;
@@ -259,8 +259,8 @@ the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 port loss n
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
-Five auth primitives coexist — four in `api/dependencies.py`, one in `api/tenant_pool.py`:
-- `require_token` — the original bearer-token gate (rule #8's baseline), unchanged.
+Six auth primitives coexist — four in `api/dependencies.py`, two in `api/tenant_pool.py` (`tenant_conn` after this list):
+- `require_token` — the original bearer-token gate (rule #8's baseline), now fail-closed (`503` when `API_TOKEN` unset).
 - `account_scope` — an EITHER gate returning a READ SCOPE (the tenancy doctrine's FOURTH shape),
   for routes serving a browser session AND a non-browser caller over the one `Authorization`
   header: the static token resolves to `[SYSTEM]` (it ships in the SPA bundle, so it is no
@@ -429,7 +429,7 @@ LLM + maps (FastAPI service + scoring jobs):
   crosses it. Each provider's own console spend cap is the hard guard.
 
 API service:
-- `API_TOKEN` — bearer-token gate (no-op when unset, for local dev). See Toolkit rule #8.
+- `API_TOKEN` — bearer-token gate; unset → `503` unless `API_AUTH_OPTIONAL=1` (local dev only). See Toolkit rule #8.
 - `CORS_ALLOW_ORIGINS` — CSV of allowed origins; must include the Chrome extension's
   `chrome-extension://<id>` origin and the SPA origin.
 - `STUCK_ROW_SWEEP_DISABLED`, `NOTIFICATIONS_MATCHER_DISABLED` (optional flags) — disable the

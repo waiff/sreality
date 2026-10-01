@@ -4,9 +4,9 @@ Each provider implements the `CompletionProvider` protocol from
 `base.py`. The agent loop in `api/agent.py` and the recorder in
 `api/llm_client.py` only ever speak the neutral types defined here.
 
-Today we ship two providers — Anthropic and Gemini. Adding a third
-(OpenAI, Vertex AI, etc.) is one new file implementing the same
-protocol, registered in `api/main.py`.
+Five providers ship: anthropic, gemini, openai, qwen, oss. Adding one is a
+new file implementing the same protocol, registered in
+`api/dependencies.py:_build_providers` (and any hand-built provider map).
 """
 
 from api.providers.base import (

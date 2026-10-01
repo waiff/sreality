@@ -114,10 +114,8 @@ def listing_row(source: str, native: str) -> ListingRow:
     )
 
 
-def payload(source: str, native: str, body: bytes | None = None) -> ArchivedPayload:
-    return ArchivedPayload(
-        id=9001, source=source, source_id_native=native, page_kind="detail",
-        payload_sha256="ab" * 32, first_observed_at=FETCHED_AT, body=body)
+def payload(body: bytes | None = None) -> ArchivedPayload:
+    return ArchivedPayload(id=9001, page_kind="detail", first_observed_at=FETCHED_AT, body=body)
 
 
 def scoped(source: str, body: bytes | str) -> ScopedDocument:
@@ -141,18 +139,12 @@ def read(
     name: str, document: ScopedDocument, item: Entry, *, native: str = "fixture",
 ) -> list[archive.PageRead]:
     return PAGE_READERS[name](
-        item, listing_row(item.source, native), payload(item.source, native), document)
+        item, listing_row(item.source, native), payload(), document)
 
 
 def one(reads: list[archive.PageRead]) -> Any:
     assert len(reads) == 1, f"expected exactly one read, got {len(reads)}"
     return reads[0].claim
-
-
-def span_text(document: ScopedDocument, claim: Any) -> str | None:
-    if claim.span_start is None or claim.span_end is None:
-        return None
-    return document.html[claim.span_start:claim.span_end]
 
 
 # ------------------------------------------------------------------ html_own_text
@@ -169,8 +161,6 @@ def test_html_own_text_reads_the_header_without_its_nested_jump_link():
                            claim_type="address_line_verbatim")))
     assert claim.value_text == "ulice Pod Slovany, Úvaly"
     assert "mapa" not in claim.value_text and "\t" not in claim.value_text
-    assert claim.span_start is not None
-    assert span_text(document, claim).startswith("ulice Pod Slovany,")
 
 
 def test_html_own_text_and_html_text_disagree_on_this_page():
@@ -185,10 +175,6 @@ def test_html_own_text_and_html_text_disagree_on_this_page():
                    entry("remax", dict(locator, reader="html_own_text"),
                          claim_type="address_line_verbatim")))
     assert "mapa" in deep.value_text and "mapa" not in own.value_text
-    # And the deep read cannot even be evidenced: "Úvaly mapa" is not contiguous in the
-    # source (the link's tag sits between the two words), so it resolves to no span at all.
-    assert deep.span_start is None
-    assert own.span_start is not None
 
 
 def test_html_own_text_captures_the_non_ulice_header_form():
@@ -221,11 +207,6 @@ def test_html_regex_reads_the_accented_street_from_a_real_archived_body():
                      _title_regex_entry(", ulice (?P<street>[^,]+),", "street",
                                         "street_name")))
     assert claim.value_text == "Májová" != "Majova"
-    # The quote is the WHOLE MATCH, not the bare street: a street name occurs in several
-    # places on a portal page and `find_span` takes the first occurrence inside the node, so
-    # quoting the match is what keeps the span pointing at the pattern that produced it.
-    assert claim.evidence_quote == ", ulice Májová,"
-    assert span_text(document, claim) == claim.evidence_quote
 
 
 def test_a_town_only_title_yields_no_street_claim():
@@ -280,13 +261,11 @@ def test_html_regex_refuses_a_missing_pattern_a_missing_group_or_an_undefined_gr
             "reading a stack trace out of a batch that rolled back")
 
 
-def test_html_regex_emits_no_claim_when_the_match_has_no_locatable_span(monkeypatch):
-    """A span-less `regex_text` claim reaches `assert_evidence_complete`, which RAISES — and
-    that refusal aborts the whole batch transaction. One page that will not yield a locatable
-    span must be zero claims, never an outage."""
+def test_html_regex_emits_no_claim_when_the_node_does_not_show_the_match(monkeypatch):
+    """A match the scoped body cannot show (`shows` is False inside the node) is zero
+    claims, never an error."""
     document = scoped("ceskereality", (_REFETCH / "ceskereality_b1.html").read_bytes())
-    monkeypatch.setattr(type(document), "find_span",
-                        lambda self, value, within=None: None)
+    monkeypatch.setattr(type(document), "shows", lambda self, value, within: False)
     assert read("html_regex", document,
                 _title_regex_entry(", ulice (?P<street>[^,]+),", "street",
                                    "street_name")) == []
@@ -309,8 +288,6 @@ def test_html_attr_regex_reads_the_obec_out_of_the_town_anchor_href():
     document = pinned("bazos")
     claim = one(read("html_attr_regex", document, _slug_entry("obec_slug")))
     assert claim.value_text == "praha-8"
-    assert span_text(document, claim) == claim.evidence_quote
-    assert "/inzeraty/" in claim.evidence_quote
 
 
 def test_html_attr_regex_lets_the_pattern_and_not_the_selector_pick_the_node():
@@ -363,9 +340,6 @@ def test_html_marker_reads_an_attribute_marker_and_derives_declared_blur():
     assert claim.value_text == "approximate_location"
     assert claim.declared_precision_label == "approximate_location"
     assert claim.blur_evidence == "declared"
-    # The VALUE is the contract's label; the EVIDENCE is the portal's own words.
-    assert claim.evidence_quote == "Přibližná lokalita"
-    assert span_text(document, claim) == claim.evidence_quote
 
 
 def test_html_marker_does_not_assert_blur_for_an_unlisted_label():
@@ -391,7 +365,6 @@ def test_html_marker_matches_a_sentence_across_source_lines():
                      native=IDNES_NATIVE))
     assert claim.value_text == "no_exact_address"
     assert claim.blur_evidence == "declared"
-    assert span_text(document, claim) == sentence
     # And the same sentence broken across source lines still matches, which `str.split()`
     # would also manage — but a zero-width space it would not, and a scrubbed archive body
     # carries both. One normalisation, `html_scope.collapse_ws`, for the whole lane.
@@ -403,9 +376,7 @@ def test_html_marker_matches_a_sentence_across_source_lines():
                                           {"css": "body", "contains": sentence,
                                            "value_label": "no_exact_address"},
                                           ["no_exact_address"]), native=IDNES_NATIVE))
-    # The quote is the contract's literal while the SPAN indexes the uncollapsed source, so
-    # the span is longer than the quote. That is correct, not a defect.
-    assert "​" in span_text(broken_document, broken_claim)
+    assert broken_claim.value_text == "no_exact_address"
 
 
 def test_html_marker_emits_nothing_when_the_marker_is_absent():
@@ -429,7 +400,6 @@ def test_html_marker_reads_an_attribute_PAIR_as_one_presence_signal():
          "value_label": "gps"}, ["estimated"])
     claim = one(read("html_marker", document, marker))
     assert claim.value_text == "gps" and claim.blur_evidence == "none"
-    assert span_text(document, claim) == claim.evidence_quote
     # One attribute missing means the pair is not there, which is the OTHER branch — and this
     # entry says nothing about it rather than inventing the absent label.
     body = '<html><body><div id="print-map" data-gps-lat="50.4"></div></body></html>'
@@ -457,20 +427,12 @@ def _blob_entry(pointer: str, **overrides: Any) -> Entry:
                  subject_scope=ID_SCOPE, **overrides)
 
 
-def test_json_scalar_reads_the_subject_blobs_scalar_and_quotes_the_member_source():
-    """mmreality JSON-escapes every accented value, so the DECODED value ("Andělská Hora") is
-    NOT a substring of the scoped payload — a claim quoting it would carry no span, and for a
-    `regex_text` sibling that is an aborted batch. The quote is therefore the JSON MEMBER
-    SOURCE SLICE, which `find_span` resolves through its `&quot;` tolerance."""
-    document = archived("mmreality")
-    claim = one(read("json_scalar", document, _blob_entry("/municipality",
-                                                          claim_type="obec_name"),
+def test_json_scalar_reads_the_subject_blobs_scalar_decoded():
+    """mmreality JSON-escapes every accented value; the claim states the DECODED value."""
+    claim = one(read("json_scalar", archived("mmreality"),
+                     _blob_entry("/municipality", claim_type="obec_name"),
                      native=MMREALITY_NATIVE))
     assert claim.value_text == "Andělská Hora"
-    assert claim.evidence_quote.startswith('"municipality":')
-    assert "\\u011b" in claim.evidence_quote, "the SOURCE spelling, not the decoded one"
-    assert claim.span_start is not None and claim.span_end > claim.span_start
-    assert "&quot;" in span_text(document, claim)
 
 
 def test_json_scalar_fills_value_num_when_the_contract_says_the_value_is_a_number():
@@ -493,7 +455,6 @@ def test_json_scalar_reads_a_plain_pointer_with_no_subject_match_at_all():
                           claim_type="map_zoom", extraction_method="map_widget_parse",
                           surface="embedded_json"), native=IDNES_NATIVE))
     assert zoom.value_text == "14" and zoom.value_num == 14.0
-    assert zoom.evidence_quote == '"zoom": 14'
     info = one(read("json_scalar", document,
                     entry("idnes",
                           {"reader": "json_scalar", "css": "script[data-maptiler-json]",
@@ -538,10 +499,10 @@ _ESCAPED_BLOB = (
 )
 
 
-def test_json_regex_claims_the_capture_and_quotes_the_member_it_ran_over():
+def test_json_regex_claims_the_capture_of_the_decoded_member():
     """`raw_json.street` is populated on 1/12 sampled mmreality rows while `originalTitle`
     carries `ul. <Street>` on 5/12. The regex runs over the DECODED string — a pattern must
-    not have to know the portal's escaping — while the quote is the member's SOURCE slice."""
+    not have to know the portal's escaping."""
     document = scoped("mmreality", _ESCAPED_BLOB)
     claim = one(read("json_regex", document,
                      entry("mmreality",
@@ -552,22 +513,6 @@ def test_json_regex_claims_the_capture_and_quotes_the_member_it_ran_over():
                            extraction_method="regex_text", surface="embedded_json",
                            subject_scope=ID_SCOPE)))
     assert claim.value_text == "Křižíkova"
-    assert claim.evidence_quote.startswith('"originalTitle":')
-    assert claim.span_start is not None and claim.span_end > claim.span_start
-
-
-def test_json_regex_emits_nothing_rather_than_raising_when_the_span_misses(monkeypatch):
-    document = scoped("mmreality", _ESCAPED_BLOB)
-    monkeypatch.setattr(type(document), "find_span",
-                        lambda self, value, within=None: None)
-    assert read("json_regex", document,
-                entry("mmreality",
-                      {"reader": "json_regex", "css": "[\\:property]",
-                       "attr": ":property", "json_pointer": "/originalTitle",
-                       "pattern": ",\\s*ul\\.\\s*(?P<street>[^,]+)$", "group": "street",
-                       "match": BLOB_MATCH},
-                      extraction_method="regex_text", surface="embedded_json",
-                      subject_scope=ID_SCOPE)) == []
 
 
 # ------------------------------------------------------------------ json_bool
@@ -589,7 +534,6 @@ def test_json_bool_maps_the_flag_to_the_contracts_label():
     assert claim.value_text == "accurate" and claim.value_num == 1.0
     assert claim.declared_precision_label == "accurate"
     assert claim.blur_evidence == "none"
-    assert claim.evidence_quote == '"accurate":true'
 
 
 def test_json_bool_declares_blur_on_the_false_branch_when_the_contract_says_so():
@@ -640,8 +584,6 @@ def test_json_point_reads_the_subject_blob_and_never_the_largest_one():
     assert claim.value_text == "50.060813844,17.389086312"
     assert claim.value_geom_wkt == "POINT(17.389086312 50.060813844)"
     assert reads[0].position_branch == "portal_pin"
-    assert claim.evidence_quote.startswith('"point":{')
-    assert claim.span_start is not None
 
 
 def test_json_point_selection_is_genuinely_id_driven_and_not_positional():
@@ -661,10 +603,6 @@ def test_json_point_reads_a_geojson_feature_in_rfc_7946_order():
     claim = one(reads)
     assert claim.value_text == "50.74437214,15.31331632"
     assert claim.value_geom_wkt == "POINT(15.31331632 50.74437214)"
-    # The quote is the array literal as written (~26 chars), not the 13 KB config: an
-    # evidence quote rides in the same jsonb array as the claim and is size-capped with it.
-    assert claim.evidence_quote == "[15.31331632, 50.74437214]"
-    assert span_text(document, claim) == claim.evidence_quote
 
 
 def _geojson_entry(**overrides: Any) -> Entry:
@@ -776,7 +714,6 @@ def test_json_geometry_types_a_point_feature_as_a_pin_and_no_shape():
     assert claim.value_geom_wkt == "POINT(16.60411 49.20256)"
     assert claim.declared_precision_label == "point" and claim.blur_evidence == "none"
     assert reads[0].position_branch == "portal_pin"
-    assert span_text(document, claim) == claim.evidence_quote
     # A Point declares no uncertainty shape: migration 383's class default is the honest
     # bound there, and inventing a radius would be worse than having none.
     assert read("json_geometry", document,
@@ -854,7 +791,6 @@ def test_json_geometry_decodes_a_js_string_literal_before_parsing():
     document = scoped("maxima", _maxima_body(escaped))
     claim = one(read("json_geometry", document, _geometry_entry("coordinate")))
     assert claim.value_geom_wkt == "POINT(16.60411 49.20256)"
-    assert span_text(document, claim) == claim.evidence_quote
 
 
 def test_json_scalar_reads_the_zoom_out_of_the_same_script_config():
@@ -892,7 +828,6 @@ def test_json_breadcrumb_anchors_the_chain_on_the_kraj_slug(level, claim_type, e
     document = archived("realitymix")
     claim = one(read("json_breadcrumb", document, _breadcrumb_entry(level, claim_type)))
     assert claim.value_text == expected
-    assert span_text(document, claim) == expected
 
 
 def test_json_breadcrumb_reads_the_flat_schema_org_shape_too():
@@ -1024,7 +959,7 @@ def test_extract_page_turns_a_subject_miss_into_one_refusal_and_no_claims():
     item = _point_pair_entry()
     register = ScopeRegister.from_zones("mmreality", contract("mmreality").exclusion_zones)
     result = extract_page(
-        payload("mmreality", "999999", body), listing_row("mmreality", "999999"), [item],
+        payload(body), listing_row("mmreality", "999999"), [item],
         register=register)
     assert result.claims == []
     # Per SOURCE: the batch summary prints one line per reason, and a fleet-wide
@@ -1038,14 +973,13 @@ def test_extract_page_still_produces_the_claim_for_the_matching_subject():
     body = (_ARCHIVED / "mmreality_detail.html").read_bytes()
     register = ScopeRegister.from_zones("mmreality", contract("mmreality").exclusion_zones)
     result = extract_page(
-        payload("mmreality", MMREALITY_NATIVE, body),
+        payload(body),
         listing_row("mmreality", MMREALITY_NATIVE),
         [_blob_entry("/municipality", claim_type="obec_name")],
         register=register)
     assert [c.value_text for c in result.claims] == ["Andělská Hora"]
     assert not result.refusals
     assert result.claims[0].surface == "archived_html"
-    assert result.claims[0].payload_scope_version.startswith("html_scope@1:mmreality:")
 
 
 # ------------------------------------------------------------------ transforms
@@ -1108,31 +1042,17 @@ def test_comma_segment_refuses_rather_than_guessing_an_admin_level(arg, value, e
     assert apply_transforms(value, (f"comma_segment:{arg}",)) == expected
 
 
-def test_a_transformed_value_quotes_the_literal_it_was_read_from():
-    """`_evidenced` defaults the quote to the value, and with a transform that lets
-    `find_span` anchor on some other occurrence of the shorter string inside the same node —
-    measured: a `data-city` transformed to "České Budějovice" resolved its span into the
-    node's `value="Nádražní 1067, České Budějovice"` attribute instead."""
+def test_a_dom_read_applies_its_transform_to_the_value():
     document = scoped("ceskereality", (_REFETCH / "ceskereality_b1.html").read_bytes())
-    item = entry("ceskereality",
-                 {"reader": "html_attr", "css": "input#driving_calculator_from",
-                  "attr": "data-city"},
-                 claim_type="obec_name", transform=("split_paren_okres",))
-    claim = one(read("html_attr", document, item))
-    assert claim.value_text == "Ostrov"
-    assert claim.evidence_quote == "Ostrov (okres Karlovy Vary)"
-    assert span_text(document, claim) == claim.evidence_quote
-
-
-def test_an_untransformed_read_still_quotes_its_own_value():
-    """The behaviour-preserving half: no DOM entry in any shipped contract declares a
-    transform, so for every one of them the quote is exactly what it was before."""
-    document = scoped("ceskereality", (_REFETCH / "ceskereality_b1.html").read_bytes())
-    claim = one(read("html_attr", document,
-                     entry("ceskereality",
-                           {"reader": "html_attr", "css": "input#driving_calculator_from",
-                            "attr": "data-city"}, claim_type="obec_name")))
-    assert claim.value_text == claim.evidence_quote == "Ostrov (okres Karlovy Vary)"
+    locator = {"reader": "html_attr", "css": "input#driving_calculator_from",
+               "attr": "data-city"}
+    plain = one(read("html_attr", document, entry("ceskereality", locator,
+                                                  claim_type="obec_name")))
+    assert plain.value_text == "Ostrov (okres Karlovy Vary)"
+    split = one(read("html_attr", document,
+                     entry("ceskereality", locator, claim_type="obec_name",
+                           transform=("split_paren_okres",))))
+    assert split.value_text == "Ostrov"
 
 
 @pytest.mark.parametrize(

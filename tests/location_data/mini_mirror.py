@@ -381,8 +381,7 @@ def claim(
 ) -> Claim:
     return Claim(
         id=claim_id, listing_id=listing_id, source=source, claim_type=claim_type,
-        surface=surface, extraction_method=extraction_method, extractor_id=f"fx.{claim_type}",
-        licence_class=licence_class,
+        surface=surface, extraction_method=extraction_method, licence_class=licence_class,
         observed_at=_T0.replace(minute=_T0.minute) if minutes == 0 else _T0,
         value_text=value_text, lat=lat, lon=lon, subject_scoped=subject_scoped,
         declared_precision_label=declared_precision_label,

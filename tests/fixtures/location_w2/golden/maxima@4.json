@@ -77,9 +77,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "okres Brno-město",
-      "evidence_span_len": 16
+      "position_branch": null
     },
     {
       "extractor_id": "mx.det.locality_obec",
@@ -96,9 +94,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Brno-střed, Veveří, Grohova",
-      "evidence_span_len": 27
+      "position_branch": null
     },
     {
       "extractor_id": "mx.det.locality_quarter",
@@ -115,9 +111,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Brno-střed, Veveří, Grohova",
-      "evidence_span_len": 27
+      "position_branch": null
     },
     {
       "extractor_id": "mx.det.locality_street",
@@ -134,9 +128,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Brno-střed, Veveří, Grohova",
-      "evidence_span_len": 27
+      "position_branch": null
     },
     {
       "extractor_id": "mx.det.map_features",
@@ -153,9 +145,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": "portal_pin",
-      "evidence_quote": "{\\\"center\\\":[16.5980,49.1990],\\\"zoom\\\":15,\\\"features\\\":[{\\\"type\\\":\\\"Point\\\",\\\"coordinates\\\":[16.60411,49.20256]}]}",
-      "evidence_span_len": 114
+      "position_branch": "portal_pin"
     },
     {
       "extractor_id": "mx.det.map_geometry",
@@ -172,9 +162,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "{\\\"center\\\":[16.5980,49.1990],\\\"zoom\\\":15,\\\"features\\\":[{\\\"type\\\":\\\"Point\\\",\\\"coordinates\\\":[16.60411,49.20256]}]}",
-      "evidence_span_len": 114
+      "position_branch": null
     }
   ]
 }

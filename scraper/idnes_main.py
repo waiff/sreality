@@ -1,24 +1,21 @@
 """Orchestrator for the reality.idnes.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.idnes_main`. iDNES is a `Portal` (IdnesPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that pages the
-HTML search results and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='idnes', migration 108), then a detail-drain that
-fetches each listing page, parses it to a `ScrapedListing`, and ingests via
-`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
-pipeline — only the per-portal fetcher (IdnesClient) + parser (idnes_parser) +
-config differ from sreality/bezrealitky (the modularity rule in CLAUDE.md).
+driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
+HTML search results per slice, diffs the ids and enqueues new/price-changed ones
+into the shared `listing_detail_queue` (source='idnes', migration 108); the
+detail-drain fetches each listing page, parses it to a `ScrapedListing`, and
+ingests via `db.ingest_scraped_listing` (Tier-0 idempotency; a first-seen row
+gets a singleton property, rule #15).
 
-Unlike bazos (a partial-walk classifieds crawler), idnes's search pages have no
-deep-pagination cap, so every slice can be paged to the portal's own last page:
-`supports_complete_walk` (config-driven) lets the runner nominate the rows such a
-walk did not see for a page check (architectural rule #3), source-scoped so it
-only ever touches idnes rows (rule #15). Since 2026-09-08 that gate is
-STRUCTURAL — every slice walked, every page loop ended by idnes — and the result
-count is evidence beside it, not a veto. The detail URL
+idnes's search pages have no deep-pagination cap, so every slice can be paged to
+the portal's own last page. A walk that reached idnes's end — every slice walked,
+every page loop ended by idnes (the STRUCTURAL gate, 2026-09-08) — nominates the
+rows it did not see for a page check (architectural rule #3), source-scoped so it
+only ever touches idnes rows (rule #15); the result count is evidence beside it,
+not a veto, and `supports_complete_walk` is posture only. The detail URL
 carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
-listing's category from its own URL — one config walks many categories without
-the queue-encodes-category limitation that constrains bazos. Coordinates come
+listing's category from its own URL — one config walks many categories. Coordinates come
 straight from the page's embedded map config when present; a page that omits it
 (~a third of listings) carries none.
 """
