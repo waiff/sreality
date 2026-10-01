@@ -32,9 +32,11 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   rulings once (movers vs stayers, never between two movers), one after-step per call;
   `detach_listing` is its one-advert adapter; the split detaches its movers in ONE call
   (1 + J recomputes for J joined units, was M + J) and its `restore_must_not_link` is proven
-  to write nothing (deleted in follow-up F1).
-- **Next:** the dispatch collapse keeps its sends (PR 4), a chained detach restores one
-  card (PR 5), the engine's undo on the set form and `detach_listing` deleted (PR 6).
+  to write nothing (deleted in follow-up F1). PR 4: the dispatch collapse keeps its sends —
+  `Dispatches` re-points a collapsed row's `channel_sends` onto the kept twin first, so a
+  delivered alert no longer aborts the merge (`channel_sends_check`; live test 3b un-xfailed).
+- **Next:** a chained detach restores one card (PR 5), the engine's undo on the set form and
+  `detach_listing` deleted (PR 6).
   After PR 2 deploys, `dirty_broker_listings` depth steps up after merges (the fix
   working); `property_sweep_last_complete` should stay fresh.
 
