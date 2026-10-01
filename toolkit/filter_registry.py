@@ -412,8 +412,8 @@ _SELF_NAMED_MATERIALS: tuple[str, ...] = ("cihla", "panel", "smisena")
 def building_material_values(buckets: Sequence[str]) -> list[str]:
     """Expand building_material buckets to building_type values (deduped, first-seen order)."""
     # cihla/panel/smisena map to themselves; ANY other bucket is `ostatni` = every
-    # COLUMN_CANONICAL_VALUES["building_type"] value outside those three. This mirrors
-    # frontend/src/lib/filters.ts buildingMaterialToValues, including the unknown-bucket arm.
+    # COLUMN_CANONICAL_VALUES["building_type"] value outside those three. Codegen emits it
+    # per bucket as BUILDING_MATERIAL_BUCKETS, which Browse's buildingMaterialToValues reads.
     other = [v for v in COLUMN_CANONICAL_VALUES["building_type"]
              if v not in _SELF_NAMED_MATERIALS]
     out: list[str] = []

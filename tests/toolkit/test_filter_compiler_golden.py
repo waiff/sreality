@@ -350,8 +350,15 @@ def _match_for(exc: Exception) -> str:
 
 
 def write() -> None:
+    stored = {c["name"]: c for c in golden()} if GOLDEN_PATH.exists() else {}
     lines: list[str] = []
     for case in generate_cases():
+        refused = case["grain"] == "listings" and set(case["input"]) - model_fields("listings")
+        if refused and case["name"] in stored:
+            # The model now refuses the field structurally (test_golden_case accepts that);
+            # keep the pre-switch pin rather than rewriting it as a TypeError.
+            lines.append(json.dumps(stored[case["name"]], ensure_ascii=False, sort_keys=True))
+            continue
         try:
             result = output(case)
         except (ValueError, TypeError, LookupError) as exc:

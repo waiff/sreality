@@ -691,12 +691,13 @@ any newly-scraped listings.
   cohort compile the registry (`sql_kind` + one hook table; Browse's TS pinned to the same
   `sql_kind`); −12 dead `ComparableFilters` fields; `subscriptions_failed` in the matcher
   stats (cleanup/filter-compiler, C4 PR 1).
+- ✅ M1: the Watchdog honours `building_material` and `min/max_garden_area` again (lost by
+  merge f2d7b359; `extra='ignore'`); `ComparableFilters` gains the garden pair; both models
+  now EQUAL their agendas by test; Browse reads the generated `BUILDING_MATERIAL_BUCKETS`
+  (fix/watchdog-dropped-filters, C4 PR 2).
 
 **Next (filter definition, tracked from C4)**
 
-- M1: the Watchdog drops `building_material` and `min/max_garden_area` (lost by merge
-  f2d7b359; `extra='ignore'`) — `fix/watchdog-dropped-filters`, C4 PR 2; the fix empties the
-  set pinned in `test_every_registry_filter_has_a_model_field`.
 - M2: the agent advertises 10 COMPARABLES ids that `_FCR_OVERRIDE_FIELDS` drops — changes
   agent cohorts, needs an operator ruling, own PR.
 - The agent's null `category_type` path (`api/agent.py`) — same posture as M2.

@@ -515,6 +515,19 @@ def test_estate_and_usable_area_bands_and_min_parking_lots():
     assert params["min_parking_lots"] == 2
 
 
+def test_garden_area_bounds_render_on_listings_and_echo_in_the_trace():
+    target = TargetSpec(lat=50.0, lng=14.0)
+    filters = ComparableFilters(min_garden_area=100, max_garden_area=800)
+    sql, params = build_query(target, filters)
+    assert "l.garden_area >= %(min_garden_area)s" in sql
+    assert "l.garden_area <= %(max_garden_area)s" in sql
+    assert params["min_garden_area"] == 100
+    assert params["max_garden_area"] == 800
+    used = _filters_used(target, filters)
+    assert used["min_garden_area"] == 100
+    assert used["max_garden_area"] == 800
+
+
 def test_condition_level_min_filters_add_where_branches():
     """Both new condition-level filters should add `>= N` branches and
     bind the parameters. Absent (None) filters add no clauses — important

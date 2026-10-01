@@ -197,6 +197,30 @@ def test_spec_model_dump_keeps_building_material_and_garden() -> None:
     assert dumped["building_material"] == ["cihla"]
 
 
+def test_build_clauses_building_material_ostatni_expands_to_the_rest_of_the_canon() -> None:
+    from toolkit.filter_registry import COLUMN_CANONICAL_VALUES
+
+    where, params = _build_match_clauses(WatchdogFilterSpec(building_material=["ostatni"]))
+    assert "l.building_type = ANY(%(building_material)s)" in where
+    assert params["building_material"] == [
+        v for v in COLUMN_CANONICAL_VALUES["building_type"]
+        if v not in {"cihla", "panel", "smisena"}
+    ]
+    # A blob saved before merge f2d7b359 holds one scalar bucket.
+    assert WatchdogFilterSpec(building_material="cihla").building_material == ["cihla"]
+    where, params = _build_match_clauses(WatchdogFilterSpec(building_material=[]))
+    assert not any("building_type" in w for w in where)
+
+
+def test_build_clauses_garden_area_bounds() -> None:
+    spec = WatchdogFilterSpec(min_garden_area=100.0, max_garden_area=800.0)
+    where, params = _build_match_clauses(spec)
+    assert "l.garden_area >= %(min_garden_area)s" in where
+    assert "l.garden_area <= %(max_garden_area)s" in where
+    assert params["min_garden_area"] == 100.0
+    assert params["max_garden_area"] == 800.0
+
+
 def test_build_clauses_handles_price_and_area_bounds() -> None:
     spec = WatchdogFilterSpec(
         min_price_czk=15_000,

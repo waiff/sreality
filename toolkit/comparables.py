@@ -100,6 +100,8 @@ class ComparableFilters:
     max_estate_area: float | None = None
     min_usable_area: float | None = None
     max_usable_area: float | None = None
+    min_garden_area: float | None = None
+    max_garden_area: float | None = None
     min_parking_lots: int | None = None
     # Derived condition scores (migrations 072/073). NULL rows are filtered
     # out by the `>= N` / `<= N` comparison — that's intentional: "show me
@@ -422,6 +424,8 @@ def _filters_used(
         "max_estate_area": filters.max_estate_area,
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
+        "min_garden_area": filters.min_garden_area,
+        "max_garden_area": filters.max_garden_area,
         "min_parking_lots": filters.min_parking_lots,
         "building_condition_level_min": filters.building_condition_level_min,
         "building_condition_level_max": filters.building_condition_level_max,
