@@ -1,6 +1,6 @@
 """Migration 583, EXECUTED over seeded hits and misses (the 573 pattern).
 
-The replay runs 582 on an empty schema, which proves only that it compiles. Here one row
+The replay runs 583 on an empty schema, which proves only that it compiles. Here one row
 per shape the file must clear and the misses it must keep are seeded, the whole file is
 run, and each row is read back: the NULL, the backup row carrying the old value and the
 rail (old_basis NULL: area_basis is not touched), the property queued for maintenance —
