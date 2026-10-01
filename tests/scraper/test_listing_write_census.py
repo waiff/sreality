@@ -77,7 +77,7 @@ LEDGER: dict[str, Site] = {
     "scripts/refresh_stale_image_urls.py": Site(
         1, "bookkeeping", "images_refreshed_at cooldown stamp", "n/a"),
     "toolkit/property_identity.py": Site(
-        3, "identity", "property_id re-point: the rule-15 merge chokepoint", "n/a"),
+        2, "identity", "property_id re-point + advert move: the rule-15 merge chokepoint", "n/a"),
     "scraper/freshness.py": Site(1, "lifecycle", "_record_gone's gone flip", "gap:item-3"),
     "scripts/backfill_listing_surrogate_id.py": Site(
         1, "identity", "dead surrogate backfill (separate cleanup PR)", "n/a"),
@@ -115,7 +115,7 @@ def test_the_writer_never_updates_listings() -> None:
 def test_every_update_listings_outside_the_owners_is_ledgered() -> None:
     found = {p: n for p, n in _sites(_UPDATE_LISTINGS).items() if p not in EXEMPT}
     wrong = {
-        p: (n, LEDGER[p].count if p in LEDGER else 0)
+        p: (found.get(p, 0), LEDGER[p].count if p in LEDGER else 0)
         for p in sorted(set(found) | set(LEDGER))
         if found.get(p, 0) != (LEDGER[p].count if p in LEDGER else 0)
     }
