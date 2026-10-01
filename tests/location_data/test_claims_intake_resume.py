@@ -91,7 +91,7 @@ class _Conn:
 
         `age_minutes` is how long ago the change committed. The default clears the lane's
         15-minute lag; a smaller one is a change still inside the window where a concurrent
-        `write_detail_batch` transaction could still be allocating ids."""
+        `listing_write` transaction could still be allocating ids."""
         next_id = (self.snapshots[-1][0] if self.snapshots else 0) + 1
         at = self.now - timedelta(minutes=age_minutes)
         for offset, listing_id in enumerate(listing_ids):
@@ -408,7 +408,7 @@ def test_the_cutover_anchor_prefers_the_old_lane_s_stopped_cursor_over_its_ok_wa
 
 def test_a_change_still_inside_the_lag_window_is_left_for_the_next_run():
     """THE RACE the lag closes. `listing_snapshots.id` is a bigserial — allocated at INSERT,
-    visible at COMMIT — and `write_detail_batch` writes N of them in one transaction
+    visible at COMMIT — and `listing_write` writes N of them in one transaction
     concurrently across the drains, so a row with an id BELOW an advanced cursor can appear
     after the cursor moved. `s.id > after_id` never looks back, so that change would be
     skipped permanently. Standing 15 minutes back costs one run of latency instead."""

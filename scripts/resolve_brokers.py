@@ -4,8 +4,8 @@ Mirrors scripts.recompute_property_stats: a pure-SQL, set-based, idempotent driv
 that runs OFF the scrape hot path. Three modes:
 
   * --incremental (cron */10): drain the dirty_broker_listings queue (new +
-    content-changed listings, enqueued at write time by the detail writers —
-    db.write_detail_batch for sreality, db.ingest_scraped_listing for idnes —
+    content-changed listings, enqueued at write time by the writer —
+    listing_write.write_listings (all portals) —
     rule #20), re-attribute exactly those, then recompute only the affected
     brokers' rollups + firm memberships. O(changes); never touches the leaderboard
     matview. There is deliberately NO full-table straggler scan here: broker_
@@ -1776,8 +1776,8 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
         cur.execute("SELECT now()")
         cutoff = cur.fetchone()[0]
         # Drain the work queue only. New + content-changed listings are enqueued
-        # at write time by the detail writers (write_detail_batch / ingest_scraped_
-        # listing) and the property drain mirrors delist/revive flips in (W3), so
+        # at write time by the writer (listing_write.write_listings, all portals)
+        # and the property drain mirrors delist/revive flips in (W3), so
         # this is the complete set of listings whose broker numbers may need
         # recomputing since the last pass. The claim is bounded by cutoff so a
         # write mid-run survives to the next pass (dirty_properties, rule #20).

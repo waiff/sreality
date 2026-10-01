@@ -400,7 +400,7 @@ sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstruk
 the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
 is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
 a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
-`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and has a `toolkit/broker_sources.py`
+`raw["broker"]`, so ceskereality is in `BROKER_FINGERPRINTED_SOURCES` and has a `toolkit/broker_sources.py`
 registry row (phone-only; no email → no firm). Per-category search pages carry a result
 total ("Máme tady N…") with no deep-pagination cap, so every kraj slice can be paged to its own
 declared tail; a category all of whose slices reached that end nominates its unseen rows for a
@@ -819,9 +819,14 @@ renumber.** Navigate by area:
    Schema changes go in a new numbered file (`002_*.sql`, `003_*.sql`...) and are applied
    via the Supabase MCP. See "Database access" for the full flow and the
    additive-vs-destructive policy.
-2. **Snapshots on content change only.** Never insert into `listings` without computing
-   the content hash and inserting into `listing_snapshots` if it differs from the most
-   recent snapshot for that listing.
+2. **Snapshots on content change only.** A fetched payload reaches `listings` ONLY via
+   `scraper/listing_write.py` `write_listings`, which appends a `listing_snapshots` row iff
+   its content hash differs from the listing's latest snapshot under THE one order
+   (`scraped_at DESC, id DESC`), stamped `statement_timestamp()` late in its transaction.
+   Payload-free writes never snapshot; each is ledgered in
+   `tests/scraper/test_listing_write_census.py`. The two hash *documents* (sreality's wire
+   payload minus volatile keys; the crawlers' 28 `_HASH_FIELDS`) share one digest,
+   `hashing.digest`; unifying the documents is a data event (≈1.5M snapshots), not a refactor.
 3. **Never delete listings.** Listings that disappear get `is_active=false`. History is
    sacred. **Since 2026-09-07 the flip is PRESENCE-VERIFIED, not inferred from absence.** A
    complete category walk (`portal_runner.run_index_walk` → `_queue_presence_checks`) queues
@@ -942,19 +947,18 @@ renumber.** Navigate by area:
    fetches never touch it.** Every existing listing whose id appears in the run's index
    gets its `last_seen_at` bumped before any detail fetches happen. A successful detail
    fetch (cron or on-demand via `freshness_check`) also bumps `last_seen_at` as a side
-   effect of `db.upsert_listing` — that's real evidence the listing is alive. A *failed*
+   effect of `listing_write.write_listings` — that's real evidence the listing is alive. A *failed*
    detail fetch must not affect `last_seen_at`, otherwise repeated failures would falsely
    flip a still-live listing to `is_active=false`. The `unchanged` path of
    `freshness_check` deliberately does NOT bump `last_seen_at` either — for that case the
    "I confirmed it" signal lives in `listing_freshness_checks.checked_at` instead. See
    architectural rule #9.
-5. **Failed detail fetches are tracked, not silently dropped.** When a detail fetch (HTTP,
-   parse, or DB write) fails, we record it in `listing_fetch_failures(sreality_id,
-   attempts, last_error, given_up)`. Next run, listings with an active failure row jump to
-   the front of `to_refetch` so the per-run cap can't keep deferring them. After 5 attempts
-   a row's `given_up` flips to true and it falls out of the active retry queue (manual SQL
-   un-flip required to retry). On successful fetch the failure row is deleted. Inspect with
-   `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
+5. **Failed detail fetches are tracked, not silently dropped.** Every portal's
+   `listing_detail_queue` row counts `attempts` on a failed fetch and is `given_up` after 5.
+   sreality also keeps `listing_fetch_failures(sreality_id, attempts, last_error, given_up)`:
+   the split walk re-enqueues an active failure at `QUEUE_PRIORITY_FAILURE` so the drain cannot
+   keep deferring it, and the row is deleted inside the successful write's transaction
+   (`listing_write`). Inspect with `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
 6. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5 downloads the
    bytes to an R2 bucket (S3-compatible) so the data survives the CDN expiring listing
    photos. The `images` table tracks per-image download state via `storage_path`,
@@ -1115,17 +1119,17 @@ renumber.** Navigate by area:
     real-world property across portals. `properties` holds the canonical advert's display row
     plus derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
     `first/last_seen_at`), written by ONE recompute (`scripts/recompute_property_stats.py`): the
-    property-maintenance job (rule #20 for the dirty-set cadence) and, per listing, the ingest
-    path's `_ensure_property`. `is_active` /
+    property-maintenance job (rule #20 for the dirty-set cadence) and the straggler-attach at
+    birth. `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
     derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
     **source-scoped** to enforce this — a portal's index walk only flips its own rows.
     (Originally `mark_inactive` scoped by `(category_main, category_type)` alone, so every
     sreality walk swept bazos rows — same canon categories, never in sreality's `seen_ids` —
-    to `is_active=false`; migration 109 era fixed it.) **New listings get a singleton property
-    at insert time — there is no insert-time matching.** All grouping is out-of-band, so
-    neither `scraper/db.py` nor the maintenance job's straggler-attach does any spatial/geo
-    probe. Frontend Browse reads `properties_public`; region stats read the property grain
+    to `is_active=false`; migration 109 era fixed it.) **New listings land `property_id` NULL on
+    every portal; the bounded straggler-attach births each a singleton, recomputes it and patches
+    `browse_list` — there is no insert-time matching.** All grouping is out-of-band, so neither
+    the writer nor the maintenance job's straggler-attach does any spatial/geo probe. Frontend Browse reads `properties_public`; region stats read the property grain
     (migration 103).
     **One property, one voice (W4, migration 561, decision 18).** A property speaks with its
     CANONICAL advert, rank 1 of `property_canonical_listings(property_id)`: active first, then
@@ -1136,10 +1140,8 @@ renumber.** Navigate by area:
     (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
     energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
     in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
-    linked in the same statement) then that recompute: on ingest (`_ensure_property`) and in the
-    straggler-attach alike. A re-scrape of a linked advert keeps the singleton mirror
-    (`_cheap_property_rollup`: counts and lifecycle, the one advert's fields while a singleton)
-    until the full recompute is measured no slower there (the W4 latency gate).
+    linked in the same statement) then that recompute, in the straggler-attach. A linked
+    advert's change reaches its property through `dirty_properties` (rule #20).
     `all_sources` / `active_sources` (never written) left the read model; the physical columns
     are W8's destructive drop (the SPA never read them).
     **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
@@ -1820,12 +1822,12 @@ renumber.** Navigate by area:
     modules that fails if any link in that chain — flag, forward, per-page check, protocol
     parameter — is missing on any portal.
     It fetches, and writes **batched** via
-    `db.write_detail_batch` (set-based `jsonb_to_recordset`; one transaction per ~100 listings;
-    snapshot-on-change preserved via an `IS DISTINCT FROM` anti-join). The index-walk uses the
-    transaction pooler; the drain uses the session pooler (`connect_session()`) for prepared
-    statements. The **Tier-1 property matcher is deferred off the hot write path** — the drain
-    inserts with `property_id` NULL and `recompute_property_stats`'s straggler-attach runs the
-    same spatial match set-based (rule #15 still governs the grouping). `scrape.yml`'s combined
+    `listing_write.write_listings` on every portal (set-based `jsonb_to_recordset`; one
+    transaction per ~100 listings; snapshot-on-change preserved via an `IS DISTINCT FROM`
+    anti-join). The index-walk uses the transaction pooler; sreality's drain uses the session
+    pooler (`connect_session()`) for prepared statements. The drain inserts with `property_id`
+    NULL and `recompute_property_stats`'s straggler-attach births the singleton (rule #15
+    still governs the grouping). `scrape.yml`'s combined
     `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
     back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
@@ -1837,7 +1839,7 @@ renumber.** Navigate by area:
     write (full analysis: `docs/design/portal-order-fidelity.md`). `listing_detail_queue.discovery_seq`
     / `listings.discovery_seq` (migration 368) is a dedicated sequence assigned once at true
     enqueue time — immune to all of the above because it's fixed before any of it happens — carried
-    through `claim_detail_batch` → `write_detail_batch` / `ingest_scraped_listing` and written
+    through `claim_detail_batch` → `listing_write.write_listings` and written
     **once**, never on a later re-fetch (`COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)`,
     the same shape as `source_id_native`'s preserve-if-set rail). It is the true relative-discovery-order
     signal; `first_seen_at` (this rule's write-time stamp) is display-only going forward.
@@ -1889,9 +1891,9 @@ renumber.** Navigate by area:
     exactly like the cap it releases, and one malformed entry never blocks a later valid one.
     It lives in the SAME setting as the cap so there is one knob to read and one to audit.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
-    The writers that change a property's children — `write_detail_batch` (a content change →
-    new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
-    (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
+    The writers that change a property's children — `listing_write.write_listings` (a content
+    change, or a revival, or a write under an inactive property), `mark_listing_inactive*`
+    (delisting), `touch_listings` (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is
@@ -1909,7 +1911,8 @@ renumber.** Navigate by area:
     237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
-    New listings (`property_id` NULL) are born + recomputed by straggler-attach, not the queue. The
+    New listings (`property_id` NULL) are born + recomputed by straggler-attach, not the queue
+    (bounded at 2000 per pass; it patches `browse_list` for the births). The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
     self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs
@@ -1925,9 +1928,11 @@ renumber.** Navigate by area:
     layer was removed in the 2026-08 cutoff, rule #15.) Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
     mutate `properties` concurrently. Inline merge/detach still call `recompute_one` directly
-    (they keep the survivor current without waiting for the cron). One accepted lag: a
-    byte-identical reactivation (a delisted listing reappears with no content change) produces
-    no snapshot, so it waits for the daily sweep — rare, documented.
+    (they keep the survivor current without waiting for the cron). A residual of removing the
+    inline singleton rollup: a crawler change confined to unhashed columns (`area_basis`,
+    `published_at`, `source_url`, which feed `price_per_m2_source_listing_id`) reaches its
+    property only at the daily sweep, and an unchanged, non-reactivating refetch no longer
+    refreshes `properties.last_seen_at`/`source_count` inline (sreality parity).
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
     a parser + a config row — no per-portal branches in shared code.** The parser's outputs
     include the row's `source_url` (its page on the portal): a stored fact every surface READS and
@@ -2257,7 +2262,7 @@ renumber.** Navigate by area:
     follows a heal differs by portal: idnes and bezrealitky hash the PARSED
     fields, so W17's parser change — not the heal — makes each live row's next detail fetch
     append exactly ONE genuine snapshot; **sreality hashes the RAW payload**
-    (`scraper.hashing.content_hash`), which did not change, so its 44,237 rows get no snapshot
+    (`scraper.hashing.sreality_hash_doc`), which did not change, so its 44,237 rows get no snapshot
     ever — the heal is the only write they receive and later refetches re-derive the same value
     and rewrite the column silently. Two populations are deliberately left with no headline:
     3,016 land rows carry no area from their portal at all, and 20 hold a parcel beyond
@@ -2821,7 +2826,7 @@ reader (`location_data/text_reading.py`); the vocabulary they share is `location
 writes is not evidence a portal published.
 
 * *The payload half* walks `listing_snapshots.id`. A snapshot row is appended exactly when a
-  listing's content hash moves (rule 2), and every write path appends one for a brand-new row too, so
+  listing's content hash moves (rule 2), and the one writer (`listing_write`) appends one for a brand-new row too, stamped `statement_timestamp()` late in its transaction, so
   "snapshots above my cursor" IS "the payloads whose claims can have changed" — where selecting on
   `last_seen_at` was a scan of the live corpus (~180 000 listings in 51 minutes), because the index
   walks re-sight everything within hours. The window is a keyset slice deduped to one row per

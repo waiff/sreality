@@ -4,7 +4,7 @@ Portals rotate image CDN URLs over time. A listing whose photos we never downloa
 before its URLs rotated is stuck: the stored URL 404s, the frontend fallback can't load
 it, and the image downloader can't fetch it either. This sweep re-enqueues such listings
 into the source-generic `listing_detail_queue`; the detail drain then re-fetches them and
-`db.record_images` repoints each not-yet-stored image's URL to the current one (it also
+`listing_write.write_listings` repoints each not-yet-stored image's URL to the current one (it also
 resets download_attempts and clears unavailable_reason for storage_path-NULL rows), after
 which the image backfill (images.yml) can store the bytes.
 

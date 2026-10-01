@@ -5,6 +5,15 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### One listing-write chokepoint (2026-10-01, done)
+- One listing-write chokepoint (`scraper/listing_write.py`): 4 writers → 1, one latest-snapshot
+  order, NULL-land on all nine. `write_listings` owns the upsert, media, failure clear,
+  snapshot-on-change (`scraped_at DESC, id DESC`, stamped `statement_timestamp()`) and the dirty
+  marks in one transaction; a census (`tests/scraper/test_listing_write_census.py`) ledgers every
+  other `UPDATE listings`. **Next:** the reader-side latest-snapshot copies (toolkit freshness /
+  comparables / summaries / building_extraction / condition_markers / condition_scoring) move onto
+  `listing_write.latest_snapshot`; unifying the two hash documents is an operator-gated data event.
+
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
 - **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each
   held a private copy of a naive area regex that matched the FIRST bare digit run before an

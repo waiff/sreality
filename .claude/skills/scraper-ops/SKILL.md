@@ -18,7 +18,7 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
    precedence, absence semantics, sentinels) and read it in the parser through `source_value` /
    `source_label`; a label→value mapping belongs in `scraper/vocabulary.py`, never in the parser.
    Gates A1–A3 (`tests/scraper/test_attribute_contract.py`) read the checked-in key census.
-3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
+3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (read by the ONE writer, `scraper/listing_write.py`) and,
    for crawler portals, `scraped_listing._LISTING_FIELDS`. Whether a parser NULL erases is decided per
    (source, column) by the producer from step 2 (`text`/`none` preserve, `structured`/`derived` clear);
    `_PRESERVE_IF_NULL_COLUMNS` is the GLOBAL identity pair (`published_at`, `source_url`) and must not grow.
@@ -249,10 +249,10 @@ from the slow "download each ad" write:
   no per-listing loop.
 - **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
   (`--max-detail-refetches`, the workflow passes 12000), fetches details on a rate-limited pool, and writes
-  them **batched** via `db.write_detail_batch` (set-based `jsonb_to_recordset`, one transaction
-  per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
-  prepared statements. New listings land with `property_id` NULL and become **singletons** via
-  `recompute_property_stats`'s straggler-attach (the hot write path carries no matching at all;
+  each ~100-item flush through **`listing_write.write_listings`** on all nine portals (set-based, ONE transaction:
+  upsert, images/videos, failure clear, snapshot-on-change, dirty marks). sreality uses the **session pooler**
+  (`connect_session()`, prepared statements), the crawlers `connect()`. New listings land `property_id` NULL and become
+  **singletons** via `recompute_property_stats`'s bounded straggler-attach (the write carries no matching at all;
   grouping is out-of-band and operator-ordered, rule #15). A gone fetch flips that listing inactive +
   dequeues it; a transient error bumps the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a SIGKILLed

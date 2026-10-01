@@ -286,7 +286,7 @@ def test_the_lane_writes_no_timestamp_cursor_and_that_is_the_epoch_marker():
 
 def test_the_snapshot_window_stands_behind_the_wall_clock():
     """THE RACE. `listing_snapshots.id` is a bigserial: the id is allocated at INSERT and
-    becomes visible at COMMIT, and `write_detail_batch` writes N snapshots inside one
+    becomes visible at COMMIT, and `listing_write` writes N snapshots inside one
     multi-statement transaction, concurrently across the per-portal drains and the realtime
     worker. A row whose id is BELOW an already-advanced cursor can therefore become visible
     after that cursor moved — and `s.id > after_id` never looks back, so that listing's
