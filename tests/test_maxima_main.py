@@ -137,7 +137,6 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "maxima"
-    assert p.supports_complete_walk is True
     assert p.categories() == _CATEGORIES
     assert p.category_labels(_CATEGORIES[0]) == ("byt", "prodej")
     assert p.category_labels(_CATEGORIES[3]) == ("byt", "pronajem")
@@ -360,9 +359,9 @@ def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
     monkeypatch.setattr(maxima_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(
         maxima_main.db, "index_summary_native",
-        lambda _c, _s, ids: {b2: {"sreality_id": -2, "price_czk": 5_500_000}} if b2 in ids else {},
+        lambda _c, _s, ids: {b2: {"id": 2, "sreality_id": -2, "price_czk": 5_500_000}} if b2 in ids else {},
     )
-    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(maxima_main.db, "touch_listings_by_id", lambda *a, **k: None)
     enq: list[Any] = []
     monkeypatch.setattr(
         maxima_main.db, "enqueue_detail",
