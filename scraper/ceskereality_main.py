@@ -777,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): the /nejnovejsi/ sort slug on the www
-    # host, diff + enqueue only. No mark_inactive, no drain, no scrape_runs row.
+    # host, diff + enqueue only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
@@ -847,7 +847,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe", action="store_true",
         help="newest-first delta probe: diff + enqueue off the first "
              "--probe-pages page(s) of the www /nejnovejsi/ sort per category, "
-             "then exit — never mark_inactive, no detail drain, no scrape_runs row",
+             "then exit — never nominates, no detail drain, no scrape_runs row",
     )
     p.add_argument(
         "--probe-pages", type=int, default=1,

@@ -249,7 +249,7 @@ def test_category_from_detail_url():
     ) == ("dum", "pronajem")
     # The new categories use multi-word singular slugs (komercni-nemovitost,
     # maly-objekt-nebo-garaz) — those must canonicalise too, else the drain
-    # records the wrong category_main and breaks source-scoped mark_inactive.
+    # records the wrong category_main and breaks source-scoped nomination.
     assert category_from_url(
         "https://reality.idnes.cz/detail/prodej/pozemek/x/6a18deadbeefdeadbeef0003/"
     ) == ("pozemek", "prodej")

@@ -21,7 +21,7 @@ from typing import Any, TypeVar
 import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
-from scraper import media
+from scraper import delist_policy, media
 from scraper.attribute_contract import CONTRACT
 
 LOG = logging.getLogger(__name__)
@@ -891,7 +891,7 @@ def touch_listings_by_id(
     a synthetic negative today and NULL once Gate 2 flips), so a sreality_id-keyed
     touch would match nothing — starving rule #4's last_seen_at signal for every
     unchanged portal row. Separate function (not a parametrized key column) to
-    mirror the mark_inactive / mark_inactive_native split and stay discoverable by
+    mirror the touch_listings split and stay discoverable by
     the SQL-correctness gate.
     """
     ids = list(listing_ids)
@@ -981,6 +981,9 @@ def presence_candidates(
         ids = [int(x) for x in ids]
     else:
         ids = [str(x) for x in ids]
+    if not ids:
+        # An empty bound array makes `<> ALL('{}')` true for every row: the whole scope.
+        raise ValueError(f"presence_candidates {source}: empty seen set would nominate the whole scope")
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
     cm_clause = "\n              AND category_main = %s" if category_main is not None else ""
     scope_params: list[Any] = [source]
@@ -1046,9 +1049,9 @@ def enqueue_presence_checks(
     """Queue nominated rows for a page check, bounded per walk. Returns
     (queued, deferred).
 
-    The bound is the old flip cap (`app_settings.delist_flip_cap`: fraction of
-    the scope's active rows, only above min_rows), repurposed. It no longer
-    refuses anything -- every closure is now page-verified -- it throttles: a
+    The bound is `delist_policy.verify_budget` over `app_settings.delist_flip_cap`
+    (a fraction of the scope's active rows, only above min_rows). It refuses
+    nothing -- every closure is page-verified -- it throttles: a
     walk that nominates more than its share queues the oldest-unseen share now
     and leaves the rest for the next walk, so a broken walk (240 of 4,771
     collected) cannot flood the drain with thousands of fetches, and a real
@@ -1060,44 +1063,39 @@ def enqueue_presence_checks(
     total = len(candidates)
     if total == 0:
         return 0, 0
-    fraction, min_rows, overrides = _delist_cap(conn)
-    limit = total
-    if active_rows >= min_rows:
-        cap = max(1, int(active_rows * fraction))
-        if total > cap:
-            permit = _delist_override_permits(
-                overrides, source=source, category_main=category_main,
-                category_type=category_type, subtype=subtype, candidates=total,
-            )
-            if permit is not None:
-                LOG.warning(
-                    "VERIFY OVERRIDE source=%s cm=%s ct=%s candidates=%d cap=%d "
-                    "-- operator override in force until %s (%s)",
-                    source, category_main, category_type, total, cap,
-                    permit.get("until"), permit.get("reason", "no reason given"),
+    budget = delist_policy.verify_budget(
+        _delist_cap_setting(conn), source=source, category_main=category_main,
+        category_type=category_type, subtype=subtype, nominated=total,
+        active_rows=active_rows, now=datetime.now(timezone.utc),
+    )
+    if budget.override is not None:
+        LOG.warning(
+            "VERIFY OVERRIDE source=%s cm=%s ct=%s candidates=%d cap=%d "
+            "-- operator override in force until %s (%s)",
+            source, category_main, category_type, total, budget.cap,
+            budget.override.get("until"), budget.override.get("reason", "no reason given"),
+        )
+    elif budget.deferred:
+        LOG.warning(
+            "VERIFY DEFERRED source=%s cm=%s ct=%s candidates=%d active=%d cap=%d "
+            "-- queuing the %d oldest-unseen now, the rest next walk",
+            source, category_main, category_type, total, active_rows, budget.cap, budget.queue,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO delist_flip_refusals
+                        (source, category_main, category_type, subtype,
+                         candidates, active_rows, cap)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (source, category_main, category_type, subtype,
+                     total, active_rows, budget.cap),
                 )
-            else:
-                limit = cap
-                LOG.warning(
-                    "VERIFY DEFERRED source=%s cm=%s ct=%s candidates=%d active=%d cap=%d "
-                    "-- queuing the %d oldest-unseen now, the rest next walk",
-                    source, category_main, category_type, total, active_rows, cap, cap,
-                )
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            INSERT INTO delist_flip_refusals
-                                (source, category_main, category_type, subtype,
-                                 candidates, active_rows, cap)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (source, category_main, category_type, subtype,
-                             total, active_rows, cap),
-                        )
-                except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks the queue
-                    LOG.warning("presence checks: could not record the deferral: %s", exc)
-    batch = list(candidates)[:limit]
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks the queue
+            LOG.warning("presence checks: could not record the deferral: %s", exc)
+    batch = list(candidates)[:budget.queue]
     queued = enqueue_detail(
         conn, source,
         [(nid, ref, price, QUEUE_PRIORITY_VERIFY) for nid, ref, price in batch],
@@ -1125,569 +1123,53 @@ def enqueue_presence_checks(
             """,
             {"source": source, "verify": QUEUE_PRIORITY_VERIFY, "rearm": PRESENCE_REARM_PER_WALK},
         )
-    return queued, total - limit
+    return queued, budget.deferred
 
 
-def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:
-    """Drop NULL ids from a delisting sweep's seen-set; None if that empties it.
-
-    Two SQL three-valued-logic traps guard this family's `<> ALL(%s)` predicate:
-    ONE NULL element makes the comparison NULL for EVERY row, silently turning
-    the sweep into a permanent no-op, while an EMPTY array makes it true for
-    every row, delisting the whole scope. A NULL can't identify a row, so
-    dropping it is right — but the caller must then bail out rather than sweep
-    with what is left of an all-NULL set (hence the None return).
-    """
-    kept = [i for i in seen if i is not None]
-    if not kept:
-        return None
-    if len(kept) != len(seen):
-        LOG.warning("INACTIVE %s: dropped %d NULL id(s) from the seen-set",
-                    label, len(seen) - len(kept))
-    return kept
-
-
-# --- the delisting flip cap (migration 451) ---------------------------------
-#
-# mark_inactive never had a ceiling: it flips every unseen active row of a
-# category in one statement, however many that is. That was survivable only
-# because the completeness gate kept the dangerous cases from running -- a
-# coincidence, not a safety property, and the coincidence ends every time we
-# repair a portal's walk. Fixing coverage is the SAME EVENT as authorising the
-# mass flip it unblocks.
-#
-# CALIBRATED AGAINST 60 DAYS OF REAL SWEEPS, not guessed. Over 11,763 sweeps
-# that flipped at least one row, the per-sweep share of a category is p95=1.8%,
-# p99=3.4%, and then the tail jumps straight to 86%: routine churn and genuine
-# incidents are two separate populations, and the gap between them is where the
-# ceiling belongs. At 2% the breaker would have tripped 446 times in 60 days --
-# on ordinary sreality and idnes rental churn -- which is not a breaker, it is
-# an outage generator. At 10% it trips on exactly the four real events in that
-# window (realitymix dum/prodej at 86%, ceskereality komercni/prodej at 30% and
-# 13.7%, sreality pozemek/podil at 18.7%).
-#
-# min_rows is a floor on CATEGORY SIZE, not on the ceiling. It is 2,000 because
-# the small categories are the churny ones: sreality pozemek/drazba holds ~600
-# live rows and legitimately turns over 6-39% of them in a sweep (auctions end
-# on a date), as does idnes dum/pronajem at ~630. Policing those is noise.
-_DELIST_CAP_DEFAULTS = {"fraction": 0.10, "min_rows": 2000}
-
-
-def _delist_cap(conn: psycopg.Connection) -> tuple[float, int, list[dict[str, Any]]]:
-    """Operator-tunable ceiling from app_settings, falling back to the baked
-    defaults so a settings hiccup can never REMOVE the guard.
-
-    Also returns the operator's release valve (`overrides`): see
-    `_delist_override_permits`. The valve lives in the SAME setting as the cap
-    so there is one knob to read, one to audit, and no second mechanism that
-    can drift out of step with the first.
-    """
-    fraction = float(_DELIST_CAP_DEFAULTS["fraction"])
-    min_rows = int(_DELIST_CAP_DEFAULTS["min_rows"])
-    overrides: list[dict[str, Any]] = []
+def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
+    """Raw app_settings.delist_flip_cap; None on a read error (the policy then uses its defaults)."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT value FROM app_settings WHERE key = 'delist_flip_cap'")
             row = cur.fetchone()
-        if row and isinstance(row[0], dict):
-            fraction = float(row[0].get("fraction", fraction))
-            min_rows = int(row[0].get("min_rows", min_rows))
-            raw = row[0].get("overrides")
-            if isinstance(raw, list):
-                overrides = [o for o in raw if isinstance(o, dict)]
-    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the cap
+    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the throttle
         LOG.warning("delist cap: falling back to defaults (%s)", exc)
-        return (float(_DELIST_CAP_DEFAULTS["fraction"]),
-                int(_DELIST_CAP_DEFAULTS["min_rows"]), [])
-    return fraction, min_rows, overrides
+        return None
+    return row[0] if row else None
 
 
-def _delist_override_permits(
-    overrides: list[dict[str, Any]],
-    *,
-    source: str,
-    category_main: str | None,
-    category_type: str | None,
-    subtype: str | None,
-    candidates: int,
-) -> dict[str, Any] | None:
-    """The operator's release valve for a breaker that has latched.
-
-    A refusal does not clear itself: the unswept rows keep aging, so the next
-    sweep proposes MORE and is refused again. That is correct breaker
-    behaviour -- an auto-reclosing breaker defeats the purpose -- but a breaker
-    with no reset is a permanent stall, so the operator needs a way to say "I
-    verified this one, let it through" that does not mean "raise the ceiling
-    everywhere".
-
-    An override is therefore SCOPED (it names the source, and may name the
-    category), BOUNDED (`max_rows` is a hard row count, so even a wildcard
-    override cannot authorise an unbounded flip), and EXPIRING (`until` is
-    required and must still be in the future). Anything missing, unparseable or
-    already expired is IGNORED -- the valve fails shut, like the cap it
-    releases.
-    """
-    for o in overrides:
-        try:
-            if o.get("source") != source:
-                continue
-            for key, actual in (("category_main", category_main),
-                                ("category_type", category_type),
-                                ("subtype", subtype)):
-                want = o.get(key)
-                if want is not None and want != actual:
-                    break
-            else:
-                until = datetime.fromisoformat(str(o["until"]).replace("Z", "+00:00"))
-                if until.tzinfo is None:
-                    until = until.replace(tzinfo=timezone.utc)
-                if until <= datetime.now(timezone.utc):
-                    continue
-                if candidates <= int(o["max_rows"]):
-                    return o
-        except Exception as exc:  # noqa: BLE001 - a malformed valve stays shut
-            LOG.warning("delist cap: ignoring malformed override %r (%s)", o, exc)
-    return None
-
-
-def _delist_flip_allowed(
-    conn: psycopg.Connection,
-    *,
-    source: str,
-    category_main: str | None,
-    category_type: str | None,
-    subtype: str | None,
-    candidates: int,
-    active_rows: int,
-) -> bool:
-    """May a sweep of this size proceed?
-
-    Refusing is safe in the direction that matters: an unswept stale row is
-    visible, queryable and self-heals the moment the listing is seen again
-    (touch_listings), while a wrongly-delisted live listing is invisible to
-    Browse, the watchdog and every estimate, and nothing re-surfaces it.
-
-    The refusal is RECORDED, not just logged: an Actions log expires, and the
-    lesson of this sprint is that a signal nothing can query is a signal nobody
-    receives.
-    """
-    fraction, min_rows, overrides = _delist_cap(conn)
-    if active_rows < min_rows:
-        # The cap polices catastrophes, not small categories. The small ones are
-        # the churny ones: sreality pozemek/drazba turns over 6-39% of its ~600
-        # live rows per sweep because auctions end on a date.
-        return True
-    cap = max(1, int(active_rows * fraction))
-    if candidates <= cap:
-        return True
-    permit = _delist_override_permits(
-        overrides, source=source, category_main=category_main,
-        category_type=category_type, subtype=subtype, candidates=candidates,
-    )
-    if permit is not None:
-        LOG.warning(
-            "DELIST OVERRIDE source=%s cm=%s ct=%s subtype=%s candidates=%d cap=%d "
-            "-- operator override in force until %s (%s)",
-            source, category_main, category_type, subtype, candidates, cap,
-            permit.get("until"), permit.get("reason", "no reason given"),
-        )
-        return True
-    LOG.error(
-        "DELIST REFUSED source=%s cm=%s ct=%s subtype=%s candidates=%d active=%d cap=%d "
-        "-- a sweep this large is a claim the market moved overnight. Verify by FETCHING the "
-        "listings, then release THIS scope with a bounded, expiring entry in "
-        "app_settings.delist_flip_cap.overrides; do not raise the ceiling for every portal",
-        source, category_main, category_type, subtype, candidates, active_rows, cap,
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO delist_flip_refusals
-                    (source, category_main, category_type, subtype,
-                     candidates, active_rows, cap)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (source, category_main, category_type, subtype,
-                 candidates, active_rows, cap),
-            )
-    except Exception as exc:  # noqa: BLE001 - never let bookkeeping undo the refusal
-        LOG.warning("delist cap: could not record the refusal: %s", exc)
-    return False
-
-
-def mark_inactive(
-    conn: psycopg.Connection,
-    category_main: str,
-    category_type: str,
-    seen_ids: set[int],
-    *,
-    source: str = "sreality",
-    min_unseen_hours: int | None = None,
-) -> int:
-    """Mark listings of this category not in seen_ids as is_active=false.
-
-    RETIRED with `mark_inactive_native` / `mark_inactive_agenda`: no production
-    caller since 2026-09-07 — index absence only nominates a page check
-    (`portal_runner._queue_presence_checks`, rule #3); only tests call these.
-
-    Scoped to (source, category_main, category_type) so a per-category index
-    walk only flips its own slice. Without the category scope, scraping rentals
-    would clobber sales `is_active`; without the source scope, a sreality walk
-    would sweep other portals' rows (which carry the same canon categories but
-    are never in sreality's seen_ids) — see architectural rule #15.
-
-    `min_unseen_hours` additionally restricts the flip to rows whose
-    last_seen_at is older than that many hours (the retired staleness rail).
-    """
-    if not seen_ids:
-        return 0
-    ids = _seen_without_nulls(seen_ids, f"{source}/{category_main}/{category_type}")
-    if ids is None:
-        return 0
-    stale_clause = (
-        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    params: list[Any] = [source, category_main, category_type]
-    if min_unseen_hours is not None:
-        params.append(min_unseen_hours)
-    params.append(ids)
-    stale_filter = (
-        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    count_params: list[Any] = [ids]
-    if min_unseen_hours is not None:
-        count_params.append(min_unseen_hours)
-    count_params += [source, category_main, category_type]
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT
-              count(*) FILTER (
-                WHERE sreality_id <> ALL(%s){stale_filter}) AS candidates,
-              count(*) AS active_rows
-            FROM listings
-            WHERE is_active = true
-              AND source = %s
-              AND category_main = %s
-              AND category_type = %s
-            """,
-            tuple(count_params),
-        )
-        candidates, active_rows = cur.fetchone()
-        if not _delist_flip_allowed(
-            conn, source=source, category_main=category_main,
-            category_type=category_type, subtype=None,
-            candidates=int(candidates), active_rows=int(active_rows),
-        ):
-            return 0
-        cur.execute(
-            f"""
-            UPDATE listings
-            SET is_active = false, inactive_at = now()
-            WHERE is_active = true
-              AND source = %s
-              AND category_main = %s
-              AND category_type = %s{stale_clause}
-              AND sreality_id <> ALL(%s)
-            RETURNING property_id
-            """,
-            tuple(params),
-        )
-        rows = cur.fetchall()
-        pids = {int(r[0]) for r in rows if r[0] is not None}
-        if pids:
-            cur.execute(
-                """
-                INSERT INTO dirty_properties (property_id)
-                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
-                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-                """,
-                (list(pids),),
-            )
-        return len(rows)
-
-
-def mark_listing_inactive(
-    conn: psycopg.Connection,
-    sreality_id: int,
-) -> None:
-    """Flip a single listing to is_active=false.
-
-    Used when a detail fetch reports the listing is gone (404/410 or
-    sreality's 'page does not exist' body) — the page-verified flip rule #3
-    relies on (the index-absence sweep in `mark_inactive` is retired).
-    """
+def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool | None:
+    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call
+    flipped it, False if it was already inactive, None if no listing has this key."""
+    exists = True
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE listings SET is_active = false, inactive_at = now() "
-            "WHERE sreality_id = %s RETURNING property_id",
-            (sreality_id,),
-        )
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            cur.execute(
-                "INSERT INTO dirty_properties (property_id) VALUES (%s) "
-                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
-                (int(row[0]),),
-            )
-
-
-def mark_inactive_native(
-    conn: psycopg.Connection,
-    source: str,
-    category_main: str,
-    category_type: str,
-    seen_natives: set[str],
-    *,
-    subtype: str | None = None,
-    scope_subtype: bool = False,
-    min_unseen_hours: int | None = None,
-) -> int:
-    """Native-id analogue of `mark_inactive` for portals whose index knows only
-    a portal-native string id (bazos), not the bigint PK.
-
-    Flips active listings of this (source, category_main, category_type) whose
-    `source_id_native` is absent from the walk to is_active=false. Scoped the
-    same way as `mark_inactive` (rule #15). A brand-new listing seen in the index
-    but not yet drained has no row, so it cannot be wrongly swept.
-
-    `scope_subtype=True` ALSO scopes the sweep to `subtype` (NULL-safe). bazos
-    walks fine sections that collapse onto one category_main (chata + dum -> dum;
-    kancelar/sklad/... -> komercni), so without this each section's per-scope
-    sweep would flip the other sections' rows inactive. The clause only NARROWS
-    the sweep, so the failure direction is over-retention, never over-deletion.
-
-    `min_unseen_hours` additionally restricts the flip to rows whose
-    last_seen_at is older than that many hours — the staleness rail that keeps
-    a single walk's index hiccup from delisting a row touched by a recent walk.
-    """
-    if not seen_natives:
-        return 0
-    natives = _seen_without_nulls(seen_natives, f"{source}/{category_main}/{category_type}")
-    if natives is None:
-        return 0
-    sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
-    stale_clause = (
-        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    params: list[Any] = [source, category_main, category_type]
-    if scope_subtype:
-        params.append(subtype)
-    if min_unseen_hours is not None:
-        params.append(min_unseen_hours)
-    params.append(natives)
-    # The cap's count runs the SAME predicate, but with the natives array inside
-    # a FILTER, so its parameters bind in a different order.
-    stale_filter = (
-        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    count_params: list[Any] = [natives]
-    if min_unseen_hours is not None:
-        count_params.append(min_unseen_hours)
-    count_params += [source, category_main, category_type]
-    if scope_subtype:
-        count_params.append(subtype)
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT
-              count(*) FILTER (
-                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
-              count(*) AS active_rows
-            FROM listings
-            WHERE is_active = true
-              AND source = %s
-              AND category_main = %s
-              AND category_type = %s{sub_clause}
-            """,
-            tuple(count_params),
-        )
-        candidates, active_rows = cur.fetchone()
-        if not _delist_flip_allowed(
-            conn, source=source, category_main=category_main,
-            category_type=category_type, subtype=subtype if scope_subtype else None,
-            candidates=int(candidates), active_rows=int(active_rows),
-        ):
-            return 0
-        cur.execute(
-            f"""
-            UPDATE listings
-            SET is_active = false, inactive_at = now()
-            WHERE is_active = true
-              AND source = %s
-              AND category_main = %s
-              AND category_type = %s{sub_clause}{stale_clause}
-              AND source_id_native <> ALL(%s)
-            RETURNING property_id
-            """,
-            tuple(params),
-        )
-        rows = cur.fetchall()
-        pids = {int(r[0]) for r in rows if r[0] is not None}
-        if pids:
-            cur.execute(
-                """
-                INSERT INTO dirty_properties (property_id)
-                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
-                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-                """,
-                (list(pids),),
-            )
-        return len(rows)
-
-
-def mark_inactive_agenda(
-    conn: psycopg.Connection,
-    source: str,
-    category_type: str,
-    seen_natives: set[str],
-    *,
-    min_unseen_hours: int | None = None,
-) -> int:
-    """Agenda-grain native-id sweep: flip active (source, category_type) listings
-    whose `source_id_native` is absent from `seen_natives` to is_active=false.
-
-    For portals (maxima/remax) whose index is TWO mixed agendas — sale / rent ≡
-    category_type — that report a per-AGENDA total but only a TITLE-DERIVED
-    per-category slice. A per-(category_main, category_type) sweep would risk
-    false-flipping a listing whose index-time title category disagrees with its
-    detail-time stored category (the same ad in two different `category_main`
-    buckets). Scoping by category_type with the FULL agenda walk's id set removes
-    that risk: a still-listed ad is in `seen_natives` regardless of which
-    category_main it maps to, so only ads genuinely gone from the whole agenda
-    flip. Source-scoped (rule #15) so a portal's walk only touches its own rows.
-
-    `min_unseen_hours` is the same staleness rail as `mark_inactive_native`. Only
-    call with the full agenda's id set AFTER a completeness-proven agenda walk.
-    """
-    if not seen_natives:
-        return 0
-    natives = _seen_without_nulls(seen_natives, f"{source}/{category_type}")
-    if natives is None:
-        return 0
-    stale_clause = (
-        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    params: list[Any] = [source, category_type]
-    if min_unseen_hours is not None:
-        params.append(min_unseen_hours)
-    params.append(natives)
-    stale_filter = (
-        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
-        if min_unseen_hours is not None else ""
-    )
-    count_params: list[Any] = [natives]
-    if min_unseen_hours is not None:
-        count_params.append(min_unseen_hours)
-    count_params += [source, category_type]
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT
-              count(*) FILTER (
-                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
-              count(*) AS active_rows
-            FROM listings
-            WHERE is_active = true
-              AND source = %s
-              AND category_type = %s
-            """,
-            tuple(count_params),
-        )
-        candidates, active_rows = cur.fetchone()
-        if not _delist_flip_allowed(
-            conn, source=source, category_main=None,
-            category_type=category_type, subtype=None,
-            candidates=int(candidates), active_rows=int(active_rows),
-        ):
-            return 0
-        cur.execute(
-            f"""
-            UPDATE listings
-            SET is_active = false, inactive_at = now()
-            WHERE is_active = true
-              AND source = %s
-              AND category_type = %s{stale_clause}
-              AND source_id_native <> ALL(%s)
-            RETURNING property_id
-            """,
-            tuple(params),
-        )
-        rows = cur.fetchall()
-        pids = {int(r[0]) for r in rows if r[0] is not None}
-        if pids:
-            cur.execute(
-                """
-                INSERT INTO dirty_properties (property_id)
-                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
-                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-                """,
-                (list(pids),),
-            )
-        return len(rows)
-
-
-def mark_listing_inactive_native(
-    conn: psycopg.Connection,
-    source: str,
-    native_id: str,
-) -> None:
-    """Flip a single (source, source_id_native) listing inactive — used when a
-    portal detail fetch reports the ad gone (404/410 / gone-marker body). A
-    definitive per-listing signal, independent of the index-absence sweep."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE listings SET is_active = false, inactive_at = now() "
-            "WHERE source = %s AND source_id_native = %s RETURNING property_id",
+            "WHERE source = %s AND source_id_native = %s AND is_active = true "
+            "RETURNING property_id",
             (source, native_id),
         )
         row = cur.fetchone()
-        if row and row[0] is not None:
+        if row is None:
+            cur.execute(
+                "SELECT 1 FROM listings WHERE source = %s AND source_id_native = %s",
+                (source, native_id),
+            )
+            exists = cur.fetchone() is not None
+        elif row[0] is not None:
             cur.execute(
                 "INSERT INTO dirty_properties (property_id) VALUES (%s) "
                 "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
                 (int(row[0]),),
             )
-
-
-def portal_inactive_sweep_due(
-    conn: psycopg.Connection,
-    source: str,
-    default_interval_hours: int = 12,
-) -> bool:
-    """Whether a portal's index-absence delisting sweep is allowed to run now.
-
-    Throttled via `portals.inactive_sweep_min_interval_hours` (NULL → the code
-    default): the frequent index walk touches last_seen + enqueues new ads every
-    run, but the riskier delisting sweep runs at most once per window so a single
-    flaky/rate-limited walk can never mass-delist. Unknown source → allowed."""
-    with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT last_inactive_sweep_at IS NULL
-                   OR now() - last_inactive_sweep_at
-                      >= make_interval(hours => coalesce(inactive_sweep_min_interval_hours, %s))
-            FROM portals WHERE source = %s
-            """,
-            (default_interval_hours, source),
+            "DELETE FROM listing_fetch_failures f USING listings l "
+            "WHERE l.source = %s AND l.source_id_native = %s AND f.sreality_id = l.sreality_id",
+            (source, native_id),
         )
-        row = cur.fetchone()
-    return True if row is None else bool(row[0])
-
-
-def record_portal_inactive_sweep(conn: psycopg.Connection, source: str) -> None:
-    """Stamp the moment a portal's delisting sweep actually ran (throttle clock)."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE portals SET last_inactive_sweep_at = now() WHERE source = %s",
-            (source,),
-        )
+    if row is not None:
+        return True
+    return False if exists else None
 
 
 def index_summary(
@@ -1771,7 +1253,7 @@ def active_count(
     """Current active-listing count for one (source, category_main, category_type).
 
     `scope_subtype=True` narrows to `subtype` (NULL-safe) so the count matches a
-    subtype-scoped `mark_inactive_native` sweep (bazos fine sections)."""
+    subtype-scoped `presence_candidates` nomination (bazos fine sections)."""
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
     params: list[Any] = [source, category_main, category_type]
     if scope_subtype:
@@ -2161,18 +1643,6 @@ def record_fetch_failure(
         )
 
 
-def clear_fetch_failure(
-    conn: psycopg.Connection,
-    sreality_id: int,
-) -> None:
-    """Remove the failure row after a successful fetch."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM listing_fetch_failures WHERE sreality_id = %s",
-            (sreality_id,),
-        )
-
-
 def sweep_stuck_scrape_runs(
     conn: psycopg.Connection,
     *,
@@ -2494,11 +1964,12 @@ QUEUE_PRIORITY_FAILURE = 2
 # is priority DESC, and 0 is "new"), so a backlog of checks can never delay a
 # brand-new listing. Negative on purpose: smallint, no CHECK, and GREATEST() on
 # re-enqueue means a row already queued as new keeps its place. -2, not -1:
-# -1 was the location-data refetch lane (deleted 2026-09-11) and the gap is kept
-# so a presence check can never inherit a slot something else sorted above.
+# -1 was the location-data refetch lane (deleted 2026-09-11; the lane itself now
+# enqueues at VERIFY) and the gap is kept so a presence check can never inherit a
+# slot something else sorted above.
 QUEUE_PRIORITY_VERIFY = -2
-# How many given-up queue rows a walk re-arms per source (see
-# enqueue_presence_checks): 50 x 5 attempts is a bounded retry budget per walk.
+# How many given-up queue rows each nominating scope with candidates re-arms,
+# source-wide (see enqueue_presence_checks): 50 x 5 attempts per such scope.
 PRESENCE_REARM_PER_WALK = 50
 # Share of each claim batch reserved for presence checks (see claim_detail_batch).
 QUEUE_VERIFY_RESERVE = 0.2

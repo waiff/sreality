@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from scraper import db
 
 
@@ -39,13 +41,6 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
-        if "AS candidates" in s:
-            # migration 451's flip cap counts the scope before any sweep flips.
-            # (0, 0) sits below min_rows so the cap allows it, keeping these
-            # tests about the dirty-property bookkeeping they assert.
-            self._rows = [(0, 0)]
-            self.rowcount = 1
-            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)
@@ -399,45 +394,6 @@ def test_mark_properties_dirty_empty_noop():
     assert conn.executed == []
 
 
-_FLIP_SQL = "UPDATE listings SET is_active = false, inactive_at = now() WHERE is_active = true"
-
-
-def test_mark_inactive_enqueues_flipped_properties_and_returns_count():
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, [(5,), (5,), (None,)]),
-        (lambda s: "INSERT INTO dirty_properties" in s, []),
-    ])
-    n = db.mark_inactive(conn, "byt", "prodej", {1, 2})
-    assert n == 3  # three listings flipped
-    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
-    assert dirty is not None
-    assert dirty[1] == ([5],)  # NULL-property listing excluded; deduped
-
-
-def test_mark_inactive_no_dirty_when_no_flips():
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, []),
-    ])
-    assert db.mark_inactive(conn, "byt", "prodej", {1}) == 0
-    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
-
-
-def test_mark_inactive_is_source_scoped():
-    # Rule #15: a sreality index walk must only flip sreality rows. Bazos rows
-    # carry the same canon categories but are never in sreality's seen_ids, so
-    # without the source clause every sreality walk would sweep them inactive.
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, []),
-    ])
-    db.mark_inactive(conn, "byt", "prodej", {1, 2}, source="sreality")
-    # The FLIP, not executed[0] — migration 451's cap counts the scope first.
-    sql, params = _find(conn.executed, "SET is_active = false")
-    assert "AND source = %s" in sql
-    assert params[0] == "sreality"          # source bound first
-    assert params[1:3] == ("byt", "prodej")
-    assert sorted(params[3]) == [1, 2]
-
-
 def test_active_count_is_source_scoped():
     conn = _FakeConn([
         (lambda s: "SELECT count(*) FROM listings" in s, [(42,)]),
@@ -448,23 +404,66 @@ def test_active_count_is_source_scoped():
     assert params == ("sreality", "byt", "prodej")
 
 
+_FLIP = "AND is_active = true RETURNING property_id"
+_EXISTS = "SELECT 1 FROM listings WHERE source = %s AND source_id_native = %s"
+_LEDGER_CLEAR = "DELETE FROM listing_fetch_failures f USING listings l"
+
+
 def test_mark_listing_inactive_enqueues_its_property():
     conn = _FakeConn([
-        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(42,)]),
+        (lambda s: _FLIP in s, [(42,)]),
         (lambda s: "INSERT INTO dirty_properties" in s, []),
     ])
-    db.mark_listing_inactive(conn, 999)
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is True
     dirty = _find(conn.executed, "INSERT INTO dirty_properties")
     assert dirty is not None
     assert dirty[1] == (42,)
+    assert _find(conn.executed, _EXISTS) is None        # the no-match probe runs only on a no-op
 
 
 def test_mark_listing_inactive_no_property_no_dirty():
     conn = _FakeConn([
-        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(None,)]),
+        (lambda s: _FLIP in s, [(None,)]),
     ])
-    db.mark_listing_inactive(conn, 999)
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is True
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+def test_an_already_inactive_listing_is_not_restamped_or_redirtied():
+    """The guard matches nothing: no second inactive_at (no duplicate collection
+    monitor 'inactive' dispatch) and no dirty mark -- False, the row exists."""
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, []),
+        (lambda s: _EXISTS in s, [(1,)]),
+    ])
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is False
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+    assert _find(conn.executed, _EXISTS)[1] == ("sreality", "12345")
+
+
+def test_a_gone_flip_that_matches_no_listing_reports_none():
+    """None, not False: the drain logs it at a level only the queue priority can pick."""
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, []),
+        (lambda s: _EXISTS in s, []),
+    ])
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is None
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+@pytest.mark.parametrize(("flip_rows", "exists_rows"), [([(42,)], []), ([(None,)], []), ([], [(1,)]), ([], [])])
+def test_every_gone_flip_clears_the_failure_ledger(flip_rows, exists_rows):
+    """Rule #5: the failure row goes when the listing's fate is known. Keyed on data,
+    not the portal -- a crawler row's NULL / synthetic sreality_id matches no ledger row."""
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, flip_rows),
+        (lambda s: _EXISTS in s, exists_rows),
+    ])
+    db.mark_listing_inactive(conn, "sreality", "12345")
+    clear = _find(conn.executed, _LEDGER_CLEAR)
+    assert clear is not None
+    assert "f.sreality_id = l.sreality_id" in clear[0]
+    assert clear[1] == ("sreality", "12345")
 
 
 def test_touch_listings_enqueues_reactivated_properties():

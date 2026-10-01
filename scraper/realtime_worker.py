@@ -8,7 +8,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
              newest-first delta probe (portal_runner.run_index_probe, Wave C-2)
              sequentially over the probe-capable portals — diff + enqueue only,
-             never mark_inactive.
+             never nominates.
 - drain:     every `realtime_drain_interval_seconds` (default 30), claim a
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub

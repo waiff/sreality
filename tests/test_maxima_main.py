@@ -266,6 +266,13 @@ def test_nomination_is_agenda_grain(monkeypatch):
     assert len(captured) == 1
 
 
+def test_the_drain_owns_the_gone_flip():
+    """The runner flips a gone listing through db.mark_listing_inactive; no
+    portal carries a flip seam of its own."""
+    assert not hasattr(MaximaPortal, "mark_inactive")
+    assert not hasattr(MaximaPortal, "mark_gone")
+
+
 def test_nomination_skips_uncorroborated_empty_page(monkeypatch):
     # The agenda declares 10, the walk collected 2 and then hit an items-less page
     # nothing could corroborate (no pager evidence, short of maxima's own count):
@@ -596,13 +603,3 @@ def test_fetch_detail_gone(monkeypatch):
 
     item = _portal().fetch_detail(_GoneClient(), "b50000001", None)
     assert item.kind == "gone"
-
-
-def test_mark_gone_flips_native(monkeypatch):
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        maxima_main.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    _portal().mark_gone(object(), "b50000001")
-    assert captured == {"source": "maxima", "nid": "b50000001"}

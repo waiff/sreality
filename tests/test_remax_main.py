@@ -123,6 +123,13 @@ def _nominations(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return captured
 
 
+def test_the_drain_owns_the_gone_flip() -> None:
+    """The runner flips a gone listing through db.mark_listing_inactive; no
+    portal carries a flip seam of its own."""
+    assert not hasattr(RemaxPortal, "mark_inactive")
+    assert not hasattr(RemaxPortal, "mark_gone")
+
+
 def test_nomination_is_agenda_grain(monkeypatch: pytest.MonkeyPatch) -> None:
     portal = _portal()
     _walk_sale_agenda(monkeypatch, portal, {(1, 1): [_page(

@@ -450,6 +450,7 @@ def test_delisting_uses_the_runners_default_nomination():
     seam nor an override."""
     p = _portal()
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
     assert not hasattr(p, "presence_candidates")
     assert getattr(p, "seen_key", "native") == "native"
 
@@ -526,16 +527,6 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
     [[w]] = calls
     assert (w.source, w.source_id_native, w.discovery_seq) == ("mmreality", "a", 5)
     assert parsed == [9]
-
-
-def test_mark_gone_flips_listing_inactive_native(monkeypatch):
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        mmreality_main.db, "mark_listing_inactive_native",
-        lambda _c, source, native_id: captured.update(source=source, native_id=native_id),
-    )
-    _portal().mark_gone(object(), "944445")
-    assert captured == {"source": "mmreality", "native_id": "944445"}
 
 
 def test_fetch_detail_reads_a_substitute_page_as_gone(monkeypatch):

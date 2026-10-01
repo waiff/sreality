@@ -78,7 +78,6 @@ LEDGER: dict[str, Site] = {
         1, "bookkeeping", "images_refreshed_at cooldown stamp", "n/a"),
     "toolkit/property_identity.py": Site(
         2, "identity", "property_id re-point + advert move: the rule-15 merge chokepoint", "n/a"),
-    "scraper/freshness.py": Site(1, "lifecycle", "_record_gone's gone flip", "gap:item-3"),
     "scripts/backfill_listing_surrogate_id.py": Site(
         1, "identity", "dead surrogate backfill (separate cleanup PR)", "n/a"),
 }

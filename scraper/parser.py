@@ -38,7 +38,7 @@ CATEGORY_TYPE: dict[int, str] = {
     # cb=4 is "prodej podílu nemovitosti" (sale of a fractional ownership
     # share). It IS its own search slice (category_type_cb=4 is a valid filter),
     # walked as its own pair in main.CATEGORIES so it gets a complete index walk
-    # and mark_inactive.
+    # and nomination.
     4: "podil",
 }
 

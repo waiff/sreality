@@ -185,6 +185,7 @@ def test_nomination_happens_for_every_category_every_run(monkeypatch):
     assert p.presence_candidates(object(), _BYT_RENT, {"b"}) == ([], 1, {"subtype": None})
     assert calls == ["prodej", "pronajem"]
     assert not hasattr(bazos_main.BazosPortal, "mark_inactive")
+    assert not hasattr(bazos_main.BazosPortal, "mark_gone")
 
 
 def test_active_count_source_scoped(monkeypatch):
@@ -198,16 +199,6 @@ def test_active_count_source_scoped(monkeypatch):
     assert _portal().active_count(object(), _BYT_RENT) == 42
     assert captured == {"cm": "byt", "ct": "pronajem", "source": "bazos",
                         "subtype": None, "scope_subtype": True}
-
-
-def test_mark_gone_flips_native_inactive(monkeypatch):
-    gone: dict[str, Any] = {}
-    monkeypatch.setattr(
-        bazos_main.db, "mark_listing_inactive_native",
-        lambda _c, src, nid: gone.update(src=src, nid=nid),
-    )
-    _portal().mark_gone(object(), "216945145")
-    assert gone == {"src": "bazos", "nid": "216945145"}
 
 
 class _IdxClient:

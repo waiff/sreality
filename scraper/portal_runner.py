@@ -17,7 +17,7 @@ district-split lives inside its `walk_category`, not here — justified in revie
   rate-limited pool, write in batches via the portal's writer, route gone→inactive
   and error→failure. Records run_type='detail'.
 - run_index_probe: the newest-first delta probe (Wave C-2 of the real-time
-  program) — first index page(s) only, diff + enqueue, NEVER mark_inactive,
+  program) — first index page(s) only, diff + enqueue, NEVER nominates,
   NO scrape_runs row.
 - run_phase: the scrape_runs lifecycle around one of the two loops above —
   open the row, run the phase, and record how it ENDED. Lifted here from nine
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from scraper import db, listing_write, portal_factory, vocabulary
+from scraper import db, delist_policy, listing_write, portal_factory, vocabulary
 from scraper.portal import (
     PortalConfig,
     classify_index_sighting,
@@ -175,7 +175,6 @@ class Portal(Protocol):
     def make_client(self, limiter: RateLimiter) -> Any: ...
     def fetch_detail(self, client: Any, native_id: str, detail_ref: str | None) -> DrainItem: ...
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]: ...
-    def mark_gone(self, conn: Any, native_id: str) -> None: ...
     def record_failure(self, conn: Any, native_id: str, message: str) -> None: ...
 
 
@@ -217,10 +216,6 @@ class PortalDefaults:
         for page_id in pages:
             db.mark_portal_page_parsed(conn, page_id)
         return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Keyed on the native id: a post-Gate-2 row's sreality_id is NULL.
-        db.mark_listing_inactive_native(conn, self.source, native_id)
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         # The queue (fail_detail) counts attempts and gives up; only sreality also
@@ -307,6 +302,10 @@ def _queue_presence_checks(
     reason -- the walk that reached the portal's last page nominates its gap and
     lets the page decide.
     """
+    nulls = sum(1 for x in seen if x is None)
+    if nulls:
+        LOG.warning("VERIFY dropped %d NULL id(s) from the seen set cm=%s ct=%s", nulls, cm, ct)
+        seen = {x for x in seen if x is not None}
     if not seen:
         # walk_coverage calls a measured zero complete (declared 0, collected 0),
         # and it is right to -- but "I saw nothing" proves nothing about what is
@@ -604,7 +603,7 @@ def run_index_probe(
     overlap; enqueue_detail is idempotent on (source, native_id)); a portal
     whose default order is NOT newest-first overrides probe_category instead.
 
-    NEVER calls mark_inactive: a page-capped walk cannot prove a delisting
+    NEVER nominates: a page-capped walk cannot prove a delisting
     (rule #3) — and the cap also makes every walk report reached_end=False, the
     same second rail the --max-pages gate uses.
 
@@ -755,60 +754,29 @@ def _flush_drain_batch(
     return conn
 
 
-class _GoneRateBreaker:
-    """Rule #3's last rail after presence verification: a positive gone signal
-    flips one listing, and nothing else does -- so the one systemic failure
-    left is a portal that answers EVERY page with the gone signal (a consent
-    interstitial that redirects off the listing, a WAF serving 404s). Ingest
-    rows (every other priority) were on the index minutes ago, so among them a gone
-    rate near zero is normal and a majority is not the market, it is the
-    portal. Once tripped for the run, gone verdicts are recorded as failures
-    (retried later) instead of flips. Presence checks (QUEUE_PRIORITY_VERIFY)
-    are NOT counted: a backlog of truly dead listings legitimately reads 100%
-    gone. Everything else, the location refetch lane included, is a listing
-    the index vouched for and counts.
-    """
-
-    MIN_SAMPLE = 20
-    MAX_GONE_SHARE = 0.5
-
-    def __init__(self, source: str) -> None:
-        self.source = source
-        self.ingest_fetched = 0
-        self.ingest_gone = 0
-        self.tripped = False
-        self.reason = ""
-
-    def observe(self, priority: int, kind: str) -> None:
-        if priority == db.QUEUE_PRIORITY_VERIFY or self.tripped:
-            return
-        self.ingest_fetched += 1
-        if kind == "gone":
-            self.ingest_gone += 1
-        if (self.ingest_fetched >= self.MIN_SAMPLE
-                and self.ingest_gone > self.MAX_GONE_SHARE * self.ingest_fetched):
-            self.tripped = True
-            self.reason = (
-                f"gone-rate breaker: {self.ingest_gone} of {self.ingest_fetched} ingest "
-                f"fetches read gone this run -- the portal, not the market"
-            )
-            LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
-                      "recorded as failures, not flips", self.reason, self.source)
-
-
-def _drain_mark_gone(portal: Portal, conn: Any, native_id: str, reconnect: Any) -> Any:
+def _drain_mark_gone(
+    portal: Portal, conn: Any, native_id: str, priority: int, reconnect: Any,
+) -> tuple[Any, str | None]:
     """Flip a gone listing inactive + dequeue it, transient-drop resilient.
-    Returns the live connection. mark_gone's own bookkeeping errors stay tolerated
-    (one listing must not red the run); a dropped connection reconnects + retries."""
-    def _op(c: Any) -> None:
-        try:
-            portal.mark_gone(c, native_id)
-        except Exception as exc:  # noqa: BLE001 - bookkeeping; tolerated like before
-            LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
+    Returns (live conn, None), or (conn, error) when the flip failed non-transiently."""
+    def _op(c: Any) -> bool | None:
+        flipped = db.mark_listing_inactive(c, portal.source, native_id)
         db.complete_detail(c, portal.source, [native_id], outcome="gone")
+        return flipped
 
-    _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
-    return conn
+    try:
+        flipped, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
+    except Exception as exc:  # noqa: BLE001 - one listing must not red the run
+        if db.is_transient_db_error(exc):
+            raise  # retries exhausted: a real outage reds the run, as before
+        LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
+        return conn, str(exc)
+    if flipped is None:
+        # A never-fetched (NEW) id has no listings row until the drain writes one, so
+        # a gone first fetch matches nothing routinely; for any other row the key broke.
+        LOG.log(logging.INFO if priority == db.QUEUE_PRIORITY_NEW else logging.WARNING,
+                "gone flip matched no listing source=%s id=%s", portal.source, native_id)
+    return conn, None
 
 
 def _drain_record_failure(
@@ -864,7 +832,8 @@ def run_detail_drain(
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
     }
-    breaker = _GoneRateBreaker(portal.source)
+    breaker = delist_policy.GoneRateBreaker(
+        portal.source, exempt_priority=db.QUEUE_PRIORITY_VERIFY)
     limiter = build_rate_limiter(
         portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False))
     client = portal.make_client(limiter)
@@ -957,8 +926,10 @@ def run_detail_drain(
                     item = future.result()  # never raises
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
-                    breaker.observe(
-                        prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW), item.kind)
+                    prio = prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW)
+                    if breaker.observe(prio, item.kind):
+                        LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
+                                  "recorded as failures, not flips", breaker.reason, portal.source)
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:
@@ -976,9 +947,15 @@ def run_detail_drain(
                             portal, conn, item.native_id, breaker.reason, portal.connect_drain)
                     elif item.kind == "gone":
                         LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
-                        conn = _drain_mark_gone(
-                            portal, conn, item.native_id, portal.connect_drain)
-                        counts["gone"] += 1
+                        conn, flip_error = _drain_mark_gone(
+                            portal, conn, item.native_id, prio, portal.connect_drain)
+                        if flip_error is None:
+                            counts["gone"] += 1
+                        else:  # the queue row stays and is retried
+                            counts["errors"] += 1
+                            conn = _drain_record_failure(
+                                portal, conn, item.native_id,
+                                f"gone flip failed: {flip_error}", portal.connect_drain)
                     else:  # error: keep the queue row, bump attempts, log failure
                         LOG.error("DETAIL id=%s error: %s", item.native_id, item.error)
                         conn = _drain_record_failure(

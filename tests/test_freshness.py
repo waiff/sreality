@@ -88,9 +88,13 @@ def _patch_db(
     new_snap_id: int = 99,
 ) -> dict[str, list]:
     """Stub all DB helpers. Returns a dict of recorded calls."""
-    calls: dict[str, list] = {"log": [], "upsert": []}
+    calls: dict[str, list] = {"log": [], "upsert": [], "flip": []}
     monkeypatch.setattr(
         freshness.listing_write, "latest_snapshot", lambda c, source, native: prev
+    )
+    monkeypatch.setattr(
+        freshness.db, "mark_listing_inactive",
+        lambda _c, source, nid: calls["flip"].append((source, nid)) or True,
     )
 
     def _write_listings(_c: Any, writes: list[Any]) -> list[WriteOutcome]:
@@ -178,10 +182,8 @@ def test_404_marks_inactive_and_logs_gone(monkeypatch):
     assert res["snapshot_id"] is None
     assert res["new_hash"] is None
     assert calls["upsert"] == []
-    assert any("UPDATE listings" in sql for sql, _ in conn.executions)
-    assert any("is_active = false" in sql for sql, _ in conn.executions)
-    # the flip stamps the delisting moment (migration 175)
-    assert any("inactive_at = now()" in sql for sql, _ in conn.executions)
+    # the one guarded flip writer: inactive_at once, dirty mark, failure row cleared
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 
@@ -197,6 +199,7 @@ def test_410_also_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 
@@ -214,7 +217,7 @@ def test_listing_gone_error_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
-    assert any("is_active = false" in sql for sql, _ in conn.executions)
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 

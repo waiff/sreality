@@ -8,6 +8,8 @@ assert the SQL text, same pattern as test_db_property.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 from scraper import db
@@ -36,12 +38,6 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
-        if "AS candidates" in s:
-            # migration 450 flip cap: it counts the scope before it flips.
-            # (0, 0) is below min_rows, so the cap allows the sweep and these
-            # tests stay about the UPDATE they were written to assert.
-            self._rows = [(0, 0)]
-            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)
@@ -76,36 +72,36 @@ def _find(executions, needle: str) -> tuple[str, Any] | None:
 # --- flips to false stamp the delisting moment -----------------------------
 
 
-def test_mark_inactive_stamps_inactive_at():
+def test_mark_listing_inactive_stamps_inactive_at_once():
     conn = _FakeConn()
-    db.mark_inactive(conn, "byt", "prodej", {1, 2})
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
+    db.mark_listing_inactive(conn, "bazos", "12345")
+    sql, params = _find(conn.executed, "SET is_active = false")
+    assert "SET is_active = false, inactive_at = now()" in sql
+    # Guarded: an already-inactive row keeps its first inactive_at.
+    assert "WHERE source = %s AND source_id_native = %s AND is_active = true" in sql
+    assert params == ("bazos", "12345")
+    assert "last_seen_at" not in sql                    # rule #4: a flip never touches it
 
 
-def test_mark_inactive_native_stamps_inactive_at():
-    conn = _FakeConn()
-    db.mark_inactive_native(conn, "bazos", "byt", "prodej", {"a", "b"})
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
+_FLIP_RE = re.compile(r"UPDATE\s+listings\b[^;]*?SET\s+is_active\s*=\s*false", re.S | re.I)
 
 
-def test_mark_listing_inactive_stamps_inactive_at():
-    conn = _FakeConn()
-    db.mark_listing_inactive(conn, 999)
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
-
-
-def test_mark_listing_inactive_native_stamps_inactive_at():
-    conn = _FakeConn()
-    db.mark_listing_inactive_native(conn, "bazos", "12345")
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
+def test_mark_listing_inactive_is_the_only_flip_writer():
+    """Rule #3: one writer flips a listing inactive, so the guard, the inactive_at
+    stamp, the dirty mark and the failure-ledger clear cannot drift between paths."""
+    root = Path(__file__).resolve().parent.parent
+    hits = []
+    for top in ("scraper", "api", "toolkit", "scripts", "autodedup", "location_data"):
+        for path in sorted((root / top).rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for m in _FLIP_RE.finditer(text):
+                hits.append((path.relative_to(root).as_posix(), text.count("\n", 0, m.start()) + 1))
+    assert len(hits) == 1, hits
+    path, line = hits[0]
+    assert path == "scraper/db.py"
+    src = (root / path).read_text(encoding="utf-8").splitlines()
+    owner = next(l for l in reversed(src[:line]) if l.startswith("def "))
+    assert owner.startswith("def mark_listing_inactive(")
 
 
 # --- reactivations clear the stamp ------------------------------------------

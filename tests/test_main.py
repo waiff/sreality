@@ -1,7 +1,7 @@
 """Tests for scraper.main._run_full — focused on the nomination guard (rule #3).
 
 Hermetic: monkeypatches db.* functions and the SrealityClient builder so
-no network is touched. Asserts that mark_inactive is called only when
+no network is touched. Asserts that nomination happens only when
 the index walk is complete (limit is None) and that it is scoped per
 category pair so a rental walk doesn't clobber sale listings.
 """
@@ -51,7 +51,7 @@ def test_extract_price_mirrors_db_placeholder_clamp():
 
 class _FakeClient:
     """Yields a deterministic per-category id range so tests can assert
-    that mark_inactive is scoped correctly."""
+    that nomination is scoped correctly."""
 
     pages_fetched = 1
     # Unfiltered total reported by probe_result_size. Matches total_entries (5)
@@ -143,7 +143,7 @@ class _FakeClient:
             self.stop_reason = self._natural_stop()
             return
         # Distinct id range per (cm, ct) so the per-category seen_ids
-        # set is observable in mark_inactive call args.
+        # set is observable in the nomination call args.
         base = self.category_main * 10000 + self.category_type * 1000
         for i in range(_FakeClient.total_entries):
             yield {"hash_id": base + i, "price_czk": 10000 + i}
@@ -161,6 +161,7 @@ def patched_db(monkeypatch):
         "touch_listings": [],
         "index_summary": [],
         "enqueue": [],
+        "seen_key": [],
     }
 
     class _FakeConn:
@@ -201,7 +202,8 @@ def patched_db(monkeypatch):
     monkeypatch.setattr(
         scraper_main.db, "presence_candidates",
         lambda _conn, source, cm, ct, ids, *, seen_key="native", **kw: (
-            calls["nominated"].append((cm, ct, set(ids))) or ([], 0)
+            calls["seen_key"].append(seen_key)
+            or calls["nominated"].append((cm, ct, set(ids))) or ([], 0)
         ),
     )
     monkeypatch.setattr(
@@ -228,11 +230,15 @@ def patched_db(monkeypatch):
     return calls
 
 
-def test_run_full_nominates_per_category_when_no_limit(patched_db):
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+def test_run_full_nominates_per_category_when_no_limit(patched_db, caplog):
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
-    # One mark_inactive call per category in CATEGORIES.
+    # One nomination per category in CATEGORIES, through the runner's own step.
     assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
+    assert set(patched_db["seen_key"]) == {"sreality_id"}
+    assert "VERIFY cm=byt ct=pronajem subtype=None candidates=0 queued=0 deferred=0 active=0" in (
+        caplog.messages)
 
     # Each call is scoped to its own (cm_text, ct_text) and carries the
     # ids that came from that category's index walk only. Expected labels
@@ -249,6 +255,27 @@ def test_run_full_nominates_per_category_when_no_limit(patched_db):
     by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["nominated"]}
     assert by_pair[("byt", "pronajem")] == {12000, 12001, 12002, 12003, 12004}
     assert by_pair[("byt", "prodej")] == {11000, 11001, 11002, 11003, 11004}
+
+
+def test_legacy_nomination_failure_is_isolated(patched_db, monkeypatch, caplog):
+    """A nomination that raises costs that category one round of page checks;
+    the next category still walks and nominates."""
+    calls = {"n": 0}
+
+    def _enqueue(_conn, source, cm, ct, cands, *, active_rows, subtype=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("pooler said no")
+        return 0, 0
+
+    monkeypatch.setattr(scraper_main.db, "enqueue_presence_checks", _enqueue)
+    with caplog.at_level("ERROR"):
+        rc, agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    assert calls["n"] == len(scraper_main.CATEGORIES)
+    assert len(agg["by_category"]) == len(scraper_main.CATEGORIES)
+    failed = [m for m in caplog.messages if m.startswith("VERIFY failed cm=")]
+    assert len(failed) == 1 and "nothing nominated this walk" in failed[0]
 
 
 def test_run_full_skips_nomination_when_limit_set(patched_db):
@@ -272,6 +299,7 @@ def test_sreality_portal_nominates_on_its_integer_ids():
     p = scraper_main.SrealityPortal()
     assert p.seen_key == "sreality_id"
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
 
 
 def test_walk_complete_tolerates_half_percent_short_walk():
@@ -287,20 +315,20 @@ def test_walk_complete_tolerates_half_percent_short_walk():
 
 
 def test_dry_run_never_nominates(patched_db, monkeypatch):
-    """dry_run skips the connection altogether, so mark_inactive can't run."""
+    """dry_run skips the connection altogether, so nomination can't run."""
     monkeypatch.setattr(scraper_main.db, "connect", lambda: None)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=True)
     assert rc == 0
     assert patched_db["nominated"] == []
 
 
-def test_run_full_isolates_one_crashing_category_marks_the_rest(
+def test_run_full_isolates_one_crashing_category_nominates_the_rest(
     patched_db, monkeypatch
 ):
     """A single category crashing mid-walk must neither propagate (taking the
     whole run down) nor discard the other categories' work: the crash is
-    caught, that category's sweep is skipped, and every other category still
-    walks and runs mark_inactive.
+    caught, that category's nomination is skipped, and every other category still
+    walks and nominates.
     """
     # Make dum/pronajem (2, 2) raise mid-iteration; its position in the walk
     # order is irrelevant (the run rotates CATEGORIES by hour), so assert on the
@@ -337,9 +365,9 @@ def test_walk_complete_thresholds():
     # No reported total → "unknown", NOT complete. These two asserted True
     # before, on the reasoning that an unmeasurable walk should be trusted so
     # delisting isn't silently disabled. That was the bug: "complete" is what
-    # authorises mark_inactive to delist everything the walk did not reach, and
-    # a probe that failed cannot authorise anything. Suppressing the sweep is
-    # the safe direction — less delisting, never more.
+    # authorises nomination of everything the walk did not reach, and a probe
+    # that failed cannot authorise anything. Suppressing nomination is the safe
+    # direction — less delisting, never more.
     assert walk_is_complete(0, None) is False
     # A DECLARED zero is different: it is a measurement, not a failure to
     # measure. An empty district IS genuinely complete, and sreality's split
@@ -397,7 +425,7 @@ def test_run_full_skips_nomination_when_our_own_stop_ended_the_walk(
     assert patched_db["nominated"] == []
 
 
-def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
+def test_run_full_nominates_when_walk_complete(patched_db, monkeypatch):
     """The happy path: sreality's declared total was consumed, so the walk
     reached the end and every category nominates."""
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
@@ -411,7 +439,7 @@ def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
 
 def test_categories_is_the_full_category_cross_product():
     """Every category_main x category_type pair the parser knows must be
-    walked: mark_inactive is scoped per (source, category_main,
+    walked: nomination is scoped per (source, category_main,
     category_type), so a missing slice never gets a complete walk and its
     delisted rows stay is_active=true forever (first the drazba/podil gap,
     then pozemek/ostatni). Every pair had nonzero live inventory when
@@ -466,19 +494,18 @@ def test_rotation_gives_each_category_the_front_across_a_full_cycle():
     assert leaders == set(scraper_main.CATEGORIES)
 
 
-# --- gone detection in _process_one ----------------------------------------
+# --- gone detection: _fetch_detail -> _write_result ------------------------
 
 
 def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
-    calls: dict[str, list] = {"inactive": [], "cleared": [], "failed": []}
-    monkeypatch.setattr(
-        scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: calls["inactive"].append(sid),
-    )
-    monkeypatch.setattr(
-        scraper_main.db, "clear_fetch_failure",
-        lambda _c, sid: calls["cleared"].append(sid),
-    )
+    calls: dict[str, list] = {"inactive": [], "failed": [], "source": []}
+
+    def _flip(_c, source, nid):
+        calls["source"].append(source)
+        calls["inactive"].append(nid)
+        return True
+
+    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _flip)
     monkeypatch.setattr(
         scraper_main.db, "record_fetch_failure",
         lambda _c, sid, msg: calls["failed"].append(sid),
@@ -494,39 +521,54 @@ class _RaisingClient:
         raise self._exc
 
 
-def test_process_one_listing_gone_flips_inactive_not_failure(monkeypatch):
+def test_listing_gone_flips_inactive_not_failure(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     client = _RaisingClient(ListingGoneError("https://x/estates/1", 200))
-    outcome, imgs = scraper_main._process_one(
-        client, object(), 12345, dry_run=False
+    outcome, imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 12345), False
     )
     assert outcome == "gone"
     assert imgs == 0
-    assert calls["inactive"] == [12345]
-    assert calls["cleared"] == [12345]
+    assert calls["inactive"] == ["12345"]
+    assert calls["source"] == ["sreality"]
     assert calls["failed"] == []  # a delisting is not a fetch failure
 
 
-def test_process_one_404_http_error_is_gone(monkeypatch):
+def test_404_http_error_is_gone(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     resp = requests.Response()
     resp.status_code = 404
     client = _RaisingClient(requests.HTTPError("404", response=resp))
-    outcome, _imgs = scraper_main._process_one(
-        client, object(), 777, dry_run=False
+    outcome, _imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 777), False
     )
     assert outcome == "gone"
-    assert calls["inactive"] == [777]
+    assert calls["inactive"] == ["777"]
     assert calls["failed"] == []
 
 
-def test_process_one_500_http_error_is_failure(monkeypatch):
+def test_handle_gone_flip_failure_is_an_error_not_gone(monkeypatch):
+    """A flip that raised is not a delisting: the listing is still active, so it
+    counts as an error and keeps a failure row to be fetched again."""
+    calls = _patch_failure_helpers(monkeypatch)
+
+    def _broken(_c, _source, _nid):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _broken)
+    outcome = scraper_main._write_result(
+        object(), scraper_main.FetchResult(12345, "gone"), False)
+    assert outcome == ("errors", 0)
+    assert calls["failed"] == [12345]
+
+
+def test_500_http_error_is_failure(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     resp = requests.Response()
     resp.status_code = 500
     client = _RaisingClient(requests.HTTPError("500", response=resp))
-    outcome, _imgs = scraper_main._process_one(
-        client, object(), 888, dry_run=False
+    outcome, _imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 888), False
     )
     assert outcome == "errors"
     assert calls["failed"] == [888]
@@ -565,13 +607,12 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     monkeypatch.setattr(scraper_main.listing_write, "write_listings", _write_listings)
     monkeypatch.setattr(
         scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: writes["gone"].append(sid),
+        lambda _c, source, nid: writes["gone"].append(nid),
     )
     monkeypatch.setattr(
         scraper_main.db, "record_fetch_failure",
         lambda _c, sid, msg: writes["fail"].append(sid),
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
 
     def fake_fetch(_client, sid):
         if sid == 11:
@@ -600,7 +641,7 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     assert counts["new"] == 2      # 10, 12 upserted
     assert counts["gone"] == 1     # 11
     assert counts["errors"] == 1   # 13 — error did not abort the pool
-    assert writes["gone"] == [11]
+    assert writes["gone"] == ["11"]
     assert writes["fail"] == [13]
     assert budget[0] == 6          # 10 - 4 processed
 
@@ -621,7 +662,6 @@ def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
         scraper_main.listing_write, "write_listings",
         lambda _c, ws: [_outcome(w, "updated") for w in ws],
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, s: None)
 
     fetched: list[int] = []
 
@@ -659,7 +699,7 @@ def _split_args(conn=None):
 
 def test_walk_category_split_unions_districts(patched_db, monkeypatch):
     """A category over SPLIT_THRESHOLD is walked per district; the union of
-    district seen_ids feeds mark_inactive and the reported result_size is the
+    district seen_ids feeds nomination and the reported result_size is the
     national probe. Complete when every district is complete and the union
     covers the national total."""
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
@@ -1045,9 +1085,9 @@ def test_sweep_stuck_scrape_runs_stamps_ended_at():
 # --- Phase 2: index-walk / detail-drain split ------------------------------
 
 
-def test_index_walk_enqueues_and_marks_inactive(patched_db, monkeypatch):
-    """The index-walk enqueues every category's new ids and runs mark_inactive
-    once per category under the completeness guard (result_size=5 == collected)."""
+def test_index_walk_enqueues_and_nominates(patched_db, monkeypatch):
+    """The index-walk enqueues every category's new ids and nominates once per
+    category under the completeness guard (result_size=5 == collected)."""
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
     rc, agg = scraper_main._run_index_walk(dry_run=False)
     assert rc == 0
@@ -1067,7 +1107,7 @@ def test_index_walk_enqueues_and_marks_inactive(patched_db, monkeypatch):
 
 
 def test_index_walk_dry_run_writes_nothing(patched_db):
-    """dry_run -> conn is None -> no enqueue, no mark_inactive."""
+    """dry_run -> conn is None -> no enqueue, no nomination."""
     rc, _agg = scraper_main._run_index_walk(dry_run=True)
     assert rc == 0
     assert patched_db["enqueue"] == []
@@ -1177,9 +1217,8 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: captured["gone"].append(sid),
+        lambda _c, source, nid: captured["gone"].append((source, nid)),
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
     return captured
 
 
@@ -1205,7 +1244,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
     assert rc == 0
-    assert cap["gone"] == [11]              # gone -> mark_listing_inactive
+    assert cap["gone"] == [("sreality", "11")]  # gone -> mark_listing_inactive
     assert cap["failure"] == [12]           # error -> record_fetch_failure
     assert cap["fail"] == [["12"]]          # error -> queue attempts++ (by native_id)
     assert sorted(x for b in cap["write"] for x in b) == [10]

@@ -131,17 +131,17 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
    `write_listings`, which appends a `listing_snapshots` row iff its content hash differs from the latest (`scraped_at
    DESC, id DESC`). Payload-free writes never snapshot (derived/enrichment/link/lifecycle columns; `scripts/reparse.py` heals of
    a stored page); each outside `scraper/db.py`'s lifecycle writers is ledgered in `tests/scraper/test_listing_write_census.py`.
-3. **Never delete; delist via `is_active=false`.** History is sacred. **Since 2026-09-07 index absence
-   NOMINATES, the page DECIDES** (`portal_runner._queue_presence_checks`); **since 2026-09-08 the gate is
-   STRUCTURAL, not numeric** — a walk that REACHED THE PORTAL'S END (`scraper.portal.walk_reached_end`:
-   every unit walked, each page loop out on a portal terminator, no stop of OURS — deadline / page cap /
-   `--limit` / slice subset / error / uncorroborated empty page) queues every active row it did not see
-   into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY` (last, 20% reserve); the drain fetches the page
-   and a POSITIVE gone signal (404/410, redirect off the listing, the portal's "no longer active" text →
-   `ListingGoneError`) flips that one listing, a live page refreshes it, an error waits. `walk_coverage`
-   still runs — a logged `COVERAGE` alarm + descent/resample trigger input, NEVER a gate. No staleness
-   rail, no absence sweep, no `supports_complete_walk` gate. `delist_flip_cap` (10%, floor 2k) THROTTLES
-   nominations per walk (rest deferred; `.overrides` lift it). Every flip stamps `inactive_at`.
+3. **Never delete; delist via `is_active=false`.** History is sacred. **Since 2026-09-07 index absence NOMINATES,
+   the page DECIDES** (`portal_runner._queue_presence_checks`); **since 2026-09-08 the gate is STRUCTURAL, not
+   numeric** — a walk that REACHED THE PORTAL'S END (`scraper.portal.walk_reached_end`: every unit walked, each page
+   loop out on a portal terminator, no stop of OURS — deadline / page cap / `--limit` / slice subset / error /
+   uncorroborated empty page) queues every active row it did not see into `listing_detail_queue` at
+   `QUEUE_PRIORITY_VERIFY` (last, 20% reserve); the drain fetches the page and a POSITIVE gone signal (404/410,
+   redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) flips that one listing, a
+   live page refreshes it, an error waits. `walk_coverage` is a logged `COVERAGE` alarm, NEVER a gate. No staleness
+   rail, no absence sweep, no `supports_complete_walk` gate. `delist_flip_cap` (10%, floor 2k) THROTTLES nominations
+   per walk (rest deferred; `.overrides` lift it). Budget + gone-rate breaker: `scraper/delist_policy.py`; every
+   flip goes through `db.mark_listing_inactive` (guarded, stamps `inactive_at` once, dirties the property).
 4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
    touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
    path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.

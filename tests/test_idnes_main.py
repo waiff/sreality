@@ -205,7 +205,7 @@ def test_the_numeric_verdict_still_pins_the_coverage_triggers():
     # An unmeasurable total is "unknown", never "complete". The old local
     # _walk_complete returned True here and this test asserted it — that
     # expectation was the DEFECT, not the spec: it let a walk that measured
-    # nothing authorise mark_inactive to delist everything it never reached.
+    # nothing authorise nominating everything it never reached.
     assert portal_mod.walk_is_complete(0, None) is False
     assert portal_mod.walk_is_complete(500, 1000, stopped_early=True) is False
     # Over-collection means the denominator is wrong (overlapping slices or
@@ -230,15 +230,15 @@ def test_walk_category_max_pages_suppresses_complete(monkeypatch):
         {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
     )
     assert pages == 1
-    assert complete is False     # max_pages => partial => never mark_inactive
+    assert complete is False     # max_pages => partial => never nominates
 
 
 def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
-    # A walk cut short must read incomplete, or mark_inactive would delist the
-    # slices it never fetched (rule #3). Under the sliced walk the cut happens
+    # A walk cut short must read incomplete, or it would nominate every row in
+    # the slices it never fetched (rule #3). Under the sliced walk the cut happens
     # between slices as well as between pages, and BOTH must suppress complete:
     # 14 of 15 slices walked is a walk with a hole in it, and a hole is exactly
-    # what the sweep would read as "these listings are gone".
+    # what nomination would read as "these listings went unseen".
     def _page(_html):
         nid = "6a18deadbeefdeadbeef0001"
         return SimpleNamespace(
@@ -417,6 +417,7 @@ def test_delisting_uses_the_runners_default_nomination():
     seam nor an override."""
     p = _portal()
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
     assert not hasattr(p, "presence_candidates")
     assert getattr(p, "seen_key", "native") == "native"
 
@@ -496,23 +497,6 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
     [[w]] = calls
     assert (w.source, w.source_id_native, w.discovery_seq) == ("idnes", "a", 5)
     assert parsed == [9]
-
-
-def test_mark_gone_flips_listing_inactive(monkeypatch):
-    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
-    # NOT a sreality_id resolved back out of the DB — a post-Gate-2 idnes row has
-    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
-    )
-    _portal().mark_gone(object(), "a")
-    assert captured == {"source": "idnes", "nid": "a"}
 
 
 # --- the empty slice ---------------------------------------------------------

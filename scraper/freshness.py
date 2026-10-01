@@ -166,12 +166,7 @@ def _record_gone(
     sreality_id: int,
     prev: listing_write.SnapshotRef | None,
 ) -> FreshnessResult:
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE listings SET is_active = false, inactive_at = now() "
-            "WHERE sreality_id = %s",
-            (sreality_id,),
-        )
+    db.mark_listing_inactive(conn, "sreality", str(sreality_id))
     prev_hash = prev.content_hash if prev else None
     _insert_log(
         conn, sreality_id, "gone",

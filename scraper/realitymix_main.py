@@ -20,8 +20,8 @@ Two deliberate differences from the ceskereality template:
   reverted #637: an arrow-trusting walk stops early on a throttled/degraded page.
   realitymix is nginx (not Cloudflare) and paginates reliably to the exact total
   with no deep-pagination cap, so a per-category walk can reach the portal's own
-  end → `walk_reached_end` lets the runner nominate the rows the walk did
-  not see for a page check (rule #3), source-scoped (rule #15). Coordinates come
+  end → `walk_reached_end` gates the runner's nomination of the rows the walk
+  did not see for a page check (rule #3), source-scoped (rule #15). Coordinates come
   straight from the page's `data-gps-lat/-lon`, so there is no geocoding step.
 """
 
@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
-    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    # page(s) only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)

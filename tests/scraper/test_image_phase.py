@@ -146,6 +146,27 @@ def test_classify_404_gone_marks_taken_down(monkeypatch):
     assert alive == set()
 
 
+@pytest.mark.parametrize("sreality_id", [-12345, 0])
+def test_classify_404_on_a_non_sreality_listing_never_runs_freshness(monkeypatch, sreality_id):
+    """A crawler listing carries a synthetic negative sreality_id; a sreality
+    freshness fetch for it proves nothing (and its gone verdict would flip a key
+    that is not sreality's). Park the one image instead."""
+    monkeypatch.setattr(
+        scraper_main, "client_freshness_check",
+        lambda *_a, **_kw: pytest.fail("no sreality fetch for a non-sreality listing"),
+    )
+    gone: set[int] = set()
+    alive: set[int] = set()
+
+    kind = scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=sreality_id,
+        error=_http_error(404),
+        gone_listings=gone, alive_listings=alive,
+    )
+    assert kind == "source_unavailable"
+    assert gone == alive == set()
+
+
 def test_classify_404_alive_is_source_unavailable(monkeypatch):
     """Image URL 404s but the listing's detail still returns 200 — that one
     CDN URL has expired (permanently dead), not a taken-down listing and not

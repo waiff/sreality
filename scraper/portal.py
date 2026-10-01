@@ -168,12 +168,12 @@ CZ_KRAJ_SLUGS: tuple[str, ...] = (
 ABROAD_SLICE = "__abroad__"
 
 
-# A walk may drive mark_inactive only when it covered ~all of what the portal
-# said it had. 0.995 tolerates live churn during a multi-minute walk; the upper
-# bound catches the opposite failure, a walk that collected MORE than the portal
-# declared, which means the slices overlap or foreign stock leaked in and the
-# "total" is not the denominator we think it is. Contamination must not read as
-# completeness.
+# A walk's coverage reads `complete` only when it covered ~all of what the portal
+# said it had (an alarm since 2026-09-08; `walk_reached_end` gates nomination).
+# 0.995 tolerates live churn during a multi-minute walk; the upper bound catches
+# the opposite failure, a walk that collected MORE than the portal declared,
+# which means the slices overlap or foreign stock leaked in and the "total" is
+# not the denominator we think it is. Contamination must not read as completeness.
 INDEX_MIN_COMPLETENESS = 0.995
 INDEX_MAX_OVERCOLLECTION = 1.02
 
@@ -442,9 +442,9 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "bazos": PortalConfig(
         source="bazos",
-        # The index reports a total, so a full walk of the configured scope is
-        # provable-complete; the per-walk completeness guard + the 12h sweep
-        # throttle (migration 113) keep delisting inference safe.
+        # The index reports a total, so a full walk of the configured scope can
+        # reach the portal's end; it then nominates its unseen rows for a page
+        # check (rule #3).
         supports_complete_walk=True,
         # Every bazos property section × sale + rent (migration 488 closed the gap
         # migration 160 deferred: pozemek/zahrada/garaz/ostatni were never walked,
@@ -476,8 +476,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
     "idnes": PortalConfig(
         source="idnes",
         # Search pages carry a result total and have no deep-pagination cap, so a
-        # per-category walk is provable-complete → mark_inactive runs under the
-        # completeness guard (source-scoped). No split needed.
+        # per-category walk can reach the portal's end → it nominates its unseen
+        # rows for a page check (source-scoped). No split needed.
         supports_complete_walk=True,
         categories=[
             {"sale_type": "prodej",   "category": "byty"},
@@ -534,8 +534,9 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # pairs a category with its agenda; walk_category walks that agenda once
         # (cached) and keeps the id-prefix slice for its category. Complete-walk
         # via AGENDA-GRAIN delisting: maxima reports a per-AGENDA total, so the
-        # sweep flips the whole agenda (af ≡ category_type) once it's fully walked
-        # (db.presence_candidates, category_main=None), not the per-(cm,ct) slice. See maxima_main.
+        # walk nominates the whole agenda's (af ≡ category_type) unseen rows once it
+        # reaches the agenda's end (db.presence_candidates, category_main=None),
+        # not the per-(cm,ct) slice. See maxima_main.
         supports_complete_walk=True,
         categories=[
             {"category_main": "byt",      "category_type": "prodej",   "af": 1},
@@ -560,8 +561,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # URL. Each descriptor pairs a category with its offer-type flag;
         # walk_category walks that agenda once (cached) and keeps the
         # title-derived slice for its category. Complete-walk via AGENDA-GRAIN
-        # delisting: remax reports a per-AGENDA total, so the sweep flips the whole
-        # agenda (sale ≡ category_type) once it's fully walked
+        # delisting: remax reports a per-AGENDA total, so the walk nominates the whole
+        # agenda's (sale ≡ category_type) unseen rows once it reaches the agenda's end
         # (db.presence_candidates, category_main=None), not the title-derived per-(cm,ct) slice. See
         # remax_main.
         supports_complete_walk=True,
@@ -585,8 +586,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
     "bezrealitky": PortalConfig(
         source="bezrealitky",
         # GraphQL listAdverts gives a totalCount and has no deep-pagination cap,
-        # so a per-category walk is provable-complete (mark_inactive runs under
-        # the completeness guard, source-scoped). No split needed.
+        # so a per-category walk can reach the portal's end (it nominates its
+        # unseen rows, source-scoped). No split needed.
         supports_complete_walk=True,
         categories=[
             {"offer_type": "PRODEJ",   "estate_type": "BYT"},
@@ -596,9 +597,9 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"offer_type": "PRODEJ",   "estate_type": "POZEMEK"},
             {"offer_type": "PRONAJEM", "estate_type": "POZEMEK"},
             # KANCELAR + NEBYTOVY_PROSTOR both canonicalise to 'komercni' —
-            # grouped into one walk so the source-scoped mark_inactive (which
+            # grouped into one walk so the source-scoped nomination (which
             # keys on canonical cm/ct) sees the union, not two disjoint subsets
-            # that would mutually delist each other.
+            # that would nominate each other's rows.
             {"offer_type": "PRODEJ",   "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
             {"offer_type": "PRONAJEM", "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
             # GARAZ + REKREACNI_OBJEKT both canonicalise to 'ostatni' — same.
@@ -619,8 +620,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
         source="ceskereality",
         # Per-category HTML search pages (/{sale}/{category}/), each carrying a
         # result total in its meta description ("Máme tady N…") and no deep-
-        # pagination cap, so a per-category walk is provable-complete → the
-        # completeness-gated mark_inactive runs (source-scoped). The detail URL
+        # pagination cap, so a per-category walk can reach the portal's end → it
+        # nominates its unseen rows for a page check (source-scoped). The detail URL
         # carries the category, so the drain re-derives each listing's category
         # from its own URL. POLITE rates — the site disallows generic bots in
         # robots.txt, so we crawl slowly with an honest UA (ceskereality_client).
@@ -651,8 +652,8 @@ _DEFAULTS: dict[str, PortalConfig] = {
         source="realitymix",
         # Per-category HTML search pages (/reality/{family}/{sale}), each carrying
         # a result total ("z celkem N nalezených") with offset paging (?stranka=N)
-        # and NO deep-pagination cap, so a per-category walk is provable-complete →
-        # the completeness-gated mark_inactive runs (source-scoped). The detail URL
+        # and NO deep-pagination cap, so a per-category walk can reach the portal's
+        # end → it nominates its unseen rows (source-scoped). The detail URL
         # does NOT encode the category, so the drain reads it from the page's
         # BreadcrumbList JSON-LD (realitymix_parser.category_from_breadcrumb).
         # realitymix is a Centrum.cz agency-feed AGGREGATOR (~48k listings), so it
