@@ -93,8 +93,8 @@ export function pipelineRevalidation(cohortScoped: boolean): readonly QueryKey[]
   return cohortScoped ? [...PIPELINE_REVALIDATE, ...browseKeys.all] : PIPELINE_REVALIDATE;
 }
 
-/* The same re-read for a write that is not a card write (a merge or split moves
- * cards between properties — lib/mergedAdverts). */
+/* The same re-read for a write that is not a card write: a merge or split moves
+ * cards between properties (the Browse merge, lib/mergedAdverts.refreshAfterSplit). */
 export function revalidatePipeline(qc: QueryClient): void {
   for (const queryKey of PIPELINE_REVALIDATE) void qc.invalidateQueries({ queryKey });
 }

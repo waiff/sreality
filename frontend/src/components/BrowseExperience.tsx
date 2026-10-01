@@ -68,6 +68,7 @@ import { pushToast } from '@/lib/toast';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { browseKeys } from '@/lib/browseKeys';
 import { revalidateCollections } from '@/lib/collectionCache';
+import { revalidatePipeline } from '@/lib/pipelineCache';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -235,6 +236,8 @@ export default function BrowseExperience({
       /* Same txn re-points collection_properties onto the survivor
        * (toolkit/operator_state.py), so the member map's KEYS changed too. */
       revalidateCollections(queryClient);
+      /* ...and reconcile_pipeline_on_merge re-keys the card onto the survivor. */
+      revalidatePipeline(queryClient);
       exitMergeMode();
     },
   });

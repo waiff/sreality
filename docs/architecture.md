@@ -1834,7 +1834,7 @@ renumber.** Navigate by area:
     property-grain filter cannot narrow the list and leave the panel above it counting the whole
     market. A membership write invalidates the Browse reads only when membership IS the cohort
     (`revalidateCollections`' `cohortScoped`, passed by the Browse card alone — the mirror of
-    `revalidatePipeline`'s knob).
+    `pipelineRevalidation`'s knob).
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
@@ -2240,8 +2240,9 @@ renumber.** Navigate by area:
     into `members` made the chokepoint smaller, which is the only sanctioned direction for it.
     `lib/pipelineCache` holds the pure patches (`placeCard` / `dropCard`), the re-read list
     (`PIPELINE_REVALIDATE`, widened to Browse by `pipelineRevalidation` when the cohort is
-    pipeline-scoped; `revalidatePipeline` for a merge or split) and the stage lookup
-    `cachedStage`; the **write policy is ONE hook, `lib/useOptimisticWrite`**, shared by
+    pipeline-scoped; `revalidatePipeline` for a merge or split, which move cards between
+    properties) and the stage lookup `cachedStage`; the **write policy is ONE hook,
+    `lib/useOptimisticWrite`**, shared by
     every optimistic write in the SPA (pipeline, dismissals, the border-case flag, the autodedup
     verdict overlay, the admin toggles, the training-set marks, the preset reorder, the exam-review
     edits): HOLD (cancel in-flight reads of
