@@ -908,8 +908,11 @@ const fetchMapPoints = async (
 
 export const fetchListingsForMap = async (
   f: ListingFilters,
-  { signal }: PgReadOptions = {},
+  opts: PgReadOptions = {},
 ): Promise<MapResult> => {
+  // `opts`, not a destructured `{ signal }`: tests/test_browse_map_read_contract.py pins this
+  // function's body by its first `{`, and a destructuring pattern in the signature would be it.
+  const signal = opts.signal;
   const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0, capped: false };
 
