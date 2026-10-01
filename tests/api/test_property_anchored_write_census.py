@@ -6,7 +6,7 @@ write is keyed on, where a stale value is just as silent and twice as reachable.
 
 A merged-away property (status <> 'active', `merged_into` set) still satisfies a
 `references properties(id)` FK, and merge re-points operator state onto the survivor
-inside the merge transaction (rule #18, `toolkit/operator_state.py`). So a write
+inside the merge transaction (rule #18, `toolkit/property_carriers.py`). So a write
 keyed on a stale property_id addresses a row that is no longer there:
 
   * an INSERT lands on the retired row and never appears on the survivor;
@@ -60,24 +60,18 @@ import ast
 import pathlib
 import re
 
+from toolkit.property_carriers import carried_columns
+
 _API = pathlib.Path(__file__).resolve().parents[2] / "api"
 
 _ID_PARAMS = frozenset({"property_id", "property_ids"})
 
 # Tables whose rows are keyed on `property_id` AND carried onto the survivor at
-# merge — `toolkit/operator_state.py::OPERATOR_STATE_TABLES` plus the two with
-# bespoke reconcilers (`property_pipeline`, rule #22; `property_dismissals`,
-# migration 536). A row in any of them is reachable only under the survivor's id
-# once a merge has happened.
-_CARRIED_TABLES = (
-    "collection_properties",
-    "property_tags",
-    "property_notes",
-    "property_pipeline",
-    "property_pipeline_events",
-    "property_dismissals",
-    "notification_dispatches",
-)
+# merge — every table a carrier in `toolkit/property_carriers.py::PROPERTY_CARRIERS`
+# keeps true (`properties.asset_id` is a column on the property row itself, see WHY A
+# CENSUS above). A row in any of them is reachable only under the survivor's id once a
+# merge has happened.
+_CARRIED_TABLES = tuple(sorted({t for t, _c in carried_columns() if t != "properties"}))
 
 _WRITE = re.compile(
     r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:public\.)?(" + "|".join(_CARRIED_TABLES) + r")\b",

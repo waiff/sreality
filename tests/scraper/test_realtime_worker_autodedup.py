@@ -379,7 +379,7 @@ def test_the_worker_merges_only_through_the_engine() -> None:
     the worker itself never names it."""
     src = "".join(inspect.getsource(fn) for fn in (
         rw._autodedup_sync, rw._autodedup_pass, rw._autodedup_outcome))
-    for forbidden in ("property_identity", "merge_properties", "operator_state"):
+    for forbidden in ("property_identity", "property_carriers", "_merge_pair"):
         assert forbidden not in src
 
 

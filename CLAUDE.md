@@ -175,9 +175,10 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     coarse `condition_assessment`.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows get a
     singleton property).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge
-    chokepoint — it re-points `listings.property_id`, soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to
-    its origin or a refusal, e.g. `moved_since`; a group undo loops it — no replay), carries operator state (rule #18) + the deal pipeline (rule #22)
-    onto the survivor, re-syncs the browse read model, and enforces **category compatibility** (sale≠rent, flat≠house — except the sanctioned
+    chokepoint, two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listing`) — it re-points
+    `listings.property_id`, soft-retires the loser, logs `property_merge_events` (read by `detach_listing`: ONE advert back to its origin or a refusal,
+    e.g. `moved_since`; a group undo loops it — no replay), carries every property-anchored operator-state row through ONE ordered list, `PROPERTY_CARRIERS`
+    (rule #18), re-syncs the browse read model, and enforces **category compatibility** (`CategoryClash`: sale≠rent, flat≠house — except the sanctioned
     **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the operator, or by the AUTODEDUP engine
     (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split): the worker's autodedup lane
     reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open operator decision,
@@ -191,17 +192,17 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     (`sql_kind`, place plan, rule-23 measures, served predicate). `notification_dispatches` = the append-only event table,
     **three producers**: `watchdog` + `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}`
     per-snapshot; a `monitor_since` anchor so a pre-membership change never fires) + `system_health` (**NOT** property-grain;
-    `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. Merges re-point (#18).
+    `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. A merge re-points them (#18), collapsing a twin: the merge's one delete.
 17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).
-18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections`, `tags`, `property_notes`, all
-    keyed on `property_id`; migration 202). One `merge_properties` transaction carries state onto the survivor in four
-    steps: asset link, `OPERATOR_STATE_TABLES` (`toolkit/operator_state.py`, incl. `notification_dispatches`), pipeline
-    (rule #22), **dismissals** (`toolkit/dismissal_identity.py`, mig 536: lift, never delete; a LIVE deal wins) — no row
-    orphans onto `merged_away` (verified out-of-band, not by an executed test); unmerge/split are best-effort. Collections
-    carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API. A new SET/APPEND table = one
-    registry line + its `_CARRIED_TABLES` census entry; a single-valued one, or one whose collision must not DELETE, needs its own carrier.
+18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections`, `tags`, `property_notes`, all keyed on `property_id`; migration 202). Every
+    property-anchored operator-state row follows a merge through ONE ordered list, `PROPERTY_CARRIERS` (`toolkit/property_carriers.py`: asset link, curation
+    tables incl. `notification_dispatches`, pipeline (rule #22), **dismissals** (mig 536: lift, never delete; a LIVE deal wins)), run inside the merge
+    transaction, so no such row orphans onto `merged_away`; every other column naming a property sits in `NOT_CARRIED` with its reason, and a census (offline
+    over migrations, live over the replayed schema) fails on a column in neither. A SET/APPEND table = one `CurationTable(...)` line; any other shape = one
+    adapter. A detach that reactivates a property gives back its pipeline card and asset link; curation, dispatches and dismissals stay on the property left.
+    Collections carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via `listing_detail_queue`** (migration 105).
     Index-walk (`--index-only`) walks the full index, `touch_listings` + end-gated nomination (rule #3), and enqueues; detail-drain
     (`--drain-only`) claims a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes via the portal's `write_details` — sreality batched via
@@ -218,15 +219,14 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     (sreality: `scraper/sreality_url.py`). A walk that can't be proven complete nominates nothing; its
     listings close only through gone detail fetches (rule #3). `supports_complete_walk` is posture. A per-portal
     need is a `Portal` protocol seam, never an `if source ==`; seams + owed copies/branches: `docs/architecture.md` § rule 21.
-22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline`
-    holds ≤1 card per property at one `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of
-    a row at the entry stage. It has its OWN merge reconciler (`reconcile_pipeline_on_merge`, TERMINAL-AWARE — a
-    live stage always beats a closed one) + lossless unmerge. Writes go through the JWT-gated API (`tenant_conn`); the SPA's surfaces share
-    ONE cache policy (`lib/pipelineCache`); `lib/usePipelineCard` + `<PipelineMark>` + `<PipelineStageMenu>` serve Browse cards/rows +
-    the listing header; the kanban (no mark: drag moves, own trash + confirm, move/remove inline in `pages/Pipeline.tsx`) and the
-    extension (glyph + stage menu) carry their own copies (owed: `roadmap/operator-workflow-track.md`). All MEAN one thing: out → a click adds at the entry stage;
-    in → move, or remove behind a two-step confirm. **Never a remove toggle** — close deals into a terminal
-    stage. Stages operator-curated (API-enforced). The badge is `pipeline_stages.code` (migration 377) — never derived from `position` or parsed from the label.
+22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline` holds ≤1 card per property at one
+    `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of a row at the entry stage. It has its OWN carrier in `PROPERTY_CARRIERS` (over
+    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property.
+    Writes go through the JWT-gated API (`tenant_conn`); the SPA's surfaces share ONE cache policy (`lib/pipelineCache`); `lib/usePipelineCard` +
+    `<PipelineMark>` + `<PipelineStageMenu>` serve Browse cards/rows + the listing header; the kanban (no mark: drag moves, own trash + confirm, move/remove
+    inline in `pages/Pipeline.tsx`) and the extension (glyph + stage menu) carry their own copies (owed: `roadmap/operator-workflow-track.md`). All MEAN one
+    thing: out → a click adds at the entry stage; in → move, or remove behind a two-step confirm. **Never a remove toggle** — close deals into a terminal stage.
+    Stages operator-curated (API-enforced). The badge is `pipeline_stages.code` (migration 377) — never derived from `position` or parsed from the label.
     Browse's pipeline scope (`?pipeline=any|<stage ids>`) is a property-id prefilter mirrored into
     `browse_stats_properties.property_ids_filter` (migration 378) and OUTSIDE preset identity; the chip LOADS
     A VIEW, the sidebar's Curation → Pipeline control modifies. That needs `category_type` nullable

@@ -363,7 +363,7 @@ def get_merged_properties(
 
 # ----- asset links (same physical building, kept as separate cohorts) -------
 # Unlike a merge these never collapse properties — both category facets survive.
-# It is the surface for the cross-category sameness merge_properties refuses.
+# It is the surface for the cross-category sameness the merge's `CategoryClash` refuses.
 
 
 @router.post("/assets/link")

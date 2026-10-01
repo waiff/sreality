@@ -7,14 +7,26 @@ map, or scraper tracks. Operator-scoped (single shared identity, no
 per-user accounts — matches today's bearer-token model) *(superseded:
 per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
 
-### Rule #18: an executed no-orphan merge test (owed, 2026-10-01)
-- **Owed:** every carrier's suite asserts only the SQL it emits (`tests/test_operator_state.py`,
-  `test_pipeline_identity.py`, `test_dismissal_identity.py`); the merge-ledger fake
-  (`tests/_property_ledger.py`) answers `[]` to that SQL, and CI's live merge tests
-  (`test_merge_safety_live.py`) run the carriers without asserting where rows land. Owed: a
-  CI-DB test that merges two properties each holding a row in every `_CARRIED_TABLES` table and
-  asserts every row lands on the survivor and none stays on the `merged_away` loser (origin:
-  Phase U2.6b below).
+### Rule #18: an executed no-orphan merge test (done, 2026-10-01)
+- **Done:** `tests/test_property_carriers_live.py` (PR 0 #1664, extended by the
+  `PROPERTY_CARRIERS` PR) merges and detaches through the public writers, one test per
+  carrier over two accounts, and asserts the retired property is left holding nothing; a
+  census offline (migrations) and live (replayed schema) fails on any column naming a
+  property that is neither carried nor in `NOT_CARRIED`. See "Merge chokepoint deepened"
+  below.
+
+### Merge chokepoint deepened: PROPERTY_CARRIERS, properties_changed, detach_listings (in progress, 2026-10)
+- **Done:** PR 0 #1664: an executed live baseline per carrier (two strict xfails pin
+  the dispatch-send abort and the chained-detach double card). PR 1:
+  `toolkit/property_carriers.py` — ONE ordered `PROPERTY_CARRIERS` list replaces the
+  `toolkit/operator_state.py` registry (Phase U2.6b below), `toolkit/dismissal_identity.py`
+  and the inline asset/pipeline calls; `NOT_CARRIED` names every other property column,
+  enforced by a census offline (migrations) and live (replayed schema);
+  `merge_properties` became the private `_merge_pair` under the set's one lock and gate;
+  typed `CategoryClash`; the `_Ledger` fake raises on SQL it does not model.
+- **Next:** `properties_changed` (PR 2), set-shaped `detach_listings` (PR 3), the
+  dispatch collapse keeps its sends (PR 4), a chained detach restores one card (PR 5),
+  the engine's undo on the set form (PR 6).
 
 ### Rule #22: converge the kanban + extension pipeline copies (owed, 2026-10-01)
 - **Owed (not built):** the kanban's shape (drag to move, trash + two-step confirm to remove)
@@ -100,9 +112,9 @@ pipeline (Phase U-PIPE) plugs into next.
   merged_away property — invariant by construction. Unmerge/split are
   best-effort (state stays on the surviving/anchor property). Adding a
   future property-anchored operator-state table = one registry line
-  *(superseded 2026-10-01: plus its `_CARRIED_TABLES` census entry, or
-  its own carrier for a single-valued table — rule #18; and see the
-  rule #18 owed entry at the top of this file)*.
+  *(superseded 2026-10-01: one `CurationTable(...)` line in
+  `PROPERTY_CARRIERS`, or one adapter for any other shape — rule #18;
+  see "Merge chokepoint deepened" above)*.
 - API re-keyed to property grain: `/collections/{id}/properties`,
   `/properties/{id}/tags`, `/properties/{id}/notes`. Frontend Browse
   tag filter + CurationBlock + CollectionDetail operate on
