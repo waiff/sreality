@@ -1,6 +1,6 @@
-"""Every property-anchored row follows a merge and a detach, executed through the public
-writers (`merge_property_set`, `detach_listing`) against the replayed schema: one test per
-carrier, each over two accounts, each proving the retired property is left holding nothing;
+"""Every property-anchored operator-state row follows a merge and a detach, executed through the
+public writers (`merge_property_set`, `detach_listing`) against the replayed schema: one test
+per carrier, each over two accounts, each proving the retired property is left holding nothing;
 then the live census — every foreign key to `properties` and every `%property_id%` column of the
 replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`). Runs in CI's
 migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""

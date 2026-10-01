@@ -22,7 +22,20 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   carrier over two accounts, and asserts the retired property is left holding nothing; a
   census offline (migrations) and live (replayed schema) fails on any column naming a
   property that is neither carried nor in `NOT_CARRIED`. See "Merge chokepoint deepened"
-  under Phase U2.6b below.
+  below.
+
+### Merge chokepoint deepened: PROPERTY_CARRIERS, properties_changed, detach_listings (in progress, 2026-10)
+- **Done:** PR 0 #1664: an executed live baseline per carrier (two strict xfails pin
+  the dispatch-send abort and the chained-detach double card). PR 1:
+  `toolkit/property_carriers.py` — ONE ordered `PROPERTY_CARRIERS` list replaces the
+  `toolkit/operator_state.py` registry (Phase U2.6b below), `toolkit/dismissal_identity.py`
+  and the inline asset/pipeline calls; `NOT_CARRIED` names every other property column,
+  enforced by a census offline (migrations) and live (replayed schema);
+  `merge_properties` became the private `_merge_pair` under the set's one lock and gate;
+  typed `CategoryClash`; the `_Ledger` fake raises on SQL it does not model.
+- **Next:** `properties_changed` (PR 2), set-shaped `detach_listings` (PR 3), the
+  dispatch collapse keeps its sends (PR 4), a chained detach restores one card (PR 5),
+  the engine's undo on the set form (PR 6).
 
 ### Rule #22: converge the kanban + extension pipeline copies (owed, 2026-10-01)
 - **Owed (not built):** the kanban's shape (drag to move, trash + two-step confirm to remove)
@@ -110,7 +123,7 @@ pipeline (Phase U-PIPE) plugs into next.
   future property-anchored operator-state table = one registry line
   *(superseded 2026-10-01: one `CurationTable(...)` line in
   `PROPERTY_CARRIERS`, or one adapter for any other shape — rule #18;
-  see "Merge chokepoint deepened" below)*.
+  see "Merge chokepoint deepened" above)*.
 - API re-keyed to property grain: `/collections/{id}/properties`,
   `/properties/{id}/tags`, `/properties/{id}/notes`. Frontend Browse
   tag filter + CurationBlock + CollectionDetail operate on
@@ -127,18 +140,6 @@ pipeline (Phase U-PIPE) plugs into next.
   an AST census over `api/` with a reasoned allowlist (it reproduces all six sites
   on the pre-fix tree, so it is not vacuous). Prod held 0 orphaned curation /
   pipeline rows against 105,513 merged-away properties, so no repair migration.
-- **Merge chokepoint deepened (PROPERTY_CARRIERS, properties_changed, detach_listings) —
-  in progress, 2026-10.** PR 0 #1664: an executed live baseline per carrier (two
-  strict xfails pin the dispatch-send abort and the chained-detach double card).
-  PR 1: `toolkit/property_carriers.py` — ONE ordered `PROPERTY_CARRIERS` list replaces
-  the registry above, `toolkit/dismissal_identity.py` and the inline asset/pipeline
-  calls; `NOT_CARRIED` names every other property column, enforced by a census
-  offline (migrations) and live (replayed schema); `merge_properties` became the
-  private `_merge_pair` under the set's one lock and gate; typed `CategoryClash`;
-  the `_Ledger` fake raises on SQL it does not model. Next: `properties_changed`
-  (PR 2), set-shaped `detach_listings` (PR 3), the dispatch collapse keeps its
-  sends (PR 4), a chained detach restores one card (PR 5), the engine's undo on
-  the set form (PR 6).
 
 ### Phase U-PIPE Phase 0: Deal pipeline — bookmark MVP (done)
 A Trello-style deal pipeline over properties. Phase 0 ships the schema + the

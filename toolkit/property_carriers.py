@@ -9,8 +9,11 @@ Carrier invariants:
   - A carrier runs on the writer's service-role cursor, inside the writer's transaction; it
     opens no transaction, commits nothing and raises nothing of its own, so any psycopg error
     aborts the whole merge or detach.
-  - Every cross-side predicate names its account explicitly (tenancy shape 3,
-    `.claude/skills/database/references/tenancy.md`): the service role bypasses RLS.
+  - Every cross-side predicate over an account's rows is partitioned by account (tenancy shape
+    3, `.claude/skills/database/references/tenancy.md`): the service role bypasses RLS. Pipeline
+    and Dismissals name `account_id`; a `CurationTable` is partitioned through its keys, ids one
+    account owns (collection_id, tag_id, subscription_id), so one whose keys are not
+    account-owned must add `account_id` to them. The asset link is shared data, no account.
   - It never deletes history. The one sanctioned delete is a SET table's collision collapse.
   - `on_merge` runs once per retired property, after the merge ledger row and the advert
     re-point and before the retire; `on_detach` only when a detach reactivated `restored`,
@@ -166,7 +169,8 @@ class AssetLink:
 class CurationTable:
     """A property-anchored SET table (`keys` given: rows unique on keys + property_id; union
     onto the survivor, collapsing a retired row whose twin the survivor holds, NULL-safe) or
-    APPEND table (no keys: every row moves). The table name is code-controlled, never input."""
+    APPEND table (no keys: every row moves). The table name is code-controlled, never input.
+    `keys` must include an account-owned id or `account_id`: the collapse joins on them alone."""
 
     def __init__(self, table: str, keys: tuple[str, ...] = ()) -> None:
         self.name = table

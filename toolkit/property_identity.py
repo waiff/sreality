@@ -3,8 +3,8 @@
 `merge_property_set` merges an active set into its oldest record under one lock and one gate;
 `detach_listing` moves one advert back to its ledger origin, or (the operator only) a native
 advert to a new record through the one birth path — a group undo is a loop of it. Both carry
-every property-anchored row through `toolkit.property_carriers.PROPERTY_CARRIERS`, then
-recompute and patch Browse. Callers: `api.property_merge` and `toolkit.property_split` (the
+every property-anchored operator-state row through `toolkit.property_carriers.PROPERTY_CARRIERS`,
+then recompute and patch Browse. Callers: `api.property_merge` and `toolkit.property_split` (the
 operator), `autodedup.apply` and `autodedup.reconcile` (merge, inside
 `app_settings.autodedup_apply_scope`), `autodedup.apply.unapply` and `autodedup.legacy_retire`
 (detach). `source='operator'` is also a ruling (decision 8); an engine merge or undo never is.
