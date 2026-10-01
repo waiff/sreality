@@ -2,8 +2,9 @@
 
 Runnable as `python -m scraper.idnes_main`. iDNES is a `Portal` (IdnesPortal)
 driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
-HTML search results per slice, diffs the ids and enqueues new/price-changed ones
-into the shared `listing_detail_queue` (source='idnes', migration 108); the
+HTML search results per slice and hands its sightings to
+`portal_runner.reconcile_sightings`, which touches and enqueues into the shared
+`listing_detail_queue` (source='idnes', migration 108); the
 detail-drain fetches each listing page, parses it to a `ScrapedListing`, and
 writes via `listing_write.write_listings` (the one listing write; a first-seen
 row lands `property_id` NULL and the straggler-attach births its singleton,
@@ -46,7 +47,6 @@ from scraper.portal import (
     StopReason,
     default_config,
     load_portal_config,
-    classify_index_sighting,
     deadline_reached,
     stop_is_portal_end,
     walk_coverage,
@@ -107,10 +107,10 @@ class SliceWalk:
     stop: StopReason
 
 
-class IdnesPortal:
+class IdnesPortal(portal_runner.PortalDefaults):
     """iDNES Reality as a Portal: the seams the generic runner needs, wrapping the
-    idnes client + parser. Operational scope (categories, complete-walk
-    capability) comes from the `portals` registry config."""
+    idnes client + parser. Operational scope (categories, rates) comes from the
+    `portals` registry config."""
 
     source = SOURCE
     # idnes is a large portal walked page-by-page (≈26 listings/page, tens of
@@ -126,7 +126,6 @@ class IdnesPortal:
         max_pages: int | None = None,
         price_change_min_pct: float | None = None,
     ) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
@@ -135,7 +134,7 @@ class IdnesPortal:
         # the daily FX re-display drift of idnes's foreign inventory so the
         # walk doesn't enqueue phantom "price changed" refetches (see
         # PortalLimits.price_change_min_pct).
-        self._price_change_min_pct = (
+        self.price_change_min_pct = (
             price_change_min_pct if price_change_min_pct is not None
             else config.limits.price_change_min_pct
         )
@@ -188,12 +187,6 @@ class IdnesPortal:
         # The runner calls this BEFORE categories(), which is what lets both the
         # category order and the slice order come from one ledger read.
         self._staleness = db.slice_staleness(conn, SOURCE)
-        return conn
-
-    def connect_drain(self) -> Any:
-        # Batched writes without prepared statements; the transaction pooler is
-        # fine — no session pooler needed.
-        conn = db.connect()
         return conn
 
     # --- the sliced walk ---
@@ -622,7 +615,8 @@ class IdnesPortal:
             cat, sale_type, len(results), len(order), sorted(set(stops)),
             deadline_hit, all_positive, national, len(seen), pages, complete,
         )
-        counts = self._reconcile(conn, collected)
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, collected, min_change_pct=self.price_change_min_pct)
         return seen, counts, national, pages, complete
 
     def _slice_order(self, cm: str | None, ct: str | None) -> list[str]:
@@ -639,46 +633,6 @@ class IdnesPortal:
             self.SLICES,
             key=lambda k: -stale.get((cm, ct, k), float("inf")),
         )
-
-    def _reconcile(
-        self, conn: Any, collected: dict[str, tuple[str, int | None]],
-    ) -> dict[str, int]:
-        """Touch what is unchanged, enqueue what is new or repriced."""
-        native_ids = list(collected)
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None and native_ids else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, collected[nid][1], self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-        entries = (
-            [(n, collected[n][0], collected[n][1], db.QUEUE_PRIORITY_CHANGED)
-             for n in changed]
-            + [(n, collected[n][0], collected[n][1], db.QUEUE_PRIORITY_NEW)
-               for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=idnes new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
-        )
-        return {"found_new": len(new_ids), "enqueued": enqueued}
 
     def _walk_flat(
         self, client: IdnesClient, sale_type: str, cat: str, conn: Any,
@@ -711,19 +665,11 @@ class IdnesPortal:
             if not parsed.items or parsed.next_offset is None or new_on_page == 0:
                 break
             page = parsed.next_offset
-        counts = self._reconcile(conn, collected)
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, collected, min_change_pct=self.price_change_min_pct)
         return set(collected), counts, total, pages, False
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> IdnesClient:
-        return IdnesClient(limiter=limiter)
-
     def fetch_detail(
         self, client: IdnesClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -775,14 +721,6 @@ class IdnesPortal:
         # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
         # have no sreality_id-keyed listing_fetch_failures row.
         pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'idnes' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
 
 
 def _load_config(dry_run: bool) -> PortalConfig:

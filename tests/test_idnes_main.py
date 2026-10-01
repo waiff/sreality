@@ -131,10 +131,9 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 # --- IdnesPortal seams ------------------------------------------------------
 
 
-def test_portal_config_and_complete_walk():
+def test_portal_config_and_labels():
     p = _portal()
     assert p.source == "idnes"
-    assert p.supports_complete_walk is True
     assert p.categories() == [{"sale_type": "prodej", "category": "byty"}]
     assert p.category_labels({"sale_type": "prodej", "category": "byty"}) == ("byt", "prodej")
 
@@ -184,7 +183,7 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     )
     assert seen == {a, b, c}
     assert total == 3 and complete is True       # full walk (no max_pages), collected == total
-    assert touched["pks"] == [8103]              # unchanged listing touched by surrogate id
+    assert touched["pks"] == [8102, 8103]        # every sighted known row, by surrogate id
     refs = {e[0]: e for e in captured["entries"]}
     assert refs[a][3] == idnes_main.db.QUEUE_PRIORITY_NEW      # new
     assert refs[b][3] == idnes_main.db.QUEUE_PRIORITY_CHANGED  # changed
