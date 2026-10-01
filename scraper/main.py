@@ -1557,9 +1557,9 @@ def _walk_category(
     LOG.info(
         "DETAIL starting refetch=%d workers=%d", total_refetch, detail_workers
     )
-    # Worker threads do the network I/O (client.get_detail + parse + hash);
-    # the main thread serialises DB writes via _write_result against the
-    # single, not-thread-safe psycopg connection. Same pattern as the
+    # Worker threads do the network I/O (client.get_detail + parse); the main
+    # thread hashes and writes via _write_result -> listing_write.write_listings
+    # against the single, not-thread-safe psycopg connection. Same pattern as the
     # image-download phase. The per-category + global caps were already
     # applied to to_refetch above, so concurrency only changes completion
     # order, never which listings run.

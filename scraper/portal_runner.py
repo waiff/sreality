@@ -598,8 +598,10 @@ def _flush_drain_batch(
     possibly a fresh one — so the caller must rebind. write_details and
     complete_detail are idempotent, so a retry that replays a partially-committed
     batch never corrupts data and the counts delta is applied once (after the
-    write op's final success, not per attempt). Every portal's flush is ONE
-    listing_write.write_listings transaction, so a replay recounts exactly."""
+    write op's final success, not per attempt). Each flush's listing write is ONE
+    listing_write transaction; a drop after it commits (a lost COMMIT ack, or the HTML
+    portals' post-write mark_portal_page_parsed) replays it as 'unchanged', so the run's
+    counters can slightly undercount — bookkeeping only, never listing data."""
     if not buffer:
         return conn
     if dry_run:

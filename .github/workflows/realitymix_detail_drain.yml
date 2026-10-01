@@ -4,8 +4,9 @@ name: "Scraping: RealityMix detail drain"
 # The slow half of the realitymix cadence split (architectural rule #19, like
 # sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue
 # (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing
-# page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via
-# db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing
+# page on a rate-limited worker pool, parses it to a ScrapedListing, and writes via
+# listing_write.write_listings (the one listing write; new rows land property_id NULL
+# and the straggler-attach births the singleton). The per-listing
 # category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail'
 # (index_pages=0). The drain records image-URL rows; the shared images.yml job
 # downloads the bytes to R2.

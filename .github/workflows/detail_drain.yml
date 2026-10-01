@@ -6,10 +6,10 @@ name: "Scraping: Sreality detail drain (Phase 2)"
 # the one generic portal_runner. Claims a bounded slice of listing_detail_queue
 # (source='sreality', enqueued by index_walk.yml), fetches each listing's
 # detail on a rate-limited worker pool (429/403 auto-penalize), and writes them
-# in batches via the set-based write_detail_batch (one transaction per ~100
-# listings) on the Session-mode pooler — the Phase-1 prepared-statement win.
-# New listings land with property_id NULL; the Tier-1 matcher is deferred to
-# the recompute_property_stats straggler-attach phase.
+# in batches via listing_write.write_listings (the one listing write, set-based,
+# one transaction per ~100 listings) on the Session-mode pooler — the Phase-1
+# prepared-statement win. New listings land with property_id NULL; the
+# recompute_property_stats straggler-attach births each a singleton.
 #
 # workers / rate / max-detail default to the per-portal config
 # (portals.operational_limits: 8 workers, 6.0 req/s, 12000 claims/run — the

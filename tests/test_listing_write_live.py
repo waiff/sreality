@@ -167,10 +167,11 @@ def _write(conn: Any, *writes: listing_write.ListingWrite) -> list[listing_write
 
 @pytest.mark.parametrize("source", PORTALS)
 def test_a_new_row_lands_bare_with_one_snapshot_and_its_media(conn, source):
-    """Executes every per-source upsert text: a new row, its natural key, one snapshot,
-    its media on the surrogate, property_id NULL and no dirty mark (rule 19)."""
+    """Executes every per-source upsert text: a new row, its natural key, its area_basis,
+    one snapshot, its media on the surrogate, property_id NULL and no dirty mark (rule 19)."""
     crawler = source != "sreality"
-    w = _scraped(source, images=2, video=True) if crawler else _sreality(images=2)
+    w = (_scraped(source, images=2, video=True, area_basis="usable") if crawler
+         else _sreality(images=2, area_basis="usable"))
     dirty_before = _one(conn, "SELECT count(*) FROM dirty_properties")
 
     [o] = _write(conn, w)
@@ -181,6 +182,7 @@ def test_a_new_row_lands_bare_with_one_snapshot_and_its_media(conn, source):
     assert _one(conn, "SELECT property_id, source, source_id_native, is_active, inactive_at "
                       "FROM listings WHERE id = %s", (o.listing_id,)) == (
         None, source, w.source_id_native, True, None)
+    assert _one(conn, "SELECT area_basis FROM listings WHERE id = %s", (o.listing_id,)) == "usable"
     assert _one(conn, "SELECT count(*) FROM images WHERE listing_id = %s", (o.listing_id,)) == 2
     assert o.images_inserted == 2
     if crawler:

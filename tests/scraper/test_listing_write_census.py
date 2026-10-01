@@ -1,11 +1,26 @@
 """Census of every write into `listings` outside the one writer (rule 2).
 
 A fetched payload reaches `listings` ONLY through scraper/listing_write.py
-`write_listings`, which owns snapshot-on-change. Everything else that writes the table
-is payload-free and ledgered here by name with a class from a closed vocabulary that
-has no slot for "fetched payload", a reason and a dirty rule (rule 20). The scan reads
-raw text, comments included, so f-string SQL cannot hide; an unledgered `UPDATE
+`write_listings`, which owns snapshot-on-change. Every other Python write of the table
+outside scraper/db.py is payload-free and ledgered here by name with a class from a
+closed vocabulary that has no slot for "fetched payload", a reason and a dirty rule
+(rule 20). The scan reads raw text, comments included, so SQL spelled with a literal
+table name is found wherever it sits (an f-string included); an unledgered `UPDATE
 listings` or a count change fails until a reviewer adds or re-pins its line.
+
+Blind spots — a green run does NOT prove these:
+(a) scraper/db.py is EXEMPT wholesale: its lifecycle/identity `UPDATE listings` sites
+    (touch, delist, singleton link) are owned there and never ledgered.
+(b) Only `*.py` under `tests.sql_corpus.RUNTIME_DIRS` is read: DB-side writers
+    (triggers such as migration 276's `trg_listings_geo_cell_key`, plpgsql functions,
+    pg_cron jobs) are invisible.
+(c) The regexes need the literal name: an interpolated table (`f"UPDATE {table} …"`,
+    as toolkit/operator_state.py does), `UPDATE ONLY listings`, a quoted identifier,
+    `MERGE INTO` and `COPY` are not matched.
+(d) Counts are per file, so a ledgered statement swapped for a payload write in the
+    same file keeps the count.
+(e) The dirty-enqueue and derived-write checks read the whole file's text, not the
+    ledgered statement.
 """
 
 from __future__ import annotations
