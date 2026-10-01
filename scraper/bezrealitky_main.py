@@ -5,8 +5,8 @@ Runnable as `python -m scraper.bezrealitky_main`. Bezrealitky is a `Portal`
 index-walk that pages bezrealitky's GraphQL `listAdverts` and enqueues
 new/price-changed ids into the shared `listing_detail_queue` (source='bezrealitky',
 migration 108), then a detail-drain that fetches `advert(id)`, parses it to a
-ScrapedListing, and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency +
-Tier-1 matching). No bespoke pipeline — only the per-portal fetcher
+ScrapedListing, and writes it via `listing_write.write_listings` (the one listing
+write). No bespoke pipeline — only the per-portal fetcher
 (BezrealitkyClient) + parser (bezrealitky_parser) + config differ from sreality.
 
 Unlike bazos (a partial-walk HTML crawler), bezrealitky's GraphQL has no
@@ -28,7 +28,7 @@ from collections.abc import Callable
 from math import ceil
 from typing import Any
 
-from scraper import db, portal_runner
+from scraper import db, listing_write, portal_runner
 from scraper.bezrealitky_client import BezrealitkyClient, detail_payload_body
 from scraper.bezrealitky_parser import (
     ESTATE_TYPE,
@@ -149,8 +149,8 @@ class BezrealitkyPortal:
         return db.connect()
 
     def connect_drain(self) -> Any:
-        # Single-row ingest (ingest_scraped_listing), not batched prepared
-        # writes, so the transaction pooler is fine — no session pooler needed.
+        # Batched writes without prepared statements; the transaction pooler is
+        # fine — no session pooler needed.
         return db.connect()
 
     def walk_category(
@@ -346,7 +346,6 @@ class BezrealitkyPortal:
         )
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
         for it in items:
             listing = it.payload["listing"]
             # W2a-0 churn instrument: bezrealitky stages no body in
@@ -374,15 +373,12 @@ class BezrealitkyPortal:
                     ).encode("utf-8"),
                     content_type="application/json",
                 )
-            pk, result = db.ingest_scraped_listing(
-                conn, listing, discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = listing.raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
+        return listing_write.tally(listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ]))
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
         # Complete-walk portal: a gone detail flips that one listing inactive

@@ -598,12 +598,8 @@ def _flush_drain_batch(
     possibly a fresh one — so the caller must rebind. write_details and
     complete_detail are idempotent, so a retry that replays a partially-committed
     batch never corrupts data and the counts delta is applied once (after the
-    write op's final success, not per attempt). One benign residue: for the
-    per-item-write portals (everyone but sreality, whose write_detail_batch is one
-    atomic transaction) a replay re-reads the pre-drop committed items as
-    'unchanged', so the run's scrape_runs new/updated/images counters can
-    slightly UNDERCOUNT on the rare reconnect path — bookkeeping only, never the
-    listing data, and Health reads listings.first_seen_at not these counters."""
+    write op's final success, not per attempt). Every portal's flush is ONE
+    listing_write.write_listings transaction, so a replay recounts exactly."""
     if not buffer:
         return conn
     if dry_run:

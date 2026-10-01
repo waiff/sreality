@@ -4,8 +4,8 @@ Runnable as `python -m scraper.maxima_main`. Maxima is a `Portal` (MaximaPortal)
 driven by the one generic `scraper.portal_runner`: an index-walk that pages the
 catalogue HTML and enqueues new/price-changed ids into the shared
 `listing_detail_queue` (source='maxima', migration 108), then a detail-drain that
-fetches each listing page, parses it to a `ScrapedListing`, and ingests via
-`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
+fetches each listing page, parses it to a `ScrapedListing`, and writes it via
+`listing_write.write_listings` (the one listing write). No bespoke
 pipeline — only the per-portal fetcher (MaximaClient) + parser (maxima_parser) +
 config differ from sreality/idnes (the modularity rule in CLAUDE.md).
 
@@ -40,7 +40,7 @@ import argparse
 import logging
 from typing import Any
 
-from scraper import db, portal_runner
+from scraper import db, listing_write, portal_runner
 from scraper.maxima_client import MaximaClient, detail_url
 from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
 from scraper.portal import (
@@ -134,8 +134,8 @@ class MaximaPortal:
         return db.connect()
 
     def connect_drain(self) -> Any:
-        # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
-        # so the transaction pooler is fine — no session pooler needed.
+        # Batched writes without prepared statements; the transaction pooler is
+        # fine — no session pooler needed.
         conn = db.connect()
         return conn
 
@@ -458,27 +458,22 @@ class MaximaPortal:
         )
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
-        for it in items:
-            p = it.payload
-            page_id = db.upsert_portal_raw_page(
+        pages = [
+            db.upsert_portal_raw_page(
                 conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=p["url"], page_kind="detail",
-                html=p["html"], http_status=p["status"],
-                # W2a-0 churn instrument: this whole write_details is replayed on
-                # a transient pooler drop, so the counter bump inside needs the
-                # item's per-fetch token to make the replay a no-op.
-            )
-            pk, result = db.ingest_scraped_listing(
-                conn, p["listing"], discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = p["listing"].raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
+                source_url=it.payload["url"], page_kind="detail",
+                html=it.payload["html"], http_status=it.payload["status"])
+            for it in items
+        ]
+        outcomes = listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ])
+        for page_id in pages:
             db.mark_portal_page_parsed(conn, page_id)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
+        return listing_write.tally(outcomes)
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
         # A gone detail flips that one listing inactive immediately (a definitive

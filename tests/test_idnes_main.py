@@ -469,19 +469,33 @@ def test_fetch_detail_error():
     assert item.kind == "error" and item.error
 
 
-def test_write_details_ingests_and_counts(monkeypatch):
-    listing = SimpleNamespace(raw={"image_urls": ["u1", "u2"]})
+def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper.listing_write import WriteOutcome
+    from scraper.scraped_listing import ScrapedListing
+
+    listing = ScrapedListing(source="idnes", source_id_native="a",
+                             source_url="https://example.test/a",
+                             raw={"image_urls": ["u1", "u2"]})
     items = [DrainItem("a", "ok", payload={
-        "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"})]
+        "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"},
+        discovery_seq=5)]
     monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(
-        idnes_main.db, "ingest_scraped_listing",
-        lambda _c, _l, discovery_seq=None, discovered_at=None: (8105, "new"))
-    monkeypatch.setattr(idnes_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
-    monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
+    parsed: list[Any] = []
+    monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed",
+                        lambda _c, page_id: parsed.append(page_id))
+    calls: list[list[Any]] = []
+
+    def _write(_c, writes):
+        calls.append(list(writes))
+        return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
+                             len(w.images)) for w in writes]
+
+    monkeypatch.setattr(idnes_main.listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
-    assert counts["new"] == 1
-    assert counts["images_discovered"] == 2
+    assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
+    [[w]] = calls
+    assert (w.source, w.source_id_native, w.discovery_seq) == ("idnes", "a", 5)
+    assert parsed == [9]
 
 
 def test_mark_gone_flips_listing_inactive(monkeypatch):
