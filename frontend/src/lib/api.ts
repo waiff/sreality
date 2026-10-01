@@ -9,11 +9,11 @@
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared
  *    secret.
- *  - default (require_token routes) sends VITE_API_TOKEN, a static secret
- *    inlined into the JS bundle at build time and therefore extractable by
- *    anyone with browser devtools. That's fine for this gate: it only proves
- *    "loaded the SPA past its password gate", never an identity or admin
- *    claim. Server-side enforcement is api/dependencies.py:require_token.
+ *  - default (require_token routes) sends VITE_API_TOKEN, a static bearer
+ *    inlined into the JS bundle at build time; Caddy serves the bundle before
+ *    any sign-in, so anyone can read it. It proves only "loaded the SPA": a
+ *    require_token route must never return identity, admin or per-account
+ *    data. Server-side enforcement is api/dependencies.py:require_token.
  *    See frontend/README.md.
  */
 

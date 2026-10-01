@@ -5,7 +5,7 @@ branches in the shared `portal_runner`. This module holds the config half:
 `PortalConfig` mirrors the operational columns on the `portals` registry
 (migration 107) and now carries `PortalLimits` — the per-portal tuning knobs
 (rate / workers / per-run caps / image limits) made operator-editable in
-migration 114. `load_portal_config` reads a row, merges the
+migration 115. `load_portal_config` reads a row, merges the
 global default layer (`app_settings.scraper_limits_global`) under the per-portal
 overrides, and falls back to baked-in defaults so a registry hiccup never breaks
 a scrape. The behavioral half — the `Portal` protocol the runner consumes and
@@ -59,7 +59,7 @@ _LIMIT_COERCERS: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class PortalLimits:
-    """Per-portal operational tuning (migration 114). Every field has a baked
+    """Per-portal operational tuning (migration 115). Every field has a baked
     default; the DB layers (global, then per-portal) override by key. A key
     absent from a JSONB layer is inherited; a key present (incl. null) is
     applied (null = "unlimited" for the optional caps)."""
@@ -393,11 +393,11 @@ _GENERIC_LIMITS = PortalLimits()
 @dataclass(frozen=True)
 class PortalConfig:
     """The portal-defining operational knobs (migration 107) + per-portal limits
-    (migration 114).
+    (migration 115).
 
     - supports_complete_walk: can the portal prove a near-complete index walk?
-      Gates mark_inactive (architectural rule #3). Partial-walk crawlers stay
-      false and never flip listings inactive.
+      Posture only since 2026-09-07 (Health; coverage_gate re-earns it) — it
+      gates no delisting; `walk_reached_end` gates nomination (rule #3).
     - categories: the per-portal list of category descriptors the runner walks.
       Shape is portal-specific (the Portal object interprets it).
     - split_threshold: deep-pagination cap above which a category is walked
@@ -418,7 +418,7 @@ class PortalConfig:
 
 # Baked-in defaults — the source of truth the runner falls back to when the DB
 # row or a column is missing, so a registry glitch can never break a scrape. The
-# `portals` row (migrations 107 + 114) is the operator-tunable override + Health
+# `portals` row (migrations 107 + 115) is the operator-tunable override + Health
 # surface. Each portal's `limits` mirror its *current code defaults* (argparse
 # defaults + the portal's index_rate), NOT the production workflow values, so a
 # DB-down run behaves exactly as it does today.

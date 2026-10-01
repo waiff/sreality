@@ -52,9 +52,10 @@ THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
     page substrate adds `'odbl'` for realitymix's Nominatim-fallback pin and nothing else.
 
 WHAT IT WRITES, AND ONLY THAT
-  `location_claims` (append-only, deduped on `claim_fingerprint`), `dirty_locations`
-  (the resolver's queue, inside the same transaction), `location_claim_batches` (this
-  lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
+  `location_claims` (deduped on `claim_fingerprint`; the readings half also DELETEs the
+  claims a new reading supersedes), `dirty_locations` (the resolver's queue, inside the
+  same transaction), `location_claim_batches` (this lane's run ledger and cursor), and the
+  mined-version stamps on the bodies and readings it mined.
   Refusals — a class-E page pin, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. (`location_claim_observations`, `location_claim_absences`
   and `location_enrichment_state` were written by every lane and read by none: dropped, 498.)

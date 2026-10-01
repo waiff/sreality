@@ -1,13 +1,12 @@
 """Orchestrator for the remax-czech.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.remax_main`. RE/MAX is a `Portal` (RemaxPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that pages the
+driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
 search results and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='remax', migration 108), then a detail-drain that
-fetches each listing page, parses it to a `ScrapedListing`, and ingests via
-`db.ingest_scraped_listing` (Tier-0 idempotency + singleton property). No bespoke
-pipeline — only the per-portal fetcher (RemaxClient) + parser (remax_parser) +
-config differ (the modularity rule in CLAUDE.md).
+`listing_detail_queue` (source='remax', migration 108); the shared detail-drain
+fetches each listing page (RemaxClient), parses it to a `ScrapedListing`
+(remax_parser), and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency;
+a first-seen row gets a singleton property, rule #15).
 
 remax exposes its catalogue as TWO mixed indexes — sale (`sale=1`) and rent
 (`sale=2`) — each spanning every property category with no per-category URL. The

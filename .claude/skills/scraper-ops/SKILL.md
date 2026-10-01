@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/broker-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract/autodedup lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/VERIFY/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/broker-maintenance/estimation/location-resolve/location-intake-fast/location-refetch/sold-comps/text-extract/autodedup/heartbeat lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -132,9 +132,9 @@ index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail d
 `*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
 the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
 cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cadence-split**
-like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
+like sreality (bazos walks 22 nationwide scopes (migration 488), ~1500 index pages — a combined run starves the
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
-mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
+nominate unseen + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
 `45 * * * *`, bounded `--max-seconds`). Bazos's ad text needs a post-publication pass the other
 portals' structured pages don't: field-capture W7 runs it as the worker's `text_extract` lane
 (`toolkit/description_extraction.py`), never in the scrape — the LLM is behind publication, never
@@ -156,10 +156,10 @@ phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds
 `idnes_index_walk.yml` ("Scraping: iDNES Reality index walk", `idnes_main --index-only`, cron
 `15 */6`) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
 hourly `30 * * * *`, bounded by `--max-seconds`; `SCRAPE_CHAIN_TOKEN` re-dispatches it while the
-queue has work). **idnes delisting is PARKED (migration 453)**; its walk is sliced into the 14
-kraje + abroad with each slice's outcome in `portal_index_slices` (454), and `coverage_gate.yml`
-("Ops: index coverage gate", cron `15 3,9,15,21`) un-parks it on evidence, unattended. **Parked
-flags, the slice ledger and the gate: `references/coverage-and-delisting.md`.**
+queue has work). idnes's `supports_complete_walk` was parked (migration 453) — posture only since
+2026-09-07, it gates no delisting; the walk is sliced into the 14 kraje + abroad, each slice's outcome
+in `portal_index_slices` (454); `coverage_gate.yml` (cron `15 3,9,15,21`) re-earns the flag from it.
+**Parked flags, the slice ledger and the gate: `references/coverage-and-delisting.md`.**
 There is no combined bazos/idnes fallback workflow anymore — sreality's
 `scrape.yml` is the only retained combined fallback (its `_run_full` is the instant revert for
 the split); for the other portals an ad-hoc combined run is `python -m scraper.<portal>_main`
@@ -232,7 +232,7 @@ not a bundled module — see `docs/architecture.md`); CI's `--check` guards drif
 from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
   `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, unseen ids are nominated
-  for a page check (rule #3, 2026-09-07), and new + price-changed ids. The walk carries a
+  for a page check (rule #3, 2026-09-07), new + price-changed ids are queued. The walk carries a
   **wall-clock deadline checked per PAGE** (`--max-seconds` → `run_index_walk` →
   `walk_category` → `portal.deadline_reached`); a deadline is a stop of OURS, so such a
   walk reports `reached_end=False`, nominates nothing, and keeps everything it collected.
@@ -243,8 +243,8 @@ from the slow "download each ad" write:
   `listing_detail_queue` in one of two service classes — ACQUISITION (never fetched) or REFRESH
   (failure-retry > price-changed > the location refetch lane). The drain reserves half of every
   claim for acquisition, so an unbounded refresh backlog can no longer starve new listings; unused
-  reserve backfills to refresh. Do NOT reintroduce a single ordering across both. No detail fetch,
-  so delistings surface within minutes. Records `run_type='index'`, `index_pages>0` (what Health
+  reserve backfills to refresh. Do NOT reintroduce a single ordering across both. No detail fetch:
+  the drain's page check decides each nominated row. Records `run_type='index'`, `index_pages>0` (what Health
   liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
   no per-listing loop.
 - **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
@@ -319,14 +319,14 @@ The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only t
 ## The real-time worker (`scraper/realtime_worker.py`)
 
 A dark-by-default, always-on Railway service (a 2nd process from the SAME image, gated by
-`REALTIME_WORKER_ENABLED`) that replaces cron quantization for the latency-critical parts of
-the pipeline — the GH Actions crons above are still the throughput/completeness backbone; the
-worker is the latency layer on top. Design + shipped waves: `docs/design/realtime-scrapers.md`.
-Lanes shipped so far:
+`REALTIME_WORKER_ENABLED`) running every lane registered in `_amain`. Its probe/drain/images/count-probe
+core replaces cron quantization for the latency-critical path (the GH Actions crons above stay the
+throughput/completeness backbone); the other lanes host background jobs and `heartbeat` beats
+`worker_heartbeats`. Design + shipped waves: `docs/design/realtime-scrapers.md`. Per-lane notes:
 - **Per-source drain-disable knob** (`realtime_drain_disabled_sources`, PR #694) — the bounded detail
   drain skips sources listed here: a portal leaves the real-time lane, its GH Actions cadence untouched.
 - **sreality count-probe lane** (migration 270, PR #696) — a per-`(category_main, category_type)` count
-  check that sees a market-wide count swing faster than a full index walk, feeding the delisting rails.
+  check that sees a market-wide count swing faster than a full index walk; opted in, it dispatches `index_walk.yml` early.
 - **Property-maintenance lane**, every 2 min (PR #716) — `run_incremental_pass` against `dirty_properties`
   (rule #20), far more often than the 5-min GH cron; serialized with it + the daily sweep by the lease-row
   CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded. Its
@@ -390,9 +390,9 @@ Lanes shipped so far:
   interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope =
   the open-R7-gate `text` cells ∪ portals declaring `llm_text`; its readings are mined by the claim lane.
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
-- **Autodedup lane** (AUTODEDUP §7.3, mig 557) — THE engine's real-time SHADOW pass (`run_incremental`); one integer
-  `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running), claim = engine rate × half a 1050 s deadline, budget
-  halved per trip; `SystemExit`/trip = a failed pass. Writes only `rt`, never a merge. Lease + cursors shared with the GH lane and `rt_seed`; `autodedup.settings.realtime_enabled=false` stops both.
+- **Autodedup lane** (AUTODEDUP §7.3/E914, mig 557) — THE engine's one real-time pass (`run_incremental`); one integer
+  `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running) is cadence AND brake, claim = engine rate × half a 1050 s deadline, rate
+  halved per trip; `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share its `autodedup.rt_lease`; no GH schedule.
 
 ## Pipeline verification (migration 274)
 
@@ -445,8 +445,8 @@ purpose — the six ground = 1 portals stay +0.8..+1.1 until the operator has ru
 
 ## Reading the logs
 
-The scheduled pipeline logs in two halves; the shared `portal_runner` emits the same line
-shapes for every portal (with its own `source=`), so this reads the same for bazos/idnes/etc.
+The scheduled pipeline logs in two halves. The shared `portal_runner` emits CATEGORY, VERIFY, RECONCILE,
+RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDEX + ENQUEUE come from each portal's own code (`walk_category`; sreality's per-page INDEX from its client).
 
 **Index walk** (`index_walk.yml` and the per-portal walks):
 - `CATEGORY start cm=... ct=...` per category pair
@@ -456,15 +456,15 @@ shapes for every portal (with its own `source=`), so this reads the same for baz
 - `PLAN unchanged=N refetch=M` per category walk (per district when split) after diffing index
   prices against the DB; `PLAN priority_retry=N` if any listings have prior failure rows
   (sreality — the other portals go straight to ENQUEUE)
-- `ENQUEUE enqueued=N new=... changed=... priority=...` per category — the ids handed to the
-  drain via `listing_detail_queue`
+- `ENQUEUE enqueued=N new=... changed=... priority=...` per category (sreality; the others log
+  `ENQUEUE source=<portal> new=... changed=... unchanged=... enqueued=...`) — ids handed to the drain
 - `VERIFY cm=... ct=... subtype=... candidates=N queued=M deferred=K active=A` — rows nominated for
   a page check (rule #3); `VERIFY skipped ...: the walk did not reach the portal's end (our stop:
   ...)` when it may not, and `COVERAGE cm=... ct=...` WARNS when it nominates while short
 - `RECONCILE cm=... ct=... sreality=... collected=... active=...` — portal-reported total vs
   collected vs our active DB count (drift feeds the Health page)
 - `INDEX total=N pages=M enqueued=K` once at end of the walk
-- `RUN done pages=N enqueued=M inactive=K errors=E`
+- `RUN done pages=N enqueued=M to_verify=V deferred=D errors=E` (E = failed categories)
 
 **Detail drain** (`detail_drain.yml` and the per-portal drains):
 - `DRAIN reclaimed stale claims=N` when a prior SIGKILLed run left claims behind
