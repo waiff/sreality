@@ -180,6 +180,21 @@ def test_a_group_may_not_carry_a_share_sale_to_a_sale_at_another_price() -> None
     assert cluster_invariants_ok(members, SETTINGS) == SHARE_PRICE_VETO
 
 
+def test_a_sale_that_prints_no_price_stays_in_its_group_when_a_share_joins() -> None:
+    # c17, Znojmo: three sales at the share's price and a fourth that prints none. Reading the
+    # fourth evicted it from the sale group BASE had built, a sale merge lost to E927.
+    members = [_fp(1, category_type="podil"), _fp(2, category_type="prodej", source="idnes"),
+               _fp(3, category_type="prodej", source="realitymix", price=None)]
+    assert share_price_conflict(members[0], members[2]) is True
+    assert cluster_invariants_ok(members, SETTINGS) is None
+
+
+def test_a_share_that_prints_no_price_is_still_refused_in_a_group() -> None:
+    members = [_fp(1, category_type="podil", price=None),
+               _fp(2, category_type="prodej", source="idnes")]
+    assert cluster_invariants_ok(members, SETTINGS) == SHARE_PRICE_VETO
+
+
 def test_the_operators_closure_is_honoured_across_a_price_gap() -> None:
     members = [_fp(1, category_type="podil"), _fp(2, category_type="prodej", source="idnes"),
                _fp(3, category_type="prodej", source="bazos", price=40_000.0)]

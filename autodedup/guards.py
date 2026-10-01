@@ -95,12 +95,15 @@ def share_price_conflict(a: "Fingerprint", b: "Fingerprint") -> bool:
     A missing price is not the same price. Only a pair that crosses deal types is read."""
     if not crosses_deal_type(a.category_type, b.category_type):
         return False
-    # Both import this module.
-    from autodedup.demonstrate import price_paths_round_equal
-    from autodedup.indistinguishable import price_path
+    from autodedup.demonstrate import price_paths_round_equal  # it imports this module
 
-    return not price_paths_round_equal(price_path(a.price, a.price_events),
-                                       price_path(b.price, b.price_events))
+    return not price_paths_round_equal(_price_path_of(a), _price_path_of(b))
+
+
+def _price_path_of(fp: "Fingerprint") -> list[float]:
+    from autodedup.indistinguishable import price_path  # it imports this module
+
+    return price_path(fp.price, fp.price_events)
 
 
 def unit_designator_conflict(
@@ -232,7 +235,10 @@ def cluster_invariants_ok(
             if not category_main_compatible(left, right):
                 return "compat_class"
 
-    typed = [fp for fp in members if fp.category_type is not None]
+    # A sale advert that prints no price says nothing against the price the group's share met
+    # on another member's edge (E12 at group grain), so only a share is read without one.
+    typed = [fp for fp in members if fp.category_type is not None
+             and (fp.category_type != deal_class_of(fp.category_type) or _price_path_of(fp))]
     if len({fp.category_type for fp in typed}) > 1:
         for index, left_fp in enumerate(typed):
             for right_fp in typed[index + 1:]:
