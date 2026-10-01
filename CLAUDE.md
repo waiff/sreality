@@ -186,13 +186,12 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     engine was REMOVED wholesale (2026-08 "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers (pHash, CLIP, `/labeling`) stay live; the
     rebuild is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`). **Never resurrect or consult the removed engine's code or design
     docs**; the operator owns the apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
-16. **Watchdog + Browse share one definition of "matches"** (`toolkit/filter_registry.py`). Browse compiles from it; the Watchdog's `_build_match_clauses`
-    still hand-writes its clauses; parity tests pin field ids, the per-m²/plot measure and place chips; curated-city rules agree via the one SQL function
-    `curated_cities_matching()` (only the matcher side is test-pinned); every other clause is kept in step by hand (owed:
-    `roadmap/operator-workflow-track.md`). `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` +
-    `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot; a `monitor_since` anchor so a change
-    predating membership never fires) and `system_health` (**NOT** property-grain — no listing, no subscription; verify_pipeline checks + `ops_incidents`,
-    migration 462). **Delivery is separate from detection**: in-app = the row itself; external = the `channel_sends` ledger. Merges re-point (#18).
+16. **Watchdog + Browse share one definition of "matches"**, rendered per relation: the Watchdog + every cohort compile
+    the registry in `toolkit/filter_compiler.compile_filter_where`; Browse's TS + RPCs are pinned per shared predicate only
+    (`sql_kind`, place plan, rule-23 measures, served predicate). `notification_dispatches` = the append-only event table,
+    **three producers**: `watchdog` + `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}`
+    per-snapshot; a `monitor_since` anchor so a pre-membership change never fires) + `system_health` (**NOT** property-grain;
+    `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. Merges re-point (#18).
 17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).

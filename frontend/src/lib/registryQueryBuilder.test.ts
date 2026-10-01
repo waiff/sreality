@@ -7,9 +7,11 @@
  * apartment/building_condition_level_min bug that motivated this
  * module — see PR history around #140 / #146). */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { FILTER_REGISTRY } from './filterRegistry.generated';
+import { FILTER_REGISTRY, type Agenda, type FilterDef } from './filterRegistry.generated';
 import { DEFAULT_FILTERS, REGISTRY_KEY_MAP } from './filters';
 import {
   BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY,
@@ -371,4 +373,77 @@ describe('the sold agenda', () => {
     // PostgREST as a predicate on a column the function never returns.
     expect(r.calls.find((c) => c.col === 'price_czk')).toBeUndefined();
   });
+});
+
+
+// --- sql_kind agreement (C4, rule 16) --------------------------------------
+//
+// `sql_kind` is derived ONCE, in toolkit/filter_registry.sql_kind, and codegen hands
+// it to this file. The Python compiler renders each kind from
+// tests/fixtures/filter_sql_kinds.json's `sql` (pytest pins that); this pins the
+// TS dispatch to the same table's PostgREST ops, so the chain Python template ->
+// generated kind -> TS dispatch is closed. A one-element list must be `.eq()`,
+// never `.in()` (`postgrest_single`; the planner rule in registryQueryBuilder.ts).
+
+interface KindRow {
+  sql: string | null;
+  postgrest: Call['op'] | null;
+  postgrest_single: Call['op'] | null;
+}
+
+const KINDS = JSON.parse(
+  readFileSync(join(process.cwd(), '..', 'tests', 'fixtures', 'filter_sql_kinds.json'), 'utf-8'),
+) as { kinds: Record<string, KindRow>; browse_hand_coded_kinds: Array<string | null> };
+
+const samplesFor = (f: FilterDef): Array<{ input: unknown; value: unknown; single: boolean }> => {
+  if (f.ui_control === 'tristate') return [{ input: 'yes', value: true, single: true }];
+  if (f.type === 'string_list') {
+    const [a, b] = (f.enum_values ?? []).map((o) => o.value);
+    return [
+      { input: [a, b], value: [a, b], single: false },
+      { input: [a], value: a, single: true },
+    ];
+  }
+  if (f.type === 'string') {
+    const first = f.enum_values?.[0]?.value;
+    return [{ input: first, value: first, single: true }];
+  }
+  return [{ input: 5, value: 5, single: true }];
+};
+
+describe('sql_kind agreement', () => {
+  it('the hand-coded browse set is exactly the kinds Browse does not auto-dispatch', () => {
+    for (const f of FILTER_REGISTRY.filters) {
+      if (!f.agendas.includes('browse') || f.pg_column == null) continue;
+      expect(
+        HAND_CODED_BROWSE_FILTERS.has(f.id),
+        `${f.id} (sql_kind=${f.sql_kind})`,
+      ).toBe(KINDS.browse_hand_coded_kinds.includes(f.sql_kind));
+    }
+  });
+
+  for (const agenda of ['browse', 'sold'] as Agenda[]) {
+    it(`every auto-dispatched ${agenda} filter emits its kind's PostgREST op`, () => {
+      let checked = 0;
+      for (const f of FILTER_REGISTRY.filters) {
+        if (!f.agendas.includes(agenda) || f.pg_column == null) continue;
+        if (agenda === 'browse' && HAND_CODED_BROWSE_FILTERS.has(f.id)) continue;
+        expect(f.sql_kind, f.id).not.toBeNull();
+        const row = KINDS.kinds[f.sql_kind as string];
+        for (const sample of samplesFor(f)) {
+          const r = new _Recorder();
+          applyAgendaFilters(r, agenda, (id) => (id === f.id ? sample.input : undefined));
+          expect(r.calls, `${agenda}:${f.id}`).toEqual([
+            {
+              op: sample.single ? row.postgrest_single : row.postgrest,
+              col: f.pg_column,
+              value: sample.value,
+            },
+          ]);
+          checked += 1;
+        }
+      }
+      expect(checked).toBeGreaterThan(0);
+    });
+  }
 });

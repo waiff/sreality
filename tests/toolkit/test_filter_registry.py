@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from toolkit import filter_compiler
 from toolkit import filter_registry as fr
 
 
@@ -26,9 +27,7 @@ from toolkit import filter_registry as fr
 # A retired filter must not be offerable to any agenda; the code paths raise on a
 # non-null value rather than silently ignoring it (silently ignoring a retired filter
 # WIDENS the cohort). W7 removes the fields themselves.
-_RETIRED_BUT_DESERIALISABLE = {
-    "near_city_proximity",   # W5 / migration 436: 0 UI widgets, 0 presets, 0 subscriptions
-}
+_RETIRED_BUT_DESERIALISABLE = set(filter_compiler.RETIRED_FILTERS)
 
 
 def test_registry_is_nonempty() -> None:
@@ -464,20 +463,39 @@ def test_sold_agenda_membership_is_opt_in() -> None:
 
 def test_every_sold_filter_is_column_backed_and_prefix_routable() -> None:
     """The sold surface has no `HAND_CODED_*` escape set: `applyRegistryFilters`
-    dispatches by type + id prefix, so a filter that fits no path is not hand-coded
-    somewhere else — it is simply never applied. Each sold filter must therefore be a
-    string_list (`.in`/`.eq`) or a `min_`/`max_`-prefixed number (`.gte`/`.lte`)."""
+    dispatches by kind, so a filter that fits no path is not hand-coded somewhere
+    else — it is simply never applied. Each sold filter must therefore be a list
+    (`.in`/`.eq`) or a bound (`.gte`/`.lte`); an `eq` number would be equality, which
+    is never what a bound means."""
     for f in fr.filters_for_agenda(fr.Agenda.SOLD):
-        assert f.pg_column, f"{f.id}: a sold filter with no column is a no-op"
-        if f.type == fr.FilterType.STRING_LIST:
-            continue
-        assert f.type in (fr.FilterType.INT, fr.FilterType.FLOAT), (
-            f"{f.id}: type {f.type} has no auto-dispatch path"
+        assert fr.sql_kind(f) in {"any", "gte", "lte"}, (
+            f"{f.id}: sql_kind {fr.sql_kind(f)!r} has no sold dispatch path"
         )
-        assert f.id.startswith(("min_", "max_")) or f.id.endswith(("_min", "_max")), (
-            f"{f.id}: a numeric sold filter without a min/max affix dispatches as "
-            f"equality, which is never what a bound means"
-        )
+
+
+def test_sql_kind_snapshot() -> None:
+    """The derived kind, counted. A move here is a filter changing how it compiles on
+    every surface at once (Python compiler and Browse's TS dispatch)."""
+    from collections import Counter
+
+    counts = Counter(fr.sql_kind(f) for f in fr.all_filters())
+    assert counts == {"gte": 18, "lte": 10, "eq": 9, "any": 7, "enum_or_unknown": 2, None: 31}
+    numeric_eq = {
+        f.id for f in fr.all_filters()
+        if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT) and fr.sql_kind(f) == "eq"
+    }
+    assert numeric_eq == {"category_sub_cb"}
+    column_backed = {f.id for f in fr.all_filters() if f.pg_column is not None}
+    assert fr.COMPILED_BY_HOOK <= column_backed
+
+
+def test_filter_to_json_carries_sql_kind() -> None:
+    """Codegen hands the SAME derived kind to Browse's TS dispatch."""
+    by_id = {f["id"]: f for f in fr.registry_to_json()["filters"]}
+    for f in fr.all_filters():
+        assert by_id[f.id]["sql_kind"] == fr.sql_kind(f), f.id
+    assert by_id["min_price_per_m2"]["sql_kind"] == "gte"
+    assert by_id["building_material"]["sql_kind"] is None
 
 
 def test_the_sold_date_filter_reaches_no_other_agenda() -> None:

@@ -84,6 +84,8 @@ export interface FilterDef {{
    *  reach it (an explicit "all" pill) — see FilterDef.nullable in
    *  toolkit/filter_registry.py. */
   nullable: boolean;
+  /** How a column-backed filter compiles everywhere (toolkit/filter_registry.sql_kind); null = hand-coded per surface. */
+  sql_kind: 'eq' | 'any' | 'enum_or_unknown' | 'gte' | 'lte' | null;
 }}
 
 export interface FilterRegistryPayload {{
