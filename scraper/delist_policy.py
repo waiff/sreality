@@ -133,3 +133,47 @@ def _override_permits(
         except Exception as exc:  # noqa: BLE001 - a malformed lift stays shut
             LOG.warning("delist cap: ignoring malformed override %r (%s)", o, exc)
     return None
+
+
+class GoneRateBreaker:
+    """Rule #3's last rail after presence verification: a positive gone signal
+    flips one listing, and nothing else does -- so the one systemic failure
+    left is a portal that answers EVERY page with the gone signal (a consent
+    interstitial that redirects off the listing, a WAF serving 404s). Ingest
+    rows (every other priority) were on the index minutes ago, so among them a gone
+    rate near zero is normal and a majority is not the market, it is the
+    portal. Once tripped for the run, gone verdicts are recorded as failures
+    (retried later) instead of flips. Presence checks (the exempt priority)
+    are NOT counted: a backlog of truly dead listings legitimately reads 100%
+    gone. Every row at the exempt priority is uncounted; that includes the
+    location refetch lane, which enqueues at QUEUE_PRIORITY_VERIFY
+    (`db.enqueue_location_refetch`).
+    """
+
+    MIN_SAMPLE = 20
+    MAX_GONE_SHARE = 0.5
+
+    def __init__(self, source: str, *, exempt_priority: int) -> None:
+        self.source = source
+        self.exempt_priority = exempt_priority
+        self.ingest_fetched = 0
+        self.ingest_gone = 0
+        self.tripped = False
+        self.reason = ""
+
+    def observe(self, priority: int, kind: str) -> bool:
+        """Count one fetch verdict; True exactly once, on the observation that trips."""
+        if priority == self.exempt_priority or self.tripped:
+            return False
+        self.ingest_fetched += 1
+        if kind == "gone":
+            self.ingest_gone += 1
+        if (self.ingest_fetched >= self.MIN_SAMPLE
+                and self.ingest_gone > self.MAX_GONE_SHARE * self.ingest_fetched):
+            self.tripped = True
+            self.reason = (
+                f"gone-rate breaker: {self.ingest_gone} of {self.ingest_fetched} ingest "
+                f"fetches read gone this run -- the portal, not the market"
+            )
+            return True
+        return False

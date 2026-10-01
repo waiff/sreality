@@ -12,7 +12,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from scraper import portal_runner
+from scraper import delist_policy, portal_runner
 from scraper.portal_runner import DrainItem
 
 
@@ -1041,7 +1041,7 @@ def test_run_phase_passes_run_id_and_kwargs_through_to_the_runner(monkeypatch):
 # --- the gone-rate breaker (rule #3's last rail) ---------------------------
 
 
-def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monkeypatch):
+def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monkeypatch, caplog):
     """A portal answering every page with its gone signal (consent redirect,
     WAF 404s) is not the market. Ingest rows were on the index minutes ago, so
     once a majority of them read gone the run stops flipping and records the
@@ -1049,35 +1049,19 @@ def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monke
     ids = [str(i) for i in range(1, 26)]
     cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
     p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
-    rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    with caplog.at_level("ERROR", logger="scraper.portal_runner"):
+        rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert rc == 0
     # The 20th observation completes the sample and trips the breaker before
     # that item is routed, so 19 flipped and the remaining 6 were recorded as
     # failures to retry later.
-    flipped = portal_runner._GoneRateBreaker.MIN_SAMPLE - 1
+    flipped = delist_policy.GoneRateBreaker.MIN_SAMPLE - 1
     assert len(cap["flip"]) == flipped
     assert len(p.calls["failure"]) == 25 - flipped
     assert agg["listings_inactive"] == flipped
-
-
-def test_drain_breaker_ignores_presence_checks(monkeypatch):
-    """A backlog of truly dead listings legitimately reads 100% gone; presence
-    checks (priority < 0) must not trip the breaker."""
-    ids = [str(i) for i in range(1, 26)]
-    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
-    monkeypatch.setattr(
-        portal_runner.db, "queue_priorities",
-        lambda conn, source, nids: {n: portal_runner.db.QUEUE_PRIORITY_VERIFY for n in nids})
-    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
-    rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
-    assert rc == 0
-    assert len(cap["flip"]) == 25 and p.calls["failure"] == []
-
-
-def test_drain_breaker_needs_a_sample_before_it_trips(monkeypatch):
-    """Nineteen gone ingest fetches in a row is still within one run's noise."""
-    ids = [str(i) for i in range(1, 20)]
-    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
-    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
-    portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
-    assert len(cap["flip"]) == 19 and p.calls["failure"] == []
+    tripped = [r for r in caplog.records if r.getMessage().startswith("DRAIN gone-rate breaker:")]
+    assert len(tripped) == 1 and tripped[0].name == "scraper.portal_runner"
+    assert tripped[0].getMessage() == (
+        "DRAIN gone-rate breaker: 20 of 20 ingest fetches read gone this run -- the portal, "
+        "not the market source=fake; further gone verdicts this run are recorded as "
+        "failures, not flips")

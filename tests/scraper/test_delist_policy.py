@@ -200,6 +200,66 @@ def test_the_budget_invariants(nominated: int, active: int) -> None:
             assert b.deferred == 0
 
 
+# --- the gone-rate breaker --------------------------------------------------
+
+VERIFY = -2
+INGEST = 0
+
+
+def _breaker() -> delist_policy.GoneRateBreaker:
+    return delist_policy.GoneRateBreaker("bazos", exempt_priority=VERIFY)
+
+
+def test_nineteen_gone_ingest_fetches_are_still_noise() -> None:
+    b = _breaker()
+    assert [b.observe(INGEST, "gone") for _ in range(19)] == [False] * 19
+    assert not b.tripped
+
+
+def test_twenty_of_twenty_trips_once_and_stays_tripped() -> None:
+    b = _breaker()
+    verdicts = [b.observe(INGEST, "gone") for _ in range(20)]
+    assert verdicts == [False] * 19 + [True]
+    assert b.tripped
+    assert b.observe(INGEST, "gone") is False and b.tripped
+    assert b.observe(INGEST, "ok") is False and b.tripped
+
+
+def test_the_share_must_exceed_half() -> None:
+    half = _breaker()
+    for i in range(20):
+        half.observe(INGEST, "gone" if i < 10 else "ok")
+    assert not half.tripped                                   # 10 of 20 is not a majority
+    over = _breaker()
+    verdicts = [over.observe(INGEST, "gone" if i < 11 else "ok") for i in range(20)]
+    assert over.tripped and verdicts.count(True) == 1         # 11 of 20 is
+
+
+def test_presence_checks_never_count() -> None:
+    """A backlog of truly dead listings legitimately reads 100% gone."""
+    b = _breaker()
+    assert not any(b.observe(VERIFY, "gone") for _ in range(100))
+    assert not b.tripped and b.ingest_fetched == 0
+
+
+def test_the_reason_text_is_pinned() -> None:
+    """The runner logs it and the queue row's last_error carries it."""
+    b = _breaker()
+    for _ in range(20):
+        b.observe(INGEST, "gone")
+    assert b.reason == (
+        "gone-rate breaker: 20 of 20 ingest fetches read gone this run "
+        "-- the portal, not the market")
+
+
+def test_the_breaker_never_logs(caplog) -> None:
+    b = _breaker()
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(25):
+            b.observe(INGEST, "gone")
+    assert caplog.records == []
+
+
 def test_the_policy_never_imports_the_db_module() -> None:
     """db.py imports this module; the reverse import would be circular, and the policy is pure."""
     src = Path(delist_policy.__file__).read_text(encoding="utf-8")

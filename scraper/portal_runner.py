@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from scraper import db, listing_write, portal_factory, vocabulary
+from scraper import db, delist_policy, listing_write, portal_factory, vocabulary
 from scraper.portal import (
     PortalConfig,
     classify_index_sighting,
@@ -754,47 +754,6 @@ def _flush_drain_batch(
     return conn
 
 
-class _GoneRateBreaker:
-    """Rule #3's last rail after presence verification: a positive gone signal
-    flips one listing, and nothing else does -- so the one systemic failure
-    left is a portal that answers EVERY page with the gone signal (a consent
-    interstitial that redirects off the listing, a WAF serving 404s). Ingest
-    rows (every other priority) were on the index minutes ago, so among them a gone
-    rate near zero is normal and a majority is not the market, it is the
-    portal. Once tripped for the run, gone verdicts are recorded as failures
-    (retried later) instead of flips. Presence checks (QUEUE_PRIORITY_VERIFY)
-    are NOT counted: a backlog of truly dead listings legitimately reads 100%
-    gone. Everything else, the location refetch lane included, is a listing
-    the index vouched for and counts.
-    """
-
-    MIN_SAMPLE = 20
-    MAX_GONE_SHARE = 0.5
-
-    def __init__(self, source: str) -> None:
-        self.source = source
-        self.ingest_fetched = 0
-        self.ingest_gone = 0
-        self.tripped = False
-        self.reason = ""
-
-    def observe(self, priority: int, kind: str) -> None:
-        if priority == db.QUEUE_PRIORITY_VERIFY or self.tripped:
-            return
-        self.ingest_fetched += 1
-        if kind == "gone":
-            self.ingest_gone += 1
-        if (self.ingest_fetched >= self.MIN_SAMPLE
-                and self.ingest_gone > self.MAX_GONE_SHARE * self.ingest_fetched):
-            self.tripped = True
-            self.reason = (
-                f"gone-rate breaker: {self.ingest_gone} of {self.ingest_fetched} ingest "
-                f"fetches read gone this run -- the portal, not the market"
-            )
-            LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
-                      "recorded as failures, not flips", self.reason, self.source)
-
-
 def _drain_mark_gone(
     portal: Portal, conn: Any, native_id: str, reconnect: Any,
 ) -> tuple[Any, str | None]:
@@ -867,7 +826,8 @@ def run_detail_drain(
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
     }
-    breaker = _GoneRateBreaker(portal.source)
+    breaker = delist_policy.GoneRateBreaker(
+        portal.source, exempt_priority=db.QUEUE_PRIORITY_VERIFY)
     limiter = build_rate_limiter(
         portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False))
     client = portal.make_client(limiter)
@@ -960,8 +920,10 @@ def run_detail_drain(
                     item = future.result()  # never raises
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
-                    breaker.observe(
-                        prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW), item.kind)
+                    if breaker.observe(
+                            prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW), item.kind):
+                        LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
+                                  "recorded as failures, not flips", breaker.reason, portal.source)
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:
