@@ -2195,7 +2195,8 @@ renumber.** Navigate by area:
     by value in vanilla TS (separate territory, no React import) and also hand-copies
     `stageBadge` / `stageAccent` into `content.ts` — pure TS it could import from
     `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand` and `lib/mfReference`.
-    Converging both is owed (`roadmap/operator-workflow-track.md` § Rule #22 owed entry).
+    The kanban's shape is sanctioned (its writes already go through `usePipelineCard`); its grey
+    `stageColor` and the extension's copies are owed (`roadmap/operator-workflow-track.md` § Rule #22).
     **TENANCY NOTE — stated here once, for rule #18 as well.** Pipeline MEMBERSHIP has exactly ONE
     definition: `current_account_ids()`, the database's own membership function, on every surface —
     the extension's `POST /listings/lookup` included, which takes no account argument and whose SQL
@@ -2237,8 +2238,10 @@ renumber.** Navigate by area:
     until W3: a per-property `card(id)` cache duplicated a single row of `members`, so every
     write had a third shape to patch and every listing header paid its own read; collapsing it
     into `members` made the chokepoint smaller, which is the only sanctioned direction for it.
-    `lib/pipelineCache` holds only the pure patches (`placeCard` / `dropCard`) and the re-read list
-    (`PIPELINE_REVALIDATE`); the **write policy is ONE hook, `lib/useOptimisticWrite`**, shared by
+    `lib/pipelineCache` holds the pure patches (`placeCard` / `dropCard`), the re-read list
+    (`PIPELINE_REVALIDATE`, widened to Browse by `pipelineRevalidation` when the cohort is
+    pipeline-scoped; `revalidatePipeline` for a merge or split) and the stage lookup
+    `cachedStage`; the **write policy is ONE hook, `lib/useOptimisticWrite`**, shared by
     every optimistic write in the SPA (pipeline, dismissals, the border-case flag, the autodedup
     verdict overlay, the admin toggles, the training-set marks, the preset reorder, the exam-review
     edits): HOLD (cancel in-flight reads of
@@ -2295,7 +2298,7 @@ renumber.** Navigate by area:
     (add/remove/move) from EVERY surface — the Browse funnels, the table rows, the listing header
     and the kanban's drag and trash — go through one hook, `lib/usePipelineCard.ts`; the property
     id travels with each call, so one instance serves a whole board. It writes over
-    `lib/useOptimisticWrite`; `lib/pipelineCache` holds only the pure patches and the re-read list.
+    `lib/useOptimisticWrite`; `lib/pipelineCache` holds the patches and the re-read list.
     **Browse can be SCOPED to the pipeline** (`ListingFilters.pipeline`, `?pipeline=any` or
     `?pipeline=<stage ids>`, registry id `pipeline`, BROWSE agenda only): a property-grain id
     allowlist resolved from `property_pipeline_public` by `resolvePipelinePrefilter` and AND'd

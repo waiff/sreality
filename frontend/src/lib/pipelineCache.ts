@@ -95,13 +95,8 @@ export function pipelineRevalidation(cohortScoped: boolean): readonly QueryKey[]
 
 /* The same re-read for a write that is not a card write (a merge or split moves
  * cards between properties — lib/mergedAdverts). */
-export function revalidatePipeline(
-  qc: QueryClient,
-  { cohortScoped = false }: { cohortScoped?: boolean } = {},
-): void {
-  for (const queryKey of pipelineRevalidation(cohortScoped)) {
-    void qc.invalidateQueries({ queryKey });
-  }
+export function revalidatePipeline(qc: QueryClient): void {
+  for (const queryKey of PIPELINE_REVALIDATE) void qc.invalidateQueries({ queryKey });
 }
 
 /* The stage a write lands on, read from the shared stage list already in cache.

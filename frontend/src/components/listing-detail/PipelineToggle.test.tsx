@@ -119,9 +119,12 @@ describe('<PipelineToggle>', () => {
     fireEvent.click(pill);
     await flush();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(api.movePipelineCard).toHaveBeenCalledTimes(1);
+    expect(api.removePipelineCard).not.toHaveBeenCalled();
 
     await act(async () => resolve({ property_id: 42, stage_id: 3, stage_key: 'offer' }));
     await waitFor(() => expect(pill).not.toHaveAttribute('aria-disabled'));
+    expect(document.activeElement).toBe(pill);
   });
 
   it('removes only after the menu confirm', async () => {
