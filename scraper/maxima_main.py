@@ -1,13 +1,13 @@
 """Orchestrator for the nemovitosti.maxima.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.maxima_main`. Maxima is a `Portal` (MaximaPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that pages the
+driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
 catalogue HTML and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='maxima', migration 108), then a detail-drain that
-fetches each listing page, parses it to a `ScrapedListing`, and writes it via
-`listing_write.write_listings` (the one listing write). No bespoke
-pipeline — only the per-portal fetcher (MaximaClient) + parser (maxima_parser) +
-config differ from sreality/idnes (the modularity rule in CLAUDE.md).
+`listing_detail_queue` (source='maxima', migration 108); the shared detail-drain
+fetches each listing page (MaximaClient), parses it to a `ScrapedListing`
+(maxima_parser), and writes via `listing_write.write_listings` (the one listing
+write; a first-seen row lands `property_id` NULL and the straggler-attach births
+its singleton, rule #15).
 
 Maxima is a small agency catalogue served as TWO mixed indexes — sale (the default
 view, `af=1`) and rent (the buy/rent toggle, `af=2`) — each spanning every property

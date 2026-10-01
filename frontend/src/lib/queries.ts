@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { fetchAllRows } from './fetchAllRows';
+import { pgRead, type PgReadOptions } from './pgRead';
 import {
   composePipelineCards,
   PIPELINE_BOARD_COLS,
@@ -563,6 +564,7 @@ export interface MapResult {
  * Map/Table fetchers below can call them without forward-ref issues. */
 async function resolveTagPrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (f.tags.length === 0) return null;
   const rows = await fetchAllRows<{ property_id: number; tag_id: number }>({
@@ -575,6 +577,7 @@ async function resolveTagPrefilter(
     orderBy: [{ column: 'property_id' }, { column: 'tag_id' }],
     key: ['property_id', 'tag_id'],
     expectMax: 100_000,
+    signal,
   });
   /* The read restricts tag_id to the selection and fetchAllRows dedupes on
    * (property_id, tag_id), so a tally IS the distinct count; the Set keeps
@@ -590,10 +593,11 @@ async function resolveTagPrefilter(
  * has one answer on screen and in the cohort. OR across the selection. */
 async function resolveCollectionPrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (f.collections.length === 0) return null;
   return propertyIdsInCollections(
-    await fetchPropertyCollectionMemberSet(),
+    await fetchPropertyCollectionMemberSet({ signal }),
     f.collections,
   );
 }
@@ -618,13 +622,15 @@ const MAX_CURATED_OBEC_IDS = 512;   // 206 today; a band, not the count
 
 async function resolveCityQualityObecPrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (!hasCityQualityFilter(f)) return null;
-  const { data, error } = await supabase.rpc('curated_cities_matching', {
-    p_index_rules: f.cityIndexRules,
-  });
-  if (error) throw error;
-  const ids = (data ?? []) as unknown as number[];
+  /* Untyped on purpose: the runtime check below is what narrows the wire shape. */
+  const { data } = await pgRead(
+    supabase.rpc('curated_cities_matching', { p_index_rules: f.cityIndexRules }),
+    { signal },
+  );
+  const ids: unknown = data ?? [];
   if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number')) {
     throw new Error('curated_cities_matching: unexpected wire shape');
   }
@@ -634,7 +640,7 @@ async function resolveCityQualityObecPrefilter(
       + 'the curated-city set is meant to be operator-sized, not market-sized',
     );
   }
-  return ids;
+  return ids as number[];
 }
 
 /* Market-growth (price-stats datasets) prefilter. For each active rule the
@@ -646,6 +652,7 @@ async function resolveCityQualityObecPrefilter(
  * obec_ids_filter on browse_stats_properties. BROWSE-only (window-dependent). */
 async function resolvePriceGrowthPrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   const rules = f.priceGrowthRules.filter(
     (r) => r.rentMinPct != null || r.saleMinPct != null,
@@ -655,7 +662,7 @@ async function resolvePriceGrowthPrefilter(
     rules.map(async (r) => {
       const rentMin = r.rentMinPct;
       const saleMin = r.saleMinPct;
-      const rows = await fetchGrowth(r.datasetId, r.fromYm, r.toYm);
+      const rows = await fetchGrowth(r.datasetId, r.fromYm, r.toYm, { signal });
       return rows
         .filter(
           (g) =>
@@ -680,6 +687,7 @@ async function resolvePriceGrowthPrefilter(
  * as the tags prefilter. Returns null when the filter is off. */
 async function resolveEstimatesPrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (!f.withEstimates) return null;
   const rows = await fetchAllRows<{ property_id: number }>({
@@ -689,6 +697,7 @@ async function resolveEstimatesPrefilter(
     orderBy: [{ column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
+    signal,
   });
   return rows.map((r) => r.property_id);
 }
@@ -717,9 +726,10 @@ export const pipelineIdsForScope = (
 
 async function resolvePipelinePrefilter(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (f.pipeline == null) return null;
-  return pipelineIdsForScope(await fetchPipelineMembers(), f.pipeline);
+  return pipelineIdsForScope(await fetchPipelineMembers({ signal }), f.pipeline);
 }
 
 /* Broker scope prefilter ("Explore this broker's listings"). Broker data is
@@ -763,17 +773,18 @@ export interface BrowsePrefilters {
 
 async function resolveBrowsePrefilters(
   f: ListingFilters,
+  signal?: AbortSignal,
 ): Promise<BrowsePrefilters> {
   const [
     tagProps, cityObec, growthObec, estimateProps, pipelineProps, collectionProps,
     brokerListingIds,
   ] = await Promise.all([
-    resolveTagPrefilter(f),
-    resolveCityQualityObecPrefilter(f),
-    resolvePriceGrowthPrefilter(f),
-    resolveEstimatesPrefilter(f),
-    resolvePipelinePrefilter(f),
-    resolveCollectionPrefilter(f),
+    resolveTagPrefilter(f, signal),
+    resolveCityQualityObecPrefilter(f, signal),
+    resolvePriceGrowthPrefilter(f, signal),
+    resolveEstimatesPrefilter(f, signal),
+    resolvePipelinePrefilter(f, signal),
+    resolveCollectionPrefilter(f, signal),
     resolveBrokerPrefilter(f),
   ]);
   // The property-grain allowlists intersect into the one .in('property_id', …)
@@ -815,8 +826,11 @@ export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
  * so it can never drift from the Map/Table semantics. A `head:true` count, same
  * risk class as the result-badge count Browse already issues. Callers gate on a
  * price bound being set; on error the UI just omits the number (graceful). */
-export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
-  const pre = await resolveBrowsePrefilters(f);
+export const fetchNoPriceCount = async (
+  f: ListingFilters,
+  { signal }: PgReadOptions = {},
+): Promise<number> => {
+  const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return 0;
   const base = listSource(f, keysetTiebreak(f), { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
@@ -826,8 +840,7 @@ export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
   };
   const scoped = applyPrefilters(applyFilters(base, noPriceFilters), pre)
     .is('price_czk', null);
-  const { count, error } = await scoped;
-  if (error) throw error;
+  const { count } = await pgRead(scoped, { signal });
   return count ?? 0;
 };
 
@@ -883,20 +896,24 @@ interface MapGrid {
 const fetchMapPoints = async (
   f: ListingFilters,
   pre: BrowsePrefilters,
+  signal?: AbortSignal,
 ): Promise<MapRow[]> => {
   const base = mapSource(f, MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const { data, error } = await scoped.limit(MAP_CAP);
-  if (error) throw error;
-  return (data ?? []) as unknown as MapRow[];
+  const { data } = await pgRead<MapRow[] | null>(scoped.limit(MAP_CAP), { signal });
+  return data ?? [];
 };
 
 export const fetchListingsForMap = async (
   f: ListingFilters,
+  opts?: PgReadOptions,
 ): Promise<MapResult> => {
-  const pre = await resolveBrowsePrefilters(f);
+  // `opts?`, not `{ signal }: PgReadOptions = {}`: tests/test_browse_map_read_contract.py pins this
+  // function's body by its first `{`, and a destructuring pattern or a `{}` default would be it.
+  const signal = opts?.signal;
+  const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0, capped: false };
 
   /* W6b. One lane still reads points unbounded, and it is deliberate:
@@ -920,7 +937,7 @@ export const fetchListingsForMap = async (
    *
    * Everything else asks the server for a bounded answer first. */
   if (isListingGrain(f)) {
-    const rows = await fetchMapPoints(f, pre);
+    const rows = await fetchMapPoints(f, pre, signal);
     return {
       rows,
       cells: null,
@@ -942,16 +959,17 @@ export const fetchListingsForMap = async (
    *   be constrained (repr-grain, degraded) rather than silently widened to the
    *   whole market. tests/test_browse_map_read_contract.py pins every emitted
    *   id space. */
-  const { data, error } = await supabase.rpc('browse_map_cells', {
-    ...buildBrowseStatsArgs(f, {
-      obec_ids_filter: pre.obecIds,
-      property_ids_filter: pre.propertyIds,
+  const { data: grid } = await pgRead<MapGrid>(
+    supabase.rpc('browse_map_cells', {
+      ...buildBrowseStatsArgs(f, {
+        obec_ids_filter: pre.obecIds,
+        property_ids_filter: pre.propertyIds,
+      }),
+      listing_ids_filter: pre.brokerListingIds,
+      point_budget: MAP_POINT_BUDGET,
     }),
-    listing_ids_filter: pre.brokerListingIds,
-    point_budget: MAP_POINT_BUDGET,
-  });
-  if (error) throw error;
-  const grid = data as MapGrid;
+    { signal },
+  );
 
   if (grid.clustered) {
     /* The cluster lane cannot truncate: the cell count is bounded by the grid
@@ -970,7 +988,7 @@ export const fetchListingsForMap = async (
    * MAP_COLS inside the RPC) would put the map's select-list in two places, and
    * the alternative to THAT (probing with a limited point read first) spends
    * ~906 KB on every zoomed-out load to save a round trip on the zoomed-in one. */
-  const rows = await fetchMapPoints(f, pre);
+  const rows = await fetchMapPoints(f, pre, signal);
   return {
     rows,
     cells: null,
@@ -1038,8 +1056,9 @@ export const fetchListingsForTable = async (
   f: ListingFilters,
   sort: SortSpec,
   cursor: KeysetCursor | null,
+  { signal }: PgReadOptions = {},
 ): Promise<TableResult> => {
-  const pre = await resolveBrowsePrefilters(f);
+  const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { rows: [], nextCursor: null };
   /* browse_list (migration 276): the compact snapshot read model — a STABLE
    * relation under the scroll (the live table mutates last_seen_at every
@@ -1057,9 +1076,8 @@ export const fetchListingsForTable = async (
     cursor,
     tiebreak,
   ) as unknown as typeof scoped;
-  const { data, error } = await keyed.limit(TABLE_PAGE_SIZE);
-  if (error) throw error;
-  const rows = (data ?? []) as unknown as TableRow[];
+  const { data } = await pgRead<TableRow[] | null>(keyed.limit(TABLE_PAGE_SIZE), { signal });
+  const rows = data ?? [];
   return {
     rows,
     nextCursor: nextCursorFrom(
@@ -1095,13 +1113,10 @@ export interface CohortCount {
 const EXACT_COUNT_BUDGET_MS = 2500;
 export const fetchBrowseCount = async (
   f: ListingFilters,
+  { signal }: PgReadOptions = {},
 ): Promise<CohortCount> => {
-  const pre = await resolveBrowsePrefilters(f);
+  const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { value: 0, precise: true };
-  type CountResp = { count: number | null; error: { message: string } | null };
-  type CountQuery = PromiseLike<CountResp> & {
-    abortSignal: (s: AbortSignal) => PromiseLike<CountResp>;
-  };
   /* The estimate reads the PLAIN relation, never the dismissal-aware function:
    * PostgREST plans a count only for a table or view, so a function call answers
    * `Content-Range: 0-N/*` and the client parses the `*` to NaN (the "~NaN"
@@ -1118,19 +1133,20 @@ export const fetchBrowseCount = async (
         f,
       ),
       pre,
-    ) as unknown as CountQuery;
-  try {
-    const { count, error } = await build('exact').abortSignal(
-      AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
     );
-    if (error) throw error;
+  try {
+    const { count } = await pgRead(build('exact'), { signal, deadlineMs: EXACT_COUNT_BUDGET_MS });
     if (count != null && Number.isFinite(count)) return { value: count, precise: true };
-  } catch {
-    // Exact didn't finish under budget — fall through to the estimate.
+  } catch (e) {
+    /* Only our 2.5 s client budget earns the estimate. The server's 57014
+     * cannot: a count is a HEAD, whose error has no body, so it arrives as a
+     * plain 500 (harmless while the 8 s statement_timeout outlasts the budget).
+     * Anything else (a 400 filter, a revoked grant, a caller abort) is not
+     * "too slow", and answering it with a different relation's estimate would
+     * hide it. */
+    if (!(e instanceof ApiError && e.kind === 'timeout')) throw e;
   }
-  const planned = await build('planned');
-  if (planned.error) throw planned.error;
-  const estimate = planned.count;
+  const { count: estimate } = await pgRead(build('planned'), { signal });
   /* No number is an error the header shows as one (dimmed + retry), never a NaN. */
   if (estimate == null || !Number.isFinite(estimate)) {
     throw new Error('Browse count unavailable: no exact count within budget and no estimate');
@@ -1195,8 +1211,9 @@ export const fetchListingsForCards = async (
   f: ListingFilters,
   sort: SortSpec,
   cursor: KeysetCursor | null,
+  { signal }: PgReadOptions = {},
 ): Promise<CardsResult> => {
-  const pre = await resolveBrowsePrefilters(f);
+  const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { rows: [], nextCursor: null };
   const s = effectiveSort(f, sort);
   const tiebreak = keysetTiebreak(f);
@@ -1208,9 +1225,8 @@ export const fetchListingsForCards = async (
     cursor,
     tiebreak,
   ) as unknown as typeof scoped;
-  const { data, error } = await keyed.limit(CARD_PAGE_SIZE);
-  if (error) throw error;
-  const baseRows = (data ?? []) as unknown as CardRow[];
+  const { data } = await pgRead<CardRow[] | null>(keyed.limit(CARD_PAGE_SIZE), { signal });
+  const baseRows = data ?? [];
   const nextCursor = nextCursorFrom(
     baseRows as unknown as Record<string, unknown>[],
     s,
@@ -1434,6 +1450,7 @@ export const buildBrowseStatsArgs = (
 
 export const fetchBrowseStats = async (
   f: ListingFilters,
+  { signal }: PgReadOptions = {},
 ): Promise<BrowseStats> => {
   /* Stats resolves through the SAME function every other Browse lane calls,
    * rather than naming its prefilters one by one — which left the panel
@@ -1442,16 +1459,18 @@ export const fetchBrowseStats = async (
    * `brokerId` is CLEARED rather than ignored: Stats has no listing-grain
    * parameter to carry the allowlist, and resolveBrokerPrefilter throws without
    * a session, so resolving it would fail the panel over a filter it cannot apply. */
-  const pre = await resolveBrowsePrefilters({ ...f, brokerId: null });
-  const { data, error } = await supabase.rpc(
-    'browse_stats_properties',
-    buildBrowseStatsArgs(f, {
-      obec_ids_filter: pre.obecIds,
-      property_ids_filter: pre.propertyIds,
-    }),
+  const pre = await resolveBrowsePrefilters({ ...f, brokerId: null }, signal);
+  const { data } = await pgRead<BrowseStats>(
+    supabase.rpc(
+      'browse_stats_properties',
+      buildBrowseStatsArgs(f, {
+        obec_ids_filter: pre.obecIds,
+        property_ids_filter: pre.propertyIds,
+      }),
+    ),
+    { signal },
   );
-  if (error) throw error;
-  return data as BrowseStats;
+  return data;
 };
 
 /* The listings_public select list: every column the view carries (the width is
@@ -1500,15 +1519,19 @@ export interface PropertyPublic extends ListingPublic {
 }
 
 /* An active property by id; null for a merged-away or unknown id. */
-export const fetchProperty = async (propertyId: number): Promise<PropertyPublic | null> => {
-  const { data, error } = await supabase
-    .from('properties_public')
-    .select(PROPERTY_COLS)
-    .eq('property_id', propertyId)
-    .maybeSingle();
-  if (error) throw error;
-  if (!data) return null;
-  const row = data as unknown as PropertyPublic;
+export const fetchProperty = async (
+  propertyId: number,
+  { signal }: PgReadOptions = {},
+): Promise<PropertyPublic | null> => {
+  const { data: row } = await pgRead<PropertyPublic | null>(
+    supabase
+      .from('properties_public')
+      .select(PROPERTY_COLS)
+      .eq('property_id', propertyId)
+      .maybeSingle(),
+    { signal },
+  );
+  if (!row) return null;
   return {
     ...row,
     source_url: null,
@@ -1524,27 +1547,35 @@ export const fetchProperty = async (propertyId: number): Promise<PropertyPublic 
  * resolves too; (source, source_id_native) is unique (migration 091). */
 export const fetchAdvertProperty = async (
   key: { source: string; nativeId: string } | { srealityId: number },
+  { signal }: PgReadOptions = {},
 ): Promise<{ id: number; property_id: number | null } | null> => {
   let q = supabase.from('listings_public').select('id,property_id');
   q = 'srealityId' in key
     ? q.eq('sreality_id', key.srealityId)
     : q.eq('source', key.source).eq('source_id_native', key.nativeId);
-  const { data, error } = await q.maybeSingle();
-  if (error) throw error;
-  return (data as unknown as { id: number; property_id: number | null } | null) ?? null;
+  const { data } = await pgRead<{ id: number; property_id: number | null } | null>(
+    q.maybeSingle(),
+    { signal },
+  );
+  return data ?? null;
 };
 
 /* Every advert of one property, oldest first — the merged-adverts section's rows. */
-export const fetchPropertySources = async (propertyId: number): Promise<PropertySource[]> => {
-  const { data, error } = await supabase
-    .from('property_sources_public')
-    .select(
-      'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
-    )
-    .eq('property_id', propertyId)
-    .order('first_seen_at', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as PropertySource[];
+export const fetchPropertySources = async (
+  propertyId: number,
+  { signal }: PgReadOptions = {},
+): Promise<PropertySource[]> => {
+  const { data } = await pgRead<PropertySource[] | null>(
+    supabase
+      .from('property_sources_public')
+      .select(
+        'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+      )
+      .eq('property_id', propertyId)
+      .order('first_seen_at', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* Price snapshots of the given adverts (the property page reads its canonical
@@ -1553,15 +1584,18 @@ export const fetchPropertySources = async (propertyId: number): Promise<Property
  * advert has a NULL sreality_id, and the chart would silently go empty. */
 export const fetchSnapshotsForListings = async (
   ids: number[],
+  { signal }: PgReadOptions = {},
 ): Promise<ListingSnapshotPublic[]> => {
   if (ids.length === 0) return [];
-  const { data, error } = await supabase
-    .from('listing_snapshots_public')
-    .select('id,sreality_id,listing_id,scraped_at,price_czk,description')
-    .in('listing_id', ids)
-    .order('scraped_at', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as ListingSnapshotPublic[];
+  const { data } = await pgRead<ListingSnapshotPublic[] | null>(
+    supabase
+      .from('listing_snapshots_public')
+      .select('id,sreality_id,listing_id,scraped_at,price_czk,description')
+      .in('listing_id', ids)
+      .order('scraped_at', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* Property-grain activity log driving the price-history chart's inactive-
@@ -1570,26 +1604,32 @@ export const fetchSnapshotsForListings = async (
  * priceHistory.buildActiveWindows). */
 export const fetchPropertyStatusEvents = async (
   propertyId: number,
+  { signal }: PgReadOptions = {},
 ): Promise<PropertyStatusEventPublic[]> => {
-  const { data, error } = await supabase
-    .from('property_status_events_public')
-    .select('property_id,is_active,event_at')
-    .eq('property_id', propertyId)
-    .order('event_at', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as PropertyStatusEventPublic[];
+  const { data } = await pgRead<PropertyStatusEventPublic[] | null>(
+    supabase
+      .from('property_status_events_public')
+      .select('property_id,is_active,event_at')
+      .eq('property_id', propertyId)
+      .order('event_at', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export const fetchFreshnessChecksByListing = async (
   sreality_id: number,
+  { signal }: PgReadOptions = {},
 ): Promise<ListingFreshnessCheckPublic[]> => {
-  const { data, error } = await supabase
-    .from('listing_freshness_checks_public')
-    .select('id,sreality_id,checked_at,outcome')
-    .eq('sreality_id', sreality_id)
-    .order('checked_at', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
+  const { data } = await pgRead<ListingFreshnessCheckPublic[] | null>(
+    supabase
+      .from('listing_freshness_checks_public')
+      .select('id,sreality_id,checked_at,outcome')
+      .eq('sreality_id', sreality_id)
+      .order('checked_at', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* Batch fetch of the listings_public rows behind a set of comparables.
@@ -1599,15 +1639,15 @@ export const fetchFreshnessChecksByListing = async (
  * the renderer. */
 export const fetchListingsByIds = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ListingPublic>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DETAIL_COLS)
-    .in('sreality_id', ids as number[]);
-  if (error) throw error;
+  const { data } = await pgRead<ListingPublic[] | null>(
+    supabase.from('listings_public').select(DETAIL_COLS).in('sreality_id', ids as number[]),
+    { signal },
+  );
   const out = new Map<number, ListingPublic>();
-  for (const row of (data ?? []) as unknown as ListingPublic[]) {
+  for (const row of data ?? []) {
     // Non-null by construction: the select above filters on sreality_id, so a
     // NULL-sreality row cannot be in `data`.
     out.set(row.sreality_id!, row);
@@ -1622,15 +1662,15 @@ export const fetchListingsByIds = async (
  * must be fetched through instead, mirroring fetchImagesForListingIds. */
 export const fetchListingsForListingIds = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ListingPublic>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DETAIL_COLS)
-    .in('id', ids as number[]);
-  if (error) throw error;
+  const { data } = await pgRead<ListingPublic[] | null>(
+    supabase.from('listings_public').select(DETAIL_COLS).in('id', ids as number[]),
+    { signal },
+  );
   const out = new Map<number, ListingPublic>();
-  for (const row of (data ?? []) as unknown as ListingPublic[]) {
+  for (const row of data ?? []) {
     out.set(row.id, row);
   }
   return out;
@@ -1658,17 +1698,20 @@ const IMAGE_PUBLIC_COLS =
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ImagePublic[]>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('images_public')
-    .select(IMAGE_PUBLIC_COLS)
-    .in('sreality_id', ids as number[])
-    .order('sequence', { ascending: true, nullsFirst: false })
-    .order('id', { ascending: true });
-  if (error) throw error;
+  const { data } = await pgRead<ImagePublic[] | null>(
+    supabase
+      .from('images_public')
+      .select(IMAGE_PUBLIC_COLS)
+      .in('sreality_id', ids as number[])
+      .order('sequence', { ascending: true, nullsFirst: false })
+      .order('id', { ascending: true }),
+    { signal },
+  );
   const out = new Map<number, ImagePublic[]>();
-  for (const row of (data ?? []) as unknown as ImagePublic[]) {
+  for (const row of data ?? []) {
     const arr = out.get(row.sreality_id);
     if (arr) {
       if (arr.length < perId) arr.push(row);
@@ -1686,17 +1729,20 @@ export const fetchImagesByListingIds = async (
 export const fetchImagesForListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ImagePublic[]>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('images_public')
-    .select(`${IMAGE_PUBLIC_COLS},listing_id`)
-    .in('listing_id', ids as number[])
-    .order('sequence', { ascending: true, nullsFirst: false })
-    .order('id', { ascending: true });
-  if (error) throw error;
+  const { data } = await pgRead<Array<ImagePublic & { listing_id: number }> | null>(
+    supabase
+      .from('images_public')
+      .select(`${IMAGE_PUBLIC_COLS},listing_id`)
+      .in('listing_id', ids as number[])
+      .order('sequence', { ascending: true, nullsFirst: false })
+      .order('id', { ascending: true }),
+    { signal },
+  );
   const out = new Map<number, ImagePublic[]>();
-  for (const row of (data ?? []) as unknown as Array<ImagePublic & { listing_id: number }>) {
+  for (const row of data ?? []) {
     const arr = out.get(row.listing_id);
     if (arr) {
       if (arr.length < perId) arr.push(row);
@@ -1721,15 +1767,18 @@ export const fetchImagesForListingIds = async (
  * at this view is therefore not a drop-in. */
 export const fetchListingCovers = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ImagePublic>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listing_cover_public')
-    .select(`${IMAGE_PUBLIC_COLS},listing_id`)
-    .in('listing_id', ids as number[]);
-  if (error) throw error;
+  const { data } = await pgRead<Array<ImagePublic & { listing_id: number }> | null>(
+    supabase
+      .from('listing_cover_public')
+      .select(`${IMAGE_PUBLIC_COLS},listing_id`)
+      .in('listing_id', ids as number[]),
+    { signal },
+  );
   const out = new Map<number, ImagePublic>();
-  for (const row of (data ?? []) as unknown as Array<ImagePublic & { listing_id: number }>) {
+  for (const row of data ?? []) {
     out.set(row.listing_id, row);
   }
   return out;
@@ -1741,19 +1790,22 @@ export const fetchListingCovers = async (
  * several portals, which is exactly what the chips show. */
 export const fetchPropertySourcesByPropertyIds = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, PropertySource[]>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('property_sources_public')
-    .select(
-      'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
-    )
-    .in('property_id', ids as number[])
-    .order('is_active', { ascending: false })
-    .order('first_seen_at', { ascending: true });
-  if (error) throw error;
+  const { data } = await pgRead<PropertySource[] | null>(
+    supabase
+      .from('property_sources_public')
+      .select(
+        'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+      )
+      .in('property_id', ids as number[])
+      .order('is_active', { ascending: false })
+      .order('first_seen_at', { ascending: true }),
+    { signal },
+  );
   const out = new Map<number, PropertySource[]>();
-  for (const row of (data ?? []) as unknown as PropertySource[]) {
+  for (const row of data ?? []) {
     const arr = out.get(row.property_id);
     if (arr) arr.push(row);
     else out.set(row.property_id, [row]);
@@ -1767,29 +1819,29 @@ export const fetchPropertySourcesByPropertyIds = async (
  * tri-state in the annotation matrix. */
 export const fetchBorderCasesByImageIds = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Set<number>> => {
   if (ids.length === 0) return new Set();
-  const { data, error } = await supabase
-    .from('image_border_cases_public')
-    .select('image_id')
-    .in('image_id', ids as number[]);
-  if (error) throw error;
-  return new Set((data ?? []).map((r) => (r as BorderCase).image_id));
+  const { data } = await pgRead<BorderCase[] | null>(
+    supabase.from('image_border_cases_public').select('image_id').in('image_id', ids as number[]),
+    { signal },
+  );
+  return new Set((data ?? []).map((r) => r.image_id));
 };
 
 /* The images behind a set of annotations. Sibling of fetchImagesByListingIds —
  * same view and columns, keyed on the image's own id instead of its listing's. */
 export const fetchImagesByImageIds = async (
   ids: ReadonlyArray<number>,
+  { signal }: PgReadOptions = {},
 ): Promise<Map<number, ImagePublic>> => {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('images_public')
-    .select(IMAGE_PUBLIC_COLS)
-    .in('id', ids as number[]);
-  if (error) throw error;
+  const { data } = await pgRead<ImagePublic[] | null>(
+    supabase.from('images_public').select(IMAGE_PUBLIC_COLS).in('id', ids as number[]),
+    { signal },
+  );
   const out = new Map<number, ImagePublic>();
-  for (const row of (data ?? []) as unknown as ImagePublic[]) out.set(row.id, row);
+  for (const row of data ?? []) out.set(row.id, row);
   return out;
 };
 
@@ -1804,8 +1856,9 @@ export const fetchImagesByImageIds = async (
  * the lightbox. */
 export const fetchImagesByListing = async (
   listing_id: number,
+  { signal }: PgReadOptions = {},
 ): Promise<ImagePublic[]> => {
-  const byListing = await fetchImagesForListingIds([listing_id], Infinity);
+  const byListing = await fetchImagesForListingIds([listing_id], Infinity, { signal });
   return byListing.get(listing_id) ?? [];
 };
 
@@ -1846,6 +1899,7 @@ export const fetchSoldComparables = async (
   lng: number,
   radiusM: number,
   filters: Record<string, unknown>,
+  { signal }: PgReadOptions = {},
 ): Promise<SoldComparable[]> => {
   const q = supabase
     .rpc('sold_comparables', { p_lat: lat, p_lng: lng, p_radius_m: radiusM }, { get: true })
@@ -1854,79 +1908,99 @@ export const fetchSoldComparables = async (
     .order('sold_at', { ascending: false })
     .order('source_record_id', { ascending: true })
     .limit(SOLD_COMPS_LIMIT + 1);
-  const { data, error } = await applyAgendaFilters(q, 'sold', (id) => filters[id]);
-  if (error) throw error;
-  return (data ?? []) as unknown as SoldComparable[];
+  const { data } = await pgRead<SoldComparable[] | null>(
+    applyAgendaFilters(q, 'sold', (id) => filters[id]),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export const fetchSoldCoverage = async (
   lat: number,
   lng: number,
+  { signal }: PgReadOptions = {},
 ): Promise<SoldCoverage | null> => {
-  const { data, error } = await supabase
-    .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
-    .select(
-      'obec_kod,obec_name,fetched_at,record_count,source_total,truncated,' +
-        'last_attempt_at,last_attempt_status',
-    );
-  if (error) throw error;
+  const { data } = await pgRead<SoldCoverage[] | null>(
+    supabase
+      .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
+      .select(
+        'obec_kod,obec_name,fetched_at,record_count,source_total,truncated,' +
+          'last_attempt_at,last_attempt_status',
+      ),
+    { signal },
+  );
   /* No row means the point is in no municipality we hold a boundary for; a row
    * with a null `fetched_at` means nobody has ever successfully looked there.
    * Both differ from `record_count: 0`, and the block says which. */
-  return ((data ?? []) as unknown as SoldCoverage[])[0] ?? null;
+  return (data ?? [])[0] ?? null;
 };
 
 /* -------------------------------------------------------------------------- */
 /* Health dashboard (Part E) — calls migration 013 health_summary RPC         */
 /* -------------------------------------------------------------------------- */
 
-export const fetchHealthSummary = async (): Promise<HealthSummary> => {
-  const { data, error } = await supabase.rpc('health_summary');
-  if (error) throw error;
-  return data as HealthSummary;
-};
+export const fetchHealthSummary = async (
+  { signal }: PgReadOptions = {},
+): Promise<HealthSummary> =>
+  (await pgRead<HealthSummary>(supabase.rpc('health_summary'), { signal })).data;
 
 export const fetchRecentScrapeRuns = async (
   days: number = 14,
+  { signal }: PgReadOptions = {},
 ): Promise<ScrapeRun[]> => {
-  const { data, error } = await supabase.rpc('recent_scrape_runs', { p_days: days });
-  if (error) throw error;
-  return (data ?? []) as ScrapeRun[];
+  const { data } = await pgRead<ScrapeRun[] | null>(
+    supabase.rpc('recent_scrape_runs', { p_days: days }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export const fetchCategoryTrends = async (
   source: string = 'sreality',
+  { signal }: PgReadOptions = {},
 ): Promise<CategoryTrend[]> => {
-  const { data, error } = await supabase.rpc('category_trends', { p_source: source });
-  if (error) throw error;
-  return (data ?? []) as CategoryTrend[];
+  const { data } = await pgRead<CategoryTrend[] | null>(
+    supabase.rpc('category_trends', { p_source: source }),
+    { signal },
+  );
+  return data ?? [];
 };
 
-export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview> => {
-  const { data, error } = await supabase.rpc('image_storage_overview');
-  if (error) throw error;
-  return data as ImageStorageOverview;
+export const fetchImageStorageOverview = async (
+  { signal }: PgReadOptions = {},
+): Promise<ImageStorageOverview> =>
+  (await pgRead<ImageStorageOverview>(supabase.rpc('image_storage_overview'), { signal })).data;
+
+export const fetchImagesFailureOverview = async (
+  { signal }: PgReadOptions = {},
+): Promise<ImageFailureRow[]> => {
+  const { data } = await pgRead<ImageFailureRow[] | null>(
+    supabase.rpc('images_failure_overview'),
+    { signal },
+  );
+  return data ?? [];
 };
 
-export const fetchImagesFailureOverview = async (): Promise<ImageFailureRow[]> => {
-  const { data, error } = await supabase.rpc('images_failure_overview');
-  if (error) throw error;
-  return (data ?? []) as ImageFailureRow[];
-};
-
-export const fetchPortalHealth = async (): Promise<PortalHealth[]> => {
-  const { data, error } = await supabase.rpc('portal_health_summary');
-  if (error) throw error;
-  return (data ?? []) as PortalHealth[];
+export const fetchPortalHealth = async (
+  { signal }: PgReadOptions = {},
+): Promise<PortalHealth[]> => {
+  const { data } = await pgRead<PortalHealth[] | null>(
+    supabase.rpc('portal_health_summary'),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export const fetchScraperHealthChecks = async (
   source: string = 'sreality',
-): Promise<ScraperHealthChecks> => {
-  const { data, error } = await supabase.rpc('scraper_health_checks', { p_source: source });
-  if (error) throw error;
-  return data as ScraperHealthChecks;
-};
+  { signal }: PgReadOptions = {},
+): Promise<ScraperHealthChecks> =>
+  (
+    await pgRead<ScraperHealthChecks>(
+      supabase.rpc('scraper_health_checks', { p_source: source }),
+      { signal },
+    )
+  ).data;
 
 /* Migration 274 — pipeline verification checks (latest row per check_key).
  * The DB stamps the ok/warn/fail status + a `value` whose unit is check-specific
@@ -1939,13 +2013,17 @@ export interface PipelineCheckRow {
   run_at: string | null;
 }
 
-export const fetchPipelineChecks = async (): Promise<PipelineCheckRow[]> => {
-  const { data, error } = await supabase
-    .from('pipeline_checks_public')
-    .select('check_key,status,value,details,run_at')
-    .order('check_key', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as PipelineCheckRow[];
+export const fetchPipelineChecks = async (
+  { signal }: PgReadOptions = {},
+): Promise<PipelineCheckRow[]> => {
+  const { data } = await pgRead<PipelineCheckRow[] | null>(
+    supabase
+      .from('pipeline_checks_public')
+      .select('check_key,status,value,details,run_at')
+      .order('check_key', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* Migration 437 — the derived-artifact registry: one row per matview / rollup
@@ -1958,15 +2036,19 @@ export const fetchPipelineChecks = async (): Promise<PipelineCheckRow[]> => {
  * over as strings on some paths — coerce both once, here, the way the cost
  * fetchers above do. `staleness_budget` stays a string on purpose;
  * lib/derivedArtifacts parses the interval. */
-export const fetchDerivedArtifacts = async (): Promise<DerivedArtifactRow[]> => {
-  const { data, error } = await supabase
-    .from('derived_artifacts_public')
-    .select(
-      'name,producer,host,cadence,staleness_budget,complete_through,last_succeeded_at,last_duration_ms,last_rows,is_serving',
-    )
-    .order('name', { ascending: true });
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
+export const fetchDerivedArtifacts = async (
+  { signal }: PgReadOptions = {},
+): Promise<DerivedArtifactRow[]> => {
+  const { data } = await pgRead<Record<string, unknown>[] | null>(
+    supabase
+      .from('derived_artifacts_public')
+      .select(
+        'name,producer,host,cadence,staleness_budget,complete_through,last_succeeded_at,last_duration_ms,last_rows,is_serving',
+      )
+      .order('name', { ascending: true }),
+    { signal },
+  );
+  return (data ?? []).map((r) => ({
     name: String(r.name),
     producer: String(r.producer),
     host: String(r.host),
@@ -1991,10 +2073,13 @@ export interface WorkflowFailureRow {
 
 export const fetchRecentWorkflowFailures = async (
   hours: number = 48,
+  { signal }: PgReadOptions = {},
 ): Promise<WorkflowFailureRow[]> => {
-  const { data, error } = await supabase.rpc('recent_workflow_failures', { p_hours: hours });
-  if (error) throw error;
-  return (data ?? []) as WorkflowFailureRow[];
+  const { data } = await pgRead<WorkflowFailureRow[] | null>(
+    supabase.rpc('recent_workflow_failures', { p_hours: hours }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* Migration 220 — streak-aware per-workflow failure summary. One row per
@@ -2016,17 +2101,13 @@ export interface WorkflowFailureSummaryRow {
 
 export const fetchWorkflowFailureSummary = async (
   hours: number = 168,
+  { signal }: PgReadOptions = {},
 ): Promise<WorkflowFailureSummaryRow[]> => {
-  const { data, error } = await supabase.rpc('workflow_failure_summary', { p_hours: hours });
-  if (error) throw error;
-  return (data ?? []) as WorkflowFailureSummaryRow[];
-};
-
-export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {
-  const { count, error } = await supabase
-    .from('listings_public')
-    .select('*', { count: 'exact', head: true });
-  return { ok: !error, count: count ?? null };
+  const { data } = await pgRead<WorkflowFailureSummaryRow[] | null>(
+    supabase.rpc('workflow_failure_summary', { p_hours: hours }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2082,7 +2163,9 @@ export const cityQualityKeys = {
   values: ['city_index_values'] as const,
 };
 
-export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
+export const fetchCuratedCities = async (
+  { signal }: PgReadOptions = {},
+): Promise<CuratedCity[]> => {
   /* 205 rows today; operator uploads grow the set. Two obce can share a name
    * (see the same-name-obce price-stats fix), hence the city_id tiebreak. */
   return await fetchAllRows<CuratedCity>({
@@ -2091,10 +2174,13 @@ export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
     orderBy: [{ column: 'name' }, { column: 'city_id' }],
     key: ['city_id'],
     expectMax: 25_000,
+    signal,
   });
 };
 
-export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]> => {
+export const fetchCityIndexDefinitions = async (
+  { signal }: PgReadOptions = {},
+): Promise<CityIndexDefinition[]> => {
   /* ~33 rows today, operator additions grow it. Display order is sort_order,
    * applied by the consumers — the fetch orders by the unique name for paging. */
   return await fetchAllRows<CityIndexDefinition>({
@@ -2104,10 +2190,13 @@ export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]
     orderBy: [{ column: 'index_name' }],
     key: ['index_name'],
     expectMax: 25_000,
+    signal,
   });
 };
 
-export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
+export const fetchCityIndexValues = async (
+  { signal }: PgReadOptions = {},
+): Promise<CityIndexValue[]> => {
   /* 205 cities × 33 indexes = 6,798 rows. This read shipped THE truncation bug
    * fetchAllRows exists to kill (only the first ~32 cities came back under the
    * then-1,000-row db-max-rows; Dobříš showed em-dashes for every index).
@@ -2121,6 +2210,7 @@ export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
     orderBy: [{ column: 'city_id' }, { column: 'index_name' }],
     key: ['city_id', 'index_name'],
     expectMax: 100_000,
+    signal,
   });
 };
 
@@ -2129,7 +2219,9 @@ export interface CityPolygon {
   geojson: string;
 }
 
-export const fetchCuratedCityPolygons = async (): Promise<CityPolygon[]> => {
+export const fetchCuratedCityPolygons = async (
+  { signal }: PgReadOptions = {},
+): Promise<CityPolygon[]> => {
   /* One simplified municipality boundary per curated city (205 rows).
    * `geojson` is the raw ST_AsGeoJSON string the map JSON.parses into a
    * Feature geometry — the same contract as rent_map_choropleth_public.
@@ -2144,6 +2236,7 @@ export const fetchCuratedCityPolygons = async (): Promise<CityPolygon[]> => {
     orderBy: [{ column: 'city_id' }],
     key: ['city_id'],
     expectMax: 25_000,
+    signal,
   });
 };
 
@@ -2174,7 +2267,9 @@ export interface RentMapKraj {
   geojson: string;
 }
 
-export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
+export const fetchRentMapChoropleth = async (
+  { signal }: PgReadOptions = {},
+): Promise<RentMapPolygon[]> => {
   /* ~7,630 rows (one per obec / katastrální území) — the OTHER read that
    * shipped the db-max-rows truncation bug (see fetchAllRows' header).
    * Fetched once and cached (staleTime: Infinity), so the handful of pages
@@ -2186,10 +2281,13 @@ export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
     orderBy: [{ column: 'ruian_code' }],
     key: ['ruian_code'],
     expectMax: 100_000,
+    signal,
   });
 };
 
-export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
+export const fetchRentMapKraje = async (
+  { signal }: PgReadOptions = {},
+): Promise<RentMapKraj[]> => {
   /* 14 kraje — fixed by geography. */
   return await fetchAllRows<RentMapKraj>({
     relation: 'rent_map_kraje_public',
@@ -2197,6 +2295,7 @@ export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
     orderBy: [{ column: 'ruian_code' }],
     key: ['ruian_code'],
     expectMax: 1_000,
+    signal,
   });
 };
 
@@ -2302,13 +2401,13 @@ export const useUrlPreview = (): UseMutationResult<
 
 export const fetchPropertyTagIds = async (
   property_id: number,
+  { signal }: PgReadOptions = {},
 ): Promise<number[]> => {
-  const { data, error } = await supabase
-    .from('property_tags_public')
-    .select('tag_id')
-    .eq('property_id', property_id);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ tag_id: number }>).map((r) => r.tag_id);
+  const { data } = await pgRead<Array<{ tag_id: number }> | null>(
+    supabase.from('property_tags_public').select('tag_id').eq('property_id', property_id),
+    { signal },
+  );
+  return (data ?? []).map((r) => r.tag_id);
 };
 
 /* All (property_id → collection_ids) memberships in ONE read, shared (React
@@ -2324,9 +2423,9 @@ export const fetchPropertyTagIds = async (
  * than resolving a truncated map, so an outgrown map can never read as a
  * smaller one — though consumers still render a REJECTED read as "no
  * membership", a fail-open that predates W1. */
-export const fetchPropertyCollectionMemberSet = async (): Promise<
-  Map<number, number[]>
-> => {
+export const fetchPropertyCollectionMemberSet = async (
+  { signal }: PgReadOptions = {},
+): Promise<Map<number, number[]>> => {
   const rows = await fetchAllRows<{ property_id: number; collection_id: number }>({
     relation: 'collection_properties_public',
     build: () =>
@@ -2336,6 +2435,7 @@ export const fetchPropertyCollectionMemberSet = async (): Promise<
     orderBy: [{ column: 'property_id' }, { column: 'collection_id' }],
     key: ['property_id', 'collection_id'],
     expectMax: 100_000,
+    signal,
   });
   const map = new Map<number, number[]>();
   for (const r of rows) {
@@ -2419,12 +2519,12 @@ async function flushDismissalBatch(): Promise<void> {
     const settle = (fn: (w: DismissalWaiter, id: number) => void) =>
       chunk.forEach((id) => batch.get(id)?.forEach((w) => fn(w, id)));
     try {
-      const { data, error } = await supabase
-        .from('property_dismissals_public')
-        .select('property_id')
-        .in('property_id', chunk);
-      if (error) throw error;
-      const hit = new Set((data ?? []).map((r) => (r as { property_id: number }).property_id));
+      /* No signal, deliberately: one read answers many queries, so one
+       * observer's cancel must not fail the others. The deadline still holds. */
+      const { data } = await pgRead<Array<{ property_id: number }> | null>(
+        supabase.from('property_dismissals_public').select('property_id').in('property_id', chunk),
+      );
+      const hit = new Set((data ?? []).map((r) => r.property_id));
       settle((w, id) => w.resolve(hit.has(id)));
     } catch (e) {
       settle((w) => w.reject(e));
@@ -2445,11 +2545,13 @@ export const fetchIsDismissed = (property_id: number): Promise<boolean> =>
 
 /* How many properties the caller has dismissed (migration 536). Only a gate —
  * a property two of the caller's accounts dismissed counts twice. */
-export const fetchDismissedCount = async (): Promise<number> => {
-  const { count, error } = await supabase
-    .from('property_dismissals_public')
-    .select('property_id', { count: 'exact', head: true });
-  if (error) throw error;
+export const fetchDismissedCount = async (
+  { signal }: PgReadOptions = {},
+): Promise<number> => {
+  const { count } = await pgRead(
+    supabase.from('property_dismissals_public').select('property_id', { count: 'exact', head: true }),
+    { signal },
+  );
   return count ?? 0;
 };
 
@@ -2478,7 +2580,9 @@ export interface PipelineMembership {
 
 export type PipelineMembers = Map<number, PipelineMembership>;
 
-export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
+export const fetchPipelineMembers = async (
+  { signal }: PgReadOptions = {},
+): Promise<PipelineMembers> => {
   const rows = await fetchAllRows<PipelineMembership>({
     relation: 'property_pipeline_public',
     build: () =>
@@ -2491,21 +2595,26 @@ export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
     orderBy: [{ column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
+    signal,
   });
   return new Map(rows.map((r) => [r.property_id, r]));
 };
 
-export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
-  const { data, error } = await supabase
-    .from('pipeline_stages_public')
-    /* `code` too (migration 377): the stage menu badges every row from this
-     * list, and the stage editor pre-fills its code box from it — omitting the
-     * column rendered every existing code as blank, inviting the operator to
-     * overwrite intentional badges (three stages deliberately share "9"). */
-    .select('id, key, label, position, color, is_terminal, is_entry, code')
-    .order('position');
-  if (error) throw error;
-  return (data ?? []) as PipelineStage[];
+export const fetchPipelineStages = async (
+  { signal }: PgReadOptions = {},
+): Promise<PipelineStage[]> => {
+  const { data } = await pgRead<PipelineStage[] | null>(
+    supabase
+      .from('pipeline_stages_public')
+      /* `code` too (migration 377): the stage menu badges every row from this
+       * list, and the stage editor pre-fills its code box from it — omitting the
+       * column rendered every existing code as blank, inviting the operator to
+       * overwrite intentional badges (three stages deliberately share "9"). */
+      .select('id, key, label, position, color, is_terminal, is_entry, code')
+      .order('position'),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* The kanban's STRUCTURAL read: which property sits in which stage, plus the
@@ -2524,7 +2633,9 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
  * lines arrive behind it. Anything added to a card from here on is a
  * decoration until proven structural: if the board cannot filter, sort or
  * place a card without it, it does not belong in this queryFn. */
-export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
+export const fetchPipelineBoard = async (
+  { signal }: PgReadOptions = {},
+): Promise<PipelineBoardCard[]> => {
   /* board_position is the MANUAL order and stays the default sort, but it is
    * not unique — it is assigned max+1 within the entry stage at bookmark time
    * and never renumbered on a stage move, so live data has collisions WITHIN
@@ -2538,6 +2649,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     orderBy: [{ column: 'board_position' }, { column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
+    signal,
   });
   return composePipelineCards(rows);
 };
@@ -2575,16 +2687,21 @@ export const pipelineCardBroker = (
 /* Daily × feature × model spend aggregates from `llm_cost_daily_public`
  * (migration 280). numeric/bigint arrive as strings from PostgREST in
  * some paths — coerce every measure to a number once, here. */
-export const fetchLlmCostDaily = async (days: number): Promise<LlmCostDailyRow[]> => {
+export const fetchLlmCostDaily = async (
+  days: number,
+  { signal }: PgReadOptions = {},
+): Promise<LlmCostDailyRow[]> => {
   const from = new Date();
   from.setUTCDate(from.getUTCDate() - days);
-  const { data, error } = await supabase
-    .from('llm_cost_daily_public')
-    .select('*')
-    .gte('day', from.toISOString().slice(0, 10))
-    .order('day', { ascending: true });
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
+  const { data } = await pgRead<Record<string, unknown>[] | null>(
+    supabase
+      .from('llm_cost_daily_public')
+      .select('*')
+      .gte('day', from.toISOString().slice(0, 10))
+      .order('day', { ascending: true }),
+    { signal },
+  );
+  return (data ?? []).map((r) => ({
     day: String(r.day),
     called_for: String(r.called_for),
     provider: String(r.provider),
@@ -2602,17 +2719,22 @@ export const fetchLlmCostDaily = async (days: number): Promise<LlmCostDailyRow[]
 /* Hour-grain twin from `llm_cost_hourly_public` (migration 281); the
  * bucket timestamptz is normalized to a canonical ISO so client-side
  * zero-filling can key on exact string equality. */
-export const fetchLlmCostHourly = async (hours: number): Promise<LlmCostHourlyRow[]> => {
+export const fetchLlmCostHourly = async (
+  hours: number,
+  { signal }: PgReadOptions = {},
+): Promise<LlmCostHourlyRow[]> => {
   const from = new Date();
   from.setUTCMinutes(0, 0, 0);
   from.setUTCHours(from.getUTCHours() - hours);
-  const { data, error } = await supabase
-    .from('llm_cost_hourly_public')
-    .select('*')
-    .gte('bucket', from.toISOString())
-    .order('bucket', { ascending: true });
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
+  const { data } = await pgRead<Record<string, unknown>[] | null>(
+    supabase
+      .from('llm_cost_hourly_public')
+      .select('*')
+      .gte('bucket', from.toISOString())
+      .order('bucket', { ascending: true }),
+    { signal },
+  );
+  return (data ?? []).map((r) => ({
     bucket: new Date(String(r.bucket)).toISOString(),
     called_for: String(r.called_for),
     provider: String(r.provider),

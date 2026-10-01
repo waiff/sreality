@@ -228,9 +228,10 @@ describe('<AutodedupProposedSplits> the cards', () => {
     ).toBeInTheDocument();
     expect(within(shot).getByText('Skupina 1 · zůstává')).toBeInTheDocument();
     expect(within(shot).getByText('Skupina 2 · oddělit')).toBeInTheDocument();
-    expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith([
-      101, 202, 303, 111, 112, 113, 461, 462, 463, 401, 402, 403, 701, 702,
-    ]);
+    expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith(
+      [101, 202, 303, 111, 112, 113, 461, 462, 463, 401, 402, 403, 701, 702],
+      expect.anything(),
+    );
 
     // a proposed group of two now leaves whole
     expect([tick(44, 112).checked, tick(44, 113).checked]).toEqual([true, true]);

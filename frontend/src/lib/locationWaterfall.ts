@@ -31,6 +31,7 @@
  */
 
 import { supabase } from '@/lib/supabase';
+import { pgRead, type PgReadOptions } from '@/lib/pgRead';
 
 export const WATERFALL_RELATION = 'location_audit_waterfall';
 
@@ -60,14 +61,18 @@ const COLS = [
 
 export const WATERFALL_KEY = ['location-waterfall'] as const;
 
-export const fetchLocationWaterfall = async (): Promise<WaterfallRow[]> => {
-  const { data, error } = await supabase
-    .from(WATERFALL_RELATION)
-    .select(COLS)
-    .order('step_no', { ascending: true })
-    .order('sub_no', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as WaterfallRow[];
+export const fetchLocationWaterfall = async (
+  { signal }: PgReadOptions = {},
+): Promise<WaterfallRow[]> => {
+  const { data } = await pgRead<WaterfallRow[] | null>(
+    supabase
+      .from(WATERFALL_RELATION)
+      .select(COLS)
+      .order('step_no', { ascending: true })
+      .order('sub_no', { ascending: true }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export interface WaterfallStep {

@@ -1,7 +1,7 @@
 """FastAPI service exposing the analytical toolkit + estimate_yield.
 
-Routes return the standard toolkit envelope verbatim. No bespoke
-response shaping; the agent layer consumes the dicts directly.
+Tool routes return the standard toolkit envelope verbatim for the agent
+layer; non-tool routes (e.g. GET /estimations/preview) shape their own.
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
 
 
 # Hide the interactive docs + machine-readable schema in prod (openapi_url=None
-# disables Swagger/ReDoc too) so the ~169-route inventory isn't publicly
+# disables Swagger/ReDoc too) so the route inventory isn't publicly
 # enumerable. Opt back in with API_DOCS_ENABLED=1 for local exploration.
 _docs_enabled = os.environ.get("API_DOCS_ENABLED") == "1"
 app = FastAPI(

@@ -17,6 +17,7 @@ vi.mock('./supabase', () => {
     const call = { relation, select: '', eq: [] as Array<[string, unknown]> };
     h.reads.push(call);
     const rows = () => h.tables[relation] ?? [];
+    let single = false;
     const b: Record<string, unknown> = {
       select: (cols: string) => {
         call.select = cols;
@@ -27,8 +28,14 @@ vi.mock('./supabase', () => {
         call.eq.push([col, val]);
         return b;
       },
-      maybeSingle: () => Promise.resolve({ data: rows()[0] ?? null, error: null }),
-      then: (resolve: (r: unknown) => unknown) => resolve({ data: rows(), error: null }),
+      retry: () => b,
+      abortSignal: () => b,
+      maybeSingle: () => {
+        single = true;
+        return b;
+      },
+      then: (resolve: (r: unknown) => unknown) =>
+        resolve({ data: single ? rows()[0] ?? null : rows(), error: null, status: 200 }),
     };
     return b;
   };

@@ -1,14 +1,14 @@
 """Orchestrator for the ceskereality.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.ceskereality_main`. ceskereality is a `Portal`
-(CeskerealityPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages the HTML search results and enqueues new/price-changed ids
-into the shared `listing_detail_queue` (source='ceskereality', migration 108),
-then a detail-drain that fetches each listing page, parses it to a
-`ScrapedListing`, and writes it via `listing_write.write_listings` (the one listing
-write). No bespoke pipeline — only the per-portal fetcher
-(CeskerealityClient) + parser (ceskereality_parser) + config differ from
-sreality/idnes (the modularity rule in CLAUDE.md).
+(CeskerealityPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` (and its bespoke `probe_category`, rule #21) pages the HTML
+search results and enqueues new/price-changed ids into the shared
+`listing_detail_queue` (source='ceskereality', migration 108); the shared
+detail-drain fetches each listing page (CeskerealityClient), parses it to a
+`ScrapedListing` (ceskereality_parser), and writes via
+`listing_write.write_listings` (the one listing write; a first-seen row lands
+`property_id` NULL and the straggler-attach births its singleton, rule #15).
 
 ceskereality's search pages carry a result total (the meta "Máme tady N…"), and a
 FILTERED search URL pages deep and row-faithfully (verified: /prodej/byty/praha/

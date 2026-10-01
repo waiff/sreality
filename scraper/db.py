@@ -1327,6 +1327,10 @@ def mark_inactive(
 ) -> int:
     """Mark listings of this category not in seen_ids as is_active=false.
 
+    RETIRED with `mark_inactive_native` / `mark_inactive_agenda`: no production
+    caller since 2026-09-07 — index absence only nominates a page check
+    (`portal_runner._queue_presence_checks`, rule #3); only tests call these.
+
     Scoped to (source, category_main, category_type) so a per-category index
     walk only flips its own slice. Without the category scope, scraping rentals
     would clobber sales `is_active`; without the source scope, a sreality walk
@@ -1334,8 +1338,7 @@ def mark_inactive(
     are never in sreality's seen_ids) — see architectural rule #15.
 
     `min_unseen_hours` additionally restricts the flip to rows whose
-    last_seen_at is older than that many hours — the staleness rail that keeps
-    a single walk's index hiccup from delisting a row touched by a recent walk.
+    last_seen_at is older than that many hours (the retired staleness rail).
     """
     if not seen_ids:
         return 0
@@ -1414,8 +1417,8 @@ def mark_listing_inactive(
     """Flip a single listing to is_active=false.
 
     Used when a detail fetch reports the listing is gone (404/410 or
-    sreality's 'page does not exist' body) — a delisting detected mid-run,
-    independent of the end-of-walk index-absence sweep in mark_inactive.
+    sreality's 'page does not exist' body) — the page-verified flip rule #3
+    relies on (the index-absence sweep in `mark_inactive` is retired).
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(

@@ -1,11 +1,6 @@
-"""The page-reader half of the ONE claim lane — evidence discipline, the licence ladder
+"""The page-reader half of the ONE claim lane — the stamping rails, the licence ladder
 on the stored body, the readers themselves, and the R2 fetch.
 
-  * EVIDENCE. Migration 382's `loc_claim_text_evidence` / `loc_claim_evidence_payload` are
-    the LAST line of defence. A batch is one transaction, so a single malformed claim rolls
-    back every good claim beside it — and the DB's error names a constraint, not the entry.
-    `assert_evidence_complete` must refuse first, and `test_the_python_validator_requires_
-    exactly_what_the_db_check_requires` reads the applied DDL so the two cannot drift.
   * THE LADDER. The licence class is read off the page's own provenance — the veto that
     used to ride on `mapy_affected` membership went with the geocoder in W4-b — and C6's
     licence spellings are pinned against the enum.
@@ -45,15 +40,12 @@ from location_data.claims_intake import (
 )
 from location_data.html_scope import ScopeRegister, scope_html
 from location_data.page_readers import (
-    ARCHIVE_ANCHOR,
-    ARCHIVE_HISTORY_COMPLETENESS,
     ARCHIVE_SURFACE,
     PAGE_READERS,
     POSITION_BRANCH_PORTAL_GEOCODED,
     POSITION_BRANCH_PORTAL_PIN,
     ArchivedPayload,
     PageRead,
-    assert_evidence_complete,
     assert_stampable,
     extract_page,
     page_entries,
@@ -62,7 +54,6 @@ from location_data.page_readers import (
 
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-_MIGRATION_382 = (_ROOT / "migrations" / "382_location_w1_claims.sql").read_text("utf-8")
 
 OBSERVED_AT = datetime(2026, 8, 12, 9, 0, tzinfo=UTC)
 FETCHED_AT = datetime(2026, 8, 13, 4, 30, tzinfo=UTC)
@@ -101,8 +92,7 @@ def listing_row(**overrides: Any) -> ListingRow:
 
 def payload(**overrides: Any) -> ArchivedPayload:
     kwargs: dict[str, Any] = {
-        "id": 9001, "source": "remax", "source_id_native": "445781", "page_kind": "detail",
-        "payload_sha256": "ab" * 32, "first_observed_at": FETCHED_AT, "body": BODY,
+        "id": 9001, "page_kind": "detail", "first_observed_at": FETCHED_AT, "body": BODY,
     }
     kwargs.update(overrides)
     return ArchivedPayload(**kwargs)
@@ -116,76 +106,7 @@ def raw_claim(entry: Entry | None = None, **overrides: Any) -> Claim:
     return _base(entry, listing_row(), value_text="Krymská", **overrides)
 
 
-# ------------------------------------------------------------------ evidence discipline
-
-def _evidence_columns_in_check(constraint: str) -> set[str]:
-    body = re.search(
-        rf"constraint\s+{constraint}\s+check\s*\((.*?)\)\);?",
-        _MIGRATION_382, re.S | re.I)
-    assert body, f"{constraint} not found in migration 382"
-    return set(re.findall(r"\b(\w+) is not null", body.group(1), re.I))
-
-
-def test_the_python_validator_requires_exactly_what_the_db_check_requires():
-    """Read the APPLIED DDL, not the design prose. If a later migration widens
-    `loc_claim_text_evidence` this fails here rather than at 3 a.m. inside a batch."""
-    required = _evidence_columns_in_check("loc_claim_text_evidence")
-    assert required == {"evidence_quote", "span_start", "span_end",
-                        "payload_scope_version", "subject_scoped"}
-
-    complete = raw_claim(
-        archive_entry(extraction_method="regex_text"),
-        evidence_quote="Krymská", span_start=10, span_end=17,
-        payload_scope_version="html_scope@1:remax:deadbeefdeadbeef",
-        payload_sha256="ab" * 32, subject_scoped=True)
-    assert_evidence_complete(complete)
-
-    for column in sorted(required):
-        with pytest.raises(IntakeRefused) as excinfo:
-            assert_evidence_complete(replace(complete, **{column: None}))
-        assert column in str(excinfo.value)
-
-
-def test_a_regex_text_claim_with_no_evidence_at_all_is_refused_before_the_write():
-    """The headline: the CHECK is never the first line of defence."""
-    with pytest.raises(IntakeRefused) as excinfo:
-        assert_evidence_complete(raw_claim(archive_entry(extraction_method="regex_text")))
-    message = str(excinfo.value)
-    assert "evidence_quote" in message and "span_start" in message
-    assert "payload_scope_version" in message
-    assert "rx.det.street" in message, "the refusal must name the extractor, not a constraint"
-
-
-def test_a_regex_text_claim_needs_no_model():
-    """A deterministic regex has no model to attribute; `llm_text` is the reading
-    substrate's, never a page reader's (W3), so the page lane checks no model at all."""
-    assert_evidence_complete(raw_claim(
-        archive_entry(extraction_method="regex_text"),
-        evidence_quote="Krymská", span_start=10, span_end=17,
-        payload_scope_version="v", payload_sha256="ab" * 32, subject_scoped=True))
-
-
-def test_a_degenerate_span_is_refused():
-    for start, end in ((17, 17), (17, 10)):
-        with pytest.raises(IntakeRefused, match="span_end"):
-            assert_evidence_complete(raw_claim(
-                archive_entry(extraction_method="regex_text"),
-                evidence_quote="Krymská", span_start=start, span_end=end,
-                payload_scope_version="v", payload_sha256="ab" * 32, subject_scoped=True))
-
-
-def test_a_quote_without_a_payload_hash_is_refused_on_any_method():
-    """`loc_claim_evidence_payload` is not scoped to the text methods: a span is meaningless
-    without the document it indexes into, whoever produced it."""
-    with pytest.raises(IntakeRefused, match="payload_sha256"):
-        assert_evidence_complete(raw_claim(evidence_quote="Krymská", span_start=1, span_end=8))
-
-
-def test_a_structured_claim_needs_no_span():
-    """`loc_claim_text_evidence` binds `llm_text` / `regex_text` only — an
-    `html_selector_parse` read of an attribute has no sentence to quote."""
-    assert_evidence_complete(raw_claim())
-
+# ------------------------------------------------------------------ the stamping rails
 
 def test_blur_evidence_is_clamped_to_the_two_values_a_migration_may_write():
     """06 §6.6 rule 7: 'detected'/'both' are the collision detector's, and the column
@@ -205,57 +126,25 @@ def test_only_portal_and_odbl_may_be_emitted():
             assert_stampable(raw_claim(archive_entry(licence_class=value)))
 
 
-# ---------------------------------------------------------------- archived stamping (C9/C10/C4)
+# ---------------------------------------------------------------- archived stamping (C9/C10)
 
 def test_every_claim_is_stamped_archived_html_with_the_pages_own_page_kind():
-    stamped = stamp_page_claim(raw_claim(), payload(page_kind="index"),
-                                  scope_version="html_scope@1:remax:beef")
+    stamped = stamp_page_claim(raw_claim(), payload(page_kind="index"))
     assert stamped.surface == ARCHIVE_SURFACE == "archived_html"
     assert stamped.page_kind == "index", "C10: a body does not change what kind of page it is"
-    assert stamped.to_row()["snapshot_id"] is None
-    assert stamped.snapshot_anchor == ARCHIVE_ANCHOR == "unanchored_latest_fetch"
     assert stamped.first_observed_at == FETCHED_AT
-    assert stamped.payload_id == 9001
-    assert stamped.payload_sha256 == "ab" * 32
-    assert stamped.payload_scope_version == "html_scope@1:remax:beef"
-    assert stamped.history_completeness == ARCHIVE_HISTORY_COMPLETENESS
 
 
 def test_the_entry_keeps_its_published_locator_kind():
     """C9's whole point: the runtime maps the SURFACE, the contract is not rewritten."""
     entry = archive_entry(surface="embedded_json")
     assert entry.surface == "embedded_json"
-    assert stamp_page_claim(raw_claim(entry), payload(),
-                               scope_version="v").surface == "archived_html"
+    assert stamp_page_claim(raw_claim(entry), payload()).surface == "archived_html"
 
 
 def test_the_archive_page_kind_enum_member_stays_unused():
     with pytest.raises(IntakeRefused, match="archive"):
-        stamp_page_claim(raw_claim(), payload(page_kind="archive"), scope_version="v")
-
-
-def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
-    """`loc_claim_anchor`: snapshot_anchor='snapshot' <-> snapshot_id IS NOT NULL.
-
-    W3 (`location_data.claims_remine`) is the one lane that writes a real `snapshot_id`,
-    so the shared `Claim` and `_CLAIM_WRITE_SQL` both carry the column. THIS lane's
-    substrate is a latest-wins archived body with no snapshot to anchor to, so it leaves
-    the column NULL — which is exactly the side of the CHECK its `unanchored_latest_fetch`
-    anchor pairs with. Asserting the NULL is stronger than asserting the column's absence
-    was: it pins the value that actually reaches the constraint."""
-    anchor_check = re.search(r"constraint loc_claim_anchor check \((.*?)\)\);",
-                             _MIGRATION_382, re.S)
-    assert anchor_check
-    assert "snapshot_anchor <> 'snapshot' and snapshot_id is null" in anchor_check.group(1)
-    assert re.search(r"^\s*snapshot_id\s+bigint,\s*$", _MIGRATION_382, re.M), \
-        "the column must be nullable for the write to legally omit it"
-    stamped = stamp_page_claim(raw_claim(), payload(), scope_version="v")
-    assert stamped.snapshot_anchor != "snapshot"
-    assert stamped.to_row()["snapshot_id"] is None
-    # The shared writer carries the column (W3 fills it); this lane's contribution to the
-    # pairing is that it never stamps the 'snapshot' anchor, so its NULL is always legal.
-    assert "snapshot_id" in claims_intake._CLAIM_WRITE_SQL
-    assert ARCHIVE_ANCHOR != "snapshot"
+        stamp_page_claim(raw_claim(), payload(page_kind="archive"))
 
 
 # ------------------------------------------------------------------ the licence ladder
@@ -377,22 +266,9 @@ def test_a_readers_claim_comes_out_fully_archived_stamped():
         [entry])
     assert len(result.claims) == 1
     claim = result.claims[0]
-    assert (claim.surface, claim.page_kind, claim.snapshot_anchor) == (
-        "archived_html", "detail", "unanchored_latest_fetch")
-    assert claim.payload_id == 9001 and claim.payload_sha256 == "ab" * 32
-    assert claim.payload_scope_version == EMPTY_REGISTER.scope_version
+    assert (claim.surface, claim.page_kind) == ("archived_html", "detail")
     assert claim.first_observed_at == FETCHED_AT
     assert claim.extractor_version == "contract:remax@2", "the CONTRACT's version, not the lane's"
-
-
-def test_an_evidence_bearing_reader_that_forgets_its_span_takes_the_run_down():
-    """Refusing loudly is the point: a reader bug must not become 1.4 M rows the CHECK
-    rejects one transaction at a time."""
-    entry = archive_entry(extraction_method="regex_text")
-    with pytest.raises(IntakeRefused, match="loc_claim_text_evidence|payload_scope_version"):
-        _with_reader(
-            lambda entry, row, payload, document: [PageRead(_base(entry, row, value_text="Krymská"))],
-            [entry])
 
 
 def test_an_entry_declared_for_another_page_kind_never_runs():
@@ -427,7 +303,7 @@ def _realitymix_coordinate(branch: str | None, licence_class: str = "portal"):
                     position_branch=branch)]
     try:
         return extract_page(
-            payload(source="realitymix"),
+            payload(),
             listing_row(source="realitymix"), [entry],
             register=ScopeRegister.from_zones("realitymix", ()))
     finally:
@@ -517,33 +393,16 @@ def test_the_insert_column_list_and_its_select_have_the_same_arity():
     assert "location_claim_observations" not in claims_intake._CLAIM_WRITE_SQL
 
 
-def test_the_evidence_columns_reach_the_row_dict_but_no_longer_the_table():
-    """Same shape as the model pair. The D7 span discipline is enforced in Python by
-    `assert_evidence_complete` (the tests above); migration 498 dropped the six columns it
-    used to land in, along with the two CHECKs that mirrored it — the archive the spans
-    index into is `portal_raw_payloads`, which is untouched."""
-    recordset = claims_intake._CLAIM_WRITE_SQL.split("), typed AS")[0]
-    for column in ("payload_id", "payload_sha256", "evidence_quote", "span_start",
-                   "span_end", "payload_scope_version"):
-        assert column in recordset, column
-        assert f"d.{column}" not in claims_intake._CLAIM_WRITE_SQL, column
-
-
-def test_the_fingerprint_stays_time_free_and_evidence_free():
-    """01 §4.2.1: values dedupe, occurrences are their own series. An evidence span in the
-    tuple would fork one claim per body."""
-    for column in ("payload_sha256", "evidence_quote", "span_start", "span_end",
-                   "payload_id", "snapshot_id", "first_observed_at"):
-        assert column not in claims_intake._CLAIM_FINGERPRINT_SQL, column
+def test_the_fingerprint_stays_time_free():
+    """01 §4.2.1: values dedupe, occurrences are their own series."""
+    assert "first_observed_at" not in claims_intake._CLAIM_FINGERPRINT_SQL
 
 
 # ------------------------------------------------------------------ chunking bounds
 
 def _archive_row(listing_id: int, filler: int = 0) -> dict[str, Any]:
-    row = raw_claim(evidence_quote="x" * filler if filler else None,
-                    span_start=0 if filler else None,
-                    span_end=filler if filler else None,
-                    payload_sha256="ab" * 32 if filler else None).to_row()
+    row = _base(archive_entry(), listing_row(),
+                value_text="x" * filler if filler else "Krymská").to_row()
     row["listing_id"] = listing_id
     return row
 
@@ -553,7 +412,7 @@ def test_the_chunk_bounds_are_the_ones_w1_shipped():
     assert DEFAULT_WRITE_CHUNK_BYTES == 32 * 1024 * 1024
 
 
-def test_a_listing_is_never_split_across_two_chunks_even_with_evidence_columns():
+def test_a_listing_is_never_split_across_two_chunks():
     """`claim_fingerprint`'s tuple begins with (listing_id, source, source_id_native), so
     two fingerprint-equal claims are the same listing's. Split them across statements and
     the second copy joins the `resighted` cohort and appends a spurious observation."""
@@ -564,7 +423,7 @@ def test_a_listing_is_never_split_across_two_chunks_even_with_evidence_columns()
         assert len({r["listing_id"] for r in chunk}) == 1
 
 
-def test_the_byte_budget_still_trips_on_evidence_bearing_rows():
+def test_the_byte_budget_trips_on_large_rows():
     rows = [_archive_row(1, filler=4096), _archive_row(2, filler=4096)]
     chunks = list(chunk_rows(rows, max_rows=DEFAULT_WRITE_CHUNK_ROWS, max_bytes=5000))
     assert len(chunks) == 2
@@ -655,18 +514,6 @@ def test_an_oversized_archived_value_is_refused_and_recorded_never_dropped():
     # an absence row would be one more row in a table nothing reads (rule 25).
 
 
-def test_the_evidence_quote_counts_toward_the_bound():
-    """It rides in the SAME jsonb array as the value columns (`Claim.to_row()`), it is NULL
-    on every W1 claim so `claim_value_bytes` never had to count it, and on this substrate it
-    is a span of a 41-245 KB HTML body — the one field most likely to blow the bound."""
-    claim = raw_claim(evidence_quote="q" * 500, span_start=0, span_end=500,
-                      payload_sha256="ab" * 32)
-    assert claims_intake.claim_value_bytes(claim) < 500
-    assert page_readers.archived_claim_value_bytes(claim) >= 500
-    assert (page_readers.archived_claim_value_bytes(claim)
-            == claims_intake.claim_value_bytes(claim) + 500)
-
-
 def test_a_value_inside_the_cap_is_kept():
     result = _with_reader(
         lambda entry, row, payload, document: [
@@ -732,23 +579,6 @@ def test_html_point_dms_reads_the_subject_map_and_converts_the_pair():
     assert reads[0].position_branch == POSITION_BRANCH_PORTAL_PIN
 
 
-def test_a_dom_read_carries_an_evidence_quote_and_a_span_that_contains_it():
-    document = remax_document()
-    # `html_own_text`, because W2-6 put the real nested header into this fixture: the deep
-    # read's value ("… Úvaly mapa") is not contiguous in the source — the link's tag sits
-    # between the two words — so it resolves to no span at all, which is the opposite of
-    # what this test is about.
-    entry = dom_entry("html_own_text", css="h2.pd-header__address")
-    claim = PAGE_READERS["html_own_text"](
-        entry, listing_row(), payload(), document)[0].claim
-
-    assert claim.evidence_quote == "ulice Pod Slovany, Úvaly"
-    assert claim.span_start is not None and claim.span_end > claim.span_start
-    # 382's `loc_claim_text_evidence` is a SUBSTRING check against the scoped body, so the
-    # span has to land on bytes that really carry the quote.
-    assert "Pod Slovany" in document.html[claim.span_start:claim.span_end]
-
-
 def test_a_selector_matching_nothing_yields_no_claim_rather_than_an_empty_one():
     document = remax_document()
     entry = dom_entry("html_text", css="div.no-such-node")
@@ -807,7 +637,7 @@ def test_html_point_attrs_reads_a_split_decimal_pair():
     which is why `html_point_dms` cannot read it — that reader parses one DMS string. This
     is the case the W2-7 portal verification found."""
     reads = PAGE_READERS["html_point_attrs"](
-        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        latlon_entry(), listing_row(source="realitymix"), payload(),
         realitymix_document())
 
     assert len(reads) == 1
@@ -832,7 +662,7 @@ def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
     document = scope_html(paris.encode("utf-8"), register=register)
 
     reads = PAGE_READERS["html_point_attrs"](
-        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        latlon_entry(), listing_row(source="realitymix"), payload(),
         document)
     assert reads == []          # outside the CZ envelope -> refused by the guard
 
@@ -840,24 +670,17 @@ def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
     # emptiness above came from the guard rather than from the parse failing.
     unguarded = replace(latlon_entry(), guards=())
     assert len(PAGE_READERS["html_point_attrs"](
-        unguarded, listing_row(source="realitymix"), payload(source="realitymix"),
+        unguarded, listing_row(source="realitymix"), payload(),
         document)) == 1
 
 
-def test_the_evidence_quote_is_locatable_in_the_body():
-    """A coordinate assembled from two attributes has a readable value ("lat,lon") that
-    appears NOWHERE in the HTML, so quoting it would produce an unlocatable span — a claim
-    asserting evidence it cannot point at. The quote is therefore the node's own
-    serialisation, which does contain both attributes."""
+def test_the_pair_reads_as_one_readable_value():
+    """The two attributes become one "lat,lon" value, in the source digits."""
     document = realitymix_document()
     claim = PAGE_READERS["html_point_attrs"](
-        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        latlon_entry(), listing_row(source="realitymix"), payload(),
         document)[0].claim
-
-    assert claim.value_text == "49.73561,13.39051"          # readable
-    assert claim.span_start is not None and claim.span_end > claim.span_start
-    span = document.html[claim.span_start:claim.span_end]
-    assert "49.73561" in span and "13.39051" in span        # 382's substring check holds
+    assert claim.value_text == "49.73561,13.39051"
 
 
 def test_a_malformed_attr_pair_is_refused_rather_than_guessed():
@@ -869,7 +692,7 @@ def test_a_malformed_attr_pair_is_refused_rather_than_guessed():
         with pytest.raises(IntakeRefused, match="ordered \\[lat_attr, lon_attr\\] pair"):
             PAGE_READERS["html_point_attrs"](
                 latlon_entry(attr=bad), listing_row(source="realitymix"),
-                payload(source="realitymix"), document)
+                payload(), document)
 
 
 def test_a_non_numeric_attribute_yields_no_claim_and_no_exception():
@@ -881,7 +704,7 @@ def test_a_non_numeric_attribute_yields_no_claim_and_no_exception():
     register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
     document = scope_html(html.encode("utf-8"), register=register)
     assert PAGE_READERS["html_point_attrs"](
-        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        latlon_entry(), listing_row(source="realitymix"), payload(),
         document) == []
 
 
@@ -904,7 +727,7 @@ def test_a_non_finite_coordinate_is_refused_even_with_no_guard_declared():
         document = scope_html(html.encode("utf-8"), register=register)
         entry = replace(latlon_entry(), guards=())        # no guard declared at all
         assert PAGE_READERS["html_point_attrs"](
-            entry, listing_row(source="realitymix"), payload(source="realitymix"),
+            entry, listing_row(source="realitymix"), payload(),
             document) == [], bad
 
 
@@ -1085,8 +908,7 @@ def _precision_claim(reader: str, method: str = "portal_declared_quality",
     reads = PAGE_READERS[reader](entry, listing_row(), payload(body=_PRECISION_BODY),
                                  document)
     assert len(reads) == 1, reader
-    return stamp_page_claim(reads[0].claim, payload(body=_PRECISION_BODY),
-                            scope_version=document.scope_version)
+    return stamp_page_claim(reads[0].claim, payload(body=_PRECISION_BODY))
 
 
 def test_a_precision_declarations_label_is_its_value_whatever_reader_produced_it():
@@ -1111,19 +933,15 @@ def test_a_reader_that_decided_the_label_itself_keeps_it():
     """`json_geometry` types a Circle as `circle` rather than echoing the portal's spelling,
     and `json_bool` maps a boolean to the label the CONTRACT names. Neither is overwritten:
     the rule fills a hole, it does not relitigate a reader's answer."""
-    document = scope_html(_PRECISION_BODY, register=EMPTY_REGISTER)
     claim = replace(
         raw_claim(archive_entry(claim_type="precision_declaration"),
                   declared_precision_label="accurate"),
         value_text="true")
-    stamped = stamp_page_claim(claim, payload(body=_PRECISION_BODY),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(claim, payload(body=_PRECISION_BODY))
     assert stamped.declared_precision_label == "accurate"
 
 
 def test_a_claim_of_any_other_type_gets_no_label():
-    document = scope_html(_PRECISION_BODY, register=EMPTY_REGISTER)
-    stamped = stamp_page_claim(raw_claim(), payload(body=_PRECISION_BODY),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(raw_claim(), payload(body=_PRECISION_BODY))
     assert stamped.claim_type == "street_name"
     assert stamped.declared_precision_label is None

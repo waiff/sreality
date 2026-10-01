@@ -10,6 +10,8 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import { isTransientApiError } from './api';
+import { pgRead } from './pgRead';
 import { ROUTES } from './routes';
 
 /**
@@ -72,27 +74,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * so the same user's three events now collapse into one cache entry.
    *
    * staleTime Infinity because a plan does not change under a live session; a
-   * real change arrives with a new sign-in, which is a new key. */
+   * real change arrives with a new sign-in, which is a new key. That is also
+   * why a TRANSIENT failure must reject rather than resolve: a resolved
+   * fallback would be cached for the whole session, while a rejection gets
+   * main.tsx's one retry and, if that fails too, leaves no data (agendas null
+   * for now) and is read again on the next mount instead of being cached. */
   const userId = session?.user?.id ?? null;
   const agendasQ = useQuery({
     queryKey: sessionAgendasKey(userId),
-    queryFn: async (): Promise<Record<string, boolean> | null> => {
-      const [entRes, plansRes] = await Promise.all([
-        supabase.from('entitlements').select('plan,status').maybeSingle(),
-        supabase.from('plans').select('key,agendas,is_default'),
+    queryFn: async ({ signal }): Promise<Record<string, boolean> | null> => {
+      /* allSettled, not all: the two failures mean different things. */
+      const settled = await Promise.allSettled([
+        pgRead<{ plan: string | null } | null>(
+          supabase.from('entitlements').select('plan,status').maybeSingle(),
+          { signal },
+        ),
+        pgRead<Array<{ key: string; agendas: unknown; is_default: boolean }> | null>(
+          supabase.from('plans').select('key,agendas,is_default'),
+          { signal },
+        ),
       ]);
-      // A billing read that fails or returns nothing must not blank the nav —
-      // null means "no constraint" to every consumer. Same posture as before.
-      if (plansRes.error || !plansRes.data) return null;
+      for (const r of settled) {
+        if (r.status === 'rejected' && (signal.aborted || isTransientApiError(r.reason))) {
+          throw r.reason;
+        }
+      }
+      const [ent, plansRes] = settled;
+      // A billing read that fails for good or returns nothing must not blank
+      // the nav — null means "no constraint" to every consumer.
+      if (plansRes.status === 'rejected' || !plansRes.value.data) return null;
+      const plans = plansRes.value.data;
+      // A non-transient entitlements failure falls to the DEFAULT plan (constrained).
       const planKey =
-        entRes.data?.plan ?? plansRes.data.find((p) => p.is_default)?.key;
-      const plan = plansRes.data.find((p) => p.key === planKey);
+        (ent.status === 'fulfilled' ? ent.value.data?.plan : null)
+        ?? plans.find((p) => p.is_default)?.key;
+      const plan = plans.find((p) => p.key === planKey);
       return (plan?.agendas as Record<string, boolean> | undefined) ?? null;
     },
     enabled: userId != null,
     staleTime: Infinity,
     gcTime: Infinity,
-    retry: false,
   });
   const agendas = userId == null ? null : agendasQ.data ?? null;
 

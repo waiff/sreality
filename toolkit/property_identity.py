@@ -646,7 +646,7 @@ def detach_listing(
     Other state, the pipeline card included, stays on the property left (rules 18, 22).
     Idempotent, the `outcome` saying why nothing moved. `source='operator'` rules it "different"
     from every advert that stays. Stable signature: the operator's routes, `unapply` and the
-    engine's W5 reconcile call it."""
+    legacy-retire lane call it (the W5 reconcile never splits)."""
     with conn.transaction():
         plan = _plan_detaches(conn, [int(listing_id)], merge_group_id).get(int(listing_id))
         if plan is None:

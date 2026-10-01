@@ -26,8 +26,8 @@ Cost is an ESTIMATE only until the first pass lands; from then on E32 binds and 
 is re-read from `llm_calls` (`JUDGEMENT_COST_SQL`), never extrapolated from token prices again.
 
 The judge's prompts, digests, tool schema and verdict parsing live in `autodedup/judge.py`; this
-module is the plumbing around them and imports it lazily, so the lane registry stays importable
-while that module is still being built.
+module is the plumbing around them and imports it lazily (`judge_module`), so importing the lane
+registry never imports it.
 """
 
 from __future__ import annotations

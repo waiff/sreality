@@ -557,14 +557,39 @@ rules. Identify which one a task belongs to before you start.
   routes, and **Settings**. The `Timeline` component dispatches on `step.kind` so it
   renders today's deterministic traces and the agent's longer traces without rework.
   Extend this SPA; do not fork a separate frontend tree.
-- Connects with the **publishable (`anon`) key only**. Never embed the service-role
-  key, the `SUPABASE_DB_URL`, or any other secret in browser-shipped code.
-- Reads exclusively from the `*_public` views and the page-specific RPCs (e.g.
-  `listings_public` / `properties_public`, `browse_stats_properties`,
-  `health_summary`). All RPCs are `SECURITY INVOKER` and
-  rely on anon's existing SELECT grant on the public views — they don't escalate. New
-  public-data RPCs follow the same pattern; new private RPCs go through the FastAPI
-  service.
+- **Credentials it holds:** the publishable (`anon`) Supabase key, the signed-in user's
+  Supabase session JWT, and `VITE_API_TOKEN` (`frontend/src/lib/api.ts`, baked in at build
+  by `frontend/Dockerfile`). Never embed a backend secret — the service-role key, the
+  `SUPABASE_DB_URL`, an LLM / maps / R2 key — in browser-shipped code. `VITE_API_TOKEN` is a
+  secret in name only: Caddy serves the bundle to anyone, before sign-in, so the token
+  proves "loaded the SPA" and nothing more. A `require_token` route may therefore never
+  return identity, admin or account-scoped data; those sit behind `verify_jwt` /
+  `require_admin` / `tenant_conn` and are called with `jwt: true` (see "Two auth shapes"
+  below). At least these still break it, running service-role behind `require_token`
+  alone with no account predicate: the estimation trace payload and both `/feedback`
+  routes, `/filter-presets*` (`filter_presets` is account-scoped since migration 290),
+  `/buildings*` (`building_runs` has tenant RLS since migration 291), and `POST
+  /notifications/dispatches/{id}/estimate` (returns any account's dispatch and starts a run
+  for it) — owed as `roadmap/public-release-track.md` item 11, an open list.
+- Every PostgREST read runs as `authenticated`; `anon` is granted nothing (Phase 0,
+  migrations 299/331). The SPA reads the `*_public` views; the Browse/map read models
+  `browse_list` (an UNLOGGED table rebuilt blue-green) and `properties_map_mv` — plain
+  SELECT grants to `authenticated`, no RLS, read directly when "show dismissed" is on and
+  otherwise through their `*_visible` INVOKER twins (migration 537); the location-audit
+  relations `location_pin_audit_mv` (a matview, no RLS) and `location_audit_waterfall` (RLS,
+  read-all policy); two RLS-scoped tables in `lib/auth.tsx` (`entitlements`, own row only;
+  `plans`); and page-specific RPCs (e.g.
+  `browse_stats_properties`, `browse_map_cells`, `sold_comparables`). Most RPCs are
+  `SECURITY INVOKER`: they read as the caller and cannot see past its grants and RLS. The
+  exceptions are `SECURITY DEFINER` — the Health/ops RPCs (`health_summary`,
+  `scraper_health_checks`, `recent_scrape_runs`, …; migrations 318/332/340), which embed
+  `is_platform_admin()` and hand anyone else NULL (the jsonb RPCs) or no rows (the
+  set-returning ones, e.g. `recent_scrape_runs`), and `sold_coverage` (migration 545),
+  ungated on purpose but narrow by construction (a point in, four facts about one
+  municipality out). A new RPC is INVOKER by default; a DEFINER one that reads admin-only
+  data embeds the admin gate or carries a `-- ci-allow-ungated:` reason
+  (`tests/test_migration_rls_grants.py`, rule 5). Anything else private goes through the
+  FastAPI service.
 - **Every PostgREST read is one of three shapes** (the 2026-08 cap-drift audit): a
   *keyed* read (`.eq` on a key, cardinality bounded by the domain — snapshots per
   listing, images per listing); an *exhaustive* read whose whole meaning is "the
@@ -590,6 +615,30 @@ rules. Identify which one a task belongs to before you start.
   reach for `.limit()` + `capped` only when the rows themselves are the point AND the
   read is ordered. Two lanes still read the map unbounded on purpose: the portal mirror
   (`listing_feed_public` has no matview twin) and the `?map=legacy` bisect hatch.
+- **Every PostgREST read is awaited through `frontend/src/lib/pgRead.ts`** — the
+  supabase-js twin of `lib/api.ts`'s `send()`, and another ESLint-enforced chokepoint
+  (destructuring `data`, `error` or `count` straight off an awaited builder call is banned;
+  `supabase.auth.*` is exempt; `const r = await q; if (r.error)` still slips through).
+  It owns four things the 51 hand-rolled `const { data, error } = await …; if (error)
+  throw error` copies it replaced had none of: a per-request deadline (`PG_DEADLINE_MS`
+  = 20 s, above the 8 s `authenticated` statement_timeout plus PostgREST's own pool wait,
+  so it fires only on a stalled transport; a read with a cheaper fallback passes
+  `deadlineMs`, as the Browse count's 2.5 s exact arm does), React Query's `signal`
+  (fetchers take a trailing `{ signal }`; a cancelled query aborts its request), an
+  `ApiError` with the wire status (55P03/40P01 → 503; 57014 → `kind: 'timeout'`, never
+  retried, with PostgREST's message kept verbatim for the Browse banners — deliberately
+  unlike the API, which answers 57014 as a retried 503 `db_busy`), and `.retry(false)` on
+  every builder so `main.tsx`'s `isTransientApiError` (network, 502/503/504, and
+  Cloudflare's 520) is the ONE retry rule for both adapters. postgrest-js otherwise
+  re-sends a GET/HEAD up to 3× (1/2/4 s backoff) on a 503, a 520 or a network error; the
+  single `main.tsx` retry after 1 s replaces that — fewer attempts on a long outage, by
+  choice. Every count read is `head: true`, sent as an HTTP HEAD whose error has no body,
+  so no SQLSTATE reaches a count: a server 57014 there is a plain 500, and only the 2.5 s
+  client budget earns the Browse estimate. A caller abort rethrows `signal.reason`, never
+  an `ApiError`. There is no tolerant mode: the few reads that must never fail the page
+  (the agenda gate in `lib/auth.tsx`, the population hint in `Filters.tsx`) handle the
+  rejection at the call site — the agenda gate still rethrows a transient failure, since
+  its result is cached for the whole session; prefilters stay fail-loud.
 - **All code-splitting goes through `frontend/src/lib/lazyChunk.ts`**, never React's bare
   `lazy` (ESLint bans it outside that file — the SPA's second such chokepoint after
   `fetchAllRows`). Every deploy rotates every hashed chunk filename (measured: 30 of 30
@@ -641,9 +690,10 @@ rules. Identify which one a task belongs to before you start.
   folds the technical text (the `cause`, when there is one) under a collapsed "Technical
   details". Everything else keeps the generic crash wording. Raw diagnostic strings in
   front of the operator are how a TypeError came to read like data corruption.
-- **No write path from the browser.** Any UI action that needs a write goes through the
-  bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
-  exceptions (see Toolkit rule #5) are reachable only via the API.
+- **No write path in the SPA's code.** Any UI action that needs a write goes through the
+  FastAPI service, not direct Postgres — by convention: `authenticated` holds RLS-scoped
+  table write grants (migrations 290/292/294) the SPA never uses. The toolkit's
+  write-allowed exceptions (see Toolkit rule #5) are reachable only via the API.
 - **Two auth shapes to the FastAPI service** (`frontend/src/lib/api.ts`), matching the
   backend gate each route actually uses. `require_admin`/`verify_jwt`/`tenant_conn` routes
   (Settings, Outreach, broker-review, skill-refinements, Collections
@@ -654,8 +704,9 @@ rules. Identify which one a task belongs to before you start.
   `is_admin: True` identity was removed 2026-08-04; see
   `docs/design/api-token-rotation-and-spa-jwt-migration.md`). Routes still gated by the
   simpler `require_token` (a shared-secret check, no identity) keep sending the static
-  `VITE_API_TOKEN` — extractable from the bundle via devtools by design, since that gate
-  only proves "past the password gate," never an admin or per-account claim. Adding a new
+  `VITE_API_TOKEN` — readable by anyone from the bundle Caddy serves before sign-in, so
+  that gate proves only "loaded the SPA," never an identity, admin or per-account claim.
+  Adding a new
   `require_admin`/`verify_jwt` route means adding `jwt: true` to its frontend call in the
   same change, or it 401s.
 - **`Mapy.cz`-powered location search.** The Region/Browse pages call `GET /maps/suggest`
@@ -732,7 +783,7 @@ rules. Identify which one a task belongs to before you start.
   `computeYield` and `YieldBlock` in the same PR** (the field hints — fond/měs + the acquisition
   denominator — are mirrored too). The bookmark is property-grain
   (rule #22): `POST /listings/lookup` returns the listing's `property_id` + pipeline
-  membership, and the toggle writes through the SAME bearer-gated
+  membership, and the toggle writes through the SAME JWT-gated (`tenant_conn`)
   `POST/DELETE /pipeline/cards` the SPA's `PipelineToggle` uses — one write path, one
   `<FunnelIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
   badge opens this same panel. The panel can be **minimized** (a `−` in the header) to a
@@ -820,13 +871,29 @@ renumber.** Navigate by area:
    via the Supabase MCP. See "Database access" for the full flow and the
    additive-vs-destructive policy.
 2. **Snapshots on content change only.** A fetched payload reaches `listings` ONLY via
-   `scraper/listing_write.py` `write_listings`, which appends a `listing_snapshots` row iff
-   its content hash differs from the listing's latest snapshot under THE one order
-   (`scraped_at DESC, id DESC`), stamped `statement_timestamp()` late in its transaction.
-   Payload-free writes never snapshot; each is ledgered in
-   `tests/scraper/test_listing_write_census.py`. The two hash *documents* (sreality's wire
-   payload minus volatile keys; the crawlers' 28 `_HASH_FIELDS`) share one digest,
+   `scraper/listing_write.py` `write_listings` — every portal's detail drain, sreality's
+   `--detail-only` and `_run_full` fallback, the URL parser and the freshness re-check —
+   which appends a `listing_snapshots` row iff its content hash differs from the listing's
+   latest snapshot under THE one order (`scraped_at DESC, id DESC`), stamped
+   `statement_timestamp()` late in its transaction (a brand-new row always gets one). The two
+   hash *documents* (sreality's wire payload minus volatile keys, `hashing.sreality_hash_doc`;
+   the crawlers' 28 `_HASH_FIELDS`, `ScrapedListing.hash_doc`) share one digest,
    `hashing.digest`; unifying the documents is a data event (≈1.5M snapshots), not a refactor.
+   **Sanctioned exceptions — payload-free, no snapshot.** Writers of derived, enrichment, link
+   or lifecycle columns: condition levels (`toolkit/condition_scoring.py`), the stored `mf_*`
+   columns (their SQL recompute, last redefined in migration 507, is no longer called — MF is
+   read-time via `mf_reference()`, migrations 565/567), broker ids (`toolkit/broker_sources.py`,
+   `scripts/resolve_brokers.py`), `property_id` (`toolkit/property_identity.py`),
+   `is_active` / `inactive_at` / `last_seen_at`, LLM description fills
+   (`toolkit/description_extraction.py`). And heals that correct OUR reading of a page we
+   already stored (`scripts/reparse.py`, `scripts/reextract.py`, the backfill family): a
+   data-quality fix, not a change the portal published. On a portal that hashes parsed
+   fields, the parser change behind a heal makes each live row's next detail fetch append
+   one genuine snapshot; sreality's raw-payload hash does not move, so a healed sreality
+   column and its history diverge for good (rule 23's W17 land-heal note: 44,237 rows).
+   Each payload-free write outside `scraper/db.py`'s lifecycle writers is ledgered in
+   `tests/scraper/test_listing_write_census.py`; its docstring lists the census's blind spots
+   (db.py itself, DB-side triggers/functions, interpolated table names, per-file counts).
 3. **Never delete listings.** Listings that disappear get `is_active=false`. History is
    sacred. **Since 2026-09-07 the flip is PRESENCE-VERIFIED, not inferred from absence.** A
    complete category walk (`portal_runner.run_index_walk` → `_queue_presence_checks`) queues
@@ -1008,7 +1075,8 @@ renumber.** Navigate by area:
 7. **No new dependencies without justification.** Each entry in `pyproject.toml` should
    have a clear reason. Prefer the stdlib.
 8. **Latest-wins data model with snapshot history.** The `listings` table always reflects
-   the most recent state. Every meaningful change appends a row to `listing_snapshots`.
+   the most recent state. Every content-hash change appends a row to `listing_snapshots`
+   (rule 2 — derived/enrichment/link/lifecycle writes and heals of our own reading do not).
    Analytical queries default to current state for relevance. Estimates that need
    retrospective auditability record the `snapshot_id` of each comparable they used — that
    resolves to the exact JSON the estimate relied on, even if the listing has since been
@@ -1038,13 +1106,35 @@ renumber.** Navigate by area:
     matching the amenity TTL. Same accumulate-and-prune discipline as amenities; allowed
     transport types are tram / subway / bus.
 12. **`estimation_runs` is the single source of truth for every estimation.** Every
-    UI/API/ClickUp/agent invocation lands here. Synchronous deterministic mode INSERTs once
-    with a terminal `status` (`'success'` or `'failed'`); the schema reserves
-    `'pending'`/`'running'` for the async agent without forcing today's code to write twice.
-    Failed runs still persist a row — the row IS the audit trail; the endpoint returns HTTP
-    200 with `status='failed'` and `error_message` set. Re-runs INSERT a new row with
-    `parent_run_id` set; the original is immutable. Legal `source` values today: `'ui'`,
-    `'api'`, `'clickup'` (CHECK constraint, not enum — adding more is a single ALTER).
+    UI/API/ClickUp/extension invocation, deterministic or agent, lands here, and
+    `create_estimation_run` (`api/estimation_runs.py`) is the one producer every path must go
+    through: `POST /estimations` and the building workflow's per-unit children
+    (`api/building_runs.py`) both call it, and it (with the executor it schedules) is where the
+    URL parse, the account stamp, the metering gates and the trace recorder live. The row is
+    INSERTed at submission — `pending` (deterministic, and any run routed to the realtime
+    worker's estimation lane), or `running` for an in-process agent run so every per-turn
+    `llm_calls` row can attribute to it — and the executor (inline call, BackgroundTask, or the
+    worker's `execute_pending_run`) UPDATEs the terminal `status` (`'success'` | `'failed'`) on
+    that same row; `sweep_stuck_runs` fails any row orphaned non-terminal. A failure before
+    execution starts (URL parse, target build, unknown skill) INSERTs the row directly as
+    `'failed'`. Either way a failed run still persists a row — the row IS the audit trail; the
+    endpoint returns HTTP 200 and the row carries `status='failed'` and `error_message`.
+    (Submit-time refusals — an ungeocodable subject's 422, a metering 429 — happen before any
+    run exists; they are not failed runs.) Re-runs INSERT a new row with `parent_run_id` set;
+    the original is immutable. Legal `source` values today: `'ui'`, `'api'`, `'clickup'`,
+    `'extension'` (CHECK constraint, not enum — migration 347 added `'extension'` by dropping
+    and re-adding the CHECK (two ALTERs), in lockstep with the `CreateEstimationIn.source`
+    `Literal`, `api/schemas.py`).
+
+    Two paths still fork the ledger and are owed a fix. (1) The Watchdog feed's "Run estimation"
+    (`POST /notifications/dispatches/{id}/estimate`) hand-INSERTs its rows and runs its own
+    executor (`api/notifications.py`: `_insert_pending_run`, `_insert_failed_run`,
+    `run_pending_estimation`), so its runs carry no trace steps, no `reference_rent` and never
+    take the job lane. Tracked in `roadmap/public-release-track.md` (Wave 3). (2)
+    `scripts/smoke_agent.py` (the manual `smoke_agent.yml` workflow) hand-INSERTs a production
+    row (`source='api'`, `mode='agent'`, `status='running'`) per invocation and drives the agent
+    itself — either route it through `create_estimation_run` or sanction it here as the one
+    manual-smoke exception.
 
     **What immutability covers.** The RESULT: the estimate, the trace, the cost, the
     comparables frozen at run time. Two things on the row are deliberately mutable and
@@ -1122,14 +1212,16 @@ renumber.** Navigate by area:
     property-maintenance job (rule #20 for the dirty-set cadence) and the straggler-attach at
     birth. `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
-    derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
-    **source-scoped** to enforce this — a portal's index walk only flips its own rows.
-    (Originally `mark_inactive` scoped by `(category_main, category_type)` alone, so every
-    sreality walk swept bazos rows — same canon categories, never in sreality's `seen_ids` —
-    to `is_active=false`; migration 109 era fixed it.) **New listings land `property_id` NULL on
-    every portal; the bounded straggler-attach births each a singleton, recomputes it and patches
-    `browse_list` — there is no insert-time matching.** All grouping is out-of-band, so neither
-    the writer nor the maintenance job's straggler-attach does any spatial/geo probe. Frontend Browse reads `properties_public`; region stats read the property grain
+    derived, not authoritative per source. `db.presence_candidates` / `db.active_count` are
+    **source-scoped** to enforce this — a portal's index walk only nominates its own rows.
+    (Originally `mark_inactive`, the retired absence sweep, scoped by `(category_main,
+    category_type)` alone, so every sreality walk swept bazos rows — same canon categories,
+    never in sreality's `seen_ids` — to `is_active=false`; migration 109 era fixed it.) **New
+    listings land `property_id` NULL on every portal; the bounded straggler-attach births each
+    a singleton, recomputes it and patches `browse_list` — there is no insert-time matching.**
+    All grouping is out-of-band, so neither the writer (`scraper/listing_write.py`) nor the
+    maintenance job's straggler-attach does any spatial/geo probe. Frontend Browse reads
+    `properties_public`; region stats read the property grain
     (migration 103).
     **One property, one voice (W4, migration 561, decision 18).** A property speaks with its
     CANONICAL advert, rank 1 of `property_canonical_listings(property_id)`: active first, then
@@ -1206,14 +1298,23 @@ renumber.** Navigate by area:
     `dedup_dirty_properties`, `dedup_scan_state`, `dedup_batches`, `dedup_batch_requests`,
     `dedup_engine_runs`, their six admin views, and the unused migration-127 eligibility index.
     `property_merge_events.generation`
-    stamps `'legacy'` on every pre-cutoff row so the future engine's merges (`'v2'`) are
-    distinguishable. The blocking keys `listings.street_name_key` and `geo_cell_key` (+ their
+    is migration 475's date stamp (`'legacy'` on every row of 2026-09-05, operator merges
+    included) and names no engine: who merged is `source` (`'auto'` = the removed engine,
+    `'autodedup'` = migration 558; `docs/design/autodedup/PROGRAM.md` E902). The blocking keys
+    `listings.street_name_key` and `geo_cell_key` (+ their
     triggers) were dropped by W4-c (mig 508) with the rest of the legacy location store; the
     rebuilt engine blocks on `listing_location.obec_kod` instead (Path C).
     **Standing rule: the removed code, its comments and its design docs are never consulted
     again for any purpose.** They survive in git history and on branch
-    `backup/pre-new-dedup-2026-08` for forensic recovery only. The operator owns all
-    merge/no-merge logic in the rebuild; thresholds, weights and rules are not to be invented.
+    `backup/pre-new-dedup-2026-08` for forensic recovery only. The removed engine's OUTPUT, the
+    `source='auto'` rows of `property_merge_events`, is selected BY SOURCE by one piece of code only, until W8: the
+    AUTODEDUP legacy-retire lane (`autodedup/legacy_retire.py`, `mode=apply` with
+    `retire_legacy=1`; the autodedup PROGRAM.md D7 carve-out), which reads them only to find
+    which of those merges to undo and feeds nothing it reads to the engine. The other ledger
+    reads (`detach_listing`, `GET /properties/{id}/origins`, and the merge ledger
+    `GET /properties/merges`, which lists `'auto'` groups beside the rest and returns their
+    `source` for display) are source-blind link mechanics. The operator owns all merge/no-merge logic in the rebuild; thresholds, weights and
+    rules are not to be invented.
     **The link mechanics: one merge, one undo.** `toolkit/property_identity.py` is the single
     chokepoint. `merge_property_set` is the ONE merge (operator and engine alike): it refuses a
     non-active property, a category clash between ANY two members, two DIFFERENT asset links,
@@ -1337,7 +1438,7 @@ renumber.** Navigate by area:
     property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
-    **AUTODEDUP one lane (W5, dark: interval 0).** The engine's ONE production path is the
+    **AUTODEDUP one lane (W5; live — interval 60 since migration 572, scope = the three trial blocks since migration 570).** The engine's ONE production path is the
     always-on worker's `autodedup` lane (`scraper/realtime_worker.py`; its interval
     `realtime_autodedup_interval_seconds`, 0 = stop, is the only switch): one pass of
     `autodedup.incremental_lane.run_incremental` decides and groups the live `rt` generation —
@@ -1354,12 +1455,21 @@ renumber.** Navigate by area:
     while the interval is above 0. Its calibration is cut from the database (`rt_seed`, and a
     re-cut inside the pass's remaining time when the pHash population drifts); a pass past its own
     deadline rolls back and halves its rate. The
-    batch `apply` mode stays until the lane has run three live days and checkpoint C2 passes;
-    `legacy_retire` until W8.
-    **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
+    batch `apply` and `unapply` modes stay until the lane has run three live days and checkpoint
+    C2 passes (the undo path after that is an open operator decision, `roadmap/autodedup.md`);
+    `legacy_retire` until W8. **The engine's only detaches** are two `detach_listing` loops that
+    write no ruling: `mode=unapply` over its own groups (below), and `retire_legacy=1`
+    (`autodedup/legacy_retire.py`), which, in the same dispatch and under the same `dry_run` as
+    an apply, first undoes the removed engine's still-intact `source='auto'` merges whose adverts
+    all sit in the scope's blocks and deal types (or whose merge mixed deal types), unless an
+    operator ruling or the engine's own grouping holds one back, stamping
+    `undone_by='autodedup-legacy-retire:<run>'`. Both are group-scoped, so neither can move a
+    native advert: only the operator splits one.
+    **AUTODEDUP apply path.** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
     it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope
-    naming no deal types or no area merges nothing (migration 558 seeds it with no area), and
+    naming no deal types or no area merges nothing (migration 558 seeded it with no area; 562 named
+    the trial, 570 restored its three blocks after the G3 prediction), and
     it is re-read before every group, so emptying its area on /settings stops a running apply
     between two groups. `autodedup/apply.py` (lane modes `apply` / `unapply` in
     `.github/workflows/autodedup.yml`) reads one stored generation's groups, names the survivor
@@ -1461,11 +1571,30 @@ renumber.** Navigate by area:
     `2026-09-09 (b)` ledger entry).
     Adding heads is a new version, never an edit, and `activate` is a separate step from `score`
     so no consumer ever reads a half-scored version. Nothing has been promoted or scored yet.
-16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
-    in `notification_subscriptions` (migration 056); the background matcher in
-    `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
-    (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
-    helper), so the two surfaces can never disagree on what a filter means.
+16. **Watchdog and Browse share one definition of "matches."** That definition is the filter
+    registry, `toolkit/filter_registry.py` (one `FilterDef` per filter id), and every surface is
+    meant to compile from it. Today only Browse does:
+    `registryQueryBuilder.applyRegistryFilters` walks the generated
+    `filterRegistry.generated.ts` and turns each browse-agenda filter's `pg_column` into a
+    PostgREST predicate, the few irregular shapes are hand-coded in `queries.ts`, and a drift
+    test (`registryQueryBuilder.test.ts`) fails CI on a registry filter that fits no path. Saved
+    watchdog filters live in `notification_subscriptions` (migration 056); the background
+    matcher `api/notifications._build_match_clauses` **hand-writes** its WHERE clauses against
+    `properties_public` and shares no clause builder with Browse. What keeps the two in step is
+    shared SQL plus parity tests, and only for what those tests name: every `WatchdogFilterSpec`
+    field must be a registry id (`tests/toolkit/test_filter_registry.py`); per-m² and plot
+    bounds resolve to the one named SQL measure on every site, as a published column or a call
+    to the measure function and never a hand-typed formula
+    (`tests/api/test_watchdog_browse_one_measure.py`); place chips compile one plan
+    (`tests/test_one_place_predicate.py`, below); and curated-city rules are evaluated by the
+    one SQL function `curated_cities_matching()` (migration 436), which the matcher reaches
+    through `toolkit/comparables._city_quality_clauses` (its only caller) and Browse through an
+    `obec_id` allowlist from the same RPC. Every other clause is kept in step by hand, so a
+    filter change lands in both places; compiling the matcher from the registry is owed
+    (`roadmap/operator-workflow-track.md` § Rule #16 owed entry).
+    `toolkit/comparables._shared_filter_where` is **not** a Watchdog–Browse helper: it is the
+    hand-written `FROM listings` builder for comparables, velocity and the transit corridor, and
+    it raises on city-quality fields (`_assert_no_city_quality`) instead of rendering them.
     **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
     and the collection monitor alert only on the canonical advert's own steps scraped after it
     became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert
@@ -1584,8 +1713,9 @@ renumber.** Navigate by area:
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
     on next upload needs no migration; each upload appends a `source_revision` and the latest
-    is the default query target. Filtering goes through the shared `_city_quality_clauses`
-    helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
+    is the default query target. Filtering goes through the matcher's `_city_quality_clauses`
+    and Browse's `obec_id` allowlist, both over `curated_cities_matching()` (the old
+    `listings_with_city_quality` RPC was dropped in migration 506), and the filters are **agenda-gated to
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
     deliberately never sees them, preserving deterministic estimate semantics. **Curated-city
     *membership* (which city, if any, a property falls in) resolves through ONE SQL function,
@@ -1616,11 +1746,20 @@ renumber.** Navigate by area:
     listing-grain on `sreality_id` pre-202). A tag, collection membership, or note is a fact
     about the real-world property, not one portal's advert, so it is keyed on `property_id`
     and **follows the property across a merge** (a detach leaves it where it is, best-effort). `toolkit/operator_state.py`
-    (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the single registry of every
-    property-anchored operator-state table — collections, tags, notes, AND `notification_dispatches`)
-    re-points that state onto the survivor inside the `merge_properties` transaction (SET tables
-    union with collision-collapse; APPEND tables move every row), so no operator-state row can
-    ever orphan onto a `merged_away` property — the invariant holds by construction. **That
+    (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the registry of every SET/APPEND-shaped
+    property-anchored table — collections, tags, notes, AND `notification_dispatches`) re-points that
+    state onto the survivor inside the `merge_properties` transaction (SET tables union with
+    collision-collapse; APPEND tables move every row). The registry is one of FOUR carriers that
+    transaction runs, in a fixed order: the asset link (inline `_CARRY_ASSET_LINK_SQL`), the registry,
+    the pipeline (`toolkit/pipeline_identity.reconcile_pipeline_on_merge`, rule #22), then dismissals
+    (`toolkit/dismissal_identity.reconcile_dismissals_on_merge`, AFTER the pipeline so a live card
+    lifts its account's dismissal). `merge_properties` is the only writer that retires a property, so
+    no carried row can orphan onto a `merged_away` one — the invariant holds by construction. No
+    executed test asserts it: each carrier's hermetic suite checks only the SQL it emits, the
+    merge-ledger fake (`tests/_property_ledger.py`) answers `[]` to the registry, pipeline and
+    dismissal SQL, and CI's live merge tests (`tests/test_merge_safety_live.py`) run the carriers
+    without asserting where the rows land; the row-level outcome was verified out-of-band (the
+    executed test is owed: `roadmap/operator-workflow-track.md` § Rule #18 owed entry). **That
     invariant has a second half, on the WRITE side: a caller-supplied `property_id` is resolved to
     the active survivor (`toolkit.property_identity.resolve_active_property_id`) before EVERY
     property-anchored write — the remove and edit halves included, not just the INSERT.** 426fa575
@@ -1635,7 +1774,11 @@ renumber.** Navigate by area:
     (it CREATES survivors) and `properties.asset_id` (a column on the property row: the merge carries it
     onto the survivor, but a link or an unlink names one row). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
     commit message is not one. Adding a
-    new property-anchored operator-state table = one registry line. Unmerge/split are deliberately
+    new SET/APPEND-shaped property-anchored table = one registry line plus its `_CARRIED_TABLES`
+    entry in the write census (a hard-coded tuple: a table missing from it has unguarded write
+    routes, silently); a table whose collision must not DELETE (history, like dismissals) or that is
+    single-valued (like the pipeline) needs its own carrier called from `merge_properties`, and the
+    same census entry. Unmerge/split are deliberately
     **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
     side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
     Notes carry `origin_listing_id` as display provenance only ("written while viewing this
@@ -1826,8 +1969,8 @@ renumber.** Navigate by area:
     transaction per ~100 listings; snapshot-on-change preserved via an `IS DISTINCT FROM`
     anti-join). The index-walk uses the transaction pooler; sreality's drain uses the session
     pooler (`connect_session()`) for prepared statements. The drain inserts with `property_id`
-    NULL and `recompute_property_stats`'s straggler-attach births the singleton (rule #15
-    still governs the grouping). `scrape.yml`'s combined
+    NULL and `recompute_property_stats`'s straggler-attach births the singleton (rule #15:
+    there is no spatial matcher; grouping is out-of-band). `scrape.yml`'s combined
     `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
     back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
@@ -1933,8 +2076,9 @@ renumber.** Navigate by area:
     `published_at`, `source_url`, which feed `price_per_m2_source_listing_id`) reaches its
     property only at the daily sweep, and an unchanged, non-reactivating refetch no longer
     refreshes `properties.last_seen_at`/`source_count` inline (sreality parity).
-21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
-    a parser + a config row — no per-portal branches in shared code.** The parser's outputs
+21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a client
+    (fetch + pacing) + a parser + a `Portal` adapter + a config row — and shared code grows no new
+    portal-name branch.** The parser's outputs
     include the row's `source_url` (its page on the portal): a stored fact every surface READS and
     none reconstructs — sreality's assembler is `scraper/sreality_url.py`, the 8 crawlers' are their
     `<portal>_client.detail_url`; the column rides `LISTING_COLUMNS` preserve-if-null on every write
@@ -1947,24 +2091,55 @@ renumber.** Navigate by area:
     `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
     pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
     (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
-    registry — `supports_complete_walk`, `categories`, `split_threshold` — migration 107); and
-    `scraper/portal_runner.py` (the one `run_index_walk` + `run_detail_drain`, parameterized by a
-    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`), bazos (`BazosPortal` in
-    `scraper/bazos_main.py`), and bezrealitky (`BezrealitkyPortal` in `scraper/bezrealitky_main.py`)
-    all implement the `Portal` protocol; `_run_index_walk` / `_run_detail_drain`, `bazos_main.main`,
-    and `bezrealitky_main.main` are thin delegators to the runner. The **only**
-    per-portal code is the fetcher (a `BasePortalClient` subclass — its `_request` does GET for
-    sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
-    config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
-    end-gated presence nomination (`_queue_presence_checks`), `scrape_runs`) is shared. A genuine per-portal need is an
-    explicit method on the `Portal` protocol, justified in review. Sanctioned hooks so far:
-    **sreality's district-split** (the deep-pagination-cap workaround) inside its `walk_category`;
-    **ceskereality's and sreality's bespoke `probe_category`** (both lack a sort param their
-    index accepts, so each implements its own per-page early-stop discovery probe instead of the
-    generic capped-walk-then-diff fallback `run_index_probe` otherwise uses — sreality's version,
-    added Phase 4 of the portal-order-fidelity program, is deliberately UNSPLIT: the
-    deep-pagination 422 is offset-triggered, not size-triggered, so a shallow probe never needs
-    the district-split; full rationale `docs/design/portal-order-fidelity.md`).
+    registry — `supports_complete_walk`, `categories`, `split_threshold`, migration 107 — plus
+    `PortalLimits` (`portals.operational_limits`, migration 115 — `115_portal_operational_limits.sql`,
+    self-titled 114): `index_rate` / `detail_rate` / `detail_workers` / caps, each portal's own
+    politeness budget, and `shared_rate_limiter` (migration 268)); `scraper/portal_runner.py` (the
+    one `run_index_walk` + `run_index_probe` + `run_detail_drain` + `run_phase`, parameterized by a
+    `Portal` object); and `scraper/portal_factory.py` (`build_portal`: source → adapter). All nine
+    portals implement the `Portal` protocol (`scraper/portal_runner.Portal`) — `SrealityPortal` in
+    `scraper/main.py`, the eight crawlers' adapters in `scraper/<portal>_main.py` — and every
+    entrypoint (`scraper/sreality_main.py`, `scraper/<portal>_main.py`) is a thin delegator to
+    `run_phase`. **Shared:** the category loop and deadline, the coverage alarm, end-gated
+    presence nomination (`_queue_presence_checks`), category-drift recording, the probe driver,
+    the whole drain (queue claim/complete/fail, the fetch pool, batch flush, the gone-rate
+    breaker) and the `scrape_runs` lifecycle (`run_phase`). **Per-portal:** the client (a
+    `BasePortalClient` subclass — URL building, body markers, egress such as `USE_PROXY`; the
+    shared `_request` does GET, or POST for bezrealitky's GraphQL), the parser, the adapter's
+    `walk_category` (paging, end detection, stop classification) and the config row. Pacing is
+    per-portal by design — each portal keeps its own politeness rules in its client + its
+    `PortalLimits`. A genuine per-portal need is a seam on the `Portal` protocol, justified in
+    review, never an `if source == …` in shared code. **The seams.** Required: `categories`,
+    `category_labels`, `connect_index`, `walk_category`, `active_count`, `connect_drain`,
+    `make_client`, `fetch_detail`, `write_details`, `mark_gone`, `record_failure`,
+    `claimable_count`. Optional (the runner reads them via `getattr`): `shared_rate_limiter`;
+    `seen_key` (sreality — integer ids); `presence_candidates` (bazos, ceskereality, realitymix,
+    remax, maxima — index sections that don't map 1:1 onto `(category_main, category_type)`);
+    `note_empty_slice` (ceskereality, realitymix — slice-buffering nominators);
+    `coverage_denominator_is_upper_bound` (ceskereality — its declared total is national, wider
+    than its kraj slices); `live_categories` (mmreality — category drift); `set_index_page_cap`
+    (the seven newest-first portals, for the probe); and `probe_category` (ceskereality and
+    sreality: both lack a sort param their index accepts, so each implements its own per-page
+    early-stop discovery probe instead of the generic capped-walk-then-diff fallback
+    `run_index_probe` otherwise uses — sreality's version, added Phase 4 of the
+    portal-order-fidelity program, is deliberately UNSPLIT: the deep-pagination 422 is
+    offset-triggered, not size-triggered, so a shallow probe never needs the district-split; full
+    rationale `docs/design/portal-order-fidelity.md`). **sreality's district-split** (the
+    deep-pagination-cap workaround) is not a seam: it lives inside its own `walk_category`.
+    **Owed — the rule is ahead of the code here** (`roadmap/scraper-track.md` § Rule #21 owed entry): (a)
+    the index-walk tail — `index_summary(_native)` → `classify_index_sighting` →
+    `touch_listings(_by_id)` → `enqueue_detail` → `walk_reached_end` — is copied into all nine
+    adapters' `walk_category`, and `write_details` / `record_failure` / `mark_gone` /
+    `_configure_logging` / `_load_config` are AST-identical in at least 7 of the 8 crawler
+    `*_main.py`; (b) six portal-name branches already sit in shared code and are debt to fold
+    into a seam or a config attribute, never precedent: `db.detail_ref` (sreality never carries
+    a stored URL into the queue — a safety boundary, its docstring says why), the two
+    `CASE WHEN %(source)s = 'sreality'` legacy `sreality_id` fills in `db.enqueue_detail` and
+    `db.enqueue_location_refetch`, `portal_factory.build_portal`'s bazos and sreality
+    constructor special-cases (both predate the config-taking constructor), and
+    `realtime_worker._PORTAL_CLASSES`'s `k != "bazos"` (the worker's sreality count-probe is a
+    documented sreality-only lane, not this); (c) `scraper/main.py` is sreality's module yet owns
+    the cross-portal image pipeline (`_run_image_downloads`) the real-time worker imports.
     The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
     `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
     the one drain. Since 2026-09-07 every portal delists the same way (rule #3): a complete
@@ -2002,18 +2177,23 @@ renumber.** Navigate by area:
     detach reactivates it (**lossless**: the reactivated property gets its pre-merge stage back,
     and in the move-if-empty case the survivor's absorbed card is dropped so it isn't
     duplicated); the survivor's own stage is left as-is — a chained-merge-safe best-effort, so a
-    survivor that absorbed the retired's stage keeps it until the operator adjusts. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
+    survivor that absorbed the retired's stage keeps it until the operator adjusts. Writes go through the JWT-gated API (`tenant_conn`; `POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<PipelineMark>`
     (`<FunnelIcon>` — a funnel with three arrows, filled body = in-pipeline — plus the stage
-    badge) used on EVERY pipeline surface — the listing-detail header (`PipelineToggle`, in the
-    top action bar next to "New estimation", NOT buried in CurationBlock), every Browse card AND
-    every Browse **table row** (`PipelineFunnelButton`, a leading unsortable column), the
-    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), the Pipeline
-    scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
-    by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
-    concept reads as one icon everywhere.**
+    badge), rendered by the listing-detail header (`PipelineToggle`, in the top action bar next to
+    "New estimation", NOT buried in CurationBlock), every Browse card AND every Browse **table
+    row** (`PipelineFunnelButton`, a leading unsortable column) and the Pipeline scope chip + its
+    sidebar stage picker; the stage-manager's entry-stage indicator uses the bare `<FunnelIcon>`
+    (`is_entry` — filled = the entry stage) — so the "into the pipeline" concept reads as one
+    icon everywhere.** Two surfaces carry their own versions today. The kanban card has no mark
+    (its column IS the stage): it moves by drag and removes through its own trash + two-step
+    confirm (`components/pipeline/BoardCard.tsx`). The Chrome-extension panel reproduces the glyph
+    by value in vanilla TS (separate territory, no React import) and also hand-copies
+    `stageBadge` / `stageAccent` into `content.ts` — pure TS it could import from
+    `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand` and `lib/mfReference`.
+    Converging both is owed (`roadmap/operator-workflow-track.md` § Rule #22 owed entry).
     **TENANCY NOTE — stated here once, for rule #18 as well.** Pipeline MEMBERSHIP has exactly ONE
     definition: `current_account_ids()`, the database's own membership function, on every surface —
     the extension's `POST /listings/lookup` included, which takes no account argument and whose SQL
@@ -2091,11 +2271,15 @@ renumber.** Navigate by area:
     NULL the funnel falls back to the stage's 1-based ordinal among the live stages
     (`lib/pipelineStage.ts:stageBadge`) — computed where it renders, so nothing guessed is ever
     written back. `stageAccent` in the same module is the one answer to "what colour is this
-    stage" (the operator's `color`, copper when unset — the board used to fall back to grey while
-    the listing header fell back to copper). The stage editor exposes `code` as a 4-char box whose
-    placeholder IS the ordinal, so "empty = automatic" is visible. Writes (add/remove/move) go
-    through one hook, `lib/usePipelineCard.ts`, which owns the cache-invalidation policy for every
-    surface.
+    stage" everywhere but the board (the operator's `color`, copper when unset); the board's
+    column headers and stage-editor swatch still use their own `stageColor`
+    (`pages/Pipeline.tsx`), which falls back to grey. The stage editor exposes `code` as a 4-char
+    box whose placeholder IS the ordinal, so "empty = automatic" is visible. Card writes from the
+    Browse funnels, the table rows and the listing header (add/remove/move) go through one hook,
+    `lib/usePipelineCard.ts`; the kanban re-implements move/remove inline in `pages/Pipeline.tsx`,
+    because the hook binds `property_id` at hook time while the board resolves it per drop/trash
+    in page-level handlers. Both write through `lib/pipelineCache`, which owns the invalidation
+    policy for every surface.
     **Browse can be SCOPED to the pipeline** (`ListingFilters.pipeline`, `?pipeline=any` or
     `?pipeline=<stage ids>`, registry id `pipeline`, BROWSE agenda only): a property-grain id
     allowlist resolved from `property_pipeline_public` by `resolvePipelinePrefilter` and AND'd
@@ -2439,7 +2623,7 @@ renumber.** Navigate by area:
     portal to remember the rule, and make the data lie in order to spare the reader a function
     call. Live readers moved:
     `toolkit.comparables._shared_filter_where` (comparables + velocity + the transit corridor)
-    and the watchdog matcher `api/notifications._build_match_clauses` — rule 16's two sites,
+    and the watchdog matcher `api/notifications._build_match_clauses` — the two Python builders,
     and there the SQL is textually identical, because neither relation publishes a plot column.
 
     **On the SPA the same measure has to BE a column, and getting that wrong is a silent
@@ -2584,15 +2768,18 @@ renumber.** Navigate by area:
 24. **Folded into 25.** The number is kept because rules are cited by number and never renumbered;
     the two-paths-until-W6 rule it used to state ended when W4-c dropped the legacy store.
 
-25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at
-    least as much as it adds.** Written 2026-09-11 from the full-programme audit ("Where the Town
-    Lives"). The programme had built a completeness-first engine wave after wave — 62 tables, 81
+25. **Location: one store, one claim shape, one label, one code predicate; a location PR that adds
+    more than it deletes says why in its body and needs the operator's ruling.** Written 2026-09-11
+    from the full-programme audit ("Where the Town Lives") as "every location PR deletes at least
+    as much as it adds"; reworded 2026-10-01 to the rule as practised — the plain-text reader's
+    W1–W3 closed at +494 on an operator ruling of 2026-09-30 (`roadmap/location-data.md`). The programme had built a completeness-first engine wave after wave — 62 tables, 81
     projection columns, 40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and
     never flipped a consumer, so nothing exercised it end to end and nothing was ever deleted; 733
     verified findings came out of that shape, not out of any one bug. The corrective, and the
     as-built state: ONE answer table (`listing_location`, 27 columns) written by ONE four-step
-    resolver (bind → fill → grade → check); ONE hourly lane over the stored payload, the stored page
-    body and the text lane's stored reading; TWELVE claim types, at most one contract entry per
+    resolver (bind → fill → grade → check); ONE claim shape in `location_claims`, written by TWO
+    producers, both fingerprinted in SQL — the hourly `claims_intake` lane (over the stored payload,
+    the stored page body and the text lane's stored reading) and `operator_corrections`; TWELVE claim types, at most one contract entry per
     type, the town entry mandatory and naming a reader; ONE label function and ONE four-level code
     predicate for every place display and filter; no serving flags, no granularity floors, no
     second store — `listings` and `properties` carry no place column, so a reader joins `ll on
@@ -2803,16 +2990,25 @@ where `listings.geom` was `geography`, so every metre-based `ST_DWithin` / `ST_D
 `ll.geom::geography` (index `listing_location_geog_gist`, migration 507) or it compiles and silently
 measures DEGREES — `tests/test_one_place_predicate.py` pins both halves.
 
-**ONE EVIDENCE TABLE.** `location_claims` is append-only evidence — what a payload asserted, with a
+**ONE EVIDENCE TABLE.** `location_claims` is the evidence — what a payload asserted, with a
 surface, an extraction method, a licence class and a `claim_fingerprint` (migration 386's IMMUTABLE
 `location_claim_fingerprint()`, computed in SQL so no second transcription of the definition can
-drift; it still takes all 23 inputs, of which 19 are stored). **19 columns**: identity, the contract
-entry, five typed value slots, the declared-precision trio, the fingerprint. Nothing is corrected in
-place — a wrong VALUE is superseded by a newer claim, a wrong CONTRACT is retracted:
+drift; it still takes all 23 inputs, of which 12 are stored columns — the other 11, e.g. `page_kind`,
+`extractor_id`, `value_norm`, `legacy_source_column`, are computed per claim, hashed and not kept).
+**19 columns**: identity, the contract entry, five typed value slots, the declared-precision trio,
+the fingerprint. A claim carries nothing else: the page lane's evidence quote, span, payload hash and
+scope version, and the anchor and history markers, followed their columns (migration 498) out of
+`Claim`. TWO producers insert claims, both `ON CONFLICT (claim_fingerprint) DO NOTHING`: the intake lane
+below and `location_data/operator_corrections.py` (an operator claim carries no contract entry, so no
+DELETE below ever reaches one). A claim is never UPDATEd, but the table is not append-only: three
+paths DELETE contract claims. A wrong VALUE is superseded — the readings half deletes the listing's
+older same-source claims of the types a new reading carries; a wrong CONTRACT is retracted:
 `python -m location_data.contracts --retract <portal>@<version> [--extractor-id X]` resolves the
 target first (no matching entry is an ERROR, not `deleted=0`), DELETEs the claims in bounded batches
-each atomic with its own `dirty_locations` enqueue, then stands the header down. Batched because
-"the contract's claims" is every listing a portal has ever had (~5 M on sreality), and one atomic
+each atomic with its own `dirty_locations` enqueue, then stands the header down; and a RETIRED
+version's claims, which the resolver already ignores, are deleted with no enqueue by
+`location_claims_retire.yml` (a `\copy` backup first, then `scripts/location_claims_retire.py`). `--retract` batches
+because "the contract's claims" is every listing a portal has ever had (~5 M on sreality), and one atomic
 DELETE of that size spends its `statement_timeout` and rolls back, making no progress ever.
 
 **ONE LANE, THREE HALVES.** `location_data/claims_intake.py` (hourly, `35 * * * *`, and the worker's
@@ -2857,7 +3053,7 @@ writes is not evidence a portal published.
   terminate the parent's session. The pool is an accelerator only: one outcome per body IN ORDER, so
   a content-triggered refusal still costs one listing's page entries and a pool the OOM killer takes
   finishes its batch on the main thread.
-* *The readings half* (W3, migration 578) runs FIRST and hourly only (its full read of the readings
+* *The readings half* (W3, migration 581) runs FIRST and hourly only (its full read of the readings
   table fails the minute lane's 5 s gate cold), in the page half's budget share. It mines each listing's
   CURRENT reading — the successful reading of its CURRENT advert text (hashed by the text lane's SQL),
   at the lane's `extractor_version` if one exists, else the newest — unless its stamp
@@ -2897,9 +3093,9 @@ of them larger idnes ones. 521 hands the UPDATE the batch's ids as a `bigint[]`
 
 If R2 is unconfigured the page half is skipped with ONE warning per run and the payload half runs
 unchanged — the hourly ingest for nine portals must never go dark because a credential rotated. The
-lane writes `location_claims`, `dirty_locations` and its own `location_claim_batches` ledger and
-nothing else: a refusal (a withheld coordinate, an oversized value, a subject miss) is a COUNTER and
-one log line per reason per batch.
+lane writes `location_claims`, `dirty_locations`, its own `location_claim_batches` ledger and the
+mined-version stamps on the bodies and readings it mined, and nothing else: a refusal (a withheld
+coordinate, an oversized value, a subject miss) is a COUNTER and one log line per reason per batch.
 
 **ONE LANE, TWO SCHEDULES (W7-a).** The module stays one lane; what it gained is a second
 *schedule* for the payload half. Under W5 the consumers serve only RESOLVED locations, so an hourly
@@ -2999,10 +3195,14 @@ one is a refusal, not a shrug — every key in this format fails OPEN when missp
 entry per claim type**; an `obec_name` entry **mandatory and naming a reader**, because a contract
 that cannot state the town cannot satisfy the invariant the store exists for; and EVERY entry naming
 a reader — "declared ahead for a later wave" is how a fleet grows 47 entries that extract nothing.
-Nine contracts, **67 entries**, 4 to 11 apiece; what a portal does not publish is an omission
+Nine contracts, **72 entries**, 5 to 11 apiece; what a portal does not publish is an omission
 recorded in its report, never a placeholder entry. **Entries are immutable**: a fix is a version
-bump, never an edit, so a claim's `extractor_id` always names the rule that produced it — hence no
-per-portal branch in the intake, a new signal is a YAML entry. A locator may name an ordered `fallback` list of alternative paths, each with the transforms ITS
+bump, never an edit, so a claim's `contract_entry_id` always names the rule that produced it, and a
+new signal is a YAML entry. The intake is not free of per-portal code, though: `extract_listing`
+keeps one sreality-only branch (the `sreality_payload_shape:` refusal counting rows still frozen on
+the legacy payload shape), and `claims_common.py` keys three Python tables by portal —
+`HISTORY_COMPLETENESS`, `COORDINATE_RULES` and `ARCHIVED_COORDINATE_RULES`, the last on purpose: a
+new coordinate entry yields no pin until a PR adds its row there and argues its licence. A locator may name an ordered `fallback` list of alternative paths, each with the transforms ITS
 shape needs, and the reader takes the first that answers — that, not a second entry, is how a portal
 whose payload changed shape keeps reading the older one (sreality@3: 30,265 delisted rows were frozen
 on the pre-cutover JSON, whose whole address is one line in `/locality/value` with the pin in `/map`,
@@ -3024,7 +3224,7 @@ of them — 3,263 active foreign listings sat `undetermined` with a Croatian tow
 The new `foreign_country_code` transform drops the `CZ` that field carries on every domestic row:
 foreign is a determination, never a default.
 
-**A contract BUMP does not supersede the old version's rows** — `location_claims` is append-only and
+**A contract BUMP does not supersede the old version's rows** — `location_claims` rows are never UPDATEd and
 its fingerprint hashes `extractor_version`, so a bump inserts new rows beside the old ones, and the
 superseded row has the LOWER id, which wins every "first admissible claim of this type" tie. So the
 resolver's claim projection (`_claims_sql`) admits a claim only when its `contract_entry_id`

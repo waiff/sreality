@@ -387,12 +387,12 @@ def test_no_write_statement_touches_an_existing_production_table():
 # --------------------------------------------- the second substrate and its hash gate
 
 # One scan row, in the order all THREE selections project: the listing, its Mapy-inventory
-# membership, its LATEST stored detail body (id, unmined?, page_kind, sha, first seen), the
+# membership, its LATEST stored detail body (id, unmined?, page_kind, first seen), the
 # portal's ACTIVE contract version and the snapshot cursor (NULL outside incremental mode),
 # which is the LAST column since W1-c deleted the legacy-column tail that used to follow it.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
            datetime(2026, 8, 13, 6, 0, tzinfo=UTC),
-           91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
+           91, True, "detail", datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
            4242)
 
 
@@ -485,7 +485,7 @@ def test_the_window_is_a_limit_subquery_that_never_touches_listings():
 
 
 def test_a_listing_with_no_stored_body_yields_no_candidate():
-    bodiless = (*_RECORD[:5], None, None, None, None, None, 5, None)
+    bodiless = (*_RECORD[:5], None, None, None, None, 5, None)
     scan = _row_from_record(bodiless)
     assert scan.body is None and scan.body_unmined is False
     assert scan.contract_version == 5 and scan.row.listing_id == 7

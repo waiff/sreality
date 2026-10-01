@@ -1,14 +1,14 @@
 """Orchestrator for the mmreality.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.mmreality_main`. M&M Reality is a `Portal`
-(MmRealityPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages each per-(sale type, property type) index and enqueues
+(MmRealityPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` pages each per-(sale type, property type) index and enqueues
 new/price-changed ids into the shared `listing_detail_queue` (source='mmreality',
-migration 108), then a detail-drain that fetches each listing page, parses its
-embedded `:property` estate object to a `ScrapedListing`, and writes it via
-`listing_write.write_listings` (the one listing write). No bespoke
-pipeline — only the per-portal fetcher (MmRealityClient) + parser
-(mmreality_parser) + config differ (the modularity rule in CLAUDE.md).
+migration 108); the shared detail-drain fetches each listing page
+(MmRealityClient), parses its embedded `:property` estate object to a
+`ScrapedListing` (mmreality_parser), and writes via `listing_write.write_listings`
+(the one listing write; a first-seen row lands `property_id` NULL and the
+straggler-attach births its singleton, rule #15).
 
 Until 2026-09 this walked the bare `/nemovitosti/` feed as "a single mixed index
 with no result total" and was parked on `supports_complete_walk=false` for it.

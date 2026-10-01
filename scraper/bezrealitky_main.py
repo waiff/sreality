@@ -1,22 +1,21 @@
 """Orchestrator for the bezrealitky.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.bezrealitky_main`. Bezrealitky is a `Portal`
-(BezrealitkyPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages bezrealitky's GraphQL `listAdverts` and enqueues
-new/price-changed ids into the shared `listing_detail_queue` (source='bezrealitky',
-migration 108), then a detail-drain that fetches `advert(id)`, parses it to a
-ScrapedListing, and writes it via `listing_write.write_listings` (the one listing
-write). No bespoke pipeline — only the per-portal fetcher
-(BezrealitkyClient) + parser (bezrealitky_parser) + config differ from sreality.
+(BezrealitkyPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` pages bezrealitky's GraphQL `listAdverts`, diffs the ids and
+enqueues new/price-changed ones into the shared `listing_detail_queue`
+(source='bezrealitky', migration 108); the detail-drain fetches `advert(id)`,
+parses it to a ScrapedListing, and writes via `listing_write.write_listings`
+(the one listing write; a first-seen row lands `property_id` NULL and the
+straggler-attach births its singleton, rule #15).
 
-Unlike bazos (a partial-walk HTML crawler), bezrealitky's GraphQL has no
-deep-pagination cap, so a per-category walk can reach the portal's own end of
-list: `supports_complete_walk` (config-driven) lets the runner nominate the rows
-such a walk did not see for a page check, and the fetch decides (architectural
-rule #3), source-scoped so it only ever touches bezrealitky rows (rule #15). Because
-the detail JSON carries offerType/estateType, the drain derives each listing's
-category from the response — so bezrealitky walks MANY categories from one config
-without the queue-encodes-category limitation that constrains bazos.
+bezrealitky's GraphQL has no deep-pagination cap, so a per-category walk can
+reach the portal's own end of list. A walk that did (`walk_reached_end`, rule #3)
+nominates the rows it did not see for a page check and the fetch decides,
+source-scoped so it only ever touches bezrealitky rows (rule #15);
+`supports_complete_walk` is posture only and gates nothing. Because the detail
+JSON carries offerType/estateType, the drain derives each listing's category
+from the response — so bezrealitky walks MANY categories from one config.
 """
 
 from __future__ import annotations

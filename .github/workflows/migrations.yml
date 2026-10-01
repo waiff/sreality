@@ -35,17 +35,6 @@ on:
       # frontend-only PR could change the zone and never run the rail that guards it.
       - "frontend/src/lib/llmCosts.ts"
   pull_request:
-    paths:
-      - "**/*.py"
-      - "migrations/**"
-      - "scripts/ci_db_bootstrap.sql"
-      - "pyproject.toml"
-      - ".github/workflows/migrations.yml"
-      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
-      # file names 'Europe/Prague' exactly once and that the literal matches the three
-      # database spellings. That rail lives in THIS lane, so without this entry a
-      # frontend-only PR could change the zone and never run the rail that guards it.
-      - "frontend/src/lib/llmCosts.ts"
   workflow_dispatch:
 
 jobs:
@@ -384,6 +373,7 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_merge_safety_live.py -q
 
       # The ONE listing write (rule 2), executed: every per-source upsert text runs, the
@@ -402,6 +392,7 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_operator_merges_live.py -q
 
       # Migration 573's destructive backfill, EXECUTED: one seeded hit and one miss per
@@ -453,7 +444,20 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_property_split_live.py -q
+
+      # Every property-anchored row a merge carries, EXECUTED through the public writers: one
+      # test per carrier (collections, tags, notes, dispatches, pipeline, dismissals, the asset
+      # link), each over two accounts, each proving the retired property is left holding no
+      # row. The record-only cursors in the unit tests cannot run the carriers' SQL. Two known
+      # defects run as strict xfails until their fix PRs remove the marker.
+      - name: Every property-anchored row follows a merge and a detach
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_property_carriers_live.py -q
 
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE

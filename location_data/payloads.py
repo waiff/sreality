@@ -128,8 +128,8 @@ DEFAULT_VERSION_CAP = 2
 #
 # 7 days is chosen against what the archive is FOR rather than against a churn rate — it
 # has to be, because the whole point is to stop depending on churn rates. A body is
-# evidence substrate: something to re-verify a claim's span against and to re-mine later.
-# Both uses want page ERAS, not fetches, and no portal's location facts turn over weekly.
+# something to re-mine later, which wants page ERAS, not fetches, and no portal's location
+# facts turn over weekly.
 #
 # 0 disables the floor (the cap still bounds storage); negative is refused.
 MIN_APPEND_INTERVAL_ENV = "LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS"
@@ -843,7 +843,7 @@ def append_payload(
     `volatile` None resolves the profile this portal's CONTRACT declares for this
     (source, page_kind) SURFACE — never for the source alone: `payload_sha256` is the
     archive's identity, so a detail profile mis-applied to an index body would bake
-    a hash taken over the wrong projection into every span that ever points at it.
+    a hash taken over the wrong projection into every claim re-mined from it.
     A surface no contract declares gets `payload_norm.BASE_PROFILE` and stamps
     `normalizer_version` with the `+base` suffix; a declared one stamps
     `+profile@<digest>` — a digest of the rules themselves, not the `contract_version`
@@ -1002,8 +1002,8 @@ def append_payload(
         #   * upload fails  -> the exception leaves `loader_db.bounded`'s
         #     `conn.transaction()`, which ROLLS BACK, so no metadata row can be committed
         #     pointing at an object that was never written. That direction matters: a
-        #     span into a body that does not exist is exactly the unverifiability this
-        #     store exists to end.
+        #     metadata row pointing at a body that does not exist is exactly the
+        #     unverifiability this store exists to end.
         #   * upload succeeds, transaction later fails -> an object nothing references.
         #     HARMLESS, and self-healing: the key is the hash of the bytes, so the next
         #     append of the same body writes the same key and adopts it.

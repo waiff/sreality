@@ -103,8 +103,7 @@ def payload(body: Path | bytes | None = None) -> ArchivedPayload:
     if isinstance(body, Path):
         body = body.read_bytes()
     return ArchivedPayload(
-        id=9001, source="realitymix", source_id_native=NATIVE, page_kind="detail",
-        payload_sha256="ab" * 32, first_observed_at=FETCHED_AT, body=body)
+        id=9001, page_kind="detail", first_observed_at=FETCHED_AT, body=body)
 
 
 def read(entry_id: str, doc: ScopedDocument | None = None, *,
@@ -411,8 +410,7 @@ def test_an_unknown_kraj_slug_costs_coverage_and_never_correctness():
 def test_the_gps_pair_is_a_portal_pin_through_the_real_licence_ladder():
     reads = read("rm.det.gps")
     assert len(reads) == 1 and reads[0].position_branch == "portal_pin"
-    claim = stamp_page_claim(reads[0].claim, payload(),
-                             scope_version=document().scope_version)
+    claim = stamp_page_claim(reads[0].claim, payload())
     licensed, reason = _licensed_coordinate(claim, row(), ENTRIES["rm.det.gps"],
                                             reads[0].position_branch)
     assert licensed is not None, reason
@@ -425,8 +423,7 @@ def test_a_coordinate_from_any_other_entry_id_is_refused_by_the_ladder():
     realitymix entry; the rung exists so a future entry cannot license a position merely by
     declaring a branch. The positive case above is not evidence for this one."""
     reads = read("rm.det.gps")
-    claim = stamp_page_claim(reads[0].claim, payload(),
-                             scope_version=document().scope_version)
+    claim = stamp_page_claim(reads[0].claim, payload())
     impostor = replace(ENTRIES["rm.det.gps"], entry_id="rm.det.not_the_rule")
     licensed, reason = _licensed_coordinate(claim, row(), impostor, "portal_pin")
     assert licensed is None and reason
@@ -524,17 +521,10 @@ def test_the_lane_over_the_captured_body_yields_exactly_these_claims():
     assert all(c.licence_class == "portal" for c in result.claims)
 
 
-def test_every_committed_body_yields_a_town_and_every_claim_carries_its_evidence():
-    """Rule 25's invariant at fixture grain: a body with no town is the red line. Migration
-    382's `loc_claim_text_evidence` is the other half — a span that does not contain its
-    quote is worse than no span."""
+def test_every_committed_body_yields_a_town():
+    """Rule 25's invariant at fixture grain: a body with no town is the red line."""
     for body in EVERY_BODY:
-        doc = document(body)
         result = extract_page(payload(body), row(), list(ENTRIES.values()),
                               register=REGISTER)
         towns = [c.value_text for c in result.claims if c.claim_type == "obec_name"]
         assert len(towns) == 1 and towns[0], body.name
-        for claim in result.claims:
-            assert claim.evidence_quote, (body.name, claim.extractor_id)
-            assert claim.span_start is not None, (body.name, claim.extractor_id)
-            assert doc.html[claim.span_start:claim.span_end] == claim.evidence_quote

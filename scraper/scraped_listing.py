@@ -3,7 +3,8 @@
 One normalized shape every non-sreality portal scraper emits. It carries the
 cross-source identity (`source` + `source_id_native`, the natural key) plus the
 subset of `listings` columns analytics read. `listing_write.from_scraped` turns
-one of these into a write; grouping is out-of-band (rule 15).
+one of these into a write (a synthetic negative `sreality_id` on first sight
+while Gate 2 is off); grouping is out-of-band (rule #15: no insert-time matching).
 
 Sreality keeps its own JSON parse path (`scraper.parser` -> `listing_write.from_sreality`);
 this contract is for the HTML/crawler sources.

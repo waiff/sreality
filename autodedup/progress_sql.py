@@ -5,8 +5,8 @@ probe that lets a pre-migration database render an empty page instead of a 500, 
 page of the ledger newest-first, and the per-wave rollup the header strip sums.
 
 The SQL lives here rather than in `api/routes/autodedup.py` for the repo's split (a route
-shapes an answer, a module owns the statement) and because `tests/sql_corpus.py`
-`RUNTIME_DIRS` carries `autodedup`, so every constant below joins the PREPARE gate for free.
+shapes an answer, a module owns the statement); the PREPARE gate reads either place, since
+`tests/sql_corpus.py` `RUNTIME_DIRS` carries both `api` and `autodedup`.
 
 `ITERATION_COLUMNS` is the contract of the select list: rows are zipped onto it rather than
 read off `cursor.description`, which the tests' fake connections do not carry.
