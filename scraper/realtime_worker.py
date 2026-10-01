@@ -824,13 +824,7 @@ def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
 def _claimable_by_source() -> dict[str, int]:
     conn = db.connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT source, count(*) FROM listing_detail_queue "
-                "WHERE claimed_at IS NULL AND given_up = false "
-                "GROUP BY source"
-            )
-            return {source: int(n) for source, n in cur.fetchall()}
+        return db.claimable_counts(conn)
     finally:
         with contextlib.suppress(Exception):
             conn.close()
