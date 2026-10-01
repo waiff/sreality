@@ -161,6 +161,7 @@ def patched_db(monkeypatch):
         "touch_listings": [],
         "index_summary": [],
         "enqueue": [],
+        "seen_key": [],
     }
 
     class _FakeConn:
@@ -201,7 +202,8 @@ def patched_db(monkeypatch):
     monkeypatch.setattr(
         scraper_main.db, "presence_candidates",
         lambda _conn, source, cm, ct, ids, *, seen_key="native", **kw: (
-            calls["nominated"].append((cm, ct, set(ids))) or ([], 0)
+            calls["seen_key"].append(seen_key)
+            or calls["nominated"].append((cm, ct, set(ids))) or ([], 0)
         ),
     )
     monkeypatch.setattr(
@@ -228,11 +230,15 @@ def patched_db(monkeypatch):
     return calls
 
 
-def test_run_full_nominates_per_category_when_no_limit(patched_db):
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+def test_run_full_nominates_per_category_when_no_limit(patched_db, caplog):
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
-    # One mark_inactive call per category in CATEGORIES.
+    # One nomination per category in CATEGORIES, through the runner's own step.
     assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
+    assert set(patched_db["seen_key"]) == {"sreality_id"}
+    assert "VERIFY cm=byt ct=pronajem subtype=None candidates=0 queued=0 deferred=0 active=0" in (
+        caplog.messages)
 
     # Each call is scoped to its own (cm_text, ct_text) and carries the
     # ids that came from that category's index walk only. Expected labels
@@ -249,6 +255,27 @@ def test_run_full_nominates_per_category_when_no_limit(patched_db):
     by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["nominated"]}
     assert by_pair[("byt", "pronajem")] == {12000, 12001, 12002, 12003, 12004}
     assert by_pair[("byt", "prodej")] == {11000, 11001, 11002, 11003, 11004}
+
+
+def test_legacy_nomination_failure_is_isolated(patched_db, monkeypatch, caplog):
+    """A nomination that raises costs that category one round of page checks;
+    the next category still walks and nominates."""
+    calls = {"n": 0}
+
+    def _enqueue(_conn, source, cm, ct, cands, *, active_rows, subtype=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("pooler said no")
+        return 0, 0
+
+    monkeypatch.setattr(scraper_main.db, "enqueue_presence_checks", _enqueue)
+    with caplog.at_level("ERROR"):
+        rc, agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    assert calls["n"] == len(scraper_main.CATEGORIES)
+    assert len(agg["by_category"]) == len(scraper_main.CATEGORIES)
+    failed = [m for m in caplog.messages if m.startswith("VERIFY failed cm=")]
+    assert len(failed) == 1 and "nothing nominated this walk" in failed[0]
 
 
 def test_run_full_skips_nomination_when_limit_set(patched_db):
@@ -467,11 +494,11 @@ def test_rotation_gives_each_category_the_front_across_a_full_cycle():
     assert leaders == set(scraper_main.CATEGORIES)
 
 
-# --- gone detection in _process_one ----------------------------------------
+# --- gone detection: _fetch_detail -> _write_result ------------------------
 
 
 def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
-    calls: dict[str, list] = {"inactive": [], "cleared": [], "failed": [], "source": []}
+    calls: dict[str, list] = {"inactive": [], "failed": [], "source": []}
 
     def _flip(_c, source, nid):
         calls["source"].append(source)
@@ -479,10 +506,6 @@ def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
         return True
 
     monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _flip)
-    monkeypatch.setattr(
-        scraper_main.db, "clear_fetch_failure",
-        lambda _c, sid: calls["cleared"].append(sid),
-    )
     monkeypatch.setattr(
         scraper_main.db, "record_fetch_failure",
         lambda _c, sid, msg: calls["failed"].append(sid),
@@ -498,11 +521,11 @@ class _RaisingClient:
         raise self._exc
 
 
-def test_process_one_listing_gone_flips_inactive_not_failure(monkeypatch):
+def test_listing_gone_flips_inactive_not_failure(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     client = _RaisingClient(ListingGoneError("https://x/estates/1", 200))
-    outcome, imgs = scraper_main._process_one(
-        client, object(), 12345, dry_run=False
+    outcome, imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 12345), False
     )
     assert outcome == "gone"
     assert imgs == 0
@@ -511,13 +534,13 @@ def test_process_one_listing_gone_flips_inactive_not_failure(monkeypatch):
     assert calls["failed"] == []  # a delisting is not a fetch failure
 
 
-def test_process_one_404_http_error_is_gone(monkeypatch):
+def test_404_http_error_is_gone(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     resp = requests.Response()
     resp.status_code = 404
     client = _RaisingClient(requests.HTTPError("404", response=resp))
-    outcome, _imgs = scraper_main._process_one(
-        client, object(), 777, dry_run=False
+    outcome, _imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 777), False
     )
     assert outcome == "gone"
     assert calls["inactive"] == ["777"]
@@ -539,13 +562,13 @@ def test_handle_gone_flip_failure_is_an_error_not_gone(monkeypatch):
     assert calls["failed"] == [12345]
 
 
-def test_process_one_500_http_error_is_failure(monkeypatch):
+def test_500_http_error_is_failure(monkeypatch):
     calls = _patch_failure_helpers(monkeypatch)
     resp = requests.Response()
     resp.status_code = 500
     client = _RaisingClient(requests.HTTPError("500", response=resp))
-    outcome, _imgs = scraper_main._process_one(
-        client, object(), 888, dry_run=False
+    outcome, _imgs = scraper_main._write_result(
+        object(), scraper_main._fetch_detail(client, 888), False
     )
     assert outcome == "errors"
     assert calls["failed"] == [888]
@@ -590,7 +613,6 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
         scraper_main.db, "record_fetch_failure",
         lambda _c, sid, msg: writes["fail"].append(sid),
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
 
     def fake_fetch(_client, sid):
         if sid == 11:
@@ -640,7 +662,6 @@ def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
         scraper_main.listing_write, "write_listings",
         lambda _c, ws: [_outcome(w, "updated") for w in ws],
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, s: None)
 
     fetched: list[int] = []
 
@@ -1198,7 +1219,6 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
         scraper_main.db, "mark_listing_inactive",
         lambda _c, source, nid: captured["gone"].append((source, nid)),
     )
-    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
     return captured
 
 

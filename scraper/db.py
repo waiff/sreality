@@ -1640,18 +1640,6 @@ def record_fetch_failure(
         )
 
 
-def clear_fetch_failure(
-    conn: psycopg.Connection,
-    sreality_id: int,
-) -> None:
-    """Remove the failure row after a successful fetch."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM listing_fetch_failures WHERE sreality_id = %s",
-            (sreality_id,),
-        )
-
-
 def sweep_stuck_scrape_runs(
     conn: psycopg.Connection,
     *,
