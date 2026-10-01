@@ -11,7 +11,6 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-import psycopg
 import pytest
 
 from tests._live_property import (  # `cur` is the fixture
@@ -204,26 +203,33 @@ def test_dispatches_collapse_null_safe(cur, accounts):
     assert _dispatches(cur, seed["colls"]) == kept
 
 
-@pytest.mark.xfail(strict=True, raises=psycopg.errors.CheckViolation,
-                   reason="PR 4: the collapse DELETE nulls the send's notification_id "
-                          "(channel_sends_check) and the whole merge aborts")
-def test_a_delivered_alert_does_not_abort_the_merge(cur, accounts):
-    seed = _seed_dispatches(cur, accounts)
-    (r_new, _key), (s_new, _s_key) = seed["r_new"], seed["s_new"]
-    # Columns as api/channel_client.py claims a send; the outbox's consumer/source/dedupe shape.
+def _send(cur: Any, nid: uuid.UUID, coll: int) -> int:
+    """A delivered email, columns as api/channel_client.py claims a send (the outbox's
+    consumer/source/dedupe shape)."""
     cur.execute(
         "INSERT INTO channel_sends "
         "  (consumer, notification_id, outreach_message_id, source_kind, source_id, "
         "   channel, recipient, category, status, dedupe_key) "
         "VALUES ('collection_monitor', %s, NULL, 'collection_monitor', %s, 'email', %s, "
         "        'transactional', 'sent', %s) RETURNING id",
-        (r_new, str(seed["colls"][0]), "ci@replay.local", f"notif:{r_new}:email"),
+        (nid, str(coll), "ci@replay.local", f"notif:{nid}:email"),
     )
-    send = int(cur.fetchone()[0])
+    return int(cur.fetchone()[0])
+
+
+def test_a_delivered_alert_does_not_abort_the_merge(cur, accounts):
+    """The collapse DELETE would null the send's notification_id (ON DELETE SET NULL), which
+    channel_sends_check refuses, aborting the merge: the send moves to S's twin first. A send
+    on a row that moves (the price drop) keeps pointing at it."""
+    seed = _seed_dispatches(cur, accounts)
+    (r_new, _key), (s_new, _s_key), (r_drop, _d_key) = (
+        seed["r_new"], seed["s_new"], seed["r_drop"])
+    sends = {_send(cur, r_new, seed["colls"][0]): s_new,
+             _send(cur, r_drop, seed["colls"][0]): r_drop}
 
     _merged(cur, seed["s"], seed["r"])
-    cur.execute("SELECT notification_id FROM channel_sends WHERE id = %s", (send,))
-    assert cur.fetchone()[0] == s_new, "the delivery record lost its event"
+    cur.execute("SELECT id, notification_id FROM channel_sends WHERE id = ANY(%s)", (list(sends),))
+    assert dict(cur.fetchall()) == sends, "a delivery record lost its event"
 
 
 # --- the deal pipeline ------------------------------------------------------------------

@@ -192,7 +192,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     (`sql_kind`, place plan, rule-23 measures, served predicate). `notification_dispatches` = the append-only event table,
     **three producers**: `watchdog` + `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}`
     per-snapshot; a `monitor_since` anchor so a pre-membership change never fires) + `system_health` (**NOT** property-grain;
-    `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. A merge re-points them (#18), collapsing a twin: the merge's one delete.
+    `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. A merge re-points them (#18), collapsing a twin (the merge's one delete) once its `channel_sends` move to the kept row.
 17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).

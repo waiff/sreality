@@ -1687,8 +1687,10 @@ renumber.** Navigate by area:
     `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
     Rows are carried onto the survivor by `PROPERTY_CARRIERS`' `notification_dispatches` entry
     (rule #18, `toolkit/property_carriers.py`, collapse key `(subscription_id, collection_id,
-    change_kind, trigger_snapshot_id)`, NULL-safe — the merge's one delete there; deleting a subscription or
-    collection cascades its rows) so they never orphan
+    change_kind, trigger_snapshot_id)`, NULL-safe — the merge's one delete there, its `channel_sends`
+    re-pointed onto the kept row first (`Dispatches.RESEND_SQL`: the FK is ON DELETE SET NULL and
+    `channel_sends_check` refuses a NULL on a notification-backed send, so one delivered alert used to
+    abort the whole merge); deleting a subscription or collection cascades its rows) so they never orphan
     onto a `merged_away` property. **Delivery and detection are SEPARATE:** in-app delivery is the event row itself
     (`channel='in_app'`); external channels (email/Telegram, Sprint N) deliver via a dedicated
     `channel_sends` ledger draining `target_channels` — NOT a `channel`-column widen. (The old

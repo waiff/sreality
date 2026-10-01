@@ -199,6 +199,37 @@ class CurationTable:
         """Nothing: the rows stay on the property the advert left (rule 18, best-effort)."""
 
 
+class Dispatches(CurationTable):
+    """The unified event table (migration 206) as a SET table, whose collapse would otherwise
+    strand a delivery: `channel_sends.notification_id` is ON DELETE SET NULL (migration 207),
+    and `channel_sends_check` (migration 274) refuses a NULL on a notification-backed send, so
+    one delivered alert aborted the whole merge. `RESEND_SQL` runs first and hands each such
+    send to the survivor's twin, the row the collapse keeps; `channel_sends` is unique only on
+    its own dedupe_key, so a move never collides."""
+
+    # The twin is the collapse's own join over the same keys; subscription_id and collection_id
+    # are account-owned ids, so the pairing never crosses an account.
+    RESEND_SQL = """
+UPDATE channel_sends cs SET notification_id = s.id
+FROM notification_dispatches r
+JOIN notification_dispatches s
+  ON s.property_id = %(survivor)s
+ AND s.subscription_id IS NOT DISTINCT FROM r.subscription_id
+ AND s.collection_id IS NOT DISTINCT FROM r.collection_id
+ AND s.change_kind IS NOT DISTINCT FROM r.change_kind
+ AND s.trigger_snapshot_id IS NOT DISTINCT FROM r.trigger_snapshot_id
+WHERE r.property_id = %(retired)s AND cs.notification_id = r.id
+"""
+
+    def __init__(self) -> None:
+        # Identity spans both property-grain producers (subscription_id XOR collection_id) and
+        # the per-snapshot grain (trigger_snapshot_id, NULL for 'new').
+        super().__init__("notification_dispatches",
+                         ("subscription_id", "collection_id", "change_kind",
+                          "trigger_snapshot_id"))
+        self.sql = (self.RESEND_SQL, *self.sql)
+
+
 class Pipeline:
     """Rule 22's single-valued card, terminal-aware; implemented in `toolkit.pipeline_identity`."""
 
@@ -262,10 +293,7 @@ PROPERTY_CARRIERS: tuple[Carrier, ...] = (
     CurationTable("collection_properties", ("collection_id",)),
     CurationTable("property_tags", ("tag_id",)),
     CurationTable("property_notes"),
-    # The unified event table (migration 206): identity spans both producers (subscription_id
-    # XOR collection_id) and the per-snapshot grain (trigger_snapshot_id, NULL for 'new').
-    CurationTable("notification_dispatches",
-                  ("subscription_id", "collection_id", "change_kind", "trigger_snapshot_id")),
+    Dispatches(),
     Pipeline(),
     Dismissals(),
 )

@@ -10,10 +10,17 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
+import psycopg
 import pytest
 
 import toolkit.property_identity as pi
-from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
+from tests._property_ledger import (  # noqa: F401 — the fixture
+    OP,
+    T0,
+    _Ledger,
+    keep_real,
+    ledger_carriers,
+)
 from tests.test_detach_listing import _appended
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import MergeStep
@@ -187,6 +194,64 @@ def test_an_engine_merge_is_never_a_ruling():
     db = _Ledger({30: 3, 70: 7}, canonical={3: 30, 7: 70})
     assert _merge(db, [3, 7])["pairs_ruled_same"] == 0
     assert db.sql("autodedup.") == [] and db.sql("p.repr_listing_ref_id FROM") == []
+
+
+def _alerted() -> _Ledger:
+    """3 survives 7. Collection 5 alerted 'new' on both (twins, subscription and snapshot NULL)
+    and a price drop on 7; collection 6 (another account's) 'new' on 7 only; a watchdog
+    subscription 'new' on each, different subscriptions. Every alert on 7 was delivered."""
+    return _Ledger(
+        {1: 3, 2: 7},
+        dispatches={
+            "s-new": {"property_id": 3, "collection_id": 5, "change_kind": "new"},
+            "r-new": {"property_id": 7, "collection_id": 5, "change_kind": "new"},
+            "r-drop": {"property_id": 7, "collection_id": 5, "change_kind": "price_drop",
+                       "trigger_snapshot_id": 99},
+            "b-new": {"property_id": 7, "collection_id": 6, "change_kind": "new"},
+            "s-sub": {"property_id": 3, "subscription_id": "sub-1", "change_kind": "new"},
+            "r-sub": {"property_id": 7, "subscription_id": "sub-2", "change_kind": "new"},
+        },
+        sends={
+            1: {"consumer": "collection_monitor", "notification_id": "r-new"},
+            2: {"consumer": "collection_monitor", "notification_id": "r-drop"},
+            3: {"consumer": "collection_monitor", "notification_id": "b-new"},
+            4: {"consumer": "watchdog", "notification_id": "r-sub"},
+            5: {"consumer": "collection_monitor", "notification_id": "s-new"},
+            6: {"consumer": "outreach", "notification_id": None},
+        },
+    )
+
+
+def test_a_delivered_alert_moves_to_the_kept_twin_and_the_merge_commits(monkeypatch):
+    """The collapse would null a send's event (ON DELETE SET NULL), which channel_sends_check
+    refuses: the send moves to the survivor's twin first. Only a twin pairs, every key equal
+    (NULL with NULL), so another collection's or subscription's alert moves with its row."""
+    keep_real(monkeypatch, carriers.Dispatches())
+    db = _alerted()
+    _merge(db, [3, 7], source="operator", decided_by=OP)
+    assert {nid: row["property_id"] for nid, row in db.dispatches.items()} == {
+        "s-new": 3, "r-drop": 3, "b-new": 3, "s-sub": 3, "r-sub": 3}
+    assert {sid: send["notification_id"] for sid, send in db.sends.items()} == {
+        1: "s-new", 2: "r-drop", 3: "b-new", 4: "r-sub", 5: "s-new", 6: None}
+    order = [s for s, _p in db.log]
+    resend = order.index(next(s for s in order if s.startswith("UPDATE channel_sends")))
+    assert resend < order.index(next(s for s in order
+                                     if s.startswith("DELETE FROM notification_dispatches")))
+    assert db.sql("UPDATE channel_sends") == [{"retired": 7, "survivor": 3}]
+
+
+def test_without_the_resend_the_collapse_strands_a_send_and_the_set_rolls_back(monkeypatch):
+    """The defect the resend fixes, modelled: the plain SET collapse aborts the whole merge."""
+    keep_real(monkeypatch, carriers.CurationTable("notification_dispatches",
+                                                  carriers.Dispatches().keys))
+    db = _alerted()
+    before = ({k: dict(v) for k, v in db.dispatches.items()},
+              {k: dict(v) for k, v in db.sends.items()})
+    with pytest.raises(psycopg.errors.CheckViolation, match="channel_sends_check"):
+        _merge(db, [3, 7], source="operator", decided_by=OP)
+    assert (db.dispatches, db.sends) == before
+    assert db.listings == {1: 3, 2: 7} and db.events == [] and db.props == {3: "active",
+                                                                           7: "active"}
 
 
 def _code() -> str:
