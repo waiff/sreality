@@ -26,6 +26,8 @@ on:
     paths:
       - "**/*.py"
       - "migrations/**"
+      # The C4 rows rail executes these fixtures; a fixture-only change must run it.
+      - "tests/fixtures/filter_compile_*.json"
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
@@ -38,6 +40,8 @@ on:
     paths:
       - "**/*.py"
       - "migrations/**"
+      # The C4 rows rail executes these fixtures; a fixture-only change must run it.
+      - "tests/fixtures/filter_compile_*.json"
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
@@ -492,6 +496,18 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_sql_prepare.py -q
+
+      # C4 (rule 16): the filter compile's golden pins the TEXT the hand-coded adapters
+      # rendered; this executes every golden case twice over seeded TEMP shadows of the
+      # relations (always rolled back) — the golden's fragments vs what the current
+      # adapter renders — and the two id sets must be equal. Every regular single-filter
+      # case must also select a strict, non-empty subset, so empty == empty cannot pass.
+      - name: "Filter compiler: old and new predicates select the same rows (C4)"
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_filter_compiler_rows_live.py -q
 
       # Migration 577 (B-j, the control draw's operator sample), EXECUTED: the replay sealed the
       # 100 pairs, a second run changes nothing, a lost row comes back, and a pair sealed under

@@ -2992,7 +2992,8 @@
         "frontend/src/lib/llmCosts.ts",
         "migrations/**",
         "pyproject.toml",
-        "scripts/ci_db_bootstrap.sql"
+        "scripts/ci_db_bootstrap.sql",
+        "tests/fixtures/filter_compile_*.json"
       ],
       "inputs": [],
       "secrets": [],
