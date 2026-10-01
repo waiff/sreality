@@ -33,6 +33,19 @@ _IMG = "https://cdn.example.test/{native}/{i}.jpg"
 _VIDEO = "https://cdn.example.test/{native}/tour.mp4"
 
 
+def add_media_arbiters(conn: Any) -> None:
+    """The media upserts arbitrate on (listing_id, sequence). Production carries those two
+    unique guards from scripts/apply_r2_unique_guards.py (built CONCURRENTLY, so outside
+    migrations), which the replayed schema therefore lacks: add them in this transaction."""
+    from scripts.apply_r2_unique_guards import UNIQUE_GUARDS
+
+    with conn.cursor() as cur:
+        for g in UNIQUE_GUARDS:
+            if g["table"] in ("images", "listing_videos"):
+                cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {g['name']} "
+                            f"ON {g['table']} {g['cols_sql']}")
+
+
 @pytest.fixture()
 def conn():
     """Non-autocommit and already inside a transaction, so every write_listings call nests as
@@ -47,6 +60,7 @@ def conn():
     try:
         with c.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
+        add_media_arbiters(c)
         yield c
     finally:
         c.rollback()
