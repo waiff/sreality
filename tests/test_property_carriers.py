@@ -294,9 +294,9 @@ def test_the_dispatch_collapse_hands_its_sends_to_the_kept_twin_first():
     the DELETE collapses it onto (the same keys, NULL-safe), so the two cannot drift apart."""
     dispatches = next(c for c in PROPERTY_CARRIERS if c.name == "notification_dispatches")
     assert isinstance(dispatches, carriers.Dispatches)
-    resend, collapse, move = (_n(s) for s in dispatches.sql)
+    lock, resend, collapse, move = (_n(s) for s in dispatches.sql)
     assert [s for s, _p in _walk(dispatches).ran] == [
-        _n(carriers.Dispatches.RESEND_SQL), collapse, move]
+        _n(carriers.Dispatches.LOCK_SQL), _n(carriers.Dispatches.RESEND_SQL), collapse, move]
     assert collapse.startswith("DELETE FROM notification_dispatches")
     assert move.startswith("UPDATE notification_dispatches SET property_id")
     twin = re.compile(r"s\.(\w+) IS NOT DISTINCT FROM r\.\1\b")
@@ -304,6 +304,16 @@ def test_the_dispatch_collapse_hands_its_sends_to_the_kept_twin_first():
     assert "s.property_id = %(survivor)s" in resend and "r.property_id = %(retired)s" in resend
     assert {"subscription_id", "collection_id"} <= set(dispatches.keys), (
         "the pairing is account-partitioned only through account-owned keys")
+
+
+def test_the_retired_dispatches_are_locked_in_their_own_statement_before_the_resend():
+    """An outbox claim's foreign key check holds FOR KEY SHARE on the dispatch; FOR UPDATE waits
+    it out and holds off the next one. A separate statement, not a CTE of the resend, so the
+    resend's fresh READ COMMITTED snapshot sees a send that claim committed."""
+    lock = _n(carriers.Dispatches.LOCK_SQL)
+    assert lock.startswith("SELECT ") and lock.endswith(" FOR UPDATE")
+    assert "FROM notification_dispatches WHERE property_id = %(retired)s" in lock
+    assert "FOR UPDATE" not in _n(carriers.Dispatches.RESEND_SQL)
 
 
 def test_curation_dispatches_and_dismissals_give_nothing_back_on_a_detach():

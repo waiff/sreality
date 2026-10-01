@@ -90,14 +90,16 @@ class _Ledger:
     membership log; verdicts: the pair rulings LEDGER (migration 574), appended on change like
     `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; mnl: (lo, hi) -> (source,
     reason); dispatches: notification_dispatches id -> {property_id, *its collapse keys} (a key
-    left out is NULL); sends: channel_sends id -> {consumer, notification_id}."""
+    left out is NULL); sends: channel_sends id -> {consumer, notification_id}; claiming: the
+    sends an outbox claim is inserting while the merge runs (not yet committed)."""
 
     def __init__(self, listings: dict[int, int], *, first_seen: dict[int, datetime] | None = None,
                  assets: dict[int, int] | None = None, canonical: dict[int, int] | None = None,
                  props: dict[int, str] | None = None,
                  cats: dict[int, tuple[str | None, str | None]] | None = None,
                  dispatches: dict[str, dict[str, Any]] | None = None,
-                 sends: dict[int, dict[str, Any]] | None = None) -> None:
+                 sends: dict[int, dict[str, Any]] | None = None,
+                 claiming: dict[int, dict[str, Any]] | None = None) -> None:
         self.listings = dict(listings)
         self.props = {pid: "active" for pid in set(listings.values())} | (props or {})
         self.into: dict[int, int] = {}
@@ -118,6 +120,7 @@ class _Ledger:
         self.dispatches = {nid: dict.fromkeys(_DISPATCH_KEYS) | row
                            for nid, row in (dispatches or {}).items()}
         self.sends = {sid: dict(row) for sid, row in (sends or {}).items()}
+        self.claiming = {sid: dict(row) for sid, row in (claiming or {}).items()}
 
     def rule(self, lo: int, hi: int, verdict: str, *, by: str = OP, note: str | None = None,
              reasons: list[str] | None = None) -> None:
@@ -333,6 +336,20 @@ class _Ledger:
         return next((sid for sid, s in self.dispatches.items() if s["property_id"] == survivor
                      and all(s[k] == row[k] for k in _DISPATCH_KEYS)), None)
 
+    def _land_claims(self, rows: set[str] | None = None) -> None:
+        """Commit the in-flight claims on `rows` (all of them when None)."""
+        landing = {sid: send for sid, send in self.claiming.items()
+                   if rows is None or send["notification_id"] in rows}
+        self.sends |= landing
+        self.claiming = {sid: send for sid, send in self.claiming.items() if sid not in landing}
+
+    def _lock_dispatches(self, p: dict[str, Any]) -> list[tuple]:
+        """`Dispatches.LOCK_SQL`: FOR UPDATE waits for each claim on a locked row to commit (its
+        foreign key check holds FOR KEY SHARE there), so the statements after it see that send."""
+        locked = {nid for nid, row in self.dispatches.items() if row["property_id"] == p["retired"]}
+        self._land_claims(locked)
+        return [(nid,) for nid in sorted(locked)]
+
     def _resend(self, p: dict[str, Any]) -> None:
         moved = 0
         for send in self.sends.values():
@@ -346,7 +363,9 @@ class _Ledger:
     def _dispatch_collapse(self, p: dict[str, Any]) -> None:
         """The DELETE, with what it fires: `channel_sends.notification_id` ON DELETE SET NULL
         (migration 207), which `channel_sends_check` (migration 274) refuses on a
-        notification-backed send, aborting the statement and so the whole merge."""
+        notification-backed send, aborting the statement and so the whole merge. A claim no lock
+        serialized lands at the worst moment for it: just before this DELETE."""
+        self._land_claims()
         gone = {nid for nid, row in self.dispatches.items() if row["property_id"] == p["retired"]
                 and self._twin(nid, p["survivor"]) is not None}
         stranded = [sid for sid, send in self.sends.items() if send["notification_id"] in gone
@@ -390,7 +409,7 @@ def _n(sql: str) -> str:
 _DISPATCHES = carriers.Dispatches()
 _DISPATCH_KEYS = _DISPATCHES.keys
 _NOTIFICATION_BACKED = ("watchdog", "collection_monitor", "system_health")
-_RESEND, _DISPATCH_COLLAPSE, _DISPATCH_MOVE = _DISPATCHES.sql
+_LOCK_DISPATCHES, _RESEND, _DISPATCH_COLLAPSE, _DISPATCH_MOVE = _DISPATCHES.sql
 
 
 # Exact statement text -> the handler that models it. Matched by equality on the constants the
@@ -431,6 +450,7 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (brm._DELETE_SQL, _Ledger._browse_delete),
         (brm._INSERT_SQL, _Ledger._nothing),
         (rps._MIRROR_BROKER_DIRTY_SQL, _Ledger._broker_mirror),
+        (_LOCK_DISPATCHES, _Ledger._lock_dispatches),
         (_RESEND, _Ledger._resend),
         (_DISPATCH_COLLAPSE, _Ledger._dispatch_collapse),
         (_DISPATCH_MOVE, _Ledger._dispatch_move),

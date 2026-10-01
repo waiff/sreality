@@ -203,9 +203,16 @@ class Dispatches(CurationTable):
     """The unified event table (migration 206) as a SET table, whose collapse would otherwise
     strand a delivery: `channel_sends.notification_id` is ON DELETE SET NULL (migration 207),
     and `channel_sends_check` (migration 274) refuses a NULL on a notification-backed send, so
-    one delivered alert aborted the whole merge. `RESEND_SQL` runs first and hands each such
-    send to the survivor's twin, the row the collapse keeps; `channel_sends` is unique only on
-    its own dedupe_key, so a move never collides."""
+    one delivered alert aborted the whole merge. Before the collapse, `LOCK_SQL` stops the
+    outbox claiming new sends on the retired rows, then `RESEND_SQL` hands each such send to
+    the survivor's twin, the row the collapse keeps; `channel_sends` is unique only on its own
+    dedupe_key, so a move never collides."""
+
+    # Its own statement, never a CTE of the resend: FOR UPDATE waits out a claim whose foreign
+    # key check holds FOR KEY SHARE on a retired row, so the resend's fresh READ COMMITTED
+    # snapshot sees that send; a later claim waits for the merge to commit.
+    LOCK_SQL = ("SELECT id FROM notification_dispatches WHERE property_id = %(retired)s "
+                "ORDER BY id FOR UPDATE")
 
     # The twin is the collapse's own join over the same keys; subscription_id and collection_id
     # are account-owned ids, so the pairing never crosses an account.
@@ -227,7 +234,7 @@ WHERE r.property_id = %(retired)s AND cs.notification_id = r.id
         super().__init__("notification_dispatches",
                          ("subscription_id", "collection_id", "change_kind",
                           "trigger_snapshot_id"))
-        self.sql = (self.RESEND_SQL, *self.sql)
+        self.sql = (self.LOCK_SQL, self.RESEND_SQL, *self.sql)
 
 
 class Pipeline:

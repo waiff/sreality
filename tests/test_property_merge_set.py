@@ -254,6 +254,44 @@ def test_without_the_resend_the_collapse_strands_a_send_and_the_set_rolls_back(m
                                                                            7: "active"}
 
 
+def _claimed() -> _Ledger:
+    """3 survives 7, collection 5 alerted 'new' on both; nothing delivered yet, but the outbox
+    is claiming the send for 7's alert (its insert not yet committed) as the merge runs."""
+    return _Ledger(
+        {1: 3, 2: 7},
+        dispatches={"s-new": {"property_id": 3, "collection_id": 5, "change_kind": "new"},
+                    "r-new": {"property_id": 7, "collection_id": 5, "change_kind": "new"}},
+        claiming={1: {"consumer": "collection_monitor", "notification_id": "r-new"}},
+    )
+
+
+def test_a_send_the_outbox_claims_mid_merge_waits_for_the_lock_and_moves_too(monkeypatch):
+    """The lock on the retired rows runs as its own statement before the resend: it waits for
+    the in-flight claim to commit, so the resend sees that send and the collapse strands none."""
+    keep_real(monkeypatch, carriers.Dispatches())
+    db = _claimed()
+    _merge(db, [3, 7], source="operator", decided_by=OP)
+    assert db.claiming == {} and db.sends == {
+        1: {"consumer": "collection_monitor", "notification_id": "s-new"}}
+    assert set(db.dispatches) == {"s-new"}
+    order = [s for s, _p in db.log]
+    lock = order.index(next(s for s in order if s.endswith("FOR UPDATE")
+                            and "notification_dispatches" in s))
+    resend = order.index(next(s for s in order if s.startswith("UPDATE channel_sends")))
+    assert lock < resend
+    assert db.log[lock][1] == {"retired": 7, "survivor": 3}
+
+
+def test_without_the_lock_a_claim_lands_after_the_resend_and_the_set_rolls_back(monkeypatch):
+    """The window the lock closes, modelled: an unserialized claim commits between the resend
+    and the collapse, whose SET NULL then trips channel_sends_check."""
+    unlocked = carriers.Dispatches()
+    unlocked.sql = tuple(s for s in unlocked.sql if s != carriers.Dispatches.LOCK_SQL)
+    keep_real(monkeypatch, unlocked)
+    with pytest.raises(psycopg.errors.CheckViolation, match="channel_sends_check"):
+        _merge(_claimed(), [3, 7], source="operator", decided_by=OP)
+
+
 def _code() -> str:
     body = "\n".join(line.split("--")[0] for line in MIGRATION.read_text().lower().splitlines())
     return re.sub(r"\s+", " ", body)
