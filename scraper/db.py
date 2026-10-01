@@ -981,6 +981,9 @@ def presence_candidates(
         ids = [int(x) for x in ids]
     else:
         ids = [str(x) for x in ids]
+    if not ids:
+        # An empty bound array makes `<> ALL('{}')` true for every row: the whole scope.
+        raise ValueError(f"presence_candidates {source}: empty seen set would nominate the whole scope")
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
     cm_clause = "\n              AND category_main = %s" if category_main is not None else ""
     scope_params: list[Any] = [source]

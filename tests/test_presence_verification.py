@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import pytest
+
 from scraper import db
 
 
@@ -115,6 +117,15 @@ def test_nomination_drops_null_ids_from_the_seen_set():
     conn = _Conn(rows=[], active_rows=0)
     db.presence_candidates(conn, "remax", "byt", "prodej", {"a", None})
     assert conn.executed[1][1][3] == ["a"]
+
+
+def test_an_all_null_seen_set_raises_before_any_sql():
+    """An emptied seen set binds `<> ALL('{}')`, true for every row: the whole scope.
+    The runner never sends one; the bind site fails closed if anything else does."""
+    conn = _Conn(rows=[], active_rows=0)
+    with pytest.raises(ValueError):
+        db.presence_candidates(conn, "remax", "byt", "prodej", {None})
+    assert conn.executed == []
 
 
 # --- the bounded enqueue ---------------------------------------------------

@@ -307,6 +307,10 @@ def _queue_presence_checks(
     reason -- the walk that reached the portal's last page nominates its gap and
     lets the page decide.
     """
+    nulls = sum(1 for x in seen if x is None)
+    if nulls:
+        LOG.warning("VERIFY dropped %d NULL id(s) from the seen set cm=%s ct=%s", nulls, cm, ct)
+        seen = {x for x in seen if x is not None}
     if not seen:
         # walk_coverage calls a measured zero complete (declared 0, collected 0),
         # and it is right to -- but "I saw nothing" proves nothing about what is

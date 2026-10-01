@@ -307,6 +307,32 @@ def test_a_walk_that_saw_nothing_still_tells_a_buffering_portal(monkeypatch):
     assert cap["candidates"] == [] and cap["queued"] == []
 
 
+def test_an_all_null_seen_set_skips_and_notes_the_slice(monkeypatch, caplog):
+    """A walk whose every id parsed to None saw nothing it can name: the NULLs are
+    dropped, and the emptied set takes the saw-nothing branch, never the whole scope."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(reached_end=True, categories=["A"])
+    p.walk_category = lambda c, conn, dry_run, limiter, deadline=None: ({None}, {"found_new": 0, "enqueued": 0}, 1, 1, True)
+    noted: list[Any] = []
+    p.note_empty_slice = noted.append
+    with caplog.at_level("WARNING", logger="scraper.portal_runner"):
+        portal_runner.run_index_walk(p, dry_run=False)
+    assert cap["candidates"] == [] and cap["queued"] == []
+    assert noted == ["A"]
+    assert any(m.startswith("VERIFY dropped 1 NULL id(s) from the seen set cm=A ct=t")
+               for m in caplog.messages)
+    assert any(m.startswith("VERIFY skipped cm=A ct=t: the walk saw no listings")
+               for m in caplog.messages)
+
+
+def test_null_ids_are_dropped_before_nomination(monkeypatch):
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(reached_end=True, categories=["A"])
+    p.walk_category = lambda c, conn, dry_run, limiter, deadline=None: ({"a", None}, {"found_new": 0, "enqueued": 0}, 2, 1, True)
+    portal_runner.run_index_walk(p, dry_run=False)
+    assert [seen for _cm, seen, _key in cap["candidates"]] == [{"a"}]
+
+
 def test_index_walk_dry_run_uses_no_connection(monkeypatch):
     cap = _nominations(monkeypatch)
     p = _FakePortal()
