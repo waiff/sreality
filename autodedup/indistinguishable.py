@@ -2623,6 +2623,7 @@ def distinguishing_facts(
     ambiguity explains. `cluster` is `gate` with the image facts PUT BACK: the invariant is the
     only thing standing between a development and one big group, and dropping its best
     hazard-cell discriminator costs four bad groups where dropping it at the gate costs none.
+    `d43_image_facts = False` (R1) drops the image facts from all three readings.
     """
     cfg = settings or Settings()
     out: list[Fact] = []
@@ -3100,6 +3101,8 @@ def distinguishing_facts(
         if aligned is not None:
             add("body_align", aligned[0], aligned[1])
 
+    if not cfg.d43_image_facts:
+        return out
     if mode == GATE and not cfg.d43_gate_image_facts:
         return out
     if mode == CLUSTER and not cfg.d43_cluster_image_facts:
