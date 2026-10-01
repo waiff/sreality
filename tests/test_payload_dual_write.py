@@ -404,7 +404,6 @@ def test_remax_page_capped_probe_still_never_archives(
     monkeypatch.setattr(remax_main, "RemaxClient", _Client)
     monkeypatch.setattr(remax_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(remax_main.db, "enqueue_detail", lambda *a, **k: 0)
-    monkeypatch.setattr(remax_main.db, "touch_listings", lambda *a, **k: None)
     monkeypatch.setattr(remax_main.db, "index_archive_week", lambda: "2026w33")
     monkeypatch.setattr(remax_main.db, "fresh_index_page_keys", lambda *a, **k: set())
 
