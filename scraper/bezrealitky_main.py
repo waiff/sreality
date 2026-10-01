@@ -2,9 +2,9 @@
 
 Runnable as `python -m scraper.bezrealitky_main`. Bezrealitky is a `Portal`
 (BezrealitkyPortal) driven by the generic `scraper.portal_runner`. Its own
-`walk_category` pages bezrealitky's GraphQL `listAdverts`, diffs the ids and
-enqueues new/price-changed ones into the shared `listing_detail_queue`
-(source='bezrealitky', migration 108); the detail-drain fetches `advert(id)`,
+`walk_category` pages bezrealitky's GraphQL `listAdverts` and hands its sightings
+to `portal_runner.reconcile_sightings`, which touches and enqueues into the shared
+`listing_detail_queue` (source='bezrealitky', migration 108); the detail-drain fetches `advert(id)`,
 parses it to a ScrapedListing, and writes via `listing_write.write_listings`
 (the one listing write; a first-seen row lands `property_id` NULL and the
 straggler-attach births its singleton, rule #15).
@@ -41,7 +41,6 @@ from scraper.portal import (
     default_config,
     deadline_reached,
     load_portal_config,
-    classify_index_sighting,
     stop_is_portal_end,
     walk_reached_end,
 )
@@ -108,21 +107,20 @@ def _end_of_list_confirmed(
     )
 
 
-class BezrealitkyPortal:
+class BezrealitkyPortal(portal_runner.PortalDefaults):
     """Bezrealitky as a Portal: the seams the generic runner needs, wrapping the
-    bezrealitky GraphQL client + parser. Operational scope (categories,
-    complete-walk capability) comes from the `portals` registry config."""
+    bezrealitky GraphQL client + parser. Operational scope (categories, rates)
+    comes from the `portals` registry config."""
 
     source = SOURCE
     index_rate = 1.0  # baked floor; the instance reads it from config.limits
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -143,14 +141,6 @@ class BezrealitkyPortal:
             et = category.get("estate_type")
             cm = ESTATE_TYPE.get(et) if isinstance(et, str) else None
         return (cm, OFFER_TYPE.get(category.get("offer_type")))
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        # Batched writes without prepared statements; the transaction pooler is
-        # fine — no session pooler needed.
-        return db.connect()
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -264,38 +254,9 @@ class BezrealitkyPortal:
         )
 
         seen = set(native_ids)
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, None, price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, None, price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=bezrealitky new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (None, price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
         )
         # STRUCTURAL, not numeric (rule #3, 2026-09-08): the walk may nominate
         # its unseen rows only if the PORTAL ended it. One flat offset walk per
@@ -308,21 +269,9 @@ class BezrealitkyPortal:
         reached_end = walk_reached_end(
             portal_end=portal_end, our_stop=bool(self._max_pages) or not portal_end,
         )
-        return (
-            seen, {"found_new": len(new_ids), "enqueued": enqueued},
-            declared_total, pages, reached_end,
-        )
-
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
+        return seen, counts, declared_total, pages, reached_end
 
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> BezrealitkyClient:
-        return BezrealitkyClient(limiter=limiter)
-
     def fetch_detail(
         self, client: BezrealitkyClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -390,14 +339,6 @@ class BezrealitkyPortal:
         # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
         # have no sreality_id-keyed listing_fetch_failures row.
         pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'bezrealitky' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
 
 
 def _load_config(dry_run: bool) -> PortalConfig:
