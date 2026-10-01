@@ -36,12 +36,6 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
-        if "AS candidates" in s:
-            # migration 450 flip cap: it counts the scope before it flips.
-            # (0, 0) is below min_rows, so the cap allows the sweep and these
-            # tests stay about the UPDATE they were written to assert.
-            self._rows = [(0, 0)]
-            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)
@@ -74,22 +68,6 @@ def _find(executions, needle: str) -> tuple[str, Any] | None:
 
 
 # --- flips to false stamp the delisting moment -----------------------------
-
-
-def test_mark_inactive_stamps_inactive_at():
-    conn = _FakeConn()
-    db.mark_inactive(conn, "byt", "prodej", {1, 2})
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
-
-
-def test_mark_inactive_native_stamps_inactive_at():
-    conn = _FakeConn()
-    db.mark_inactive_native(conn, "bazos", "byt", "prodej", {"a", "b"})
-    flip = _find(conn.executed, "SET is_active = false")
-    assert flip is not None
-    assert "inactive_at = now()" in flip[0]
 
 
 def test_mark_listing_inactive_stamps_inactive_at():

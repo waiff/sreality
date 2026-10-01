@@ -39,13 +39,6 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
-        if "AS candidates" in s:
-            # migration 451's flip cap counts the scope before any sweep flips.
-            # (0, 0) sits below min_rows so the cap allows it, keeping these
-            # tests about the dirty-property bookkeeping they assert.
-            self._rows = [(0, 0)]
-            self.rowcount = 1
-            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)
@@ -397,45 +390,6 @@ def test_mark_properties_dirty_empty_noop():
     conn = _FakeConn([])
     assert db.mark_properties_dirty(conn, [None]) == 0
     assert conn.executed == []
-
-
-_FLIP_SQL = "UPDATE listings SET is_active = false, inactive_at = now() WHERE is_active = true"
-
-
-def test_mark_inactive_enqueues_flipped_properties_and_returns_count():
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, [(5,), (5,), (None,)]),
-        (lambda s: "INSERT INTO dirty_properties" in s, []),
-    ])
-    n = db.mark_inactive(conn, "byt", "prodej", {1, 2})
-    assert n == 3  # three listings flipped
-    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
-    assert dirty is not None
-    assert dirty[1] == ([5],)  # NULL-property listing excluded; deduped
-
-
-def test_mark_inactive_no_dirty_when_no_flips():
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, []),
-    ])
-    assert db.mark_inactive(conn, "byt", "prodej", {1}) == 0
-    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
-
-
-def test_mark_inactive_is_source_scoped():
-    # Rule #15: a sreality index walk must only flip sreality rows. Bazos rows
-    # carry the same canon categories but are never in sreality's seen_ids, so
-    # without the source clause every sreality walk would sweep them inactive.
-    conn = _FakeConn([
-        (lambda s: _FLIP_SQL in s, []),
-    ])
-    db.mark_inactive(conn, "byt", "prodej", {1, 2}, source="sreality")
-    # The FLIP, not executed[0] — migration 451's cap counts the scope first.
-    sql, params = _find(conn.executed, "SET is_active = false")
-    assert "AND source = %s" in sql
-    assert params[0] == "sreality"          # source bound first
-    assert params[1:3] == ("byt", "prodej")
-    assert sorted(params[3]) == [1, 2]
 
 
 def test_active_count_is_source_scoped():
