@@ -35,8 +35,11 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   to write nothing (deleted in follow-up F1). PR 4: the dispatch collapse keeps its sends —
   `Dispatches` re-points a collapsed row's `channel_sends` onto the kept twin first, so a
   delivered alert no longer aborts the merge (`channel_sends_check`; live test 3b un-xfailed).
-- **Next:** a chained detach restores one card (PR 5), the engine's undo on the set form and
-  `detach_listing` deleted (PR 6).
+  PR 5: a chained detach restores one card — the pipeline drops the card that followed the
+  advert where it now sits on the undo path unless a survivor held its own or another deal
+  still stands merged in, one hop included (live test 4b un-xfailed, 4c-4j); the asset link
+  and the pipeline both read the detach's undo path.
+- **Next:** the engine's undo on the set form and `detach_listing` deleted (PR 6).
   After PR 2 deploys, `dirty_broker_listings` depth steps up after merges (the fix
   working); `property_sweep_last_complete` should stay fresh.
 

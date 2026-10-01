@@ -221,7 +221,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `supports_complete_walk` is posture. A per-portal need is a `Portal` seam, never an `if source ==`; seams + owed: `docs/architecture.md` § rule 21.
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline` holds ≤1 card per property at one
     `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of a row at the entry stage. It has its OWN carrier in `PROPERTY_CARRIERS` (over
-    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property.
+    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property, chain-aware.
     Writes go through the JWT-gated API (`tenant_conn`); every SPA card write (Browse cards/rows, listing header, kanban drag + trash) is ONE hook,
     `lib/usePipelineCard` (id per call), over ONE write policy, `lib/useOptimisticWrite` (`lib/pipelineCache`: patches + re-read list). `<PipelineMark>` +
     `<PipelineStageMenu>` serve Browse + the listing header; the kanban (no mark; drag, own trash and confirm) and the extension (glyph, stage `<select>`) keep

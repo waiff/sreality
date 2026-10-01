@@ -51,7 +51,7 @@ def accounts(cur: Any) -> tuple[uuid.UUID, uuid.UUID]:
 
 
 def _require(ok: bool, why: str) -> None:
-    # Not `assert`: a strict xfail(raises=AssertionError) must not swallow a broken setup.
+    # Not `assert`: a broken setup fails as setup, never as the behavior the test asserts.
     if not ok:
         pytest.fail(why)
 
@@ -75,14 +75,15 @@ def _left_on(cur: Any, pid: int) -> dict[str, int]:
     return out
 
 
-def _merged(cur: Any, survivor: int, retired: int, *, source: str = "operator") -> str:
-    """Merge the pair through the public writer; the orphan probe runs on the retired side."""
-    out = merge_property_set(cur.connection, [survivor, retired], source=source,
+def _merged(cur: Any, survivor: int, *retired: int, source: str = "operator") -> str:
+    """Merge the set through the public writer; the orphan probe runs on each retired side."""
+    out = merge_property_set(cur.connection, [survivor, *retired], source=source,
                              reason="manual_subset", decided_by=OP)["data"]
-    _require((out["survivor_id"], out["retired_ids"]) == (survivor, [retired]),
+    _require((out["survivor_id"], out["retired_ids"]) == (survivor, list(retired)),
              f"the seed order did not pick the survivor: {out}")
-    left = _left_on(cur, retired)
-    _require(not any(left.values()), f"rows left on the merged_away property {retired}: {left}")
+    for pid in retired:
+        left = _left_on(cur, pid)
+        _require(not any(left.values()), f"rows left on the merged_away property {pid}: {left}")
     return str(out["merge_group_id"])
 
 
@@ -270,18 +271,24 @@ def test_pipeline_terminal_aware_merge_and_lossless_detach(cur, accounts):
     assert _cards(cur, b) == {s: live_b, r: live_b}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="PR 5: a chained detach restores the card on B and leaves the one "
-                          "the last survivor absorbed")
-def test_a_chained_detach_restores_one_card(cur, accounts):
-    x, y = accounts
-    c, a, b = _property(cur), _property(cur), _property(cur)
-    adverts = {pid: _advert(cur, pid, source=src)
-               for pid, src in ((c, "sreality"), (a, "idnes"), (b, "remax"))}
-    for pid in (c, a, b):
+def _chain(cur: Any, *sources: str) -> tuple[list[int], dict[int, int]]:
+    """Properties C < A < B (< D ...), one advert each, recomputed so the lower id survives."""
+    pids = [_property(cur) for _ in sources]
+    adverts = {pid: _advert(cur, pid, source=src) for pid, src in zip(pids, sources)}
+    for pid in pids:
         _recompute(cur, pid)
+    return pids, adverts
+
+
+def test_a_chained_detach_restores_one_card(cur, accounts):
+    """X's card followed B's advert A then C; neither survivor held its own, so the detach gives
+    it back to B and takes it off C. Y's card on B met Y's own on C at the second hop (snapshotted
+    under C there, not at the first): both of Y's cards stay."""
+    x, y = accounts
+    (c, a, b), adverts = _chain(cur, "sreality", "idnes", "remax")
     live_x, live_y = _stage(cur, x, position=2), _stage(cur, y, position=2)
     _card(cur, x, b, live_x)
+    _card(cur, y, b, live_y)
     _card(cur, y, c, live_y)
 
     _merged(cur, a, b)
@@ -289,7 +296,197 @@ def test_a_chained_detach_restores_one_card(cur, accounts):
     _require(_cards(cur, x) == {c: live_x}, "the card did not follow both merges")
     _detached(cur, adverts[b], b)
     assert _cards(cur, x) == {b: live_x}, "one deal, two cards"
-    assert _cards(cur, y) == {c: live_y}
+    assert _cards(cur, y) == {b: live_y, c: live_y}, "a path survivor's own card was dropped"
+
+
+def test_a_side_merge_keeps_the_card_it_joined(cur, accounts):
+    """After the chain, C absorbs D, which held X's card: C's card now carries D's deal too, so
+    the detach gives B its card back and leaves C's. Y's card followed the chain alone (D held
+    none of Y's), so it comes off C: one card per deal, and no deal dropped."""
+    x, y = accounts
+    (c, a, b, d), adverts = _chain(cur, "sreality", "idnes", "remax", "bazos")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, b, live_x)
+    _card(cur, y, b, live_y)
+    _card(cur, x, d, ahead_x)
+
+    _merged(cur, a, b)
+    _merged(cur, c, a)
+    _merged(cur, c, d)
+    _require(_cards(cur, x) == {c: ahead_x}, "D's card did not meet the chain's on C")
+    _detached(cur, adverts[b], b)
+    assert _cards(cur, x) == {b: live_x, c: ahead_x}, "the detach dropped D's deal"
+    assert _cards(cur, y) == {b: live_y}, "one deal, two cards"
+
+
+@pytest.mark.parametrize("emptied_by", ["detach", "remove"])
+def test_a_side_merge_onto_an_emptied_survivor_keeps_its_deal(cur, accounts, emptied_by):
+    """The chain's card leaves C (A's own advert detached, which gives A the card back, or the
+    operator removes it), then C absorbs D, which held X's card: it lands on the emptied C, so
+    C holds no snapshot of its own there. The detach of B's advert gives B its card back and
+    leaves D's deal on C: the side merge is read off the merge ledger (D into C, still
+    standing), not off C's card. The card that went back to A followed B's advert, so it comes
+    off A, for Y too: one card per deal."""
+    x, y = accounts
+    (c, a, b, d), adverts = _chain(cur, "sreality", "idnes", "remax", "bazos")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, b, live_x)
+    _card(cur, y, b, live_y)
+    _card(cur, x, d, ahead_x)
+
+    _merged(cur, a, b)
+    _merged(cur, c, a)
+    if emptied_by == "detach":
+        _detached(cur, adverts[a], a)
+        _require(_cards(cur, x) == {a: live_x} and _cards(cur, y) == {a: live_y},
+                 "A's detach did not give A the chain's card")
+    else:
+        cur.execute("DELETE FROM property_pipeline WHERE account_id = %s AND property_id = %s",
+                    (x, c))
+    _require(c not in _cards(cur, x), "the chain's card did not leave C")
+    _merged(cur, c, d)
+    _require(_cards(cur, x).get(c) == ahead_x, "D's card did not land on the emptied C")
+    _detached(cur, adverts[b], b)
+    assert _cards(cur, x) == {b: live_x, c: ahead_x}, "D's deal dropped, or B's on two cards"
+    assert _cards(cur, y) == {b: live_y}, "one deal, two cards"
+
+
+def test_a_one_hop_detach_keeps_the_card_a_standing_side_merge_joined(cur, accounts):
+    """S absorbs R's card (S held none), then D's: S's card carries D's deal while D stays
+    merged, so detaching R's advert gives R its card back and leaves S's. Before the side-merge
+    keep, the one-hop drop took S's card and D's deal with it."""
+    x, y = accounts
+    (s, r, d), adverts = _chain(cur, "sreality", "idnes", "remax")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, r, live_x)
+    _card(cur, x, d, ahead_x)
+    _card(cur, y, r, live_y)
+
+    _merged(cur, s, r)
+    _merged(cur, s, d)
+    _detached(cur, adverts[r], r)
+    assert _cards(cur, x) == {r: live_x, s: ahead_x}, "the detach dropped D's deal"
+    assert _cards(cur, y) == {r: live_y}, "one deal, two cards"
+
+
+def test_an_undone_side_merge_keeps_no_card(cur, accounts):
+    """Undone newest first (the engine's unapply, an operator splitting D off then R): D's
+    detach gives D its card back and S keeps the one it held at that merge; R's detach then
+    finds the side merge undone, so S's card goes and the full revert leaves none on S."""
+    x, y = accounts
+    (s, r, d), adverts = _chain(cur, "sreality", "idnes", "remax")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, r, live_x)
+    _card(cur, x, d, ahead_x)
+    _card(cur, y, d, live_y)
+
+    _merged(cur, s, r)
+    _merged(cur, s, d)
+    _detached(cur, adverts[d], d)
+    _require(_cards(cur, x) == {s: ahead_x, d: ahead_x}, "D's detach did not restore D's card")
+    _detached(cur, adverts[r], r)
+    assert _cards(cur, x) == {r: live_x, d: ahead_x}, "an undone side merge kept S's card"
+    assert _cards(cur, y) == {d: live_y}, "one deal, two cards"
+
+
+def test_a_side_merge_undone_in_part_keeps_no_card(cur, accounts):
+    """D absorbed E, then S absorbs R's card and D's. Detaching D's own advert brings D back
+    with its card while E's advert stays on S, so a ledger row of that side merge is still
+    live; the side merge stands only while D is merged into S, so R's detach takes S's card
+    and the later return of E's advert changes no card."""
+    x, y = accounts
+    (s, r, d, e), adverts = _chain(cur, "sreality", "idnes", "remax", "bazos")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, r, live_x)
+    _card(cur, x, d, ahead_x)
+    _card(cur, y, r, live_y)
+
+    _merged(cur, d, e)
+    _merged(cur, s, r)
+    _merged(cur, s, d)
+    _detached(cur, adverts[d], d)
+    _require(_cards(cur, x) == {s: ahead_x, d: ahead_x}, "D's detach did not restore D's card")
+    _detached(cur, adverts[r], r)
+    assert _cards(cur, x) == {r: live_x, d: ahead_x}, "a side merge undone in part kept S's card"
+    assert _cards(cur, y) == {r: live_y}, "one deal, two cards"
+    _detached(cur, adverts[e], e)
+    assert (_cards(cur, x), _cards(cur, y)) == ({r: live_x, d: ahead_x}, {r: live_y})
+
+
+def test_an_origin_merged_twice_gets_one_card(cur, accounts):
+    """B (two adverts) merges into A, comes back with one, moves on a stage and merges into A
+    again, its card landing on the emptied A. The second advert's detach undoes the FIRST merge
+    and brings B back: B's own snapshot of the second merge is no standing side merge (B is
+    active again), so A's card goes and B's deal is on one card, at its first merge's stage
+    (the restore is the pre-merge stage). Y's card on A, which B never held, stays."""
+    x, y = accounts
+    (a, b), adverts = _chain(cur, "sreality", "idnes")
+    second = _advert(cur, b, source="remax")
+    _recompute(cur, b)
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, b, live_x)
+    _card(cur, y, a, live_y)
+
+    _merged(cur, a, b)
+    _detached(cur, adverts[b], b)
+    _require(_cards(cur, x) == {b: live_x}, "the first detach did not give B its card back")
+    cur.execute("UPDATE property_pipeline SET stage_id = %s WHERE account_id = %s "
+                "AND property_id = %s", (ahead_x, x, b))
+    _merged(cur, a, b)
+    _require(_cards(cur, x) == {a: ahead_x}, "B's card did not land on the emptied A")
+    _detached(cur, second, b)
+    assert _cards(cur, x) == {b: live_x}, "one deal, two cards"
+    assert _cards(cur, y) == {a: live_y}, "a card B never held was dropped"
+
+
+def test_a_chain_cut_in_the_middle_drops_the_copy_where_it_went_back(cur, accounts):
+    """A's own advert is detached first: A gets the chain's card back and C's comes off. The
+    operator then puts a new deal on C. B's detach takes the card off A, where the one that
+    followed B's advert went back, and leaves C's new deal: one card per deal, none dropped."""
+    x, y = accounts
+    (c, a, b), adverts = _chain(cur, "sreality", "idnes", "remax")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, b, live_x)
+    _card(cur, y, b, live_y)
+
+    _merged(cur, a, b)
+    _merged(cur, c, a)
+    _detached(cur, adverts[a], a)
+    _require((_cards(cur, x), _cards(cur, y)) == ({a: live_x}, {a: live_y}),
+             "A's detach did not give A the chain's card")
+    _card(cur, x, c, ahead_x)
+    _detached(cur, adverts[b], b)
+    assert _cards(cur, x) == {c: ahead_x, b: live_x}, "C's new deal dropped, or B's on two cards"
+    assert _cards(cur, y) == {b: live_y}, "one deal, two cards"
+
+
+def test_a_set_merge_counts_its_survivor_card_only_from_before_it(cur, accounts):
+    """S absorbs R1 then R2 in one set merge; S held no card, so its snapshot at R2's step is
+    R1's card, not its own. R1's detach takes Y's card off S (only R1 held one) and leaves X's,
+    which carries R2's deal while R2 stays merged; R2's detach then takes X's off S too."""
+    x, y = accounts
+    (s, r1, r2), adverts = _chain(cur, "sreality", "idnes", "remax")
+    live_x, ahead_x = _stage(cur, x, position=2), _stage(cur, x, position=3)
+    live_y = _stage(cur, y, position=2)
+    _card(cur, x, r1, live_x)
+    _card(cur, x, r2, ahead_x)
+    _card(cur, y, r1, live_y)
+
+    _merged(cur, s, r1, r2)
+    _require((_cards(cur, x), _cards(cur, y)) == ({s: ahead_x}, {s: live_y}),
+             "the set merge did not keep the most advanced card on S")
+    _detached(cur, adverts[r1], r1)
+    assert _cards(cur, x) == {s: ahead_x, r1: live_x}, "the detach dropped R2's deal"
+    assert _cards(cur, y) == {r1: live_y}, "one deal, two cards"
+    _detached(cur, adverts[r2], r2)
+    assert _cards(cur, x) == {r1: live_x, r2: ahead_x}, "one deal, two cards"
 
 
 # --- dismissals -------------------------------------------------------------------------

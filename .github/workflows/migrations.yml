@@ -460,8 +460,7 @@ jobs:
       # Every property-anchored row a merge carries, EXECUTED through the public writers: one
       # test per carrier (collections, tags, notes, dispatches, pipeline, dismissals, the asset
       # link), each over two accounts, each proving the retired property is left holding no
-      # row. The record-only cursors in the unit tests cannot run the carriers' SQL. Two known
-      # defects run as strict xfails until their fix PRs remove the marker.
+      # row. The record-only cursors in the unit tests cannot run the carriers' SQL.
       - name: Every property-anchored row follows a merge and a detach
         timeout-minutes: 5
         env:

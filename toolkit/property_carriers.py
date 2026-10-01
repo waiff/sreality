@@ -250,7 +250,7 @@ class Pipeline:
 
     def on_detach(self, cur: psycopg.Cursor, step: DetachStep) -> None:
         pipeline_identity.reconcile_pipeline_on_detach(
-            cur, restored_id=step.restored, left_id=step.left, undo=step.undo)
+            cur, restored_id=step.restored, undo=step.undo)
 
 
 # One active row per (property, account): where both sides hold one, the survivor's stands and

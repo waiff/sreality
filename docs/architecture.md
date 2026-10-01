@@ -2219,10 +2219,20 @@ renumber.** Navigate by area:
     always beats a closed/terminal one, so a merge never buries a live deal under `lost`/`won`;
     within the same terminality the higher `position` wins (tie → later `updated_at`).
     `reconcile_pipeline_on_detach` restores a retired property's card from that snapshot when a
-    detach reactivates it (**lossless**: the reactivated property gets its pre-merge stage back,
-    and in the move-if-empty case the survivor's absorbed card is dropped so it isn't
-    duplicated); the survivor's own stage is left as-is — a chained-merge-safe best-effort, so a
-    survivor that absorbed the retired's stage keeps it until the operator adjusts. Writes go through the JWT-gated API (`tenant_conn`; `POST/DELETE /pipeline/cards` to
+    detach reactivates it (**lossless**: the reactivated property gets its pre-merge stage back;
+    progress made on the merged card does not come back with it), then, in the move-if-empty
+    case, drops the card that followed the advert wherever it now sits on the advert's undo path
+    (the first survivor a detach has since reactivated, else the property left), unless it may
+    carry another deal: a survivor up to there held a card before its merge began (a set merge's
+    later snapshots of its survivor are not its own card), or another card-holding property
+    still stands merged into one (the merge ledger and `merged_into`, not the survivor's
+    snapshot). One hop too, so the engine's `unapply` and `legacy_retire` see it: a standing
+    side merge now keeps the survivor's card the old one-hop drop deleted, an undone one keeps
+    nothing. Best-effort, so a deal can stay on two cards: a survivor that held a card at its
+    merge (its own, or one an earlier merge brought in) keeps it, a path property merged back in
+    after a detach reads as another deal, and a property reactivated after the deal it carried
+    went home still gets its snapshot; a card the operator adds where the one that followed sat
+    reads as that card. Writes go through the JWT-gated API (`tenant_conn`; `POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<PipelineMark>`

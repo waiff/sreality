@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests import sql_corpus
+from toolkit import pipeline_identity
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import (
     CARRIER_SQL,
@@ -326,17 +327,30 @@ def test_curation_dispatches_and_dismissals_give_nothing_back_on_a_detach():
         assert cur.ran == [], carrier.name
 
 
-def test_the_pipeline_restore_drops_the_absorbed_card_only_where_today_does():
-    """With one hop (or any detach whose property left is that merge's survivor) the card the
-    survivor absorbed comes off it; off a later survivor on a chain, the restore runs alone."""
+def test_the_pipeline_restore_drops_the_absorbed_card_along_the_undo_path():
+    """The snapshot is restored, then the card that followed the advert comes off the first
+    active survivor on its undo path (a reactivated one got it back, else the property left),
+    unless a survivor up to there held a card before its merge began (snapshots at every pair
+    step) or another card-holding property still stands merged into one (still `merged_away`
+    into it, by a live ledger row): live tests 4 and 4b to 4j."""
     pipeline = next(c for c in PROPERTY_CARRIERS if c.name == "pipeline")
-    one_hop = _walk(pipeline)
-    detach = one_hop.ran[4:]
-    assert [p for _s, p in detach] == [{"g": G, "r": 20, "s": 10}] * 2
+    restore, drop = _n(pipeline_identity._RESTORE_SQL), _n(pipeline_identity._DROP_ABSORBED_SQL)
+    assert ("unnest(%(groups)s::uuid[], %(path)s::bigint[], %(prevs)s::bigint[]) "
+            "WITH ORDINALITY AS h(g, s, p, k)") in drop
+    assert "WHERE pr.status = 'active' ORDER BY hop.k LIMIT 1" in drop
+    assert "WHERE pp.property_id = t.s AND t.s <> %(r)s" in drop
+    assert ">= (SELECT count(DISTINCT m.retired_property_id) FROM property_merge_events m" in drop
+    assert ("JOIN properties d ON d.id = o.property_id AND d.status = 'merged_away' "
+            "JOIN hop h ON h.s = d.merged_into AND h.k <= t.k") in drop
+    assert "m.survivor_property_id = h.s AND m.undone_at IS NULL" in drop
+    assert drop.count("IS NOT DISTINCT FROM pp.account_id") == 4, "every card probe is per account"
+    one_hop = {"g": G, "r": 20, "groups": [G], "path": [10], "prevs": [20]}
+    assert _walk(pipeline).ran[4:] == [(restore, one_hop), (drop, one_hop)]
     chained = _StrictCur(pipeline)
     pipeline.on_detach(chained, DetachStep(20, 5, (Hop(1, G, 10, 20), Hop(2, G2, 5, 10)),
                                            "operator"))
-    assert [(s.split()[0], p) for s, p in chained.ran] == [("INSERT", {"g": G, "r": 20, "s": None})]
+    path = {"g": G, "r": 20, "groups": [G, G2], "path": [10, 5], "prevs": [20, 10]}
+    assert chained.ran == [(restore, path), (drop, path)]
 
 
 def test_every_carrier_statement_is_in_the_prepare_corpus():
