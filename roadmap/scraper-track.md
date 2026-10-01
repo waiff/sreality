@@ -128,6 +128,21 @@ Independent of the analytical, UI, and map tracks.
   ("zastavěná plocha" / mmreality's `builtUpArea`) with no column to hold it — a schema question,
   not a parser fix; bazos gains no side columns (its free text carries no labelled parcel); and
   the unverified-key census across the nine portals is still unwritten.
+- **W22 (2026-10-01, PR #1668; heal = migration 582, PR #1669) — a figure in the plot box is
+  not always a plot.** General ruling 3 (2026-09-30) + the operator's flat answers: on 14 of 14
+  live pages the portal itself printed one figure in the plot box and the floor-area box
+  (ceskereality 1,383 komerční + 3,185 flats, idnes 651, realitymix 427, mmreality 53 active
+  rows; not our key maps). ONE rule, `scraper.area.stated_plot`, at ONE call site before the
+  content hash (`ScrapedListing.__post_init__`; sreality's `parse_listing` calls it itself): a
+  byt NEVER carries a plot; a komerční plot equal (0.1 m²) to the usable measure or a LABELLED
+  headline (usable / floor / total) is absence; dum / pozemek / ostatni unchanged; never
+  compared against a title fallback or zastavěná plocha. Contract cells stay `structured` (a
+  `none` / `text` cell would preserve-if-null and freeze every stored echo). Live rows clear at
+  their next fetch (one snapshot each); stored echoes need the migration — reparse never
+  blanks. **Owed before PR #1668 merges:** the stratified production hand-read of rule hits by
+  portal × komerční subtype (the #1630 → #1637 lesson). **Owed after:** the mmreality-dum
+  residue check (rows whose stored page has no `parcelArea`); the optional `verify_pipeline`
+  arm (byt / komerční rows with `estate_area = area_m2`, ~0 after both PRs).
 
 ### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
 - **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;

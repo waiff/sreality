@@ -660,6 +660,21 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   378126: usable_area 1,800 m², area_m2 NULL) — the guards read only `area_m2`, but the LLM judge's digest
   (`autodedup/judge.py` `DIGEST_ATTRS`) still shows it as "usable area".
 
+**A figure in the plot box is not always a plot (general ruling 3, 2026-09-30; operator answers 2026-10-01; PR #1668,
+heal = migration 582 in PR #1669).** Not our scraping: on 14 of 14 live pages the portal itself prints one figure in
+the plot box and the floor-area box, and every `estate_area` key map was right (ceskereality 1,383 of 3,023 active
+komerční plots, idnes 651, realitymix 427, mmreality 53; plus ceskereality's 3,185 active flat "plots" — the doubled
+floor figure, the placeholder 1 or the building's parcel). The missing rule is one function, `scraper.area.stated_plot`,
+at the contract boundary BEFORE the hash (`ScrapedListing.__post_init__`; sreality's `parse_listing`): a byt NEVER
+carries a plot; a komerční plot equal (0.1 m², half up) to the usable measure or a LABELLED headline (usable / floor /
+total) is absence; dum stays as it is (the operator's call), pozemek and ostatni untouched; a title fallback and
+zastavěná plocha are never compared. Contract cells stay `structured` (R4: `none` / `text` would preserve-if-null and
+freeze every stored echo). The heal is a 573-pattern migration (byt: every stored plot; komerční: the equality rule;
+active AND inactive; backup into `backup_a4.listing_cells`, no snapshot, `dirty_properties`), because reparse never
+blanks (R9). **Residuals, named:** the reverse case (idnes 19082282, a campsite's 8 616 m² land typed into the usable
+box) keeps the wrong area and loses the true plot; a garage whose parcel truly equals its floor loses a figure that
+added nothing; idnes dum carries 2,077 echoes and no rule (the house rule is unchanged).
+
 **W9.** Each item its own PR (status as of 2026-09-21, worked alongside W0):
 
 - ✅ **browse_list cadence docs.** It is `*/15` since migration 413; `toolkit/browse_read_model.py` and the Browse
