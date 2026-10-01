@@ -193,6 +193,10 @@ _SPECIAL: dict[str, list[tuple[dict[str, Any], str | None]]] = {
     "total_price_change_pct": [({"total_price_change_pct": v}, None) for v in (-5, 0, 5)],
     "city_index_rules": [({"city_index_rules": [_CITY_RULE]}, None),
                          ({"city_index_rules": []}, None)],
+    # `ostatni` is the one bucket that is not identity: it pins the expanded array, so a
+    # change to building_material_values or the building_type canon shows up here.
+    "building_material": [({"building_material": v}, "bare")
+                          for v in (["cihla"], ["ostatni"], ["cihla", "panel"], [])],
 }
 
 
