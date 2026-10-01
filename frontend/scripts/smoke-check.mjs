@@ -301,7 +301,7 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
     await page.goto(`${BASE_URL}/pipeline`, {
       waitUntil: 'domcontentloaded', timeout: 30000,
     });
-    const cardLink = page.locator('a[href^="/listing/"]').first();
+    const cardLink = page.locator('a[href^="/property/"]').first();
     await cardLink.waitFor({ state: 'visible', timeout: 30000 });
     const firstCardMs = Date.now() - tFirstCard;
     step(
@@ -317,12 +317,12 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
 
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
     const priced = await page
-      .locator('a[href^="/listing/"]')
+      .locator('a[href^="/property/"]')
       .filter({ hasText: /\d/ })
       .count();
     step('at least one card shows a price', priced >= 1, `${priced} priced cards`);
 
-    const columns = await page.locator('ul[class*="min-h-24"]').count();
+    const columns = await page.locator('main ul[aria-label]').count() // one <ul aria-label={stage.label}> per stage column (pages/Pipeline.tsx);
     step('stage columns rendered', columns >= 2, `${columns} columns`);
     await page.screenshot({ path: path.join(SHOT_DIR, '05-pipeline.png') });
 
