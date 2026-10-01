@@ -249,7 +249,7 @@ describe('<ListingCards> photo hydration', () => {
 
     expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
     expect(queries.fetchImagesForListingIds).toHaveBeenCalledTimes(1);
-    expect(queries.fetchImagesForListingIds).toHaveBeenCalledWith([111], 50);
+    expect(queries.fetchImagesForListingIds).toHaveBeenCalledWith([111], 50, expect.anything());
   });
 
   /* The north star as a test: every surface pays only for what it RENDERS.

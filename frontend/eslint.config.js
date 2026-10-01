@@ -34,6 +34,21 @@ export default [
             'Do not fetch-all with .range() — it does not lift PostgREST\'s db-max-rows clamp. Use fetchAllRows (lib/fetchAllRows.ts) for exhaustive reads, or an explicit .limit() for bounded ones.',
         },
         {
+          // Every PostgREST read is awaited through pgRead (lib/pgRead.ts): one
+          // deadline, one abort rule, one error class, one retry rule. The
+          // hand-rolled `const { data, error } = await …; if (error) throw
+          // error` it replaced had none of the four, and a `{ data }`- or
+          // `{ count }`-only await is worse: it reads a failure as empty. So
+          // destructuring data/error/count straight off an awaited method call
+          // is banned. Best-effort and syntactic, like the .range() ban above:
+          // `const r = await q; if (r.error)` (an await on a bare variable)
+          // still slips through. supabase.auth.* calls are not reads and stay out.
+          selector:
+            "VariableDeclarator[init.type='AwaitExpression'][init.argument.callee.type='MemberExpression'][init.argument.callee.object.property.name!='auth'] > ObjectPattern > Property[key.name=/^(data|error|count)$/]",
+          message:
+            'Await PostgREST reads through pgRead (lib/pgRead.ts) — it owns the deadline, abort and error classification.',
+        },
+        {
           // Code-splitting goes through lazyChunk (lib/lazyChunk.ts), never
           // React's bare `lazy`. After a deploy a stale chunk 404s; the page has
           // to reload WITHOUT letting React observe the failed import, or the

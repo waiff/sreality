@@ -58,6 +58,8 @@
  *     terminating request, because the exact total already says when to stop.
  */
 
+import { pgRead, type PgBuilder } from './pgRead';
+
 export class FetchAllOverflowError extends Error {
   constructor(relation: string, expectMax: number) {
     super(
@@ -75,25 +77,19 @@ export interface OrderSpec {
 
 /* The slice of a PostgREST builder this helper drives. Both `.from().select()`
  * and `.rpc()` builders satisfy it structurally. A FRESH builder is built per
- * page — PostgREST builders are single-use. */
-export interface PageBuilder<Row> {
-  order(column: string, opts?: { ascending?: boolean }): PageBuilder<Row>;
-  range(
-    from: number,
-    to: number,
-  ): PromiseLike<{
-    data: Row[] | null;
-    error: { message: string } | null;
-    /* Present only when the builder requested `count: 'exact'`; drives the
-     * fast path above. Absent (or null) callers get the plain sequential walk. */
-    count?: number | null;
-  }>;
+ * page — PostgREST builders are single-use. Each page is awaited through
+ * pgRead (lib/pgRead.ts): its own deadline, the caller's signal, and an
+ * ApiError on failure. A page's `count` is present only when the builder
+ * requested `count: 'exact'`; it drives the fast path above. */
+export interface PageBuilder {
+  order(column: string, opts?: { ascending?: boolean }): PageBuilder;
+  range(from: number, to: number): PgBuilder;
 }
 
-export interface FetchAllOptions<Row> {
+export interface FetchAllOptions {
   /* Display name for error messages (usually the relation / RPC name). */
   relation: string;
-  build: () => PageBuilder<Row>;
+  build: () => PageBuilder;
   /* Applied in order; MUST make the sort total (i.e. include every `key`
    * column) — validated here, at call time, so a non-total order is a loud
    * programmer error instead of a rare page-boundary data bug. */
@@ -105,6 +101,8 @@ export interface FetchAllOptions<Row> {
   /* Rows requested per page. The server may return fewer under a lower
    * db-max-rows; the loop is correct either way. */
   pageSize?: number;
+  /* React Query's signal: a cancel aborts every page in flight. */
+  signal?: AbortSignal;
 }
 
 export async function fetchAllRows<Row extends object>({
@@ -114,7 +112,8 @@ export async function fetchAllRows<Row extends object>({
   key,
   expectMax,
   pageSize = 1000,
-}: FetchAllOptions<Row>): Promise<Row[]> {
+  signal,
+}: FetchAllOptions): Promise<Row[]> {
   const ordered = new Set(orderBy.map((o) => o.column));
   for (const k of key) {
     if (!ordered.has(k)) {
@@ -127,13 +126,15 @@ export async function fetchAllRows<Row extends object>({
   const out: Row[] = [];
   const seen = new Set<string>();
 
-  const orderedBuild = (): PageBuilder<Row> => {
+  const orderedBuild = (): PageBuilder => {
     let page = build();
     for (const o of orderBy) {
       page = page.order(o.column, { ascending: o.ascending ?? true });
     }
     return page;
   };
+  const page = (from: number) =>
+    pgRead<Row[] | null>(orderedBuild().range(from, from + pageSize - 1), { signal });
 
   const absorb = (rows: readonly Row[]): void => {
     for (const row of rows) {
@@ -145,12 +146,11 @@ export async function fetchAllRows<Row extends object>({
     if (out.length > expectMax) throw new FetchAllOverflowError(relation, expectMax);
   };
 
-  const first = await orderedBuild().range(0, pageSize - 1);
-  if (first.error) throw first.error;
+  const first = await page(0);
   const firstRows = first.data ?? [];
   if (firstRows.length === 0) return out;
 
-  const count = first.count ?? null;
+  const count = first.count;
   if (count != null && count > expectMax) {
     throw new FetchAllOverflowError(relation, expectMax);
   }
@@ -168,14 +168,9 @@ export async function fetchAllRows<Row extends object>({
        * full-size window is safe to request up front, together. */
       const totalPages = Math.ceil(count / pageSize);
       const rest = await Promise.all(
-        Array.from({ length: totalPages - 1 }, (_, i) => i + 1).map((i) =>
-          orderedBuild().range(i * pageSize, (i + 1) * pageSize - 1),
-        ),
+        Array.from({ length: totalPages - 1 }, (_, i) => page((i + 1) * pageSize)),
       );
-      for (const page of rest) {
-        if (page.error) throw page.error;
-        absorb(page.data ?? []);
-      }
+      for (const p of rest) absorb(p.data ?? []);
       return out;
     }
     /* Short first page but count says there's more: db-max-rows clamped
@@ -189,8 +184,7 @@ export async function fetchAllRows<Row extends object>({
    * request an exact count, or a count that came back below db-max-rows. */
   let offset = firstRows.length;
   for (;;) {
-    const { data, error } = await orderedBuild().range(offset, offset + pageSize - 1);
-    if (error) throw error;
+    const { data } = await page(offset);
     const rows = data ?? [];
     if (rows.length === 0) return out;
     absorb(rows);
