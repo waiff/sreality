@@ -206,6 +206,17 @@ def test_every_model_field_is_partitioned() -> None:
         _ids(fr.Agenda.WATCHDOG) | PROPERTIES_GRAIN.caller_renders | set(RETIRED_FILTERS))
 
 
+def test_every_registry_filter_has_a_model_field() -> None:
+    """The reverse direction: a registry id with no model field is silently dropped
+    (`extra='ignore'`). The pinned sets are today's known gaps; a fix shrinks them."""
+    assert _ids(fr.Agenda.WATCHDOG) - PROPERTIES_GRAIN.caller_renders - _spec_fields() == {
+        "building_material", "min_garden_area", "max_garden_area",  # M1
+    }
+    assert _ids(fr.Agenda.COMPARABLES) - LISTINGS_GRAIN.caller_renders - _comparable_fields() == {
+        "min_garden_area", "max_garden_area",  # M2
+    }
+
+
 # --- the gate (rules 16 + 17) and the retired raise ------------------------------------
 
 

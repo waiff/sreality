@@ -16,11 +16,14 @@ consumer needs:
 - optional enum value list with Czech + English labels,
 - legacy aliases so older field names stay readable.
 
-Adding a new filter is a single PR that touches this file and (if it
+Adding a new filter is a single PR that touches this file, the consumer
+models of its agendas (ComparableFilters / WatchdogFilterSpec) and (if it
 needs a DB column) a migration. Every downstream surface — Pydantic
 schemas, agent tool JSON, Watchdog matcher, React FilterForm, browse
 URL serialiser — is generated from the registry, compiled from it
-(`toolkit/filter_compiler.py`), or pinned to it by a coverage test.
+(`toolkit/filter_compiler.py`), or pinned to it by a coverage test; the
+model fields are pinned in both directions, so a filter missing from a
+model fails CI rather than being silently dropped.
 
 The `filter_visibility` table (migration 059) lets the operator turn
 individual (agenda, filter) pairs off from Settings. Use

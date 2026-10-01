@@ -1588,7 +1588,10 @@ renumber.** Navigate by area:
     two browse RPCs agree per shared predicate only (place plan, rule-23 measures,
     `curated_cities_matching()`, served predicate). Open divergences: center+radius is a circle
     in Python and a bounding square in Browse (M3); `tom_days` reaches Stats but not the Browse
-    list (M4).
+    list (M4); and the Watchdog silently drops `building_material` and `min/max_garden_area`
+    (`WatchdogFilterSpec` lacks them, `extra='ignore'`), so a saved watchdog matches more than
+    the Browse view it came from (M1, `fix/watchdog-dropped-filters`; pinned by name in
+    `tests/toolkit/test_filter_compiler.py`).
     **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
     and the collection monitor alert only on the canonical advert's own steps scraped after it
     became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert

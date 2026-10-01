@@ -9,7 +9,9 @@ How to add a filter
 Declare a FilterDef in toolkit/filter_registry.py. A column-backed bound, list or flag compiles
 from its derived `sql_kind` (toolkit/filter_compiler.py, and Browse's TS auto-dispatch); anything
 else needs one `_HOOKS` entry there. Add the field to the consumer model (ComparableFilters /
-WatchdogFilterSpec) and to `_filters_used`; the coverage tests name whatever is missing.
+WatchdogFilterSpec) and to `_filters_used`. tests/toolkit/test_filter_compiler.py checks both
+directions (every model field is a registry id; every agenda id has a model field, today's
+known gaps M1/M2 pinned by name), so a missing field fails CI instead of being dropped.
 """
 
 from __future__ import annotations
