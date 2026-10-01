@@ -175,14 +175,14 @@ def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_st
     assert {r["decided_by"] for r in _appended(db)} == {OP}
 
 
-def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_recomputes_both_once():
+def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_changes_both_once():
     """Undo in the reverse of the carry: every carrier gets ONE step, the asset link last; which
     of them gives anything back (the pipeline card and the asset link; curation, dispatches and
     dismissals stay on the property left) is each carrier's own, tests/test_property_carriers.py."""
     db = _Ledger({1: 10, 2: 20}, assets={20: 7})
     group = _merged(db, [10, 20])["merge_group_id"]
-    db.log.clear()
-    db.carried.clear()
+    for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
+        seen.clear()
     detach_listing(db, 2, decided_by=OP)
     step = DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),), source="operator")
     walked = [s for s, _p in db.log if s.startswith("carrier:") or s.startswith("WITH carried AS")]
@@ -196,8 +196,7 @@ def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_recomputes_both
     for table in ("property_status_events", "DELETE FROM properties",
                   "DELETE FROM property_merge_events"):
         assert table not in written, f"a detach touched {table}"
-    assert [p["pid"] for p in db.sql("WITH batch AS")] == [10, 20]
-    assert db.sql("DELETE FROM browse_list") == [([10, 20],)]
+    assert db.changed == db.browse == db.broker == [[10, 20]]
     (reactivate,) = [s for s, _p in db.log if "SET status = 'active'" in s]
     assert "merged_into = NULL, merged_at = NULL, is_active = EXISTS (" in reactivate
 
@@ -272,8 +271,7 @@ def test_a_native_split_takes_the_merges_lock_order_and_leaves_curation_behind()
     for table in ("asset_membership_events", "DELETE FROM properties"):
         assert table not in written, f"a native split touched {table} (rules 18, 22)"
     born = db.listings[2]
-    assert [p["pid"] for p in db.sql("WITH batch AS")] == [10, born]
-    assert db.sql("DELETE FROM browse_list") == [([10, born],)]
+    assert db.changed == db.browse == db.broker == [[10, born]]
 
 
 def test_a_split_advert_merged_back_is_detached_to_its_new_record():

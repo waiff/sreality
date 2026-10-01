@@ -1,7 +1,8 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
-record survives, one asset link rides onto it and two refuse, ONE group and ONE recompute per
-set, every carrier walked per retired property, the operator's cards ruled "same"; and migration
-560's copy. Over tests/_property_ledger's stateful fake, each carrier recorded at the seam."""
+record survives, one asset link rides onto it and two refuse, ONE group and ONE after-step
+(`properties_changed`) per set, every carrier walked per retired property, the operator's cards
+ruled "same"; and migration 560's copy. Over tests/_property_ledger's stateful fake, each carrier
+recorded at the seam."""
 
 from __future__ import annotations
 
@@ -91,12 +92,17 @@ def test_two_different_asset_links_refuse_the_set_before_anything_merges():
     assert db.events == [] and ("rollback", None) in db.log
 
 
-def test_the_survivor_is_recomputed_once_for_the_whole_set():
+def test_the_whole_set_is_brought_current_once():
+    """One `properties_changed` over the survivor and every retired id: the rollup (a retired id
+    holds no advert, so the recompute skips it), the Browse patch (its row goes) and the broker
+    queue, each once, after the last retire."""
     db = _Ledger({1: 1, 2: 2, 3: 3, 4: 3, 5: 4})
     _merge(db, [4, 3, 2, 1])
-    assert [p["pid"] for p in db.sql("WITH batch AS")] == [1]
-    assert db.sql("DELETE FROM browse_list") == [([1, 2, 3, 4],)]
+    assert db.changed == db.browse == db.broker == [[1, 2, 3, 4]]
     assert db.sql("status = 'merged_away'") == [(1, 2), (1, 3), (1, 4)]
+    order = [s for s, _p in db.log]
+    last_retire = max(i for i, s in enumerate(order) if "status = 'merged_away'" in s)
+    assert last_retire < order.index(next(s for s in order if s.startswith("WITH batch AS")))
 
 
 class _RefuseNine:
@@ -119,8 +125,8 @@ def test_a_refusal_on_a_later_pair_rolls_the_whole_set_back(monkeypatch):
         _merge(db, [3, 7, 9])
     assert any(step.retired == 7 for s, step in db.log if s.startswith("carrier:"))
     assert db.listings == {1: 3, 2: 7, 3: 9} and db.events == []
-    assert db.carried == [] and db.changed == [] and db.props == {3: "active", 7: "active",
-                                                                     9: "active"}
+    assert db.carried == [] and db.changed == db.browse == db.broker == []
+    assert db.props == {3: "active", 7: "active", 9: "active"}
     assert db.sql("WITH batch AS") == []
 
 
@@ -171,6 +177,10 @@ def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
     order = [s for s, _p in db.log]
     first_merge = next(i for i, s in enumerate(order) if "INTO property_merge_events" in s)
     assert order.index(next(s for s in order if "p.repr_listing_ref_id FROM" in s)) < first_merge
+    # the rulings come before the after-step (the one lock order, rulings then `properties`)
+    last_ruling = max(i for i, s in enumerate(order) if "autodedup." in s)
+    assert last_ruling < next(i for i, s in enumerate(order) if s.startswith("WITH batch AS"))
+    assert db.changed == [[3, 7, 9]]
 
 
 def test_an_engine_merge_is_never_a_ruling():

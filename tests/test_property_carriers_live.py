@@ -2,7 +2,8 @@
 public writers (`merge_property_set`, `detach_listing`) against the replayed schema: one test
 per carrier, each over two accounts, each proving the retired property is left holding nothing;
 then the live census — every foreign key to `properties` and every `%property_id%` column of the
-replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`). Runs in CI's
+replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`); then the after-step
+(`properties_changed`: rollup, Browse row, broker queue) both writers run. Runs in CI's
 migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
 
 from __future__ import annotations
@@ -399,3 +400,53 @@ def test_every_property_id_column_is_classified(cur):
     existing = {(str(t), str(c)) for t, c in cur.fetchall()}
     stale = sorted(_classified() - existing)
     assert not stale, f"carried or NOT_CARRIED names a column the schema no longer has: {stale}"
+
+
+# --- the after-step, `properties_changed`, inside both writers ------------------------------
+
+
+def _derived(cur: Any, pid: int) -> tuple[int | None, bool, bool]:
+    """(source_count, listed in browse_list, present in browse_projection) for one property."""
+    cur.execute("SELECT source_count FROM properties WHERE id = %s", (pid,))
+    (count,) = cur.fetchone()
+    cur.execute("SELECT EXISTS (SELECT 1 FROM browse_list WHERE property_id = %s), "
+                "EXISTS (SELECT 1 FROM browse_projection WHERE property_id = %s)", (pid, pid))
+    listed, projected = cur.fetchone()
+    return count, bool(listed), bool(projected)
+
+
+def _queued(cur: Any, listing_id: int) -> bool:
+    cur.execute("SELECT EXISTS (SELECT 1 FROM dirty_broker_listings WHERE listing_id = %s)",
+                (listing_id,))
+    return bool(cur.fetchone()[0])
+
+
+def test_merge_and_detach_bring_derived_state_current(cur):
+    """The rollup counts the moved advert (counts, not timestamps: now() is fixed inside the test
+    transaction), Browse lists a property exactly where the projection does and never the retired
+    one, and the broker-attributed advert is queued for the broker drain — after the merge, and
+    again after the detach for the property left and the one restored."""
+    s, r, _s_advert, advert = _pair(cur)
+    cur.execute("INSERT INTO broker_identities (source, source_broker_id_native, display_name) "
+                "VALUES ('idnes', %s, 'lp') RETURNING id", (f"lp-{uuid.uuid4()}",))
+    cur.execute("UPDATE listings SET broker_identity_id = %s WHERE id = %s",
+                (int(cur.fetchone()[0]), advert))
+    # R listed as the last rebuild left it; nothing queued before the writer runs.
+    cur.execute("INSERT INTO browse_list SELECT * FROM browse_projection WHERE property_id = %s",
+                (r,))
+    cur.execute("DELETE FROM dirty_broker_listings WHERE listing_id = %s", (advert,))
+    _require(_derived(cur, s)[0] == 1, "the seed recompute did not count S's one advert")
+
+    _merged(cur, s, r)
+    count, listed, projected = _derived(cur, s)
+    assert count == 2, "the survivor's rollup missed the advert it absorbed"
+    assert listed == projected, "the survivor's Browse row was not patched"
+    assert not _derived(cur, r)[1], "Browse still lists the merged-away property"
+    assert _queued(cur, advert), "the merge did not queue the attributed advert for brokers"
+
+    cur.execute("DELETE FROM dirty_broker_listings WHERE listing_id = %s", (advert,))
+    _detached(cur, advert, r)
+    for pid in (s, r):
+        count, listed, projected = _derived(cur, pid)
+        assert (count, listed) == (1, projected), f"property {pid} not brought current"
+    assert _queued(cur, advert), "the detach did not queue the attributed advert for brokers"

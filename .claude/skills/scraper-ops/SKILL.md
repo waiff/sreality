@@ -329,8 +329,8 @@ throughput/completeness backbone); the other lanes host background jobs and `hea
   check that sees a market-wide count swing faster than a full index walk; opted in, it dispatches `index_walk.yml` early.
 - **Property-maintenance lane**, every 2 min (PR #716) — `run_incremental_pass` against `dirty_properties`
   (rule #20), far more often than the 5-min GH cron; serialized with it + the daily sweep by the lease-row
-  CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded. Its
-  drain also mirrors claimed properties' attributed listings into `dirty_broker_listings` (Broker Unify W3).
+  CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded. Each drain
+  slice = ONE `properties_changed` txn (recompute, Browse patch, `dirty_broker_listings` mirror), as merge/detach run inline.
 - **Broker-maintenance lane** (Broker Unify W3) — same cadence; `scripts.resolve_brokers.
   run_incremental_pass` (`broker_resolution.yml` runs the SAME driver as backstop): drain until empty,
   recompute affected brokers (one merged statement), republish `broker_region_type_stats` via the

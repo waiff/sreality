@@ -7,8 +7,9 @@ tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
 STRICT: it answers each statement by its exact text and raises on one it does not model. The
 carriers it does not model (all but the asset link) are swapped for `RecordingCarrier`s by the
 `ledger_carriers` fixture, which every suite over this fake opts into; `db.carried` then holds
-each (merge|detach, carrier name, step) the writers handed the seam, `db.changed` each recompute
-and `db.browse` each Browse patch."""
+each (merge|detach, carrier name, step) the writers handed the seam; `db.changed`, `db.browse` and
+`db.broker` each id list the after-step (`properties_changed`) recomputed, patched into Browse and
+queued for the broker drain."""
 
 from __future__ import annotations
 
@@ -38,14 +39,15 @@ class _Tx:
         self.saved = (dict(self.db.listings), dict(self.db.props), [dict(e) for e in self.db.events],
                       dict(self.db.into), dict(self.db.assets),
                       [dict(r) for r in self.db.verdicts], dict(self.db.mnl),
-                      list(self.db.carried), list(self.db.changed), list(self.db.browse))
+                      list(self.db.carried), list(self.db.changed), list(self.db.browse),
+                      list(self.db.broker))
         return self
 
     def __exit__(self, exc_type: Any, *exc: Any) -> bool:
         if exc_type is not None:
             (self.db.listings, self.db.props, self.db.events, self.db.into,
              self.db.assets, self.db.verdicts, self.db.mnl,
-             self.db.carried, self.db.changed, self.db.browse) = self.saved
+             self.db.carried, self.db.changed, self.db.browse, self.db.broker) = self.saved
             self.db.log.append(("rollback", None))
         return False
 
@@ -105,6 +107,7 @@ class _Ledger:
         self.carried: list[tuple[str, str, Any]] = []
         self.changed: list[list[int]] = []
         self.browse: list[list[int]] = []
+        self.broker: list[list[int]] = []
 
     def rule(self, lo: int, hi: int, verdict: str, *, by: str = OP, note: str | None = None,
              reasons: list[str] | None = None) -> None:
@@ -293,11 +296,14 @@ class _Ledger:
     def _staying(self, p: Any) -> list[tuple]:
         return [(lid,) for lid, pid in sorted(self.listings.items()) if pid == p[0]]
 
-    def _recompute_one(self, p: Any) -> None:
-        self.changed.append([p["pid"]])
+    def _recompute_scoped(self, p: Any) -> None:
+        self.changed.append(list(p["ids"]))
 
     def _browse_delete(self, p: Any) -> None:
         self.browse.append(list(p[0]))
+
+    def _broker_mirror(self, p: Any) -> None:
+        self.broker.append(list(p["ids"]))
 
     def _nothing(self, p: Any) -> None:
         return None
@@ -364,9 +370,10 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (pi._UNDO_SQL, _Ledger._undo),
         (pi._REACTIVATE_SQL, _Ledger._reactivate),
         (pi._STAYING_SQL, _Ledger._staying),
-        (rps._RECOMPUTE_ONE_SQL, _Ledger._recompute_one),
+        (rps._RECOMPUTE_SCOPED_SQL, _Ledger._recompute_scoped),
         (brm._DELETE_SQL, _Ledger._browse_delete),
         (brm._INSERT_SQL, _Ledger._nothing),
+        (rps._MIRROR_BROKER_DIRTY_SQL, _Ledger._broker_mirror),
     )
 }
 

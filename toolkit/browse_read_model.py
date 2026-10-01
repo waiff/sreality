@@ -9,15 +9,15 @@ Browse the instant the API returns, not up to a rebuild-interval later (the
 "merge did nothing, then fixed itself after ~2 min" report — docs/design/browse-merge-consistency.md). This
 patches exactly the touched rows; the periodic rebuild stays the backstop.
 
-Second caller since W6 (docs/design/field-capture/PROGRAM.md, A15): the dirty-set
-maintenance drain, for the properties it just recomputed. Same argument, different
-writer — a post-publication attribute fill reaches `properties` in ~2 min and then
-waited a measured 11.7 min on average (94 rebuilds over 24 h; worst 36.6) for the
-wholesale rebuild to carry it into Browse. It is a FAST PATH, not a guarantee: a
-rebuild snapshots `browse_projection` at its start and swaps the new table in at its
-end, so a patch committed inside that window writes a table that is about to be
-dropped and is simply superseded (283 succeeded rebuilds / 72 h, mean 237 s against a
-900 s cadence = in flight ~26% of wall-clock).
+Called by `scripts.recompute_property_stats.properties_changed` (both identity writers and the
+dirty drain) and by the two asset writers. The drain is there since W6
+(docs/design/field-capture/PROGRAM.md, A15) — a post-publication attribute fill reaches
+`properties` in ~2 min and then waited a measured 11.7 min on average (94 rebuilds over 24 h;
+worst 36.6) for the wholesale rebuild to carry it into Browse. It is a FAST PATH, not a
+guarantee: a rebuild snapshots `browse_projection` at its start and swaps the new table in at
+its end, so a patch committed inside that window writes a table that is about to be dropped and
+is simply superseded (283 succeeded rebuilds / 72 h, mean 237 s against a 900 s cadence = in
+flight ~26% of wall-clock).
 """
 
 from __future__ import annotations

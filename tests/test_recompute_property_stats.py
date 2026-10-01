@@ -17,6 +17,7 @@ from scripts.recompute_property_stats import (
     _attach_stragglers,
     _batch_ranges,
     _drain_dirty,
+    properties_changed,
 )
 
 
@@ -235,8 +236,30 @@ class _DrainConn:
     def cursor(self) -> _DrainCur:
         return _DrainCur(self)
 
-    def transaction(self) -> _FakeTxn:
-        return _FakeTxn()
+    def transaction(self) -> Any:
+        conn = self
+
+        class _Txn:
+            def __enter__(self) -> Any:
+                conn.executed.append(("BEGIN", None))
+                return self
+
+            def __exit__(self, *exc: Any) -> None:
+                conn.executed.append(("COMMIT", None))
+
+        return _Txn()
+
+
+# One drain slice, in order: the after-step inside ONE bounded transaction (the Browse patch in
+# its own savepoint), then the dequeue outside it.
+_SLICE = ("BEGIN", "SET LOCAL statement_timeout", "WITH batch AS",
+          "BEGIN", "DELETE FROM browse_list", "INSERT INTO browse_list", "COMMIT",
+          "INSERT INTO dirty_broker_listings", "COMMIT", "DELETE FROM dirty_properties")
+
+
+def _steps(executed: list[tuple[str, Any]]) -> list[str]:
+    return [next(p for p in _SLICE if s.startswith(p)) for s, _ in executed
+            if s.startswith(_SLICE)]
 
 
 def test_drain_dirty_recomputes_each_batch_then_terminates():
@@ -246,8 +269,32 @@ def test_drain_dirty_recomputes_each_batch_then_terminates():
     assert conn.recomputed == [[7, 8], [9]]
     # deletes are scoped to the claimed ids and the run cutoff
     assert conn.deleted == [([7, 8], "CUTOFF"), ([9], "CUTOFF")]
-    # scoped recomputes run under the raised per-statement ceiling too
-    assert sum("SET LOCAL statement_timeout" in s for s, _ in conn.executed) == 2
+    # each slice: recompute under the raised ceiling, Browse patch, broker queue, then dequeue
+    assert _steps(conn.executed) == list(_SLICE) * 2
+    assert [p for s, p in conn.executed if s.startswith("INSERT INTO dirty_broker_listings")] == [
+        {"ids": [7, 8]}, {"ids": [9]}]
+    assert [p for s, p in conn.executed if s.startswith("DELETE FROM browse_list")] == [
+        ([7, 8],), ([9],)]
+
+
+def test_properties_changed_recomputes_then_patches_then_queues_brokers():
+    """The identity writers' after-step is the drain's, minus the ceiling and the dequeue: it
+    nests in the caller's transaction and inherits the caller's timeouts."""
+    conn = _FakeConn()
+    properties_changed(conn, [9, 3, None, 9, 3])
+    assert _steps(conn.executed) == ["WITH batch AS", "DELETE FROM browse_list",
+                                     "INSERT INTO browse_list", "INSERT INTO dirty_broker_listings"]
+    assert len(conn.executed) == 4
+    assert [p for _s, p in conn.executed] == [{"ids": [3, 9]}, ([3, 9],), ([3, 9],),
+                                               {"ids": [3, 9]}]
+    assert not any("statement_timeout" in s or "dirty_properties" in s for s in _sqls(conn))
+
+
+def test_properties_changed_with_no_ids_runs_nothing():
+    conn = _FakeConn()
+    properties_changed(conn, [])
+    properties_changed(conn, [None])
+    assert conn.executed == []
 
 
 def test_drain_dirty_empty_queue_is_noop():
@@ -528,6 +575,14 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
     ceilings = [s for s, _ in conn.executed if "SET LOCAL statement_timeout" in s]
     recomputes = [s for s, _ in conn.executed if "WITH batch AS" in s]
     assert len(ceilings) == len(recomputes) == 2
+
+
+def test_the_full_sweep_patches_no_browse_row(monkeypatch: Any) -> None:
+    """It recomputes every property, and the */15 wholesale rebuild is already that job's
+    read-model half: only the dirty drain and the identity writers patch Browse."""
+    conn = _SweepConn(max_id=4000)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert not any("browse_list" in s for s in _sqls(conn))
 
 
 def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(

@@ -82,14 +82,14 @@ considered operator-triggered identity changes as a distinct case.
 
 A 4-agent parallel audit of every property-mutating endpoint and every
 operator-state mutation type found the staleness gap is **confined to
-identity-changing mutations on `properties`** — merge, unmerge, split, and (by
+identity-changing mutations on `properties`** — merge, detach, split, and (by
 construction, same chokepoint) the Tier-2 auto-merge sweep. It does **not**
 extend to collections, tags, notes, or deal-pipeline stage moves:
 
 | Mutation | Chokepoint | Touches `properties`? | In `browse_projection`'s column list? | Affected |
 |---|---|---|---|---|
-| Merge (the operator's set, the AUTODEDUP apply path) | `merge_property_set` (through the private `_merge_pair` per retired property) | Yes, one inline recompute per set | Yes (most columns) | **Yes** |
-| Detach (one advert back; a group undo is a loop of them) | `detach_listing` | Yes, inline recompute of both properties | Yes | **Yes** |
+| Merge (the operator's set, the AUTODEDUP apply path) | `merge_property_set` (through the private `_merge_pair` per retired property) | Yes, one `properties_changed` per set | Yes (most columns) | **Yes** |
+| Detach (one advert back; a group undo is a loop of them) | `detach_listing` | Yes, one `properties_changed` over left + restored | Yes | **Yes** |
 | Asset link/unlink | `link_properties`/`unlink_property` (`toolkit/asset_identity.py`) | Yes, `asset_id` only, no recompute | Yes — `p.asset_id` is the last column in `browse_projection` (migration 276 line 86) | **Yes, latent** (not the reported bug — Browse doesn't currently render `asset_id` on cards — but the same gap exists the moment it does; see Rollout) |
 | Dismiss (cluster/candidate), decision feedback, archive-reset | candidate-table writes only | No | — | No |
 | Collections, tags, notes, pipeline-stage moves, watchdog/collection monitoring toggle | `api/curation.py`, `toolkit/pipeline_identity.py` | Different tables entirely (`collection_properties`, `property_tags`, `property_notes`, `property_pipeline`, `collections`) | **No** — none of these columns exist in `browse_projection`'s SELECT (migration 276 lines 57-86) | **No** — these are read live via dedicated `*_public` views/routes, never via `browse_list`, so they were never subject to the 5-min snapshot lag to begin with |
@@ -168,7 +168,7 @@ expected to be required since it's the same role that ran the migration that
 created the table). This is pure application-layer SQL added to one file.
 
 **[as-built] The helper lives in its own module, `toolkit/browse_read_model.py`
-— not `property_identity.py`.** Both `property_identity` (merge/unmerge/split)
+— not `property_identity.py`.** Both `property_identity` (merge/detach/split)
 and `asset_identity` (link/unlink) need it; a shared single-purpose module
 keeps `asset_identity` from importing the merge module (an unnatural
 dependency) and gives future read-model helpers (e.g. a `properties_map_mv`
@@ -217,14 +217,16 @@ is column-compatible by the same definition — no hand-maintained column list.
 post-deploy check is in the verification plan; the SAVEPOINT covers the narrow
 projection-migration window regardless.)
 
-Called at the two recompute chokepoints — the whole change, so every current
-and future caller (including the Tier-2 auto-merge sweep) gets it for free:
+Called by the one after-step, `properties_changed` (scripts/recompute_property_stats.py), which
+both writers and the dirty drain call — the whole change, so every current and future caller
+(including the AUTODEDUP apply path) gets it for free. The after-step recomputes first (the
+projection reads the recomputed `properties` row), patches Browse, then queues the touched
+properties' broker-attributed adverts for the broker drain:
 
-- `merge_property_set`, after the survivor's one recompute (W3 of the AUTODEDUP production
-  sprint moved it out of the per-pair step, then `merge_properties`, now the private `_merge_pair`):
-  `sync_browse_list(conn, [survivor_id, *retired_ids])`
-- `detach_listing`, after recomputing the property the advert left and the one it returned to:
-  `sync_browse_list(conn, [left_id, restored_id])`
+- `merge_property_set`, once per set after the last retire (and the operator's rulings):
+  `properties_changed(conn, [survivor_id, *retired_ids])` — a retired id holds no advert, so the
+  recompute skips it and the patch deletes its row
+- `detach_listing`, once per advert moved: `properties_changed(conn, [left_id, restored_id])`
 
 **[as-built] Also wired into `toolkit/asset_identity.py`** (`link_properties` →
 the surviving asset's members; `unlink_property` → the cleared property + any
@@ -391,6 +393,13 @@ Deferred, each its own future PR, only on operator request:
 
 ## Testing / verification — **[as-built]**
 
+- **[2026-10, supersedes the two bullets below]** The source-grep wiring guardrail and
+  `tests/test_property_identity.py` are gone; behaviour records replace them: each writer's
+  patch is asserted where it runs (`db.browse` in tests/test_property_merge_set.py and
+  tests/test_detach_listing.py, the asset writers in tests/test_asset_identity.py, the drain
+  slice's order in tests/test_recompute_property_stats.py), and
+  `test_merge_and_detach_bring_derived_state_current` (tests/test_property_carriers_live.py)
+  executes merge + detach against the replayed schema in CI's migrations job.
 - **Hermetic unit + wiring tests** (the repo's `_FakeConn` convention — the
   spatial/recompute SQL is verified out-of-band, control flow + emitted
   statements here): `tests/test_browse_read_model.py` exercises the

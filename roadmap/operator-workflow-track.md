@@ -23,10 +23,15 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   and the inline asset/pipeline calls; `NOT_CARRIED` names every other property column,
   enforced by a census offline (migrations) and live (replayed schema);
   `merge_properties` became the private `_merge_pair` under the set's one lock and gate;
-  typed `CategoryClash`; the `_Ledger` fake raises on SQL it does not model.
-- **Next:** `properties_changed` (PR 2), set-shaped `detach_listings` (PR 3), the
-  dispatch collapse keeps its sends (PR 4), a chained detach restores one card (PR 5),
-  the engine's undo on the set form (PR 6).
+  typed `CategoryClash`; the `_Ledger` fake raises on SQL it does not model. PR 2:
+  `properties_changed` (`scripts/recompute_property_stats.py`) — ONE after-step (scoped
+  recompute → Browse patch → broker queue) shared by the merge, the detach and the dirty
+  drain (one commit per slice, was three); merges, detaches and splits now
+  reach `brokers.property_count` on the broker drain's cadence instead of the daily sweep.
+- **Next:** set-shaped `detach_listings` (PR 3), the dispatch collapse keeps its sends
+  (PR 4), a chained detach restores one card (PR 5), the engine's undo on the set form
+  (PR 6). After PR 2 deploys, `dirty_broker_listings` depth steps up after merges (the fix
+  working); `property_sweep_last_complete` should stay fresh.
 
 ### Rule #22: converge the kanban + extension pipeline copies (partly done, 2026-10-01)
 - **Done (2026-10-01):** the kanban's move/remove no longer re-implement the hook —
