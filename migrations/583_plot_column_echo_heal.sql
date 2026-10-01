@@ -1,4 +1,4 @@
--- 582_plot_column_echo_heal.sql
+-- 583_plot_column_echo_heal.sql
 -- The stored `estate_area` values the plot rule now declines and that NO ingest path can
 -- clear: a flat's "plot" (every one), and a commercial unit's "plot" that merely repeats
 -- its own floor figure. DATA ONLY, DESTRUCTIVE (a value becomes NULL), every cleared cell
@@ -36,9 +36,9 @@
 --
 -- THE RAILS. Each predicate below is exactly the parser rule, so the file NULLs only rows
 -- whose stored value `scraper.area.stated_plot` declines today. The literals are pinned to
--- the Python constants by tests/test_migration_582_rails.py (static: the category sets, the
+-- the Python constants by tests/test_migration_583_rails.py (static: the category sets, the
 -- labelled bases, and the predicate replayed against `stated_plot` over a grid) and executed
--- over seeded hits and misses by tests/test_migration_582_live.py (CI replay):
+-- over seeded hits and misses by tests/test_migration_583_live.py (CI replay):
 --   P1  byt with any estate_area (`PLOT_FREE_CATEGORIES`): a flat NEVER carries a plot. On
 --       ceskereality the 3,185 active flat "plots" were the doubled floor figure (987), the
 --       placeholder 1, the whole building's parcel (355, 575, 1,661, 3,470) or a near-floor

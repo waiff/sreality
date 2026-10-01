@@ -407,18 +407,18 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_migration_573_live.py tests/test_migration_573_rails.py -q
 
-      # Migration 582's destructive heal, EXECUTED: a flat's stored plot (P1) and a komerční
+      # Migration 583's destructive heal, EXECUTED: a flat's stored plot (P1) and a komerční
       # plot equal to its floor figure (P2) are seeded beside the misses the rule must keep
       # (a house, land, a title-fallback headline, a parcel equal to the built-up area, the
       # named pre-stamp under-heal), the whole file run over them, then the NULL, the backup
       # row, the dirty_properties row and a no-op second run read back. The static half —
       # the literals pinned to scraper.area's PLOT_* sets and the predicate replayed against
-      # stated_plot over a grid — is tests/test_migration_582_rails.py.
-      - name: A plot that is the floor area clears exactly the hits (migration 582)
+      # stated_plot over a grid — is tests/test_migration_583_rails.py.
+      - name: A plot that is the floor area clears exactly the hits (migration 583)
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/test_migration_582_live.py tests/test_migration_582_rails.py -q
+        run: pytest tests/test_migration_583_live.py tests/test_migration_583_rails.py -q
 
       # Migration 574 (E920), EXECUTED: a flip and a withdrawal are new rows, and the lane's
       # must-links, apply's pair and group negatives and the rulings page all read the newest

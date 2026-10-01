@@ -1,10 +1,10 @@
-"""Migration 582's predicate IS the plot rule, literally (the 573 pattern).
+"""Migration 583's predicate IS the plot rule, literally (the 573 pattern).
 
-582 NULLs the stored `estate_area` values `scraper.area.stated_plot` declines, and its header
+583 NULLs the stored `estate_area` values `scraper.area.stated_plot` declines, and its header
 asserts that each arm is exactly that rule. The CI schema replay runs the file only on an
 empty schema, so nothing else would notice a later change to the category sets or the
 labelled bases letting the file NULL plots the parser still keeps. The live half, over
-seeded hits and misses, is tests/test_migration_582_live.py.
+seeded hits and misses, is tests/test_migration_583_live.py.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from scraper import area
 
 _SQL = (Path(__file__).resolve().parent.parent / "migrations"
-        / "582_plot_column_echo_heal.sql").read_text(encoding="utf-8")
+        / "583_plot_column_echo_heal.sql").read_text(encoding="utf-8")
 _BODY = _SQL[_SQL.index("set lock_timeout"):]
 _HEADER = _SQL[:_SQL.index("set lock_timeout")]
 

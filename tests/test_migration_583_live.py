@@ -1,4 +1,4 @@
-"""Migration 582, EXECUTED over seeded hits and misses (the 573 pattern).
+"""Migration 583, EXECUTED over seeded hits and misses (the 573 pattern).
 
 The replay runs 582 on an empty schema, which proves only that it compiles. Here one row
 per shape the file must clear and the misses it must keep are seeded, the whole file is
@@ -28,8 +28,8 @@ _needs_db = pytest.mark.skipif(
 )
 
 _SQL = (Path(__file__).resolve().parent.parent / "migrations"
-        / "582_plot_column_echo_heal.sql").read_text(encoding="utf-8")
-_SREALITY_IDS = itertools.count(9_582_000_001)
+        / "583_plot_column_echo_heal.sql").read_text(encoding="utf-8")
+_SREALITY_IDS = itertools.count(9_583_000_001)
 
 # (label, source, category_main, estate_area, usable_area, area_m2, area_basis, is_active,
 #  rail). rail None = a miss the file must keep.
@@ -97,13 +97,13 @@ def _seed(cur: Any, row: tuple[Any, ...]) -> tuple[int, int]:
         "property_id) VALUES (%s, %s, %s, '{}'::jsonb, %s, 'prodej', 5000000, %s, %s, %s, %s, "
         "%s, %s) RETURNING id",
         (next(_SREALITY_IDS) if source == "sreality" else None, source,
-         f"m582-{uuid.uuid4()}", category, headline, basis, usable, plot, active, pid),
+         f"m583-{uuid.uuid4()}", category, headline, basis, usable, plot, active, pid),
     )
     return int(cur.fetchone()[0]), pid
 
 
 def _python_declines(row: tuple[Any, ...]) -> bool:
-    """The parser rule's verdict on the same stored cells — the equivalence 582 claims. A
+    """The parser rule's verdict on the same stored cells — the equivalence 583 claims. A
     stored row is read as the rule would read a fresh parse of it: the plot, the usable
     measure, the headline and its basis stamp (NULL where the row predates the stamp)."""
     _, _, category, plot, usable, headline, basis, _, _ = row
