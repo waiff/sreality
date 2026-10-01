@@ -999,7 +999,8 @@ renumber.** Navigate by area:
    rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
    `mark_inactive_native`) — was retired on 2026-09-07 together with absence-based delisting: a
    page check needs no staleness window, because it does not infer. A false flip still self-heals
-   on the next index sighting (`touch_listings` reactivates).
+   on the next index sighting (`portal_runner.reconcile_sightings` touches every sighted row we
+   hold, whatever its price, and the touch reactivates it).
    Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
    health check reads it. **A non-sreality portal sweeps on its own native id**
    (`db.mark_inactive_native` / `mark_inactive_agenda`, keyed `source_id_native`), never on a
@@ -1012,7 +1013,10 @@ renumber.** Navigate by area:
    EMPTY array flips the predicate the other way and would delist the entire scope.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
    fetches never touch it.** Every existing listing whose id appears in the run's index
-   gets its `last_seen_at` bumped before any detail fetches happen. A successful detail
+   gets its `last_seen_at` bumped before any detail fetches happen — whatever its index price:
+   one function, `portal_runner.reconcile_sightings`, on all nine portals and in both bespoke
+   probes (touch-all since 2026-10; seven portals and both probes used to touch unchanged rows
+   only). A successful detail
    fetch (cron or on-demand via `freshness_check`) also bumps `last_seen_at` as a side
    effect of `listing_write.write_listings` — that's real evidence the listing is alive. A *failed*
    detail fetch must not affect `last_seen_at`, otherwise repeated failures would falsely
@@ -1927,11 +1931,13 @@ renumber.** Navigate by area:
     the pipeline and collection state beside it) and its writes on the same `/dismissals` routes.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
-    (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
-    nominates unseen rows for a page check (rule #3, 2026-09-07), and **enqueues** new/price-changed
+    (`scraper.main --index-only`, `run_type='index'`) walks the full index,
+    `portal_runner.reconcile_sightings` (touch every sighted known row) + nominates unseen rows for a page check (rule #3, 2026-09-07), and **enqueues** new/price-changed
     ids — classified by the ONE shared verdict rule, `portal.classify_index_sighting`, which
     every portal including sreality routes through (a rail in `tests/scraper/test_portal.py`
-    fails any `*_main.py` that calls `price_changed` directly). Its load-bearing clause: **an
+    fails any `*_main.py` that calls `price_changed` directly). A second rail in the same file
+    fails any adapter that calls `index_summary_native` / `touch_listings*` / `enqueue_detail` /
+    `classify_index_sighting` itself — the diff exists once. Its load-bearing clause: **an
     index card with no price is missing evidence, not evidence of change, and reads
     `unchanged`.** Six portals used to fall through to `changed` there, re-enqueueing every
     "Cena na dotaz" listing on every walk forever — 85% of sreality's refresh queue, 91% of
@@ -2037,7 +2043,7 @@ renumber.** Navigate by area:
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `listing_write.write_listings` (a content
     change, or a revival, or a write under an inactive property), `mark_listing_inactive*`
-    (delisting), `touch_listings` (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
+    (delisting), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is
@@ -2105,19 +2111,30 @@ renumber.** Navigate by area:
     portals implement the `Portal` protocol (`scraper/portal_runner.Portal`) — `SrealityPortal` in
     `scraper/main.py`, the eight crawlers' adapters in `scraper/<portal>_main.py` — and every
     entrypoint (`scraper/sreality_main.py`, `scraper/<portal>_main.py`) is a thin delegator to
-    `run_phase`. **Shared:** the category loop and deadline, the coverage alarm, end-gated
+    `run_phase`. **Shared:** the category loop and deadline, the sighting diff
+    (`reconcile_sightings`: clamp → `index_summary_native` → touch every sighted known row →
+    `classify_index_sighting` → enqueue FAILURE (sreality's `retry_first`) > CHANGED > NEW), the
+    default seams on `PortalDefaults` (`connect_index`, `connect_drain`, `make_client`,
+    `active_count`, and the HTML portals' `write_details` / `mark_gone` / `record_failure`), the
+    entrypoints' `load_config` / `configure_logging`, the coverage alarm, end-gated
     presence nomination (`_queue_presence_checks`), category-drift recording, the probe driver,
     the whole drain (queue claim/complete/fail, the fetch pool, batch flush, the gone-rate
     breaker) and the `scrape_runs` lifecycle (`run_phase`). **Per-portal:** the client (a
     `BasePortalClient` subclass — URL building, body markers, egress such as `USE_PROXY`; the
     shared `_request` does GET, or POST for bezrealitky's GraphQL), the parser, the adapter's
-    `walk_category` (paging, end detection, stop classification) and the config row. Pacing is
+    `walk_category` (paging, end detection, stop classification; it hands its sightings to
+    `reconcile_sightings` and never reads or writes `listings` itself) and the config row. Pacing is
     per-portal by design — each portal keeps its own politeness rules in its client + its
     `PortalLimits`. A genuine per-portal need is a seam on the `Portal` protocol, justified in
-    review, never an `if source == …` in shared code. **The seams.** Required: `categories`,
-    `category_labels`, `connect_index`, `walk_category`, `active_count`, `connect_drain`,
-    `make_client`, `fetch_detail`, `write_details`, `mark_gone`, `record_failure`,
-    `claimable_count`. Optional (the runner reads them via `getattr`): `shared_rate_limiter`;
+    review, never an `if source == …` in shared code. **The seams.** Attributes: `source`,
+    `index_rate`, `price_change_min_pct` (+ optional `shared_rate_limiter`). Required:
+    `categories`, `category_labels`, `walk_category`, `fetch_detail`. Defaulted on
+    `PortalDefaults`, overridden only where the portal differs: `connect_index` (idnes: staleness
+    preload), `connect_drain` (sreality: session pooler), `make_client` (sreality: category-bound
+    client), `active_count` (bazos: subtype scope), `write_details` (bezrealitky: GraphQL payload
+    archive; sreality: its FetchResult writer), `mark_gone` + `record_failure` (sreality: the
+    `listing_fetch_failures` ledger, rule #5). The drain's dry-run count is `db.claimable_counts`,
+    not a seam. Optional (the runner reads them via `getattr`):
     `seen_key` (sreality — integer ids); `presence_candidates` (bazos, ceskereality, realitymix,
     remax, maxima — index sections that don't map 1:1 onto `(category_main, category_type)`);
     `note_empty_slice` (ceskereality, realitymix — slice-buffering nominators);
@@ -2132,11 +2149,11 @@ renumber.** Navigate by area:
     rationale `docs/design/portal-order-fidelity.md`). **sreality's district-split** (the
     deep-pagination-cap workaround) is not a seam: it lives inside its own `walk_category`.
     **Owed — the rule is ahead of the code here** (`roadmap/scraper-track.md` § Rule #21 owed entry): (a)
-    the index-walk tail — `index_summary(_native)` → `classify_index_sighting` →
-    `touch_listings(_by_id)` → `enqueue_detail` → `walk_reached_end` — is copied into all nine
-    adapters' `walk_category`, and `write_details` / `record_failure` / `mark_gone` /
-    `_configure_logging` / `_load_config` are AST-identical in at least 7 of the 8 crawler
-    `*_main.py`; (b) six portal-name branches already sit in shared code and are debt to fold
+    the index-walk tail is hoisted (2026-10, `reconcile_sightings`, rail in
+    `tests/scraper/test_portal.py`), and the AST-identical `write_details` / `mark_gone` /
+    `record_failure` / `_configure_logging` / `_load_config` copies moved onto `PortalDefaults` /
+    `portal_runner` with it; still copied: each `walk_category`'s `walk_reached_end` assembly
+    (deliberate — the units differ: kraje, slices, agendas, districts); (b) six portal-name branches already sit in shared code and are debt to fold
     into a seam or a config attribute, never precedent: `db.detail_ref` (sreality never carries
     a stored URL into the queue — a safety boundary, its docstring says why), the two
     `CASE WHEN %(source)s = 'sreality'` legacy `sreality_id` fills in `db.enqueue_detail` and

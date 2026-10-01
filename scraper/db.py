@@ -1718,6 +1718,9 @@ def index_summary(
         }
 
 
+INDEX_SUMMARY_CHUNK = 5000
+
+
 def index_summary_native(
     conn: psycopg.Connection,
     source: str,
@@ -1727,28 +1730,33 @@ def index_summary_native(
     source_id_native for one portal.
 
     The native-id analogue of `index_summary` (which keys on the bigint PK that
-    sreality's index already carries). A non-sreality portal's index walk only
-    knows the portal-native string id, so it looks rows up by
-    (source, source_id_native) to decide price-change refetch — and to resolve the
+    sreality's index already carries). The index walk's sighting diff
+    (`portal_runner.reconcile_sightings`) looks rows up by (source,
+    source_id_native) to decide price-change refetch — and to resolve the
     surrogate `id` set for touch_listings_by_id. The `"id"` value is the identity
     to carry forward; `"sreality_id"` is legacy (NULL for post-Gate-2 rows).
+    Ids are deduped and looked up INDEX_SUMMARY_CHUNK at a time, so one huge
+    category (ceskereality, ~21k) never becomes one statement.
     """
-    ids = [str(n) for n in native_ids]
+    ids = list(dict.fromkeys(str(n) for n in native_ids))
     if not ids:
         return {}
+    out: dict[str, dict[str, Any]] = {}
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT source_id_native, id, sreality_id, price_czk, last_seen_at
-            FROM listings
-            WHERE source = %s AND source_id_native = ANY(%s)
-            """,
-            (source, ids),
-        )
-        return {
-            native: {"id": lid, "sreality_id": pk, "price_czk": price, "last_seen_at": ls}
-            for native, lid, pk, price, ls in cur.fetchall()
-        }
+        for start in range(0, len(ids), INDEX_SUMMARY_CHUNK):
+            cur.execute(
+                """
+                SELECT source_id_native, id, sreality_id, price_czk, last_seen_at
+                FROM listings
+                WHERE source = %s AND source_id_native = ANY(%s)
+                """,
+                (source, ids[start : start + INDEX_SUMMARY_CHUNK]),
+            )
+            out.update(
+                (native, {"id": lid, "sreality_id": pk, "price_czk": price, "last_seen_at": ls})
+                for native, lid, pk, price, ls in cur.fetchall()
+            )
+    return out
 
 
 def active_count(
@@ -2501,6 +2509,23 @@ QUEUE_VERIFY_RESERVE = 0.2
 QUEUE_ACQUISITION_RESERVE = 0.5
 
 _QUEUE_ENQUEUE_CHUNK = 1000
+
+
+def claimable_counts(conn: psycopg.Connection, source: str | None = None) -> dict[str, int]:
+    """Queue rows a drain could claim right now, per source (every source when None)."""
+    with conn.cursor() as cur:
+        if source is None:
+            cur.execute(
+                "SELECT source, count(*) FROM listing_detail_queue "
+                "WHERE claimed_at IS NULL AND given_up = false GROUP BY source"
+            )
+        else:
+            cur.execute(
+                "SELECT source, count(*) FROM listing_detail_queue "
+                "WHERE source = %s AND claimed_at IS NULL AND given_up = false GROUP BY source",
+                (source,),
+            )
+        return {s: int(n) for s, n in cur.fetchall()}
 
 
 def enqueue_detail(

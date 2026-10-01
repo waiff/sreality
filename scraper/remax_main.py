@@ -2,8 +2,9 @@
 
 Runnable as `python -m scraper.remax_main`. RE/MAX is a `Portal` (RemaxPortal)
 driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
-search results and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='remax', migration 108); the shared detail-drain
+search results and hands its sightings to `portal_runner.reconcile_sightings`,
+which touches and enqueues into the shared `listing_detail_queue`
+(source='remax', migration 108); the shared detail-drain
 fetches each listing page (RemaxClient), parses it to a `ScrapedListing`
 (remax_parser), and writes via `listing_write.write_listings` (the one listing
 write; a first-seen row lands `property_id` NULL and the straggler-attach births
@@ -36,13 +37,10 @@ import argparse
 import logging
 from typing import Any
 
-from scraper import db, listing_write, portal_runner
+from scraper import db, portal_runner
 from scraper.portal import (
     PortalConfig,
     StopReason,
-    default_config,
-    load_portal_config,
-    classify_index_sighting,
     deadline_reached, stop_is_portal_end, walk_coverage, walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
@@ -77,7 +75,7 @@ class _AgendaWalk:
         self.reached_end = reached_end
 
 
-class RemaxPortal:
+class RemaxPortal(portal_runner.PortalDefaults):
     """remax-czech.cz as a Portal: the seams the generic runner needs, wrapping
     the remax client + parser. Two mixed indexes (sale=1 / sale=2); each config
     descriptor pairs a category with its offer-type flag and keeps the
@@ -87,12 +85,11 @@ class RemaxPortal:
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
@@ -112,13 +109,6 @@ class RemaxPortal:
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
         return (category.get("category_main"), category.get("category_type"))
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        conn = db.connect()
-        return conn
 
     def _walk_agenda(
         self, sale: int, conn: Any, limiter: RateLimiter,
@@ -318,53 +308,17 @@ class RemaxPortal:
 
         native_ids = [n for n in walk.native_ids if self._belongs(walk.cat_map.get(n), cm)]
         seen = set(native_ids)
-
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            idx_price = walk.price_map.get(nid)
-            # A price-less card ("Dohodou" / "Info o ceně v RK") carries NO
-            # change signal — classifying it as changed put ~1,100 such
-            # listings on a permanent CHANGED-priority refetch treadmill every
-            # walk, eating the whole drain budget ahead of the NEW rows (rent
-            # listings never got claimed). Touch it and move on.
-            if classify_index_sighting(
-                prev, idx_price, self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=remax cm=%s ct=%s new=%d changed=%d unchanged=%d enqueued=%d",
-            cm, category.get("category_type"), len(new_ids), len(changed),
-            len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (walk.ref_map[n], walk.price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
+            label=f" cm={cm} ct={category.get('category_type')}",
         )
         # remax reports a per-AGENDA total, not per-category, so the per-category
         # "portal expected" is what this category collected — index% is then 100%
         # by construction. The 5th element is the AGENDA's structural verdict, not
         # the slice's: nomination is agenda-grain, so the title-derived slice never
         # needs an end of its own.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.reached_end
+        return seen, counts, len(seen), pages, walk.reached_end
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
@@ -407,16 +361,7 @@ class RemaxPortal:
         )
         return candidates, active_rows, {"category_main": None}
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> RemaxClient:
-        return RemaxClient(limiter=limiter)
-
     def fetch_detail(
         self, client: RemaxClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -436,60 +381,12 @@ class RemaxPortal:
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        pages = [
-            db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=it.payload["url"], page_kind="detail",
-                html=it.payload["html"], http_status=it.payload["status"])
-            for it in items
-        ]
-        outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
-            for it in items
-        ])
-        for page_id in pages:
-            db.mark_portal_page_parsed(conn, page_id)
-        return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = %s AND claimed_at IS NULL AND given_up = false",
-                (SOURCE,),
-            )
-            return int(cur.fetchone()[0])
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = RemaxPortal(config, max_pages=args.max_pages)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -571,13 +468,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

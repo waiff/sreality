@@ -10,6 +10,9 @@ district-split lives inside its `walk_category`, not here — justified in revie
   shared listing_detail_queue (source-generic, migration 108); nominate the rows
   the walk did not see for a page check, but only from a walk that reached the
   portal's end (`reached_end`, architectural rule #3). Records run_type='index'.
+- reconcile_sightings: the ONE sighting diff. Each adapter's walk_category (and
+  each bespoke probe page) hands what it saw here: every sighted row we hold is
+  touched, new + repriced ids are enqueued. No adapter diffs sightings itself.
 - run_detail_drain: claim a bounded slice of the queue for this source, fetch on a
   rate-limited pool, write in batches via the portal's writer, route gone→inactive
   and error→failure. Records run_type='detail'.
@@ -29,12 +32,20 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from scraper import db, vocabulary
-from scraper.portal import deadline_reached, walk_coverage
+from scraper import db, listing_write, portal_factory, vocabulary
+from scraper.portal import (
+    PortalConfig,
+    classify_index_sighting,
+    deadline_reached,
+    default_config,
+    load_portal_config,
+    walk_coverage,
+)
 from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
@@ -88,14 +99,16 @@ class Portal(Protocol):
     implement this; everything else is shared in this module."""
 
     source: str
-    supports_complete_walk: bool
     index_rate: float
+    # PortalLimits.price_change_min_pct: the walk hands it to reconcile_sightings.
+    price_change_min_pct: float
     # Optional (read via getattr, default False): when on, the runner paces via
     # the cross-runtime portal_rate_state ledger instead of a process-local
     # limiter. Resolved from PortalLimits.shared_rate_limiter by each portal.
     shared_rate_limiter: bool
 
     # --- index-walk seams ---
+    # The runner calls connect_index() BEFORE categories() (idnes relies on it).
     def categories(self) -> list[Any]: ...
     def category_labels(self, category: Any) -> tuple[str, str]: ...
     def connect_index(self) -> Any: ...
@@ -121,6 +134,7 @@ class Portal(Protocol):
     #   not enough and was the idnes failure: one idnes category is ~1,050 pages,
     #   so the runner's between-category check never got a turn and GitHub
     #   SIGKILLed the job at page 599 of 1,050, 9 runs out of 12.
+    #   `counts` is what the walk's reconcile_sightings call returned.
     def active_count(self, conn: Any, category: Any) -> int | None: ...
     # --- presence seams (optional; read via getattr) ---
     # seen_key: "native" (default; walk_category returns source_id_native strings)
@@ -130,8 +144,8 @@ class Portal(Protocol):
     #   -> (candidates, active_rows) | (candidates, active_rows, scope) | None:
     #   override the default nomination for portals whose index sections do not
     #   map 1:1 onto (category_main, category_type) -- bazos scopes by subtype,
-    #   ceskereality buffers sibling slices and nominates once on the last,
-    #   remax/maxima nominate a whole agenda. `scope` names what was actually
+    #   ceskereality + realitymix buffer sibling slices and nominate once on the
+    #   last, remax/maxima nominate a whole agenda. `scope` names what was actually
     #   nominated ({"subtype": ...} / {"category_main": None}) so the throttle
     #   and the operator override match the same scope. None means "not yet".
     #   `candidates` are (native_id, detail_ref, price) triples, oldest-unseen
@@ -139,6 +153,10 @@ class Portal(Protocol):
     # live_categories(limiter) -> (live, configured) | None: the portal's own
     #   category vocabulary as it lists it right now vs as configured; the runner
     #   records any difference in portal_category_drift (alarm, not gate).
+    # note_empty_slice(category): ceskereality + realitymix keep the sibling-slice
+    #   counter honest when the runner refuses an empty seen set.
+    # coverage_denominator_is_upper_bound: ceskereality; picks the COVERAGE log
+    #   level only.
 
     # --- probe seams (optional; duck-typed by run_index_probe) ---
     # set_index_page_cap(pages: int | None): re-cap the walk's index page budget
@@ -159,7 +177,117 @@ class Portal(Protocol):
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]: ...
     def mark_gone(self, conn: Any, native_id: str) -> None: ...
     def record_failure(self, conn: Any, native_id: str, message: str) -> None: ...
-    def claimable_count(self, conn: Any) -> int: ...
+
+
+class PortalDefaults:
+    """Seam bodies the adapters used to copy; override one only where the portal differs."""
+
+    source: str
+
+    def connect_index(self) -> Any:
+        return db.connect()
+
+    def connect_drain(self) -> Any:
+        return db.connect()
+
+    def make_client(self, limiter: RateLimiter) -> Any:
+        return portal_factory.build_client_class(self.source)(limiter=limiter)
+
+    def active_count(self, conn: Any, category: Any) -> int | None:
+        cm, ct = self.category_labels(category)  # type: ignore[attr-defined]
+        if cm is None or ct is None:
+            return None
+        return db.active_count(conn, cm, ct, source=self.source)
+
+    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        """The HTML portals' flush: stage each detail page, ONE listing write, mark the pages parsed."""
+        pages = [
+            db.upsert_portal_raw_page(
+                conn, source=self.source, source_id_native=it.native_id,
+                source_url=it.payload["url"], page_kind="detail",
+                html=it.payload["html"], http_status=it.payload["status"])
+            for it in items
+        ]
+        outcomes = listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ])
+        for page_id in pages:
+            db.mark_portal_page_parsed(conn, page_id)
+        return listing_write.tally(outcomes)
+
+    def mark_gone(self, conn: Any, native_id: str) -> None:
+        # Keyed on the native id: a post-Gate-2 row's sreality_id is NULL.
+        db.mark_listing_inactive_native(conn, self.source, native_id)
+
+    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
+        # The queue (fail_detail) counts attempts and gives up; only sreality also
+        # keeps a listing_fetch_failures row (rule #5), so only it overrides this.
+        return None
+
+
+# What one walk (or one probe page) saw: native_id -> (detail_ref, index price).
+Sightings = Mapping[str, tuple[str | None, int | None]]
+
+
+def reconcile_sightings(
+    conn: Any,
+    source: str,
+    sightings: Sightings,
+    *,
+    min_change_pct: float,
+    label: str = "",
+    retry_first: Callable[[Any, list[str]], set[str]] | None = None,
+) -> dict[str, int]:
+    """Touch every sighted listing we hold and enqueue new + repriced ids (rules #3/#4/#19); conn=None is a dry run."""
+    prices = {nid: db.sane_price_czk(price) for nid, (_, price) in sightings.items()}
+    existing = (
+        db.index_summary_native(conn, source, list(sightings))
+        if conn is not None and sightings else {}
+    )
+    if conn is not None and existing:
+        db.touch_listings_by_id(conn, [row["id"] for row in existing.values()])
+    new = [nid for nid in sightings if nid not in existing]
+    changed = [
+        nid for nid in sightings
+        if nid in existing
+        and classify_index_sighting(existing[nid], prices[nid], min_change_pct) == "changed"
+    ]
+    retry = retry_first(conn, changed) if retry_first and conn is not None and changed else set()
+    entries = (
+        [(n, sightings[n][0], prices[n], db.QUEUE_PRIORITY_FAILURE) for n in changed if n in retry]
+        + [(n, sightings[n][0], prices[n], db.QUEUE_PRIORITY_CHANGED) for n in changed if n not in retry]
+        + [(n, sightings[n][0], prices[n], db.QUEUE_PRIORITY_NEW) for n in new]
+    )
+    enqueued = db.enqueue_detail(conn, source, entries) if conn is not None and entries else 0
+    LOG.info(
+        "ENQUEUE source=%s%s new=%d changed=%d unchanged=%d enqueued=%d",
+        source, label, len(new), len(changed), len(existing) - len(changed), enqueued,
+    )
+    return {"found_new": len(new), "enqueued": enqueued}
+
+
+def load_config(source: str, dry_run: bool = False) -> PortalConfig:
+    """The portal's registry row; its baked default on a dry run or a registry hiccup."""
+    if dry_run:
+        return default_config(source)
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, source)
+    except Exception as exc:  # noqa: BLE001 - a registry hiccup must not break a scrape
+        LOG.warning(
+            "load_portal_config failed source=%s: %s; using baked-in default", source, exc,
+        )
+        return default_config(source)
+
+
+def configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 def _queue_presence_checks(
@@ -468,8 +596,8 @@ def run_index_probe(
 
     Discovery ONLY. Per category: fetch the first `probe_pages` index page(s)
     through the portal's own walk machinery under its page cap, diff against
-    the DB and enqueue new/price-changed ids (the index_summary/touch/enqueue
-    path inside walk_category), and stop the category early when page 1 yields
+    the DB and enqueue new/price-changed ids (the walk's own
+    `reconcile_sightings` call), and stop the category early when page 1 yields
     zero unknown ids — the index is newest-first, so an all-known first page
     proves nothing new sits deeper. The generic path peeks at page 1 then
     re-walks at probe_pages only when the peek found something (one page of
@@ -743,7 +871,7 @@ def run_detail_drain(
 
     if dry_run:
         with portal.connect_index() as conn:
-            claimable = portal.claimable_count(conn)
+            claimable = db.claimable_counts(conn, portal.source).get(portal.source, 0)
         LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
         return (0, {})
 

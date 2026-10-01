@@ -9,7 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from scraper import mmreality_main
+from scraper import mmreality_main, portal_runner
 from scraper.mmreality_main import MmRealityPortal
 from scraper.portal import PortalConfig
 from scraper.portal_base import ListingGoneError
@@ -62,7 +62,7 @@ class _Limiter:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(mmreality_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(mmreality_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         mmreality_main.db, "scrape_run_start",
@@ -89,7 +89,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(mmreality_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(mmreality_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         mmreality_main.db, "scrape_run_start",
@@ -118,7 +118,7 @@ def test_drain_only_skips_index(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(mmreality_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
         mmreality_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
@@ -138,9 +138,6 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "mmreality"
-    # The flag is the live registry row's; the coverage gate flips it from
-    # ledger evidence, never code.
-    assert p.supports_complete_walk is False
     assert len(p.categories()) == 10
     assert p.category_labels(BYTY) == ("byt", "prodej")
     assert p.category_labels({"sale_type": "pronajem", "category": "komercni-objekty"}) == (
@@ -238,7 +235,7 @@ def test_walk_category_classifies_and_reaches_the_portals_last_page(monkeypatch)
     assert (total, pages, reached_end) == (3, 2, True)
     assert _ScriptedClient.calls == [
         ("prodej", "byty", None), ("prodej", "byty", 2), ("prodej", "byty", 2)]
-    assert cap["touched"] == [8103]
+    assert cap["touched"] == [8102, 8103]
     refs = {e[0]: e for e in cap["entries"]}
     assert refs[a][3] == mmreality_main.db.QUEUE_PRIORITY_NEW
     assert refs[b][3] == mmreality_main.db.QUEUE_PRIORITY_CHANGED
@@ -502,6 +499,7 @@ def test_fetch_detail_error():
 
 
 def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper import listing_write
     from scraper.listing_write import WriteOutcome
     from scraper.scraped_listing import ScrapedListing
 
@@ -522,7 +520,7 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
         return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
                              len(w.images)) for w in writes]
 
-    monkeypatch.setattr(mmreality_main.listing_write, "write_listings", _write)
+    monkeypatch.setattr(listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
     assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
     [[w]] = calls

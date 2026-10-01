@@ -361,9 +361,9 @@ def test_sreality_probe_category_never_archives(
             return [{"hash_id": 7, "price_czk": 1}]
 
     monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _Client())
-    monkeypatch.setattr(scraper_main.db, "index_summary", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(scraper_main.db, "enqueue_detail", lambda *a, **k: 1)
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(scraper_main.db, "touch_listings_by_id", lambda *a, **k: None)
     conn = _FakeConn()
 
     scraper_main.SrealityPortal().probe_category(
@@ -404,7 +404,6 @@ def test_remax_page_capped_probe_still_never_archives(
     monkeypatch.setattr(remax_main, "RemaxClient", _Client)
     monkeypatch.setattr(remax_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(remax_main.db, "enqueue_detail", lambda *a, **k: 0)
-    monkeypatch.setattr(remax_main.db, "touch_listings", lambda *a, **k: None)
     monkeypatch.setattr(remax_main.db, "index_archive_week", lambda: "2026w33")
     monkeypatch.setattr(remax_main.db, "fresh_index_page_keys", lambda *a, **k: set())
 

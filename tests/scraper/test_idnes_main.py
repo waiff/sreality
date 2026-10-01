@@ -88,10 +88,11 @@ def _walk(monkeypatch, ids: list[str], **portal_kw: Any) -> dict[str, Any]:
 
 def test_fx_jitter_reads_unchanged_while_genuine_cut_enqueues(monkeypatch):
     got = _walk(monkeypatch, [_JITTER_ID, _CUT_ID, _NEW_ID])
-    # the 0.075% FX move is under the 0.5% baked tolerance -> touched, no enqueue.
-    # touched is the SURROGATE id (5101), not the legacy sreality_id (-101):
-    # touch_listings_by_id keys on listings.id so a NULL-sreality row is bumped too.
-    assert got["touched"] == [5101]
+    # the 0.075% FX move is under the 0.5% baked tolerance -> no enqueue. Every
+    # sighted known row is touched (touch-all), by its SURROGATE id (5101, not the
+    # legacy sreality_id -101): touch_listings_by_id keys on listings.id so a
+    # NULL-sreality row is bumped too.
+    assert got["touched"] == [5101, 5102]
     enqueued = {e[0]: e[3] for e in got["entries"]}
     assert enqueued == {
         _CUT_ID: db.QUEUE_PRIORITY_CHANGED,   # -1% is a real price cut
@@ -104,7 +105,7 @@ def test_zero_tolerance_override_restores_exact_compare(monkeypatch):
     got = _walk(
         monkeypatch, [_JITTER_ID, _CUT_ID], price_change_min_pct=0.0
     )
-    assert got["touched"] == []
+    assert got["touched"] == [5101, 5102]
     enqueued = {e[0]: e[3] for e in got["entries"]}
     assert enqueued == {
         _JITTER_ID: db.QUEUE_PRIORITY_CHANGED,  # exact compare: any move enqueues
@@ -114,5 +115,5 @@ def test_zero_tolerance_override_restores_exact_compare(monkeypatch):
 
 def test_null_to_value_price_transition_always_enqueues(monkeypatch):
     got = _walk(monkeypatch, [_NULLPRICE_ID])
-    assert got["touched"] == []
+    assert got["touched"] == [5104]
     assert [e[0] for e in got["entries"]] == [_NULLPRICE_ID]

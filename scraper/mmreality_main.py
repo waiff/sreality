@@ -2,9 +2,9 @@
 
 Runnable as `python -m scraper.mmreality_main`. M&M Reality is a `Portal`
 (MmRealityPortal) driven by the generic `scraper.portal_runner`. Its own
-`walk_category` pages each per-(sale type, property type) index and enqueues
-new/price-changed ids into the shared `listing_detail_queue` (source='mmreality',
-migration 108); the shared detail-drain fetches each listing page
+`walk_category` pages each per-(sale type, property type) index and hands its
+sightings to `portal_runner.reconcile_sightings`, which touches and enqueues into
+the shared `listing_detail_queue` (source='mmreality', migration 108); the shared detail-drain fetches each listing page
 (MmRealityClient), parses its embedded `:property` estate object to a
 `ScrapedListing` (mmreality_parser), and writes via `listing_write.write_listings`
 (the one listing write; a first-seen row lands `property_id` NULL and the
@@ -33,7 +33,7 @@ import logging
 import re
 from typing import Any
 
-from scraper import db, listing_write, portal_runner
+from scraper import db, portal_runner
 from scraper.mmreality_client import MmRealityClient, detail_url
 from scraper.mmreality_parser import (
     GROUP_SLUGS, NoPropertyObject, PropertyMismatch, index_price, live_groups, parse_detail,
@@ -44,11 +44,9 @@ from scraper.portal import (
     StopReason,
     default_config,
     deadline_reached,
-    load_portal_config,
     stop_is_portal_end,
     walk_coverage,
     walk_reached_end,
-    classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -166,7 +164,7 @@ _SITE_TITLE = "| M&M Reality"
 _SITE_TITLE_ESCAPED = "| M&amp;M Reality"
 
 
-class MmRealityPortal:
+class MmRealityPortal(portal_runner.PortalDefaults):
     """M&M Reality as a Portal: the seams the generic runner needs, wrapping the
     mmreality client + parser. Operational scope comes from the `portals`
     registry config; one category per (sale type, property type) index."""
@@ -175,7 +173,6 @@ class MmRealityPortal:
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         usable = [
             c for c in (config.categories or [])
             if c.get("sale_type") in SALE_TYPE and c.get("category") in CATEGORY_MAIN
@@ -195,7 +192,7 @@ class MmRealityPortal:
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -213,15 +210,6 @@ class MmRealityPortal:
             CATEGORY_MAIN.get(category.get("category")),
             SALE_TYPE.get(category.get("sale_type")),
         )
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        # Batched writes without prepared statements; the transaction pooler is
-        # fine — no session pooler needed.
-        conn = db.connect()
-        return conn
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -381,44 +369,11 @@ class MmRealityPortal:
             # gate shut for good (the always-on worker probes under a cap).
             self._record_slice(conn, category, outcome, declared, len(seen), pages)
 
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (ref_map[n], price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct, label=f" sale={sale_type} cat={cat}",
         )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=mmreality sale=%s cat=%s new=%d changed=%d unchanged=%d "
-            "enqueued=%d",
-            sale_type, cat, len(new_ids), len(changed), len(unchanged_pks), enqueued,
-        )
-        return (
-            seen, {"found_new": len(new_ids), "enqueued": enqueued}, declared, pages,
-            reached_end,
-        )
+        return seen, counts, declared, pages, reached_end
 
     def _record_slice(
         self, conn: Any, category: dict[str, Any], outcome: str,
@@ -457,16 +412,7 @@ class MmRealityPortal:
         configured = {f"{c['sale_type']}/{c['category']}" for c in self._categories}
         return live, configured
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> MmRealityClient:
-        return MmRealityClient(limiter=limiter)
-
     def fetch_detail(
         self, client: MmRealityClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -508,62 +454,12 @@ class MmRealityPortal:
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        pages = [
-            db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=it.payload["url"], page_kind="detail",
-                html=it.payload["html"], http_status=it.payload["status"])
-            for it in items
-        ]
-        outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
-            for it in items
-        ])
-        for page_id in pages:
-            db.mark_portal_page_parsed(conn, page_id)
-        return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # A gone detail is a definitive per-listing delisting signal even for a
-        # partial-walk portal — flip just that one (source-scoped, rule #15).
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = %s AND claimed_at IS NULL AND given_up = false",
-                (SOURCE,),
-            )
-            return int(cur.fetchone()[0])
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = MmRealityPortal(config, max_pages=args.max_pages)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -627,13 +523,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

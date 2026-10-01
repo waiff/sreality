@@ -1,9 +1,9 @@
 """Orchestrator for the bazos.cz crawler — on the shared portal framework (Phase 4).
 
 Runnable as `python -m scraper.bazos_main`. Bazos is a `Portal` (BazosPortal)
-driven by the generic `scraper.portal_runner`. Its own `walk_category` stages raw
-pages and enqueues listings into the shared `listing_detail_queue` (source='bazos',
-migration 108); the shared detail-drain fetches (BazosClient) + parses
+driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
+index and hands its sightings to `portal_runner.reconcile_sightings`, which touches
+and enqueues into the shared `listing_detail_queue` (source='bazos', migration 108); the shared detail-drain fetches (BazosClient) + parses
 (bazos_parser) + writes via `listing_write.write_listings` (the one listing write;
 a first-seen row lands `property_id` NULL and the straggler-attach births its
 singleton, rule #15).
@@ -35,7 +35,7 @@ import argparse
 import logging
 from typing import Any
 
-from scraper import db, listing_write, portal_runner
+from scraper import db, portal_runner
 from scraper.bazos_client import BazosClient, detail_url
 from scraper.bazos_parser import (
     CATEGORY_MAIN,
@@ -48,10 +48,7 @@ from scraper.bazos_parser import (
 from scraper.portal import (
     PortalConfig,
     StopReason,
-    classify_index_sighting,
     deadline_reached,
-    default_config,
-    load_portal_config,
     stop_is_portal_end,
     walk_coverage,
     walk_reached_end,
@@ -68,7 +65,7 @@ SOURCE = "bazos"
 # single walk-miss costs one fetch, never a live listing.
 
 
-class BazosPortal:
+class BazosPortal(portal_runner.PortalDefaults):
     """Bazos as a Portal: the seams the generic runner needs, wrapping the
     bazos client + parser. Single-category, one locality scope per run.
 
@@ -83,7 +80,7 @@ class BazosPortal:
     section never suppresses another's nomination."""
 
     source = SOURCE
-    supports_complete_walk = True
+    price_change_min_pct = 0.0
     index_rate = 0.5
 
     def __init__(
@@ -116,14 +113,6 @@ class BazosPortal:
             CATEGORY_MAIN.get(category.get("category")),
             SALE_TYPE.get(category.get("sale_type")),
         )
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        # Batched writes without prepared statements; the transaction pooler is
-        # fine — no session pooler needed.
-        return db.connect()
 
     def walk_category(
         self, category: dict[str, str], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -246,35 +235,6 @@ class BazosPortal:
                 break
             offset = page.next_offset
 
-        # Resolve which natives already have a row (PK + stored price), so we can
-        # bump last_seen cheaply (no detail fetch) and enqueue only genuinely-new
-        # + price-changed ads — the discipline sreality's index walk uses.
-        existing = (
-            db.index_summary_native(conn, SOURCE, seen) if conn is not None else {}
-        )
-        if conn is not None and existing:
-            db.touch_listings_by_id(conn, [v["id"] for v in existing.values()])
-
-        new_entries: list[tuple[str, str, int | None, int]] = []
-        changed_entries: list[tuple[str, str, int | None, int]] = []
-        unchanged = 0
-        for native, path, idx_price in items:
-            prev = existing.get(native)
-            verdict = classify_index_sighting(prev, idx_price)
-            if verdict == "new":
-                new_entries.append((native, path, idx_price, db.QUEUE_PRIORITY_NEW))
-            elif verdict == "changed":
-                changed_entries.append(
-                    (native, path, idx_price, db.QUEUE_PRIORITY_CHANGED)
-                )
-            else:
-                unchanged += 1
-
-        enqueued = 0
-        entries = changed_entries + new_entries
-        if conn is not None and entries:
-            enqueued = db.enqueue_detail(conn, SOURCE, entries)
-
         # The gate is STRUCTURAL: did bazos say there is nothing after this page?
         # The count is still measured — as a record and an alarm (the runner logs
         # the gap and writes both facts into scrape_runs.by_category) — but it
@@ -299,16 +259,15 @@ class BazosPortal:
             our_stop=not portal_end or bool(self._max_pages) or narrowed,
         )
         LOG.info(
-            "ENQUEUE source=bazos enqueued=%d new=%d changed=%d unchanged=%d "
-            "seen=%d total=%s stop=%s coverage=%s reached_end=%s",
-            enqueued, len(new_entries), len(changed_entries), unchanged,
-            len(seen), total, stop, coverage, reached_end,
+            "INDEX walk end sale_type=%s category=%s stop=%s reached_end=%s "
+            "collected=%d total=%s pages=%d coverage=%s",
+            sale_type, cat, stop, reached_end, len(seen), total, pages, coverage,
         )
-        return (
-            seen,
-            {"found_new": len(new_entries), "enqueued": enqueued},
-            total, pages, reached_end,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (path, price) for n, path, price in items},
+            min_change_pct=self.price_change_min_pct,
         )
+        return seen, counts, total, pages, reached_end
 
     def _classify_gone(
         self, *, total: int | None, collected: int, pages: int, offset: int,
@@ -448,9 +407,6 @@ class BazosPortal:
         )
 
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> BazosClient:
-        return BazosClient(limiter=limiter)
-
     def fetch_detail(
         self, client: BazosClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -476,56 +432,6 @@ class BazosPortal:
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        pages = [
-            db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=it.payload["url"], page_kind="detail",
-                html=it.payload["html"], http_status=it.payload["status"])
-            for it in items
-        ]
-        outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
-            for it in items
-        ])
-        for page_id in pages:
-            db.mark_portal_page_parsed(conn, page_id)
-        return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # A gone detail (404/410 / gone-marker body) is definitive per-listing
-        # evidence — flip it inactive immediately, independent of the throttled
-        # index-absence sweep.
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; bazos has no
-        # sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'bazos' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
-
-
-
-
-def _load_config(dry_run: bool) -> "PortalConfig":
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
 
 def _resolve_scopes(
     args: argparse.Namespace, config: "PortalConfig"
@@ -548,9 +454,9 @@ def _resolve_scopes(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     limits = config.limits
     scopes = _resolve_scopes(args, config)
     if scopes is None:
@@ -563,9 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     portal.index_rate = limits.index_rate
     portal.shared_rate_limiter = limits.shared_rate_limiter
-    # The DB column is the source of truth for delisting (consistent with the
-    # derived Health posture badge); the class default True is the safe fallback.
-    portal.supports_complete_walk = config.supports_complete_walk
+    portal.price_change_min_pct = limits.price_change_min_pct
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else limits.detail_workers
@@ -660,13 +564,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

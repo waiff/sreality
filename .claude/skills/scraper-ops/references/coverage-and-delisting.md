@@ -330,8 +330,9 @@ API ignores sort, so it re-touches the same ~10,000 rows every pass. The walks a
 the only coverage mechanism.
 
 **A lost lock fight that discards a finished walk.** The last step of a category
-walk bumps `last_seen_at` for every unchanged row (`touch_listings` for sreality,
-`touch_listings_by_id` for the other eight portals). Twice it has died AFTER every
+walk (`portal_runner.reconcile_sightings`) bumps `last_seen_at` for every sighted row
+we already hold, whatever its index price (`touch_listings_by_id` on all nine
+portals). Twice it has died AFTER every
 page was fetched, and each time the category was recorded as collected=0 and its
 sweep skipped: a `DeadlockDetected` against a concurrent writer (sreality
 komercni/prodej, 2026-09-05 10:38, 3 of 46 runs), and a `QueryCanceled` — "statement

@@ -37,7 +37,6 @@ class _ProbePortal:
 
     source = "fake"
     index_rate = 100.0
-    supports_complete_walk = True
 
     def __init__(self, *, categories=None, walk_results=None, walk_fails=None) -> None:
         self._categories = categories if categories is not None else ["A"]

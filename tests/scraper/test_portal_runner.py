@@ -50,10 +50,9 @@ class _FakePortal:
     source = "fake"
     index_rate = 1.0
 
-    def __init__(self, *, supports_complete_walk=True, categories=None, reached_end=True,
+    def __init__(self, *, categories=None, reached_end=True,
                  result_size=2, fetch_kinds=None, walk_fails=None, conn_close_error=None,
                  write_errors=None, reconnect_conns=False) -> None:
-        self.supports_complete_walk = supports_complete_walk
         self._categories = categories if categories is not None else ["A", "B"]
         # `reached_end` is STRUCTURAL: "the walk reached the portal's end", not
         # "the counts reconciled". `result_size` is the portal's declared total,
@@ -132,9 +131,6 @@ class _FakePortal:
     def record_failure(self, conn, native_id, message):
         self.calls["failure"].append(native_id)
 
-    def claimable_count(self, conn):
-        return 0
-
 
 # --- run_index_walk ---------------------------------------------------------
 
@@ -161,7 +157,7 @@ def _nominations(monkeypatch):
 
 def test_index_walk_nominates_unseen_rows_when_the_walk_reached_the_portals_end(monkeypatch):
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, reached_end=True)
+    p = _FakePortal(reached_end=True)
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert p.calls["walk"] == ["A", "B"]
@@ -185,7 +181,7 @@ def test_index_walk_nominates_nothing_when_our_own_stop_fired(monkeypatch):
     part of the portal it never reached, not evidence -- even when the counts
     reconcile perfectly."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, reached_end=False)
+    p = _FakePortal(reached_end=False)
     _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert cap["candidates"] == [] and cap["queued"] == []
     assert [(c["walk_reached_end"], c["walk_coverage"]) for c in agg["by_category"]] == [
@@ -223,13 +219,32 @@ def test_index_walk_skip_line_names_our_stop_not_the_count(monkeypatch, caplog):
     assert "an unfinished walk nominates nothing" in line[0]
 
 
-def test_index_walk_nominates_even_when_portal_flag_is_down(monkeypatch):
-    """supports_complete_walk gated a sweep that could be wrong. A nomination
-    cannot be -- the page decides -- so the flag no longer gates it."""
-    cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=False, reached_end=True)
-    portal_runner.run_index_walk(p, dry_run=False)
-    assert [c for c, _, _ in cap["queued"]] == ["A", "B"]
+class _ReconcilingPortal(_FakePortal):
+    """A walk whose counts come from the shared sighting diff, as every adapter's do."""
+
+    price_change_min_pct = 0.0
+
+    def walk_category(self, c, conn, dry_run, limiter, deadline=None):
+        self.calls["walk"].append(c)
+        sightings = {f"{c}1": (None, 100), f"{c}2": (None, 200), f"{c}3": (None, 300)}
+        counts = portal_runner.reconcile_sightings(
+            conn, self.source, sightings, min_change_pct=self.price_change_min_pct)
+        return set(sightings), counts, 3, 1, False
+
+
+def test_walk_counts_from_reconcile_reach_by_category(monkeypatch):
+    stored = {"A1": {"id": 1, "price_czk": 100}, "B2": {"id": 2, "price_czk": 1}}
+    monkeypatch.setattr(
+        portal_runner.db, "index_summary_native",
+        lambda _c, _s, ids: {n: stored[n] for n in ids if n in stored})
+    monkeypatch.setattr(portal_runner.db, "touch_listings_by_id", lambda _c, ids: len(ids))
+    monkeypatch.setattr(portal_runner.db, "enqueue_detail", lambda _c, _s, entries: len(entries))
+    p = _ReconcilingPortal(reached_end=False)
+    _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
+    assert [(c["listings_found_new"], c["listings_enqueued"]) for c in agg["by_category"]] == [
+        (2, 2), (2, 3),
+    ]
+    assert agg["listings_found_new"] == 4
 
 
 def test_index_walk_uses_a_portal_override_for_nomination(monkeypatch):
@@ -305,7 +320,7 @@ def test_index_walk_bumps_index_pages_per_committed_category(monkeypatch):
     _nominations(monkeypatch)
     # With a run_id, each category's pages are committed immediately so Health
     # liveness survives a SIGKILL before finalize.
-    p = _FakePortal(supports_complete_walk=True, reached_end=True)
+    p = _FakePortal(reached_end=True)
     bumps: list[tuple[int, int]] = []
     monkeypatch.setattr(
         portal_runner.db, "bump_index_pages",
@@ -331,7 +346,7 @@ def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
     # max_seconds with a deadline in the past -> stop before any category, finalize
     # cleanly (no SIGKILL). monotonic: first call sets the deadline, later calls
     # are past it.
-    p = _FakePortal(supports_complete_walk=True, reached_end=True)
+    p = _FakePortal(reached_end=True)
     calls = {"n": 0}
 
     def fake_monotonic():
@@ -350,7 +365,7 @@ def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
 def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
     _nominations(monkeypatch)
     # A generous budget never trips the deadline -> full walk, same as no budget.
-    p = _FakePortal(supports_complete_walk=True, reached_end=True)
+    p = _FakePortal(reached_end=True)
     monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 0.0)
     portal_runner.run_index_walk(p, dry_run=False, max_seconds=10_000)
     assert p.calls["walk"] == ["A", "B"]
@@ -361,7 +376,7 @@ def test_index_walk_one_failed_category_stays_green_with_error_recorded(monkeypa
     # tolerated) but the failure is COUNTED in the aggregate, and the other
     # category is still walked + its unseen rows nominated.
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, reached_end=True, walk_fails={"A"})
+    p = _FakePortal(reached_end=True, walk_fails={"A"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert agg["errors"] == 1
@@ -375,7 +390,7 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
     # EVERY category failed -> the portal is fully blocked (e.g. WAF 403s the
     # runner egress); the run must go red, not record a green zero-listing walk.
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, reached_end=True, walk_fails={"A", "B"})
+    p = _FakePortal(reached_end=True, walk_fails={"A", "B"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc != 0
     assert agg["errors"] == 2
@@ -409,6 +424,7 @@ def _patch_queue(monkeypatch, claim_batches):
         portal_runner.db, "fail_detail",
         lambda _c, _src, ids, msg, **k: cap["fail"].append(sorted(ids)),
     )
+    monkeypatch.setattr(portal_runner.db, "claimable_counts", lambda _c, _s=None: {})
     return cap
 
 
