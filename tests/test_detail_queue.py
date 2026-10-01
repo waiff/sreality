@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from scraper import db
 
 
@@ -402,23 +404,68 @@ def test_active_count_is_source_scoped():
     assert params == ("sreality", "byt", "prodej")
 
 
+_FLIP = "AND is_active = true RETURNING property_id"
+_EXISTS = "SELECT 1 FROM listings WHERE source = %s AND source_id_native = %s"
+_LEDGER_CLEAR = "DELETE FROM listing_fetch_failures f USING listings l"
+
+
 def test_mark_listing_inactive_enqueues_its_property():
     conn = _FakeConn([
-        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(42,)]),
+        (lambda s: _FLIP in s, [(42,)]),
         (lambda s: "INSERT INTO dirty_properties" in s, []),
     ])
-    db.mark_listing_inactive(conn, 999)
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is True
     dirty = _find(conn.executed, "INSERT INTO dirty_properties")
     assert dirty is not None
     assert dirty[1] == (42,)
+    assert _find(conn.executed, _EXISTS) is None        # the no-match probe runs only on a no-op
 
 
 def test_mark_listing_inactive_no_property_no_dirty():
     conn = _FakeConn([
-        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(None,)]),
+        (lambda s: _FLIP in s, [(None,)]),
     ])
-    db.mark_listing_inactive(conn, 999)
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is True
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+def test_an_already_inactive_listing_is_not_restamped_or_redirtied(caplog):
+    """The guard matches nothing: no second inactive_at (no duplicate collection
+    monitor 'inactive' dispatch), no dirty mark, and no warning -- the row exists."""
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, []),
+        (lambda s: _EXISTS in s, [(1,)]),
+    ])
+    with caplog.at_level("WARNING", logger="scraper.db"):
+        assert db.mark_listing_inactive(conn, "sreality", "12345") is False
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+    assert _find(conn.executed, _EXISTS)[1] == ("sreality", "12345")
+    assert not any("gone flip matched no listing" in m for m in caplog.messages)
+
+
+def test_a_gone_flip_that_matches_no_listing_is_logged(caplog):
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, []),
+        (lambda s: _EXISTS in s, []),
+    ])
+    with caplog.at_level("WARNING", logger="scraper.db"):
+        assert db.mark_listing_inactive(conn, "sreality", "12345") is False
+    assert "gone flip matched no listing source=sreality id=12345" in caplog.messages
+
+
+@pytest.mark.parametrize(("flip_rows", "exists_rows"), [([(42,)], []), ([(None,)], []), ([], [(1,)]), ([], [])])
+def test_every_gone_flip_clears_the_failure_ledger(flip_rows, exists_rows):
+    """Rule #5: the failure row goes when the listing's fate is known. Keyed on data,
+    not the portal -- a crawler row's NULL / synthetic sreality_id matches no ledger row."""
+    conn = _FakeConn([
+        (lambda s: _FLIP in s, flip_rows),
+        (lambda s: _EXISTS in s, exists_rows),
+    ])
+    db.mark_listing_inactive(conn, "sreality", "12345")
+    clear = _find(conn.executed, _LEDGER_CLEAR)
+    assert clear is not None
+    assert "f.sreality_id = l.sreality_id" in clear[0]
+    assert clear[1] == ("sreality", "12345")
 
 
 def test_touch_listings_enqueues_reactivated_properties():

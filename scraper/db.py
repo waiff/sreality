@@ -1138,52 +1138,35 @@ def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
     return row[0] if row else None
 
 
-def mark_listing_inactive(
-    conn: psycopg.Connection,
-    sreality_id: int,
-) -> None:
-    """Flip a single listing to is_active=false.
-
-    Used when a detail fetch reports the listing is gone (404/410 or
-    sreality's 'page does not exist' body) — the page-verified flip rule #3
-    relies on (the index-absence sweep in `mark_inactive` is retired).
-    """
+def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool:
+    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call flipped it."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE listings SET is_active = false, inactive_at = now() "
-            "WHERE sreality_id = %s RETURNING property_id",
-            (sreality_id,),
-        )
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            cur.execute(
-                "INSERT INTO dirty_properties (property_id) VALUES (%s) "
-                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
-                (int(row[0]),),
-            )
-
-
-def mark_listing_inactive_native(
-    conn: psycopg.Connection,
-    source: str,
-    native_id: str,
-) -> None:
-    """Flip a single (source, source_id_native) listing inactive — used when a
-    portal detail fetch reports the ad gone (404/410 / gone-marker body). A
-    definitive per-listing signal, independent of the index-absence sweep."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE listings SET is_active = false, inactive_at = now() "
-            "WHERE source = %s AND source_id_native = %s RETURNING property_id",
+            "WHERE source = %s AND source_id_native = %s AND is_active = true "
+            "RETURNING property_id",
             (source, native_id),
         )
         row = cur.fetchone()
-        if row and row[0] is not None:
+        if row is None:
+            cur.execute(
+                "SELECT 1 FROM listings WHERE source = %s AND source_id_native = %s",
+                (source, native_id),
+            )
+            if cur.fetchone() is None:
+                LOG.warning("gone flip matched no listing source=%s id=%s", source, native_id)
+        elif row[0] is not None:
             cur.execute(
                 "INSERT INTO dirty_properties (property_id) VALUES (%s) "
                 "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
                 (int(row[0]),),
             )
+        cur.execute(
+            "DELETE FROM listing_fetch_failures f USING listings l "
+            "WHERE l.source = %s AND l.source_id_native = %s AND f.sreality_id = l.sreality_id",
+            (source, native_id),
+        )
+    return row is not None
 
 
 def index_summary(

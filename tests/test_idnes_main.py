@@ -417,6 +417,7 @@ def test_delisting_uses_the_runners_default_nomination():
     seam nor an override."""
     p = _portal()
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
     assert not hasattr(p, "presence_candidates")
     assert getattr(p, "seen_key", "native") == "native"
 
@@ -496,23 +497,6 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
     [[w]] = calls
     assert (w.source, w.source_id_native, w.discovery_seq) == ("idnes", "a", 5)
     assert parsed == [9]
-
-
-def test_mark_gone_flips_listing_inactive(monkeypatch):
-    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
-    # NOT a sreality_id resolved back out of the DB — a post-Gate-2 idnes row has
-    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
-    )
-    _portal().mark_gone(object(), "a")
-    assert captured == {"source": "idnes", "nid": "a"}
 
 
 # --- the empty slice ---------------------------------------------------------

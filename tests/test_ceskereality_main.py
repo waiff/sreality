@@ -22,8 +22,6 @@ from __future__ import annotations
 import re
 from types import SimpleNamespace
 
-import pytest
-
 from scraper import ceskereality_main as m
 from scraper import portal as m_portal
 from scraper.ceskereality_client import (
@@ -663,6 +661,7 @@ def test_the_old_sweep_seam_is_gone():
     """No portal may flip rows from index absence any more; the runner never
     calls mark_inactive and the seam must not linger to tempt anyone."""
     assert not hasattr(m.CeskerealityPortal, "mark_inactive")
+    assert not hasattr(m.CeskerealityPortal, "mark_gone")
 
 
 # --- newest-first delta probe (/nejnovejsi/ on the www host) -----------------
@@ -759,23 +758,6 @@ def test_probe_category_early_stops_on_all_known_page(monkeypatch):
     assert counts["found_new"] == 0
     assert enqueued == []           # unchanged prices -> nothing enqueued
     assert sorted(touched) == [51, 52]   # but last_seen was bumped (by surrogate id)
-
-
-def test_mark_gone_flips_native_inactive(monkeypatch):
-    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
-    # NOT a sreality_id resolved out of the DB — a post-Gate-2 ceskereality row has
-    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
-    captured: dict = {}
-    monkeypatch.setattr(
-        m.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    monkeypatch.setattr(
-        m.db, "mark_listing_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
-    )
-    m.CeskerealityPortal(default_config("ceskereality")).mark_gone(object(), "7000009")
-    assert captured == {"source": "ceskereality", "nid": "7000009"}
 
 
 def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):

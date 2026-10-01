@@ -1028,11 +1028,6 @@ class SrealityPortal(portal_runner.PortalDefaults):
                     discovery_seq=it.discovery_seq, discovered_at=it.discovered_at))
         return listing_write.tally(listing_write.write_listings(conn, writes))
 
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        sid = int(native_id)
-        db.mark_listing_inactive(conn, sid)
-        db.clear_fetch_failure(conn, sid)
-
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         db.record_fetch_failure(conn, int(native_id), message)
 
@@ -1638,21 +1633,23 @@ def _process_one(
 
 
 def _handle_gone(conn: Any, sid: int) -> tuple[str, int]:
-    """A delisted listing: flip is_active=false and clear any failure row.
+    """A delisted listing: flip is_active=false; the flip also clears any failure row.
 
     A gone detail fetch is evidence of delisting, not a transient failure,
     so it must not accumulate in listing_fetch_failures (which would burn
     the 5-attempt budget and then strand the listing as given_up). Returns
-    the 'gone' outcome so the walk counts it separately from errors.
+    the 'gone' outcome so the walk counts it separately from errors; a flip
+    that failed is an error, recorded so the listing is fetched again.
     """
     LOG.info("DETAIL id=%d gone (is_active=false)", sid)
     if conn is None:
         return ("gone", 0)
     try:
-        db.mark_listing_inactive(conn, sid)
-    except Exception as exc:
+        db.mark_listing_inactive(conn, "sreality", str(sid))
+    except Exception as exc:  # noqa: BLE001
         LOG.warning("could not mark id=%d inactive: %s", sid, exc)
-    _clear_failure(conn, sid)
+        _record_failure(conn, sid, "db", exc)
+        return ("errors", 0)
     return ("gone", 0)
 
 

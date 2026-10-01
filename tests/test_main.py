@@ -272,6 +272,7 @@ def test_sreality_portal_nominates_on_its_integer_ids():
     p = scraper_main.SrealityPortal()
     assert p.seen_key == "sreality_id"
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
 
 
 def test_walk_complete_tolerates_half_percent_short_walk():
@@ -470,11 +471,14 @@ def test_rotation_gives_each_category_the_front_across_a_full_cycle():
 
 
 def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
-    calls: dict[str, list] = {"inactive": [], "cleared": [], "failed": []}
-    monkeypatch.setattr(
-        scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: calls["inactive"].append(sid),
-    )
+    calls: dict[str, list] = {"inactive": [], "cleared": [], "failed": [], "source": []}
+
+    def _flip(_c, source, nid):
+        calls["source"].append(source)
+        calls["inactive"].append(nid)
+        return True
+
+    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _flip)
     monkeypatch.setattr(
         scraper_main.db, "clear_fetch_failure",
         lambda _c, sid: calls["cleared"].append(sid),
@@ -502,8 +506,8 @@ def test_process_one_listing_gone_flips_inactive_not_failure(monkeypatch):
     )
     assert outcome == "gone"
     assert imgs == 0
-    assert calls["inactive"] == [12345]
-    assert calls["cleared"] == [12345]
+    assert calls["inactive"] == ["12345"]
+    assert calls["source"] == ["sreality"]
     assert calls["failed"] == []  # a delisting is not a fetch failure
 
 
@@ -516,8 +520,23 @@ def test_process_one_404_http_error_is_gone(monkeypatch):
         client, object(), 777, dry_run=False
     )
     assert outcome == "gone"
-    assert calls["inactive"] == [777]
+    assert calls["inactive"] == ["777"]
     assert calls["failed"] == []
+
+
+def test_handle_gone_flip_failure_is_an_error_not_gone(monkeypatch):
+    """A flip that raised is not a delisting: the listing is still active, so it
+    counts as an error and keeps a failure row to be fetched again."""
+    calls = _patch_failure_helpers(monkeypatch)
+
+    def _broken(_c, _source, _nid):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _broken)
+    outcome = scraper_main._write_result(
+        object(), scraper_main.FetchResult(12345, "gone"), False)
+    assert outcome == ("errors", 0)
+    assert calls["failed"] == [12345]
 
 
 def test_process_one_500_http_error_is_failure(monkeypatch):
@@ -565,7 +584,7 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     monkeypatch.setattr(scraper_main.listing_write, "write_listings", _write_listings)
     monkeypatch.setattr(
         scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: writes["gone"].append(sid),
+        lambda _c, source, nid: writes["gone"].append(nid),
     )
     monkeypatch.setattr(
         scraper_main.db, "record_fetch_failure",
@@ -600,7 +619,7 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     assert counts["new"] == 2      # 10, 12 upserted
     assert counts["gone"] == 1     # 11
     assert counts["errors"] == 1   # 13 — error did not abort the pool
-    assert writes["gone"] == [11]
+    assert writes["gone"] == ["11"]
     assert writes["fail"] == [13]
     assert budget[0] == 6          # 10 - 4 processed
 
@@ -1177,7 +1196,7 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_listing_inactive",
-        lambda _c, sid: captured["gone"].append(sid),
+        lambda _c, source, nid: captured["gone"].append((source, nid)),
     )
     monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
     return captured
@@ -1205,7 +1224,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
     assert rc == 0
-    assert cap["gone"] == [11]              # gone -> mark_listing_inactive
+    assert cap["gone"] == [("sreality", "11")]  # gone -> mark_listing_inactive
     assert cap["failure"] == [12]           # error -> record_fetch_failure
     assert cap["fail"] == [["12"]]          # error -> queue attempts++ (by native_id)
     assert sorted(x for b in cap["write"] for x in b) == [10]

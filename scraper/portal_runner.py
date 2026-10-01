@@ -175,7 +175,6 @@ class Portal(Protocol):
     def make_client(self, limiter: RateLimiter) -> Any: ...
     def fetch_detail(self, client: Any, native_id: str, detail_ref: str | None) -> DrainItem: ...
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]: ...
-    def mark_gone(self, conn: Any, native_id: str) -> None: ...
     def record_failure(self, conn: Any, native_id: str, message: str) -> None: ...
 
 
@@ -217,10 +216,6 @@ class PortalDefaults:
         for page_id in pages:
             db.mark_portal_page_parsed(conn, page_id)
         return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Keyed on the native id: a post-Gate-2 row's sreality_id is NULL.
-        db.mark_listing_inactive_native(conn, self.source, native_id)
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         # The queue (fail_detail) counts attempts and gives up; only sreality also
@@ -800,19 +795,23 @@ class _GoneRateBreaker:
                       "recorded as failures, not flips", self.reason, self.source)
 
 
-def _drain_mark_gone(portal: Portal, conn: Any, native_id: str, reconnect: Any) -> Any:
+def _drain_mark_gone(
+    portal: Portal, conn: Any, native_id: str, reconnect: Any,
+) -> tuple[Any, str | None]:
     """Flip a gone listing inactive + dequeue it, transient-drop resilient.
-    Returns the live connection. mark_gone's own bookkeeping errors stay tolerated
-    (one listing must not red the run); a dropped connection reconnects + retries."""
+    Returns (live conn, None), or (conn, error) when the flip failed non-transiently."""
     def _op(c: Any) -> None:
-        try:
-            portal.mark_gone(c, native_id)
-        except Exception as exc:  # noqa: BLE001 - bookkeeping; tolerated like before
-            LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
+        db.mark_listing_inactive(c, portal.source, native_id)
         db.complete_detail(c, portal.source, [native_id], outcome="gone")
 
-    _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
-    return conn
+    try:
+        _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
+    except Exception as exc:  # noqa: BLE001 - one listing must not red the run
+        if db.is_transient_db_error(exc):
+            raise  # retries exhausted: a real outage reds the run, as before
+        LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
+        return conn, str(exc)
+    return conn, None
 
 
 def _drain_record_failure(
@@ -980,9 +979,15 @@ def run_detail_drain(
                             portal, conn, item.native_id, breaker.reason, portal.connect_drain)
                     elif item.kind == "gone":
                         LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
-                        conn = _drain_mark_gone(
+                        conn, flip_error = _drain_mark_gone(
                             portal, conn, item.native_id, portal.connect_drain)
-                        counts["gone"] += 1
+                        if flip_error is None:
+                            counts["gone"] += 1
+                        else:  # the queue row stays and is retried
+                            counts["errors"] += 1
+                            conn = _drain_record_failure(
+                                portal, conn, item.native_id,
+                                f"gone flip failed: {flip_error}", portal.connect_drain)
                     else:  # error: keep the queue row, bump attempts, log failure
                         LOG.error("DETAIL id=%s error: %s", item.native_id, item.error)
                         conn = _drain_record_failure(

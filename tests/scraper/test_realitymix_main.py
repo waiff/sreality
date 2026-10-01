@@ -438,6 +438,7 @@ def test_the_old_sweep_seam_is_gone():
     """No portal may flip rows from index absence any more; the runner never
     calls mark_inactive and the seam must not linger to tempt anyone."""
     assert not hasattr(RealitymixPortal, "mark_inactive")
+    assert not hasattr(RealitymixPortal, "mark_gone")
 
 
 
