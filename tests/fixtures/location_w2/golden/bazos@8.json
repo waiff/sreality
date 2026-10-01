@@ -50,9 +50,7 @@
       "licence_class": "portal",
       "blur_evidence": "declared",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Přibližná lokalita",
-      "evidence_span_len": 18
+      "position_branch": null
     },
     {
       "extractor_id": "bzs.det.link_pin",
@@ -69,9 +67,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": "portal_pin",
-      "evidence_quote": "<a href=\"/place/50.0925,14.4505,15z\" title=\"Přibližná lokalita\">mapa</a>",
-      "evidence_span_len": 72
+      "position_branch": "portal_pin"
     },
     {
       "extractor_id": "bzs.det.psc",
@@ -88,9 +84,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "<a href=\"/inzeraty/praha-8/18600/\">Praha 8, 186 00</a>",
-      "evidence_span_len": 54
+      "position_branch": null
     }
   ],
   "reading_claims": {

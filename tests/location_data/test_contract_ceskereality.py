@@ -108,8 +108,7 @@ def mined(key: str, *, source_body: bytes | None = None,
     raw = path.read_bytes() if source_body is None else source_body
     listing_native = native or key.split("-")[0]
     payload = ArchivedPayload(
-        id=1, source=SOURCE, source_id_native=listing_native, page_kind=page_kind,
-        payload_sha256="0" * 64, first_observed_at=OBSERVED_AT, body=raw)
+        id=1, page_kind=page_kind, first_observed_at=OBSERVED_AT, body=raw)
     return extract_page(payload, fx.listing(SOURCE, {}, native=listing_native), entries(),
                         register=register())
 
@@ -328,28 +327,6 @@ def test_the_pin_is_licensed_as_this_portals_own_rather_than_stamped_by_its_read
     assert pin.locator["attr"] == ["data-coord-lat", "data-coord-lng"]
     assert pin.precision_map["precision_cap"]["granularity_max"] == "address_point"
     assert pin.guards == ["reject_outside_cz_bbox"]
-
-
-# ------------------------------------------------------------- evidence and spans
-
-@pytest.mark.parametrize("key", sorted(BODIES))
-def test_every_claim_cites_a_span_that_slices_back_to_its_own_quote(key: str) -> None:
-    """Migration 382's `loc_claim_text_evidence`. A transformed value is a NORMALISED form,
-    so each reader quotes the RAW attribute it read from — quoting `Ostrov` resolved the span
-    into the node's own `value=` attribute instead of into `data-city`, and a span pointing
-    at a different fact is worse than no span."""
-    html = document(key).html
-    for claim in mined(key).claims:
-        assert claim.span_start is not None and claim.span_end > claim.span_start
-        assert html[claim.span_start:claim.span_end] == claim.evidence_quote
-
-
-def test_the_two_reads_of_each_attribute_quote_the_whole_attribute() -> None:
-    claims = by_id(mined("3861311"))
-    for entry_id in ("cr.det.data_city", "cr.det.city_okres"):
-        assert claims[entry_id].evidence_quote == "Ostrov (okres Karlovy Vary)"
-    for entry_id in ("cr.det.address_street", "cr.det.address_cp"):
-        assert claims[entry_id].evidence_quote == "Májová 843, Ostrov"
 
 
 # ---------------------------------------------- refusals, zones and the PII rails

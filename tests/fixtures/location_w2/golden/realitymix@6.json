@@ -54,9 +54,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": "portal_pin",
-      "evidence_quote": "<div id=\"print-map\" data-gps-lat=\"49.73561\" data-gps-lon=\"13.39051\" data-address=\"Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město\"></div>",
-      "evidence_span_len": 147
+      "position_branch": "portal_pin"
     },
     {
       "extractor_id": "rm.det.map_okres",
@@ -73,9 +71,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město",
-      "evidence_span_len": 57
+      "position_branch": null
     },
     {
       "extractor_id": "rm.det.map_street",
@@ -92,9 +88,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město",
-      "evidence_span_len": 57
+      "position_branch": null
     },
     {
       "extractor_id": "rm.det.og_psc",
@@ -111,9 +105,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "<meta property=\"og:title\" content=\"Prodej bytu 3+1 82 m2, Slovanská alej, 326 00 Plzeň 2-Slovany\">",
-      "evidence_span_len": 98
+      "position_branch": null
     },
     {
       "extractor_id": "rm.det.slug",
@@ -130,9 +122,7 @@
       "licence_class": "portal",
       "blur_evidence": "none",
       "subject_scoped": true,
-      "position_branch": null,
-      "evidence_quote": "<link rel=\"canonical\" href=\"https://realitymix.cz/detail/plzen/prodej-bytu-3-1-82-m2-slovanska-alej.html\">",
-      "evidence_span_len": 106
+      "position_branch": null
     }
   ]
 }

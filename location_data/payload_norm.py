@@ -34,9 +34,9 @@ exactly what it governs.
 WHY GIT AND NOT THE DB PROJECTION. 02 section 2.1.8 makes git the store of record
 and `portal_contracts`/`portal_contract_entries` a deploy-time projection of it,
 and `contracts.py` still projects `persistence` there for review in psql. But
-`payload_sha256` is a PERMANENT content address that every evidence span inherits,
-so the projection that produces it must be a function of the deployed artefact
-ALONE. Read from the DB, it would additionally be a function of whether the
+`payload_sha256` is a PERMANENT content address, so the projection that produces
+it must be a function of the deployed artefact ALONE. Read from the DB, it would
+additionally be a function of whether the
 contract-load job had run yet — two runners hashing one body two ways, at the same
 moment, recoverable only through the label. The contract files ship in the same
 image as this code (Dockerfile `COPY contracts/`), so there is no such window.

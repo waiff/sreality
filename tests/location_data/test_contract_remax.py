@@ -105,8 +105,7 @@ def listing_row(native: str = "fixture", **overrides: Any) -> ListingRow:
 
 def payload(body: bytes | None = None) -> ArchivedPayload:
     return ArchivedPayload(
-        id=9001, source="remax", source_id_native="fixture", page_kind="detail",
-        payload_sha256="ab" * 32, first_observed_at=FETCHED_AT, body=body)
+        id=9001, page_kind="detail", first_observed_at=FETCHED_AT, body=body)
 
 
 def scoped(body: bytes | str) -> ScopedDocument:
@@ -134,12 +133,6 @@ def value_of(entry_id: str, document: ScopedDocument) -> str | None:
 def only(reads: list[page_readers.PageRead]) -> page_readers.PageRead:
     assert len(reads) == 1, f"expected exactly one read, got {len(reads)}"
     return reads[0]
-
-
-def span_text(document: ScopedDocument, claim: Any) -> str | None:
-    if claim.span_start is None or claim.span_end is None:
-        return None
-    return document.html[claim.span_start:claim.span_end]
 
 
 _HEADER = re.compile(r'(<h2 class="pd-header__address">)(.*?)(</h2>)', re.S)
@@ -312,17 +305,6 @@ def test_the_header_read_drops_the_nested_jump_link():
     assert value_of("rx.det.header_okres", document) is None
 
 
-def test_the_towns_evidence_resolves_to_the_uncollapsed_source():
-    """The quote is what the page said, the span indexes the real bytes — so a value that
-    stopped coming out of the element it claims to would be visible, not plausible."""
-    document = scoped(ARCHIVED_BODY.read_bytes())
-    claim = only(run_entry(entry_named("rx.det.header_obec"), document)).claim
-    assert claim.value_text == "Úvaly"
-    assert claim.span_start is not None
-    assert span_text(document, claim) == claim.evidence_quote
-    assert "Úvaly" in claim.evidence_quote
-
-
 # ------------------------------------------------------------------ the kraj crumb
 
 def test_the_kraj_comes_from_the_crumb_whose_own_href_carries_the_slug():
@@ -357,8 +339,7 @@ def test_the_pin_is_licensed_portal_from_its_own_declared_branch():
     entry = entry_named("rx.det.gps")
     read = only(run_entry(entry, document))
     assert read.position_branch == "portal_pin"
-    stamped = stamp_page_claim(read.claim, payload(),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(read.claim, payload())
     licensed, reason = _licensed_coordinate(stamped, listing_row(), entry,
                                             read.position_branch)
     assert licensed is not None and licensed.licence_class == "portal"
@@ -367,16 +348,13 @@ def test_the_pin_is_licensed_portal_from_its_own_declared_branch():
 
 def test_the_pins_geometry_round_trips_the_portals_own_dms_string():
     """The WKT is not a second parse of the page: it is `parse_dms_pair` on the same raw
-    attribute the claim quotes, so a drift in the arithmetic shows up here rather than as a
+    attribute the claim states, so a drift in the arithmetic shows up here rather than as a
     plausible pin a few hundred metres away."""
     document = scoped(ARCHIVED_BODY.read_bytes())
     read = only(run_entry(entry_named("rx.det.gps"), document))
     lat, lon = parse_dms_pair(read.claim.value_text)
     assert lat is not None and lon is not None
     assert read.claim.value_geom_wkt == page_readers.point_wkt(lat, lon)
-    # The quote is the DECODED attribute and the span indexes the serialised source, where
-    # the seconds mark is `&quot;`.
-    assert unescape(span_text(document, read.claim)) == read.claim.evidence_quote
 
 
 def test_the_pin_is_scoped_by_element_id_so_a_neighbour_card_can_never_win_it():
@@ -401,8 +379,7 @@ def test_only_the_rules_own_entry_id_can_license_this_portals_pin():
     document = scoped(ARCHIVED_BODY.read_bytes())
     entry = entry_named("rx.det.gps")
     read = only(run_entry(entry, document))
-    stamped = stamp_page_claim(read.claim, payload(),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(read.claim, payload())
     impostor = replace(entry, entry_id="rx.det.not_the_rule")
     licensed, reason = _licensed_coordinate(
         stamped, listing_row(), impostor, read.position_branch)
@@ -455,7 +432,7 @@ def test_the_subject_map_entry_reads_nothing_on_any_body_in_this_repo():
 def test_the_subject_map_entry_reads_the_subject_the_day_the_portal_renders_it():
     """The ruled shape, proven without fabricating a claim in the golden: the subject map
     carries the attribute, a carousel card carries a different one, and the read is the
-    subject's with a span that resolves."""
+    subject's."""
     body = (
         '<html><body>'
         '<div id="listingMap" class="smap-defaults" '
@@ -468,9 +445,7 @@ def test_the_subject_map_entry_reads_the_subject_the_day_the_portal_renders_it()
     document = scoped(body)
     claim = only(run_entry(entry_named("rx.det.map_address"), document)).claim
     assert claim.value_text == "Roháčova"
-    assert claim.evidence_quote == "Roháčova, Praha 3 - Žižkov, Praha,"
     assert claim.subject_scoped is True
-    assert span_text(document, claim) == claim.evidence_quote
     assert document.contains(
         "V Horní Stromce, Praha 3, Vinohrady, okres Hlavní město Praha") is False
 
