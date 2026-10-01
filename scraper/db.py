@@ -1138,8 +1138,10 @@ def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
     return row[0] if row else None
 
 
-def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool:
-    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call flipped it."""
+def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool | None:
+    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call
+    flipped it, False if it was already inactive, None if no listing has this key."""
+    exists = True
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE listings SET is_active = false, inactive_at = now() "
@@ -1153,8 +1155,7 @@ def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str)
                 "SELECT 1 FROM listings WHERE source = %s AND source_id_native = %s",
                 (source, native_id),
             )
-            if cur.fetchone() is None:
-                LOG.warning("gone flip matched no listing source=%s id=%s", source, native_id)
+            exists = cur.fetchone() is not None
         elif row[0] is not None:
             cur.execute(
                 "INSERT INTO dirty_properties (property_id) VALUES (%s) "
@@ -1166,7 +1167,9 @@ def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str)
             "WHERE l.source = %s AND l.source_id_native = %s AND f.sreality_id = l.sreality_id",
             (source, native_id),
         )
-    return row is not None
+    if row is not None:
+        return True
+    return False if exists else None
 
 
 def index_summary(

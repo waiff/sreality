@@ -755,21 +755,27 @@ def _flush_drain_batch(
 
 
 def _drain_mark_gone(
-    portal: Portal, conn: Any, native_id: str, reconnect: Any,
+    portal: Portal, conn: Any, native_id: str, priority: int, reconnect: Any,
 ) -> tuple[Any, str | None]:
     """Flip a gone listing inactive + dequeue it, transient-drop resilient.
     Returns (live conn, None), or (conn, error) when the flip failed non-transiently."""
-    def _op(c: Any) -> None:
-        db.mark_listing_inactive(c, portal.source, native_id)
+    def _op(c: Any) -> bool | None:
+        flipped = db.mark_listing_inactive(c, portal.source, native_id)
         db.complete_detail(c, portal.source, [native_id], outcome="gone")
+        return flipped
 
     try:
-        _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
+        flipped, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
     except Exception as exc:  # noqa: BLE001 - one listing must not red the run
         if db.is_transient_db_error(exc):
             raise  # retries exhausted: a real outage reds the run, as before
         LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
         return conn, str(exc)
+    if flipped is None:
+        # A never-fetched (NEW) id has no listings row until the drain writes one, so
+        # a gone first fetch matches nothing routinely; for any other row the key broke.
+        LOG.log(logging.INFO if priority == db.QUEUE_PRIORITY_NEW else logging.WARNING,
+                "gone flip matched no listing source=%s id=%s", portal.source, native_id)
     return conn, None
 
 
@@ -920,8 +926,8 @@ def run_detail_drain(
                     item = future.result()  # never raises
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
-                    if breaker.observe(
-                            prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW), item.kind):
+                    prio = prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW)
+                    if breaker.observe(prio, item.kind):
                         LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
                                   "recorded as failures, not flips", breaker.reason, portal.source)
                     if item.kind == "ok":
@@ -942,7 +948,7 @@ def run_detail_drain(
                     elif item.kind == "gone":
                         LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
                         conn, flip_error = _drain_mark_gone(
-                            portal, conn, item.native_id, portal.connect_drain)
+                            portal, conn, item.native_id, prio, portal.connect_drain)
                         if flip_error is None:
                             counts["gone"] += 1
                         else:  # the queue row stays and is retried

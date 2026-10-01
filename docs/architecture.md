@@ -1014,8 +1014,10 @@ renumber.** Navigate by area:
    091's UNIQUE `(source, source_id_native)`), guarded `AND is_active = true` so `inactive_at`
    is stamped once per inactive spell (cleared on reactivation; the delisting-latency health
    check and the collection monitor's `inactive` event read it), dirty-marking the property
-   (rule #20) and clearing sreality's failure row (rule #5), in one transaction; a key that
-   matches no row logs `gone flip matched no listing`. A flip that raises non-transiently is a
+   (rule #20) and clearing sreality's failure row (rule #5), in one transaction. It returns
+   None when no row has the key, and the drain logs `gone flip matched no listing`: INFO for
+   a never-fetched (`QUEUE_PRIORITY_NEW`) id, which has no row until its first write, WARNING
+   for any other priority (the natural key broke). A flip that raises non-transiently is a
    failure (the queue row stays), never completed as gone. The verify budget (the throttle
    below) and the drain's gone-rate breaker live in the pure `scraper/delist_policy.py`.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
@@ -1036,7 +1038,10 @@ renumber.** Navigate by area:
    sreality also keeps `listing_fetch_failures(sreality_id, attempts, last_error, given_up)`:
    the split walk re-enqueues an active failure at `QUEUE_PRIORITY_FAILURE` so the drain cannot
    keep deferring it, and the row is deleted inside the successful write's transaction
-   (`listing_write`), and also when a gone flip lands (`db.mark_listing_inactive`). A given-up
+   (`listing_write`), and also when a gone flip lands (`db.mark_listing_inactive`). That clear
+   joins through `listings`, so a sreality id that errored before it was ever written and then
+   reads gone keeps its row (accepted: nothing re-enqueues it, since the walk retries only
+   failures still in the index, though Health counts it under sreality). A given-up
    queue row is not dropped either: `enqueue_presence_checks` re-arms up to
    `PRESENCE_REARM_PER_WALK` = 50 given-up rows per nominating scope, source-wide, at VERIFY
    priority. Inspect with `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.

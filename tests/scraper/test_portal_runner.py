@@ -703,6 +703,37 @@ def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
     assert agg["listings_inactive"] == 1 and agg["errors"] == 0
 
 
+@pytest.mark.parametrize(("priority", "level"), [
+    (portal_runner.db.QUEUE_PRIORITY_NEW, "INFO"),
+    (portal_runner.db.QUEUE_PRIORITY_CHANGED, "WARNING"),
+    (portal_runner.db.QUEUE_PRIORITY_VERIFY, "WARNING"),
+])
+def test_a_gone_flip_matching_no_listing_warns_only_for_a_row_we_held(monkeypatch, caplog, priority, level):
+    """A NEW id has no listings row until its first write, so a gone first fetch
+    matching nothing is routine; any other priority means the natural key broke."""
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None, None)]])
+    monkeypatch.setattr(portal_runner.db, "mark_listing_inactive", lambda _c, _s, _n: None)
+    monkeypatch.setattr(portal_runner.db, "queue_priorities",
+                        lambda _c, _s, nids: {n: priority for n in nids})
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    hits = [r for r in caplog.records if r.getMessage() == "gone flip matched no listing source=fake id=9"]
+    assert [r.levelname for r in hits] == [level]
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert agg["listings_inactive"] == 1 and agg["errors"] == 0
+
+
+def test_a_flip_or_an_already_inactive_row_logs_no_match(monkeypatch, caplog):
+    cap = _patch_queue(monkeypatch, [[("8", None, None, None, None), ("9", None, None, None, None)]])
+    monkeypatch.setattr(portal_runner.db, "mark_listing_inactive", lambda _c, _s, nid: nid == "8")
+    p = _FakePortal(fetch_kinds={"8": "gone", "9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert sorted(x for b in cap["complete"] for x in b) == ["8", "9"]
+    assert not any("matched no listing" in m for m in caplog.messages)
+
+
 def test_drain_record_failure_drop_on_queue_bump_does_not_replay_ledger(monkeypatch):
     # The failure path bumps TWO non-idempotent counters: record_failure
     # (listing_fetch_failures.attempts+1) then fail_detail (queue attempts+1). They
@@ -1065,3 +1096,19 @@ def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monke
         "DRAIN gone-rate breaker: 20 of 20 ingest fetches read gone this run -- the portal, "
         "not the market source=fake; further gone verdicts this run are recorded as "
         "failures, not flips")
+
+
+def test_drain_breaker_exempts_presence_checks(monkeypatch):
+    """A presence-check backlog of truly dead listings legitimately reads ~100% gone;
+    the runner must hand the breaker the VERIFY exemption, or every later gone
+    verdict that run would become a failure and the listings would stay active."""
+    ids = [str(i) for i in range(1, 26)]
+    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    monkeypatch.setattr(portal_runner.db, "queue_priorities",
+                        lambda _c, _s, nids: {n: portal_runner.db.QUEUE_PRIORITY_VERIFY for n in nids})
+    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
+    rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert len(cap["flip"]) == 25
+    assert p.calls["failure"] == []
+    assert agg["listings_inactive"] == 25 and agg["errors"] == 0

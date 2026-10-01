@@ -429,28 +429,26 @@ def test_mark_listing_inactive_no_property_no_dirty():
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
 
 
-def test_an_already_inactive_listing_is_not_restamped_or_redirtied(caplog):
+def test_an_already_inactive_listing_is_not_restamped_or_redirtied():
     """The guard matches nothing: no second inactive_at (no duplicate collection
-    monitor 'inactive' dispatch), no dirty mark, and no warning -- the row exists."""
+    monitor 'inactive' dispatch) and no dirty mark -- False, the row exists."""
     conn = _FakeConn([
         (lambda s: _FLIP in s, []),
         (lambda s: _EXISTS in s, [(1,)]),
     ])
-    with caplog.at_level("WARNING", logger="scraper.db"):
-        assert db.mark_listing_inactive(conn, "sreality", "12345") is False
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is False
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
     assert _find(conn.executed, _EXISTS)[1] == ("sreality", "12345")
-    assert not any("gone flip matched no listing" in m for m in caplog.messages)
 
 
-def test_a_gone_flip_that_matches_no_listing_is_logged(caplog):
+def test_a_gone_flip_that_matches_no_listing_reports_none():
+    """None, not False: the drain logs it at a level only the queue priority can pick."""
     conn = _FakeConn([
         (lambda s: _FLIP in s, []),
         (lambda s: _EXISTS in s, []),
     ])
-    with caplog.at_level("WARNING", logger="scraper.db"):
-        assert db.mark_listing_inactive(conn, "sreality", "12345") is False
-    assert "gone flip matched no listing source=sreality id=12345" in caplog.messages
+    assert db.mark_listing_inactive(conn, "sreality", "12345") is None
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
 
 
 @pytest.mark.parametrize(("flip_rows", "exists_rows"), [([(42,)], []), ([(None,)], []), ([], [(1,)]), ([], [])])
