@@ -37,8 +37,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from scraper import db, portal_factory, vocabulary
-from scraper.portal import classify_index_sighting, deadline_reached, walk_coverage
+from scraper import db, listing_write, portal_factory, vocabulary
+from scraper.portal import (
+    PortalConfig,
+    classify_index_sighting,
+    deadline_reached,
+    default_config,
+    load_portal_config,
+    walk_coverage,
+)
 from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
@@ -192,6 +199,34 @@ class PortalDefaults:
             return None
         return db.active_count(conn, cm, ct, source=self.source)
 
+    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        """The HTML portals' flush: stage each detail page, ONE listing write, mark the pages parsed."""
+        pages = [
+            db.upsert_portal_raw_page(
+                conn, source=self.source, source_id_native=it.native_id,
+                source_url=it.payload["url"], page_kind="detail",
+                html=it.payload["html"], http_status=it.payload["status"])
+            for it in items
+        ]
+        outcomes = listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ])
+        for page_id in pages:
+            db.mark_portal_page_parsed(conn, page_id)
+        return listing_write.tally(outcomes)
+
+    def mark_gone(self, conn: Any, native_id: str) -> None:
+        # Keyed on the native id: a post-Gate-2 row's sreality_id is NULL.
+        db.mark_listing_inactive_native(conn, self.source, native_id)
+
+    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
+        # The queue (fail_detail) counts attempts and gives up; only sreality also
+        # keeps a listing_fetch_failures row (rule #5), so only it overrides this.
+        return None
+
 
 # What one walk (or one probe page) saw: native_id -> (detail_ref, index price).
 Sightings = Mapping[str, tuple[str | None, int | None]]
@@ -232,6 +267,27 @@ def reconcile_sightings(
         source, label, len(new), len(changed), len(existing) - len(changed), enqueued,
     )
     return {"found_new": len(new), "enqueued": enqueued}
+
+
+def load_config(source: str, dry_run: bool = False) -> PortalConfig:
+    """The portal's registry row; its baked default on a dry run or a registry hiccup."""
+    if dry_run:
+        return default_config(source)
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, source)
+    except Exception as exc:  # noqa: BLE001 - a registry hiccup must not break a scrape
+        LOG.warning(
+            "load_portal_config failed source=%s: %s; using baked-in default", source, exc,
+        )
+        return default_config(source)
+
+
+def configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 def _queue_presence_checks(

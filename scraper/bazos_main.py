@@ -35,7 +35,7 @@ import argparse
 import logging
 from typing import Any
 
-from scraper import db, listing_write, portal_runner
+from scraper import db, portal_runner
 from scraper.bazos_client import BazosClient, detail_url
 from scraper.bazos_parser import (
     CATEGORY_MAIN,
@@ -49,8 +49,6 @@ from scraper.portal import (
     PortalConfig,
     StopReason,
     deadline_reached,
-    default_config,
-    load_portal_config,
     stop_is_portal_end,
     walk_coverage,
     walk_reached_end,
@@ -434,46 +432,6 @@ class BazosPortal(portal_runner.PortalDefaults):
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        pages = [
-            db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=it.payload["url"], page_kind="detail",
-                html=it.payload["html"], http_status=it.payload["status"])
-            for it in items
-        ]
-        outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
-            for it in items
-        ])
-        for page_id in pages:
-            db.mark_portal_page_parsed(conn, page_id)
-        return listing_write.tally(outcomes)
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # A gone detail (404/410 / gone-marker body) is definitive per-listing
-        # evidence — flip it inactive immediately, independent of the throttled
-        # index-absence sweep.
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; bazos has no
-        # sreality_id-keyed listing_fetch_failures row.
-        pass
-
-
-def _load_config(dry_run: bool) -> "PortalConfig":
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
 
 def _resolve_scopes(
     args: argparse.Namespace, config: "PortalConfig"
@@ -496,9 +454,9 @@ def _resolve_scopes(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     limits = config.limits
     scopes = _resolve_scopes(args, config)
     if scopes is None:
@@ -606,13 +564,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

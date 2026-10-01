@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from scraper import maxima_main
+from scraper import maxima_main, portal_runner
 from scraper.maxima_main import MaximaPortal
 from scraper.portal import PortalConfig
 
@@ -62,7 +62,7 @@ class _Limiter:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(maxima_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
@@ -88,7 +88,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(maxima_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
@@ -117,7 +117,7 @@ def test_drain_only_skips_index(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,

@@ -192,7 +192,7 @@ def _load_limits(dry_run: bool) -> PortalLimits:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
     if args.images_only:
         if args.dry_run or args.detail_only is not None or args.no_image_downloads:
@@ -623,13 +623,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 def _build_client(

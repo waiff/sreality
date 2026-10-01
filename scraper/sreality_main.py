@@ -36,34 +36,18 @@ per-portal stats read today.
 from __future__ import annotations
 
 import argparse
-import logging
 
-from scraper import db, portal_runner
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper import portal_runner
 from scraper.portal_factory import build_portal
 
-LOG = logging.getLogger(__name__)
 SOURCE = "sreality"
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = build_portal(SOURCE, config)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -127,13 +111,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

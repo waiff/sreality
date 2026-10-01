@@ -38,9 +38,7 @@ from scraper.bezrealitky_parser import (
 from scraper.portal import (
     PortalConfig,
     StopReason,
-    default_config,
     deadline_reached,
-    load_portal_config,
     stop_is_portal_end,
     walk_reached_end,
 )
@@ -328,37 +326,12 @@ class BezrealitkyPortal(portal_runner.PortalDefaults):
             for it in items
         ]))
 
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Complete-walk portal: a gone detail flips that one listing inactive
-        # immediately (mirrors sreality), then the runner dequeues it. Keyed on the
-        # native id directly (not a sreality_id round-trip): post-Gate-2 the row's
-        # sreality_id is NULL, so the legacy mark_listing_inactive would no-op.
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = BezrealitkyPortal(config, max_pages=args.max_pages)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -437,13 +410,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

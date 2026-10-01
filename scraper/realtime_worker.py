@@ -144,7 +144,7 @@ from psycopg.types.json import Jsonb
 from scraper import (
     db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import PortalConfig
 
 LOG = logging.getLogger("scraper.realtime_worker")
 
@@ -748,15 +748,7 @@ def _read_count_dispatch_enabled() -> bool:
 
 
 def _load_config(source: str) -> PortalConfig:
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, source)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a pass
-        LOG.warning(
-            "load_portal_config failed source=%s: %s; using baked-in default",
-            source, exc,
-        )
-        return default_config(source)
+    return portal_runner.load_config(source)
 
 
 def _build_portal(source: str, config: PortalConfig) -> Any:

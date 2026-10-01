@@ -8,7 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from scraper import idnes_main
+from scraper import idnes_main, portal_runner
 from scraper import portal as portal_mod
 from scraper.idnes_main import IdnesPortal
 from scraper.portal import PortalConfig
@@ -54,7 +54,7 @@ class _Limiter:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
@@ -82,7 +82,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
@@ -111,7 +111,7 @@ def test_drain_only_skips_index(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
@@ -469,6 +469,7 @@ def test_fetch_detail_error():
 
 
 def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper import listing_write
     from scraper.listing_write import WriteOutcome
     from scraper.scraped_listing import ScrapedListing
 
@@ -489,7 +490,7 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
         return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
                              len(w.images)) for w in writes]
 
-    monkeypatch.setattr(idnes_main.listing_write, "write_listings", _write)
+    monkeypatch.setattr(listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
     assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
     [[w]] = calls

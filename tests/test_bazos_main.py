@@ -586,6 +586,7 @@ def test_fetch_detail_error():
 
 
 def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper import listing_write
     from scraper.listing_write import WriteOutcome
     from scraper.scraped_listing import ScrapedListing
 
@@ -606,7 +607,7 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
         return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
                              len(w.images)) for w in writes]
 
-    monkeypatch.setattr(bazos_main.listing_write, "write_listings", _write)
+    monkeypatch.setattr(listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
     assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
     [[w]] = calls
