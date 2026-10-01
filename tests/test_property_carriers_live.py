@@ -1,10 +1,10 @@
 """Every property-anchored operator-state row follows a merge and a detach, executed through the
-public writers (`merge_property_set`, `detach_listing`) against the replayed schema: one test
+public writers (`merge_property_set`, `detach_listings`) against the replayed schema: one test
 per carrier, each over two accounts, each proving the retired property is left holding nothing;
 then the live census — every foreign key to `properties` and every `%property_id%` column of the
 replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`); then the after-step
-(`properties_changed`: rollup, Browse row, broker queue) both writers run. Runs in CI's
-migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
+(`properties_changed`: rollup, Browse row, broker queue) both writers run; then a set detach's
+rulings. Runs in CI's migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from tests._live_property import (  # `cur` is the fixture
     cur,
 )
 from toolkit.property_carriers import NOT_CARRIED, carried_columns
-from toolkit.property_identity import detach_listing, merge_property_set
+from toolkit.property_identity import detach_listings, merge_property_set
 
 pytestmark = REQUIRED_DB
 
@@ -88,7 +88,8 @@ def _merged(cur: Any, survivor: int, retired: int, *, source: str = "operator") 
 
 
 def _detached(cur: Any, listing_id: int, origin: int, *, source: str = "operator") -> None:
-    out = detach_listing(cur.connection, listing_id, decided_by=OP, source=source)["data"]
+    (out,) = detach_listings(cur.connection, [listing_id], decided_by=OP,
+                             source=source)["data"]["adverts"]
     _require((out["outcome"], out["restored_property_id"], out["reactivated"])
              == ("detached", origin, True), f"the detach did not bring {origin} back: {out}")
 
@@ -467,3 +468,47 @@ def test_merge_and_detach_bring_derived_state_current(cur):
     for pid in (s, r):
         assert _derived(cur, pid) == (1, True, True), f"property {pid} not brought current"
     assert _queued(cur, advert), "the detach did not queue the attributed advert for brokers"
+
+
+# --- the set detach: rulings once, movers against the stayers ----------------------------------
+
+
+def _ruled(cur: Any, ids: list[int]) -> list[tuple[int, int, str, str]]:
+    """Every pair ruling among these adverts, oldest first: (lo, hi, verdict, note)."""
+    cur.execute("SELECT listing_lo, listing_hi, verdict, note FROM autodedup.verdicts "
+                "WHERE kind = 'pair' AND listing_lo = ANY(%(ids)s) AND listing_hi = ANY(%(ids)s) "
+                "ORDER BY decided_at, id", {"ids": ids})
+    return [(int(lo), int(hi), v, n) for lo, hi, v, n in cur.fetchall()]
+
+
+def _source_count(cur: Any, pid: int) -> int:
+    cur.execute("SELECT source_count FROM properties WHERE id = %s", (pid,))
+    return int(cur.fetchone()[0])
+
+
+def test_a_set_detach_rules_once_and_changes_once(cur):
+    """S holds three adverts from two origins after the merge: its own and R's two. Detaching
+    R's two in ONE call sends both home and reactivates R once; each is ruled `different` from
+    S's advert only and never from the other (they sit together again), and every touched
+    property's rollup counts its adverts. That the after-step runs once is the fake's
+    (`db.changed`, tests/test_detach_listing.py)."""
+    s, r = _property(cur), _property(cur)
+    stay = _advert(cur, s, source="sreality")
+    movers = [_advert(cur, r, source="idnes"), _advert(cur, r, source="remax")]
+    for pid in (s, r):
+        _recompute(cur, pid)
+    _merged(cur, s, r)
+    _require(_source_count(cur, s) == 3, "the merge did not bring S's rollup current")
+
+    out = detach_listings(cur.connection, movers, decided_by=OP, reason="jiné patro")["data"]
+    assert [(a["listing_id"], a["outcome"], a["left_property_id"], a["restored_property_id"],
+             a["reactivated"]) for a in out["adverts"]] == [
+        (movers[0], "detached", s, r, True), (movers[1], "detached", s, r, False)]
+    note = f"operator detach from {s}: jiné patro"
+    ruled = _ruled(cur, [stay, *movers])
+    assert sorted((lo, hi, v) for lo, hi, v, n in ruled if n == note) == sorted(
+        (*sorted((stay, m)), "different") for m in movers)
+    assert out["rulings_written"] == 2
+    assert not [row for row in ruled if {row[0], row[1]} == set(movers)], (
+        "two adverts that moved together were ruled against each other")
+    assert (_source_count(cur, s), _source_count(cur, r)) == (1, 2)

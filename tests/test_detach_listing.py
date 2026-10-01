@@ -1,8 +1,9 @@
-"""The one undo: `toolkit.property_identity.detach_listing` and the origins route over it
-(decision 8). Over the stateful fake in tests/_property_ledger.py, so a merge and its undo replay
-end to end here (and in tests/test_property_merge_set.py), each carrier recorded at the seam;
-executed: tests/test_merge_safety_live.py and tests/test_property_carriers_live.py. The operator's
-split route over it is tests/test_property_split.py.
+"""The one undo: `toolkit.property_identity.detach_listings` (and `detach_listing`, its
+one-advert adapter) and the origins route over it (decision 8). Over the stateful fake in
+tests/_property_ledger.py, so a merge and its undo replay end to end here (and in
+tests/test_property_merge_set.py), each carrier recorded at the seam and each after-step in
+`db.changed`; executed: tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
+The operator's split route over it is tests/test_property_split.py.
 """
 
 from __future__ import annotations
@@ -16,7 +17,12 @@ import toolkit.property_identity as pi
 from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import DetachStep, Hop
-from toolkit.property_identity import MergeError, detach_listing, merge_property_set
+from toolkit.property_identity import (
+    MergeError,
+    detach_listing,
+    detach_listings,
+    merge_property_set,
+)
 
 pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
@@ -344,6 +350,84 @@ def test_a_native_split_replans_under_the_lock():
     meanwhile(lambda: db.listings.update({2: 70}))
     assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "moved_since"
     assert db.events == [] and _verdicts(db) == [] and set(db.props) == {10, 70}
+
+
+# --- the set writer: one lock, one ruling pass, one after-step -----------------------------
+
+
+def _set(db: _Ledger, ids: list[int], **kw: Any) -> dict[str, Any]:
+    return detach_listings(db, ids, decided_by=kw.pop("decided_by", OP), **kw)["data"]
+
+
+def test_a_set_detach_rules_movers_only_against_the_stayers():
+    """10 = {1 its own, 2 and 3 merged from 20}: detaching 2 and 3 in ONE call sends both home,
+    reactivates 20 once (one carrier walk), rules each `different` from 1 only (never from each
+    other: they sit together again) and brings 10 and 20 current ONCE."""
+    db = _Ledger({1: 10, 2: 20, 3: 20})
+    group = _merged(db, [10, 20])["merge_group_id"]
+    for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
+        seen.clear()
+    out = _set(db, [3, 2], reason="jiné patro")
+    assert [(a["listing_id"], a["outcome"], a["left_property_id"], a["restored_property_id"],
+             a["reactivated"], a["merge_group_ids"]) for a in out["adverts"]] == [
+        (3, "detached", 10, 20, True, [group]), (2, "detached", 10, 20, False, [group])]
+    assert db.listings == {1: 10, 2: 20, 3: 20} and db.props[20] == "active"
+    note = "operator detach from 10: jiné patro"
+    assert sorted(_verdicts(db)) == [(1, 2, "different", note), (1, 3, "different", note)]
+    assert out["rulings_written"] == 2 and db.word(2, 3) is None and (2, 3) not in db.mnl
+    assert len(_restores(db)) == 1
+    assert db.changed == db.browse == db.broker == [[10, 20]], "the after-step runs once per set"
+    # every property the steps lock, locked first in id order, before anything moves
+    first_lock = next(i for i, (s, _p) in enumerate(db.log) if s.endswith("FOR UPDATE"))
+    assert db.log[first_lock][1] == {"ids": [10, 20]}
+    assert first_lock < next(i for i, (s, _p) in enumerate(db.log) if s.startswith("UPDATE"))
+
+
+def test_a_set_of_native_adverts_is_born_apart_and_ruled_against_the_stayer():
+    db = _Ledger({1: 10, 2: 10, 3: 10})
+    out = _set(db, [2, 3])
+    born = [a["restored_property_id"] for a in out["adverts"]]
+    assert [a["outcome"] for a in out["adverts"]] == ["split_native", "split_native"]
+    assert db.listings == {1: 10, 2: born[0], 3: born[1]} and 10 not in born
+    assert {(lo, hi) for lo, hi, _v, _n in _verdicts(db)} == {(1, 2), (1, 3)}
+    assert db.changed == [sorted({10, *born})]
+    # the last own advert stays: the call's earlier adverts are seen by each re-plan
+    db = _Ledger({1: 10, 2: 10})
+    out = _set(db, [1, 2])
+    assert [a["outcome"] for a in out["adverts"]] == ["split_native", "not_merged"]
+    assert out["rulings_written"] == 1 and len(db.changed) == 1
+
+
+def test_an_unknown_advert_refuses_the_set_before_anything_moves():
+    db = _Ledger({1: 10, 2: 20})
+    _merged(db, [10, 20])
+    before, db.log[:] = (dict(db.listings), dict(db.props), [dict(e) for e in db.events]), []
+    with pytest.raises(MergeError, match="listing 99 not found"):
+        _set(db, [2, 99, 98])
+    assert (dict(db.listings), dict(db.props), [dict(e) for e in db.events]) == before
+    assert not any(s.startswith(("UPDATE", "INSERT")) or s.endswith("FOR UPDATE")
+                   for s, _p in db.log)
+    assert db.changed == [[10, 20]], "only the merge's after-step"
+
+
+def test_an_empty_set_is_a_no_op():
+    db = _Ledger({1: 10})
+    out = detach_listings(db, [], decided_by=OP)
+    assert out["data"] == {"adverts": [], "rulings_written": 0}
+    assert out["metadata"]["tool"] == "detach_listings"
+    assert db.log == [] and db.changed == []
+
+
+def test_detach_outcomes_answers_propose_only_for_the_engine():
+    """Decision 9, read-only: what the writer would answer each source now."""
+    db = _Ledger({1: 10, 2: 10, 3: 30})
+    _merged(db, [10, 30], source="autodedup")
+    assert pi.detach_outcomes(db, [1, 2, 3]) == {1: "split_native", 2: "split_native",
+                                                3: "detached"}
+    assert pi.detach_outcomes(db, [1, 2, 3], source="autodedup") == {
+        1: "propose_only", 2: "propose_only", 3: "detached"}
+    engine = _set(db, [1], decided_by="autodedup-reconcile", source="autodedup")
+    assert engine["adverts"][0]["outcome"] == "propose_only"
 
 
 # --- the origins route (the split route: tests/test_property_split.py) --------------------

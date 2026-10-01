@@ -162,7 +162,7 @@ cannot be got wrong, because there is nothing at the route to get wrong.
 **3. An explicit `account_id = %s` predicate belongs ONLY on a service-role connection.**
 There, RLS is off (BYPASSRLS) and the predicate is the SOLE gate rather than a second opinion
 about a caller the database has already scoped. The live sites: `toolkit/property_carriers.py` and `toolkit/pipeline_identity.py`
-(the carriers, which run inside `merge_property_set`'s and `detach_listing`'s service-role transactions
+(the carriers, which run inside `merge_property_set`'s and `detach_listings`' service-role transactions
 and must partition every join between the retired and survivor sides: by an explicit `account_id`,
 or through a key one account owns, as a `CurationTable`'s collection/tag/subscription id does), `api/estimation_runs.py`
 (service-role child runs from `building_runs`), and the Stripe webhook (no caller identity at
