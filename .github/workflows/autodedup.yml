@@ -281,7 +281,7 @@ name: "AUTODEDUP: engine lane"
 #             that dry run holds the lease too, so no pass moves the plan under it.
 #             `dry_run=0` is refused while realtime_autodedup_interval_seconds is above 0 (the
 #             lane would race it), takes that same lease (one writer) and merges for real through
-#             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
+#             toolkit.property_identity.merge_property_set (source 'autodedup', ONE merge group
 #             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE
 #             rollout control (seeded by migration 558 with no area, edited on /settings),
 #             which must ITSELF name category_types and an area (blocks, listing_ids or

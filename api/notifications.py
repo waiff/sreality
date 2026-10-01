@@ -4,7 +4,7 @@ Three responsibilities:
 
 1. CRUD over `notification_subscriptions` — the operator's saved
    filter specs. Each row holds a name + a `WatchdogFilterSpec` JSONB
-   blob mirroring (a subset of) `toolkit.ComparableFilters`.
+   blob whose field names are filter-registry ids (`toolkit/filter_registry.py`).
 
 2. The background matcher. A FastAPI lifespan-spawned asyncio task
    wakes every `notifications_matcher_interval_seconds`, walks listings
@@ -19,17 +19,15 @@ Three responsibilities:
    `BackgroundTasks` finish the work asynchronously so the UI returns
    immediately and polls for the yield to land.
 
-`WatchdogFilterSpec` is intentionally a separate, narrower model than
+`WatchdogFilterSpec` is intentionally a separate model from
 `ComparableFilters`: the watchdog matcher does NOT require a target
 lat/lng (district / disposition / price filters alone are useful), but
 DOES accept a spatial center + radius for "alert me about anything
-near X". `_build_match_clauses` converts the spec into parameterised
-SQL by hand, against `properties_public`; it shares no clause builder
-with Browse (rule 16): parity tests pin field ids, the per-m²/plot
-measure and place chips; curated-city rules agree through the one SQL
-function `curated_cities_matching()` (only this side is test-pinned);
-every other clause is kept in step by hand (compiling it from the
-registry is owed: roadmap/operator-workflow-track.md, rule #16 entry).
+near X", and it carries the city-quality filters rule 17 keeps off the
+cohort model. `_build_match_clauses` renders it over `properties_public`
+through the one filter compiler (`toolkit/filter_compiler.compile_filter_where`)
+that also renders every estimation cohort, so the matcher and the cohort
+tools cannot disagree on what a filter means.
 """
 
 from __future__ import annotations
@@ -57,7 +55,7 @@ from api.location_filter import (
 )
 from location_data.claims_common import served_location_predicate
 from scraper import db as scraper_db
-from toolkit.measures import plot_area_sql
+from toolkit.filter_compiler import PROPERTIES_GRAIN, compile_filter_where
 
 if TYPE_CHECKING:
     import psycopg
@@ -71,8 +69,8 @@ LOG = logging.getLogger(__name__)
 class WatchdogFilterSpec(BaseModel):
     """JSON shape persisted in `notification_subscriptions.filter_spec`.
 
-    Mirrors the subset of `toolkit.ComparableFilters` that the Browse
-    sidebar exposes; the matcher converts this into a parameterised
+    Field names are registry ids (`toolkit/filter_registry.py`) for what the
+    Browse sidebar exposes; the matcher converts this into a parameterised
     WHERE clause via `_build_match_clauses`. Every field defaults to
     `None` so a watchdog can be as wide ("any apartment for rent") or
     narrow ("furnished 3+kk in Praha 2 under 30 000 Kč near these
@@ -200,8 +198,8 @@ class WatchdogFilterSpec(BaseModel):
     max_city_population: int | None = None
     near_city_proximity: dict[str, Any] | None = None
     # Fast polygon-edge proximity (migration 142). Precomputed columns on
-    # properties_public; `>= value`. Browse filters the same columns (registry
-    # `pg_column`); this side renders them in `_city_quality_clauses`.
+    # properties_public; `>= value`. Compiled as plain `>=` bounds by
+    # toolkit/filter_compiler.
     near_pop_5km_min: int | None = None
     near_pop_15km_min: int | None = None
     near_jobs_5km_min: float | None = None
@@ -274,9 +272,9 @@ def _build_match_clauses(
     """Render the filter spec as parameterised WHERE clauses.
 
     The matcher prepends a watermark / window clause; this helper owns
-    the spec-derived part only. Hand-written, not compiled from the
-    registry: a filter change must land here and in Browse
-    (`registryQueryBuilder.ts` / `queries.ts`) alike (rule 16).
+    the spec-derived part only. Spec-derived clauses come from
+    `compile_filter_where(…, PROPERTIES_GRAIN)`; only the served predicate,
+    circle and place chips are rendered here.
     """
     # THE CONSUMER RULE (W5, operator ruling 2026-09-13), unconditional and first.
     # Browse inherits it from `browse_projection` (migration 512); the matcher cannot,
@@ -287,24 +285,6 @@ def _build_match_clauses(
     # nobody can find in Browse, and "matches" would mean two different things.
     where: list[str] = [served_location_predicate("l.listing_id")]
     params: dict[str, Any] = {}
-
-    if spec.category_main_in:
-        where.append("l.category_main = ANY(%(category_main_in)s)")
-        params["category_main_in"] = list(spec.category_main_in)
-    if spec.category_type is not None:
-        where.append("l.category_type = %(category_type)s")
-        params["category_type"] = spec.category_type
-    if spec.category_sub_cb is not None:
-        where.append("l.category_sub_cb = %(category_sub_cb)s")
-        params["category_sub_cb"] = spec.category_sub_cb
-
-    if spec.subtype:
-        where.append("l.subtype = ANY(%(subtype)s)")
-        params["subtype"] = list(spec.subtype)
-
-    if spec.dispositions:
-        where.append("l.disposition = ANY(%(dispositions)s)")
-        params["dispositions"] = list(spec.dispositions)
 
     if (
         spec.lat is not None
@@ -334,164 +314,9 @@ def _build_match_clauses(
         where.extend(d_where)
         params.update(d_params)
 
-    # Price bound. With include_no_price, NULL-price listings survive the bound
-    # (mirrors browse_stats_properties + queries.ts:applyFilters). Scope is
-    # price_czk only — the price/m² + yield bounds below still drop NULL rows.
-    if spec.min_price_czk is not None:
-        if spec.include_no_price:
-            where.append("(l.price_czk is null or l.price_czk >= %(min_price_czk)s)")
-        else:
-            where.append("l.price_czk >= %(min_price_czk)s")
-        params["min_price_czk"] = spec.min_price_czk
-    if spec.max_price_czk is not None:
-        if spec.include_no_price:
-            where.append("(l.price_czk is null or l.price_czk <= %(max_price_czk)s)")
-        else:
-            where.append("l.price_czk <= %(max_price_czk)s")
-        params["max_price_czk"] = spec.max_price_czk
-    # ONE measure, one definition (migration 425). `l` is properties_public,
-    # which publishes price_per_m2 as measure_price_per_m2(...) -- basis-resolved
-    # and floored. Browse filters on the SAME measure (browse_list.price_per_m2,
-    # materialised from browse_projection), so a hand-typed
-    # `price_czk / NULLIF(area_m2, 0)` here would make the Watchdog fire on rows
-    # Browse excludes -- e.g. a 136 Kc commercial "rental" at 0.54 Kc/m2, whose
-    # measure is NULL below the rent floor. Rule #16 is that the two surfaces
-    # share one definition of "matches"; reading the published column is how.
-    if spec.min_price_per_m2 is not None:
-        where.append("l.price_per_m2 >= %(min_price_per_m2)s")
-        params["min_price_per_m2"] = spec.min_price_per_m2
-    if spec.max_price_per_m2 is not None:
-        where.append("l.price_per_m2 <= %(max_price_per_m2)s")
-        params["max_price_per_m2"] = spec.max_price_per_m2
-    if spec.min_mf_gross_yield_pct is not None:
-        where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
-        params["min_mf_gross_yield_pct"] = spec.min_mf_gross_yield_pct
-    if spec.max_mf_gross_yield_pct is not None:
-        where.append("l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s")
-        params["max_mf_gross_yield_pct"] = spec.max_mf_gross_yield_pct
-    if spec.min_area_m2 is not None:
-        where.append("l.area_m2 >= %(min_area_m2)s")
-        params["min_area_m2"] = spec.min_area_m2
-    if spec.max_area_m2 is not None:
-        where.append("l.area_m2 <= %(max_area_m2)s")
-        params["max_area_m2"] = spec.max_area_m2
-    if spec.min_usable_area is not None:
-        where.append("l.usable_area >= %(min_usable_area)s")
-        params["min_usable_area"] = spec.min_usable_area
-    if spec.max_usable_area is not None:
-        where.append("l.usable_area <= %(max_usable_area)s")
-        params["max_usable_area"] = spec.max_usable_area
-    # THE plot-area measure, never the bare column (migration 534) — the watchdog and
-    # Browse share one definition of "matches" (rule 16), and for `pozemek` the plot is
-    # `area_m2`, not `estate_area`.
-    if spec.min_estate_area is not None:
-        where.append(f"{plot_area_sql('l')} >= %(min_estate_area)s")
-        params["min_estate_area"] = spec.min_estate_area
-    if spec.max_estate_area is not None:
-        where.append(f"{plot_area_sql('l')} <= %(max_estate_area)s")
-        params["max_estate_area"] = spec.max_estate_area
-
-    if spec.has_balcony is not None:
-        where.append("l.has_balcony = %(has_balcony)s")
-        params["has_balcony"] = spec.has_balcony
-    if spec.has_lift is not None:
-        where.append("l.has_lift = %(has_lift)s")
-        params["has_lift"] = spec.has_lift
-    if spec.has_parking is not None:
-        where.append("l.has_parking = %(has_parking)s")
-        params["has_parking"] = spec.has_parking
-    if spec.terrace is not None:
-        where.append("l.terrace = %(terrace)s")
-        params["terrace"] = spec.terrace
-    if spec.cellar is not None:
-        where.append("l.cellar = %(cellar)s")
-        params["cellar"] = spec.cellar
-    if spec.garage is not None:
-        where.append("l.garage = %(garage)s")
-        params["garage"] = spec.garage
-
-    # furnished / ownership: multi-select with the `__unknown__` sentinel.
-    # Same helper `_shared_filter_where` uses for comparables.
-    from toolkit.comparables import _enum_or_unknown_clause
-    from toolkit.filter_registry import (
-        FURNISHED_CANONICAL,
-        OWNERSHIP_CANONICAL,
-        PRICE_CHANGE_COUNT_COLUMNS,
-    )
-    if spec.furnished:
-        clause = _enum_or_unknown_clause(
-            list(spec.furnished), "l.furnished", "furnished",
-            FURNISHED_CANONICAL, params,
-        )
-        if clause:
-            where.append(clause)
-    if spec.ownership:
-        clause = _enum_or_unknown_clause(
-            list(spec.ownership), "l.ownership", "ownership",
-            OWNERSHIP_CANONICAL, params,
-        )
-        if clause:
-            where.append(clause)
-    if spec.portals:
-        where.append("l.source = ANY(%(portals)s)")
-        params["portals"] = list(spec.portals)
-    if spec.condition_match:
-        where.append("l.condition = ANY(%(condition_match)s)")
-        params["condition_match"] = list(spec.condition_match)
-
-    if spec.min_parking_lots is not None:
-        where.append("l.parking_lots >= %(min_parking_lots)s")
-        params["min_parking_lots"] = spec.min_parking_lots
-
-    if spec.building_condition_level_min is not None:
-        where.append("l.building_condition_level >= %(building_condition_level_min)s")
-        params["building_condition_level_min"] = spec.building_condition_level_min
-    if spec.building_condition_level_max is not None:
-        where.append("l.building_condition_level <= %(building_condition_level_max)s")
-        params["building_condition_level_max"] = spec.building_condition_level_max
-    if spec.apartment_condition_level_min is not None:
-        where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
-        params["apartment_condition_level_min"] = spec.apartment_condition_level_min
-    if spec.apartment_condition_level_max is not None:
-        where.append("l.apartment_condition_level <= %(apartment_condition_level_max)s")
-        params["apartment_condition_level_max"] = spec.apartment_condition_level_max
-
-    # Property-grain derived aggregates (only meaningful against
-    # properties_public, which the matcher reads). NULL rows excluded by the
-    # comparison. The window picks the precomputed count column; the column
-    # name comes from the registry's canonical dict, never from the spec.
-    if spec.price_change_count_min is not None:
-        count_col = PRICE_CHANGE_COUNT_COLUMNS[spec.price_change_window_days]
-        where.append(f"l.{count_col} >= %(price_change_count_min)s")
-        params["price_change_count_min"] = spec.price_change_count_min
-    if spec.total_price_change_pct is not None and spec.total_price_change_pct != 0:
-        op = "<=" if spec.total_price_change_pct < 0 else ">="
-        where.append(f"l.total_price_change_pct {op} %(total_price_change_pct)s")
-        params["total_price_change_pct"] = spec.total_price_change_pct
-
-    # Phase QUAL — city quality predicates. This matcher is the helper's only caller
-    # (`_shared_filter_where` raises on these fields). Browse agrees through the SQL,
-    # not the helper: both evaluate rules via `curated_cities_matching()` and read the
-    # same precomputed `home_obec_pop` / `near_*` columns.
-    from toolkit.comparables import ComparableFilters, _city_quality_clauses
-    cq_filters = ComparableFilters(
-        city_index_rules=spec.city_index_rules,
-        min_city_population=spec.min_city_population,
-        max_city_population=spec.max_city_population,
-        near_city_proximity=spec.near_city_proximity,
-        near_pop_5km_min=spec.near_pop_5km_min,
-        near_pop_15km_min=spec.near_pop_15km_min,
-        near_jobs_5km_min=spec.near_jobs_5km_min,
-        near_jobs_15km_min=spec.near_jobs_15km_min,
-        near_youth_5km_min=spec.near_youth_5km_min,
-        near_youth_15km_min=spec.near_youth_15km_min,
-        near_overall_5km_min=spec.near_overall_5km_min,
-        near_overall_15km_min=spec.near_overall_15km_min,
-    )
-    city_clauses, city_params = _city_quality_clauses(cq_filters)
-    where.extend(city_clauses)
-    params.update(city_params)
-
+    compiled, compiled_params = compile_filter_where(dict(spec), PROPERTIES_GRAIN)
+    where.extend(compiled)
+    params.update(compiled_params)
     return where, params
 
 
@@ -1473,6 +1298,9 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     total_lookback_inserted = 0
     total_listings_in_window = 0
     cursors_advanced = 0
+    # A spec that cannot even be rendered mutes its watchdog every pass; counted, so the
+    # loop's INFO line says so instead of one LOG per subscription nobody reads.
+    failed = 0
 
     for sub_id, raw_spec, cursor_ts, channels in sub_rows:
         try:
@@ -1483,6 +1311,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "matcher: subscription %s has invalid filter_spec: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
         # One failing subscription must not zero the whole feed. The
@@ -1594,10 +1423,12 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             LOG.exception(
                 "matcher: subscription %s failed, skipping: %s", sub_id, exc,
             )
+            failed += 1
             continue
 
     return {
         "subscriptions_evaluated": len(sub_rows),
+        "subscriptions_failed": failed,
         "matches_inserted": total_inserted,
         "gate_lookback_inserted": total_lookback_inserted,
         "listings_in_window": total_listings_in_window,
@@ -1664,6 +1495,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
     if not drops:
         return {
             "subscriptions_evaluated": 0,
+            "subscriptions_failed": 0,
             "price_drops_in_window": 0,
             "changes_inserted": 0,
         }
@@ -1681,6 +1513,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
         sub_rows = cur.fetchall()
 
     total_inserted = 0
+    failed = 0
     for sub_id, raw_spec, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
@@ -1690,6 +1523,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "change matcher: subscription %s has invalid filter_spec: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
         try:
@@ -1731,10 +1565,12 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 "change matcher: subscription %s failed, skipping: %s",
                 sub_id, exc,
             )
+            failed += 1
             continue
 
     return {
         "subscriptions_evaluated": len(sub_rows),
+        "subscriptions_failed": failed,
         "price_drops_in_window": len(drops),
         "changes_inserted": total_inserted,
     }
@@ -2127,7 +1963,8 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
 
         try:
             stats = await asyncio.to_thread(_match_once_in_thread)
-            if stats.get("matches_inserted", 0) > 0:
+            if (stats.get("matches_inserted", 0) > 0
+                    or stats.get("subscriptions_failed", 0) > 0):
                 LOG.info("notification matcher: %s", stats)
             else:
                 LOG.debug("notification matcher: %s", stats)
@@ -2144,7 +1981,8 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
             try:
                 cstats = await asyncio.to_thread(_match_changes_in_thread)
                 last_change_run = time.monotonic()
-                if cstats.get("changes_inserted", 0) > 0:
+                if (cstats.get("changes_inserted", 0) > 0
+                        or cstats.get("subscriptions_failed", 0) > 0):
                     LOG.info("notification change matcher: %s", cstats)
                 else:
                     LOG.debug("notification change matcher: %s", cstats)

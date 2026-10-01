@@ -4,7 +4,7 @@
 rebuilt wholesale every 15 min by pg_cron (`rebuild_browse_list`, migration 277;
 the cadence moved 5 -> 15 min in migration 413, which cut the rebuild's duty
 cycle from 142% to 79.7%). That cadence fits organic scrape churn but not an
-operator-initiated identity change: a merge / unmerge / split must show in
+operator-initiated identity change: a merge / detach / split must show in
 Browse the instant the API returns, not up to a rebuild-interval later (the
 "merge did nothing, then fixed itself after ~2 min" report — docs/design/browse-merge-consistency.md). This
 patches exactly the touched rows; the periodic rebuild stays the backstop.
@@ -29,6 +29,17 @@ import psycopg
 
 LOG = logging.getLogger(__name__)
 
+_DELETE_SQL = "DELETE FROM browse_list WHERE property_id = ANY(%s)"
+# DO NOTHING, not a bare INSERT: two patches of the same id from different connections serialize
+# on the row lock, and under READ COMMITTED the loser's DELETE cannot see the winner's fresh row —
+# so its INSERT would hit browse_list_pk and discard the whole patch (a merge's, for up to a
+# rebuild interval). The winner read the same projection, so its row is the answer.
+_INSERT_SQL = (
+    "INSERT INTO browse_list "
+    "SELECT * FROM browse_projection WHERE property_id = ANY(%s) "
+    "ON CONFLICT (property_id) DO NOTHING"
+)
+
 
 def sync_browse_list(conn: psycopg.Connection, property_ids: Iterable[int]) -> None:
     """Re-materialize these properties' `browse_list` rows to match `properties` now.
@@ -50,18 +61,8 @@ def sync_browse_list(conn: psycopg.Connection, property_ids: Iterable[int]) -> N
         # Own transaction, so a failure here unwinds only the patch, never the
         # merge/link/recompute it follows.
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute("DELETE FROM browse_list WHERE property_id = ANY(%s)", (ids,))
-            # DO NOTHING, not a bare INSERT: two patches of the same id from different
-            # connections serialize on the row lock, and under READ COMMITTED the loser's
-            # DELETE cannot see the winner's fresh row — so its INSERT would hit
-            # browse_list_pk and discard the whole patch (a merge's, for up to a rebuild
-            # interval). The winner read the same projection, so its row is the answer.
-            cur.execute(
-                "INSERT INTO browse_list "
-                "SELECT * FROM browse_projection WHERE property_id = ANY(%s) "
-                "ON CONFLICT (property_id) DO NOTHING",
-                (ids,),
-            )
+            cur.execute(_DELETE_SQL, (ids,))
+            cur.execute(_INSERT_SQL, (ids,))
     except psycopg.Error as exc:
         LOG.warning(
             "browse_list sync failed for %s: %s — self-heals on the next rebuild",
