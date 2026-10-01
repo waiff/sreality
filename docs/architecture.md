@@ -337,7 +337,7 @@ paged to its own last page with no stop of ours — and the source- and category
 decides each row (rule #3; the 12 h staleness rail went with absence-based delisting). The
 coverage gate (migration 455) flips `supports_complete_walk` from that evidence
 (migration 481 set the ten descriptors). A gone detail fetch still flips a single
-listing immediately (`mark_listing_inactive_native`).
+listing immediately (`db.mark_listing_inactive`).
 Registered as a scraper portal (migration 117, sort 35).
 
 **Data source (remax-czech.cz).** A scheduled scraper (`scraper/remax_client.py`,
@@ -900,7 +900,7 @@ renumber.** Navigate by area:
    every active row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY`
    (served after new and changed listings); the drain fetches the page and only a POSITIVE gone
    signal — 404/410, a redirect off the listing, the portal's own "no longer active" text,
-   raised as `ListingGoneError` — flips it (`mark_gone` → `mark_listing_inactive_native`);
+   raised as `ListingGoneError` — flips it (the drain calls `db.mark_listing_inactive`);
    a live page refreshes it, an error leaves it for the next pass. Why: absence-based sweeps
    needed a staleness rail, a national cross-check and a latching cap to be safe, and even so
    parked two portals for weeks (ceskereality's rentals could never reach the national count
@@ -996,21 +996,28 @@ renumber.** Navigate by area:
    (`INDEX_MIN_COMPLETENESS = 0.995`) for the framework portals, NOT 100% — portal counts
    jitter mid-walk, and a strict 1.0 gate proved statistically unreachable for large bazos
    categories (delistings then accumulated for 11 days). The old second rail — flipping only
-   rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
-   `mark_inactive_native`) — was retired on 2026-09-07 together with absence-based delisting: a
+   rows additionally unseen for 24h+ (`min_unseen_hours` on the deleted absence sweep) — was
+   retired on 2026-09-07 together with absence-based delisting: a
    page check needs no staleness window, because it does not infer. A false flip still self-heals
    on the next index sighting (`portal_runner.reconcile_sightings` touches every sighted row we
    hold, whatever its price, and the touch reactivates it).
-   Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
-   health check reads it. **A non-sreality portal sweeps on its own native id**
-   (`db.mark_inactive_native` / `mark_inactive_agenda`, keyed `source_id_native`), never on a
-   PK set resolved back out of the DB: under the listing-identity refactor's Gate 2 a
-   non-sreality row carries `sreality_id = NULL`, and SQL three-valued logic makes ONE NULL
-   inside the sweep's `<> ALL(...)` predicate evaluate NULL for EVERY row — the sweep would
-   silently become a permanent no-op for the whole portal. `db.mark_inactive` (keyed
-   `sreality_id`) is therefore sreality-only. All three sweeps drop NULL ids from the bound
-   array and bail out rather than sweep with what's left of an all-NULL seen-set, since an
-   EMPTY array flips the predicate the other way and would delist the entire scope.
+   **Nomination keying.** `db.presence_candidates` excludes the seen set on `source_id_native`,
+   or on `sreality_id` for sreality (`seen_key`), never on a PK set resolved back out of the DB.
+   SQL three-valued logic sets two traps in its `<> ALL(...)` predicate: ONE NULL in the bound
+   array makes it NULL for EVERY row (nothing nominated, silently), and an EMPTY array makes it
+   true for every row (the whole scope nominated). So the runner drops NULL ids from the seen
+   set (`VERIFY dropped N NULL id(s)`, a parser bug to file) and an emptied set takes the
+   saw-nothing branch, and the bind site raises on an empty array so any other caller fails
+   closed (`VERIFY failed`). **One flip writer.** Every gone signal — the drain on all nine
+   portals, the legacy `main._handle_gone` and `freshness._record_gone` — goes through
+   `db.mark_listing_inactive(conn, source, native_id)`: keyed on the natural key (migration
+   091's UNIQUE `(source, source_id_native)`), guarded `AND is_active = true` so `inactive_at`
+   is stamped once per inactive spell (cleared on reactivation; the delisting-latency health
+   check and the collection monitor's `inactive` event read it), dirty-marking the property
+   (rule #20) and clearing sreality's failure row (rule #5), in one transaction; a key that
+   matches no row logs `gone flip matched no listing`. A flip that raises non-transiently is a
+   failure (the queue row stays), never completed as gone. The verify budget (the throttle
+   below) and the drain's gone-rate breaker live in the pure `scraper/delist_policy.py`.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
    fetches never touch it.** Every existing listing whose id appears in the run's index
    gets its `last_seen_at` bumped before any detail fetches happen — whatever its index price:
@@ -1029,7 +1036,10 @@ renumber.** Navigate by area:
    sreality also keeps `listing_fetch_failures(sreality_id, attempts, last_error, given_up)`:
    the split walk re-enqueues an active failure at `QUEUE_PRIORITY_FAILURE` so the drain cannot
    keep deferring it, and the row is deleted inside the successful write's transaction
-   (`listing_write`). Inspect with `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
+   (`listing_write`), and also when a gone flip lands (`db.mark_listing_inactive`). A given-up
+   queue row is not dropped either: `enqueue_presence_checks` re-arms up to
+   `PRESENCE_REARM_PER_WALK` = 50 given-up rows per nominating scope, source-wide, at VERIFY
+   priority. Inspect with `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
 6. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5 downloads the
    bytes to an R2 bucket (S3-compatible) so the data survives the CDN expiring listing
    photos. The `images` table tracks per-image download state via `storage_path`,
@@ -1216,8 +1226,8 @@ renumber.** Navigate by area:
     property-maintenance job (rule #20 for the dirty-set cadence) and the straggler-attach at
     birth. `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
-    derived, not authoritative per source. `db.presence_candidates` / `db.active_count` are
-    **source-scoped** to enforce this — a portal's index walk only nominates its own rows.
+    derived, not authoritative per source. `db.presence_candidates` / `db.mark_listing_inactive` /
+    `db.active_count` are **source-scoped** to enforce this — a portal's index walk only nominates its own rows.
     (Originally `mark_inactive`, the retired absence sweep, scoped by `(category_main,
     category_type)` alone, so every sreality walk swept bazos rows — same canon categories,
     never in sreality's `seen_ids` — to `is_active=false`; migration 109 era fixed it.) **New
@@ -2013,46 +2023,40 @@ renumber.** Navigate by area:
     restate the queue delay as a market fact, which is precisely the false statement that hid the
     outage. NULL is the truthful value for a row whose discovery time was not retained; only the
     tail seeded from `detail_queue_completions` is populated for history.
-    **THIRD DELISTING RAIL — the flip cap (migration 451).** `mark_inactive` had no ceiling: it
-    flipped every unseen active row of a category in one statement, however many that was. That
-    was survivable only because the completeness gate kept the dangerous cases from running — a
-    coincidence, not a safety property, and it ends every time a portal's walk is repaired,
-    because **fixing coverage is the same event as authorising the mass flip it unblocks**.
+    **THE VERIFY THROTTLE (was the flip cap, migrations 451/452).** The absence sweep it was
+    built for had no ceiling (it flipped every unseen active row of a category in one statement)
+    and was deleted with absence-based delisting; the ceiling survives as a per-walk throttle on
+    nomination, because **fixing coverage is the same event as unblocking a mass nomination** —
     ceskereality's rebuilt walk moved byt/prodej from 85.7% to 99.8% in one deploy and made
-    ~29,400 rows eligible; idnes has identical exposure the first time its walk ever completes.
-    All three sweeps (`mark_inactive`, `_native`, `_agenda`) now count their scope BEFORE
-    flipping and refuse anything above `app_settings.delist_flip_cap`. A refusal is RECORDED in
-    `delist_flip_refusals` and alarmed by `verify_pipeline`'s `delist_flip_refused` — an Actions
-    log expires, and a signal nothing can query is a signal nobody receives. Refusing is safe in
-    the direction that matters: an unswept stale row is visible and self-heals on next sighting,
-    a wrongly-delisted live listing is not.
+    ~29,400 rows eligible at once. `delist_policy.verify_budget` queues the oldest-unseen `cap`
+    rows of a scope above `app_settings.delist_flip_cap` and defers the rest; a deferral row goes
+    to `delist_flip_refusals` (the row now means "deferred") and is alarmed by
+    `verify_pipeline`'s `delist_flip_refused` — an Actions log expires, and a signal nothing can
+    query is a signal nobody receives. There is no latch: the next walk re-nominates what was
+    deferred, so a real backlog drains in a few walks.
     **The threshold is 10% with a 2,000-row category floor, and it is MEASURED (migration 452).**
     Across 60 days and 11,763 flipping sweeps the per-sweep share of a category is p95 = 1.8%,
     p99 = 3.4%, and then the tail jumps straight to 86% — routine churn and genuine incidents are
     two populations with a wide empty gap, and the ceiling belongs in the gap. The first cut (2%,
     floor 500) sat *inside* the churn population: it would have tripped 446 times in 60 days on
-    ordinary sreality and idnes rental churn, and because the cap latches, it would have stalled
+    ordinary sreality and idnes rental churn, and because the cap latched then, it would have stalled
     delisting on our two largest sources permanently. At 10% it trips on exactly four real events
     (realitymix `dum/prodej` 86.3%, ceskereality `komercni/prodej` 30.1% and 13.7%, sreality
     `pozemek/podil` 18.7%). The floor is on category SIZE, not on the ceiling, because the small
     categories are the churny ones — sreality `pozemek/drazba` legitimately turns over 6–39% of
     its ~600 rows per sweep, since auctions end on a date. **Calibrate a breaker against the
     measured distribution or it becomes the outage it was meant to prevent.**
-    **The cap LATCHES on purpose, so it needs a reset.** A refusal does not clear itself: the
-    unswept rows keep aging, the next sweep proposes more, and it is refused again. That is
-    correct breaker behaviour — an auto-reclosing breaker defeats the purpose — but the only
-    reset migration 451 offered was raising the global ceiling, which disarms the guard for every
-    portal at once. `delist_flip_cap.overrides` is the per-scope release valve: each entry is
+    `delist_flip_cap.overrides` lifts the throttle for one scope: each entry is
     SCOPED (names its `source`; `category_main` / `category_type` / `subtype` omitted or null
     mean "any"), BOUNDED (`max_rows` is a hard row count, so even a wildcard entry cannot
-    authorise an unbounded flip), and EXPIRING (`until` is required and must still be in the
+    authorise an unbounded queue), and EXPIRING (`until` is required and must still be in the
     future). Anything missing, unparseable or already expired is ignored — the valve fails shut,
     exactly like the cap it releases, and one malformed entry never blocks a later valid one.
     It lives in the SAME setting as the cap so there is one knob to read and one to audit.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `listing_write.write_listings` (a content
-    change, or a revival, or a write under an inactive property), `mark_listing_inactive*`
-    (delisting), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
+    change, or a revival, or a write under an inactive property), `mark_listing_inactive`
+    (delisting: the drain, the legacy `_handle_gone` and freshness), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is
@@ -2124,11 +2128,11 @@ renumber.** Navigate by area:
     (`reconcile_sightings`: clamp → `index_summary_native` → touch every sighted known row →
     `classify_index_sighting` → enqueue FAILURE (sreality's `retry_first`) > CHANGED > NEW), the
     default seams on `PortalDefaults` (`connect_index`, `connect_drain`, `make_client`,
-    `active_count`, and the HTML portals' `write_details` / `mark_gone` / `record_failure`), the
+    `active_count`, and the HTML portals' `write_details` / `record_failure`), the
     entrypoints' `load_config` / `configure_logging`, the coverage alarm, end-gated
     presence nomination (`_queue_presence_checks`), category-drift recording, the probe driver,
-    the whole drain (queue claim/complete/fail, the fetch pool, batch flush, the gone-rate
-    breaker) and the `scrape_runs` lifecycle (`run_phase`). **Per-portal:** the client (a
+    the whole drain (queue claim/complete/fail, the fetch pool, batch flush, the gone flip through
+    `db.mark_listing_inactive`, the gone-rate breaker from `delist_policy`) and the `scrape_runs` lifecycle (`run_phase`). **Per-portal:** the client (a
     `BasePortalClient` subclass — URL building, body markers, egress such as `USE_PROXY`; the
     shared `_request` does GET, or POST for bezrealitky's GraphQL), the parser, the adapter's
     `walk_category` (paging, end detection, stop classification; it hands its sightings to
@@ -2141,9 +2145,10 @@ renumber.** Navigate by area:
     `PortalDefaults`, overridden only where the portal differs: `connect_index` (idnes: staleness
     preload), `connect_drain` (sreality: session pooler), `make_client` (sreality: category-bound
     client), `active_count` (bazos: subtype scope), `write_details` (bezrealitky: GraphQL payload
-    archive; sreality: its FetchResult writer), `mark_gone` + `record_failure` (sreality: the
-    `listing_fetch_failures` ledger, rule #5). The drain's dry-run count is `db.claimable_counts`,
-    not a seam. Optional (the runner reads them via `getattr`):
+    archive; sreality: its FetchResult writer), `record_failure` (sreality: the
+    `listing_fetch_failures` ledger, rule #5). There is no flip seam: the drain flips a gone
+    listing itself (2026-10; the nine `mark_gone` copies were deleted). The drain's dry-run
+    count is `db.claimable_counts`, not a seam. Optional (the runner reads them via `getattr`):
     `seen_key` (sreality — integer ids); `presence_candidates` (bazos, ceskereality, realitymix,
     remax, maxima — index sections that don't map 1:1 onto `(category_main, category_type)`);
     `note_empty_slice` (ceskereality, realitymix — slice-buffering nominators);
@@ -2159,8 +2164,8 @@ renumber.** Navigate by area:
     deep-pagination-cap workaround) is not a seam: it lives inside its own `walk_category`.
     **Owed — the rule is ahead of the code here** (`roadmap/scraper-track.md` § Rule #21 owed entry): (a)
     the index-walk tail is hoisted (2026-10, `reconcile_sightings`, rail in
-    `tests/scraper/test_portal.py`), and the AST-identical `write_details` / `mark_gone` /
-    `record_failure` / `_configure_logging` / `_load_config` copies moved onto `PortalDefaults` /
+    `tests/scraper/test_portal.py`), and the AST-identical `write_details` / `mark_gone` (since
+    deleted: the drain flips itself) / `record_failure` / `_configure_logging` / `_load_config` copies moved onto `PortalDefaults` /
     `portal_runner` with it; still copied: each `walk_category`'s `walk_reached_end` assembly
     (deliberate — the units differ: kraje, slices, agendas, districts); (b) six portal-name branches already sit in shared code and are debt to fold
     into a seam or a config attribute, never precedent: `db.detail_ref` (sreality never carries

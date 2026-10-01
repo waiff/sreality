@@ -1,4 +1,4 @@
-# Coverage and delisting: the parked flag, the slice ledger, and the gate
+# Coverage and delisting: the (formerly parked) flag, the slice ledger, and the gate
 
 Loaded on demand from `scraper-ops`. Everything here is about one question —
 **may this portal delete listings?** — and the four layers that now answer it
@@ -18,7 +18,8 @@ instead of a boolean somebody typed once.
 > "The structural gate" below; the arithmetic in this file still governs the
 > descent/resample triggers and the ledger's `outcome`, which did not change.
 
-`portals.supports_complete_walk` used to gate `mark_inactive` (architectural rule #3):
+`portals.supports_complete_walk` used to gate the absence sweep (architectural rule #3; the
+sweep, `mark_inactive`, was deleted in 2026-10):
 a portal that could not prove it saw the whole catalogue never delisted from index
 absence. It was set true for idnes when the walk *could* in principle be
 complete — and then stayed true for months while the walk was reaching 13% of
@@ -26,7 +27,8 @@ the biggest category.
 
 That is the failure mode to remember: **the flag does not decay.** Nothing
 re-checks it, so it goes on asserting whatever was true the day it was typed.
-Two portals are parked on it today for exactly that reason:
+Two portals were parked on it for exactly that reason (history: the flag gates nothing
+since 2026-09-07):
 
 | portal | parked in | why |
 | --- | --- | --- |

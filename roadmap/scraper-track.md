@@ -10,7 +10,7 @@ Independent of the analytical, UI, and map tracks.
   → enqueue) existed 11 times (8 crawler walk tails, sreality's `enqueue_only` block, both bespoke
   probes); every one is now a `reconcile_sightings` call. The copied seams (`connect_index`,
   `connect_drain`, `make_client`, `active_count`) and, after item 1, the AST-identical
-  `write_details` / `mark_gone` / `record_failure` sit on `PortalDefaults` (follow-up F1 pulled
+  `write_details` / `mark_gone` (since deleted: the drain flips itself) / `record_failure` sit on `PortalDefaults` (follow-up F1 pulled
   forward as a pure move: byte-identical bodies, no DRAIN-line change); `_load_config` /
   `_configure_logging` became `portal_runner.load_config` / `configure_logging`;
   `claimable_count` ×9 + the worker's copy became `db.claimable_counts`. The never-read
@@ -37,21 +37,15 @@ Independent of the analytical, UI, and map tracks.
   C2-5 maxima/remax negative agenda cache; C2-3 uniform `Portal(config)` constructor (drops the
   two `portal_factory` branches); C2-4 sreality per-page deadline.
 
-### `scraper/db.py` still carries policy and a dead delist sweep (2026-10-01, owed)
-- **Owed:** presence-verified delisting (2026-09-07) left the absence sweep in `scraper/db.py` with
-  no production caller — `mark_inactive`, `mark_inactive_native`, `mark_inactive_agenda`,
-  `_delist_flip_allowed`, `_seen_without_nulls`, `portal_inactive_sweep_due`,
-  `record_portal_inactive_sweep` (~400 lines; called only from tests —
-  `tests/test_db_mark_inactive_null_safety.py`, `tests/test_delist_flip_cap.py`,
-  `tests/test_detail_queue.py` (the three `test_mark_inactive_*` cases) and
-  `tests/test_db_inactive_at.py` (the two `mark_inactive*` cases) — and `portal_inactive_sweep_due` /
-  `record_portal_inactive_sweep` from nothing at all; `portals.last_inactive_sweep_at` /
-  `inactive_sweep_min_interval_hours` are read only there). Delete them, and in the same change
-  delete the first two test files and trim those cases from the other two. The same
-  file also holds policy that belongs beside its callers (CLAUDE.md § Coding conventions): the
-  presence-check throttle (`enqueue_presence_checks`), the claim-batch reserves (`QUEUE_*_RESERVE`),
-  and the Gate-2 flag read — move each out when its area is next touched. (The broker-fingerprint
-  diff and the singleton rollup with its lazy recompute import left with the one-writer chokepoint, below.)
+### `scraper/db.py` policy and the dead delist sweep (2026-10-01; sweep + throttle done, reserves owed)
+- **Done (2026-10):** the absence sweep (`mark_inactive`, `_native`, `_agenda`, `_delist_flip_allowed`,
+  `_seen_without_nulls`, `portal_inactive_sweep_due`, `record_portal_inactive_sweep`) and its tests
+  are deleted; the presence-check throttle's policy moved to `scraper/delist_policy.py`
+  (`enqueue_presence_checks` keeps only its I/O).
+- **Owed:** the claim-batch reserves (`QUEUE_*_RESERVE`) and the Gate-2 flag read — move each out
+  when its area is next touched. Two forward migrations, each its own PR: drop the unread
+  `portals.inactive_sweep_min_interval_hours` / `last_inactive_sweep_at` (DESTRUCTIVE — operator OK +
+  pg_dump first) and restate migration 453's stale `COMMENT ON COLUMN portals.supports_complete_walk`.
 
 ### Rule #21: fold the shared-code portal-name branches (owed, 2026-10-01)
 - **Owed (rule #21 audit):** the framework is shared at the runner, not below it.
@@ -301,9 +295,12 @@ Independent of the analytical, UI, and map tracks.
   seam (mmreality implements it; ceskereality exposes no machine-readable category list).
 - **Next:** watch the first walks' `VERIFY` lines and `delist_flip_refusals` deferrals; the
   ceskereality backlog (~40k) drains at 10% of each category per walk.
-- **Owed:** the retired absence sweep still ships in `scraper/db.py` with no production caller;
-  its deletion is tracked at the top of this file (`scraper/db.py` still carries policy and a dead
-  delist sweep).
+- 2026-10: the delist decision consolidated: `scraper/delist_policy.py` (verify budget + gone-rate
+  breaker), one guarded flip writer `db.mark_listing_inactive` on every path (freshness now
+  dirty-marks + clears the failure row; no `inactive_at` re-stamp; a failed flip is retried, never
+  completed as gone; an all-NULL seen set no longer nominates the whole scope; a crawler image's 404
+  no longer runs a sreality freshness fetch), the ~430-line dead absence sweep and all nine
+  `mark_gone` adapters deleted.
 
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
@@ -312,11 +309,11 @@ Independent of the analytical, UI, and map tracks.
   the portal was parked on `supports_complete_walk=false`, was wrong on both halves.
 - Walk is now one category per (sale type × property type), ten in all, each proved by
   the shared `walk_is_complete` arithmetic, written to the slice ledger (one row per
-  category), swept by the category-scoped `mark_inactive_native` behind the 12 h rail.
+  category), (then) swept by the since-deleted absence sweep behind the 12 h rail.
   Migration 481 set the ten descriptors; the coverage gate flips the flag from evidence.
 - **Next:** watch `portal_coverage_gate` for mmreality's three-cycle streak (~a day).
-  Its ~3,300 stale rows (27% of active) will then hit the flip cap — verify a sample by
-  fetch and release with a bounded override, exactly as idnes.
+  **Superseded 2026-09-07:** presence verification nominates the stale rows; the page decides,
+  so no flip cap is released by hand.
 
 ### Phase 1.5: Six-category coverage (done)
 Cross-listed under top-level Done above. Headline: all six byt / dum
