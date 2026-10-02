@@ -366,6 +366,14 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_detail_queue_fairness_live.py -q
 
+      # A lease the caller will not wait for must be refused WITHOUT moving the shared
+      # frontier (2026-09-29: callers slept an hour behind it). The fake ledger only
+      # emulates that statement, and a failing one silently falls back to local pacing.
+      - name: A refused rate-ledger lease moves nothing (executed)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/scraper/test_rate_ledger_live.py -q
+
       # W3's whole claim is that ONE row backs the property-grain per-m2: the
       # representative child's price over that same child's area. That lives in
       # which CTE feeds which SET item across a 300-line statement -- PREPARE

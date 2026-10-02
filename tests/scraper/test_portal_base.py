@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from scraper.portal_base import BasePortalClient, ListingGoneError
+from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.rate_limit import RateLimiter
 
 
@@ -119,6 +120,26 @@ def test_pace_uses_limiter():
     c = _client([_Resp(200)], limiter=lim)
     c._request("http://x/")
     assert lim.acquired == 1
+
+
+def test_a_refused_ledger_slot_ends_the_request_at_once(monkeypatch):
+    # Not a RequestException: retrying cannot bring a slot that is minutes away any
+    # nearer, and each retry would only lease again. The 403 is penalized; the
+    # retry's refused acquire ends the request.
+    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+
+    class _RefusingLimiter(_FakeLimiter):
+        def acquire(self) -> None:
+            super().acquire()
+            if self.penalized:
+                raise RateBudgetUnavailable("x: next shared slot 3600s away")
+
+    lim = _RefusingLimiter()
+    c = _client([_Resp(403), _Resp(200)], limiter=lim, max_retries=3)
+    with pytest.raises(RateBudgetUnavailable):
+        c._request("http://x/")
+    assert len(c._session.calls) == 1
+    assert (lim.acquired, lim.penalized) == (2, 1)
 
 
 def test_no_limiter_falls_back_to_sleep(monkeypatch):

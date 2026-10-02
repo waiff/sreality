@@ -53,10 +53,13 @@ class _Sentinel(Exception):
 def test_every_phase_paces_with_this_portals_own_limits(
     source: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, float, bool, int]] = []
+    calls: list[tuple[str, float, bool, int, float | None, float | None]] = []
 
-    def spy(src: str, rate: float, shared: bool, *, lease_n: int = DEFAULT_LEASE_N) -> Any:
-        calls.append((src, rate, shared, lease_n))
+    def spy(
+        src: str, rate: float, shared: bool, *, lease_n: int = DEFAULT_LEASE_N,
+        max_wait_s: float | None = None, deadline: float | None = None,
+    ) -> Any:
+        calls.append((src, rate, shared, lease_n, max_wait_s, deadline))
         raise _Sentinel
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", spy)
@@ -67,10 +70,11 @@ def test_every_phase_paces_with_this_portals_own_limits(
         portal_runner.run_index_probe(portal, dry_run=True)
     with pytest.raises(_Sentinel):
         portal_runner.run_detail_drain(portal, None, True, 3, 0.77)
+    # No caller bound passed, so no ledger bound: only the realtime worker bounds its waits.
     assert calls == [
-        (source, _RATE, _SHARED, DEFAULT_LEASE_N),
-        (source, _RATE, _SHARED, portal_runner.PROBE_LEASE_N),
-        (source, 0.77, _SHARED, DEFAULT_LEASE_N),
+        (source, _RATE, _SHARED, DEFAULT_LEASE_N, None, None),
+        (source, _RATE, _SHARED, portal_runner.PROBE_LEASE_N, None, None),
+        (source, 0.77, _SHARED, DEFAULT_LEASE_N, None, None),
     ]
 
 

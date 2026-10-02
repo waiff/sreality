@@ -6,6 +6,7 @@ are monkeypatched.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -546,6 +547,84 @@ def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
     assert rc == 0
     assert cap["claim_n"] == []      # budget exceeded → stopped before claiming
     assert p.conn.closed             # but finalized cleanly (no stuck run)
+
+
+@pytest.mark.parametrize("reason,refused,stopped,line", [
+    ("cap", 1, 0, "DRAIN stopped source=fake: the shared rate budget refused the run; "
+                  "2 claims handed back untouched"),
+    ("deadline", 0, 1, "DRAIN time budget reached mid-chunk; 2 claims handed back "
+                       "source=fake"),
+])
+def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(
+    monkeypatch, caplog, reason, refused, stopped, line,
+):
+    # Every portal's fetch_detail turns the refusal into an ordinary "error" item.
+    # Recording it would spend an attempt of a listing that did nothing wrong (five
+    # and it is given up), so the claim goes back untouched and the drain stops. A
+    # worker drain that runs out of time mid-chunk stops the same way, but that is a
+    # healthy pass with a backlog, not a blocked portal, and is counted apart.
+    cap = _patch_queue(monkeypatch, [
+        [("1", None, None, None, None), ("2", None, None, None, None),
+         ("3", None, None, None, None)],
+        [("4", None, None, None, None)],
+    ])
+    released: list[list[str]] = []
+    monkeypatch.setattr(
+        portal_runner.db, "release_claims",
+        lambda _c, _src, ids: released.append(sorted(ids)) or len(ids))
+
+    class _Refused(_FakePortal):
+        def make_client(self, limiter):
+            self.limiter = limiter
+            return object()
+
+        def fetch_detail(self, client, native_id, ref):
+            if native_id == "1":
+                return super().fetch_detail(client, native_id, ref)
+            self.limiter.refused, self.limiter.refused_reason = True, reason
+            return DrainItem(native_id=native_id, kind="error", error="refused")
+
+    p = _Refused()
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        rc, agg = portal_runner.run_detail_drain(
+            p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert released == [["2", "3"]]
+    assert cap["fail"] == [] and p.calls["failure"] == []
+    assert len(cap["claim_n"]) == 1                 # the second chunk is never claimed
+    assert p.calls["write"] == [["1"]]
+    assert (agg["budget_refused"], agg["deadline_stopped"], agg["errors"]) == (
+        refused, stopped, 0)
+    assert line in caplog.messages
+
+
+@pytest.mark.parametrize("max_claims,lease_n", [(3, 3), (200, 20), (None, 20)])
+def test_detail_drain_hands_its_bound_and_a_lease_sized_to_its_work_to_the_limiter(
+    monkeypatch, max_claims, lease_n,
+):
+    # Every leased slot moves the shared frontier, used or not: a worker drain with three
+    # rows waiting leased twenty every 30 s and pushed the other callers back.
+    seen: dict[str, Any] = {}
+
+    def fake_build(source, rate, shared, **kw):
+        seen.update(kw)
+        return portal_runner.RateLimiter(rate)
+
+    monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
+    _patch_queue(monkeypatch, [])
+    before = time.monotonic()
+    portal_runner.run_detail_drain(
+        _FakePortal(), max_claims, False, detail_workers=1, detail_rate=1.0,
+        max_seconds=120.0, max_wait_s=120.0)
+    # The deadline too: the loop checks its budget only between chunks, and a 403 storm
+    # on a one-worker portal held one chunk under the worker's pass lock for an hour.
+    assert before + 120.0 <= seen.pop("deadline") <= time.monotonic() + 120.0
+    assert seen == {"lease_n": lease_n, "max_wait_s": 120.0}
+    # An Actions drain (no bound) keeps its old behaviour: no deadline in the limiter.
+    portal_runner.run_detail_drain(
+        _FakePortal(), max_claims, False, detail_workers=1, detail_rate=1.0,
+        max_seconds=120.0)
+    assert seen["deadline"] is None and seen["max_wait_s"] is None
 
 
 def test_detail_drain_swallows_teardown_close_failure(monkeypatch):

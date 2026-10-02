@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import logging
 import os
+import subprocess
+import sys
 import threading
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -258,8 +263,9 @@ def test_drain_pass_serves_only_claimable_registry_sources(monkeypatch):
     state = rw._new_state()
     asyncio.run(rw._drain_pass(asyncio.Event(), state))
     # sreality (Phase 4 of portal-order-fidelity) is now in the worker
-    # registry too, so its claimable rows drain here; bazos still has none.
-    assert ran == [("ceskereality", 200), ("idnes", 200), ("sreality", 200)]
+    # registry too, so its claimable rows drain here; bazos still has none. Each is
+    # capped at what is waiting, so its shared-ledger lease is sized to its work.
+    assert ran == [("ceskereality", 7), ("idnes", 5), ("sreality", 200)]
     drain = state["lanes"]["drain"]
     assert drain["last"]["sources"] == 3
     assert drain["last"]["new"] == 9
@@ -277,7 +283,7 @@ def test_drain_pass_skips_proxied_source_without_env(monkeypatch):
         rw, "_run_drain_sync",
         lambda s, n: ran.append((s, n)) or _drain_agg())
     asyncio.run(rw._drain_pass(asyncio.Event(), rw._new_state()))
-    assert ran == [("remax", 50)]
+    assert ran == [("remax", 3)]
 
 
 def test_drain_pass_filters_drain_disabled_source(monkeypatch):
@@ -296,7 +302,7 @@ def test_drain_pass_filters_drain_disabled_source(monkeypatch):
         lambda s, n: ran.append((s, n)) or _drain_agg())
     state = rw._new_state()
     asyncio.run(rw._drain_pass(asyncio.Event(), state))
-    assert ran == [("idnes", 100), ("remax", 100)]
+    assert ran == [("idnes", 5), ("remax", 3)]
     assert state["lanes"]["drain"]["last"]["skipped"] == 1
     assert state["lanes"]["drain"]["last"]["sources"] == 2
 
@@ -427,7 +433,7 @@ class _FakeConn:
 
 def test_heartbeat_upserts_latest_wins_row(monkeypatch):
     conn = _FakeConn()
-    monkeypatch.setattr(rw.db, "connect", lambda: conn)
+    monkeypatch.setattr(rw.db, "connect", lambda **_: conn)
     state = rw._new_state()
     rw._record_pass(state, "probe", {"portals": 4})
 
@@ -926,9 +932,8 @@ def _patch_resolver(
     monkeypatch.setattr(rw, "_read_location_resolve_batch_size", lambda: 250)
     monkeypatch.setattr(rw, "_RESOLVE_LEASE_BUSY_LOGGED", False)
     monkeypatch.setattr(rw, "_RESOLVE_SESSION_WARNED", False)
-    monkeypatch.setattr(rw, "_RESOLVE_WEDGE_LOGGED", False)
     monkeypatch.setattr(rw, "_RESOLVE_LAST_IDLE", False)
-    monkeypatch.setattr(rw, "_RESOLVE_PASS_LOCK", threading.Lock())
+    monkeypatch.setattr(rw, "_RESOLVE_PASS_LOCK", rw._PassLock("location_resolve"))
     return conn, captured
 
 
@@ -1157,7 +1162,7 @@ def test_location_resolve_sync_refuses_to_run_beside_an_abandoned_pass(
         "location_data.resolver.lease.held",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("the lease must not be touched while a pass is live")))
-    rw._RESOLVE_PASS_LOCK.acquire()  # stands in for the still-running thread
+    assert rw._RESOLVE_PASS_LOCK.try_enter()  # stands in for the still-running thread
     try:
         out = rw._location_resolve_sync()
     finally:
@@ -1175,7 +1180,7 @@ def test_location_resolve_sync_releases_the_pass_lock_when_the_drain_raises(
     _patch_resolver(monkeypatch, run=boom)
     with pytest.raises(RuntimeError):
         rw._location_resolve_sync()
-    assert rw._RESOLVE_PASS_LOCK.acquire(blocking=False), "the pass lock leaked"
+    assert rw._RESOLVE_PASS_LOCK.try_enter(), "the pass lock leaked"
     rw._RESOLVE_PASS_LOCK.release()
 
 
@@ -1267,8 +1272,7 @@ def _patch_intake_fast(
     monkeypatch.setattr("location_data.claims_intake.running_batch_id", fake_running)
     monkeypatch.setattr("location_data.claims_intake.run", fake_run)
     monkeypatch.setattr(rw, "_project_contracts_once", lambda: True)
-    monkeypatch.setattr(rw, "_INTAKE_FAST_PASS_LOCK", threading.Lock())
-    monkeypatch.setattr(rw, "_INTAKE_FAST_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_INTAKE_FAST_PASS_LOCK", rw._PassLock("location_intake_fast"))
     monkeypatch.setattr(rw, "_INTAKE_FAST_LAST_IDLE", True)
     captured["conn_obj"] = conn
     return captured
@@ -1392,7 +1396,7 @@ def test_location_intake_fast_sync_skips_while_the_previous_tick_is_running(
 
     _patch_intake_fast(monkeypatch)
     monkeypatch.setattr("location_data.claims_intake.run", never)
-    rw._INTAKE_FAST_PASS_LOCK.acquire()
+    assert rw._INTAKE_FAST_PASS_LOCK.try_enter()
     try:
         out = rw._location_intake_fast_sync()
     finally:
@@ -1722,9 +1726,10 @@ def test_the_daily_lane_never_reads_as_a_stalled_one() -> None:
 def _patch_sold_comps(
     monkeypatch: pytest.MonkeyPatch,
     cells: list[int] | None,
-    results: list[dict[str, Any]] | None = None,
+    results: list[dict[str, Any] | Exception] | None = None,
 ) -> dict[str, Any]:
-    """Stub the work-list and the cell fetch; capture what the lane asked for."""
+    """Stub the work-list and the cell fetch (an Exception in `results` is raised);
+    capture what the lane asked for."""
     captured: dict[str, Any] = {"kwargs": {}, "fetched": [], "clients": 0}
 
     class _Conn:
@@ -1745,12 +1750,16 @@ def _patch_sold_comps(
     def fake_fetch(c: Any, client: Any, obec_kod: int, **kw: Any) -> dict[str, Any]:
         captured["fetched"].append(obec_kod)
         if scripted:
-            return scripted.pop(0)
+            nxt = scripted.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
         return {"obec_kod": obec_kod, "status": "ok", "records": 2, "new": 1,
                 "pages": 1, "source_total": 625, "dropped": 0, "error": None}
 
-    def fake_client() -> object:
+    def fake_client(**kw: Any) -> object:
         captured["clients"] += 1
+        captured["client_kwargs"] = kw
         return object()
 
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
@@ -1760,7 +1769,7 @@ def _patch_sold_comps(
     # the client and owns `SOURCE`, so `realtime_worker` imports no reas module.
     monkeypatch.setattr(rw.sold_fetch, "build_client", fake_client)
     monkeypatch.setattr(rw, "_SOLD_COMPS_STORE_WARNED", False)
-    monkeypatch.setattr(rw, "_SOLD_COMPS_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_SOLD_COMPS_PASS_LOCK", rw._PassLock("sold_comps"))
     captured["conn_obj"] = conn
     return captured
 
@@ -1799,7 +1808,28 @@ def test_sold_comps_tick_fetches_the_capped_cell_list_on_one_client(
     # One client per pass: the politeness ledger is shared, the session need not be.
     assert captured["clients"] == 1
     assert out == {"ran": True, "cells": 2, "records": 4, "new": 2, "failed": 0,
-                   "skipped": 0, "seconds": out["seconds"]}
+                   "skipped": 0, "budget_refused": 0, "seconds": out["seconds"]}
+    assert captured["conn_obj"].closed is True
+    # The worker's third ledger caller is bounded like the probe and the drain.
+    assert captured["client_kwargs"] == {"max_wait_s": rw.LEDGER_MAX_WAIT_SECONDS}
+
+
+def test_a_ledger_refusal_ends_the_sold_comps_tick_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The refusal is sticky for the client, so every later cell would be refused too and
+    # written to the ledger as a failure it is not.
+    from scraper.rate_ledger import RateBudgetUnavailable
+
+    captured = _patch_sold_comps(monkeypatch, [1, 2, 3], results=[
+        {"obec_kod": 1, "status": "ok", "records": 5, "new": 5, "pages": 1,
+         "source_total": 625, "dropped": 0, "error": None},
+        RateBudgetUnavailable("reas: next shared slot 900s away, bound 120s"),
+    ])
+
+    out = rw._sold_comps_sync()
+
+    assert captured["fetched"] == [1, 2]
+    assert (out["cells"], out["records"], out["failed"], out["budget_refused"]) == (1, 5, 0, 1)
     assert captured["conn_obj"].closed is True
 
 
@@ -1816,7 +1846,7 @@ def test_an_abandoned_pass_is_not_walked_a_second_time(
     # ledger row yet, so the freshness subtraction cannot stop the next tick handing
     # it the SAME cells. This lock is what does.
     captured = _patch_sold_comps(monkeypatch, [554782])
-    rw._SOLD_COMPS_PASS_LOCK.acquire()
+    assert rw._SOLD_COMPS_PASS_LOCK.try_enter()
     try:
         out = rw._sold_comps_sync()
     finally:
@@ -1971,7 +2001,7 @@ def test_an_abandoned_text_extract_pass_is_never_overlapped(
     set of paid calls."""
     monkeypatch.setattr(rw.db, "connect", lambda: pytest.fail(
         "a second pass must not open a connection while the first still holds the lock"))
-    assert rw._TEXT_EXTRACT_PASS_LOCK.acquire(blocking=False)
+    assert rw._TEXT_EXTRACT_PASS_LOCK.try_enter()
     try:
         assert rw._text_extract_sync() == {"claimed": 0, "previous_pass_running": True}
     finally:
@@ -1987,3 +2017,400 @@ def test_text_extract_is_free_while_its_scope_is_empty(
     monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
     monkeypatch.setattr(description_extraction, "lane_scope", lambda conn: {})
     assert rw._text_extract_sync() == {"claimed": 0, "reason": "empty_scope"}
+
+
+# --- liveness: the 2026-09-29 freeze ----------------------------------------------------
+#
+# ceskereality answered 403 to everything; the shared rate ledger parked every caller up
+# to an hour; each abandoned probe/drain pass left one more thread asleep there; the
+# default executor filled; the heartbeat write and every interval read queued behind
+# them; the loop stayed alive, so nothing exited and Railway never restarted the worker.
+
+
+def _stuck_portal(source_to_block: str):
+    """A _run_*_sync fake that blocks inside one portal until released — the abandoned
+    pass's thread, still asleep in the ledger."""
+    entered, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def run(source: str, *_: Any) -> dict[str, Any]:
+        ran.append(source)
+        if source == source_to_block:
+            entered.set()
+            release.wait(10)
+        return _probe_agg()
+
+    return run, ran, entered, release
+
+
+def test_a_second_probe_pass_while_one_is_in_flight_is_skipped_and_counted(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    run, ran, entered, release = _stuck_portal("ceskereality")
+    monkeypatch.setattr(rw, "_run_probe_sync", run)
+    abandoned = threading.Thread(target=rw._probe_sync, args=(set(), asyncio.Event()))
+    abandoned.start()
+    state = rw._new_state()
+    try:
+        assert entered.wait(5)
+        asyncio.run(rw._probe_pass(asyncio.Event(), state))
+        probe = state["lanes"]["probe"]
+        assert probe["passes"] == 1
+        assert probe["last"] == {"previous_pass_running": True}
+        assert ran == ["bazos", "bezrealitky", "ceskereality"]  # no second thread started
+    finally:
+        release.set()
+        abandoned.join(5)
+    asyncio.run(rw._probe_pass(asyncio.Event(), state))  # the lock came back with the thread
+    assert state["lanes"]["probe"]["last"]["portals"] == len(rw.REALTIME_SOURCES)
+
+
+def test_a_second_drain_pass_while_one_is_in_flight_is_skipped_and_counted(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_drain_slice", lambda: 200)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_claimable_by_source", lambda: {"ceskereality": 7, "idnes": 5})
+    run, ran, entered, release = _stuck_portal("ceskereality")
+    monkeypatch.setattr(rw, "_run_drain_sync", lambda s, n: run(s) and _drain_agg())
+    abandoned = threading.Thread(
+        target=rw._drain_sync, args=(200, set(), asyncio.Event()))
+    abandoned.start()
+    state = rw._new_state()
+    try:
+        assert entered.wait(5)
+        asyncio.run(rw._drain_pass(asyncio.Event(), state))
+        drain = state["lanes"]["drain"]
+        assert drain["passes"] == 1
+        assert drain["last"] == {"previous_pass_running": True}
+        assert ran == ["ceskereality"]
+    finally:
+        release.set()
+        abandoned.join(5)
+    asyncio.run(rw._drain_pass(asyncio.Event(), state))
+    assert state["lanes"]["drain"]["last"]["sources"] == 2
+
+
+def test_a_lane_wedged_behind_its_pass_lock_stays_in_flight(monkeypatch):
+    # _lane_loop abandons the pass at LANE_PASS_TIMEOUT_SECONDS and clears its stamp, and
+    # every later pass is skipped in ~0 s: without the lock's age the heartbeat would show
+    # a lane passing happily while its one thread sits stuck, and worker_lane_stall, which
+    # reads in_flight_s, would never see it.
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
+    monkeypatch.setattr(rw, "_PROBE_PASS_LOCK", rw._PassLock("probe"))
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    state = rw._new_state()
+    rw._record_pass_start(state, "probe")
+    assert rw._PROBE_PASS_LOCK.try_enter()  # the abandoned pass's thread
+    try:
+        rw._PASS_LOCKS_HELD["probe"] = time.monotonic() - 2400
+        rw._record_pass_failed(state, "probe", float(rw.LANE_PASS_TIMEOUT_SECONDS))
+        asyncio.run(rw._probe_pass(asyncio.Event(), state))
+        assert state["lanes"]["probe"]["last"] == {"previous_pass_running": True}
+        assert state["lanes"]["probe"]["started_at"] is None
+        assert rw._lane_snapshot(state["lanes"])["probe"]["in_flight_s"] >= 2400
+    finally:
+        rw._PROBE_PASS_LOCK.release()
+    assert rw._lane_snapshot(state["lanes"])["probe"]["in_flight_s"] is None
+
+
+def test_the_broker_lane_skips_while_an_abandoned_pass_holds_its_lock(monkeypatch):
+    # The broker lane's lease row goes stale under an abandoned pass, so only this lock keeps
+    # the next tick from opening a connection and draining beside it.
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
+    monkeypatch.setattr(rw, "_BROKER_MAINTENANCE_PASS_LOCK", rw._PassLock("broker_maintenance"))
+
+    def _no_connect(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("a skipped pass must not connect")
+
+    monkeypatch.setattr(rw.db, "connect", _no_connect)
+    state = rw._new_state()
+    assert rw._BROKER_MAINTENANCE_PASS_LOCK.try_enter()  # the abandoned pass's thread
+    try:
+        asyncio.run(rw._broker_maintenance_pass(asyncio.Event(), state))
+        last = state["lanes"]["broker_maintenance"]["last"]
+        assert last["previous_pass_running"] is True and last["skipped"] is True
+        assert rw._lane_snapshot(state["lanes"])["broker_maintenance"]["in_flight_s"] is not None
+    finally:
+        rw._BROKER_MAINTENANCE_PASS_LOCK.release()
+
+
+def test_probe_and_drain_count_a_refused_portal_and_move_on(monkeypatch):
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_read_drain_slice", lambda: 200)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
+    monkeypatch.setattr(rw, "_claimable_by_source", lambda: {"ceskereality": 7, "idnes": 5})
+    monkeypatch.setattr(rw, "_run_probe_sync", lambda s: _probe_agg(
+        budget_refused=int(s == "ceskereality")))
+    monkeypatch.setattr(rw, "_run_drain_sync", lambda s, n: _drain_agg(
+        budget_refused=int(s == "ceskereality"), deadline_stopped=int(s == "idnes")))
+    state = rw._new_state()
+    asyncio.run(rw._probe_pass(asyncio.Event(), state))
+    asyncio.run(rw._drain_pass(asyncio.Event(), state))
+    probe, drain = state["lanes"]["probe"]["last"], state["lanes"]["drain"]["last"]
+    assert (probe["portals"], probe["budget_refused"], probe["errors"]) == (
+        len(rw.REALTIME_SOURCES), 1, 0)
+    # A drain out of time mid-chunk (idnes, a backlog) is not a blocked portal: the
+    # heartbeat keeps the two apart.
+    assert (drain["sources"], drain["budget_refused"], drain["deadline_stopped"],
+            drain["errors"]) == (2, 1, 1, 0)
+    snapshot = rw._lane_snapshot(state["lanes"])["drain"]["last"]
+    assert (snapshot["budget_refused"], snapshot["deadline_stopped"]) == (1, 1)
+
+
+def test_only_the_worker_bounds_its_ledger_waits(monkeypatch):
+    # The Actions walks and drains are built to wait; the worker's probe and drain are not,
+    # because a thread parked in the ledger is a thread the executor never gets back.
+    from types import SimpleNamespace
+
+    seen: dict[str, dict[str, Any]] = {}
+    monkeypatch.setattr(rw, "_load_config", lambda s: SimpleNamespace(
+        limits=SimpleNamespace(detail_workers=2, detail_rate=1.0)))
+    monkeypatch.setattr(rw, "_build_portal", lambda s, c: object())
+    monkeypatch.setattr(rw.portal_runner, "run_index_probe", lambda p, **kw: (
+        seen.setdefault("probe", kw) and (0, {})))
+    monkeypatch.setattr(rw.portal_runner, "run_detail_drain", lambda p, **kw: (
+        seen.setdefault("drain", kw) and (0, {})))
+    rw._run_probe_sync("ceskereality")
+    rw._run_drain_sync("ceskereality", 7)
+    assert seen["probe"]["max_wait_s"] == seen["drain"]["max_wait_s"] == (
+        rw.LEDGER_MAX_WAIT_SECONDS) == rw.DRAIN_MAX_SECONDS
+
+
+def _watchdog_off_the_terminal(monkeypatch) -> list[int]:
+    """No pass lock held, and a stderr without a descriptor: the watchdog switches stderr
+    to non-blocking before its dump, which must never reach the terminal running the
+    tests. Returns what the fake backstop records: a real faulthandler timer would
+    _exit the test run."""
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    return []
+
+
+def test_watchdog_exits_once_no_beat_finishes(monkeypatch, caplog):
+    backstops = _watchdog_off_the_terminal(monkeypatch)
+    clock = [1000.0]
+    state = rw._new_state()
+    state["beat_done_at"] = 1000.0
+    dumps: list[dict[str, Any]] = []
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: dumps.append(kw))
+    exits: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     arm_backstop=backstops.append)
+    assert exits == [1]
+    assert backstops == [rw.WATCHDOG_LAST_WORDS_SECONDS + 5]  # armed before the dump
+    assert clock[0] - 1000.0 == rw.LIVENESS_BOUND_SECONDS == 10 * rw.HEARTBEAT_INTERVAL_SECONDS
+    assert dumps == [{"all_threads": True}]
+    assert sum("WATCHDOG" in r.getMessage() for r in caplog.records) == 1
+
+
+_FULL_STDERR_CHILD = """
+import logging, os, sys
+from scraper import realtime_worker as rw
+logging.getLogger().addHandler(logging.NullHandler())  # the dump is stderr's only writer
+os.set_blocking(2, False)
+try:
+    while True:
+        os.write(2, b"x" * 65536)
+except BlockingIOError:
+    pass
+os.set_blocking(2, True)
+if sys.argv[1] == "blocking":
+    os.set_blocking = lambda fd, blocking: None
+rw.WATCHDOG_LAST_WORDS_SECONDS = 1.0
+state = rw._new_state()
+state["beat_done_at"] = -1e9
+# rc 3 = the watchdog's own exit; rc 1 = the faulthandler timer's _exit(1). Telling them
+# apart by the exit code, not by the clock, keeps the test honest on a slow runner.
+rw._watchdog(state, sleep=lambda s: None, exit_=lambda rc: os._exit(3))
+"""
+
+
+@pytest.mark.parametrize("mode", ["as_shipped", "blocking"])
+def test_watchdog_exits_even_when_stderr_is_a_full_pipe(mode):
+    # faulthandler writes holding the GIL, so a dump into a full pipe stops every thread,
+    # the watchdog's join and os._exit included. A REAL full pipe, in a child process: as
+    # shipped the dump gets EAGAIN and the watchdog's own exit (rc 3 in the child) ends it;
+    # with the dump blocking anyway, the faulthandler timer armed before it does, _exit(1)
+    # from a thread that needs no GIL (a signal would not: as PID 1 the kernel drops
+    # SIGALRM's default). Each guard is pinned by its own exit code, so a broken primary
+    # guard cannot hide behind the backstop.
+    started = time.monotonic()
+    child = subprocess.Popen(
+        [sys.executable, "-c", _FULL_STDERR_CHILD, mode],
+        cwd=Path(__file__).resolve().parents[2],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        rc = child.wait(timeout=60)
+    finally:
+        child.kill()
+        child.stderr.close()
+    if mode == "blocking":  # the timer, not the watchdog's own exit 1 s after the dump
+        assert rc == 1
+        assert time.monotonic() - started >= 1.0 + 5
+    else:
+        assert rc == 3
+
+
+
+def test_the_backstop_is_a_faulthandler_timer_that_exits_and_writes_off_stderr(monkeypatch):
+    # A timer thread, never a signal: the worker is its container's PID 1, and the kernel
+    # drops a default-action signal sent to PID 1. Its dump goes nowhere: it fires only
+    # when the dump into stderr is stuck, and a write into that pipe would block it too.
+    armed: list[tuple[float, dict[str, Any]]] = []
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback_later",
+                        lambda timeout, **kw: armed.append((timeout, kw)))
+    rw._arm_exit_backstop(15.0)
+    ((timeout, kw),) = armed
+    try:
+        assert (timeout, kw["exit"]) == (15.0, True)
+        assert os.readlink(f"/proc/self/fd/{kw['file']}") == os.devnull
+    finally:
+        os.close(kw["file"])
+    assert inspect.signature(rw._watchdog).parameters["arm_backstop"].default is (
+        rw._arm_exit_backstop)
+
+
+def test_watchdog_exits_even_when_arming_the_backstop_fails(monkeypatch):
+    # An exhausted fd table or thread limit at the moment of the wedge makes the arm
+    # raise (os.open of /dev/null, or faulthandler's own thread). The exit is
+    # unconditional: a watchdog that raised instead would leave the freeze it exists to end.
+    _watchdog_off_the_terminal(monkeypatch)
+    state = rw._new_state()
+    state["beat_done_at"] = -1e9
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
+    exits: list[int] = []
+
+    def arm(seconds: float) -> None:
+        raise OSError(24, "Too many open files")
+
+    rw._watchdog(state, sleep=lambda s: None, exit_=exits.append, arm_backstop=arm)
+    assert exits == [1]
+
+
+def test_watchdog_exits_when_a_pass_lock_outlives_its_bound(monkeypatch, caplog):
+    # A probe or drain thread stuck in an HTTP read or a lock wait is one thread: the
+    # executor never fills, the beats go on, and the lane is dead for every portal.
+    backstops = _watchdog_off_the_terminal(monkeypatch)
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {"drain": 0.0})
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
+    clock = [0.0]
+    state = rw._new_state()
+    state["beat_done_at"] = 0.0
+    exits: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        if clock[0] > 2 * rw.PASS_LOCK_BOUND_SECONDS:
+            pytest.fail("the watchdog never exited on the wedged lock")
+        clock[0] += seconds
+        state["beat_done_at"] = clock[0]  # the heartbeat never stops
+
+    with caplog.at_level(logging.CRITICAL, logger="scraper.realtime_worker"):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     arm_backstop=backstops.append)
+    assert exits == [1]
+    assert clock[0] == rw.PASS_LOCK_BOUND_SECONDS == 2 * rw.LANE_PASS_TIMEOUT_SECONDS
+    assert any("pass lock of drain" in r.getMessage() for r in caplog.records)
+
+
+def test_watchdog_stays_quiet_while_beats_finish(monkeypatch):
+    # Beats every 240 s -- slower than the 30 s cadence, inside the bound.
+    backstops = _watchdog_off_the_terminal(monkeypatch)
+    clock = [0.0]
+    state = rw._new_state()
+    state["beat_done_at"] = 0.0
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: pytest.fail(
+        "a heartbeat that keeps finishing must never dump stacks"))
+    ticks: list[float] = []
+
+    class _Enough(Exception):
+        pass
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+        ticks.append(seconds)
+        if len(ticks) % 8 == 0:
+            state["beat_done_at"] = clock[0]
+        if len(ticks) > 200:
+            raise _Enough
+
+    exits: list[int] = []
+    with pytest.raises(_Enough):
+        rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                     arm_backstop=backstops.append)
+    assert exits == [] and backstops == []
+
+
+def test_a_beat_that_fails_still_finishes_and_connects_once_with_a_bound(monkeypatch):
+    # A database that refuses the write is not something a restart fixes, and a
+    # heartbeat-only fault must not restart every lane every five minutes, so a failed
+    # beat still FINISHES. It must also finish well inside LIVENESS_BOUND_SECONDS: one
+    # connect attempt at a short timeout, never db.connect's three at psycopg's 130 s.
+    seen: dict[str, Any] = {}
+
+    class _Down(_FakeConn):
+        def cursor(self) -> Any:
+            raise RuntimeError("heartbeat write refused")
+
+    def connect(**kw: Any) -> _Down:
+        seen.update(kw)
+        return _Down()
+
+    monkeypatch.setattr(rw.db, "connect", connect)
+    state = rw._new_state()
+    state["beat_done_at"] = 1.0
+    with pytest.raises(RuntimeError):
+        rw._beat_sync(state)
+    assert state["beat_done_at"] > 1.0
+    assert seen == {"attempts": 1, "connect_timeout": rw.HEARTBEAT_CONNECT_TIMEOUT_SECONDS}
+
+
+def test_a_full_executor_stops_the_heartbeat_and_the_watchdog_exits(monkeypatch):
+    # The heartbeat runs on the executor every lane shares, which makes it that
+    # executor's canary: threads that never come back (the ledger sleepers of 2026-09-29)
+    # starve the beat, and a beat that never finishes is an exit, not a silent freeze.
+    from concurrent.futures import ThreadPoolExecutor
+
+    backstops = _watchdog_off_the_terminal(monkeypatch)
+    conn = _FakeConn()
+    monkeypatch.setattr(rw.db, "connect", lambda **_: conn)
+    monkeypatch.setattr(rw.faulthandler, "dump_traceback", lambda **kw: None)
+    state = rw._new_state()
+    booted = state["beat_done_at"]
+    release = threading.Event()
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        stuck = [asyncio.ensure_future(asyncio.to_thread(release.wait, 10)) for _ in range(2)]
+        await asyncio.sleep(0.05)
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(rw._heartbeat_pass(state), timeout=0.5)
+        finally:
+            release.set()
+            await asyncio.gather(*stuck)
+
+    asyncio.run(scenario())
+    assert conn.calls == [] and state["beat_done_at"] == booted
+
+    clock = [booted]
+    exits: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    rw._watchdog(state, clock=lambda: clock[0], sleep=sleep, exit_=exits.append,
+                 arm_backstop=backstops.append)
+    assert exits == [1]
+
+
+def test_the_worker_starts_the_watchdog_and_pins_its_executor():
+    src = inspect.getsource(rw._amain)
+    assert "target=_watchdog" in src and "daemon=True" in src
+    assert "set_default_executor(ThreadPoolExecutor(max_workers=LANE_EXECUTOR_THREADS))" in src

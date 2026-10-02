@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from scraper import sold_db, sold_fetch
+from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.reas_parser import ReasPayloadError
 
 _BOX = sold_db.CellBox(
@@ -256,6 +257,19 @@ def test_a_transport_failure_ends_in_the_ledger_and_never_raises(cell):
     assert out["status"] == "failed"
     assert out["error"] == "TimeoutError: read timed out"
     assert cell["ledger"][0]["status"] == "failed"
+
+
+def test_a_shared_budget_refusal_is_raised_and_leaves_no_ledger_row(cell):
+    # Not the cell's failure: a `failed` row would hold a healthy cell back six hours,
+    # and the lane must stop instead of refusing every remaining cell one by one.
+    class _Refused:
+        def fetch_sold_page(self, bounds, *, page: int = 1) -> str:
+            raise RateBudgetUnavailable("reas: next shared slot 900s away, bound 120s")
+
+    with pytest.raises(RateBudgetUnavailable):
+        sold_fetch.fetch_cell(_FakeConn(), _Refused(), 500496)
+
+    assert cell["ledger"] == [] and cell["upserts"] == []
 
 
 def test_the_ledger_error_is_truncated(cell):

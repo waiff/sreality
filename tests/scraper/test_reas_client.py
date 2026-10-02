@@ -65,11 +65,14 @@ def test_the_built_client_shares_one_politeness_budget(monkeypatch):
     built: list[tuple] = []
     monkeypatch.setattr(
         "scraper.reas_client.build_rate_limiter",
-        lambda source, rate, shared, lease_n: built.append(
-            (source, rate, shared, lease_n)) or object(),
+        lambda source, rate, shared, lease_n, max_wait_s: built.append(
+            (source, rate, shared, lease_n, max_wait_s)) or object(),
     )
     client = build_client()
-    source, rate, shared, lease_n = built[0]
+    build_client(max_wait_s=120.0)
+    source, rate, shared, lease_n, max_wait_s = built[0]
+    # The CLI waits as the ledger says; only the realtime worker's lane passes a bound.
+    assert (max_wait_s, built[1][4]) == (None, 120.0)
     assert (source, shared) == ("reas", True)
     assert rate <= 0.2, "one request per five seconds is the politeness budget"
     assert lease_n <= 5, "a cell is a handful of requests, not a drain"

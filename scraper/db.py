@@ -334,6 +334,7 @@ def connect(
     *,
     attempts: int = _CONNECT_ATTEMPTS,
     retry_delay: float = _CONNECT_RETRY_DELAY,
+    connect_timeout: int | None = None,
 ) -> psycopg.Connection:
     """Open an autocommit connection. Callers manage transactions explicitly.
 
@@ -344,13 +345,16 @@ def connect(
 
     A pooler handshake drop is retried `attempts` times spaced `retry_delay`s
     apart (see _connect_with_retry). Callers that can't afford the full budget —
-    the synchronous API per-request path — pass a smaller one.
+    the synchronous API per-request path — pass a smaller one, and a caller that
+    must finish quickly passes `connect_timeout` (seconds per address; psycopg's
+    default is 130).
     """
     return _connect_with_retry(
         lambda: psycopg.connect(
             url or database_url(),
             autocommit=True,
             prepare_threshold=None,
+            connect_timeout=connect_timeout,
             **_KEEPALIVES,
         ),
         attempts=attempts,
@@ -2416,6 +2420,24 @@ def fail_detail(
             """,
             {"max": max_attempts, "err": truncated, "source": source, "ids": ids},
         )
+
+
+def release_claims(
+    conn: psycopg.Connection, source: str, native_ids: Iterable[str],
+) -> int:
+    """Hand claimed rows back untouched -- no attempts bump, no completion row -- when
+    the drain could not fetch them for a reason that is not theirs (the shared rate
+    ledger refused the run its slots)."""
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listing_detail_queue SET claimed_at = NULL "
+            "WHERE source = %s AND native_id = ANY(%s) AND claimed_at IS NOT NULL",
+            (source, ids),
+        )
+        return cur.rowcount or 0
 
 
 COMPLETION_RETENTION_DAYS = 7

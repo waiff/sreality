@@ -46,7 +46,7 @@ from scraper.portal import (
     load_portal_config,
     walk_coverage,
 )
-from scraper.rate_ledger import build_rate_limiter
+from scraper.rate_ledger import DEFAULT_LEASE_N, build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger("scraper.portal_runner")
@@ -589,6 +589,7 @@ def run_index_probe(
     portal: Portal,
     dry_run: bool,
     probe_pages: int = 1,
+    max_wait_s: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Newest-first delta probe: the cheap "what's new" pass the always-on
     worker runs every 2-5 min per portal (docs/design/realtime-scrapers.md).
@@ -615,6 +616,9 @@ def run_index_probe(
     one-page walk's. run_type='probe' is also outside the CHECK (migration
     105). Probe discovery stays observable through listing_detail_queue (the
     Health backlog/lag checks) and the drain's own scrape_runs rows.
+
+    `max_wait_s` bounds each wait for a shared-ledger slot; a refused portal is
+    given up for this probe and counted under `budget_refused`, not as an error.
     """
     probe_pages = max(1, int(probe_pages))
     prober = getattr(portal, "probe_category", None)
@@ -627,6 +631,7 @@ def run_index_probe(
     limiter = build_rate_limiter(
         portal.source, portal.index_rate,
         getattr(portal, "shared_rate_limiter", False), lease_n=PROBE_LEASE_N,
+        max_wait_s=max_wait_s,
     )
     conn = None if dry_run else portal.connect_index()
     total_pages = 0
@@ -663,6 +668,8 @@ def run_index_probe(
                             portal.walk_category(category, conn, dry_run, limiter))
                         pages += deep_pages
             except Exception as exc:
+                if limiter.refused:
+                    break
                 LOG.exception(
                     "PROBE category failed cm=%s ct=%s: %s", cm_text, ct_text, exc)
                 failed_categories += 1
@@ -686,6 +693,8 @@ def run_index_probe(
                 "listings_enqueued": counts.get("enqueued", 0),
                 "early_stopped": stopped,
             })
+            if limiter.refused:
+                break
     finally:
         if conn is not None:
             conn.close()
@@ -707,6 +716,7 @@ def run_index_probe(
         "listings_enqueued": total_enqueued,
         "early_stopped": early_stopped,
         "errors": failed_categories,
+        "budget_refused": int(limiter.refused),
         "by_category": by_category,
     }
     return (rc, agg)
@@ -814,6 +824,7 @@ def run_detail_drain(
     detail_rate: float,
     max_seconds: float | None = None,
     run_id: int | None = None,
+    max_wait_s: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Claim queue rows for this source, fetch on a worker pool, write batched.
 
@@ -827,6 +838,11 @@ def run_detail_drain(
     per chunk (bump_scrape_run_counts), so a mid-run crash or SIGKILL keeps the
     committed work's counts instead of finalize zeroing them (caller passes
     bump_already_applied=True so the happy path counts exactly once).
+
+    `max_wait_s` bounds each wait for a shared-ledger slot and, with `max_seconds`, the
+    run: every acquire past the deadline is refused too. On a refusal the unfetched
+    claims go back untouched and the drain stops (`budget_refused` for a blocked
+    portal, `deadline_stopped` for a time budget reached mid-chunk).
     """
     counts: dict[str, int] = {
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
@@ -834,8 +850,15 @@ def run_detail_drain(
     }
     breaker = delist_policy.GoneRateBreaker(
         portal.source, exempt_priority=db.QUEUE_PRIORITY_VERIFY)
+    deadline = (time.monotonic() + max_seconds) if max_seconds else None
+    # A lease is sized to the work: every leased slot moves the shared frontier
+    # whether or not it is used, so a 3-row drain leasing 20 pushed every other caller back.
+    # A bounded caller also gets the deadline: the loop below checks it only between
+    # chunks, and a 403 storm on a one-worker portal held one chunk for an hour.
     limiter = build_rate_limiter(
-        portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False))
+        portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False),
+        lease_n=min(DEFAULT_LEASE_N, max_claims or DEFAULT_LEASE_N), max_wait_s=max_wait_s,
+        deadline=deadline if max_wait_s is not None else None)
     client = portal.make_client(limiter)
 
     if dry_run:
@@ -844,11 +867,11 @@ def run_detail_drain(
         LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
         return (0, {})
 
-    deadline = (time.monotonic() + max_seconds) if max_seconds else None
     claim_chunk = min(DRAIN_CLAIM_CHUNK, 100) if max_seconds else DRAIN_CLAIM_CHUNK
     conn = portal.connect_drain()
     total_claimed = 0
     buffer: list[DrainItem] = []
+    deferred: list[str] = []
 
     # Persist the counts delta since the last bump onto the scrape_runs row, so a
     # crash/SIGKILL keeps what committed. Single accumulator (counts) + delta means
@@ -924,6 +947,13 @@ def run_detail_drain(
                 }
                 for future in as_completed(futures):
                     item = future.result()  # never raises
+                    if item.kind == "error" and limiter.refused:
+                        # The ledger refused this fetch its slot; fetch_detail turned the
+                        # raise into an ordinary error. Not the listing's failure, so no
+                        # attempt is spent (an error landing after the refusal is
+                        # deferred too -- the safe direction: a retry, never an attempt).
+                        deferred.append(item.native_id)
+                        continue
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
                     prio = prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW)
@@ -969,6 +999,20 @@ def run_detail_drain(
                 counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
             )
             _persist_counts()
+            if limiter.refused:
+                _, conn = db.run_resilient(
+                    conn, lambda c: db.release_claims(c, portal.source, deferred),
+                    reconnect=portal.connect_drain, label="drain.release",
+                )
+                if limiter.refused_reason == "deadline":
+                    LOG.info(
+                        "DRAIN time budget reached mid-chunk; %d claims handed back "
+                        "source=%s", len(deferred), portal.source)
+                else:
+                    LOG.warning(
+                        "DRAIN stopped source=%s: the shared rate budget refused the run; "
+                        "%d claims handed back untouched", portal.source, len(deferred))
+                break
         conn = _flush_drain_batch(
             portal, conn, buffer, counts, dry_run, portal.connect_drain)
         _persist_counts()
@@ -1012,6 +1056,8 @@ def run_detail_drain(
         "listings_inactive":    counts["gone"],
         "images_discovered":    counts["images_discovered"],
         "errors":               counts["errors"],
+        "budget_refused":       int(limiter.refused and limiter.refused_reason != "deadline"),
+        "deadline_stopped":     int(limiter.refused_reason == "deadline"),
         "by_category":          [],
     }
     return (0, scrape_agg)
