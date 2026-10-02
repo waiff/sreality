@@ -566,11 +566,13 @@ rules. Identify which one a task belongs to before you start.
   return identity, admin or account-scoped data; those sit behind `verify_jwt` /
   `require_admin` / `tenant_conn` and are called with `jwt: true` (see "Two auth shapes"
   below). At least these still break it, running service-role behind `require_token`
-  alone with no account predicate: the estimation trace payload and both `/feedback`
-  routes, `/filter-presets*` (`filter_presets` is account-scoped since migration 290),
-  `/buildings*` (`building_runs` has tenant RLS since migration 291), and `POST
-  /notifications/dispatches/{id}/estimate` (returns any account's dispatch and starts a run
-  for it) — owed as `roadmap/public-release-track.md` item 11, an open list.
+  alone with no account predicate: `/filter-presets*` (`filter_presets` is account-scoped
+  since migration 290), `/buildings*` (`building_runs` has tenant RLS since migration 291),
+  and `POST /notifications/dispatches/{id}/estimate` (returns any account's dispatch and
+  starts a run for it) — owed as `roadmap/public-release-track.md` item 11, an open list.
+  The estimation trace payload and both `/feedback` routes moved onto the tenant pool
+  2026-10-02; the feedback POST's refiner is admin-only (the `database` skill's
+  `references/tenancy.md`, named exception).
 - Every PostgREST read runs as `authenticated`; `anon` is granted nothing (Phase 0,
   migrations 299/331). The SPA reads the `*_public` views; the Browse/map read models
   `browse_list` (an UNLOGGED table rebuilt blue-green) and `properties_map_mv` — plain

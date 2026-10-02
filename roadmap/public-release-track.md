@@ -621,24 +621,25 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       tables + webhook + unsubscribe, GDPR sign-off, a deliverability check, and a matcher-pass load
       check at target sub count.
 11. **OWED (security, found 2026-10-01): `require_token` routes that are account-blind — an
-    open list, the three estimation routes first.** `GET /estimations/{run_id}/trace/{step_n}/payload` and `GET` + `POST
-    /estimations/{run_id}/feedback` (`api/main.py:967`, `:983`, `:994`) run on the service-role
-    `deps.get_db_conn` behind `require_token` alone. That token is the SPA's `VITE_API_TOKEN`
-    (`frontend/src/lib/api.ts:103`, baked in by `frontend/Dockerfile:19,24`), readable by anyone
-    from the publicly served bundle — so any caller can read any account's trace payloads and
-    feedback by run id, and post feedback on any run, which by default
-    (`api/schemas.py:782`, `kick_off_refinement = True`) spends LLM credit on the refiner and
-    writes a `skill_refinements` proposal. This bypasses the tenant RLS on
-    `estimation_trace_payloads` / `estimation_feedback` (migration 292:138, :163). The siblings
-    `GET /estimations/{run_id}` and `PATCH …/scenario` (`api/main.py:932`, `:943`) already run on
-    `tenant_pool.tenant_conn`. **Fix:** resolve the run and read/write the trace + feedback rows
-    through `tenant_conn` (RLS; a foreign run then 404s), keep the refiner's platform writes
-    (`skill_refinements`, no `authenticated` grant) on the service-role connection — the A5
-    two-connection split — and add `jwt: true` to `getTracePayload` / `listEstimationFeedback` /
-    `submitEstimationFeedback` (`frontend/src/lib/api.ts:408-443`). **Same shape, same fix,
-    already found:** `/filter-presets*` (`api/routes/filter_presets.py` → `api/filter_presets.py`
-    `list_presets` selects every row; `filter_presets` is account-scoped with RLS since migration
-    290), `/buildings*` (`api/main.py` `get_buildings` → `list_building_runs`, no account filter;
+    open list.** **DONE 2026-10-02 — the three estimation routes:** `GET
+    /estimations/{run_id}/trace/{step_n}/payload` and `GET` + `POST /estimations/{run_id}/feedback`
+    ran service-role behind the SPA-bundle `VITE_API_TOKEN` alone, so any holder could read any
+    account's trace payloads and post feedback on any run (by default spending refiner LLM credit).
+    The two reads now take `tenant_pool.tenant_conn` (no `require_token`): RLS-only (migration 292
+    on `estimation_trace_payloads` / `estimation_feedback`), a foreign run 404s and the static token
+    401s. `POST` takes `verify_jwt` and opens a SHORT `tenant_pool.tenant_transaction`: a strict
+    probe of the run (404 before any write; a non-admin must OWN the run, since a note on a SYSTEM
+    run would be stamped SYSTEM and readable by every account) plus the note's `INSERT`, committed.
+    The refiner is admin-only (unmetered LLM spend, and its row carries the platform skill prompt;
+    a non-admin's `kick_off_refinement` stores the note as `submitted`) and runs afterwards on a
+    service-role connection, so no tenant transaction sits open across the LLM call. Doctrine:
+    the `database` skill's `references/tenancy.md`, named exception. SPA `getTracePayload` /
+    `listEstimationFeedback` / `submitEstimationFeedback` send `jwt: true`. Census:
+    `tests/api/test_admin_route_coverage.py`;
+    behaviour: `tests/api/test_estimation_child_routes_tenancy.py`. **Still owed, same shape:**
+    `/filter-presets*` (`api/routes/filter_presets.py` → `api/filter_presets.py` `list_presets`
+    selects every row; `filter_presets` is account-scoped with RLS since migration 290),
+    `/buildings*` (`api/main.py` `get_buildings` → `list_building_runs`, no account filter;
     `building_runs` tenant RLS since migration 291) and `POST /notifications/dispatches/{id}/estimate`
     (`api/routes/notifications.py` `post_kickoff_estimate` returns any account's dispatch row and
     starts a run for it). Then sweep the remaining `require_token` routes the SPA calls for the

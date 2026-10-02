@@ -94,6 +94,8 @@ tenant-scoped:
   authorization — a route needing per-account isolation must use it, not `get_db_conn`. There
   is NO fallback connection (the static-`API_TOKEN` bypass was deleted 2026-09-11): an unset
   `TENANT_POOL_DB_URL` raises. The `legacy_backfill_claim` TABLE stays (signup CAS).
+  `tenant_transaction(claims)` is the same block as a context manager, for one named
+  exception (`references/tenancy.md`): it commits before slow service-role work.
 
 **Pooler-safe mutual exclusion: lease-row CAS, not session advisory locks (migration
 279, PR #717).** `pg_advisory_lock`/`unlock` are **session-scoped** — sound only on a

@@ -12,10 +12,14 @@ authentication, not authorization.
 The pool role (migration 293) is LOGIN + NOINHERIT with zero direct grants;
 data access exists only under the explicit `SET LOCAL ROLE authenticated`,
 so a code path that forgets the switch fails closed, never leaks.
+
+`tenant_transaction` is the same scoped transaction as a plain context manager,
+for the one route that must not hold it across slow service-role work.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -29,14 +33,10 @@ from api import dependencies as deps
 _TENANT_POOL_ENV = "TENANT_POOL_DB_URL"
 
 
-def tenant_conn(
-    claims: dict = Depends(deps.verify_jwt),
-) -> "Iterator[psycopg.Connection]":
-    """FastAPI dependency: one transaction, RLS-scoped to the caller's accounts.
-
-    verify_jwt is a dependency of THIS function; FastAPI caches dependency
-    results per request, so a route that also declares Depends(verify_jwt)
-    pays no second verification.
+@contextlib.contextmanager
+def tenant_transaction(claims: dict) -> "Iterator[psycopg.Connection]":
+    """One RLS-scoped transaction for `claims`: committed when the block exits
+    cleanly, rolled back when it raises, and the connection closed either way.
 
     There is NO fallback connection: every caller is a real Supabase JWT and
     gets the RLS-scoped tenant-pool transaction. An unconfigured pool must
@@ -65,9 +65,23 @@ def tenant_conn(
                 )
             yield conn
         # conn.transaction() commits on clean resumption, rolls back on the
-        # route's exception — reads and writes share this one block.
+        # caller's exception — reads and writes share this one block.
     finally:
         conn.close()
+
+
+def tenant_conn(
+    claims: dict = Depends(deps.verify_jwt),
+) -> "Iterator[psycopg.Connection]":
+    """FastAPI dependency: one transaction, RLS-scoped to the caller's accounts,
+    held for the whole request (it commits at dependency teardown).
+
+    verify_jwt is a dependency of THIS function; FastAPI caches dependency
+    results per request, so a route that also declares Depends(verify_jwt)
+    pays no second verification.
+    """
+    with tenant_transaction(claims) as conn:
+        yield conn
 
 
 def resolve_account_id(conn: psycopg.Connection, claims: dict) -> uuid.UUID | None:
