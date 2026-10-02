@@ -14,7 +14,7 @@ import pytest
 import requests
 
 from scraper.ceskereality_client import CeskerealityClient, detail_url, index_url
-from scraper.portal_base import BasePortalClient, ListingGoneError
+from scraper.portal_base import BasePortalClient, ListingGoneError, client_hints
 from scraper.rate_limit import RateLimiter
 
 _DETAIL = (
@@ -152,9 +152,9 @@ def test_sends_chrome_client_hints_matching_its_ua():
     """2026-09-29: the site's nginx 403s a Chrome UA without sec-ch-ua hints."""
     headers = CeskerealityClient()._session.headers
     major = re.search(r"Chrome/(\d+)", headers["User-Agent"]).group(1)
-    assert headers["sec-ch-ua"] == (
-        f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not-A.Brand";v="99"'
-    )
+    assert headers["sec-ch-ua"] == client_hints(headers["User-Agent"])["sec-ch-ua"]
+    assert f'"Chromium";v="{major}"' in headers["sec-ch-ua"]
+    assert f'"Google Chrome";v="{major}"' in headers["sec-ch-ua"]
     assert headers["sec-ch-ua-mobile"] == "?0"
     assert headers["sec-ch-ua-platform"] == '"Windows"'
 

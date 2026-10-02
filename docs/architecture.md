@@ -408,8 +408,10 @@ page check (rule #3, source-scoped) even when the declared counts add up short �
 whole point of the 2026-09-08 structural gate, since one 87-row Karlovarský slice collecting 86
 had been vetoing a 20,964-row category. The detail URL carries the category, so the drain derives each listing's category from
 its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
-The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
-robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
+The client rides the residential proxy (`USE_PROXY`) with the shared Chrome browser `User-Agent` plus
+matching `sec-ch-ua` client hints (`CLIENT_HINTS` — since 2026-09-29 the site's own nginx 403s a hint-less
+Chrome UA), at a polite rate. The site's robots.txt disallows generic bots; sending browser-like headers is
+an operator-owned posture (decided 2026-10-02). NOTE: ceskereality ALSO has an on-demand URL parser
 (`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
 preview — a separate entry point unchanged by the scheduled scraper.
 

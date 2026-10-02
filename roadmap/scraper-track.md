@@ -7,9 +7,11 @@ Independent of the analytical, UI, and map tracks.
 
 ### ceskereality hard-403 — Chrome client hints (2026-10-02, fix built, recovery owed)
 - 2026-10-02: every ceskereality request 403s since 09-29 — its nginx rejects a Chrome UA without
-  sec-ch-ua hints (a header rule, not IP/proxy); fixed by `CLIENT_HINTS=True` on the client. The
-  Actions crons were paused by hand meanwhile. **Owed:** a canary through the proxy, reset its
-  `portal_rate_state` row, lift the two `app_settings` kill switches.
+  sec-ch-ua hints (a header rule, not IP/proxy); fix built: `CLIENT_HINTS=True` (200 proven only from a
+  residential IP, unverified via the prod proxy). Both Actions workflows disabled by hand meanwhile.
+  **Owed:** canary = `gh workflow enable` + dispatch one bounded run at once (crons re-arm on enable),
+  also fetch one img.ceskereality.cz image (bare-requests download, no hints); only after a green
+  canary reset its `portal_rate_state` row + lift the two `app_settings` kill switches.
 
 ### The sighting diff lives once — `portal_runner.reconcile_sightings` (2026-10-01, done)
 - **Moved:** the index-walk diff (clamp → `index_summary_native` → touch → `classify_index_sighting`

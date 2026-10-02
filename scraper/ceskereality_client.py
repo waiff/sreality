@@ -125,7 +125,7 @@ def detail_url(path_or_url: str) -> str:
 
 class CeskerealityClient(BasePortalClient):
     ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    # Route through the residential proxy (SCRAPER_PROXY_URL) — the site throttles
+    # Route through the residential proxy (SCRAPER_PROXY_URL) — the site hard-403s
     # our datacenter IP. With a residential exit, the shared browser UA is most
     # natural, so no USER_AGENT override.
     USE_PROXY = True
