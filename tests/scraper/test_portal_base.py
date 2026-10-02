@@ -11,7 +11,7 @@ import time
 import pytest
 import requests
 
-from scraper.portal_base import BasePortalClient, ListingGoneError
+from scraper.portal_base import BasePortalClient, ListingGoneError, client_hints
 from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.rate_limit import RateLimiter
 
@@ -174,3 +174,45 @@ def test_accept_header_per_subclass():
     assert JsonClient()._session.headers["Accept"] == "application/json"
     assert BasePortalClient()._session.headers["Accept"] == "*/*"
     assert "Mozilla" in BasePortalClient()._session.headers["User-Agent"]
+
+
+_WIN_CHROME = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+)
+
+
+def test_client_hints_derive_from_a_windows_chrome_ua():
+    assert client_hints(_WIN_CHROME) == {
+        "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+
+def test_client_hints_empty_for_a_non_chrome_ua():
+    assert client_hints("sreality-bot/1.0 (+https://example.org)") == {}
+
+
+def test_client_hints_platform_follows_the_ua():
+    mac = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    hints = client_hints(mac)
+    assert hints["sec-ch-ua-platform"] == '"macOS"'
+    assert 'v="131"' in hints["sec-ch-ua"]
+
+
+def test_default_client_sends_no_client_hints():
+    """Guards the other portals: hints are opt-in, so their profile is unchanged."""
+    headers = BasePortalClient()._session.headers
+    assert not [k for k in headers if k.lower().startswith("sec-ch-ua")]
+
+
+def test_client_hints_never_contradict_a_non_chrome_ua_override():
+    class HonestBot(BasePortalClient):
+        USER_AGENT = "sreality-bot/1.0"
+        CLIENT_HINTS = True
+
+    headers = HonestBot()._session.headers
+    assert headers["User-Agent"] == "sreality-bot/1.0"
+    assert not [k for k in headers if k.lower().startswith("sec-ch-ua")]

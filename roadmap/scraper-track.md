@@ -5,6 +5,12 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### ceskereality hard-403 — Chrome client hints (2026-10-02, fix built, recovery owed)
+- 2026-10-02: every ceskereality request 403s since 09-29 — its nginx rejects a Chrome UA without
+  sec-ch-ua hints (a header rule, not IP/proxy); fixed by `CLIENT_HINTS=True` on the client. The
+  Actions crons were paused by hand meanwhile. **Owed:** a canary through the proxy, reset its
+  `portal_rate_state` row, lift the two `app_settings` kill switches.
+
 ### The sighting diff lives once — `portal_runner.reconcile_sightings` (2026-10-01, done)
 - **Moved:** the index-walk diff (clamp → `index_summary_native` → touch → `classify_index_sighting`
   → enqueue) existed 11 times (8 crawler walk tails, sreality's `enqueue_only` block, both bespoke

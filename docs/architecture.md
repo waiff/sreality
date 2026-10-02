@@ -243,7 +243,7 @@ job clock, and the one that finished covered 2 of 10 categories and 13% of the b
 in ~2.3s each for exactly 20 requests, then one stalls for ~390 SECONDS and returns 200 — no
 429, no error, no retry, so every rail we own stays quiet. Twenty-four such stalls consumed 143
 of one 160-minute run. A residential IP shows no stall over 26 consecutive requests (0.62
-pages/s vs 0.047), so idnes now sets `USE_PROXY` like the two Cloudflare portals — but with
+pages/s vs 0.047), so idnes now sets `USE_PROXY` like ceskereality and mmreality — but with
 `PROXY_REQUIRED = False`, because idnes only *degrades* without the proxy where they hard-403,
 and skipping a slow portal trades degraded data for none.
 **The walk is SLICED, and the slices are REMEMBERED.** Each category is walked as the 14

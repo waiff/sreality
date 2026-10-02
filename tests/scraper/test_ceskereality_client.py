@@ -7,13 +7,14 @@ No network: a fake session feeds canned responses. Mirrors test_idnes_client.py.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
 import requests
 
 from scraper.ceskereality_client import CeskerealityClient, detail_url, index_url
-from scraper.portal_base import ListingGoneError
+from scraper.portal_base import BasePortalClient, ListingGoneError
 from scraper.rate_limit import RateLimiter
 
 _DETAIL = (
@@ -145,3 +146,22 @@ def test_fetch_detail_archived_page_is_gone():
     c = _client([FakeResponse(200, body, url=_DETAIL)])
     with pytest.raises(ListingGoneError):
         c.fetch_detail(_DETAIL)
+
+
+def test_sends_chrome_client_hints_matching_its_ua():
+    """2026-09-29: the site's nginx 403s a Chrome UA without sec-ch-ua hints."""
+    headers = CeskerealityClient()._session.headers
+    major = re.search(r"Chrome/(\d+)", headers["User-Agent"]).group(1)
+    assert headers["sec-ch-ua"] == (
+        f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not-A.Brand";v="99"'
+    )
+    assert headers["sec-ch-ua-mobile"] == "?0"
+    assert headers["sec-ch-ua-platform"] == '"Windows"'
+
+
+def test_client_hints_leave_the_other_headers_unchanged():
+    ours = CeskerealityClient()._session.headers
+    base = BasePortalClient()._session.headers
+    assert ours["User-Agent"] == base["User-Agent"]
+    assert ours["Accept-Language"] == base["Accept-Language"] == "cs,en;q=0.9"
+    assert ours["Accept"] == CeskerealityClient.ACCEPT

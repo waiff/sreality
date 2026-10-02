@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,33 @@ _BASE_HEADERS: dict[str, str] = {
         "Chrome/148.0.0.0 Safari/537.36"
     ),
 }
+
+
+_CHROME_MAJOR = re.compile(r"Chrome/(\d+)")
+
+
+def client_hints(user_agent: str) -> dict[str, str]:
+    """The sec-ch-ua headers a real Chrome sends with this User-Agent ({} for a non-Chrome UA)."""
+    match = _CHROME_MAJOR.search(user_agent)
+    if match is None:
+        return {}
+    major = match.group(1)
+    if "Windows NT" in user_agent:
+        platform = "Windows"
+    elif "Macintosh" in user_agent:
+        platform = "macOS"
+    elif "Linux" in user_agent:
+        platform = "Linux"
+    else:
+        platform = "Windows"
+    return {
+        "sec-ch-ua": (
+            f'"Chromium";v="{major}", "Google Chrome";v="{major}", '
+            '"Not-A.Brand";v="99"'
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": f'"{platform}"',
+    }
 
 
 class ListingGoneError(Exception):
@@ -85,6 +113,11 @@ class BasePortalClient:
     # "without it, do not bother". Default True preserves the two incumbents.
     PROXY_REQUIRED: bool = True
     PROXY_ENV = "SCRAPER_PROXY_URL"
+    # Opt-in: send the Chrome client hints (sec-ch-ua*) derived from the UA. A
+    # Chrome UA without them is the bot signature ceskereality's nginx started
+    # rejecting on 2026-09-29 (403 on every request); a real Chrome always sends
+    # them. Per portal, so a healthy portal's request profile stays unchanged.
+    CLIENT_HINTS: bool = False
 
     def __init__(
         self,
@@ -105,6 +138,8 @@ class BasePortalClient:
         headers = {**_BASE_HEADERS, "Accept": self.ACCEPT}
         if self.USER_AGENT is not None:
             headers["User-Agent"] = self.USER_AGENT
+        if self.CLIENT_HINTS:
+            headers.update(client_hints(headers["User-Agent"]))
         self._session.headers.update(headers)
         if self.USE_PROXY:
             proxy = os.environ.get(self.PROXY_ENV)
