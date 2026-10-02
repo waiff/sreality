@@ -188,6 +188,39 @@ def test_spec_ignores_retired_price_history_keys() -> None:
     assert "distinct_site_count_min" not in params
 
 
+def test_spec_model_dump_keeps_building_material_and_garden() -> None:
+    """create/update_subscription persist `model_dump()`. Merge f2d7b359 dropped these
+    fields from the model, so extra='ignore' discarded them on every save and the
+    watchdog matched wider than the Browse view it was made from."""
+    dumped = WatchdogFilterSpec(min_garden_area=100, building_material=["cihla"]).model_dump()
+    assert dumped["min_garden_area"] == 100
+    assert dumped["building_material"] == ["cihla"]
+
+
+def test_build_clauses_building_material_ostatni_expands_to_the_rest_of_the_canon() -> None:
+    from toolkit.filter_registry import COLUMN_CANONICAL_VALUES
+
+    where, params = _build_match_clauses(WatchdogFilterSpec(building_material=["ostatni"]))
+    assert "l.building_type = ANY(%(building_material)s)" in where
+    assert params["building_material"] == [
+        v for v in COLUMN_CANONICAL_VALUES["building_type"]
+        if v not in {"cihla", "panel", "smisena"}
+    ]
+    # A blob saved before merge f2d7b359 holds one scalar bucket.
+    assert WatchdogFilterSpec(building_material="cihla").building_material == ["cihla"]
+    where, params = _build_match_clauses(WatchdogFilterSpec(building_material=[]))
+    assert not any("building_type" in w for w in where)
+
+
+def test_build_clauses_garden_area_bounds() -> None:
+    spec = WatchdogFilterSpec(min_garden_area=100.0, max_garden_area=800.0)
+    where, params = _build_match_clauses(spec)
+    assert "l.garden_area >= %(min_garden_area)s" in where
+    assert "l.garden_area <= %(max_garden_area)s" in where
+    assert params["min_garden_area"] == 100.0
+    assert params["max_garden_area"] == 800.0
+
+
 def test_build_clauses_handles_price_and_area_bounds() -> None:
     spec = WatchdogFilterSpec(
         min_price_czk=15_000,
@@ -664,6 +697,7 @@ def test_match_once_uses_per_subscription_cursor() -> None:
 
     assert stats == {
         "subscriptions_evaluated": 1,
+        "subscriptions_failed": 0,
         "matches_inserted": 3,
         "gate_lookback_inserted": 0,
         "listings_in_window": 5,
@@ -1055,6 +1089,80 @@ def test_match_once_skips_invalid_filter_spec() -> None:
     assert stats["matches_inserted"] == 1
 
 
+def _raise_for_poison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the compile raise for any spec carrying the poison price bound."""
+    import api.notifications as nf
+
+    real = nf._build_match_clauses
+
+    def fake(spec: WatchdogFilterSpec) -> Any:
+        if spec.min_price_czk == 666:
+            raise ValueError("a stored spec the compile refuses")
+        return real(spec)
+
+    monkeypatch.setattr(nf, "_build_match_clauses", fake)
+
+
+def test_match_once_counts_failed_subscriptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec that raises inside the compile mutes its watchdog every pass. It is counted
+    (the loop logs the stats at INFO when the count is above 0) and the other
+    subscription still matches."""
+    _raise_for_poison(monkeypatch)
+    cursor_ts = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (
+            lambda s: "FROM notification_subscriptions WHERE is_active" in s,
+            [
+                (UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"), {"min_price_czk": 666},
+                 cursor_ts, []),
+                (UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"), {}, cursor_ts, []),
+            ],
+            2,
+        ),
+        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s,
+         [(datetime(2026, 5, 15, tzinfo=timezone.utc), 1)], 0),
+        (
+            lambda s: "INSERT INTO notification_dispatches" in s
+            and "image_lookback_minutes" in s,
+            [],
+            0,
+        ),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 1),
+        (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s,
+         [], 1),
+    ]
+    stats = match_once(_FakeConn(script))  # type: ignore[arg-type]
+    assert stats["subscriptions_evaluated"] == 2
+    assert stats["subscriptions_failed"] == 1
+    assert stats["matches_inserted"] == 1
+
+
+def test_match_changes_once_counts_failed_subscriptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.notifications import match_changes_once
+
+    _raise_for_poison(monkeypatch)
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (lambda s: "FROM listing_price_steps" in s, [(101, 5001, 4_900_000, 5_000_000)], 0),
+        (
+            lambda s: "FROM notification_subscriptions WHERE is_active" in s,
+            [
+                (UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"), {"min_price_czk": 666}, []),
+                (UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"), {}, []),
+            ],
+            2,
+        ),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 1),
+    ]
+    stats = match_changes_once(_FakeConn(script))  # type: ignore[arg-type]
+    assert stats["subscriptions_evaluated"] == 2
+    assert stats["subscriptions_failed"] == 1
+    assert stats["changes_inserted"] == 1
+
+
 # --- images-first publication gate (Wave C-4) ----------------------------
 
 
@@ -1304,6 +1412,7 @@ def test_match_changes_once_noops_when_no_recent_drops() -> None:
 
     assert stats == {
         "subscriptions_evaluated": 0,
+        "subscriptions_failed": 0,
         "price_drops_in_window": 0,
         "changes_inserted": 0,
     }

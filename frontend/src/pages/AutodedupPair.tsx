@@ -41,6 +41,7 @@ import {
 import { imageSrc } from '@/lib/imageUrl';
 import { ROUTES, withQuery } from '@/lib/routes';
 import { fmtCzk, fmtFloor } from '@/lib/format';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
@@ -87,12 +88,12 @@ export default function AutodedupPair() {
   const sample = params.get('sample') === '1';
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
-  const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const { overlay, submit, isPending } = useVerdictOverlay();
   const notes = useVerdictAnnotations();
   const { latest } = useAutodedupGenerations();
 
   const q = useQuery({
-    queryKey: ['autodedup', 'pair', lo, hi, generation],
+    queryKey: autodedupKeys.pair(lo, hi, generation),
     queryFn: () => getAutodedupPair(lo as number, hi as number, generation),
     enabled: lo != null && hi != null,
   });
@@ -196,7 +197,7 @@ export default function AutodedupPair() {
             <VerdictButtons
               kind="pair"
               verdict={stored}
-              pending={pendingKey === key}
+              pending={isPending(key)}
               annotation={notes.annotationOf(key, stored)}
               onVerdict={(value, annotation) =>
                 submit(key, {
@@ -216,7 +217,7 @@ export default function AutodedupPair() {
               value={notes.annotationOf(key, stored)}
               onChange={(next) => notes.setAnnotation(key, next)}
               dirty={notes.isDirty(key, stored)}
-              pending={pendingKey === key}
+              pending={isPending(key)}
               onSave={() =>
                 stored &&
                 submit(key, {

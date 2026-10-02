@@ -107,13 +107,13 @@ class _ClaimCursor:
 
     It refuses a statement that does not carry them and then applies them to its own rows, so
     the tests below go red BOTH when a rail is dropped from the SQL and when the loader stops
-    using that SQL. `sreality` is at version 4 and `bazos` at 7 (W18's head).
+    using that SQL. `sreality` is at version 4 and `bazos` at 7 (W18's head, which the rows
+    below were written against; bazos@8 declares the same five types plus three).
     """
 
     ACTIVE = {"sreality": 4, "bazos": 7}
 
-    # What the ACTIVE contract DECLARES an entry for. bazos@7 is the real shape: the four
-    # page entries plus the `street_name` payload entry W18 added.
+    # What the ACTIVE contract DECLARES an entry for: bazos@7's shape.
     DECLARED = {
         "sreality": ("obec_name", "coordinate"),
         "bazos": ("obec_name", "psc", "precision_declaration", "coordinate", "street_name"),
@@ -294,8 +294,8 @@ def test_a_naive_and_an_aware_claim_set_resolve_identically():
             Claim(
                 id=i, listing_id=900001, source="sreality", claim_type=claim_type,
                 surface="api_json", extraction_method="portal_structured_field",
-                extractor_id="fx", licence_class="portal", observed_at=moment,
-                value_text=value, claim_confidence="high", subject_scoped=True,
+                licence_class="portal", observed_at=moment,
+                value_text=value, subject_scoped=True,
             )
             for i, (claim_type, value) in enumerate(
                 (("obec_name", "Praha"), ("street_name", STREET)), start=1

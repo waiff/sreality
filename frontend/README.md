@@ -74,6 +74,8 @@ src/
   routes.tsx         route table
   lib/
     supabase.ts      single shared client
+    pgRead.ts        THE PostgREST read: every supabase-js read is awaited
+                     here (deadline, abort, ApiError, one retry rule)
     types.ts         shapes mirroring listings_public et al.
     queries.ts       supabase query helpers (grows with parts B–E)
     listingUrl.ts    propertyPath(propertyId) — the ONE detail-page builder

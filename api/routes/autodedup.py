@@ -451,8 +451,10 @@ def _families(mask: Any) -> list[str]:
 def _certificate(decision: Any) -> str | None:
     """`certificate:K-A` / `certificate:K-A:evidence_gate` -> `K-A`; anything else -> None.
 
-    The certificate is not a column of `autodedup.pairs`: `decide.decide_pair` spells it into
-    the reason string, and this is the single place that reads it back out."""
+    `decide.decide_pair` spells the certificate into the decision string and this reads it back
+    out of that string, though `autodedup.pairs.certificate` is a column since migration 539:
+    the string misses a pair E63 re-promoted under a `context_rule:` reason, and the column is
+    NULL on batch generations scored before W9m (autodedup/score_sql.py)."""
     text = str(decision or "")
     parts = text.split(":")
     return parts[1] if len(parts) >= 2 and parts[0] == "certificate" and parts[1] else None

@@ -21,12 +21,13 @@ psycopg sends no type OID for a Python `None`, so an uncast NULL fails Parse wit
 Keyset paging, never OFFSET: each list statement's cursor is the row-value of its own sort
 key, so a page boundary cannot repeat or skip a row under a concurrent rebuild.
 
-The `certificate` of a pair is not a column: `decide.decide_pair` writes the reason string
-`certificate:K-A` (or `certificate:K-A:evidence_gate`), so `split_part(decision, ':', 1) =
-'certificate'` is how a certificate edge is counted, and the route parses the code out of the
-same string. A `LIKE 'certificate:%'` would be the obvious spelling and is deliberately NOT
-used: a bare `%` inside a module-level `*_SQL` constant is what
-tests/test_sql_placeholders.py exists to reject.
+These statements count a certificate edge off the reason string `decide.decide_pair` writes -
+`certificate:K-A` (or `certificate:K-A:evidence_gate`) - as `split_part(decision, ':', 1) =
+'certificate'`, and the route parses the code out of the same string, although
+`autodedup.pairs.certificate` has been a column since migration 539 (NULL on batch generations
+scored before W9m, autodedup/score_sql.py). A `LIKE 'certificate:%'` would be the obvious
+spelling and is deliberately NOT used: a bare `%` inside a module-level `*_SQL` constant is
+what tests/test_sql_placeholders.py exists to reject.
 """
 
 from __future__ import annotations

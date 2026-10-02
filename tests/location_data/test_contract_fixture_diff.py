@@ -30,12 +30,15 @@ import pytest
 from location_data import contracts
 from location_data.claims_intake import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    READERS,
     Claim,
     IntakeResult,
     ListingRow,
     extract_listing,
+    reading_entries,
     value_norm_mirror,
 )
+from location_data.text_reading import Reading
 from location_data.page_readers import (
     PAGE_READERS,
     ArchivedPayload,
@@ -209,12 +212,12 @@ def bodies_for(source: str) -> dict[str, tuple[Body, ...]]:
 # generated column, included because a normalisation change is exactly the kind of silent
 # drift this gate exists to surface.
 _CLAIM_FIELDS = (
-    "claim_type", "surface", "page_kind", "extraction_method", "snapshot_anchor",
+    "claim_type", "surface", "page_kind", "extraction_method",
     "value_text", "value_norm", "value_num", "value_geom_wkt", "value_shape_wkt",
     "value_jsonb", "distance_m", "travel_mode", "target_text",
     "declared_precision_label", "declared_confidence", "declared_radius_m",
-    "claim_confidence", "blur_evidence", "licence_class", "history_completeness",
-    "subject_scoped", "legacy_source_column", "legacy_write_path_unknown",
+    "claim_confidence", "blur_evidence", "licence_class",
+    "subject_scoped", "legacy_source_column",
 )
 
 
@@ -298,10 +301,6 @@ def project_archived(read: Any) -> dict[str, Any]:
         "blur_evidence": claim.blur_evidence,
         "subject_scoped": claim.subject_scoped,
         "position_branch": read.position_branch,
-        "evidence_quote": claim.evidence_quote,
-        "evidence_span_len": (
-            None if claim.span_start is None or claim.span_end is None
-            else claim.span_end - claim.span_start),
     }
 
 
@@ -316,15 +315,12 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     register = ScopeRegister.from_zones(contract.source, contract.exclusion_zones)
     document = scope_html(path.read_bytes(), register=register)
     payload = ArchivedPayload(
-        id=1, source=contract.source, source_id_native=native, page_kind="detail",
-        payload_sha256="0" * 64, first_observed_at=_ARCHIVE_CLOCK,
-        body=path.read_bytes())
+        id=1, page_kind="detail", first_observed_at=_ARCHIVE_CLOCK, body=path.read_bytes())
     row = fx.listing(contract.source, {}, native=native)
     out: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda e: e.entry_id):
         for read in PAGE_READERS[entry.reader](entry, row, payload, document):
-            stamped = stamp_page_claim(read.claim, payload,
-                                          scope_version=document.scope_version)
+            stamped = stamp_page_claim(read.claim, payload)
             # The C6 licence ladder, applied exactly as the real lane applies it. Without
             # this the gate would show a green claim for a coordinate the lane REFUSES —
             # an entry id absent from ARCHIVED_COORDINATE_RULES — which is a false safety
@@ -340,9 +336,32 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     return out
 
 
+# The READINGS arm (W3): a reading entry reads the text lane's stored answer, never a body,
+# so its fixture is a FROZEN READING (`<portal>_readings.json`: the block + the advert text).
+# No model runs here; V1–V4 and the typed numbers are what it pins, as listing -> entry -> value
+# (an entry is one claim type; surface, method and licence are pinned in `test_text_reading`).
+def score_readings(contract: contracts.PortalContract) -> dict[str, dict[str, str]]:
+    path = _W2 / f"{contract.source}_readings.json"
+    entries = reading_entries(fx.entries_for(contract.source))
+    out: dict[str, dict[str, str]] = {}
+    for item in json.loads(path.read_text(encoding="utf-8")) if path.exists() else []:
+        row = fx.listing(contract.source, {}, native=item["listing"])
+        reading = Reading(1, item["extracted"], item["advert_text"])
+        out[item["listing"]] = {c.extractor_id: c.value_text for entry in entries
+                                for c in READERS[str(entry.reader)].fn(entry, row, reading)}
+    return out
+
+
+def _reading_rows(golden: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"listing": listing, "extractor_id": entry, "value_text": value}
+            for listing, claims in golden.get("reading_claims", {}).items()
+            for entry, value in claims.items()]
+
+
 def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
     declared = contract_regression_ids(contract)
     bodies = bodies_for(contract.source)
+    readings = score_readings(contract)
     scored = [score(contract.source, listing_id, body)
               for listing_id in sorted(bodies)
               for body in bodies[listing_id]]
@@ -353,6 +372,7 @@ def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
         "listings_without_a_fixture_body": [i for i in declared if i not in bodies],
         "fixtures": scored,
         "archived_claims": score_archived(contract),
+        **({"reading_claims": readings} if readings else {}),
     }
 
 
@@ -471,6 +491,8 @@ def diff_golden(golden: dict[str, Any], actual: dict[str, Any]) -> list[str]:
                            golden.get("archived_claims", []),
                            actual.get("archived_claims", []),
                            "extractor_id", "claim_type")
+    lines += _diff_section("reading claim", _reading_rows(golden), _reading_rows(actual),
+                           "listing", "extractor_id")
 
     old = {_fixture_key(f): f for f in golden.get("fixtures", [])}
     new = {_fixture_key(f): f for f in actual.get("fixtures", [])}

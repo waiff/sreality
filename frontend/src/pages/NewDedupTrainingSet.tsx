@@ -23,6 +23,8 @@ import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
 import { pushToast } from '@/lib/toast';
+import { trainingSetKeys } from '@/lib/newDedupKeys';
+import { cachePatch, useOptimisticWrite, type CachePatch } from '@/lib/useOptimisticWrite';
 
 /* NEW DEDUP · Training set — a head's labels, in four trays.
  *
@@ -176,7 +178,7 @@ export default function NewDedupTrainingSet() {
     setParams(merged, { replace: true });
   };
 
-  const headsQ = useQuery({ queryKey: ['training-set-heads'], queryFn: () => listTrainingSetHeads() });
+  const headsQ = useQuery({ queryKey: trainingSetKeys.heads, queryFn: () => listTrainingSetHeads() });
   const heads = headsQ.data?.data ?? [];
   const ordered = useMemo(
     () => [...heads].sort((a, b) => b.positive - a.positive || a.label.localeCompare(b.label)),
@@ -190,7 +192,7 @@ export default function NewDedupTrainingSet() {
    * drift from what the grid will actually render. A 404 (no label for this
    * head, or a holdout image) leaves the page exactly where it was. */
   const locateQ = useQuery({
-    queryKey: ['training-set-locate', activeId, deepLinkImage],
+    queryKey: trainingSetKeys.locate(activeId, deepLinkImage),
     queryFn: () => locateTrainingImage(activeId as number, deepLinkImage as number),
     enabled: activeId != null && deepLinkImage != null,
   });
@@ -204,7 +206,7 @@ export default function NewDedupTrainingSet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [located, pageSize, tray, offset]);
 
-  const rowsKey = ['training-set', activeId, tray, offset, pageSize];
+  const rowsKey = trainingSetKeys.rows(activeId, tray, offset, pageSize);
   const rowsQ = useQuery({
     queryKey: rowsKey,
     queryFn: () => listTrainingSet({ tag_id: activeId as number, ...trayQuery(tray), limit: pageSize, offset }),
@@ -216,56 +218,69 @@ export default function NewDedupTrainingSet() {
     : Math.max(0, Math.floor(Math.max(0, total - 1) / pageSize) * pageSize);
 
   /* COUNTS MOVE ON THE CLICK, in tray terms. A mark change moves a row between
-   * trays; the reserve is only ever entered or left by an explicit move. */
-  const bumpTrays = (deltas: Partial<Record<Tray, number>>) =>
-    qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
+   * trays; the reserve is only ever entered or left by an explicit move. The
+   * updaters are pure so the optimistic writes below hand them to
+   * useOptimisticWrite, which holds and snapshots the same keys it patches. */
+  type HeadsData = typeof headsQ.data;
+  type RowsData = typeof rowsQ.data;
+  const withTrays = (deltas: Partial<Record<Tray, number>>) => (old: HeadsData): HeadsData =>
+    old && ({
       ...old,
       data: old.data.map((h) => h.id !== activeId ? h : Object.entries(deltas).reduce(
         (acc, [k, d]) => ({ ...acc, [k]: Math.max(0, acc[k as keyof typeof acc] as number + (d as number)) }),
         { ...h },
       )),
-    }));
+    });
+  const bumpTrays = (deltas: Partial<Record<Tray, number>>) =>
+    qc.setQueryData(trainingSetKeys.heads, withTrays(deltas));
 
-  const patchRow = (imageId: number, fn: (r: TrainingSetRow) => TrainingSetRow) =>
-    qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
+  const withRow = (imageId: number, fn: (r: TrainingSetRow) => TrainingSetRow) =>
+    (old: RowsData): RowsData => old && ({
       ...old, data: { ...old.data, rows: old.data.rows.map((r) => r.image_id === imageId ? fn(r) : r) },
-    }));
+    });
+  const patchRow = (imageId: number, fn: (r: TrainingSetRow) => TrainingSetRow) =>
+    qc.setQueryData(rowsKey, withRow(imageId, fn));
 
-  const correctMut = useMutation({
-    mutationFn: ({ imageId, state }: { imageId: number; state: TagState; from: TagState; fromMine: boolean }) =>
+  const correctMut = useOptimisticWrite({
+    mutationKey: ['write', 'training-set', 'correct'],
+    mutationFn: ({ imageId, state }: { imageId: number; state: TagState; from: TagState }) =>
       setNewDedupTagAnnotation(activeId as number, imageId, state, state === 'excluded' ? 'pruned' : null),
-    onMutate: (vars) => {
-      /* Optimistic: the tile and the counts move now. A failure reverts both.
-       * A mark written by the operator is admitted, so a reserve row that is
-       * re-marked leaves the reserve and enters its new tray.
-       *
-       * On the review lane the DRAWN COUNT MUST NOT MOVE — the thousand is a
-       * list, not a tray, and shrinking it as the operator works would be the
-       * churn the stored draw exists to prevent. What moves there is progress
-       * and the two state trays the photo travels between. */
-      patchRow(vars.imageId, (r) => ({
-        ...r, state: vars.state, source: 'human', in_training: true,
-        excluded_reason: vars.state === 'excluded' ? 'pruned' : null,
-      }));
+    /* Optimistic: the tile and the counts move now. A failure restores both
+     * exactly as they were — on the page the click was made on, even if the
+     * operator has paged away since.
+     * A mark written by the operator is admitted, so a reserve row that is
+     * re-marked leaves the reserve and enters its new tray.
+     *
+     * On the review lane the DRAWN COUNT MUST NOT MOVE — the thousand is a
+     * list, not a tray, and shrinking it as the operator works would be the
+     * churn the stored draw exists to prevent. What moves there is progress
+     * and the two state trays the photo travels between. */
+    patch: (vars) => {
+      const patches: CachePatch[] = [
+        cachePatch({ queryKey: rowsKey, exact: true }, withRow(vars.imageId, (r) => ({
+          ...r, state: vars.state, source: 'human', in_training: true,
+          excluded_reason: vars.state === 'excluded' ? 'pruned' : null,
+        }))),
+      ];
       /* A mark you set is admitted, so the row lands in its new sign's TRAINING
        * tray wherever it came from. */
       if (vars.state !== (tray.endsWith('_reserve') ? tray.slice(0, -'_reserve'.length) : tray)) {
-        bumpTrays({ [tray]: -1, [vars.state]: +1 } as Partial<Record<Tray, number>>);
+        patches.push(cachePatch(
+          { queryKey: trainingSetKeys.heads, exact: true },
+          withTrays({ [tray]: -1, [vars.state]: +1 } as Partial<Record<Tray, number>>),
+        ));
       }
+      return patches;
     },
+    /* A failure also re-reads the row pages: the rollback restores the page as
+     * it was at the click, which would otherwise erase a move or a note that
+     * landed on a neighbouring tile while this mark was in flight. */
+    revalidate: (_vars, failed) =>
+      failed ? [trainingSetKeys.heads, trainingSetKeys.all] : [trainingSetKeys.heads],
     onSuccess: (_res, vars) => {
       setChanged((prev) => new Map(prev).set(vars.imageId, {
         from: prev.get(vars.imageId)?.from ?? vars.from, to: vars.state,
       }));
-      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
-    },
-    onError: (e: Error, vars) => {
-      patchRow(vars.imageId, (r) => ({
-        ...r, state: vars.from, source: vars.fromMine ? 'human' : 'machine',
-        in_training: !inReserve,
-      }));
-      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
-      pushToast('err', e.message);
     },
   });
 
@@ -283,18 +298,17 @@ export default function NewDedupTrainingSet() {
     },
     onSuccess: (moved, vars) => {
       const set = new Set(moved);
-      qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
+      qc.setQueryData(rowsKey, (old: RowsData) => old && ({
         ...old, data: { ...old.data, rows: old.data.rows.map((r) => set.has(r.image_id) ? { ...r, in_training: vars.into } : r) },
       }));
       const home = tray.endsWith('_reserve') ? (tray.slice(0, -'_reserve'.length) as Tray) : tray;
       const rest = `${home}_reserve` as Tray;
       bumpTrays(vars.into ? { [rest]: -moved.length, [home]: +moved.length }
                           : { [home]: -moved.length, [rest]: +moved.length });
-      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      qc.invalidateQueries({ queryKey: trainingSetKeys.heads });
       pushToast('ok', vars.into ? `${moved.length} moved into the training set`
                                 : `${moved.length} returned to reserve`);
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
   /* Rows a page-wide move would touch: everything still on the tray's side.
    * Empty outside the two trays where membership is a question at all. */
@@ -349,35 +363,28 @@ export default function NewDedupTrainingSet() {
   const drawMut = useMutation({
     mutationFn: () => drawTrainingSet(activeId as number, { state: 'negative', size: drawSize }),
     onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
-      qc.invalidateQueries({ queryKey: ['training-set'] });
+      qc.invalidateQueries({ queryKey: trainingSetKeys.heads });
+      qc.invalidateQueries({ queryKey: trainingSetKeys.all });
       patch({ set: 'negative', offset: null });
       pushToast('ok', `${res.data.drawn} negatives drawn at random`);
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
 
   /* WHERE THE OPERATOR GOT TO. Three-valued, because "set aside on purpose" is
    * a decision and must not read as "nobody has said" (migration 487). It
    * writes one column and nothing reads it — no gate, no training effect. */
-  const patchHeadState = (next: ReviewState) =>
-    qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
-      ...old,
-      data: old.data.map((h) => h.id === activeId ? { ...h, review_state: next } : h),
-    }));
-  const reviewMut = useMutation({
+  const reviewMut = useOptimisticWrite({
+    mutationKey: ['write', 'training-set', 'review-state'],
     mutationFn: (state: ReviewState) =>
       setNewDedupTagFlags(activeId as number, { review_state: state }),
-    onMutate: (state) => {
-      const was = activeHead?.review_state ?? 'not_ready';
-      patchHeadState(state);
-      return { was };
-    },
-    onError: (e: Error, _state, ctx) => {
-      patchHeadState(ctx?.was ?? 'not_ready');
-      pushToast('err', e.message);
-    },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['training-set-heads'] }),
+    // A failure restores the head as it was — never a default state.
+    patch: (state) => [
+      cachePatch({ queryKey: trainingSetKeys.heads, exact: true }, (old: HeadsData) => old && ({
+        ...old,
+        data: old.data.map((h) => h.id === activeId ? { ...h, review_state: state } : h),
+      })),
+    ],
+    revalidate: [trainingSetKeys.heads],
   });
 
   const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
@@ -393,7 +400,6 @@ export default function NewDedupTrainingSet() {
       if (data.note) patchRowNote(vars.imageId, data.note);
       pushToast('ok', 'Note saved');
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
   const editNoteMut = useMutation({
     mutationFn: ({ noteId, text }: { noteId: number; text: string; imageId: number }) => editTagLabelNote(noteId, text),
@@ -403,7 +409,6 @@ export default function NewDedupTrainingSet() {
       setEditingNote((prev) => { const n = new Set(prev); n.delete(vars.imageId); return n; });
       pushToast('ok', 'Note updated');
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
   const deleteNoteMut = useMutation({
     mutationFn: ({ noteId }: { noteId: number; imageId: number }) => deleteTagLabelNote(noteId),
@@ -412,7 +417,6 @@ export default function NewDedupTrainingSet() {
       setEditingNote((prev) => { const n = new Set(prev); n.delete(vars.imageId); return n; });
       pushToast('ok', 'Note removed');
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
 
   if (headsQ.isLoading) return <div className="p-6"><Spinner /></div>;
@@ -432,8 +436,7 @@ export default function NewDedupTrainingSet() {
   const markAt = (idx: number, state: TagState) => {
     const r = rows[idx];
     if (!r || correctMut.isPending) return;
-    correctMut.mutate({ imageId: r.image_id, state, from: r.state,
-                        fromMine: r.source !== 'machine' });
+    correctMut.mutate({ imageId: r.image_id, state, from: r.state });
   };
   const moveAt = (idx: number) => {
     const r = rows[idx];
@@ -540,7 +543,7 @@ export default function NewDedupTrainingSet() {
                 ? (mine ? `Already ${TRAY_LABEL[v]}, yours` : 'Confirm — makes this your label and admits it')
                 : `Change the mark to ${TRAY_LABEL[v]}`}
               disabled={correctMut.isPending}
-              onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state, fromMine: mine })}
+              onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state })}
               className={`flex-1 py-0.5 text-[0.65rem] whitespace-nowrap rounded-[var(--radius-xs)] border transition-colors ${
                 r.state === v ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
                   : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'}`}

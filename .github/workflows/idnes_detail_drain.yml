@@ -4,8 +4,9 @@ name: "Scraping: iDNES Reality detail drain"
 # The slow half of the iDNES cadence split (architectural rule #19, like sreality).
 # Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by
 # idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool,
-# parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0
-# idempotency + Tier-1 property matching). The per-listing category is derived from
+# parses it to a ScrapedListing, and writes via listing_write.write_listings (the one
+# listing write; new rows land property_id NULL and the straggler-attach births the
+# singleton). The per-listing category is derived from
 # its detail URL. Records run_type='detail' (index_pages=0). The drain records
 # image-URL rows; the shared images.yml job downloads the bytes to R2.
 #
@@ -21,7 +22,8 @@ name: "Scraping: iDNES Reality detail drain"
 # gap — no overlap). Doubles backfill throughput vs the prior every-2h cadence; the
 # concurrency group still serialises runs if GitHub slips a tick.
 #
-# Required secret: SUPABASE_DB_URL (single-row ingest uses the transaction pooler).
+# Required secret: SUPABASE_DB_URL (batched writes without prepared statements use the
+# transaction pooler).
 
 on:
   schedule:

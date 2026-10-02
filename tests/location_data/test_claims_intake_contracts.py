@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from location_data import claims_intake, contracts, page_readers
+from location_data import claims_intake, contracts, page_readers, text_reading
 from location_data.claims_intake import GUARDS, READERS, SOURCES, TRANSFORMS
 from location_data.page_readers import PAGE_READERS
 from location_data.contracts import (
@@ -78,6 +78,7 @@ _INTAKE_AST = ast.parse(Path(claims_intake.__file__).read_text(encoding="utf-8")
 # because the gate could not see the reader.
 _ARCHIVE_AST = ast.parse(
     Path(page_readers.__file__).read_text(encoding="utf-8"))
+_READING_AST = ast.parse(Path(text_reading.__file__).read_text(encoding="utf-8"))
 
 
 def _reader_bodies(
@@ -309,10 +310,17 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     # inside a link, and a schema.org JSON-LD block. Written as "no reader may be declared on
     # a W2 surface until W2 gives it one" and updated here deliberately — still an exact set,
     # so a further surface cannot arrive unreviewed.
+    # W3 opened `description`: the text lane's stored reading, the lane's third substrate.
     assert surfaces == {
         "api_json", "graphql", "embedded_json",
-        "html_selector", "archived_html", "map_config", "url_slug", "jsonld",
+        "html_selector", "archived_html", "map_config", "url_slug", "jsonld", "description",
     }
+    assert {n for n, r in READERS.items()
+            if r.substrate == claims_intake.SUBSTRATE_READING} == {"text_reading"}
+    reader = next(node for node in _READING_AST.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "read_claims")
+    assert READER_CONTRACTS["text_reading"].appetite - {"reader"} == _appetite_of(
+        reader, _READING_AST) == {"slot", "fallback"}
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
     assert methods <= EXTRACTION_METHODS
     # `regex_text` arrives with the canon and is the one that changes what a claim MUST
@@ -323,7 +331,7 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     assert methods == {
         "portal_structured_field", "portal_declared_quality",
         "html_selector_parse", "map_widget_parse", "url_slug_parse", "regex_text",
-        "breadcrumb_parse",
+        "breadcrumb_parse", "llm_text",
     }
 
 
@@ -390,7 +398,7 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
     for name, spec in READER_CONTRACTS.items():
         assert spec.reads_stored_body == (name in PAGE_READERS), name
     # The same no-helper rule as the W1 scan, for the same reason: a helper evaluating
-    # guards on a reader's behalf would let the table lie. `_evidenced` and `_entry_css` are
+    # guards on a reader's behalf would let the table lie. `_page_claim` and `_entry_css` are
     # shared, and neither may touch the two entry points.
     reader_names = {fn.name for fn in bodies.values()} | {"apply_transforms", "guard_admits"}
     for node in _ARCHIVE_AST.body:
@@ -408,15 +416,16 @@ def test_the_transform_and_guard_vocabularies_stay_in_sync_with_the_runtime():
 
 
 def test_the_payload_half_executes_no_evidence_bearing_method():
-    """`regex_text` / `llm_text` need a span into a RETRIEVABLE document, and
-    `listings.raw_json` is latest-wins JSON nobody archived (01 §4.2). The stored page body
-    IS retrievable (content-addressed, immutable), so the page half may carry them — which
-    is the whole reason the two substrates stay distinguishable inside one registry."""
+    """`regex_text` needs a span into a RETRIEVABLE document, and `listings.raw_json` is
+    latest-wins JSON nobody archived (01 §4.2): only the stored page body carries it. `llm_text`
+    is the stored READING's, whose row is its evidence (value, quote, model, text hash)."""
+    home = {"regex_text": claims_intake.SUBSTRATE_ARCHIVED_HTML,
+            "llm_text": claims_intake.SUBSTRATE_READING}
     for contract in _all().values():
         for entry in contract.entries:
-            if entry.extraction_method in ("regex_text", "llm_text"):
-                assert (READERS[entry.reader].substrate
-                        == claims_intake.SUBSTRATE_ARCHIVED_HTML), entry.entry_id
+            if entry.extraction_method in home:
+                assert READERS[entry.reader].substrate == home[entry.extraction_method], (
+                    entry.entry_id)
 
 
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
@@ -491,14 +500,13 @@ def test_the_forbidden_licence_class_and_detected_blur_are_rejected():
         _entry(blur_evidence="detected")
 
 
-def test_a_non_enum_confidence_is_rejected_on_both_of_its_spellings():
-    """`claim_confidence` lands in a typed `match_confidence` column, so a typo caught here
-    is a CI failure instead of a mid-batch INSERT error that takes a whole run down."""
+def test_a_non_enum_confidence_is_rejected():
+    """A typo caught here is a CI failure instead of a resolver reading a label it ignores.
+    `locator.claim_confidence` is gone (W3): no reader stamps one."""
     with pytest.raises(ContractError, match="prior.match_confidence"):
         _entry(prior={"match_confidence": "certain"})
-    with pytest.raises(ContractError, match="locator.claim_confidence"):
-        _entry(locator={"reader": "scalar", "json_pointer": "/x",
-                        "claim_confidence": "very-high"})
+    with pytest.raises(ContractError, match="never reads locator.claim_confidence"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x", "claim_confidence": "low"})
 
 
 def test_a_fallback_path_is_held_to_every_rail_the_primary_locator_is():
@@ -535,11 +543,11 @@ def test_a_fallback_path_is_held_to_every_rail_the_primary_locator_is():
 
 def test_only_the_readers_that_walk_fallback_paths_may_declare_one():
     """`fallback` is `optional_keys` on the three payload readers that call `locator_reads`
-    and on nothing else — a declaration on any other reader is the inert rail this gate
-    exists to refuse."""
+    and on the reading reader, which walks its slots (W3) — a declaration on any other reader
+    is the inert rail this gate exists to refuse."""
     walkers = {name for name, spec in READER_CONTRACTS.items()
                if "fallback" in spec.optional_keys}
-    assert walkers == {"scalar", "point_pair", "declared_quality"}
+    assert walkers == {"scalar", "point_pair", "declared_quality", "text_reading"}
     with pytest.raises(ContractError, match="never reads locator.fallback"):
         _entry(locator={"reader": "conflict_signal", "json_pointer": "/a",
                         "fallback": [{"json_pointer": "/b"}]})

@@ -45,9 +45,9 @@ psql "$SUPABASE_DB_URL" -c "\d listings" | head -60
 We connect directly to Supabase Postgres with `psycopg` v3 (not the Supabase REST client),
 for two reasons. **PostGIS support:** inserting `geography(point, 4326)` is one line of SQL
 with `ST_SetSRID(ST_MakePoint(lon, lat), 4326)`, where the PostgREST equivalent needs a stored
-procedure or fragile GeoJSON casting. **Atomic transactions:** `listings`, `listing_snapshots`
-and `images` for one listing write inside a single transaction, which the REST client cannot
-span. Do not introduce `supabase-py` without an explicit reason and a discussion.
+procedure or fragile GeoJSON casting. **Atomic transactions:** `scraper/listing_write.py` writes `listings`,
+`listing_snapshots`, `images`/`listing_videos` and the dirty marks of a whole drain flush in ONE transaction, which the
+REST client cannot span. Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 **`connect()` and `connect_session()` are BOTH `autocommit=True`** — "callers manage
 transactions explicitly". Anything that must be atomic needs an explicit
@@ -68,7 +68,7 @@ tenant-scoped:
   `DuplicatePreparedStatement`. Takes `attempts`/`retry_delay` for bounded retry on a flaky
   connect handshake (PR #663).
 - `connect_session()` — **only** for a long-lived hot loop that repeats the same SQL thousands of
-  times: the scraper's detail-write loop (`scraper/main.py:_run_full`), the location resolve drain
+  times: the sreality detail drain (`SrealityPortal.connect_drain`, the one writer's prepared statements), the location resolve drain
   (`location_data/resolver/drain.py` + the realtime worker's `location_resolve` lane, the one
   worker lane not on `db.connect()`), and the registry loaders (`location_data/loader_db.py`,
   which additionally REFUSES the fallback — a 3 M-row COPY needs session GUCs). Points at
@@ -461,7 +461,8 @@ So: wrap a gate that sits alongside a column predicate; a standalone gate is alr
 - **Location-data relations (`location_*`, `ruian_*`, `portal_contract*`; migs 380+) are
   service-role-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every table, sequence
   + function; the SPA reads a listing's place through the public views, never the store.
-  `location_claims` (19 cols) is append-only and **never UPDATEd**. The resolver reads only
+  `location_claims` (19 cols) is **never UPDATEd** — rows are inserted, or DELETEd (a superseded
+  reading in `claims_intake`, a retraction, a retirement). The resolver reads only
   ACTIVE-contract + operator claims, so a wrong contract is RETRACTED (DELETE + re-resolve enqueue,
   `contracts.py --retract`) and a merely SUPERSEDED version's claims are deleted with NO enqueue by
   `location_claims_retire.yml` (backup artifact, then keyset batches) — run it after a retirement. The live set is `location_claims`,

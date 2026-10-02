@@ -1,6 +1,6 @@
 ---
 name: toolkit-api
-description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, the two-gate auth split (require_token shared-secret vs. require_admin/verify_jwt real Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
+description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, the two-gate auth split (require_token shared-secret vs. require_admin/verify_jwt real Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic, Gemini, OpenAI, Qwen, OSS), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
 ---
 
 # Toolkit & API
@@ -16,7 +16,7 @@ it (`api/`). They do not apply to the scraper.
 
 1. **Tools return facts, not opinions.** No "recommended price", no "this looks like a good
    deal." Tools return data + provenance. Reasoning happens at the agent layer.
-2. **Standard envelope on every tool's return value:**
+2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `asset_identity` / `property_identity` / `location_quality` still omit `data_freshness`):
    ```python
    {
      "data": ...,
@@ -30,7 +30,7 @@ it (`api/`). They do not apply to the scraper.
    }
    ```
 3. **Every tool excludes `given_up = true` listings** from `listing_fetch_failures` by
-   default. An `include_unreliable: bool = False` parameter overrides. Every cohort (`_shared_filter_where`: comparables, velocity, the transit corridor) also counts a property ONCE, as its canonical advert (`properties.repr_listing_ref_id`, migration 561), and leaves out every advert of the subject's property via `TargetSpec.exclude_listing_ids` / `TargetIn.exclude_listing_ids` (the ONE exclusion, decision 13: any advert of the subject names its whole property; the sreality-keyed `exclude_ids` is gone, a frozen spec's copy is history and never re-read).
+   default. An `include_unreliable: bool = False` parameter overrides. Every cohort (`_shared_filter_where`, the listings adapter over `toolkit/filter_compiler.compile_filter_where`: comparables, velocity, the transit corridor) also counts a property ONCE, as its canonical advert (`properties.repr_listing_ref_id`, migration 561), and leaves out every advert of the subject's property via `TargetSpec.exclude_listing_ids` / `TargetIn.exclude_listing_ids` (the ONE exclusion, decision 13: any advert of the subject names its whole property; the sreality-keyed `exclude_ids` is gone, a frozen spec's copy is history and never re-read).
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval 'X days'`
    (default 7).** Don't trust `is_active` alone — a listing not seen for 30 days is
    functionally inactive.
@@ -95,8 +95,8 @@ it (`api/`). They do not apply to the scraper.
    override. Every mutating `/broker-review/*` route binds `require_admin`'s claims and threads
    `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by` /
    `lifted_by`.
-   **Three routes write the AUTODEDUP ruling store** (mig 528, same `decided_by` idiom): `POST /autodedup/verdict` (+ `/split`), and via `toolkit.property_identity.record_rulings` `POST /properties/merge` (`merge_property_set`: the oldest record survives, the one asset link is carried, two linked units refuse the engine; "same" on the ticked cards' canonical adverts) and `POST /properties/{id}/detach` (`detach_listing`: one advert back to its ledger origin with the link a merge carried off it, `origin_moved_on` if a later merge retired that origin elsewhere, or (operator only) one no merge brought, beside another own advert, to a new record through the one birth path (`split_native`), optional `reason`; "different" from every advert that stays). An engine merge / `unapply` rules nothing. Each upserts
-   `autodedup.verdicts`; a negative PAIR verdict adds `autodedup.must_not_link` and reversing it DELETEs that row; cluster verdicts add none; only `/autodedup/*` answers an un-migrated store with a 503. Engine SPLITS are propose-only (decision 9): `GET /autodedup/proposed-splits` (`generation`, keyset `after`/`limit`) and `/proposed-splits/{property_id}` read `autodedup/proposed_splits.py` → `{property_id, canonical_listing_id, proposed, groups: [{cluster_key, adverts: [{listing_id, source, is_active, origin_property_id}]}], unseen, splits: [{listing_lo, listing_hi, reason_source, reason, ruling}], ruled}`; the batch split is the detach route per advert, no write route of its own.
+   **The AUTODEDUP ruling store is written** (mig 528, same `decided_by` idiom) by `POST /autodedup/verdict` (+ `/split`, `/candidate-split`) and, via `toolkit.property_identity.record_rulings`, by `POST /properties/merge` (`merge_property_set`: the oldest record survives, every property-anchored operator-state row follows through `PROPERTY_CARRIERS` (a collapsed dispatch's `channel_sends` move to its kept twin first), two linked units refuse the engine, `CategoryClash` refuses rule 15, ONE `properties_changed` (rollup, Browse row, broker queue) ends it; "same" on the ticked cards' canonical adverts) and `POST /properties/{id}/split` (ONE `detach_listings` over its movers + `merge_property_set` per joined unit; "different" movers vs stayers, never between two movers). An engine merge / `unapply` rules nothing. Each appends
+   on change (migration 574); a negative PAIR verdict upserts `autodedup.must_not_link` and reversing it DELETEs that row; cluster verdicts add none; only `/autodedup/*` answers an un-migrated store with a 503. Engine SPLITS are propose-only (decision 9): `GET /autodedup/proposed-splits` (`generation`, keyset `after`/`limit`) and `/proposed-splits/{property_id}` read `autodedup/proposed_splits.py` → `{property_id, canonical_listing_id, proposed, groups: [{cluster_key, adverts: [{listing_id, source, is_active, origin_property_id}]}], unseen, splits: [{listing_lo, listing_hi, reason_source, reason, ruling}], ruled}`; the batch split is the split statement (`POST /properties/{id}/split`), no write route of its own.
 6. **Spatial queries measure in metres, so they cast.** A listing's point is
    `listing_location.geom`, a `geometry(Point,4326)`: always
    `ST_DWithin(ll.geom::geography, target, radius_m)`. Never compute distance in Python.
@@ -104,22 +104,22 @@ it (`api/`). They do not apply to the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
 8. **Two auth gates coexist by design: `require_token` (shared secret) and
    `require_admin`/`verify_jwt` (real identity, JWT-only since 2026-08-04).** Baseline:
-   every endpoint except `/health` requires `Authorization: Bearer <token>` when
-   `API_TOKEN` is set (no-op when unset, for local dev); `/health` stays open for Railway
+   a `require_token` route needs `Authorization: Bearer <API_TOKEN>` and fails CLOSED (`503`
+   when `API_TOKEN` is unset, unless `API_AUTH_OPTIONAL=1` for local dev); `/health` stays open for Railway
    healthchecks. `/admin/*` (Settings-page surface: skills, `app_settings`, agent tool
    inventory) is bearer-gated like every other write surface — it was historically exempt
    on the theory that the private Railway URL was the perimeter, but that URL ships
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
    of the token: `/admin/*`, `/properties/merge*`, `/properties/assets/*`, `/labeling/*`,
-   `/outreach/*`, `/broker-review/*`,
-   `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
+   `/outreach/*`, `/broker-review/*`, `/autodedup/*`, `/new-dedup/*`,
+   `/skill-refinements/*`, `/location/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
-   `/pipeline/*`, `/collections` (GET), `/estimations` create/detail/scenario, notes,
+   `/pipeline/*`, `/collections`, `/tags`, `/estimations` create/detail/scenario, notes,
    `/listings/lookup` (**RLS-ONLY**: it takes no account argument and its SQL carries no account predicate — `current_account_ids()` must stay the ONE membership definition, the same one the SPA reads; a second, explicitly-bound one is what broke the extension 2026-07-23→09-11), and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
-   identity without the admin claim; every other route is still `require_token`-only (a
-   shared secret, no identity — `POST /collections`, tags, buildings, manual estimates,
-   filter-presets). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
+   identity without the admin claim (`GET /estimations{,/latest-by-listing}` take `account_scope`);
+   most other routes are still `require_token`-only (a shared secret, no identity — buildings,
+   manual estimates, filter-presets, estimation preview/feedback/trace payload). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
    broker E2E review): the leaderboard returned up to 2000 brokers' unmasked email +
    phone behind the bundle-extractable token. Every `/brokers/*` envelope now runs
    through `toolkit.brokers.apply_pii_policy`, which swaps any contact column for
@@ -193,14 +193,14 @@ it (`api/`). They do not apply to the scraper.
     seed `INSERT` in a new migration, apply.
 11. **LLM provider is pluggable; `llm_calls.provider` records which backend served each call.**
     `api/providers/` defines a `CompletionProvider` Protocol with neutral message / tool /
-    completion types; `anthropic`, `gemini`, `openai` and (since W2-10) `qwen` are wired up
+    completion types; `anthropic`, `gemini`, `openai`, `qwen` (W2-10) and `oss` (`oss:` ids) are wired up
     (default `anthropic`). `provider_for_model` derives the backend from the model id
     prefix, so a lane that only knows its `app_settings` model routes without threading a
     provider argument. Adding a provider is a new file implementing the same Protocol,
-    registered in `api/dependencies.py:_build_providers` — AND, separately, in each cron
-    script's own provider map: no script under `scripts/` uses `get_providers()`, and a
-    model whose provider is unregistered raises in `LLMClient.call` BEFORE the try/except
-    that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
+    registered in `api/dependencies.py:_build_providers` — AND, separately, in every hand-built provider map (`scraper/main.py`,
+    the condition scripts, `scripts/bakeoff_text_extraction.py`, `autodedup/judge_lane.py`, `toolkit/vision_batch.py`,
+    `toolkit/description_extraction.py`; the API, the worker and `smoke_agent.py` use `get_providers()`), and a model whose
+    provider is unregistered raises in `LLMClient.call` BEFORE the try/except that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
     invisible to `llm_errors` and `llm_burn_rate` alike. `LLMClient` is the audit orchestrator — every call
     writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
     tag. An unmapped model id records `cost_usd=0` rather than raising — silent, not loud;
@@ -253,14 +253,14 @@ never raw exception text. Route-owned refusals (property_split's 409) stay.
 `frontend/src/lib/api.ts` is the ONE transport (uploads + blob downloads, no raw `fetch()` beside
 it): `REQUEST_DEADLINE_MS` (130 s) sits above the server's 120 s budget and under Railway's ~300 s
 close — keep that ordering — a deadline abort (`ApiError.kind === 'timeout'`) is NEVER retried;
-react-query retries once only on `isTransientApiError` (network or 502/503/504). The extension
-duplicates the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 message-port loss
-no fetch deadline sees.
+react-query retries once only on `isTransientApiError` (network or 502/503/504/520). PostgREST reads
+use its twin `lib/pgRead.ts` (20 s, same ApiError, library retry off). The extension duplicates
+the deadline by value; its overlay keeps `LOOKUP_TIMEOUT_MS` for MV3 port loss no fetch sees.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
-Five auth primitives coexist — four in `api/dependencies.py`, one in `api/tenant_pool.py`:
-- `require_token` — the original bearer-token gate (rule #8's baseline), unchanged.
+Six auth primitives coexist — four in `api/dependencies.py`, two in `api/tenant_pool.py` (`tenant_conn` after this list):
+- `require_token` — the original bearer-token gate (rule #8's baseline), now fail-closed (`503` when `API_TOKEN` unset).
 - `account_scope` — an EITHER gate returning a READ SCOPE (the tenancy doctrine's FOURTH shape),
   for routes serving a browser session AND a non-browser caller over the one `Authorization`
   header: the static token resolves to `[SYSTEM]` (it ships in the SPA bundle, so it is no
@@ -429,7 +429,7 @@ LLM + maps (FastAPI service + scoring jobs):
   crosses it. Each provider's own console spend cap is the hard guard.
 
 API service:
-- `API_TOKEN` — bearer-token gate (no-op when unset, for local dev). See Toolkit rule #8.
+- `API_TOKEN` — bearer-token gate; unset → `503` unless `API_AUTH_OPTIONAL=1` (local dev only). See Toolkit rule #8.
 - `CORS_ALLOW_ORIGINS` — CSV of allowed origins; must include the Chrome extension's
   `chrome-extension://<id>` origin and the SPA origin.
 - `STUCK_ROW_SWEEP_DISABLED`, `NOTIFICATIONS_MATCHER_DISABLED` (optional flags) — disable the

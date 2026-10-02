@@ -9,14 +9,14 @@ about (`text`, `none`) it is destruction: it erased 2,949 of 24,621 `condition` 
 The rule is per (source, column) and comes from `scraper.attribute_contract`, never a
 second hand-kept list, so declaring a producer is the only way to change what preserves.
 These tests render the SQL — the one artifact that decides it — for all nine portals and
-for BOTH write paths.
+for the one writer's per-source statement.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from scraper import db
+from scraper import db, listing_write
 from scraper.attribute_contract import CONTRACT
 
 PORTALS = sorted(CONTRACT)
@@ -86,14 +86,9 @@ def test_the_area_pair_never_decouples(portal: str) -> None:
 
 
 @pytest.mark.parametrize("portal", PORTALS)
-def test_both_write_paths_render_the_same_rule(portal: str) -> None:
-    """The per-item upsert (all nine portals) and the batched drain upsert (sreality)
-    are two statements; the SET clause they carry is ONE string from one builder."""
-    fragment = db._listing_update_set_sql(portal)
-    assert fragment in db._upsert_listing_sql(portal)
-    if portal == "sreality":
-        assert fragment == db._BATCH_UPDATE_SET
-        assert fragment in db._BATCH_UPSERT_SQL
+def test_the_one_writer_carries_the_rule(portal: str) -> None:
+    """The contract's SET clause is ONE string, rendered into the one per-source upsert."""
+    assert db._listing_update_set_sql(portal) in listing_write._upsert_sql(portal)
 
 
 def test_every_declared_producer_is_one_the_rule_knows() -> None:

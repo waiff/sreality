@@ -3,7 +3,7 @@
 CRUD over the property-grain curation tables (migration 202): collection
 membership, tags and notes are keyed on `property_id` so operator curation
 describes the real-world property and is dedup-stable (it follows the property
-across merge/unmerge/split via toolkit.operator_state). Each handler is a plain
+across merge/detach via toolkit.property_carriers). Each handler is a plain
 function returning a dict; EVERY FastAPI route in api/main.py that wraps them now
 uses tenant_pool.tenant_conn + Depends(verify_jwt) (RLS-scoped by the caller's
 verified JWT) — reads then need no account_id in code, RLS filters them; top-level

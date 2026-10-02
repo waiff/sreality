@@ -21,12 +21,14 @@ import {
   pipelineViewFilters,
   applyRegistryUpdate,
   applyRegistryUpdates,
+  buildingMaterialToValues,
   filtersEqualForPreset,
   filtersForPreset,
   readPresetSpec,
   filtersToWatchdogSpec,
   fromSearchParams,
   isDefault,
+  type BuildingMaterial,
   type ListingFilters,
   type MapBounds,
   listingFiltersToRegistryView,
@@ -34,7 +36,7 @@ import {
   toSearchParams,
   watchdogNameSuggestion,
 } from './filters';
-import { filterById } from './filterRegistry.generated';
+import { BUILDING_MATERIAL_BUCKETS, filterById } from './filterRegistry.generated';
 import type { Disposition } from './types';
 
 describe('URL round-trip', () => {
@@ -715,17 +717,43 @@ describe('filtersToWatchdogSpec', () => {
       lastSeenMaxDays: 7,
       tags: [3],
       collections: [4],
-      buildingMaterial: ['cihla'],
     });
     expect(unsupported).toContain('listing status');
     expect(unsupported).toContain('last/first-seen date range');
     expect(unsupported).toContain('tags');
     expect(unsupported).toContain('collections');
-    expect(unsupported).toContain('building material');
+  });
+
+  it('carries building material and garden bounds (lost by merge f2d7b359)', () => {
+    const { spec, unsupported } = filtersToWatchdogSpec({
+      ...DEFAULT_FILTERS,
+      buildingMaterial: ['cihla', 'ostatni'],
+      gardenAreaMin: 100,
+      gardenAreaMax: 800,
+    });
+    expect(spec.building_material).toEqual(['cihla', 'ostatni']);
+    expect(spec.min_garden_area).toBe(100);
+    expect(spec.max_garden_area).toBe(800);
+    expect(unsupported).toEqual([]);
+    expect(filtersToWatchdogSpec(DEFAULT_FILTERS).spec.building_material).toBeNull();
   });
 
   it('a default filter set has nothing unsupported', () => {
     expect(filtersToWatchdogSpec(DEFAULT_FILTERS).unsupported).toEqual([]);
+  });
+});
+
+describe('buildingMaterialToValues', () => {
+  it('expands each bucket exactly as the generated table (the Python expansion)', () => {
+    for (const [bucket, values] of Object.entries(BUILDING_MATERIAL_BUCKETS)) {
+      expect(buildingMaterialToValues([bucket as BuildingMaterial])).toEqual(values);
+    }
+    expect(Object.keys(BUILDING_MATERIAL_BUCKETS)).toEqual(['cihla', 'panel', 'smisena', 'ostatni']);
+  });
+
+  it('dedupes a union of buckets in first-seen order', () => {
+    expect(buildingMaterialToValues(['panel', 'cihla', 'panel'])).toEqual(['panel', 'cihla']);
+    expect(buildingMaterialToValues([])).toEqual([]);
   });
 });
 

@@ -1372,7 +1372,7 @@ def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
     assert schedule.bodies_first is False
     assert schedule.bodies_cap == 300
     assert schedule.bodies_budget_share == 1.0
-    assert schedule.backlog_readout is False
+    assert (schedule.backlog_readout, schedule.readings) == (False, False)  # W3: hourly only
     assert schedule.pool is rw._intake_fast_pool()
     # The heartbeat's `last`: what the tick achieved and where it left BOTH keysets.
     assert out == {

@@ -25,66 +25,69 @@ Two facts make this urgent rather than theoretical:
     mechanism behind it — and `_shared_filter_where` called the helper unconditionally, with
     no grain argument and no guard.
 
+The rail is now the filter compiler's agenda gate (`toolkit/filter_compiler.py`, C4): every
+filter in the City-quality category is BROWSE + WATCHDOG in the registry, so a listings-grain
+compile (COMPARABLES) raises `rule 17 violation` — derived from the category, not a hand list
+— and `ComparableFilters` no longer has the fields at all.
+
 Offline; runs in the normal `pytest -q` lane.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import toolkit.filter_registry as fr
-from toolkit.comparables import (
-    ComparableFilters,
-    TargetSpec,
-    _assert_no_city_quality,
-    _CITY_QUALITY_FIELDS,
-    _city_quality_clauses,
-    _shared_filter_where,
-)
+from api.notifications import WatchdogFilterSpec, _build_match_clauses
+from toolkit.comparables import ComparableFilters, TargetSpec, _shared_filter_where
+from toolkit.filter_compiler import LISTINGS_GRAIN, compile_filter_where
 
 _TARGET = TargetSpec(lat=50.08, lng=14.42)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATION = _ROOT / "migrations" / "436_city_quality_obec_key.sql"
 
+_CITY_QUALITY = [f.id for f in fr.all_filters() if f.category == fr.CATEGORY_CITY_QUALITY]
+_RULE = {"index_name": "celkove_hodnoceni", "value": 6, "op": ">="}
+
 
 # --- the rule-17 re-arm ----------------------------------------------------
 
 
 def test_city_quality_on_a_listings_grain_call_raises():
-    """RED by: replacing the raise in `_shared_filter_where` with an inert branch.
+    """RED by: letting the compiler's gate render an off-agenda filter.
 
     This is the assertion that replaces the 42703 the schema used to throw.
     """
-    filters = ComparableFilters(
-        city_index_rules=[{"index_name": "celkove_hodnoceni", "value": 6, "op": ">="}]
-    )
     with pytest.raises(ValueError, match="rule 17 violation"):
-        _shared_filter_where(_TARGET, filters)
+        compile_filter_where({"city_index_rules": [_RULE]}, LISTINGS_GRAIN)
 
 
-@pytest.mark.parametrize("field", _CITY_QUALITY_FIELDS)
+@pytest.mark.parametrize("field", _CITY_QUALITY)
 def test_every_city_quality_field_is_guarded(field: str):
-    """Not just `city_index_rules` — every field of the family.
+    """Not just `city_index_rules` — every filter of the category, read off the registry.
 
-    RED by: removing any name from `_CITY_QUALITY_FIELDS`.
+    RED by: adding Agenda.COMPARABLES to any City-quality FilterDef.
     """
-    value: object = 1
-    if field == "city_index_rules":
-        value = [{"index_name": "x", "value": 1, "op": ">="}]
-    elif field == "near_city_proximity":
-        value = {"radius_km": 10, "index_rules": []}
-    filters = ComparableFilters(**{field: value})  # type: ignore[arg-type]
+    value: Any = [_RULE] if field == "city_index_rules" else 1
     with pytest.raises(ValueError, match="rule 17 violation"):
-        _assert_no_city_quality(filters)
+        compile_filter_where({field: value}, LISTINGS_GRAIN)
+
+
+def test_no_city_quality_field_is_a_comparable_filter():
+    """The cohort model refuses them structurally, before any gate runs."""
+    fields = {f.name for f in dataclasses.fields(ComparableFilters)}
+    assert not fields.intersection(_CITY_QUALITY)
+    assert "near_city_proximity" not in fields
 
 
 def test_a_clean_listings_grain_call_still_passes():
     """The guard must not fire on ordinary comparables."""
-    _assert_no_city_quality(ComparableFilters(category_main="byt"))
     where, _ = _shared_filter_where(_TARGET, ComparableFilters(category_main="byt"))
     assert where, "the ordinary path stopped rendering predicates"
 
@@ -99,7 +102,7 @@ def test_the_agenda_gate_excludes_city_quality_from_estimation():
     """
     for agenda in (fr.Agenda.COMPARABLES, fr.Agenda.ESTIMATION):
         ids = {f.id for f in fr.filters_for_agenda(agenda)}
-        leaked = ids.intersection(_CITY_QUALITY_FIELDS)
+        leaked = ids.intersection(_CITY_QUALITY)
         assert not leaked, (
             f"rule 17: {sorted(leaked)} reachable from the {agenda} agenda — an estimate "
             "would depend on a city_index_* revision"
@@ -114,11 +117,7 @@ def test_the_watchdog_matcher_renders_one_obec_predicate():
 
     RED by: restoring the nested-EXISTS tree.
     """
-    where, params = _city_quality_clauses(
-        ComparableFilters(
-            city_index_rules=[{"index_name": "celkove_hodnoceni", "value": 6, "op": ">="}]
-        )
-    )
+    where, params = _build_match_clauses(WatchdogFilterSpec(city_index_rules=[_RULE]))
     city = [w for w in where if "curated_cities_matching" in w]
     assert len(city) == 1, f"expected one city-quality predicate, got {where}"
     assert "l.obec_id = ANY (ARRAY(SELECT curated_cities_matching(" in city[0]
@@ -136,11 +135,14 @@ def test_no_operator_token_is_string_interpolated_any_more():
     RED by: reintroducing `_index_rule_predicate`.
     """
     import toolkit.comparables as c
+    import toolkit.filter_compiler as fc
 
-    assert not hasattr(c, "_index_rule_predicate"), (
-        "_index_rule_predicate is back — the operator token is being interpolated again"
-    )
-    assert not hasattr(c, "_ALLOWED_OPS")
+    for module in (c, fc):
+        assert not hasattr(module, "_index_rule_predicate"), (
+            f"{module.__name__}._index_rule_predicate is back — the operator token is "
+            "being interpolated again"
+        )
+        assert not hasattr(module, "_ALLOWED_OPS")
 
 
 def test_near_city_proximity_is_retired_loudly():
@@ -149,8 +151,8 @@ def test_near_city_proximity_is_retired_loudly():
     RED by: deleting the raise (silently dropping the branch).
     """
     with pytest.raises(ValueError, match="near_city_proximity is retired"):
-        _city_quality_clauses(
-            ComparableFilters(near_city_proximity={"radius_km": 10, "index_rules": []})
+        _build_match_clauses(
+            WatchdogFilterSpec(near_city_proximity={"radius_km": 10, "index_rules": []})
         )
 
 

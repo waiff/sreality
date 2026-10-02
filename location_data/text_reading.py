@@ -2,15 +2,18 @@
 
 The text lane (`toolkit/description_extraction.py`) asks for this block in the SAME call that
 reads the attribute fields, and stores the answer RAW under `location` in
-`listing_description_enrichments.extracted`. Nothing here writes. `read_location` applies only
-the checks that need nothing but the advert itself — V1 (the quote is verbatim in it) and V3
-(the advert offers a property); whether a value names a real place is the register's question,
-asked by the claim reader (W3).
+`listing_description_enrichments.extracted`. Nothing here writes. The claim lane hands a
+listing's current reading to `read_claims` — the reader `text_reading`, the lane's third
+substrate (W3) — which applies V1–V4 and builds claims through `_base`; whether a value names
+a real place is the register's question, asked by the resolver.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+import re
+from typing import Any, Callable, Mapping, NamedTuple
+
+from location_data.claims_common import Claim, Entry, ListingRow, _base
 
 AD_KINDS = ("offer", "exchange", "wanted", "not_property")
 ADMITTED_AD_KINDS = frozenset({"offer", "exchange"})
@@ -99,3 +102,81 @@ def read_location(payload: Mapping[str, Any] | None,
 def _cell(raw: Any) -> tuple[Any, Any]:
     raw = raw if isinstance(raw, Mapping) else {}
     return raw.get("value"), raw.get("evidence_quote")
+
+
+class Reading(NamedTuple):
+    """A listing's CURRENT reading as the claim lane selects it: the row id, the raw block
+    (`{"location": …}`) and the advert text it was read from, composed in SQL."""
+    id: int
+    payload: Mapping[str, Any]
+    advert_text: str
+
+
+# A č.ev. rides the č.p. claim type MARKED, and resolver S1 types it (`normalize._EVIDENCNI`).
+_CLAIM_VALUE = {"house_number_ev": "č.ev. {}"}
+_NUMBER = {"house_number_cp": r"\d{1,6}", "house_number_co": r"\d{1,5}[a-z]?",
+           "house_number_ev": r"\d{1,6}"}
+# V4, on the lane's fold. A marker, or "Word N[/M]" whose word is the reading's OWN street,
+# town or part ("Husova 12/4", "Hodoviz 13"; so never "patro 3", "v roce 1985", "ploše 60"),
+# never a decimal or a quantity ("60,91 m²", "4. patře", "1500 Kč"); a parcel, LV, k.ú., GPS
+# or negation token anywhere drops it. "Praha 8" passes: only the prompt refuses a district.
+_ANCHORS = ("street", "town", "part_of_town")
+_MARKER = {"house_number_cp": r"c\.?\s*p\.?|cislo\s+popisne",
+           "house_number_co": r"c\.?\s*o\.?|cislo\s+orientacni",
+           "house_number_ev": r"c\.?\s*ev\.?|ev\.?\s*c\.?|cislo\s+evidencni|evidencni\s+cislo"}
+_QUANTITY = r"(?![.,]\d|\s*\.?\s*(?:m2|m²|m\b|kc|%|patr|np\b|podlaz))"
+_END = {"house_number_co": r"(?![\da-z])"}
+_FORM = {"house_number_cp": r"([^\W\d_]{{2,}})\.?\s+{n}(?:\s*/\s*\d+[a-z]?)?{end}",
+         "house_number_co": r"([^\W\d_]{{2,}})\.?\s+\d+\s*/\s*{n}{end}"}
+_REFUSED_NUMBER = re.compile(r"parc|\bp\.\s*c\.|\blv\b|\blistu?\s+vlastnictvi|\bk\.\s*u\."
+                             r"|katastr|gps|\bbez\b|\bnema\b|\bneni\b")
+
+
+def read_claims(entry: Entry, row: ListingRow, reading: Reading) -> list[Claim]:
+    """THE reader `text_reading`: the entry's `slot`, then each `fallback` slot, through V1
+    and V3 (`read_location`), V2 for a name and V4 for a number. Pure: the reading is an input."""
+    slots = [str(entry.locator["slot"])] + [
+        str(alt["slot"]) for alt in entry.locator.get("fallback") or () if isinstance(alt, Mapping)]
+    read = read_location(reading.payload, reading.advert_text)
+    anchors = {w[:3] for s in _ANCHORS for w in _words(read[s]["value"] or "")}
+    for slot in slots:
+        value, quote = read[slot]["value"], read[slot]["quote"]
+        if value is None or not (_numbered(slot, value, quote, anchors) if slot in _NUMBER
+                                 else _grounded(value, quote)):
+            continue
+        return [_base(entry, row, value_text=_CLAIM_VALUE.get(slot, "{}").format(value))]
+    return []
+
+
+def _fold(text: str) -> str:
+    # Lazy for the same reason as `read_location`: the lane's fold, plus ů->o (Dvůr/Dvoře).
+    from toolkit.description_extraction import _flat
+    return _flat(text.replace("ů", "o").replace("Ů", "O"))
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[^\W\d_]+", _fold(text))
+
+
+def _grounded(value: str, quote: str) -> bool:
+    """V2: a value word of 3+ letters shares its first three with a quote word (Brno/Brně,
+    Plzeň/Plzni, Hora/Hoře); a name with no such word ("Aš") must stand in the quote whole."""
+    said, named = _words(quote), _words(value)
+    long = [w[:3] for w in named if len(w) >= 3]
+    if not long:
+        return bool(named) and all(w in said for w in named)
+    return bool(set(long) & {w[:3] for w in said if len(w) >= 3})
+
+
+def _numbered(slot: str, value: str, quote: str, anchors: set[str]) -> bool:
+    """V4: the number stands in its quote behind its marker, or behind a word of the reading's
+    own street/town/part (`anchors`: 3-letter stems), and is no decimal or quantity."""
+    number, folded = value.strip().lower(), _fold(quote)
+    if not re.fullmatch(_NUMBER[slot], number) or _REFUSED_NUMBER.search(folded):
+        return False
+    n, end = re.escape(number), _END.get(slot, r"(?![\d/])") + _QUANTITY
+    if re.search(rf"\b(?:{_MARKER[slot]})\s*[:.]?\s*{n}{end}", folded):
+        return True
+    form = _FORM.get(slot)
+    return bool(form) and any(m[1][:3] in anchors
+                              for m in re.finditer(form.format(n=n, end=end), folded))

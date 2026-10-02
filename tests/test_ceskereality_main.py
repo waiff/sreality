@@ -22,8 +22,6 @@ from __future__ import annotations
 import re
 from types import SimpleNamespace
 
-import pytest
-
 from scraper import ceskereality_main as m
 from scraper import portal as m_portal
 from scraper.ceskereality_client import (
@@ -663,6 +661,7 @@ def test_the_old_sweep_seam_is_gone():
     """No portal may flip rows from index absence any more; the runner never
     calls mark_inactive and the seam must not linger to tempt anyone."""
     assert not hasattr(m.CeskerealityPortal, "mark_inactive")
+    assert not hasattr(m.CeskerealityPortal, "mark_gone")
 
 
 # --- newest-first delta probe (/nejnovejsi/ on the www host) -----------------
@@ -761,36 +760,21 @@ def test_probe_category_early_stops_on_all_known_page(monkeypatch):
     assert sorted(touched) == [51, 52]   # but last_seen was bumped (by surrogate id)
 
 
-def test_mark_gone_flips_native_inactive(monkeypatch):
-    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
-    # NOT a sreality_id resolved out of the DB — a post-Gate-2 ceskereality row has
-    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
-    captured: dict = {}
-    monkeypatch.setattr(
-        m.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    monkeypatch.setattr(
-        m.db, "mark_listing_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
-    )
-    m.CeskerealityPortal(default_config("ceskereality")).mark_gone(object(), "7000009")
-    assert captured == {"source": "ceskereality", "nid": "7000009"}
-
-
 def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):
     fake = _NewestClient({
         1: [("7000001", "3 200 000 Kč"), ("7000002", "4 100 000 Kč")],
     })
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
     stored = {  # 7000002 known at an OLD price -> changed; 7000001 unknown -> new
-        "7000002": {"sreality_id": -2, "price_czk": 3_900_000, "last_seen_at": None},
+        "7000002": {"id": 52, "sreality_id": -2, "price_czk": 3_900_000, "last_seen_at": None},
     }
     enqueued: list[tuple] = []
+    touched: list[int] = []
     monkeypatch.setattr(
         m.db, "index_summary_native",
         lambda _c, src, ids: {i: stored[i] for i in ids if i in stored})
-    monkeypatch.setattr(m.db, "touch_listings", lambda _c, pks: len(pks))
+    monkeypatch.setattr(
+        m.db, "touch_listings_by_id", lambda _c, pks: touched.extend(pks) or len(pks))
     monkeypatch.setattr(
         m.db, "enqueue_detail", lambda _c, src, entries: enqueued.extend(entries) or len(entries))
     portal = m.CeskerealityPortal(default_config("ceskereality"))
@@ -803,6 +787,7 @@ def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):
     assert by_id["7000001"][3] == m.db.QUEUE_PRIORITY_NEW
     assert by_id["7000002"][3] == m.db.QUEUE_PRIORITY_CHANGED
     assert by_id["7000002"][2] == 4_100_000     # refreshed observed price
+    assert touched == [52]                       # the repriced row is touched too (touch-all)
     # detail_ref is the absolute detail URL the drain fetches
     assert by_id["7000001"][1].startswith("https://www.ceskereality.cz/")
 
@@ -950,7 +935,7 @@ def test_one_row_per_kraj_not_per_subtype(monkeypatch):
 
 def test_a_kraj_is_exhausted_only_if_every_part_is(monkeypatch):
     """Fourteen good subtypes and one that failed is not 93% of a kraj — it is a
-    kraj with a hole, and mark_inactive would read the hole as 'these are gone'."""
+    kraj with a hole, and nomination would read the hole as 'these went unseen'."""
     written = _record(monkeypatch, [
         _sr("praha", "exhausted", subtype="byty-2-1"),
         _sr("praha", "ceiling", subtype="byty-3-1"),

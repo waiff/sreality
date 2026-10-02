@@ -5,8 +5,9 @@ name: "Scraping: Bezrealitky scraper (pilot)"
 # framework. Bezrealitky is a JSON-API portal (public GraphQL at
 # api.bezrealitky.cz) like sreality: the index walk pages listAdverts and
 # enqueues new/price-changed ids into listing_detail_queue, then the detail
-# drain fetches advert(id), parses to a ScrapedListing, and ingests through
-# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+# drain fetches advert(id), parses to a ScrapedListing, and writes via
+# listing_write.write_listings (the one listing write; new rows land property_id
+# NULL and the straggler-attach births the singleton).
 #
 # Categories live in the `portals` registry row (migration 110), not here, so
 # coverage is tuned with a SQL update, no workflow edit. A scheduled run takes

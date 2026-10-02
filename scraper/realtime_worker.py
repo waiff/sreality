@@ -8,7 +8,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
              newest-first delta probe (portal_runner.run_index_probe, Wave C-2)
              sequentially over the probe-capable portals — diff + enqueue only,
-             never mark_inactive.
+             never nominates.
 - drain:     every `realtime_drain_interval_seconds` (default 30), claim a
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub
@@ -144,7 +144,7 @@ from psycopg.types.json import Jsonb
 from scraper import (
     db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import PortalConfig
 
 LOG = logging.getLogger("scraper.realtime_worker")
 
@@ -748,15 +748,7 @@ def _read_count_dispatch_enabled() -> bool:
 
 
 def _load_config(source: str) -> PortalConfig:
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, source)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a pass
-        LOG.warning(
-            "load_portal_config failed source=%s: %s; using baked-in default",
-            source, exc,
-        )
-        return default_config(source)
+    return portal_runner.load_config(source)
 
 
 def _build_portal(source: str, config: PortalConfig) -> Any:
@@ -824,13 +816,7 @@ def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
 def _claimable_by_source() -> dict[str, int]:
     conn = db.connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT source, count(*) FROM listing_detail_queue "
-                "WHERE claimed_at IS NULL AND given_up = false "
-                "GROUP BY source"
-            )
-            return {source: int(n) for source, n in cur.fetchall()}
+        return db.claimable_counts(conn)
     finally:
         with contextlib.suppress(Exception):
             conn.close()
@@ -1689,6 +1675,7 @@ def _intake_fast_pass(conn: Any) -> dict[str, Any]:
         # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
         # it would cost more than the drain it measures.
         backlog_readout=False,
+        readings=False,  # the readings half is the hourly run's (its selector's 5 s gate)
         pool=_intake_fast_pool(),
     )
     stats = claims_intake.run(

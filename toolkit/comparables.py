@@ -4,18 +4,14 @@ Pure function over a psycopg connection. Builds parameterised SQL
 dynamically based on which filters are set; never string-interpolates
 user values into the query body.
 
-How to add a new filter
------------------------
-1. Add a field to ComparableFilters with a None default and a clear
-   type. None must mean "no filter applied".
-2. Add a branch in build_query() that appends the WHERE clause and
-   binds the value via params[name] = filters.<name>.
-3. Add the field to _filters_used() so the metadata block echoes it.
-4. Add a hermetic test in test_comparables.py asserting both presence
-   when set and absence when None.
-
-That's the entire change. SELECT projection, ORDER BY, LIMIT, and the
-spatial / freshness clauses don't need to be touched.
+How to add a filter
+-------------------
+Declare a FilterDef in toolkit/filter_registry.py. A column-backed bound, list or flag compiles
+from its derived `sql_kind` (toolkit/filter_compiler.py, and Browse's TS auto-dispatch); anything
+else needs one `_HOOKS` entry there. Add the field to the consumer model (ComparableFilters /
+WatchdogFilterSpec) and to `_filters_used`. tests/toolkit/test_filter_registry.py pins each
+model's fields EQUAL to its agendas (WatchdogFilterSpec == WATCHDOG; ComparableFilters ==
+COMPARABLES|ESTIMATION|VELOCITY), so a missing field fails CI instead of being dropped.
 """
 
 from __future__ import annotations
@@ -24,19 +20,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from psycopg.types.json import Jsonb
-
-from toolkit.filter_registry import (
-    FURNISHED_CANONICAL,
-    OWNERSHIP_CANONICAL,
-    UNKNOWN_FILTER_VALUE,
-)
+from toolkit.filter_compiler import LISTINGS_GRAIN, compile_filter_where
 from toolkit.measures import (
     cohort_basis,
     measure_backed,
     per_m2_basis_sql,
     per_m2_sql,
-    plot_area_sql,
     spec_ppm2_basis,
 )
 
@@ -101,7 +90,7 @@ class ComparableFilters:
     category_sub_cb: int | None = None
     include_unreliable: bool = False
     # Multi-select enums. Each may carry the `__unknown__` sentinel meaning
-    # "NULL or a non-canonical value" — see _enum_or_unknown_clause.
+    # "NULL or a non-canonical value" (toolkit/filter_compiler._enum_or_unknown_clause).
     furnished: list[str] | None = None
     terrace: bool | None = None
     cellar: bool | None = None
@@ -111,6 +100,8 @@ class ComparableFilters:
     max_estate_area: float | None = None
     min_usable_area: float | None = None
     max_usable_area: float | None = None
+    min_garden_area: float | None = None
+    max_garden_area: float | None = None
     min_parking_lots: int | None = None
     # Derived condition scores (migrations 072/073). NULL rows are filtered
     # out by the `>= N` / `<= N` comparison — that's intentional: "show me
@@ -132,34 +123,6 @@ class ComparableFilters:
     last_seen_max_days: int | None = None
     first_seen_min_days: int | None = None
     first_seen_max_days: int | None = None
-    # City-quality filters (Phase QUAL). Browse + Watchdog only — the
-    # registry's agenda gating keeps these out of the agent's tool
-    # schema. Each entry in `city_index_rules` is a dict
-    # `{"index_name": str, "op": ">="|"<=", "value": float}`. Rules are
-    # AND'd. A listing matches when there exists a curated city C such
-    # that the listing is within C.default_radius_m of C.centroid AND
-    # every index rule holds for C.
-    city_index_rules: list[dict[str, Any]] | None = None
-    min_city_population: int | None = None
-    max_city_population: int | None = None
-    # Proximity: `{"index_rules": [...], "population_min": int|null,
-    # "radius_km": int}`. A listing matches when there exists a curated
-    # city C within `radius_km*1000` of the listing AND the inner rules
-    # all hold for C. `radius_km` defaults to 5 in the UI but the SQL
-    # requires it explicit.
-    near_city_proximity: dict[str, Any] | None = None
-    # Fast polygon-edge proximity (migration 142). Precomputed columns on
-    # properties_public, filtered `>= value`. BROWSE / WATCHDOG only — the
-    # listings-grain comparables agenda never sets these (agenda-gated), so
-    # the `l.home_obec_pop` / `l.near_*` references never materialise here.
-    near_pop_5km_min: int | None = None
-    near_pop_15km_min: int | None = None
-    near_jobs_5km_min: float | None = None
-    near_jobs_15km_min: float | None = None
-    near_youth_5km_min: float | None = None
-    near_youth_15km_min: float | None = None
-    near_overall_5km_min: float | None = None
-    near_overall_15km_min: float | None = None
 
 
 _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
@@ -178,173 +141,14 @@ _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
 _HARD_LIMIT = 500
 
 
-# ---------------------------------------------------------------------------
-# Rule 17 rail.
-#
-# Until W5 the SCHEMA enforced rule 17 for free: `listings` has no `home_city_id`,
-# so a city-quality clause on a listings-grain query died at parse with 42703
-# before a row was read. W5 (migration 436) re-keyed membership onto `l.obec_id`
-# -- a column `listings` HAD until W4-c -- so for that window the identical bypass
-# planned, executed, and silently returned an estimate narrowed by operator-curated,
-# revision-versioned, SUBJECTIVE city scores, with a `status='success'` row in
-# `estimation_runs` and a full trace. Nothing would fail.
-#
-# This function IS that former schema rail. It is deliberately a raise and not an
-# inert branch: rendering nothing would be exactly the silent failure W5 exists to
-# prevent.
-#
-# NOTE the direction. The design proposal claimed the obec rewrite removes this
-# latent failure "structurally". It is the reverse -- the rewrite converts a LOUD
-# failure into a silent one.
-# ---------------------------------------------------------------------------
-_CITY_QUALITY_FIELDS: tuple[str, ...] = (
-    "city_index_rules",
-    "min_city_population",
-    "max_city_population",
-    "near_city_proximity",
-    "near_pop_5km_min", "near_pop_15km_min",
-    "near_jobs_5km_min", "near_jobs_15km_min",
-    "near_youth_5km_min", "near_youth_15km_min",
-    "near_overall_5km_min", "near_overall_15km_min",
-)
-
-
-def _assert_no_city_quality(filters: ComparableFilters) -> None:
-    """Raise if any city-quality field is set on a listings-grain call."""
-    populated = [
-        name
-        for name in _CITY_QUALITY_FIELDS
-        if getattr(filters, name, None) not in (None, [], {})
-    ]
-    if populated:
-        raise ValueError(
-            "rule 17 violation: city-quality filters "
-            f"({', '.join(populated)}) reached _shared_filter_where. Its callers are "
-            "FROM listings l and feed estimation; these filters are BROWSE + WATCHDOG "
-            "only (filter_registry agendas) and would make an estimate depend on a "
-            "city_index_* revision. The Watchdog matcher calls _city_quality_clauses "
-            "directly (api/notifications.py) and does not pass through here."
-        )
-
-
-def _city_quality_clauses(
-    filters: ComparableFilters,
-) -> tuple[list[str], dict[str, Any]]:
-    """Render the Phase QUAL clauses against a properties_public-grain alias.
-
-    Its ONLY caller is the Watchdog matcher (`api/notifications.py`), which is that
-    grain (`home_obec_pop`, `near_*`, `obec_id`).
-
-    `_shared_filter_where` no longer calls this. Its callers are `FROM listings l`
-    and feed estimation, and since W5 (migration 436) re-keyed membership onto
-    `l.obec_id` -- a column `listings` HAD until W4-c -- a stray call resolved and
-    silently narrowed an estimate instead of throwing 42703. `_shared_filter_where`
-    raises via `_assert_no_city_quality` instead, which is the rail regardless of
-    what the `listings` catalog happens to carry.
-
-    Rule evaluation itself is owned by `curated_cities_matching()` (migration 436);
-    this function renders one `obec_id = ANY(...)` predicate and nothing else.
-    """
-    where: list[str] = []
-    params: dict[str, Any] = {}
-
-    rules = filters.city_index_rules or []
-    pop_min = filters.min_city_population
-    pop_max = filters.max_city_population
-
-    # Population now reads the precomputed home_obec_pop column (migration 142)
-    # — the listing's OWN municipality population, country-wide, no curated-city
-    # join. Browse / Watchdog grain only (properties_public exposes it); the
-    # listings-grain comparables agenda never sets these.
-    if pop_min is not None:
-        where.append("l.home_obec_pop >= %(min_city_population)s")
-        params["min_city_population"] = pop_min
-    if pop_max is not None:
-        where.append("l.home_obec_pop <= %(max_city_population)s")
-        params["max_city_population"] = pop_max
-
-    # Fast polygon-edge proximity columns (migration 142). Plain `>= value`
-    # predicates against the precomputed maxes within a fixed 5 / 15 km.
-    _PROX_COLS = (
-        ("near_pop_5km_min", "near_pop_5km"),
-        ("near_pop_15km_min", "near_pop_15km"),
-        ("near_jobs_5km_min", "near_jobs_5km"),
-        ("near_jobs_15km_min", "near_jobs_15km"),
-        ("near_youth_5km_min", "near_youth_5km"),
-        ("near_youth_15km_min", "near_youth_15km"),
-        ("near_overall_5km_min", "near_overall_5km"),
-        ("near_overall_15km_min", "near_overall_15km"),
-    )
-    for attr, col in _PROX_COLS:
-        val = getattr(filters, attr, None)
-        if val is not None:
-            where.append(f"l.{col} >= %({attr})s")
-            params[attr] = val
-
-    if rules:
-        # ONE SQL function owns rule evaluation (migration 436). All three consumers --
-        # Browse (a client-resolved obec array), Stats (the same call inside
-        # browse_stats_properties) and this matcher -- reduce to `obec_id = ANY(...)`,
-        # a form with nothing left to diverge on (rule 16). Migration 374's own header
-        # records two divergences found between the three hand-maintained copies this
-        # replaces, including an operator-chosen op silently re-interpreted as >=.
-        #
-        # ARRAY(SELECT ...) forces a once-per-statement InitPlan; `IN (SELECT ...)` can
-        # degrade into a per-row correlated SubPlan -- the exact shape that made this
-        # predicate cost 1,778,259 blocks.
-        #
-        # Nothing is string-interpolated any more: the operator whitelist lives in the
-        # function's CASE, whose else-arm is `>=`. That is strictly safer than the old
-        # inline-the-operator-token approach.
-        where.append(
-            "l.obec_id = ANY (ARRAY(SELECT curated_cities_matching("
-            "%(city_index_rules)s::jsonb)))"
-        )
-        params["city_index_rules"] = Jsonb(rules)
-
-    if filters.near_city_proximity is not None:
-        raise ValueError(
-            "near_city_proximity is retired (W5, migration 436): no UI widget ever set "
-            "it, 0 of 7 filter_presets and 0 of 2 notification_subscriptions carry a "
-            "value, and it was never load-tested (migration 375's own header flags it as "
-            "~33 s EXTRAPOLATED, CPU-bound ST_DWithin on scalars no index can serve). "
-            "Use the migration-142 near_*_min columns."
-        )
-
-    return where, params
-
-
-def _enum_or_unknown_clause(
-    values: list[str],
-    col: str,
-    pname: str,
-    canonical: tuple[str, ...],
-    params: dict[str, Any],
-) -> str | None:
-    """WHERE fragment for a multi-select enum that may carry the `__unknown__`
-    sentinel. Real values match by `= ANY(...)`; `__unknown__` matches NULL or
-    any value outside the canonical set. Returns None when nothing to filter."""
-    reals = [v for v in values if v != UNKNOWN_FILTER_VALUE]
-    parts: list[str] = []
-    if reals:
-        parts.append(f"{col} = ANY(%({pname})s)")
-        params[pname] = reals
-    if UNKNOWN_FILTER_VALUE in values:
-        parts.append(f"({col} IS NULL OR NOT ({col} = ANY(%({pname}_canon)s)))")
-        params[f"{pname}_canon"] = list(canonical)
-    if not parts:
-        return None
-    return "(" + " OR ".join(parts) + ")"
-
-
 def _shared_filter_where(
-    target: TargetSpec, filters: ComparableFilters
+    target: TargetSpec, filters: ComparableFilters, *, radius: bool = True,
 ) -> tuple[list[str], dict[str, Any]]:
     """Build WHERE clauses + bound params shared across all spatial tools.
 
-    Includes: spatial radius, category, disposition, area band, floor band,
-    condition/building/energy filters, amenity booleans, price bounds,
-    locality IDs, one advert per property minus the subject's, and the failure-row exclusion.
+    The listings adapter: target-relative clauses and the cohort invariants here, every
+    registry filter through `compile_filter_where(…, LISTINGS_GRAIN)`. `radius=False`
+    (the transit corridor) leaves out the target circle and its param, nothing else.
 
     Does NOT include the lifecycle / max_age_days clauses — those are
     operational rather than attribute filters. Each caller appends them
@@ -357,11 +161,7 @@ def _shared_filter_where(
     would silently return a ~111 km cohort for a 1 km radius. The cast is served
     by `listing_location_geog_gist` (migration 507).
     """
-    params: dict[str, Any] = {
-        "lat": target.lat,
-        "lng": target.lng,
-        "radius_m": filters.radius_m,
-    }
+    params: dict[str, Any] = {"lat": target.lat, "lng": target.lng}
     where: list[str] = [
         # THIS IS THE W5 CONSUMER RULE, in its strictly narrower form — do not remove it
         # thinking the spatial clause below already implies it. A comparable must have a
@@ -369,20 +169,17 @@ def _shared_filter_where(
         # one thing this lane drops; everything the rule hides, this hides too. Pinned by
         # tests/test_location_w5_serve_resolved.py.
         "ll.geom IS NOT NULL",
-        (
+    ]
+    if radius:
+        # Emitted whenever radius is on, even for a NULL radius_m (the agent can send one):
+        # that is an empty cohort, never a nationwide one.
+        where.append(
             "ST_DWithin("
             "ll.geom::geography, "
             "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
             "%(radius_m)s)"
-        ),
-    ]
-
-    if filters.category_main is not None:
-        where.append("l.category_main = %(category_main)s")
-        params["category_main"] = filters.category_main
-    if filters.category_type is not None:
-        where.append("l.category_type = %(category_type)s")
-        params["category_type"] = filters.category_type
+        )
+        params["radius_m"] = filters.radius_m
 
     if target.disposition is not None:
         if filters.disposition_match == "exact":
@@ -406,148 +203,9 @@ def _shared_filter_where(
         params["floor_min"] = target.floor - filters.floor_band
         params["floor_max"] = target.floor + filters.floor_band
 
-    if filters.portals:
-        where.append("l.source = ANY(%(portals)s)")
-        params["portals"] = list(filters.portals)
-    if filters.condition_match:
-        where.append("l.condition = ANY(%(condition_match)s)")
-        params["condition_match"] = list(filters.condition_match)
-    if filters.building_type_match:
-        where.append("l.building_type = ANY(%(building_type_match)s)")
-        params["building_type_match"] = list(filters.building_type_match)
-    if filters.energy_rating_match:
-        where.append("l.energy_rating = ANY(%(energy_rating_match)s)")
-        params["energy_rating_match"] = list(filters.energy_rating_match)
-
-    if filters.has_balcony is not None:
-        where.append("l.has_balcony = %(has_balcony)s")
-        params["has_balcony"] = filters.has_balcony
-    if filters.has_lift is not None:
-        where.append("l.has_lift = %(has_lift)s")
-        params["has_lift"] = filters.has_lift
-    if filters.has_parking is not None:
-        where.append("l.has_parking = %(has_parking)s")
-        params["has_parking"] = filters.has_parking
-
-    if filters.min_price_czk is not None:
-        where.append("l.price_czk >= %(min_price_czk)s")
-        params["min_price_czk"] = filters.min_price_czk
-    if filters.max_price_czk is not None:
-        where.append("l.price_czk <= %(max_price_czk)s")
-        params["max_price_czk"] = filters.max_price_czk
-    # ONE measure, one definition (migration 425). `l` is always the `listings`
-    # TABLE here -- the only three FROM clauses over _shared_filter_where are
-    # comparables, velocity and the transit corridor -- and `listings` has no
-    # price_per_m2 column, so the four-argument call is the only spelling that
-    # resolves. It also floors the cohort exactly where Browse and the Watchdog
-    # floor it, which is what rule #16 asks of an estimation cohort too.
-    if filters.min_price_per_m2 is not None:
-        where.append(f"{per_m2_sql('l')} >= %(min_price_per_m2)s")
-        params["min_price_per_m2"] = filters.min_price_per_m2
-    if filters.max_price_per_m2 is not None:
-        where.append(f"{per_m2_sql('l')} <= %(max_price_per_m2)s")
-        params["max_price_per_m2"] = filters.max_price_per_m2
-
-    if filters.category_sub_cb is not None:
-        where.append("l.category_sub_cb = %(category_sub_cb)s")
-        params["category_sub_cb"] = filters.category_sub_cb
-
-    if filters.furnished:
-        clause = _enum_or_unknown_clause(
-            list(filters.furnished), "l.furnished", "furnished",
-            FURNISHED_CANONICAL, params,
-        )
-        if clause:
-            where.append(clause)
-    if filters.ownership:
-        clause = _enum_or_unknown_clause(
-            list(filters.ownership), "l.ownership", "ownership",
-            OWNERSHIP_CANONICAL, params,
-        )
-        if clause:
-            where.append(clause)
-
-    if filters.terrace is not None:
-        where.append("l.terrace = %(terrace)s")
-        params["terrace"] = filters.terrace
-    if filters.cellar is not None:
-        where.append("l.cellar = %(cellar)s")
-        params["cellar"] = filters.cellar
-    if filters.garage is not None:
-        where.append("l.garage = %(garage)s")
-        params["garage"] = filters.garage
-
-    # THE plot-area measure, never the bare column: `area_m2` is polymorphic and for
-    # `pozemek` it IS the parcel, so `l.estate_area` alone drops every land row whose
-    # portal states the plot only as the headline (migration 534).
-    if filters.min_estate_area is not None:
-        where.append(f"{plot_area_sql('l')} >= %(min_estate_area)s")
-        params["min_estate_area"] = filters.min_estate_area
-    if filters.max_estate_area is not None:
-        where.append(f"{plot_area_sql('l')} <= %(max_estate_area)s")
-        params["max_estate_area"] = filters.max_estate_area
-    if filters.min_usable_area is not None:
-        where.append("l.usable_area >= %(min_usable_area)s")
-        params["min_usable_area"] = filters.min_usable_area
-    if filters.max_usable_area is not None:
-        where.append("l.usable_area <= %(max_usable_area)s")
-        params["max_usable_area"] = filters.max_usable_area
-    if filters.min_parking_lots is not None:
-        where.append("l.parking_lots >= %(min_parking_lots)s")
-        params["min_parking_lots"] = filters.min_parking_lots
-    if filters.building_condition_level_min is not None:
-        where.append("l.building_condition_level >= %(building_condition_level_min)s")
-        params["building_condition_level_min"] = filters.building_condition_level_min
-    if filters.building_condition_level_max is not None:
-        where.append("l.building_condition_level <= %(building_condition_level_max)s")
-        params["building_condition_level_max"] = filters.building_condition_level_max
-    if filters.apartment_condition_level_min is not None:
-        where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
-        params["apartment_condition_level_min"] = filters.apartment_condition_level_min
-    if filters.apartment_condition_level_max is not None:
-        where.append("l.apartment_condition_level <= %(apartment_condition_level_max)s")
-        params["apartment_condition_level_max"] = filters.apartment_condition_level_max
-
-    # TOM bounds. The expression mirrors migration 052's
-    # listings_public.tom_days computation so SQL and Python agree on
-    # the definition of "days on market".
-    _tom_expr = (
-        "(case when l.is_active "
-        "then greatest(0, floor(extract(epoch from (now() - l.first_seen_at)) / 86400)::int) "
-        "else greatest(0, floor(extract(epoch from (l.last_seen_at - l.first_seen_at)) / 86400)::int) "
-        "end)"
-    )
-    if filters.tom_days_min is not None:
-        where.append(f"{_tom_expr} >= %(tom_days_min)s")
-        params["tom_days_min"] = filters.tom_days_min
-    if filters.tom_days_max is not None:
-        where.append(f"{_tom_expr} <= %(tom_days_max)s")
-        params["tom_days_max"] = filters.tom_days_max
-
-    if filters.last_seen_max_days is not None:
-        where.append(
-            "l.last_seen_at >= now() - make_interval(days => %(last_seen_max_days)s)"
-        )
-        params["last_seen_max_days"] = filters.last_seen_max_days
-    if filters.last_seen_min_days is not None:
-        where.append(
-            "l.last_seen_at <= now() - make_interval(days => %(last_seen_min_days)s)"
-        )
-        params["last_seen_min_days"] = filters.last_seen_min_days
-    if filters.first_seen_max_days is not None:
-        where.append(
-            "l.first_seen_at >= now() - make_interval(days => %(first_seen_max_days)s)"
-        )
-        params["first_seen_max_days"] = filters.first_seen_max_days
-    if filters.first_seen_min_days is not None:
-        where.append(
-            "l.first_seen_at <= now() - make_interval(days => %(first_seen_min_days)s)"
-        )
-        params["first_seen_min_days"] = filters.first_seen_min_days
-
-    # NOT an inert branch: rendering nothing here would be the silent failure W5
-    # exists to prevent. See _assert_no_city_quality.
-    _assert_no_city_quality(filters)
+    compiled, compiled_params = compile_filter_where(vars(filters), LISTINGS_GRAIN)
+    where.extend(compiled)
+    params.update(compiled_params)
 
     if not filters.include_unreliable:
         # Stays sreality-keyed: listing_fetch_failures is a queue table, not an R2
@@ -766,6 +424,8 @@ def _filters_used(
         "max_estate_area": filters.max_estate_area,
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
+        "min_garden_area": filters.min_garden_area,
+        "max_garden_area": filters.max_garden_area,
         "min_parking_lots": filters.min_parking_lots,
         "building_condition_level_min": filters.building_condition_level_min,
         "building_condition_level_max": filters.building_condition_level_max,

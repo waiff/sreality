@@ -84,6 +84,8 @@ export interface FilterDef {{
    *  reach it (an explicit "all" pill) — see FilterDef.nullable in
    *  toolkit/filter_registry.py. */
   nullable: boolean;
+  /** How a column-backed filter compiles everywhere (toolkit/filter_registry.sql_kind); null = hand-coded per surface. */
+  sql_kind: 'eq' | 'any' | 'enum_or_unknown' | 'gte' | 'lte' | null;
 }}
 
 export interface FilterRegistryPayload {{
@@ -153,6 +155,14 @@ def _render_constants() -> str:
             "export const PRICE_UNIT_LABELS: Record<string, string> = "
             + json.dumps({o.value: o.label_cs for o in fr.PRICE_UNIT_OPTIONS},
                          ensure_ascii=False)
+            + ";",
+            "",
+            "/* building_material bucket -> the building_type values it matches. The one",
+            " * expansion is toolkit.filter_registry.building_material_values; Browse reads",
+            " * it from here, so Browse and the Watchdog match the same rows (rule 16). */",
+            "export const BUILDING_MATERIAL_BUCKETS: Record<string, readonly string[]> = "
+            + json.dumps({o.value: fr.building_material_values([o.value])
+                          for o in fr.BUILDING_MATERIAL_OPTIONS})
             + ";",
             "",
         ]

@@ -73,21 +73,16 @@ def test_an_unmerge_logs_only_where_the_propertys_own_history_disagrees():
     assert "values (NEW.id, NEW.is_active, now())" in branch
 
 
-def test_the_status_log_stays_with_its_own_property():
-    from toolkit.operator_state import OPERATOR_STATE_TABLES
-
-    assert "property_status_events" not in {t[0] for t in OPERATOR_STATE_TABLES}
-
-
 def test_the_merge_retires_and_the_detach_reactivates_in_one_statement_each():
     """Both halves must touch `status` and `is_active` together, or the trigger sees a
-    plain is_active flip on an active row and logs it."""
-    merge = " ".join(inspect.getsource(pi.merge_properties).split())
-    assert "SET status = 'merged_away', merged_into = %s, merged_at = now(), is_active = false" in merge
+    plain is_active flip on an active row and logs it. (The status log staying with its own
+    property is tests/test_property_carriers.py; the executed half the live tests.)"""
+    retire = " ".join(pi._RETIRE_SQL.split())
+    assert "SET status = 'merged_away', merged_into = %s, merged_at = now(), is_active = false" \
+        in retire
     reactivate = " ".join(pi._REACTIVATE_SQL.split())
     assert "SET status = 'active', merged_into = NULL, merged_at = NULL, is_active = EXISTS (" \
         in reactivate
-    assert "_REACTIVATE_SQL" in inspect.getsource(pi.detach_listing)
 
 
 # --- 3. rulings, in the review pages' own statements ----------------------------------------

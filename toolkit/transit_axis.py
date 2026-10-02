@@ -273,14 +273,8 @@ def build_corridor_query(
 ) -> tuple[str, dict[str, Any]]:
     """Render the corridor SQL + params. Pure; exposed so the schema-aware
     PREPARE gate can reach a statement built by in-function concatenation."""
-    shared_where, params = _shared_filter_where(target, filters)
-    # _shared_filter_where adds a ST_DWithin(ll.geom, anchor, radius_m)
-    # clause we don't want here — strip it. (W4-a moved the pin to
-    # listing_location; the fragment this matches moved with it.)
-    listing_where = [
-        w for w in shared_where if "ST_DWithin(ll.geom" not in w
-    ]
-    params.pop("radius_m", None)
+    # The corridor replaces the anchor circle, so the adapter leaves it out (radius=False).
+    listing_where, params = _shared_filter_where(target, filters, radius=False)
 
     life_where, life_params = _lifecycle_where(
         filters.lifecycle, filters.max_age_days,

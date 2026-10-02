@@ -16,6 +16,7 @@ import json
 import pathlib
 from typing import Any
 
+from scraper.hashing import digest
 from scraper.mmreality_parser import PropertyMismatch, declared_total, extract_property
 from scraper.mmreality_parser import (
     index_price,
@@ -351,11 +352,11 @@ def test_content_hash_stable_and_bridges_to_ingest():
     url = "https://www.mmreality.cz/nemovitosti/944445/"
     a = parse_detail(_detail_html(ESTATE), source_url=url)
     b = parse_detail(_detail_html(ESTATE), source_url=url)
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
 
-    row = a.to_row(-7)
-    assert row["sreality_id"] == -7
+    row = a.listing_columns()
+    assert "sreality_id" not in row
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 3_190_000
 

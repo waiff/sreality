@@ -5,7 +5,7 @@ resolving limits CLI > portals registry > baked default, and recording an
 non-destructive drain finalize (PR #403 semantics).
 
 The portal seams themselves (district-split walk, enqueue priorities,
-mark_inactive completeness gate, batched drain writes, gone/error routing) are
+nomination completeness gate, batched drain writes, gone/error routing) are
 covered by tests/test_main.py against scraper.main.SrealityPortal — the same
 object this entrypoint drives.
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from scraper import sreality_main
+from scraper import sreality_main, portal_runner
 from scraper.main import SrealityPortal
 from scraper.portal import PortalConfig, PortalLimits, default_config
 
@@ -46,14 +46,14 @@ def _config(limits: PortalLimits | None = None) -> PortalConfig:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start",
+        portal_runner.db, "scrape_run_start",
         lambda _c, run_type, source: (starts.append((run_type, source)) or len(starts)),
     )
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_finalize",
+        portal_runner.db, "scrape_run_finalize",
         lambda _c, run_id, **kw: finals.append((run_id, kw)),
     )
     monkeypatch.setattr(
@@ -76,13 +76,13 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 def test_drain_finalize_is_non_destructive_index_is_not(monkeypatch):
     finals: list[dict[str, Any]] = []
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start", lambda _c, run_type, source: 1
+        portal_runner.db, "scrape_run_start", lambda _c, run_type, source: 1
     )
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_finalize",
+        portal_runner.db, "scrape_run_finalize",
         lambda _c, run_id, **kw: finals.append(kw),
     )
     monkeypatch.setattr(
@@ -109,17 +109,17 @@ def test_crashed_drain_records_an_error_instead_of_finalizing_green(monkeypatch)
     """
     finals: list[dict[str, Any]] = []
     bumps: list[tuple[int, dict[str, Any]]] = []
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start", lambda _c, run_type, source: 9
+        portal_runner.db, "scrape_run_start", lambda _c, run_type, source: 9
     )
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_finalize",
+        portal_runner.db, "scrape_run_finalize",
         lambda _c, run_id, **kw: finals.append(kw),
     )
     monkeypatch.setattr(
-        sreality_main.db, "bump_scrape_run_counts",
+        portal_runner.db, "bump_scrape_run_counts",
         lambda _c, run_id, **kw: bumps.append((run_id, kw)),
     )
 
@@ -137,13 +137,13 @@ def test_crashed_drain_records_an_error_instead_of_finalizing_green(monkeypatch)
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start",
+        portal_runner.db, "scrape_run_start",
         lambda _c, run_type, source: (calls.append(run_type) or len(calls)),
     )
-    monkeypatch.setattr(sreality_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
+    monkeypatch.setattr(portal_runner.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
         sreality_main.portal_runner, "run_index_walk",
         lambda portal, dry_run, **kw: (0, {}),
@@ -181,12 +181,12 @@ def test_failed_index_walk_skips_drain(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start",
+        portal_runner.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
     )
-    monkeypatch.setattr(sreality_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
+    monkeypatch.setattr(portal_runner.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
         sreality_main.portal_runner, "run_index_walk",
         lambda portal, dry_run, **kw: (0, {}),
@@ -203,11 +203,11 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 
 
 def _capture_drain(monkeypatch, captured):
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start", lambda _c, run_type, source: 1
+        portal_runner.db, "scrape_run_start", lambda _c, run_type, source: 1
     )
-    monkeypatch.setattr(sreality_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
+    monkeypatch.setattr(portal_runner.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
         sreality_main.portal_runner, "run_detail_drain",
         lambda portal, dry_run, **kw: (captured.update(kw, portal=portal) or (0, {})),
@@ -220,7 +220,7 @@ def test_registry_limits_govern_when_flags_omitted(monkeypatch):
         index_rate=2.0, detail_workers=8, detail_rate=6.0, max_detail_per_run=12000,
     )
     monkeypatch.setattr(
-        sreality_main, "_load_config", lambda dry_run: _config(registry)
+        portal_runner, "load_config", lambda _source, dry_run=False: _config(registry)
     )
     _capture_drain(monkeypatch, captured)
 
@@ -237,7 +237,7 @@ def test_cli_flags_override_registry(monkeypatch):
     captured: dict[str, Any] = {}
     registry = PortalLimits(detail_workers=8, detail_rate=6.0, max_detail_per_run=12000)
     monkeypatch.setattr(
-        sreality_main, "_load_config", lambda dry_run: _config(registry)
+        portal_runner, "load_config", lambda _source, dry_run=False: _config(registry)
     )
     _capture_drain(monkeypatch, captured)
 
@@ -252,12 +252,12 @@ def test_cli_flags_override_registry(monkeypatch):
 
 def test_max_seconds_reaches_the_index_walk(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
-    monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
+    monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
-        sreality_main.db, "scrape_run_start", lambda _c, run_type, source: 1
+        portal_runner.db, "scrape_run_start", lambda _c, run_type, source: 1
     )
-    monkeypatch.setattr(sreality_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
+    monkeypatch.setattr(portal_runner.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
         sreality_main.portal_runner, "run_index_walk",
         lambda portal, dry_run, **kw: (captured.update(kw) or (0, {})),
@@ -271,8 +271,8 @@ def test_load_config_falls_back_to_baked_default(monkeypatch):
     def _no_db():
         raise RuntimeError("registry unavailable")
 
-    monkeypatch.setattr(sreality_main.db, "connect", _no_db)
-    config = sreality_main._load_config(dry_run=False)
+    monkeypatch.setattr(portal_runner.db, "connect", _no_db)
+    config = portal_runner.load_config("sreality", dry_run=False)
     assert config == default_config("sreality")
     assert config.split_threshold == 10000
     assert config.supports_complete_walk is True

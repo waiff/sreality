@@ -33,7 +33,7 @@ from scraper import street
 from location_data import claims_common, claims_intake, contracts
 from location_data.claims_intake import Entry, IntakeRefused
 from location_data.page_readers import PAGE_READERS, ArchivedPayload, extract_page
-from location_data.html_scope import ScopeRegister, scope_html
+from location_data.html_scope import ScopeRegister
 from tests.location_data import claim_intake_fixtures as fx
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -103,8 +103,7 @@ def live_body(locality: str, config: str | None, description: str | None = None)
 
 def run(body: bytes, *, native: str = "fixture", entries: list[Entry] | None = None):
     payload = ArchivedPayload(
-        id=1, source="maxima", source_id_native=native, page_kind="detail",
-        payload_sha256="0" * 64, first_observed_at=FETCHED_AT, body=body)
+        id=1, page_kind="detail", first_observed_at=FETCHED_AT, body=body)
     row = fx.listing("maxima", {}, native=native)
     return extract_page(payload, row, entries if entries is not None else ENTRIES,
                         register=REGISTER)
@@ -162,7 +161,7 @@ def test_the_town_entry_reads_div_locality_and_claims_segment_one_verbatim():
     assert one(run(_PINNED.read_bytes()), "mx.det.locality_obec").value_text == "Brno-střed"
 
 
-def test_every_entry_claims_on_the_pinned_body_with_a_resolvable_span():
+def test_every_entry_claims_on_the_pinned_body():
     """All six fire on the body the fixture-diff gate scores — the property that makes the
     golden a real gate rather than a record of six silences."""
     result = run(_PINNED.read_bytes())
@@ -176,13 +175,6 @@ def test_every_entry_claims_on_the_pinned_body_with_a_resolvable_span():
             ("mx.det.locality_obec", "mx.det.locality_quarter", "mx.det.locality_street",
              "mx.det.description_okres", "mx.det.map_geometry")] == [
         "Brno-střed", "Veveří", "Grohova", "Brno-město", "Point"]
-    # A span that does not resolve to its own quote is worse than no span (mig 382's CHECK
-    # only tests substring-ness, so a span pointing at another occurrence still passes it).
-    document = scope_html(_PINNED.read_bytes(), register=REGISTER)
-    for claim in result.claims:
-        assert claim.evidence_quote is not None, claim.extractor_id
-        assert claim.span_start is not None and claim.span_end is not None, claim.extractor_id
-        assert document.html[claim.span_start:claim.span_end] == claim.evidence_quote
 
 
 def test_the_pinned_point_feature_is_licensed_as_a_portal_pin():
@@ -204,7 +196,6 @@ def test_the_okres_entry_reads_the_description_and_resolves_the_d6_homonym():
     claim = one(run(live_body("Krásný Les", None, LIVE_OKRES_PROSE), native="f60012522"),
                 "mx.det.description_okres")
     assert claim.value_text == "Liberec"
-    assert claim.evidence_quote == "okres Liberec"
 
 
 def test_the_okres_pattern_stops_at_the_sentence_punctuation_and_keeps_a_hyphen():

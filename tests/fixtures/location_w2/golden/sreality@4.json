@@ -46,7 +46,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": null,
           "value_norm": null,
           "value_num": null,
@@ -62,10 +61,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.inaccuracy_type",
@@ -73,7 +70,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_declared_quality",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "address",
           "value_norm": "address",
           "value_num": null,
@@ -89,10 +85,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.street",
@@ -100,7 +94,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Bernáčkova",
           "value_norm": "bernackova",
           "value_num": null,
@@ -116,10 +109,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_city",
@@ -127,7 +118,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Brno - Dolní Heršpice",
           "value_norm": "brno dolni herspice",
           "value_num": null,
@@ -143,10 +133,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         }
       ],
       "refusals": {
@@ -170,7 +158,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": null,
           "value_norm": null,
           "value_num": null,
@@ -186,10 +173,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.inaccuracy_type",
@@ -197,7 +182,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_declared_quality",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "not_address",
           "value_norm": "not address",
           "value_num": null,
@@ -213,10 +197,8 @@
           "claim_confidence": null,
           "blur_evidence": "declared",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_city",
@@ -224,7 +206,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Praha 5 - Košíře",
           "value_norm": "praha 5 kosire",
           "value_num": null,
@@ -240,10 +221,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         }
       ],
       "refusals": {
@@ -267,7 +246,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": null,
           "value_norm": null,
           "value_num": null,
@@ -283,10 +261,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.inaccuracy_type",
@@ -294,7 +270,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_declared_quality",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "address",
           "value_norm": "address",
           "value_num": null,
@@ -310,10 +285,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.street",
@@ -321,7 +294,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Sinkulova",
           "value_norm": "sinkulova",
           "value_num": null,
@@ -337,10 +309,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_city",
@@ -348,7 +318,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Praha 4 - Podolí",
           "value_norm": "praha 4 podoli",
           "value_num": null,
@@ -364,10 +333,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         }
       ],
       "refusals": {
@@ -391,7 +358,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": null,
           "value_norm": null,
           "value_num": null,
@@ -407,10 +373,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.inaccuracy_type",
@@ -418,7 +382,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_declared_quality",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "street",
           "value_norm": "street",
           "value_num": null,
@@ -434,10 +397,8 @@
           "claim_confidence": null,
           "blur_evidence": "declared",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.street",
@@ -445,7 +406,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "náměstí Jiřího z Poděbrad",
           "value_norm": "namesti jiriho z podebrad",
           "value_num": null,
@@ -461,10 +421,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.housenumber",
@@ -472,7 +430,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "1558",
           "value_norm": "1558",
           "value_num": null,
@@ -488,10 +445,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.streetnumber",
@@ -499,7 +454,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "7",
           "value_norm": "7",
           "value_num": null,
@@ -515,10 +469,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.zip",
@@ -526,7 +478,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "13000",
           "value_norm": "13000",
           "value_num": null,
@@ -542,10 +493,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_city",
@@ -553,7 +502,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Praha",
           "value_norm": "praha",
           "value_num": null,
@@ -569,10 +517,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_citypart",
@@ -580,7 +526,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Vinohrady",
           "value_norm": "vinohrady",
           "value_num": null,
@@ -596,10 +541,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_district",
@@ -607,7 +550,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Praha 3",
           "value_norm": "praha 3",
           "value_num": null,
@@ -623,10 +565,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_region",
@@ -634,7 +574,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Hlavní město Praha",
           "value_norm": "hlavni mesto praha",
           "value_num": null,
@@ -650,10 +589,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "sr.det.name_country",
@@ -661,7 +598,6 @@
           "surface": "api_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Česká republika",
           "value_norm": "ceska republika",
           "value_num": null,
@@ -677,10 +613,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "full",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         }
       ],
       "refusals": {}

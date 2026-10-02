@@ -28,8 +28,10 @@ from autodedup import apply_sql as S
 from autodedup import lane
 from autodedup.incremental_sql import RT_LEASE_READ_SQL, RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
 from toolkit import property_identity
+from tests._property_ledger import _Ledger
 from toolkit.property_identity import (
     AssetLinkConflict,
+    CategoryClash,
     MergeError,
     _detach_plan,
     _origin_gone,
@@ -325,11 +327,13 @@ class FakeDb:
         s, r = self.properties[survivor_id], self.properties[retired_id]
         if s["status"] != "active" or r["status"] != "active":
             raise MergeError("not active")
-        if fail or (s["category_type"] and r["category_type"]
-                    and s["category_type"] != r["category_type"]):
-            raise MergeError(f"category_type mismatch ({retired_id}); refusing to merge")
+        if fail:
+            raise CategoryClash("category_type", "fail", str(retired_id))
+        if (s["category_type"] and r["category_type"]
+                and s["category_type"] != r["category_type"]):
+            raise CategoryClash("category_type", s["category_type"], r["category_type"])
         if not category_main_compatible(s["category_main"], r["category_main"]):
-            raise MergeError("category_main mismatch; refusing to merge")
+            raise CategoryClash("category_main", s["category_main"], r["category_main"])
         moved = sorted(lid for lid, row in self.listings.items()
                        if row["property_id"] == retired_id)
         for lid in moved:
@@ -1005,6 +1009,20 @@ def test_a_refusal_rolls_the_whole_group_back_and_is_final_for_the_generation() 
     assert _only(A.plan_apply(db, GEN, scope)).reasons == [A.SKIP_REFUSED_BEFORE]
 
 
+def test_a_real_category_refusal_is_terminal() -> None:
+    """E41 by type, not by text: the chokepoint's own `CategoryClash` is final for the
+    generation; a property-state refusal from the same gate is re-planned."""
+    with pytest.raises(MergeError) as clash:
+        property_identity.merge_property_set(
+            _Ledger({1: 3, 2: 7}, cats={7: ("pronajem", "byt")}), [3, 7],
+            source="autodedup", reason="r")
+    assert isinstance(clash.value, CategoryClash) and A._terminal(clash.value)
+    with pytest.raises(MergeError, match="properties not found") as gone:
+        property_identity.merge_property_set(_Ledger({1: 3}), [3, 99], source="autodedup",
+                                             reason="r")
+    assert not A._terminal(gone.value)
+
+
 def test_a_negative_recorded_during_a_run_stops_the_group_it_names() -> None:
     # The plan read no negative; the operator rules 20 x 21 different while group 10 merges.
     # Group 20 re-reads its negatives inside its own transaction and is skipped, not merged.
@@ -1592,7 +1610,7 @@ def test_a_later_retiring_merge_the_operator_undid_is_not_named(hand_into: int) 
 def test_a_merge_undone_and_then_redone_by_hand_is_noted_undone_by_the_dry_run_too() -> None:
     # g12 merged 200 (11) into 100 (10). The operator undid it on the merge ledger and later
     # merged 200 into 100 again by hand: `merged_into` is the same, but that is THEIR merge
-    # (its `merged_at` is not g12's `applied_at`). `unmerge_group` finds nothing live of g12,
+    # (its `merged_at` is not g12's `applied_at`). g12's detach loop finds nothing live of it,
     # so the dry run says "already undone" exactly as the live run then records it.
     db = FakeDb()
     _scope, calls = _applied_two(db)

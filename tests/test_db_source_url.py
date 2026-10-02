@@ -1,7 +1,7 @@
 """The write-path wiring of listings.source_url (docs/design/portal-listing-url.md).
 
-source_url rides the shared LISTING_COLUMNS machinery, so one entry covers both ingest
-paths (upsert_listing + the batched drain) for all nine portals — the bespoke post-insert
+source_url rides the shared LISTING_COLUMNS machinery, so one entry covers the one listing
+write (scraper/listing_write.py) for all nine portals — the bespoke post-insert
 UPDATE the crawler path used is gone. These pin: the column + its pgtype, preserve-if-null
 on the ON CONFLICT SET (an incoming NULL can only mean "could not assemble", never "left
 its page"), its exclusion from the ScrapedListing content hash and from both snapshot-diff
@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from scraper import db, freshness
+from scraper import db, freshness, listing_write
+from scraper.portal import _DEFAULTS
 from scraper.scraped_listing import _HASH_FIELDS, _LISTING_FIELDS, ScrapedListing
 from toolkit import snapshots
 
@@ -20,21 +21,22 @@ from toolkit import snapshots
 def test_column_is_wired_into_listing_columns() -> None:
     assert "source_url" in db.LISTING_COLUMNS
     assert db._LISTING_COLUMN_PGTYPE["source_url"] == "text"
-    assert "source_url text" in db._BATCH_UPSERT_SQL
+    assert "source_url text" in listing_write._RECORD_SPEC
 
 
 def test_update_set_preserves_source_url_if_incoming_null() -> None:
     assert "source_url" in db._PRESERVE_IF_NULL_COLUMNS
     expected = "source_url = COALESCE(EXCLUDED.source_url, listings.source_url)"
     assert db._listing_update_set_sql("sreality").count(expected) == 1
-    assert expected in db._BATCH_UPSERT_SQL
+    for portal in _DEFAULTS:
+        assert expected in listing_write._upsert_sql(portal)
 
 
 def test_contract_carries_but_never_hashes_source_url() -> None:
     assert "source_url" in _LISTING_FIELDS
     assert "source_url" not in _HASH_FIELDS
     row = ScrapedListing(source="bazos", source_id_native="1",
-                         source_url="https://reality.bazos.cz/inzerat/1/x.php").to_row(-1)
+                         source_url="https://reality.bazos.cz/inzerat/1/x.php").listing_columns()
     assert row["source_url"] == "https://reality.bazos.cz/inzerat/1/x.php"
 
 

@@ -1,8 +1,10 @@
 """One place that turns a source name into a Portal (or client) instance.
 
-Two callers need the same table and the same two constructor exceptions: the
-realtime worker, to run a lane, and the coverage gate, to ask a portal what its
-declared categories canonicalise to. A second copy of that table is a second
+Every caller that turns a source into a Portal needs the same table and the same
+two constructor exceptions: the realtime worker, to run a lane; the coverage
+gate, to ask a portal what its declared categories canonicalise to; and the
+sreality entrypoint, to build its portal from config. `portal_runner` reads the
+client table to make a portal's client. A second copy of either table is a second
 thing to get wrong, and the thing it would get wrong is not cosmetic — the gate
 mis-counting a portal's categories is what kept ceskereality permanently parked.
 
@@ -62,14 +64,17 @@ def build_portal(source: str, config: PortalConfig) -> Any:
         portal = bazos_main.BazosPortal(categories=scopes)
         portal.index_rate = config.limits.index_rate
         portal.shared_rate_limiter = config.limits.shared_rate_limiter
-        portal.supports_complete_walk = config.supports_complete_walk
+        portal.price_change_min_pct = config.limits.price_change_min_pct
         return portal
     if source == "sreality":
         # Also predates the config-taking constructor (main.SrealityPortal takes
         # index_rate, not a PortalConfig, and builds its own category list).
         from scraper import main as sreality_main
 
-        return sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
+        portal = sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
+        portal.shared_rate_limiter = config.limits.shared_rate_limiter
+        portal.price_change_min_pct = config.limits.price_change_min_pct
+        return portal
     mod_name, cls_name = PORTAL_CLASSES[source]
     cls = getattr(importlib.import_module(mod_name), cls_name)
     return cls(config)

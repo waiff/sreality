@@ -3,7 +3,9 @@
 Hermetic: a small stateful in-memory fake conn modelling `properties` (id ->
 status + asset_id) and `assets`, so the link/unlink branching (new asset, join
 existing, UNION across assets, dissolve-on-<2) is genuinely exercised without a
-DB. No CI Postgres exists, so a real-DB test is not an option here.
+DB. No CI Postgres exists, so a real-DB test is not an option here. Every writer
+patches Browse (`asset_id` is a `browse_projection` column) for exactly the
+properties whose link changed: `_patched` reads that off the log.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         c = self._conn
+        c.log.append((s, params))
         p = params or ()
         if "SELECT id, status, asset_id FROM properties WHERE id = ANY" in s:
             self._rows = [
@@ -108,6 +111,7 @@ class _FakeConn:
         self.assets = assets or {}
         self.next_asset_id = (max(self.assets) + 1) if self.assets else 1
         self.events: list[Any] = []
+        self.log: list[tuple[str, Any]] = []
 
     def cursor(self) -> _Cur:
         return _Cur(self)
@@ -120,6 +124,11 @@ def _active(*ids: int, asset: int | None = None) -> dict[int, dict[str, Any]]:
     return {i: {"status": "active", "asset_id": asset} for i in ids}
 
 
+def _patched(conn: _FakeConn) -> list[list[int]]:
+    """The id list of each Browse patch the writer ran."""
+    return [list(p[0]) for s, p in conn.log if s.startswith("DELETE FROM browse_list")]
+
+
 def test_link_two_standalone_creates_asset():
     conn = _FakeConn(_active(1, 2))
     out = link_properties(conn, property_ids=[1, 2])
@@ -130,6 +139,7 @@ def test_link_two_standalone_creates_asset():
     # one 'linked' event per newly attached property
     linked = [e for e in conn.events if e[2] == "linked"]
     assert len(linked) == 2
+    assert _patched(conn) == [[1, 2]]
 
 
 def test_link_joins_existing_asset():
@@ -141,6 +151,7 @@ def test_link_joins_existing_asset():
     assert out["data"]["asset_id"] == 5
     assert out["data"]["newly_linked_property_ids"] == [2]
     assert conn.props[2]["asset_id"] == 5
+    assert _patched(conn) == [[1, 2]]
 
 
 def test_link_unions_two_assets_dissolving_higher():
@@ -155,6 +166,7 @@ def test_link_unions_two_assets_dissolving_higher():
     assert out["data"]["member_property_ids"] == [1, 2, 3]  # 3 came along
     assert conn.assets[9]["status"] == "dissolved"
     assert conn.props[3]["asset_id"] == 5
+    assert _patched(conn) == [[1, 2, 3]]
 
 
 def test_link_needs_two_distinct():
@@ -182,6 +194,7 @@ def test_unlink_dissolves_when_one_remains():
     assert out["data"]["remaining_member_ids"] == []
     assert conn.props[1]["asset_id"] is None and conn.props[2]["asset_id"] is None
     assert conn.assets[5]["status"] == "dissolved"
+    assert _patched(conn) == [[1, 2]]
 
 
 def test_unlink_keeps_asset_with_two_plus():
@@ -193,6 +206,7 @@ def test_unlink_keeps_asset_with_two_plus():
     assert out["data"]["asset_dissolved"] is False
     assert out["data"]["remaining_member_ids"] == [2, 3]
     assert conn.assets[5]["status"] == "active"
+    assert _patched(conn) == [[1]]
 
 
 def test_unlink_property_not_in_asset_raises():

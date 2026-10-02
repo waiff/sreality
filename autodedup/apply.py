@@ -54,6 +54,7 @@ from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
     AssetLinkConflict,
+    CategoryClash,
     MergeError,
     detach_listing,
     detach_outcomes,
@@ -919,7 +920,7 @@ def _rows_for(
 def _terminal(exc: MergeError) -> bool:
     """E41: a category refusal at the chokepoint is final for this group in this generation;
     a property-state refusal (a concurrent operator merge) is re-planned from fresh state."""
-    return "mismatch" in str(exc)
+    return isinstance(exc, CategoryClash)
 
 
 def group_brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:

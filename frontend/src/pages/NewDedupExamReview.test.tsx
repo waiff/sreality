@@ -3,17 +3,23 @@
  * the exam's own vocabulary — never a per-cell patch that could produce a row
  * shape the exam could not. */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import NewDedupExamReview from './NewDedupExamReview';
 import * as api from '@/lib/api';
+import { createMutationCache } from '@/lib/mutationCache';
 import * as queries from '@/lib/queries';
+import * as toast from '@/lib/toast';
 
 vi.mock('@/lib/api');
 vi.mock('@/lib/queries');
+vi.mock('@/lib/toast', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/toast')>();
+  return { ...actual, pushToast: vi.fn(() => 1) };
+});
 vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const TAGS = [
@@ -22,7 +28,11 @@ const TAGS = [
 ];
 
 function renderPage(entries = ['/new-dedup/exam/review']) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The app's own MutationCache, so a failed write's one toast is in the loop.
+  const qc = new QueryClient({
+    mutationCache: createMutationCache(),
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={entries}><NewDedupExamReview /></MemoryRouter>
@@ -120,17 +130,6 @@ describe('<NewDedupExamReview>', () => {
     ));
   });
 
-  it('a failed save reverts only that row', async () => {
-    vi.mocked(api.answerExamQuestion).mockRejectedValue(new Error('boom'));
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByText(/2 answered/);
-    const btn = screen.getAllByRole('button', { name: /interier - koupelna/ })[0];
-    await user.click(btn);
-    // Optimistic leave-out, then back to the server's picked once the save fails.
-    await waitFor(() => expect(btn).toHaveAttribute('aria-pressed', 'true'));
-  });
-
   it('marks a recorded negative apart from anything undecided', async () => {
     // Review shows only fully answered images, so a plain button IS a negative
     // — but plain looks exactly like the exam's "not yet decided". The verdict
@@ -222,6 +221,28 @@ describe('<NewDedupExamReview> machine suggestion beside the final', () => {
   });
 });
 
+describe('<NewDedupExamReview> a correction that fails', () => {
+  it('puts only that row back and says why, once', async () => {
+    let reject!: (e: Error) => void;
+    vi.mocked(api.answerExamQuestion).mockReturnValue(
+      new Promise((_res, rej) => { reject = rej; }) as never);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/2 answered/);
+    await user.click(screen.getAllByRole('button', { name: /interier - koupelna/ })[0]);
+    // Painted on the click…
+    expect(screen.getAllByText('left out')).toHaveLength(2);
+    await act(async () => reject(new Error('exam store offline')));
+    // …and back to the server's version once it fails; row 777's own
+    // leave-out stands.
+    await waitFor(() => expect(screen.getAllByText('left out')).toHaveLength(1));
+    expect(screen.getAllByRole('button', { name: /interier - koupelna/ })[0])
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(toast.pushToast).toHaveBeenCalledTimes(1);
+    expect(toast.pushToast).toHaveBeenCalledWith('err', 'exam store offline');
+  });
+});
+
 describe('<NewDedupExamReview> machine review proposals', () => {
   const withMachine = (verdicts: Record<string, 'yes' | 'no' | 'skip'>, dismissed: number[] = []) => {
     vi.mocked(api.getExamAnswers).mockResolvedValue({
@@ -282,6 +303,22 @@ describe('<NewDedupExamReview> machine review proposals', () => {
     ));
     expect(screen.queryByTestId('proposal-555-25')).toBeNull();
     expect(api.answerExamQuestion).not.toHaveBeenCalled();
+  });
+
+  it('a keep-mine that fails raises the proposal again and says why, once', async () => {
+    let reject!: (e: Error) => void;
+    vi.mocked(api.dismissExamMachineProposal).mockReturnValue(
+      new Promise((_res, rej) => { reject = rej; }) as never);
+    withMachine({ '22': 'yes', '25': 'yes' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/1 answered/);
+    await user.click(screen.getByRole('button', { name: /keep mine/ }));
+    expect(screen.queryByTestId('proposal-555-25')).toBeNull();
+    await act(async () => reject(new Error('nope')));
+    await waitFor(() => expect(screen.getByTestId('proposal-555-25')).toBeInTheDocument());
+    expect(toast.pushToast).toHaveBeenCalledTimes(1);
+    expect(toast.pushToast).toHaveBeenCalledWith('err', 'nope');
   });
 
   it('a dismissed cell from the server is not raised again', async () => {

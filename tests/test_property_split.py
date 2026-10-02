@@ -1,7 +1,7 @@
 """The operator's split statement, `toolkit.property_split` (E919), and `POST /properties/{id}/split`.
 
 Over tests/_property_ledger.py's stateful fake, so every move replays through the real
-`detach_listing` / `merge_property_set` and every ruling lands in a verdict store that reads back.
+`detach_listings` / `merge_property_set` and every ruling lands in a verdict store that reads back.
 The screenshot case: property 10 holds its own advert s=1, b=2 merged from 20 and i=3 merged from
 30; the operator separates b and confirms s + i as one. Executed on Postgres:
 tests/test_property_split_live.py.
@@ -18,9 +18,11 @@ import pytest
 
 import toolkit.property_identity as pi
 import toolkit.property_split as ps
-from tests._property_ledger import OP, T0, _Ledger
+from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit.property_identity import merge_property_set
 from toolkit.property_split import SplitRefused, split_property, undo_split
+
+pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
 OTHER = "someone.else@example.com"
 
@@ -40,7 +42,7 @@ def _split(db: _Ledger, separate: list[list[int]], *, adverts: list[int] | None 
 
 def _state(db: _Ledger) -> tuple:
     return (dict(db.listings), dict(db.props), [dict(e) for e in db.events],
-            [dict(r) for r in db.verdicts], dict(db.mnl))
+            [dict(r) for r in db.verdicts], dict(db.mnl), list(db.carried))
 
 
 def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:
@@ -117,8 +119,8 @@ def test_a_bare_veto_the_split_confirms_comes_back_as_the_different_it_was():
 
 def test_a_whole_group_leaves_together_as_one_record_the_oldest():
     """Three own adverts (grouped at ingest): 2 and 3 are one unit. Each is born a record, the
-    two records are joined by the one merge, and (2, 3) ends `same` although the detach of 2 first
-    ruled it `different` from 3, still on the property then."""
+    two records are joined by the one merge, and (2, 3) ends `same`, the only word it ever got:
+    the set detach rules each mover against the advert that stays, never against the other."""
     db = _Ledger({1: 10, 2: 10, 3: 10})
     out = _split(db, [[2, 3]])
     born = out["units"][1]["property_id"]
@@ -126,7 +128,7 @@ def test_a_whole_group_leaves_together_as_one_record_the_oldest():
     assert [m["outcome"] for m in out["units"][1]["moved"]] == ["split_native", "split_native"]
     assert out["units"][1]["merge_group_id"] is not None
     assert sorted(p for p, s in db.props.items() if s == "merged_away") == [born + 1]
-    assert db.word(2, 3)[0] == "same" and (2, 3) not in db.mnl
+    assert [v for v, _note, _by in db.history(2, 3)] == ["same"] and (2, 3) not in db.mnl
     assert db.word(1, 2)[0] == db.word(1, 3)[0] == "different"
     assert set(db.mnl) == {(1, 2), (1, 3)}
 
@@ -232,7 +234,7 @@ def test_an_advert_that_cannot_move_refuses_and_rolls_back_every_detach_before_i
     # planned so before any lock: an origin a later merge retired elsewhere
     db = _Ledger({1: 10, 31: 30, 32: 30, 9: 5}, first_seen={5: T0 - timedelta(days=9)})
     merge_property_set(db, [10, 30], source="operator", reason="r", decided_by=OP)
-    ps.detach_listing(db, 31, decided_by=OP)
+    pi.detach_listings(db, [31], decided_by=OP)
     merge_property_set(db, [5, 30], source="autodedup", reason="r")
     assert _refused(_split, db, [[32]], adverts=[1, 32]).ids == [
         {"listing_id": 32, "outcome": "origin_moved_on"}]
@@ -267,7 +269,7 @@ def test_a_join_the_one_merge_refuses_is_refused_and_nothing_moves():
 def test_a_join_that_would_drag_an_advert_nobody_named_is_refused():
     db = _Ledger({1: 10, 2: 20, 4: 20, 3: 30})
     merge_property_set(db, [10, 20, 30], source="autodedup", reason="r")
-    ps.detach_listing(db, 4, decided_by=OP)            # 20 is back, holding 4
+    pi.detach_listings(db, [4], decided_by=OP)         # 20 is back, holding 4
     before = _state(db)
     dragged = _refused(_split, db, [[2, 3]], adverts=[1, 2, 3])
     assert (dragged.code, dragged.ids) == ("join_would_drag", [4]) and _state(db) == before
@@ -298,7 +300,7 @@ def test_two_units_that_came_from_one_property_are_refused_not_sent_home_togethe
 def test_an_origin_holding_another_units_or_an_unnamed_advert_is_refused():
     db = _Ledger({1: 10, 2: 20, 3: 20})
     merge_property_set(db, [10, 20], source="autodedup", reason="r")
-    ps.detach_listing(db, 3, decided_by=OTHER)          # 20 is back, holding 3
+    pi.detach_listings(db, [3], decided_by=OTHER)       # 20 is back, holding 3
     before = _state(db)
     # 3 stays in the kept unit; OTHER's detach ruled (1, 3) `different`, the newest word (E52)
     refused = _refused(_split, db, [[2]], adverts=[1, 2, 3], confirm_retract=True)
@@ -314,13 +316,27 @@ def test_an_origin_holding_another_units_or_an_unnamed_advert_is_refused():
     assert out["reversed_pairs"] == [[2, 3]]
 
 
+def _restored(db: _Ledger) -> list[Any]:
+    """Every must-not-link row `restore_must_not_link` wrote back."""
+    return db.sql(" ".join(pi.usql.MUST_NOT_LINK_RESTORE_SQL.split()))
+
+
+def _interim(db: _Ledger, lo: int, hi: int) -> list[tuple]:
+    """A detach's own `different` on a pair: never one inside a unit (`_rule_detached`)."""
+    return [row for row in db.history(lo, hi)
+            if row[0] == "different" and str(row[1]).startswith("operator detach from")]
+
+
 def test_a_machine_veto_survives_the_split_and_its_undo():
     """Review finding 2: `different` rewrites a guard row as the operator's, and the undo's
-    `unsure` used to delete it; `same` (a group leaving together, the keeper swap) keeps it."""
+    `unsure` used to delete it; `same` (a group leaving together, the keeper swap) keeps it.
+    No detach in a split rules a pair inside one unit, so the split's `restore_must_not_link`
+    writes nothing (F1 deletes it on this proof)."""
     db = _Ledger({1: 10, 2: 20})
     merge_property_set(db, [10, 20], source="autodedup", reason="r")
     db.mnl[(1, 2)] = ("guard", "floor 3 vs 7")
     out = _split(db, [[2]])
+    assert _restored(db) == []
     assert db.mnl[(1, 2)][0] == "operator"
     assert out["undo"]["rulings"][0]["must_not_link"] == {"source": "guard",
                                                           "reason": "floor 3 vs 7"}
@@ -332,11 +348,13 @@ def test_a_machine_veto_survives_the_split_and_its_undo():
     db = _screenshot()
     db.mnl[(2, 3)] = ("model", "m")
     _split(db, [[2, 3]])
+    assert _restored(db) == [] and _interim(db, 2, 3) == []
     assert db.word(2, 3)[0] == "same" and db.mnl[(2, 3)] == ("model", "m")
     # the keeper swap: the kept unit's adverts go home one by one, then are ruled `same`
     db = _screenshot()
     db.mnl[(2, 3)] = ("llm", "l")
     out = _split(db, [[1]])
+    assert _restored(db) == [] and _interim(db, 2, 3) == []
     assert out["record_kept_by"] == "B" and db.word(2, 3)[0] == "same"
     assert db.mnl[(2, 3)] == ("llm", "l")
     undo = out["undo"]
@@ -445,17 +463,39 @@ def test_a_lock_timeout_or_deadlock_is_busy():
 
 
 def test_the_statement_writes_only_through_the_chokepoint():
-    """Rule 15: the split moves adverts through `detach_listing` / `merge_property_set` and rules
+    """Rule 15: the split moves adverts through `detach_listings` / `merge_property_set` and rules
     through `record_rulings`, and holds no write statement of its own."""
     src = inspect.getsource(ps)
     for statement in ("UPDATE listings", "UPDATE properties", "INSERT INTO property_merge_events",
                       "INSERT INTO autodedup", "DELETE FROM", "INSERT INTO properties",
                       "SELECT id, property_id FROM listings WHERE id"):
         assert statement not in src, statement
-    for writer in ("detach_listing(", "merge_property_set(", "record_rulings(",
+    for writer in ("detach_listings(", "merge_property_set(", "record_rulings(",
                    "restore_must_not_link("):
         assert writer in inspect.getsource(ps.split_property) + inspect.getsource(ps._join)
     assert ps.listing_places is pi.listing_places and not hasattr(ps, "_PLACES_SQL")
+    assert not hasattr(ps, "detach_listing"), "the split detaches its movers as ONE set"
+
+
+@pytest.mark.parametrize(("listings", "separate", "joins"), [
+    ({1: 10, 2: 20, 3: 30}, [[2], [3]], 0),     # two merged adverts go home apart
+    ({1: 10, 2: 10, 3: 10}, [[2], [3]], 0),     # two native adverts, each born a record
+    ({1: 10, 2: 10, 3: 10}, [[2, 3]], 1),       # born apart, then joined as one unit
+    ({1: 10, 2: 10, 3: 10, 4: 10, 5: 10}, [[2, 3], [4, 5]], 2),
+])
+def test_a_split_brings_derived_state_current_once_per_writer_call(listings, separate, joins):
+    """M movers and J joined units: ONE `properties_changed` for the set detach (over the record
+    and every property reached), then one per join — 1 + J, not M + J."""
+    db = _Ledger(listings)
+    if len(set(listings.values())) > 1:
+        merge_property_set(db, sorted(set(listings.values())), source="autodedup", reason="r")
+    for seen in (db.changed, db.browse, db.broker):
+        seen.clear()
+    out = _split(db, separate)
+    reached = sorted({10, *(m["to"] for u in out["units"] for m in u["moved"])})
+    assert out["moved"] == sum(map(len, separate)) and len(db.changed) == 1 + joins
+    assert db.changed[0] == reached
+    assert db.changed == db.browse == db.broker
 
 
 def test_one_pair_verdict_vocabulary():

@@ -9,11 +9,11 @@
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared
  *    secret.
- *  - default (require_token routes) sends VITE_API_TOKEN, a static secret
- *    inlined into the JS bundle at build time and therefore extractable by
- *    anyone with browser devtools. That's fine for this gate: it only proves
- *    "loaded the SPA past its password gate", never an identity or admin
- *    claim. Server-side enforcement is api/dependencies.py:require_token.
+ *  - default (require_token routes) sends VITE_API_TOKEN, a static bearer
+ *    inlined into the JS bundle at build time; Caddy serves the bundle before
+ *    any sign-in, so anyone can read it. It proves only "loaded the SPA": a
+ *    require_token route must never return identity, admin or per-account
+ *    data. Server-side enforcement is api/dependencies.py:require_token.
  *    See frontend/README.md.
  */
 
@@ -138,13 +138,16 @@ export class ApiError extends Error {
 
 /* The ONE retry policy question: is this worth one more attempt? Network blips
  * and gateway/busy answers (502/503/504 — the API classifies a lock-blocked or
- * cancelled DB read as 503 db_busy) are; a deadline timeout is not (the caller
- * already waited the full budget once), and neither is any 4xx or 500 (they are
- * deterministic — retrying re-runs the same failure and doubles the wait). */
+ * cancelled DB read as 503 db_busy — and 520, Cloudflare's "unknown origin
+ * error" in front of Supabase's REST endpoint, which postgrest-js itself
+ * retried before pgRead switched its retry off) are; a deadline timeout is not
+ * (the caller already waited the full budget once), and neither is any 4xx or
+ * 500 (they are deterministic — retrying re-runs the same failure and doubles
+ * the wait). */
+const TRANSIENT_STATUSES = new Set([502, 503, 504, 520]);
 export const isTransientApiError = (err: unknown): boolean =>
   err instanceof ApiError &&
-  (err.kind === 'network' ||
-    (err.kind === 'http' && (err.status === 502 || err.status === 503 || err.status === 504)));
+  (err.kind === 'network' || (err.kind === 'http' && TRANSIENT_STATUSES.has(err.status)));
 
 export type QueryScalar = string | number | boolean;
 /* An array value is serialized as REPEATED params (ids=1&ids=2) — the shape a
