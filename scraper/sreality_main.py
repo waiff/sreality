@@ -16,12 +16,12 @@ What stays sreality-specific lives behind the Portal seams, unchanged:
   per-(cm,ct) presence nomination) inside SrealityPortal.walk_category. The
   count (INDEX_MIN_COMPLETENESS, 0.995) still triggers the national fallback
   and reports coverage; since 2026-09-08 it gates nothing;
-- the batched prepared writes (db.write_detail_batch on the session pooler)
+- the batched prepared writes (listing_write.write_listings on the session pooler)
   behind SrealityPortal.write_details — at sreality volume (~15k details/day)
   per-row ingest would forfeit the Phase-1 prepared-statement win;
-- ListingGoneError -> immediate single-listing inactive flip + failure-row
-  clear, and listing_fetch_failures bookkeeping, behind mark_gone /
-  record_failure.
+- ListingGoneError -> the runner's single-listing inactive flip
+  (db.mark_listing_inactive, which also clears the failure row), and
+  listing_fetch_failures bookkeeping behind record_failure.
 
 scraper.main keeps the legacy CLI (scrape.yml's instant-revert fallback) and
 the image-download phase used by images.yml / images_fresh.yml — neither moves
@@ -36,40 +36,19 @@ per-portal stats read today.
 from __future__ import annotations
 
 import argparse
-import logging
 
-from scraper import db, portal_runner
-from scraper.main import SrealityPortal
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper import portal_runner
+from scraper.portal_factory import build_portal
 
-LOG = logging.getLogger(__name__)
 SOURCE = "sreality"
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
-    portal = SrealityPortal(index_rate=config.limits.index_rate)
-    # The DB column is the source of truth for delisting (so it stays consistent
-    # with the derived Health posture badge); the class default is the safe
-    # fallback for the legacy main._run_full path that doesn't load config.
-    portal.supports_complete_walk = config.supports_complete_walk
-    portal.shared_rate_limiter = config.limits.shared_rate_limiter
+    config = portal_runner.load_config(SOURCE, args.dry_run)
+    portal = build_portal(SOURCE, config)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -132,13 +111,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import { examHref } from './NewDedupExam';
@@ -17,7 +17,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { splitTagLabel } from '@/lib/tagLabel';
 import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
-import { pushToast } from '@/lib/toast';
+import { useOptimisticWrite } from '@/lib/useOptimisticWrite';
 
 /* NEW DEDUP · Exam review — every answered exam image in a list, editable.
  *
@@ -141,19 +141,26 @@ export default function NewDedupExamReview() {
   };
   const stateOf = (r: ExamAnswerRow): RowState => edited.get(r.image_id) ?? rowStateOf(r);
 
-  const saveMut = useMutation({
-    mutationFn: (body: {
-      image_id: number; picked_tag_ids: number[]; skipped_tag_ids: number[];
-      cant_tell: boolean; set?: string;
-    }) => answerExamQuestion(cohort, body),
-    onError: (e: Error, body) => {
-      pushToast('err', e.message);
-      // Revert the failed row to the server's version; other edits stand.
-      setEdited((prev) => {
-        const next = new Map(prev);
-        next.delete(body.image_id);
-        return next;
-      });
+  /* The row repaints on the click; a failure reverts it to the server's
+   * version (other edits stand) and the app's global toast says why. */
+  const saveMut = useOptimisticWrite({
+    mutationKey: ['write', 'exam', 'answer'],
+    mutationFn: ({ imageId, next }: { imageId: number; next: RowState }) =>
+      answerExamQuestion(cohort, {
+        image_id: imageId,
+        picked_tag_ids: [...next.picked].sort((a, b) => a - b),
+        skipped_tag_ids: [...next.skipped].sort((a, b) => a - b),
+        cant_tell: next.cantTell,
+        ...(setName ? { set: setName } : {}),
+      }),
+    patch: ({ imageId, next }) => {
+      setEdited((prev) => new Map(prev).set(imageId, next));
+      return () =>
+        setEdited((prev) => {
+          const reverted = new Map(prev);
+          reverted.delete(imageId);
+          return reverted;
+        });
     },
   });
 
@@ -162,40 +169,31 @@ export default function NewDedupExamReview() {
   const dismissedOf = (r: ExamAnswerRow): Set<number> =>
     dismissed.get(r.image_id) ?? new Set(r.machine?.dismissed_tag_ids ?? []);
 
-  const dismissMut = useMutation({
-    mutationFn: (body: { image_id: number; tag_id: number }) =>
-      dismissExamMachineProposal(cohort, body),
-    onError: (e: Error, body) => {
-      pushToast('err', e.message);
+  const dismissMut = useOptimisticWrite({
+    mutationKey: ['write', 'exam', 'dismiss-proposal'],
+    mutationFn: ({ r, tagId }: { r: ExamAnswerRow; tagId: number }) =>
+      dismissExamMachineProposal(cohort, { image_id: r.image_id, tag_id: tagId }),
+    patch: ({ r, tagId }) => {
       setDismissed((prev) => {
         const next = new Map(prev);
-        const cur = new Set(next.get(body.image_id) ?? []);
-        cur.delete(body.tag_id);
-        next.set(body.image_id, cur);
+        const seed = prev.get(r.image_id) ?? new Set(r.machine?.dismissed_tag_ids ?? []);
+        next.set(r.image_id, new Set([...seed, tagId]));
         return next;
       });
+      return () =>
+        setDismissed((prev) => {
+          const next = new Map(prev);
+          const cur = new Set(next.get(r.image_id) ?? []);
+          cur.delete(tagId);
+          next.set(r.image_id, cur);
+          return next;
+        });
     },
   });
 
-  const keepMine = (r: ExamAnswerRow, tagId: number) => {
-    setDismissed((prev) => {
-      const next = new Map(prev);
-      next.set(r.image_id, new Set([...dismissedOf(r), tagId]));
-      return next;
-    });
-    dismissMut.mutate({ image_id: r.image_id, tag_id: tagId });
-  };
+  const keepMine = (r: ExamAnswerRow, tagId: number) => dismissMut.mutate({ r, tagId });
 
-  const commit = (imageId: number, next: RowState) => {
-    setEdited((prev) => new Map(prev).set(imageId, next));
-    saveMut.mutate({
-      image_id: imageId,
-      picked_tag_ids: [...next.picked].sort((a, b) => a - b),
-      skipped_tag_ids: [...next.skipped].sort((a, b) => a - b),
-      cant_tell: next.cantTell,
-      ...(setName ? { set: setName } : {}),
-    });
-  };
+  const commit = (imageId: number, next: RowState) => saveMut.mutate({ imageId, next });
 
   const cycleTag = (r: ExamAnswerRow, tagId: number) => {
     const cur = stateOf(r);

@@ -26,6 +26,7 @@ import {
   type AutodedupValidationProgress,
 } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 export interface ValidationStripProps {
   /* Three grains: a cluster on the groups queue, a pair on the residual queue
@@ -60,7 +61,7 @@ export default function ValidationStrip({
   minScore,
 }: ValidationStripProps) {
   const q = useQuery({
-    queryKey: ['autodedup', 'validation-progress', surface, generation, seed, minScore ?? null],
+    queryKey: autodedupKeys.validationProgressFor(surface, generation, seed, minScore ?? null),
     queryFn: () =>
       getAutodedupValidationProgress({
         surface,

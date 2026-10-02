@@ -30,9 +30,8 @@ from typing import Any
 from psycopg.rows import dict_row
 
 from scripts.resolve_brokers import (
-    _BROKER_ROLLUP,
     _IDENTITY_ROLLUP,
-    _MEMBERSHIP_RECOMPUTE,
+    recompute_brokers,
 )
 
 LOG = logging.getLogger("broker_review")
@@ -467,10 +466,7 @@ def _recompute_brokers(conn: Any, broker_ids: list[int]) -> None:
         cur.execute(_IDENTITY_ROLLUP.format(
             extra="AND broker_identity_id IN (SELECT id FROM broker_identities "
                   "WHERE broker_id = ANY(%(bids)s))"), {"bids": bids})
-        cur.execute(_BROKER_ROLLUP.format(bscope="AND broker_id = ANY(%(bids)s)"), {"bids": bids})
-        cur.execute(_MEMBERSHIP_RECOMPUTE.format(
-            bscope="AND bi.broker_id = ANY(%(bids)s)",
-            mscope="m.broker_id = ANY(%(bids)s) AND"), {"bids": bids})
+        recompute_brokers(cur, bids)
 
 
 def _iso(v: Any) -> Any:

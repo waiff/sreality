@@ -77,7 +77,10 @@ def _seed_broker(cur, broker_id: int, status: str = "active", firm_id=None):
     )
 
 
-def _seed_stats(cur, broker_id: int, apc: int, geo_level: str = "region", geo_id: int = 1):
+def _seed_stats(cur, broker_id: int, apc: int, geo_level: str = "cz", geo_id: int = 0):
+    """Default cell = the national ('cz', 0) one: since W4 a call with no geo
+    arrays reads exactly that cell (it no longer sums region rows), so a no-geo
+    test must seed it. Geo tests pass explicit levels."""
     cur.execute(
         "insert into broker_region_type_stats "
         "(broker_id, geo_level, geo_id, category_main, category_type, "
@@ -186,20 +189,32 @@ def test_empty_firm_array_still_means_no_firm_matches(conn):
     assert null_array == 5, f"p_firm_ids => null must be unconstrained, got {null_array}"
 
 
-def test_geo_arms_do_not_duplicate_a_broker_present_at_two_levels(conn):
-    """The UNION ALL must sit BELOW one GROUP BY.
+def _seed_admin(cur, unit_id: int, level: str, parent_id=None):
+    cur.execute(
+        "insert into admin_boundaries (id, level, name, parent_id, geom) "
+        "values (%s, %s, %s, %s, "
+        " ST_Multi(ST_GeomFromText('POLYGON((0 0,0 1,1 1,1 0,0 0))',4326))::geography)",
+        (unit_id, level, f"{level}-{unit_id}", parent_id),
+    )
 
-    Splitting the 4-way OR into level-guarded arms is the single most likely place to
-    introduce a duplicate: a per-arm GROUP BY would emit two CTE rows for a broker holding
-    both a region and an okres row, doubling its counts AND its output row.
 
-    RED by: giving each arm its own GROUP BY.
+def test_disjoint_geo_levels_still_sum_through_one_group_by(conn):
+    """The geo disjuncts sit BELOW one GROUP BY, and DISJOINT selections stay
+    additive (each property lives in one geo, so their cells may be summed).
+    The okres here has NO admin_boundaries parent among the selected krajs, so
+    the W4 nested-chip suppression must leave it alone.
+
+    RED by: a per-arm GROUP BY (duplicated output row), or a suppression
+    predicate so eager it drops an okres whose parent was never selected.
     """
     with conn.cursor() as cur:
         _park(cur)
         _seed_broker(cur, 1)
         _seed_stats(cur, 1, 10, geo_level="region", geo_id=1)
         _seed_stats(cur, 1, 7, geo_level="okres", geo_id=2)
+        # okres 2's parent is kraj 99 — NOT selected below.
+        _seed_admin(cur, 99, "kraj")
+        _seed_admin(cur, 2, "okres", parent_id=99)
         cur.execute("analyze brokers; analyze broker_region_type_stats;")
 
         cur.execute(
@@ -209,8 +224,44 @@ def test_geo_arms_do_not_duplicate_a_broker_present_at_two_levels(conn):
         )
         rows = cur.fetchall()
 
-    assert len(rows) == 1, f"broker 1 was duplicated across geo arms: {rows}"
+    assert len(rows) == 1, f"broker 1 was duplicated across geo disjuncts: {rows}"
     assert rows[0][1] == 17, (
-        f"expected the two levels summed once (10 + 7 = 17), got {rows[0][1]} — a per-arm "
-        "GROUP BY would double it"
+        f"expected the two DISJOINT levels summed once (10 + 7 = 17), got {rows[0][1]}"
+    )
+
+
+def test_a_chip_nested_under_a_selected_parent_counts_once(conn):
+    """The operator's 2026-09-30 ruling: a kraj chip plus an okres chip inside it
+    counts the shared inventory ONCE. The okres cell is a subset of the kraj cell,
+    so summing both (the pre-W4 behaviour, once enshrined here as `== 17`) double-
+    counted every property in the okres; the fast branch now suppresses a selected
+    okres whose admin_boundaries parent is also selected (and an obec under a
+    selected okres or kraj).
+
+    RED by: deleting either NOT EXISTS from the fast branch's okres/obec disjuncts.
+    """
+    with conn.cursor() as cur:
+        _park(cur)
+        _seed_broker(cur, 1)
+        _seed_stats(cur, 1, 10, geo_level="region", geo_id=1)   # kraj total: 10
+        _seed_stats(cur, 1, 7, geo_level="okres", geo_id=2)     # inside kraj 1
+        _seed_stats(cur, 1, 4, geo_level="obec", geo_id=3)      # inside okres 2
+        _seed_admin(cur, 1, "kraj")
+        _seed_admin(cur, 2, "okres", parent_id=1)
+        _seed_admin(cur, 3, "obec", parent_id=2)
+        cur.execute(
+            "analyze brokers; analyze broker_region_type_stats; analyze admin_boundaries;"
+        )
+
+        cur.execute(
+            "select broker_id, active_property_count from public.broker_leaderboard("
+            "  p_region_ids => '{1}', p_okres_ids => '{2}', p_obec_ids => '{3}',"
+            "  p_category_main => 'byt', p_category_type => 'prodej')"
+        )
+        rows = cur.fetchall()
+
+    assert len(rows) == 1, f"expected one row, got {rows}"
+    assert rows[0][1] == 10, (
+        f"kraj + nested okres + nested obec must count the kraj's inventory once "
+        f"(10), got {rows[0][1]} — a nested chip escaped suppression"
     )

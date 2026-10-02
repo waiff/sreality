@@ -8,7 +8,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
              newest-first delta probe (portal_runner.run_index_probe, Wave C-2)
              sequentially over the probe-capable portals — diff + enqueue only,
-             never mark_inactive.
+             never nominates.
 - drain:     every `realtime_drain_interval_seconds` (default 30), claim a
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub
@@ -46,6 +46,18 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              lease row (migration 279 — pooler-proof CAS; a session advisory
              lock strands over the transaction pooler) — a concurrent caller
              skips.
+- broker_maintenance: every `realtime_maintenance_interval_seconds` (shared
+             with the maintenance lane — same cadence class, no new setting),
+             one drain-until-empty broker pass via scripts.resolve_brokers.
+             run_incremental_pass (THE same implementation broker_resolution.yml
+             runs; never forked). Attributes dirty listings to brokers,
+             recomputes only the affected brokers' rollups, and republishes the
+             leaderboard matview when its derived_artifacts stamp is older than
+             ~an hour — so broker numbers stop being a once-daily artifact of
+             the GH-throttled full sweep (Broker Unify W3). Safe beside the GH
+             cron + daily sweep: all callers serialize on broker_resolution_lock;
+             a concurrent caller skips. Its own pass lock keeps an abandoned pass,
+             whose lease row goes stale, from running beside the next one.
 - location_resolve: every `realtime_location_resolve_interval_seconds`
              (default 15), one bounded pass of THE location resolver drain
              (location_data.resolver.drain.run — the same code
@@ -141,7 +153,7 @@ from psycopg.types.json import Jsonb
 from scraper import (
     db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import PortalConfig
 from scraper.rate_ledger import RateBudgetUnavailable
 
 LOG = logging.getLogger("scraper.realtime_worker")
@@ -184,7 +196,7 @@ HEARTBEAT_CONNECT_TIMEOUT_SECONDS = 10
 # Every lane's blocking work, the heartbeat's included, runs on asyncio's default
 # executor, which makes the heartbeat its canary: if leaked threads fill it, beats stop
 # and the watchdog restarts the worker. Pinned rather than min(32, cpu+4), so the
-# headroom does not depend on what the container reports: thirteen lanes hold at most
+# headroom does not depend on what the container reports: fourteen lanes hold at most
 # one thread each in normal running.
 LANE_EXECUTOR_THREADS = 32
 IDLE_WAIT_SECONDS = 60.0
@@ -542,6 +554,10 @@ _R2_WARNED: set[str] = set()
 # holding its lock.
 _PROBE_PASS_LOCK = _PassLock("probe")
 _DRAIN_PASS_LOCK = _PassLock("drain")
+# The broker lane's: an abandoned drain-until-empty pass keeps its thread, and its
+# broker_resolution_lock row goes stale after _LOCK_STALE_MIN, so without this the next
+# tick would take the lease and run a second pass beside it, a thread per abandoned pass.
+_BROKER_MAINTENANCE_PASS_LOCK = _PassLock("broker_maintenance")
 
 # Count-probe walk DISPATCH is double-gated — a token env var AND the
 # realtime_sreality_count_dispatch_enabled setting (default off) — so the lane
@@ -815,15 +831,7 @@ def _read_count_dispatch_enabled() -> bool:
 
 
 def _load_config(source: str) -> PortalConfig:
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, source)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a pass
-        LOG.warning(
-            "load_portal_config failed source=%s: %s; using baked-in default",
-            source, exc,
-        )
-        return default_config(source)
+    return portal_runner.load_config(source)
 
 
 def _build_portal(source: str, config: PortalConfig) -> Any:
@@ -893,13 +901,7 @@ def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
 def _claimable_by_source() -> dict[str, int]:
     conn = db.connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT source, count(*) FROM listing_detail_queue "
-                "WHERE claimed_at IS NULL AND given_up = false "
-                "GROUP BY source"
-            )
-            return {source: int(n) for source, n in cur.fetchall()}
+        return db.claimable_counts(conn)
     finally:
         with contextlib.suppress(Exception):
             conn.close()
@@ -1362,6 +1364,53 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
     _record_pass(state, "maintenance", last)
 
 
+def _broker_maintenance_sync() -> dict[str, Any]:
+    """One drain-until-empty broker pass on the worker's own connection. Reuses
+    THE script implementation (never forks it); broker_resolution_lock inside
+    run_incremental_pass makes this safe beside the GH cron and the daily full
+    sweep — a concurrent caller returns skipped. In ONE thread holding the lane's pass
+    lock (see _probe_sync). Lazy import keeps scripts.resolve_brokers off the worker's
+    startup path."""
+    if not _BROKER_MAINTENANCE_PASS_LOCK.try_enter():
+        return {"skipped": True, "previous_pass_running": True,
+                "attributed": 0, "brokers": 0, "refreshed": False}
+    try:
+        from scripts.resolve_brokers import run_incremental_pass
+
+        batch_size = _read_maintenance_batch_size()
+        conn = db.connect()
+        try:
+            return run_incremental_pass(conn, batch_size)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _BROKER_MAINTENANCE_PASS_LOCK.release()
+
+
+async def _broker_maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    stats = await asyncio.to_thread(_broker_maintenance_sync)
+    last = {
+        "skipped": bool(stats.get("skipped")),
+        "attributed": stats.get("attributed", 0),
+        "brokers": stats.get("brokers", 0),
+        "refreshed": bool(stats.get("refreshed")),
+    }
+    if stats.get("previous_pass_running"):
+        # _PassLock has already logged the wedge once.
+        last["previous_pass_running"] = True
+    elif last["skipped"]:
+        LOG.info("BROKER lane skipped (resolution lock held by cron or daily sweep)")
+    else:
+        LOG.info(
+            "BROKER lane attributed=%d brokers=%d refreshed=%s",
+            last["attributed"], last["brokers"], last["refreshed"],
+        )
+    _record_pass(state, "broker_maintenance", last)
+
+
 # estimation lane: claim ONE pending run atomically over the transaction pooler.
 # FOR UPDATE SKIP LOCKED (not a session advisory lock — unsound over the pooler,
 # the mig-279 lesson) flips pending->running + stamps claimed_at/worker in one
@@ -1744,6 +1793,7 @@ def _intake_fast_pass(conn: Any) -> dict[str, Any]:
         # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
         # it would cost more than the drain it measures.
         backlog_readout=False,
+        readings=False,  # the readings half is the hourly run's (its selector's 5 s gate)
         pool=_intake_fast_pool(),
     )
     stats = claims_intake.run(
@@ -2317,7 +2367,7 @@ async def _lane_loop(
             #
             # Honest limit: a pass that is blocked inside asyncio.to_thread keeps
             # running after the cancellation -- Python cannot kill a thread. This
-            # frees the LANE, not the thread: the seven lanes with a _PassLock leak at
+            # frees the LANE, not the thread: the eight lanes with a _PassLock leak at
             # most one each and stay in flight in the heartbeat while it lives; a lane
             # without one leaks a thread per abandoned pass, and if those fill the
             # executor the heartbeat stops and the watchdog restarts the process.
@@ -2414,6 +2464,11 @@ async def _amain() -> int:
         ("maintenance", lambda: _lane_loop(
             "maintenance", stop_event, _read_maintenance_interval,
             lambda: _maintenance_pass(stop_event, state),
+            state,
+            default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
+        ("broker_maintenance", lambda: _lane_loop(
+            "broker_maintenance", stop_event, _read_maintenance_interval,
+            lambda: _broker_maintenance_pass(stop_event, state),
             state,
             default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
         ("estimation", lambda: _lane_loop(

@@ -48,40 +48,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
     },
     {
-      "filename": "apply_dirty_broker_listings_pk_swap.yml",
-      "name": "Apply dirty_broker_listings PK swap",
-      "description": "R2 Phase D — finalizes dirty_broker_listings's PK swap (sreality_id -> listing_id), deliberately deferred from PR #853's dual-write until the writer deploy was confirmed fully live (see scripts/apply_dirty_broker_listings_pk_swap.py). Must run BEFORE the matching writer-code deploy lands (ON CONFLICT (listing_id) needs the unique index this creates).",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "dry_run",
-          "description": "Report current state and exit",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "apply-dirty-broker-listings-pk-swap",
-      "cancelInProgress": false,
-      "timeoutMinutes": 30,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_dirty_broker_listings_pk_swap.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_dirty_broker_listings_pk_swap.yml"
-    },
-    {
       "filename": "apply_listings_pk_swap.yml",
       "name": "R2 GATE 1 — listings PK swap",
       "description": "The destructive step of the listing-identity refactor: swaps listings' PRIMARY KEY from sreality_id to the surrogate id (runbook § 6). Catalog-only — no table scan, no data rewrite — and reversible in place while zero NULL sreality_id rows exist (see scripts/apply_listings_pk_swap.py).",
@@ -618,7 +584,7 @@
     {
       "filename": "bazos_detail_drain.yml",
       "name": "Scraping: Bazos detail drain",
-      "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+      "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
       "portal": "bazos",
       "manual": true,
       "schedules": [
@@ -777,7 +743,7 @@
     {
       "filename": "broker_resolution.yml",
       "name": "Broker resolution (incremental)",
-      "description": "Broker intelligence: the incremental identity resolver. Drains the dirty_broker_listings queue — new + content-changed listings enqueued at write time by the detail writers (rule #20), so there is no full-table straggler scan — attributes them to their per-source broker_identities, ensures their firms, attaches singleton canonical brokers, and recomputes ONLY the affected brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard matview (that is the daily full sweep's job). Source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate the broker tables at once.",
+      "description": "Broker intelligence: the THROTTLED BACKSTOP of the incremental identity resolver (Broker Unify W3). The primary host is the realtime worker's broker_maintenance lane; both call THE same driver, scripts.resolve_brokers.run_incremental_pass — drain the dirty_broker_listings queue until empty (new + content-changed listings enqueued at write time by the detail writers, plus delist/revive flips mirrored in by the property drain), attribute to per-source broker_identities, ensure firms, attach singleton canonical brokers, recompute ONLY the affected brokers' rollups + memberships (one merged statement), and republish the leaderboard matview CONCURRENTLY when its derived_artifacts stamp is older than ~an hour. So this cron matters exactly when the worker is down. O(changes); source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate at once.",
       "portal": null,
       "manual": true,
       "schedules": [
@@ -831,7 +797,7 @@
     {
       "filename": "ceskereality_detail_drain.yml",
       "name": "Scraping: Českéreality detail drain",
-      "description": "The slow half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='ceskereality', enqueued by ceskereality_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+      "description": "The slow half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='ceskereality', enqueued by ceskereality_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
       "portal": "ceskereality",
       "manual": true,
       "schedules": [
@@ -1442,7 +1408,7 @@
     {
       "filename": "detail_drain.yml",
       "name": "Scraping: Sreality detail drain (Phase 2)",
-      "description": "The slow half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --drain-only` drives SrealityPortal through the one generic portal_runner. Claims a bounded slice of listing_detail_queue (source='sreality', enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool (429/403 auto-penalize), and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) on the Session-mode pooler — the Phase-1 prepared-statement win. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
+      "description": "The slow half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --drain-only` drives SrealityPortal through the one generic portal_runner. Claims a bounded slice of listing_detail_queue (source='sreality', enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool (429/403 auto-penalize), and writes them in batches via listing_write.write_listings (the one listing write, set-based, one transaction per ~100 listings) on the Session-mode pooler — the Phase-1 prepared-statement win. New listings land with property_id NULL; the recompute_property_stats straggler-attach births each a singleton.",
       "portal": "sreality",
       "manual": true,
       "schedules": [
@@ -1797,17 +1763,7 @@
       "schedules": [],
       "onPush": false,
       "onPullRequest": true,
-      "paths": [
-        ".claude/**",
-        "CLAUDE.md",
-        "ROADMAP.md",
-        "api/**",
-        "frontend/**",
-        "migrations/**",
-        "roadmap/**",
-        "scraper/**",
-        "toolkit/**"
-      ],
+      "paths": null,
       "inputs": [],
       "secrets": [],
       "concurrencyGroup": null,
@@ -2204,7 +2160,7 @@
     {
       "filename": "idnes_detail_drain.yml",
       "name": "Scraping: iDNES Reality detail drain",
-      "description": "The slow half of the iDNES cadence split (architectural rule #19, like sreality). Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+      "description": "The slow half of the iDNES cadence split (architectural rule #19, like sreality). Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
       "portal": "idnes",
       "manual": true,
       "schedules": [
@@ -2843,7 +2799,7 @@
     {
       "filename": "location_claims_retire.yml",
       "name": "Ops: retire claims under old contract versions",
-      "description": "Deletes every `location_claims` row written under a RETIRED contract version (`portal_contracts.is_active = false`) — W6-a of the location simplification sprint, ~9.5 M of ~13.2 M rows measured 2026-09-13. The resolver has never read them: it admits a claim only under an ACTIVE contract header, or an operator claim with no contract entry at all. So no verdict moves and NOTHING is enqueued into `dirty_locations` — which is what separates this from `contracts.py --retract`, the mechanism that withdraws a version's evidence BECAUSE it was wrong and must re-resolve every listing it touched.",
+      "description": "Deletes every `location_claims` row written under a RETIRED contract version (`portal_contracts.is_active = false`) — W6-a of the location simplification sprint, ~9.5 M of ~13.2 M rows measured 2026-09-13. NOT invisible to the resolver: since v5.3 it reads, PER CLAIM TYPE, the newest version <= the active one a listing carries (`resolve_db._claims_sql`), and the rail below is per LISTING. Location reader W3: do NOT dispatch while text-less delisted bazos rows hold their bazos@7 town — they never get a reading, so until the rail is per type that is permanent. Nothing is enqueued — unlike `contracts.py --retract`, which withdraws evidence that was wrong.",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -3026,7 +2982,8 @@
         "frontend/src/lib/llmCosts.ts",
         "migrations/**",
         "pyproject.toml",
-        "scripts/ci_db_bootstrap.sql"
+        "scripts/ci_db_bootstrap.sql",
+        "tests/fixtures/filter_compile_*.json"
       ],
       "inputs": [],
       "secrets": [],
@@ -3279,7 +3236,7 @@
     {
       "filename": "realitymix_detail_drain.yml",
       "name": "Scraping: RealityMix detail drain",
-      "description": "The slow half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+      "description": "The slow half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton). The per-listing category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
       "portal": "realitymix",
       "manual": true,
       "schedules": [
@@ -3769,7 +3726,7 @@
     {
       "filename": "resolve_brokers_full.yml",
       "name": "Broker resolution (full sweep + backfill)",
-      "description": "Broker intelligence: the daily full-sweep reconcile + the one-shot backfill. Re-attributes EVERY sreality listing from raw_json (keyset-batched so the raw_json scan never times out over the pooler), recomputes all rollups, rebuilds firm memberships + firm counts, runs the cross-source merge step, REFRESHes the leaderboard matview, and clears the dirty queue — the self-healing backstop for anything the */10 incremental pass missed. Runs after the property recompute (04:15) so property_id is fresh for property_count. mode=backfill is the same code path (the first population); dispatch it once after this lands on main. Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency group with the incremental job.",
+      "description": "Broker intelligence: the daily full-sweep RECONCILE + the one-shot backfill. Re-attributes a rotating lap of broker-bearing listings from raw_json (keyset-batched so the raw_json scan never times out over the pooler), recomputes ALL broker rollups + memberships in ONE merged statement (recompute_brokers(None), Broker Unify W3 — the old 9-window loop paid ~27 full index walks and 100+ min), rebuilds firm rollups, runs the cross-source merge step, generates candidates, and clears the dirty queue — the self-healing backstop for anything the incremental drain missed. It no longer publishes the leaderboard matview: that is the drain path's job (hourly-if-stale, worker lane + broker_resolution.yml), so serving freshness stopped depending on this job's length or its GH-cron-drifted start time. Nominally runs after the property recompute (04:15); in practice GH throttling drifts both into the same mid-morning window. mode=backfill is the same code path (the first population); dispatch it once after this lands on main. Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency group with the incremental job.",
       "portal": null,
       "manual": true,
       "schedules": [
@@ -3955,7 +3912,7 @@
     {
       "filename": "scrape_bezrealitky.yml",
       "name": "Scraping: Bezrealitky scraper (pilot)",
-      "description": "Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal framework. Bezrealitky is a JSON-API portal (public GraphQL at api.bezrealitky.cz) like sreality: the index walk pages listAdverts and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches advert(id), parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+      "description": "Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal framework. Bezrealitky is a JSON-API portal (public GraphQL at api.bezrealitky.cz) like sreality: the index walk pages listAdverts and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches advert(id), parses to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton).",
       "portal": "bezrealitky",
       "manual": true,
       "schedules": [
@@ -4026,7 +3983,7 @@
     {
       "filename": "scrape_maxima.yml",
       "name": "Scraping: Maxima Reality scraper (pilot)",
-      "description": "Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared portal framework. Maxima is a single real-estate agency that publishes its whole catalogue (~220 listings) as one server-rendered WordPress index (no JSON API, no per-category URL): the index walk pages the catalogue and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /nemovitosti/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+      "description": "Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared portal framework. Maxima is a single real-estate agency that publishes its whole catalogue (~220 listings) as one server-rendered WordPress index (no JSON API, no per-category URL): the index walk pages the catalogue and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /nemovitosti/{id}/ page, parses to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton).",
       "portal": "maxima",
       "manual": true,
       "schedules": [
@@ -4089,7 +4046,7 @@
     {
       "filename": "scrape_mmreality.yml",
       "name": "Scraping: M&M Reality scraper (pilot)",
-      "description": "Scheduled scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+      "description": "Scheduled scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton).",
       "portal": "mmreality",
       "manual": true,
       "schedules": [
@@ -4239,7 +4196,7 @@
     {
       "filename": "scrape_remax.yml",
       "name": "Scraping: RE/MAX scraper (pilot)",
-      "description": "Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as a single server-rendered search index (no JSON API, no per-category URL) split only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk pages each agenda and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /reality/detail/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + singleton property).",
+      "description": "Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as a single server-rendered search index (no JSON API, no per-category URL) split only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk pages each agenda and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /reality/detail/{id}/ page, parses to a ScrapedListing, and writes via listing_write.write_listings (the one listing write; new rows land property_id NULL and the straggler-attach births the singleton).",
       "portal": "remax",
       "manual": true,
       "schedules": [

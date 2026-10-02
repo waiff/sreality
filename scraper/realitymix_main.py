@@ -1,14 +1,14 @@
 """Orchestrator for the realitymix.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.realitymix_main`. realitymix is a `Portal`
-(RealitymixPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages the HTML search results and enqueues new/price-changed ids
-into the shared `listing_detail_queue` (source='realitymix', migration 108), then
-a detail-drain that fetches each listing page, parses it to a `ScrapedListing`,
-and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1
-matching). No bespoke pipeline — only the per-portal fetcher (RealitymixClient) +
-parser (realitymix_parser) + config differ from sreality/idnes/ceskereality (the
-modularity rule in CLAUDE.md).
+(RealitymixPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` pages the HTML search results and hands its sightings to
+`portal_runner.reconcile_sightings`, which touches and enqueues into the shared
+`listing_detail_queue` (source='realitymix', migration 108); the shared detail-drain fetches each
+listing page, parses it to a `ScrapedListing` (realitymix_parser, fetched by
+RealitymixClient), and writes via `listing_write.write_listings` (the one
+listing write; a first-seen row lands `property_id` NULL and the
+straggler-attach births its singleton, rule #15).
 
 Two deliberate differences from the ceskereality template:
 - The detail URL (`/detail/{obec}/{slug}-{id}.html`) does NOT encode the
@@ -20,8 +20,8 @@ Two deliberate differences from the ceskereality template:
   reverted #637: an arrow-trusting walk stops early on a throttled/degraded page.
   realitymix is nginx (not Cloudflare) and paginates reliably to the exact total
   with no deep-pagination cap, so a per-category walk can reach the portal's own
-  end → `supports_complete_walk` lets the runner nominate the rows the walk did
-  not see for a page check (rule #3), source-scoped (rule #15). Coordinates come
+  end → `walk_reached_end` gates the runner's nomination of the rows the walk
+  did not see for a page check (rule #3), source-scoped (rule #15). Coordinates come
   straight from the page's `data-gps-lat/-lon`, so there is no geocoding step.
 """
 
@@ -36,10 +36,7 @@ from scraper import db, portal_runner
 from scraper.portal import (
     PortalConfig,
     StopReason,
-    default_config,
     deadline_reached,
-    load_portal_config,
-    classify_index_sighting,
     stop_is_portal_end,
     walk_coverage,
     walk_reached_end,
@@ -71,21 +68,20 @@ PER_PAGE = 20  # realitymix renders 20 results per ?stranka page
 # veto.
 
 
-class RealitymixPortal:
+class RealitymixPortal(portal_runner.PortalDefaults):
     """realitymix.cz as a Portal: the seams the generic runner needs, wrapping the
-    realitymix client + parser. Operational scope (categories, complete-walk
-    capability, rates) comes from the `portals` registry config."""
+    realitymix client + parser. Operational scope (categories, rates) comes from
+    the `portals` registry config."""
 
     source = SOURCE
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
         # counts — the cross-slice nomination buffer (see presence_candidates).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
@@ -105,13 +101,6 @@ class RealitymixPortal:
             CATEGORY_MAIN.get(category.get("category")),
             SALE_TYPE.get(category.get("sale_type")),
         )
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        conn = db.connect()
-        return conn
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -252,38 +241,9 @@ class RealitymixPortal:
             page += 1
 
         seen = set(native_ids)
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=realitymix new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (ref_map[n], price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
         )
         # Rule #3 gate, structural since 2026-09-08. A realitymix category is a
         # flat national list (no region split, split_threshold=None), so it is ONE
@@ -306,7 +266,7 @@ class RealitymixPortal:
             sale_type, cat, stop, reached_end, len(seen), total, pages,
             walk_coverage(len(seen), total, stopped_early=not reached_end),
         )
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, reached_end
+        return seen, counts, total, pages, reached_end
 
     def note_empty_slice(self, category: dict[str, Any]) -> None:
         """A slice the runner refused to nominate from (it saw nothing) still counts
@@ -345,16 +305,7 @@ class RealitymixPortal:
             return None
         return db.presence_candidates(conn, SOURCE, cm, ct, group)
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> RealitymixClient:
-        return RealitymixClient(limiter=limiter)
-
     def fetch_detail(
         self, client: RealitymixClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -374,66 +325,12 @@ class RealitymixPortal:
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
-        for it in items:
-            p = it.payload
-            page_id = db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=p["url"], page_kind="detail",
-                html=p["html"], http_status=p["status"],
-                # W2a-0 churn instrument: this whole write_details is replayed on
-                # a transient pooler drop, so the counter bump inside needs the
-                # item's per-fetch token to make the replay a no-op.
-            )
-            pk, result = db.ingest_scraped_listing(
-                conn, p["listing"], discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = p["listing"].raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
-            db.mark_portal_page_parsed(conn, page_id)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Keyed on the native id directly (not a sreality_id round-trip): post-Gate-2
-        # the row's sreality_id is NULL, so the legacy mark_listing_inactive no-ops.
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'realitymix' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = RealitymixPortal(config, max_pages=args.max_pages)
 
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -444,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
-    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    # page(s) only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
@@ -516,13 +413,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

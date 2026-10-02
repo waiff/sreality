@@ -275,18 +275,22 @@ def list_suppressions(conn: Any) -> list[dict[str, Any]]:
 def _broker_context(conn: Any, leader: dict[str, Any]) -> dict[str, Any]:
     broker_id = leader["broker_id"]
     with conn.cursor(row_factory=dict_row) as cur:
+        # W4: exact rollup cells — the regional ('*','*') cell ranks regions,
+        # the national 'cz' concrete cells rank categories. No sums: cells that
+        # can overlap must never be added.
         cur.execute(
             "SELECT o.name FROM broker_region_type_stats s "
             "LEFT JOIN broker_geo_options o ON o.geo_level='region' AND o.geo_id=s.geo_id "
             "WHERE s.broker_id=%s AND s.geo_level='region' "
-            "GROUP BY o.name ORDER BY sum(s.active_property_count) DESC NULLS LAST LIMIT 3",
+            "  AND s.category_main='*' AND s.category_type='*' "
+            "ORDER BY s.active_property_count DESC NULLS LAST LIMIT 3",
             (broker_id,))
         regions = [r["name"] for r in cur.fetchall() if r["name"]]
         cur.execute(
             "SELECT s.category_main, s.category_type FROM broker_region_type_stats s "
-            "WHERE s.broker_id=%s AND s.geo_level='region' "
-            "GROUP BY s.category_main, s.category_type "
-            "ORDER BY sum(s.active_property_count) DESC NULLS LAST LIMIT 3",
+            "WHERE s.broker_id=%s AND s.geo_level='cz' "
+            "  AND s.category_main <> '*' AND s.category_type <> '*' "
+            "ORDER BY s.active_property_count DESC NULLS LAST LIMIT 3",
             (broker_id,))
         cats = [f"{r['category_main']}/{r['category_type']}" for r in cur.fetchall() if r["category_main"]]
     return {
@@ -345,10 +349,12 @@ def _leader_row(conn: Any, broker_id: int) -> dict[str, Any] | None:
     # unscoped total at a broker who also syndicates foreign stock would put a
     # number in the email that no surface the operator sees agrees with.
     with conn.cursor(row_factory=dict_row) as cur:
+        # W4: the true property counts under their true names — the old aliasing
+        # quoted LISTING counts as property counts in drafted emails.
         cur.execute(
             "SELECT broker_id, display_name, primary_email, primary_phone, firm_name, "
-            "  firm_domain, cz_listing_count AS property_count, "
-            "  cz_active_listing_count AS active_property_count "
+            "  firm_domain, cz_property_count AS property_count, "
+            "  cz_active_property_count AS active_property_count "
             "FROM brokers_public WHERE broker_id = %s", (broker_id,))
         return cur.fetchone()
 

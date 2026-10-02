@@ -2,8 +2,8 @@
 made true in ONE transaction and ruled.
 
 `split_property` takes every advert the operator was shown and the units to separate; the rest is
-the kept unit. It moves adverts ONLY through rule 15's chokepoint (`detach_listing`, then
-`merge_property_set` to join a unit that landed on two records) and rules ONLY through
+the kept unit. It moves adverts ONLY through rule 15's chokepoint (ONE `detach_listings` call,
+then `merge_property_set` to join a unit that landed on two records) and rules ONLY through
 `record_rulings` (each pair through `record_ruling`, the one pair writer, which APPENDS to the
 rulings ledger, migration 574 / E920): `different` + an operator must-not-link across units,
 `same` inside each separated unit, and `same` inside the kept unit when `keep_together`; a
@@ -27,7 +27,7 @@ from autodedup import ui_sql as usql
 from toolkit.property_identity import (
     MOVED,
     MergeError,
-    detach_listing,
+    detach_listings,
     detach_outcomes,
     listing_origins,
     listing_places,
@@ -316,15 +316,13 @@ def split_property(
                 raise SplitRefused(409, "stale", f"property {record} changed while splitting")
             _landings(conn, letter, movers, origins)
             vetoes = must_not_link_rows(conn, named)
-            moves: list[dict[str, Any]] = []
-            for lid in movers:
-                out = detach_listing(conn, lid, decided_by=decided_by, reason=reason,
-                                     source="operator")["data"]
-                if out["outcome"] not in MOVED:
-                    raise SplitRefused(409, "cannot_move", "an advert cannot leave the property",
-                                       [{"listing_id": lid, "outcome": out["outcome"]}])
-                moves.append({"listing_id": lid, "outcome": out["outcome"], "from": record,
-                              "to": out["restored_property_id"]})
+            out = detach_listings(conn, movers, decided_by=decided_by, reason=reason,
+                                  source="operator")["data"]["adverts"]
+            if stuck := [{"listing_id": a["listing_id"], "outcome": a["outcome"]}
+                         for a in out if a["outcome"] not in MOVED]:
+                raise SplitRefused(409, "cannot_move", "an advert cannot leave the property", stuck)
+            moves = [{"listing_id": a["listing_id"], "outcome": a["outcome"], "from": record,
+                      "to": a["restored_property_id"]} for a in out]
             joined = _join(conn, record, units, {int(m["to"]) for m in moves}, decided_by)
             final = listing_places(conn, named)
 
@@ -334,7 +332,9 @@ def split_property(
             different = {p for p, t in write.items() if t == "different"}
             record_rulings(conn, same, verdict="same", decided_by=decided_by, note=note)
             record_rulings(conn, different, verdict="different", decided_by=decided_by, note=note)
-            # `same` leaves a machine veto standing; an interim detach ruling may have taken it.
+            # `same` leaves a machine veto standing; no detach in this call rules a pair inside one
+            # unit (`_rule_detached`), so this writes nothing today — kept until F1 deletes it with
+            # the rail's proof (tests/test_property_split.py, the machine-veto test).
             restore_must_not_link(conn, {p: v for p, v in vetoes.items()
                                          if v[0] != "operator" and targets.get(p) == "same"})
     except _BUSY as exc:

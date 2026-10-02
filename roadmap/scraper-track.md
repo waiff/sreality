@@ -5,6 +5,71 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### The sighting diff lives once — `portal_runner.reconcile_sightings` (2026-10-01, done)
+- **Moved:** the index-walk diff (clamp → `index_summary_native` → touch → `classify_index_sighting`
+  → enqueue) existed 11 times (8 crawler walk tails, sreality's `enqueue_only` block, both bespoke
+  probes); every one is now a `reconcile_sightings` call. The copied seams (`connect_index`,
+  `connect_drain`, `make_client`, `active_count`) and, after item 1, the AST-identical
+  `write_details` / `mark_gone` (since deleted: the drain flips itself) / `record_failure` sit on `PortalDefaults` (follow-up F1 pulled
+  forward as a pure move: byte-identical bodies, no DRAIN-line change); `_load_config` /
+  `_configure_logging` became `portal_runner.load_config` / `configure_logging`;
+  `claimable_count` ×9 + the worker's copy became `db.claimable_counts`. The never-read
+  `supports_complete_walk` attribute left the Protocol (the column stays: posture).
+- **Touch-all:** every sighted row we hold is touched whatever its index price (rule #4's wording,
+  rule #3's self-heal). bezrealitky, ceskereality, idnes, maxima, mmreality, realitymix, remax and
+  both probes used to touch unchanged rows only; bazos + the sreality walk already touched all
+  (sreality's lookup moves to `index_summary_native` / `touch_listings_by_id`; nomination keeps
+  `seen_key="sreality_id"`).
+- **Drift closed:** D2 (`price_change_min_pct` now honoured on bazos + sreality), D3 (the index-price
+  clamp now applies on ceskereality + realitymix); the worker's sreality lanes now honour
+  `shared_rate_limiter` (`portal_factory` dropped it). Log lines: ENQUEUE has one shape (logger
+  `scraper.portal_runner`); bazos/sreality ENQUEUE and the two `PROBE page` lines changed shape;
+  the registry-fallback WARNING is now `load_portal_config failed source=…` (logger
+  `scraper.portal_runner`) on all 9 `*_main` entrypoints, as the worker already logged it.
+- **Watch (sreality parity):** the walk + probe now look sreality up by `source_id_native`; a row
+  whose `source_id_native` ≠ `sreality_id::text` reads as new on every sighting — `found_new` and the
+  NEW queue grow, and the probe stops early less often, so the worker's `PROBE done pages=` per pass rises
+  toward `PROBE_MAX_PAGES` (more sreality requests). Pre-merge parity count must be 0.
+- **Rails:** `test_no_portal_adapter_diffs_its_own_sightings` (`tests/scraper/test_portal.py`) and
+  `tests/scraper/test_walk_politeness_census.py` (each portal built with its own limits; walk /
+  probe / drain pace with them; the diff makes no HTTP request; every walk client gets the limiter).
+- **Next:** C2-2 delete sreality's dormant `_run_full` + `scrape.yml` (and the rail exemption);
+  C2-5 maxima/remax negative agenda cache; C2-3 uniform `Portal(config)` constructor (drops the
+  two `portal_factory` branches); C2-4 sreality per-page deadline.
+
+### `scraper/db.py` policy and the dead delist sweep (2026-10-01; sweep + throttle done, reserves owed)
+- **Done (2026-10):** the absence sweep (`mark_inactive`, `_native`, `_agenda`, `_delist_flip_allowed`,
+  `_seen_without_nulls`, `portal_inactive_sweep_due`, `record_portal_inactive_sweep`) and its tests
+  are deleted; the presence-check throttle's policy moved to `scraper/delist_policy.py`
+  (`enqueue_presence_checks` keeps only its I/O).
+- **Owed:** the claim-batch reserves (`QUEUE_*_RESERVE`) and the Gate-2 flag read — move each out
+  when its area is next touched. Two forward migrations, each its own PR: drop the unread
+  `portals.inactive_sweep_min_interval_hours` / `last_inactive_sweep_at` (DESTRUCTIVE — operator OK +
+  pg_dump first) and restate migration 453's stale `COMMENT ON COLUMN portals.supports_complete_walk`.
+
+### Rule #21: fold the shared-code portal-name branches (owed, 2026-10-01)
+- **Owed (rule #21 audit):** the framework is shared at the runner, not below it.
+  ~~The index-walk tail and the identical drain hooks~~ (hoisted 2026-10-01, entry above; each
+  `walk_category` still assembles its own `walk_reached_end`, deliberately). Still owed: six
+  portal-name branches sit in shared code (`db.detail_ref`, the two
+  `CASE WHEN %(source)s = 'sreality'` queue fills, `portal_factory.build_portal`'s bazos +
+  sreality cases, `realtime_worker`'s `k != "bazos"`); and `scraper/main.py` (sreality's
+  module) owns the cross-portal `_run_image_downloads`. Next: fold each branch into a `Portal`
+  seam or config attribute while pacing stays per-portal (client + `PortalLimits`).
+  Inventory: `docs/architecture.md` § rule 21.
+
+### Rule #2: one snapshot implementation — one listing-write chokepoint (2026-10-01, done)
+- **Was owed:** the hash-and-append logic existed twice (`db.upsert_listing` row-at-a-time,
+  `_BATCH_SNAPSHOT_SQL` in `db.write_detail_batch`), picking a listing's latest snapshot differently.
+- **Shipped:** one listing-write chokepoint (`scraper/listing_write.py`): 4 writers → 1, one
+  latest-snapshot order, NULL-land on all nine. `write_listings` owns the upsert, media, failure
+  clear, snapshot-on-change (`scraped_at DESC, id DESC`, stamped `statement_timestamp()`; the live
+  suite pins an exact `scraped_at` tie resolving on `id`) and the dirty marks in one transaction; a
+  census (`tests/scraper/test_listing_write_census.py`) ledgers every other `UPDATE listings`
+  outside `scraper/db.py` (its docstring names its blind spots). **Next:** the reader-side latest-snapshot copies (toolkit freshness / comparables / summaries /
+  building_extraction / condition_markers / condition_scoring) move onto
+  `listing_write.latest_snapshot`; unifying the two hash documents is an operator-gated data event.
+
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
 - **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each
   held a private copy of a naive area regex that matched the FIRST bare digit run before an
@@ -230,6 +295,12 @@ Independent of the analytical, UI, and map tracks.
   seam (mmreality implements it; ceskereality exposes no machine-readable category list).
 - **Next:** watch the first walks' `VERIFY` lines and `delist_flip_refusals` deferrals; the
   ceskereality backlog (~40k) drains at 10% of each category per walk.
+- 2026-10: the delist decision consolidated: `scraper/delist_policy.py` (verify budget + gone-rate
+  breaker), one guarded flip writer `db.mark_listing_inactive` on every path (freshness now
+  dirty-marks + clears the failure row; no `inactive_at` re-stamp; a failed flip is retried, never
+  completed as gone; an all-NULL seen set no longer nominates the whole scope; a crawler image's 404
+  no longer runs a sreality freshness fetch), the ~430-line dead absence sweep and all nine
+  `mark_gone` adapters deleted.
 
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
@@ -238,11 +309,11 @@ Independent of the analytical, UI, and map tracks.
   the portal was parked on `supports_complete_walk=false`, was wrong on both halves.
 - Walk is now one category per (sale type × property type), ten in all, each proved by
   the shared `walk_is_complete` arithmetic, written to the slice ledger (one row per
-  category), swept by the category-scoped `mark_inactive_native` behind the 12 h rail.
+  category), (then) swept by the since-deleted absence sweep behind the 12 h rail.
   Migration 481 set the ten descriptors; the coverage gate flips the flag from evidence.
 - **Next:** watch `portal_coverage_gate` for mmreality's three-cycle streak (~a day).
-  Its ~3,300 stale rows (27% of active) will then hit the flip cap — verify a sample by
-  fetch and release with a bounded override, exactly as idnes.
+  **Superseded 2026-09-07:** presence verification nominates the stale rows; the page decides,
+  so no flip cap is released by hand.
 
 ### Phase 1.5: Six-category coverage (done)
 Cross-listed under top-level Done above. Headline: all six byt / dum
@@ -408,14 +479,19 @@ branches in shared code. The lean/modular guardrail before onboarding portals 3+
 - **`portal_runner`** (`scraper/portal_runner.py`): one `run_index_walk` + one
   `run_detail_drain`, parameterized by a `Portal`. `SrealityPortal` /
   `BazosPortal` implement the seams; the entrypoints are thin delegators.
-  sreality stays byte-identical (the district-split is the one sanctioned hook);
-  bazos joins the queue/drain model (partial walks → never marks inactive).
+  sreality stays byte-identical (the district-split is the one sanctioned hook —
+  *superseded 2026-10-01: see the rule #21 owed entry at the top of this file and `docs/architecture.md` § rule 21's seam list*);
+  bazos joins the queue/drain model (partial walks → never marks inactive) *(superseded: bazos is
+  a complete-walk portal — a finished walk nominates its unseen rows for a page check, rule #3
+  since 2026-09-07 — and walks 22 multi-category scopes, migration 488)*.
 - Architectural rules #19 (shared split) + #21 (the framework + modularity).
   Pilot scope: bazos is single-category (the queue doesn't carry the category
-  parse_detail needs); multi-category bazos would encode it — deferred.
+  parse_detail needs); multi-category bazos would encode it — deferred *(superseded: the
+  detail's breadcrumb carries the category, so one queue covers every scope)*.
 After Phase 4 the limiter is each portal's polite fetch rate, not the DB or
 pipeline divergence — the healthy place to be. **Validated by onboarding
-bezrealitky (portal 3)** as a pure fetcher + parser + config row — a JSON-API
+bezrealitky (portal 3)** as a pure fetcher + parser + config row *(superseded 2026-10-01:
+it also carries its own `walk_category` and `Portal` adapter — see the rule #21 owed entry at the top of this file)* — a JSON-API
 portal that, because its detail JSON carries the category, walks many categories
 through the unchanged queue/drain (the multi-category limitation is per-portal,
 not a framework one). See the dated entry at the top of ## Done.

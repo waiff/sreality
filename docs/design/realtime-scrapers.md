@@ -71,7 +71,8 @@ settings-paced asyncio-loop pattern — matcher/outbox). It runs, as continuous 
 5. **Notification producers, event-driven**: matcher woken per new-property batch (also
    fixes the cursor-vs-attach race), price-drop detection moved to write time (the drain
    already computes the price diff), sreality singleton-property creation inlined into
-   `write_detail_batch` (every other portal already creates it inline).
+   `write_detail_batch` (every other portal already creates it inline). — *superseded 2026-10:
+   every portal lands NULL; the straggler-attach births + browse-syncs (`scraper/listing_write.py`).*
 
 **Cold lane — GitHub Actions keeps** the delay-tolerant heavy work it does well and for
 free: full reconcile index walks (completeness + delisting evidence), image/CLIP backfills,
@@ -430,13 +431,14 @@ Four changes, each closing one link:
   sreality's client acquires once and retries inside `_request`, four penalizes to one lease),
   and a drain's lease is sized to its claims (`min(20, max_claims)`; the worker caps
   `max_claims` at what is waiting) instead of 20 slots per pass whatever the work.
-- **Probe and drain hold pass locks** like the five lanes that already did, all seven through one
-  `_PassLock`: each pass runs in ONE thread, so a lane leaks at most one; a skipped pass records
+- **Probe and drain hold pass locks** like the five lanes that already did, and so does the broker
+  lane (Broker Unify W3; an abandoned pass's `broker_resolution_lock` row goes stale, so the lease
+  alone would let the next tick run beside it), all eight through one `_PassLock`: each pass runs in ONE thread, so a lane leaks at most one; a skipped pass records
   `previous_pass_running`. While an abandoned pass still holds its lock, the lane's `in_flight_s`
   keeps counting from that pass's start (a skip otherwise reads like a quick pass), so
   `worker_lane_stall` warns at 20 min and fails at 60.
 - **The heartbeat is the executor's canary.** It stays on the default executor every lane shares,
-  pinned at 32 threads (`LANE_EXECUTOR_THREADS`; thirteen lanes hold at most one each in normal
+  pinned at 32 threads (`LANE_EXECUTOR_THREADS`; fourteen lanes hold at most one each in normal
   running), so anything that fills it (leaked threads from the lanes without a pass lock, say)
   stops the beats. A beat connects once with a 10 s timeout, so a slow connect cannot outlast
   the watchdog's bound in the middle of a beat.

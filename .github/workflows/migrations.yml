@@ -26,6 +26,8 @@ on:
     paths:
       - "**/*.py"
       - "migrations/**"
+      # The C4 rows rail executes these fixtures; a fixture-only change must run it.
+      - "tests/fixtures/filter_compile_*.json"
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
@@ -35,17 +37,6 @@ on:
       # frontend-only PR could change the zone and never run the rail that guards it.
       - "frontend/src/lib/llmCosts.ts"
   pull_request:
-    paths:
-      - "**/*.py"
-      - "migrations/**"
-      - "scripts/ci_db_bootstrap.sql"
-      - "pyproject.toml"
-      - ".github/workflows/migrations.yml"
-      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
-      # file names 'Europe/Prague' exactly once and that the literal matches the three
-      # database spellings. That rail lives in THIS lane, so without this entry a
-      # frontend-only PR could change the zone and never run the rail that guards it.
-      - "frontend/src/lib/llmCosts.ts"
   workflow_dispatch:
 
 jobs:
@@ -79,18 +70,26 @@ jobs:
           # Install server + PostGIS + pgvector in ONE apt transaction so the
           # binary and every contrib .so land at the same (newest) 17.x minor —
           # a partial upgrade is what triggers "undefined symbol" on load.
-          # Check-Valid-Until=false: the base image is Debian BULLSEYE, and
-          # bullseye-security's Release file has now expired — apt refuses the
-          # whole repo and `apt-get update` exits 100, which took every
-          # migration-touching PR red on 2026-09-08 with nothing wrong in the
-          # diff. An expired Release file does not self-heal: the suite has
-          # simply stopped being republished. Ignoring the date is safe HERE
-          # specifically — this container lives for the minutes it takes to
-          # replay migrations against an empty database, serves no traffic and
-          # holds no data — and it is the narrow fix. The real one is a
-          # bookworm-based postgis tag, which also moves the PostGIS minor and
-          # so belongs in its own change, not in a CI unblock.
-          RUN apt-get -o Acquire::Check-Valid-Until=false update \
+          # The base image is Debian BULLSEYE, which is end-of-life, and every Debian
+          # postgis/postgis:17 tag is still built on it (17-3.5 too; the rest are
+          # alpine — checked 2026-10-01), so there is no newer tag to move to. Each
+          # step below exists because bullseye going stale took every
+          # migration-touching PR red with nothing wrong in the diff:
+          #  * 2026-09-08: bullseye-security's Release file expired and is no longer
+          #    republished, so apt refused the repo. Check-Valid-Until=false ignores
+          #    the date — safe HERE only because this container lives for the
+          #    minutes of one replay against an empty database and serves no traffic.
+          #  * 2026-10-01: PGDG removed bullseye-pgdg from apt.postgresql.org (404)
+          #    and froze it on apt-archive.postgresql.org — same signing key, and the
+          #    same final versions the last green run installed (17.11, PostGIS
+          #    3.5.2, pgvector 0.8.6). The sed repoints the image's pgdg source; the
+          #    grep fails the build if the sed matched nothing.
+          # Leaving bullseye means building FROM postgres:17-bookworm and installing
+          # PostGIS (3.6 there) from PGDG ourselves — its own change, not a CI unblock.
+          RUN sed -i 's#http://apt.postgresql.org/pub/repos/apt#https://apt-archive.postgresql.org/pub/repos/apt#' \
+                 /etc/apt/sources.list.d/pgdg.list \
+            && grep -q 'https://apt-archive.postgresql.org/pub/repos/apt' /etc/apt/sources.list.d/pgdg.list \
+            && apt-get -o Acquire::Check-Valid-Until=false update \
             && apt-get install -y --no-install-recommends \
                  postgresql-17 postgresql-17-postgis-3 postgresql-17-pgvector \
             && rm -rf /var/lib/apt/lists/*
@@ -158,13 +157,14 @@ jobs:
       # anti-join COMPILES; W10's claim is about which row it RETURNS once a stored
       # gone page is stamped 410, and only a real schema can answer that. The registry
       # publish check joins for the same reason: carry-forward equality and the
-      # completeness read are PostGIS and anti-join answers, not SQL shapes.
+      # completeness read are PostGIS and anti-join answers, not SQL shapes; so W3's readings half.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           pytest tests/test_sql_schema_prepare.py tests/test_broker_sources.py \
                  tests/location_data/test_location_w10_gone_bodies_live.py \
+                 tests/location_data/test_readings_half_live.py \
                  tests/location_data/test_registry_publish_live.py \
                  tests/toolkit/test_dedup_candidates_sql.py -q
 
@@ -391,7 +391,16 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_merge_safety_live.py -q
+
+      # The ONE listing write (rule 2), executed: every per-source upsert text runs, the
+      # latest-snapshot tiebreak and statement_timestamp() stamp are observed, not asserted.
+      - name: The one listing write appends exactly on content change (executed)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_listing_write_live.py -q
 
       # Migration 564's one-time copy, EXECUTED: the operator's Browse merges become
       # autodedup.operator_merges rows with 560's members and sides, and each merge's own
@@ -401,6 +410,7 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_operator_merges_live.py -q
 
       # Migration 573's destructive backfill, EXECUTED: one seeded hit and one miss per
@@ -452,7 +462,20 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_property_split_live.py -q
+
+      # Every property-anchored row a merge carries, EXECUTED through the public writers: one
+      # test per carrier (collections, tags, notes, dispatches, pipeline, dismissals, the asset
+      # link), each over two accounts, each proving the retired property is left holding no
+      # row. The record-only cursors in the unit tests cannot run the carriers' SQL. Two known
+      # defects run as strict xfails until their fix PRs remove the marker.
+      - name: Every property-anchored row follows a merge and a detach
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_property_carriers_live.py -q
 
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
@@ -499,6 +522,18 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_sql_prepare.py -q
+
+      # C4 (rule 16): the filter compile's golden pins the TEXT the hand-coded adapters
+      # rendered; this executes every golden case twice over seeded TEMP shadows of the
+      # relations (always rolled back) — the golden's fragments vs what the current
+      # adapter renders — and the two id sets must be equal. Every regular single-filter
+      # case must also select a strict, non-empty subset, so empty == empty cannot pass.
+      - name: "Filter compiler: old and new predicates select the same rows (C4)"
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_filter_compiler_rows_live.py -q
 
       # Migration 577 (B-j, the control draw's operator sample), EXECUTED: the replay sealed the
       # 100 pairs, a second run changes nothing, a lost row comes back, and a pair sealed under

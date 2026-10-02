@@ -13,6 +13,7 @@ import type { SplitUnit } from '@/lib/api';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { revalidateCollections } from '@/lib/collectionCache';
 import { revalidatePipeline } from '@/lib/pipelineCache';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 export const mergedAdvertsKeys = {
   all: ['merged-adverts'] as const,
@@ -86,7 +87,7 @@ export function refreshAfterSplit(qc: QueryClient): void {
     ['property-status-events'],
     ['snapshots'],
     mergedAdvertsKeys.all,
-    ['autodedup', 'proposed-splits'],
+    autodedupKeys.proposedSplits,
   ]) {
     qc.invalidateQueries({ queryKey: key });
   }

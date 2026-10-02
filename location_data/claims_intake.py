@@ -1,20 +1,24 @@
 """THE claim lane — one hourly pass that mines every substrate we hold for a listing.
 
-WHAT THIS LANE IS (rule 25: one store, one lane, eleven claim types, no flags)
-  * TWO HALVES, both bounded by the run budget, in this order every hour:
-      - BODIES FIRST: the unmined latest detail bodies of active page-portal listings,
+WHAT THIS LANE IS (rule 25: one store, one lane, twelve claim types, no flags)
+  * THREE HALVES, all bounded by the run budget, in this order every hour:
+      - READINGS FIRST (W3, hourly only), so a reading supersedes before a body enqueues:
+        each listing's CURRENT stored reading not checked at the active contract;
+      - THEN BODIES: the unmined latest detail bodies of active page-portal listings,
         drained straight out of `portal_raw_payloads` in 1 500-row batches on a keyset
-        over `p.id` that CONTINUES across runs (W6-b), until the backlog is empty or half
-        the budget is gone.
+        over `p.id` that CONTINUES across runs (W6-b) — these two share half the budget.
       - THEN THE CHANGED LISTINGS: a keyset scan of `listing_snapshots.id`, the
         append-on-content-change log (rule 2), joined back to `listings`, standing 15
         minutes behind the clock. What a run opens is an hour's CHANGE, not every
         listing the index walks re-sighted.
-  * Two substrates, ONE registry (`READERS`), one write:
+  * Three substrates, ONE registry (`READERS`), one write:
       - `listings.raw_json`, the portal's own payload as we stored it — the readers below;
       - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the listing's
         `(source, source_id_native)`, fetched from R2 and scoped by the contract's exclusion
-        zones — the 14 page readers in `location_data.page_readers`.
+        zones — the 14 page readers in `location_data.page_readers`;
+      - the STORED READING: the text lane's answer about where the property is
+        (`listing_description_enrichments`, reader `location_data.text_reading`); a mined
+        reading SUPERSEDES the listing's other claims of the types it declares.
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
     reader from `READERS`. A name in NO registry is a hard refusal (a real deploy error).
@@ -48,9 +52,10 @@ THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
     page substrate adds `'odbl'` for realitymix's Nominatim-fallback pin and nothing else.
 
 WHAT IT WRITES, AND ONLY THAT
-  `location_claims` (append-only, deduped on `claim_fingerprint`), `dirty_locations`
-  (the resolver's queue, inside the same transaction), `location_claim_batches` (this
-  lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
+  `location_claims` (deduped on `claim_fingerprint`; the readings half also DELETEs the
+  claims a new reading supersedes), `dirty_locations` (the resolver's queue, inside the
+  same transaction), `location_claim_batches` (this lane's run ledger and cursor), and the
+  mined-version stamps on the bodies and readings it mined.
   Refusals — a class-E page pin, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. (`location_claim_observations`, `location_claim_absences`
   and `location_enrichment_state` were written by every lane and read by none: dropped, 498.)
@@ -78,7 +83,7 @@ from typing import Any, NamedTuple, TypeVar
 import psycopg
 from psycopg.types.json import Jsonb
 
-from location_data import loader_db, page_readers, payloads
+from location_data import loader_db, page_readers, payloads, text_reading
 # The names re-exported here are the ones something OUTSIDE this module imports from it —
 # the contract validator's mirror gates (`TRANSFORMS`/`GUARDS`), the licence-ladder tables the
 # portal tests score against, and the value objects. Anything the lane neither uses nor
@@ -95,6 +100,7 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     SOURCES,
     SUBSTRATE_ARCHIVED_HTML,
     SUBSTRATE_PAYLOAD,
+    SUBSTRATE_READING,
     TRANSFORMS,
     Claim,
     Entry,
@@ -117,6 +123,7 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     value_norm_mirror,
 )
 from scraper import db, street
+from toolkit import description_extraction as text_lane
 
 LOG = logging.getLogger("location_data.claims_intake")
 
@@ -129,8 +136,8 @@ LANE = "location_claims_intake"
 _T = TypeVar("_T")
 WAVE = "W1"
 
-# ONE LANE, TWO SCHEDULES (W7-a). This module is still the only claim producer; what W7-a
-# adds is a SECOND schedule for its incremental listing scan — the realtime worker runs it
+# ONE LANE, TWO SCHEDULES (W7-a). This module is still the only portal-claim producer (the
+# text lane writes readings); what W7-a adds is a SECOND schedule for it — the worker runs it
 # every ~60 s with a 2-minute lag and a 45 s budget, because the hourly GitHub run plus the
 # 15-minute lag left a listing written just after a tick invisible to Browse for up to ~75
 # minutes (measured 2026-09-13: two sreality listings first seen 45 s into the 18:19 run had
@@ -220,11 +227,9 @@ DEFAULT_BODY_FETCH_CAP = 1_500
 class Reader:
     """One row of THE reader registry: the substrate it takes, and the function.
 
-    ONE registry, not three. The lane used to carry `READERS` (raw_json) plus two
-    name-only mirrors — `ARCHIVE_ONLY_READERS` and `LLM_ONLY_READERS` — because the
-    other two lanes could not be imported here without a cycle. The cycle is gone
-    (`claims_common` holds the shared vocabulary), the LLM lane is gone, and a name that
-    lives in a mirror rather than in the registry is a name nothing executes.
+    ONE registry for three substrates, never a name-only mirror: a name that lives in a
+    mirror rather than in the registry is a name nothing executes, and the deleted LLM
+    lane's mirror took the hourly intake down for ~40 hours (2026-09-06).
     """
     name: str
     substrate: str
@@ -244,11 +249,16 @@ def reader(name: str) -> Callable[[PayloadReaderFn], PayloadReaderFn]:
     return register
 
 
-def payload_entries(entries: list[Entry]) -> list[Entry]:
-    """The entries this lane executes against `listings.raw_json`."""
+def payload_entries(entries: list[Entry], substrate: str = SUBSTRATE_PAYLOAD) -> list[Entry]:
+    """The entries this lane executes against `listings.raw_json` (or another substrate)."""
     return [e for e in entries
             if e.reader and READERS.get(e.reader) is not None
-            and READERS[e.reader].substrate == SUBSTRATE_PAYLOAD]
+            and READERS[e.reader].substrate == substrate]
+
+
+def reading_entries(entries: list[Entry]) -> list[Entry]:
+    """The entries this lane executes against a listing's stored reading (W3)."""
+    return payload_entries(entries, SUBSTRATE_READING)
 
 @dataclass(frozen=True, slots=True)
 class LocatorRead:
@@ -284,19 +294,13 @@ def locator_reads(entry: Entry) -> list[LocatorRead]:
 
 @reader("scalar")
 def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
-    """`claim_confidence` is the CONTRACT's statement about what KIND of field this is, and
-    the resolver obeys it: a `low` claim is a headline rather than an address field, so the
-    binder will match it exactly and never fuzzily (W18, `bind`'s R3 rung). It is stamped
-    here rather than inferred anywhere downstream — no rule may name a portal."""
     for read in locator_reads(entry):
         value = _text(json_pointer(row.raw_json, str(read.locator["json_pointer"])))
         value = apply_transforms(value, read.transform)
         if value is None:
             continue
         number = _number(value) if entry.locator.get("value_kind") == "num" else None
-        confidence = entry.locator.get("claim_confidence")
-        return [_base(entry, row, value_text=value, value_num=number,
-                      claim_confidence=None if confidence is None else str(confidence))]
+        return [_base(entry, row, value_text=value, value_num=number)]
     return []
 
 
@@ -421,14 +425,14 @@ def _read_bbox_envelope(entry: Entry, row: ListingRow) -> list[Claim]:
 # ------------------------------------------------------------------ the value-size cap
 
 
-# The 14 page readers fold into THE registry here, after the payload ones above have
-# registered.
-# Folded rather than mirrored by name: `location_data.page_readers` imports
-# `claims_common`, never this module, so there is no cycle left to work around.
+# The 14 page readers and the one reading reader fold into THE registry here, after the
+# payload ones above have registered. Folded rather than mirrored by name: both modules
+# import `claims_common`, never this one, so there is no cycle to work around.
 for _page_reader_name, _page_reader_fn in page_readers.PAGE_READERS.items():
     READERS[_page_reader_name] = Reader(
         _page_reader_name, SUBSTRATE_ARCHIVED_HTML, _page_reader_fn)
 del _page_reader_name, _page_reader_fn
+READERS["text_reading"] = Reader("text_reading", SUBSTRATE_READING, text_reading.read_claims)
 
 
 # ------------------------------------------------------------------ extraction
@@ -460,18 +464,20 @@ def _refuse_oversized(
 
 def extract_listing(
     row: ListingRow, entries: list[Entry], *, max_value_bytes: int | None = None,
+    reading: text_reading.Reading | None = None,
 ) -> IntakeResult:
-    """Everything the PAYLOAD substrate knows about one listing. Pure — no DB, no clock,
-    no network. Page entries are this lane's too; they read a different substrate and are
-    executed by `extract_page` once the body is in hand."""
+    """Everything the PAYLOAD substrate (or, handed one, the stored READING) knows about one
+    listing. Pure — no DB, no clock, no network. Page entries are this lane's too; they read
+    a different substrate and are executed by `extract_page` once the body is in hand."""
     if max_value_bytes is None:
         max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
                                            DEFAULT_MAX_CLAIM_VALUE_BYTES)
     result = IntakeResult()
 
-    for entry in payload_entries(entries):
+    for entry in payload_entries(entries, SUBSTRATE_PAYLOAD if reading is None
+                                 else SUBSTRATE_READING):
         spec = READERS[str(entry.reader)]
-        for claim in spec.fn(entry, row):
+        for claim in spec.fn(entry, row) if reading is None else spec.fn(entry, row, reading):
             if claim.licence_class not in EMITTABLE_LICENCE_CLASSES:
                 raise IntakeRefused(
                     f"{entry.entry_id} produced licence_class='{claim.licence_class}'; "
@@ -484,7 +490,7 @@ def extract_listing(
     for reason in oversized:
         result.refuse(reason)
 
-    if row.source == "sreality":
+    if row.source == "sreality" and reading is None:
         shape = sreality_payload_shape(row.raw_json)
         if shape != "post_cutover":
             # 06 §6.2.1 caveat, narrowed by @3: the legacy shape's address, pin and
@@ -513,7 +519,7 @@ _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 _RELATIONS = (
     "location_claims", "location_claim_batches", "dirty_locations",
     "portal_contracts", "portal_contract_entries", "portal_raw_payloads",
-    "listing_snapshots",
+    "listing_snapshots", "listing_description_enrichments",
 )
 
 _TIMEOUT_GUARD_SQL = """
@@ -640,9 +646,10 @@ _LEGACY_WATERMARK_SQL = """
 """
 
 # THE LAG, a correctness rail. `listing_snapshots.id` is a bigserial — allocated at INSERT,
-# visible at COMMIT — and `write_detail_batch` writes N of them in one transaction across
-# the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
+# visible at COMMIT — and `listing_write.write_listings` writes N of them in one transaction
+# across the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
 # never looks back. Standing 15 minutes back keeps the window below every in-flight
+# transaction; its snapshot `scraped_at` is `statement_timestamp()`, stamped late in the
 # transaction. The seed takes the same predicate, or a cold start would jump over them.
 #
 # A PARAMETER SINCE W7-a, not a widened default: the fast schedule trades the rail for
@@ -680,7 +687,7 @@ _BODY_JOIN = """
     LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
     LEFT JOIN LATERAL (
         SELECT p.id, p.contract_version, p.page_kind::text AS page_kind,
-               encode(p.payload_sha256, 'hex') AS payload_sha256, p.first_observed_at
+               p.first_observed_at
         FROM portal_raw_payloads p
         WHERE p.source = l.source
           AND p.source_id_native = l.source_id_native
@@ -697,7 +704,7 @@ _BODY_JOIN = """
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            pb.id, (pb.contract_version IS DISTINCT FROM pc.version), pb.page_kind,
-           pb.payload_sha256, pb.first_observed_at, pc.version,
+           pb.first_observed_at, pc.version,
 """
 
 _FROM_LISTINGS = """
@@ -779,7 +786,6 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 _UNMINED_BODIES_SELECT = (
     _SELECT_COLUMNS
     .replace("l.raw_json", "NULL::jsonb")
-    .replace("pb.payload_sha256", "encode(p.payload_sha256, 'hex')")
     .replace("pb.page_kind", "p.page_kind::text")
     .replace("pb.id", "p.id")
     .replace("pb.contract_version", "p.contract_version")
@@ -875,12 +881,13 @@ _STAMP_MINED_SQL = """
 #
 # The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
 #
-# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 498). Nine of its inputs — page_kind,
-# extractor_id, extractor_version, value_norm, distance_m, travel_mode, target_text,
-# declared_confidence, legacy_source_column — are no longer STORED, but the readers still
-# compute them and they still enter the hash. That is what keeps 5 M existing fingerprints
-# valid: narrowing the tuple would re-dialect every one of them, and a re-dialected
-# fingerprint does not conflict, it inserts.
+# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 498). Eleven of its inputs —
+# source_id_native, page_kind, extractor_id, extractor_version, value_norm, shape,
+# distance_m, travel_mode, target_text, declared_confidence, legacy_source_column — are not
+# STORED, but the readers still compute them and they still enter the hash. That is what
+# keeps 5 M existing fingerprints valid: narrowing the tuple would re-dialect every one of
+# them, and a re-dialected fingerprint does not conflict, it inserts. The recordset below
+# carries the fingerprint's inputs and the stored columns, nothing else.
 _CLAIM_FINGERPRINT_SQL = """
     location_claim_fingerprint(
         t.listing_id, t.source, t.source_id_native,
@@ -893,11 +900,11 @@ _CLAIM_FINGERPRINT_SQL = """
         t.legacy_source_column)
 """
 
-_CLAIM_WRITE_SQL = f"""
+_CLAIM_INSERT_CTES = f"""
     WITH input AS (
         SELECT * FROM jsonb_to_recordset(%(rows)s::jsonb) AS x(
             listing_id bigint, source text, source_id_native text,
-            snapshot_id bigint, snapshot_anchor text, first_observed_at timestamptz,
+            first_observed_at timestamptz,
             claim_type text, surface text, page_kind text, extraction_method text,
             extractor_id text, extractor_version text, contract_entry_id bigint,
             value_text text, value_num numeric, value_geom_wkt text, value_shape_wkt text,
@@ -905,11 +912,7 @@ _CLAIM_WRITE_SQL = f"""
             declared_precision_label text, declared_confidence text,
             declared_radius_m numeric, claim_confidence text,
             blur_evidence text, licence_class text,
-            legacy_source_column text, legacy_write_path_unknown boolean,
-            history_completeness text, subject_scoped boolean,
-            payload_id bigint, payload_sha256 text, evidence_quote text,
-            span_start integer, span_end integer, payload_scope_version text,
-            model text, prompt_version text)
+            legacy_source_column text, subject_scoped boolean)
     ), typed AS (
         SELECT i.*,
                location_value_norm(i.value_text) AS value_norm,
@@ -940,16 +943,90 @@ _CLAIM_WRITE_SQL = f"""
         FROM deduped d
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id, listing_id
-    ), enqueued AS (
+    )"""
+_ENQUEUE_CTE = """, enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
-        SELECT DISTINCT listing_id, 'claim_insert' FROM ins
+        SELECT DISTINCT listing_id, 'claim_insert' FROM {changed}
         ON CONFLICT (listing_id) DO UPDATE
            SET enqueued_at = now(), reason = EXCLUDED.reason,
                attempts = 0, next_eligible_at = now()
         RETURNING listing_id
-    )
+    )"""
+_CLAIM_WRITE_SQL = (_CLAIM_INSERT_CTES + _ENQUEUE_CTE.format(changed="ins") + """
     SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued)
+""")
+
+# THE READINGS HALF (W3, final-plan D1/D5). A listing's CURRENT reading is its successful
+# location reading of its CURRENT advert text (hashed by the text lane's own SQL), at the lane's
+# `extractor_version` if one exists, else the newest. The stamp (migration 581) says the listing
+# was CHECKED at `<source>@<version>`: plain on the reading it MINED, with '~' on one of another
+# text (on all, when the current text is unread: its claims stay). No cursor, no index (§10):
+# `unsettled` reads the table once, hash-free; a listing is hashed only when its preferred reading
+# is not checked at the active contract, or ACTIVE with two texts read (a delisted text is frozen).
+_READING = "e.extracted ? 'location' AND e.extracted -> 'error' IS NULL"
+_PREFERRED = ("(e.extractor_version IS NOT DISTINCT FROM %(version)s::text) DESC, "
+              "e.created_at DESC, e.id DESC")
+_UNMINED_READINGS_SQL = f"""
+    WITH unsettled AS (
+        SELECT e.listing_id,
+               (array_agg(e.mined_contract_version ORDER BY {_PREFERRED}))[1] AS checked
+          FROM listing_description_enrichments e
+         WHERE {_READING}
+         GROUP BY e.listing_id
+        HAVING count(DISTINCT e.text_hash) > 1
+            OR NOT coalesce((array_agg(e.mined_contract_version ORDER BY {_PREFERRED}))[1]
+                            = ANY(%(stamps)s::text[]), false)
+    )
+    SELECT l.id, l.source, l.source_id_native, l.last_seen_at, r.id, s.stamp,
+           jsonb_build_object('location', r.location), {text_lane._TEXT_EXPR}
+      FROM unsettled u
+      JOIN listings l ON l.id = u.listing_id AND l.source = ANY(%(sources)s::text[])
+      JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
+     CROSS JOIN LATERAL (SELECT l.source || '@' || pc.version AS stamp) s
+      LEFT JOIN LATERAL (
+        SELECT e.id, e.mined_contract_version, e.extracted -> 'location' AS location
+          FROM listing_description_enrichments e
+         WHERE e.listing_id = l.id AND {_READING}
+           AND e.text_hash = {text_lane._HASH_EXPR}
+         ORDER BY {_PREFERRED}
+         LIMIT 1) r ON true
+     WHERE (l.is_active OR rtrim(u.checked, '~') IS DISTINCT FROM s.stamp)
+       AND CASE WHEN r.id IS NULL THEN u.checked IS DISTINCT FROM s.stamp || '~'
+                ELSE (r.mined_contract_version, rtrim(u.checked, '~'))
+                     IS DISTINCT FROM (s.stamp, s.stamp) END
+     LIMIT %(cap)s
 """
+
+# ONE STATEMENT per batch, each reading's four acts in it: insert its claims; DELETE the
+# listing's other same-source, non-operator claims of the reading entries' types (SUPERSESSION,
+# readings only — a degraded page must never delete a town); stamp the listing's readings (a
+# same-text one cleared, to be mined once preferred); enqueue. `reading_id` null: stamped only.
+_CHECKED = ("CASE WHEN e.id = m.reading_id THEN m.stamp"
+            " WHEN e.text_hash IS DISTINCT FROM cur.text_hash THEN m.stamp || '~' END")
+_READING_WRITE_SQL = (_CLAIM_INSERT_CTES + f""", mined AS (
+        SELECT * FROM jsonb_to_recordset(%(readings)s::jsonb) AS m(
+            listing_id bigint, source text, reading_id bigint, stamp text, claim_types text[])
+    ), superseded AS (
+        DELETE FROM location_claims c
+         USING mined m
+         WHERE c.listing_id = m.listing_id AND c.source = m.source
+           AND m.reading_id IS NOT NULL AND c.contract_entry_id IS NOT NULL
+           AND c.claim_type::text = ANY(m.claim_types)
+           AND NOT EXISTS (SELECT 1 FROM fingerprinted f
+                            WHERE f.claim_fingerprint = c.claim_fingerprint)
+        RETURNING c.listing_id
+    ), stamped AS (
+        UPDATE listing_description_enrichments e SET mined_contract_version = {_CHECKED}
+          FROM mined m LEFT JOIN listing_description_enrichments cur ON cur.id = m.reading_id
+         WHERE e.listing_id = m.listing_id AND {_READING}
+           AND e.mined_contract_version IS DISTINCT FROM {_CHECKED}
+        RETURNING e.id
+    ), changed AS (
+        SELECT listing_id FROM ins UNION SELECT listing_id FROM superseded
+    )""" + _ENQUEUE_CTE.format(changed="changed") + """
+    SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued),
+           (SELECT count(*) FROM superseded)
+""")
 
 
 # ------------------------------------------------------------------ db plumbing
@@ -1114,7 +1191,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     the tail — a column appended after it would be swallowed silently.
     """
     (listing_id, source, native, raw_json, last_seen_at,
-     body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
+     body_id, body_unmined, body_page_kind, body_first_observed,
      contract_version, snapshot_cursor) = record
     row = ListingRow(
         listing_id=int(listing_id),
@@ -1127,10 +1204,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     body: page_readers.ArchivedPayload | None = None
     if body_id is not None:
         body = page_readers.ArchivedPayload(
-            id=int(body_id), source=source,
-            source_id_native=row.source_id_native,
-            page_kind=body_page_kind,
-            payload_sha256=str(body_sha),
+            id=int(body_id), page_kind=body_page_kind,
             # 06 §6.6 Rule 1 + Rule 2: the BODY's own first observation, never now() and
             # never `last_observed_at` (which an unchanged refetch moves).
             first_observed_at=body_first_observed)
@@ -1389,7 +1463,7 @@ class Schedule:
 
     Every default IS the hourly GitHub run, so `run()` with no schedule behaves byte for
     byte as it did — the fields exist because the realtime worker runs the SAME function on
-    a minute's cadence and a 45 s budget, which changes five things and nothing else.
+    a minute's cadence and a 45 s budget, which changes six things and nothing else.
 
       * `lane` — the resume key. `location_claim_batches` resumes on (lane, source,
         scan_mode) for the listing keyset and on (lane, source) for the bodies keyset, so
@@ -1408,6 +1482,7 @@ class Schedule:
       * `backlog_readout` — the run-end `count(*)`. It is the hourly chain's signal; a
         60 s-cadence lane that paid for it every tick would spend more time counting the
         backlog than draining it.
+      * `readings` — hourly only: its selector's full read (8.2 s cold) fails a 5 s gate (W3).
 
     `pool` is not a schedule difference but a lifetime one: a warm `ExtractionPool` for a
     lane that runs a batch a minute for ever (W7-a2). None = build one per batch, as before.
@@ -1419,6 +1494,7 @@ class Schedule:
     bodies_cap: int | None = None
     bodies_budget_share: float = BODIES_BUDGET_SHARE
     backlog_readout: bool = True
+    readings: bool = True
     pool: page_readers.ExtractionPool | None = None
 
     @property
@@ -1736,6 +1812,76 @@ def drain_unmined_bodies(
     stats["bodies_seconds"] = time.monotonic() - started
 
 
+READINGS_PER_BATCH = 1_000  # tiny rows (~5 claims each): the bound is the transaction's length
+_STAMP_COLUMN_SQL = ("SELECT 1 FROM pg_attribute WHERE attname = 'mined_contract_version'"
+                     " AND attrelid = to_regclass('listing_description_enrichments')")
+
+
+def drain_readings(
+    conn: psycopg.Connection, *, source: str | None, entries_by_source: dict[str, list[Entry]],
+    statement_timeout: int, budget: _Budget, batch_id: int | None, dry_run: bool,
+    stats: dict[str, Any], refusals: dict[str, int], schedule: Schedule = HOURLY,
+    max_value_bytes: int | None = None,
+) -> None:
+    """The READINGS half (W3), in the bodies' budget share. Scope is data: the portals whose
+    ACTIVE contract has an entry on the reading substrate (rule 21)."""
+    scope = {s: found for s in sorted(entries_by_source) if source in (None, s)
+             if (found := reading_entries(entries_by_source[s]))}
+    if not scope:
+        return
+    with conn.cursor() as cur:
+        cur.execute(_STAMP_COLUMN_SQL)
+        if cur.fetchone() is None:  # merged ahead of migration 581: only this half waits
+            LOG.warning("INTAKE readings half skipped: migration 581 is not applied")
+            return
+    stamps = [f"{s}@{entries[0].contract_version}" for s, entries in scope.items()]
+    types = {s: sorted({e.claim_type for e in entries}) for s, entries in scope.items()}
+    model = text_lane.resolve_model(conn)
+    params = {"sources": list(scope), "stamps": stamps, "cap": READINGS_PER_BATCH,
+              "version": text_lane.extractor_version(model) if model else None}
+    last_seconds = 0.0
+
+    def reading_batch(phase: _Phase) -> int:
+        result = IntakeResult()
+        mined: list[dict[str, Any]] = []
+        with guarded(conn, statement_timeout) as cur:
+            cur.execute(_UNMINED_READINGS_SQL, params)
+            records = cur.fetchall()
+            for listing_id, src, native, seen, reading_id, stamp, payload, text in records:
+                row = ListingRow(int(listing_id), src, str(native or listing_id), {}, seen)
+                if reading_id is not None:  # else its current text is not read: stamped only
+                    reading = text_reading.Reading(int(reading_id), payload or {}, text or "")
+                    result.extend(extract_listing(row, scope[src], reading=reading,
+                                                  max_value_bytes=max_value_bytes))
+                    stats["readings_mined"] += 1
+                mined.append({"listing_id": int(listing_id), "source": src, "stamp": stamp,
+                              "reading_id": reading_id, "claim_types": types[src]})
+            stats["claims"] += len(result.claims)
+            for reason, count in result.refusals.items():
+                refusals[reason] = refusals.get(reason, 0) + count
+                stats["refusals"] += count
+            if mined and not dry_run and batch_id is not None:
+                phase.name = "readings insert / supersede / stamp / enqueue"
+                cur.execute(_READING_WRITE_SQL, {
+                    "rows": Jsonb([c.to_row() for c in result.claims]),
+                    "readings": Jsonb(mined)})
+                inserted, enqueued, superseded = (int(x) for x in cur.fetchone())
+                stats["claims_inserted"] += inserted
+                stats["enqueued"] += enqueued
+                stats["claims_superseded"] += superseded
+        return len(records)
+
+    while budget.room_for(last_seconds, schedule.bodies_budget_share):
+        batch_started = time.monotonic()
+        selected = _with_lock_retry(reading_batch, family="readings", stats=stats,
+                                    refusals=refusals, budget=budget)
+        last_seconds = time.monotonic() - batch_started
+        LOG.info("INTAKE readings batch selected=%d mined=%d superseded=%d in %.1fs",
+                 selected, stats["readings_mined"], stats["claims_superseded"], last_seconds)
+        if selected < READINGS_PER_BATCH or dry_run:  # a dry run stamps nothing: same rows
+            break
+
+
 def run(
     conn: psycopg.Connection,
     *,
@@ -1853,7 +1999,7 @@ def run(
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "bodies_resumed_from_id": 0, "bodies_cursor_after_id": 0,
-        "bodies_cursor_versions": None,
+        "bodies_cursor_versions": None, "readings_mined": 0, "claims_superseded": 0,
         "full_walk_continued": False, "full_walk_cursor": None, "lock_retries": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
@@ -1870,6 +2016,12 @@ def run(
         # 250 000 rows behind. The fast schedule inverts it (W7-a2) — the JSON half is what
         # a minute-old listing needs, and the bodies pass takes the remainder of the budget.
         def drain_bodies() -> None:
+            if schedule.readings:  # FIRST: a mined reading supersedes before a body enqueues
+                drain_readings(
+                    conn, source=source, entries_by_source=entries_by_source,
+                    statement_timeout=statement_timeout, budget=budget, batch_id=batch_id,
+                    dry_run=dry_run, stats=stats, refusals=refusals, schedule=schedule,
+                    max_value_bytes=max_value_bytes)
             drain_unmined_bodies(
                 conn, source=source, page_sources=page_capable,
                 entries_by_source=entries_by_source, registers=registers, store=store,
@@ -2062,11 +2214,13 @@ def run(
     # ONE LINE THE OPERATOR CAN READ A RUN OFF. The per-batch progress lines say what the
     # run was doing; this says what it achieved and what is left.
     LOG.info("INTAKE summary mode=%s source=%s outcome=%s listings=%d payload_claims=%d "
-             "claims_inserted=%d bodies_mined=%d backlog_remaining=%s refusals=%s "
+             "claims_inserted=%d bodies_mined=%d readings_mined=%d superseded=%d "
+             "backlog_remaining=%s refusals=%s "
              "lock_retries=%d bodies=%.0fs (fetch %.0fs extract %.0fs) payload=%.0fs "
              "cursor=%d",
              mode, source or "*", outcome, stats["listings"], stats["claims_payload"],
-             stats["claims_inserted"], stats["bodies_mined"],
+             stats["claims_inserted"], stats["bodies_mined"], stats["readings_mined"],
+             stats["claims_superseded"],
              stats["bodies_backlog_remaining"]
              if stats["bodies_backlog_remaining"] is not None else "?",
              ",".join(f"{r}={c}" for r, c in stats["refusal_reasons"].items()) or "none",

@@ -31,16 +31,26 @@ vi.mock('./supabase', () => {
   const builder = (relation: string) => {
     h.reads.push(relation);
     const rows = () => h.tables[relation] ?? [];
+    let window: [number, number] | null = null;
     const b: Record<string, unknown> = {
       select: () => b,
       order: () => b,
       in: () => b,
       eq: () => b,
       limit: () => b,
-      range: (from: number, to: number) =>
-        Promise.resolve({ data: rows().slice(from, to + 1), error: null }),
+      retry: () => b,
+      abortSignal: () => b,
+      range: (from: number, to: number) => {
+        window = [from, to + 1];
+        return b;
+      },
       then: (resolve: (r: unknown) => unknown) =>
-        resolve({ data: rows(), error: null }),
+        resolve({
+          data: window ? rows().slice(...window) : rows(),
+          error: null,
+          count: null,
+          status: 200,
+        }),
     };
     return b;
   };

@@ -7,6 +7,19 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### SPA read seam: every PostgREST read through `pgRead` (done, 2026-10-01)
+- `lib/pgRead.ts` is now the one way the SPA awaits a supabase-js read (56 direct awaits plus the
+  18 `fetchAllRows` sites, whose every page it awaits; across `queries.ts`, `priceStats`, `pinAudit`,
+  `locationWaterfall`, `auth.tsx`, `Filters.tsx`): a 20 s deadline (none before — a stalled read
+  spun forever), React Query's signal (cancelled queries abort their request), and an `ApiError`
+  with the wire status so `main.tsx`'s one retry rule now covers PostgREST too (main.tsx never
+  retried a Supabase read; only postgrest-js's own hidden GET retry did, now switched off). Recorded
+  trade: that hidden retry made up to 3 attempts (1/2/4 s) on a 503, a 520 or a network error; the
+  one rule makes a single retry after 1 s, and now counts Cloudflare's 520 as transient. The Browse
+  count falls back to the estimate only on its own 2.5 s budget, not on any error; the agenda gate
+  rethrows a transient failure instead of caching "no constraint" for the session; dead `ping`
+  deleted; an ESLint selector bans destructuring `data`/`error`/`count` off an awaited builder.
+
 ### Browse map: pin precision on request, not under every pin (done, 2026-09-22)
 - Location W3-3 drew a true-metre uncertainty circle under every pin below building level. ~87 % of
   active pins are below it (street 300 m, část obce 750 m, obec 1 km), so at street zoom the map

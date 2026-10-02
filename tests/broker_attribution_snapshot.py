@@ -513,3 +513,221 @@ ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
   attrs_computed_at = now()
 """,
 }
+
+
+# --- Broker Unify W4: agency capture (deviation 4) ---------------------------
+# The identity template gained ONE column end to end: broker_identities.
+# agency_name — idnes's human-readable firm label, captured at attribution so
+# _FIRM_DISPLAY_NAMES stops re-reading every idnes raw_json from TOAST daily
+# (mean 200 s, max 858 s measured 2026-09-30). idnes renders the real
+# extraction; the other four render `NULL::text AS agency` plus the NULL-
+# preserving latest-wins conflict arm — purely additive, verified by
+# test_null_column_deltas_only_add_columns' opcode walk. These entries
+# supersede the identity entries above where both exist (dict update order).
+REGISTRY_DELTAS.update({
+    ("sreality", "identity"): """
+WITH src AS (
+  SELECT
+    (l.raw_json->'user'->>'user_id') AS uid,
+    nullif(l.raw_json->'user'->>'user_name', '') AS name,
+    lower(nullif(l.raw_json->'user'->>'user_email', '')) AS email,
+    nullif(l.raw_json->'user'->>'broker_rating', '')::numeric AS rating,
+    nullif(l.raw_json->'user'->>'broker_review_count', '')::int AS reviews,
+    NULL::text AS agency,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'sreality' AND l.raw_json ? 'user'
+    AND (l.raw_json->'user'->>'user_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
+  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
+)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, rating, review_count,
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'sreality', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
+  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+""",
+    ("idnes", "identity"): """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'account_oid') AS uid,
+    nullif(l.raw_json->'broker'->>'name', '') AS name,
+    lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
+    NULL::numeric AS rating,
+    NULL::int AS reviews,
+    nullif(l.raw_json->'broker'->>'agency_name', '') AS agency,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
+  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
+)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, rating, review_count,
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'idnes', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
+  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+""",
+    ("ceskereality", "identity"): """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id') AS uid,
+    nullif(l.raw_json->'broker'->>'name', '') AS name,
+    NULL::text AS email,
+    NULL::numeric AS rating,
+    NULL::int AS reviews,
+    NULL::text AS agency,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'ceskereality' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
+  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
+)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, rating, review_count,
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'ceskereality', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
+  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+""",
+    ("realitymix", "identity"): """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id') AS uid,
+    nullif(l.raw_json->'broker'->>'name', '') AS name,
+    NULL::text AS email,
+    NULL::numeric AS rating,
+    NULL::int AS reviews,
+    NULL::text AS agency,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'realitymix' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
+  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
+)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, rating, review_count,
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'realitymix', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
+  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+""",
+    ("remax", "identity"): """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id') AS uid,
+    nullif(l.raw_json->'broker'->>'name', '') AS name,
+    lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
+    NULL::numeric AS rating,
+    NULL::int AS reviews,
+    NULL::text AS agency,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'remax' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (
+  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews, agency
+  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
+)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, rating, review_count,
+   agency_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'remax', a.uid, lt.name, lt.email, lt.rating, lt.reviews, lt.agency, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
+  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
+  agency_name  = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN coalesce(EXCLUDED.agency_name, broker_identities.agency_name)
+                      ELSE broker_identities.agency_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+""",
+})

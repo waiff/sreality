@@ -19,7 +19,7 @@ import { YmPicker, YM_CUR, YM_PARTS } from '@/components/YmPicker';
 function InsufficientNote({ datasetId, selected }: { datasetId: number; selected: number | null }) {
   const { data: count } = useQuery<number, Error>({
     queryKey: priceStatsKeys.noDataCount(datasetId),
-    queryFn: () => fetchNoDataCount(datasetId),
+    queryFn: ({ signal }) => fetchNoDataCount(datasetId, { signal }),
     staleTime: 60_000,
   });
   if (!count) return null;

@@ -1,4 +1,4 @@
-"""Tests for the content_hash function (v1 estate shape)."""
+"""Tests for sreality's content hash (v1 estate shape): hashing.digest over hashing.sreality_hash_doc."""
 
 from __future__ import annotations
 
@@ -9,9 +9,13 @@ from typing import Any
 
 import pytest
 
-from scraper.hashing import content_hash
+from scraper.hashing import digest, sreality_hash_doc
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def content_hash(raw: dict[str, Any]) -> str:
+    return digest(sreality_hash_doc(raw))
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { revalidateCollections } from './collectionCache';
-import { BROWSE_QUERY_KEYS } from './browseInvalidation';
+import { browseKeys } from './browseKeys';
 import { curationKeys } from './queries';
 
 describe('collection revalidation contract', () => {
@@ -38,7 +38,7 @@ describe('collection revalidation contract', () => {
     expect(on.mock.calls.map(([arg]) => arg.queryKey)).toEqual([
       curationKeys.propertyCollectionMembers,
       curationKeys.collections,
-      ...BROWSE_QUERY_KEYS.map((k) => [k]),
+      ...browseKeys.all,
     ]);
   });
 });

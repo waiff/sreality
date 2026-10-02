@@ -9,6 +9,7 @@ full-resolution original).
 
 from __future__ import annotations
 
+from scraper.hashing import digest
 from scraper.remax_parser import (
     category_from_typ,
     category_of,
@@ -301,11 +302,11 @@ def test_parse_detail_full():
 def test_parse_detail_content_hash_and_to_row():
     a = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL)
     b = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL)
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
 
-    row = a.to_row(-11)
-    assert row["sreality_id"] == -11
+    row = a.listing_columns()
+    assert "sreality_id" not in row
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 9_962_000
 

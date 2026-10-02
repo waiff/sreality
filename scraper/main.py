@@ -11,7 +11,7 @@ are set; otherwise the phase is a no-op).
 
 Run with:
     python -m scraper.main                       # full run
-    python -m scraper.main --limit 10            # cap to 10 listings; mark-inactive skipped
+    python -m scraper.main --limit 10            # cap to 10 listings; nomination skipped
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
@@ -22,8 +22,8 @@ Run with:
     python -m scraper.main --image-workers 16            # tune concurrency
 
 `--limit` is production-safe: the limited scrape upserts what it sees,
-but it does NOT mark unseen listings inactive — that inference is only
-valid when the entire sreality index has been walked.
+but it does NOT nominate unseen listings for a page check — that inference
+is only valid when the entire sreality index has been walked.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from scraper import db, hashing, image_storage, media, parser, portal_runner
+from scraper import db, image_storage, listing_write, media, parser, portal_runner
 from scraper.portal import (
     PortalLimits,
     StopReason,
@@ -121,7 +121,7 @@ SUSPICIOUS_STOP_THRESHOLD = 0.30
 # already category-agnostic. drazba (auction) and podil (fractional-ownership
 # sale) are their OWN search slices (category_type_cb=3/4 are valid filters,
 # each returns a few dozen-to-low-hundred results nationally). Without them
-# those listings get no complete index walk, so mark_inactive never runs for
+# those listings get no complete index walk, so nomination never runs for
 # them (it is scoped per (source, category_main, category_type)) and a delisted
 # auction/share stays is_active=true forever — see the stuck-active backlog the
 # missing slices left behind. pozemek (land) and ostatni (other) close the same
@@ -192,7 +192,7 @@ def _load_limits(dry_run: bool) -> PortalLimits:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
     if args.images_only:
         if args.dry_run or args.detail_only is not None or args.no_image_downloads:
@@ -417,7 +417,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help=(
             "cap number of index entries processed. With this flag the "
-            "scrape skips mark-inactive: a partial index view cannot "
+            "scrape skips nomination: a partial index view cannot "
             "determine which listings have left sreality."
         ),
     )
@@ -596,7 +596,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--index-only",
         action="store_true",
         help=(
-            "Phase 2: walk the index, touch + mark_inactive, and enqueue "
+            "Phase 2: walk the index, touch + nominate (rule #3), and enqueue "
             "new/price-changed ids into listing_detail_queue. No detail "
             "fetch — the detail-drain (--drain-only) consumes the queue."
         ),
@@ -616,20 +616,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help=(
             "Wall-clock budget for the index walk. On expiry the walk stops "
-            "cleanly and reports the category INCOMPLETE, so mark_inactive is "
+            "cleanly and reports the category INCOMPLETE, so nomination is "
             "suppressed (rule #3) rather than the job being SIGKILLed by the "
             "CI timeout with nothing recorded."
         ),
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 def _build_client(
@@ -657,7 +650,7 @@ def _run_detail_only(
     raw = client.get_detail(sreality_id)
     row = parser.parse_listing(raw)
     images = parser.parse_images(raw)
-    h = hashing.content_hash(raw)
+    w = listing_write.from_sreality(raw, row, images)
 
     cm_text = row.get("category_main") or "?"
     ct_text = row.get("category_type") or "?"
@@ -665,7 +658,7 @@ def _run_detail_only(
     if dry_run:
         LOG.info(
             "DRY-RUN id=%d hash=%s images=%d price=%s area=%s",
-            sreality_id, h[:8], len(images),
+            sreality_id, w.content_hash[:8], len(images),
             row.get("price_czk"), row.get("area_m2"),
         )
         LOG.info("RUN done pages=0 new=0 updated=0 unchanged=0 errors=0")
@@ -674,10 +667,10 @@ def _run_detail_only(
     counts = {"new": 0, "updated": 0, "unchanged": 0}
     new_imgs = 0
     with db.connect() as conn:
-        result = db.upsert_listing_with_property(conn, row, raw, h)
-        counts[result] = 1
-        LOG.info("DETAIL id=%d %s", sreality_id, result)
-        new_imgs = db.record_images(conn, sreality_id, images)
+        [o] = listing_write.write_listings(conn, [w])
+        counts[o.result] = 1
+        LOG.info("DETAIL id=%d %s", sreality_id, o.result)
+        new_imgs = o.images_inserted
         if new_imgs:
             LOG.info("IMAGE id=%d inserted=%d", sreality_id, new_imgs)
     LOG.info(
@@ -775,7 +768,7 @@ def _run_full(
             except Exception as exc:
                 # A category's walk failing (e.g. sreality throttling that
                 # outlasts the retries) must not kill the whole run. Record it
-                # as incomplete — the sweep is skipped (no false delisting) and
+                # as incomplete — nomination is skipped (no false delisting) and
                 # the remaining categories still walk and finalize.
                 LOG.exception(
                     "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
@@ -799,33 +792,24 @@ def _run_full(
 
             # Rule #3 (2026-09-07): a walk that reached the portal's end
             # NOMINATES the rows it did not see for a page check; the drain's
-            # fetch decides. Same seam the framework runner uses, so this
-            # dispatch-only fallback cannot drift back to absence-based
-            # delisting. `complete` is the structural verdict (every district
-            # ended on sreality's own signal, no stop of ours anywhere), so a
-            # truncated walk nominates nothing.
-            inactive = 0
+            # fetch decides. The framework runner's own nomination step, so this
+            # dispatch-only fallback cannot drift from it (NULL ids dropped, an
+            # empty seen set refused, sreality_id-keyed via SrealityPortal.seen_key).
+            # `complete` is the structural verdict (every district ended on
+            # sreality's own signal, no stop of ours anywhere), so a truncated
+            # walk nominates nothing.
             if conn is not None and limit is None:
-                if complete and not seen_ids:
-                    LOG.warning(
-                        "VERIFY skipped cm=%s ct=%s: the walk saw no listings, so "
-                        "it cannot nominate any", cm_text, ct_text,
-                    )
-                elif complete:
-                    candidates, active_rows = db.presence_candidates(
-                        conn, "sreality", cm_text, ct_text, seen_ids,
-                        seen_key="sreality_id",
-                    )
-                    queued, deferred = db.enqueue_presence_checks(
-                        conn, "sreality", cm_text, ct_text, candidates,
-                        active_rows=active_rows,
-                    )
-                    LOG.info(
-                        "VERIFY cm=%s ct=%s candidates=%d queued=%d deferred=%d "
-                        "collected=%d result_size=%s",
-                        cm_text, ct_text, len(candidates), queued, deferred,
-                        len(seen_ids), cat_result_size,
-                    )
+                if complete:
+                    try:
+                        portal_runner._queue_presence_checks(
+                            SrealityPortal(), conn, (category_main, category_type),
+                            seen_ids, cm_text, ct_text,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a nomination failure is not a walk failure
+                        LOG.exception(
+                            "VERIFY failed cm=%s ct=%s: %s -- nothing nominated this walk",
+                            cm_text, ct_text, exc,
+                        )
                 else:
                     LOG.warning(
                         "VERIFY skipped cm=%s ct=%s: the walk did not reach "
@@ -858,15 +842,13 @@ def _run_full(
                 cm_text, ct_text, cat_result_size, len(seen_ids), active_db, drift_txt,
             )
 
-            # Delistings detected mid-walk via a gone detail fetch are
-            # disjoint from mark_inactive's index-absence sweep (that sweep
-            # only flips rows still is_active=true), so summing is safe.
+            # The walk flips nothing; gone detail fetches are the only flips.
             category_aggregates.append({
                 "category_main": cm_text,
                 "category_type": ct_text,
                 "listings_found_new":   cat_counts.get("found_new", 0),
                 "listings_scraped_new": cat_counts.get("new", 0),
-                "listings_inactive":    inactive + cat_counts.get("gone", 0),
+                "listings_inactive":    cat_counts.get("gone", 0),
                 "images_discovered":    cat_counts.get("images_discovered", 0),
                 "images_stored":        0,
                 "sreality_result_size": cat_result_size,
@@ -917,20 +899,21 @@ def _run_full(
     return (0, scrape_agg)
 
 
-class SrealityPortal:
+class SrealityPortal(portal_runner.PortalDefaults):
     """The sreality portal as a Portal (Phase 4): the seams the generic
-    portal_runner needs, wrapping this module's existing helpers so sreality's
-    behavior is unchanged. The district-split (the one sanctioned per-portal
-    customization, forced by the deep-pagination cap) stays inside walk_category.
+    portal_runner needs, wrapping this module's existing helpers. The
+    district-split (the one sanctioned per-portal customization, forced by the
+    deep-pagination cap) stays inside walk_category, which hands each district's
+    sightings to the shared portal_runner.reconcile_sightings.
     """
     # The walk's seen set is sreality's own integer ids, so the runner's default
     # nomination (rule #3, 2026-09-07) excludes them on listings.sreality_id.
     seen_key = "sreality_id"
 
     source = "sreality"
-    supports_complete_walk = True
+    price_change_min_pct = 0.0  # instance reads from config (portal_factory)
     index_rate = DEFAULT_DETAIL_RATE  # baked floor; instance reads from config
-    shared_rate_limiter = False  # instance reads from config (sreality_main)
+    shared_rate_limiter = False  # instance reads from config (portal_factory)
 
     def __init__(self, index_rate: float = DEFAULT_DETAIL_RATE) -> None:
         self.index_rate = index_rate
@@ -941,9 +924,6 @@ class SrealityPortal:
     def category_labels(self, category: tuple[int, int]) -> tuple[str, str]:
         cm, ct = category
         return parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct]
-
-    def connect_index(self) -> Any:
-        return db.connect()
 
     def connect_drain(self) -> Any:
         # Session-mode pooler for the batched prepared writes (Phase 1 win).
@@ -958,6 +938,7 @@ class SrealityPortal:
             cm, ct, limiter=limiter, conn=conn, cat_limit=None, dry_run=dry_run,
             refetch_budget=[None], cat_refetch_cap=None, detail_workers=1,
             enqueue_only=True, deadline=deadline,
+            min_change_pct=self.price_change_min_pct,
         )
 
     def probe_category(
@@ -978,9 +959,10 @@ class SrealityPortal:
         page returns zero new ids, exactly like ceskereality's probe; capped at
         PROBE_MAX_PAGES regardless of the caller's probe_pages as defense in
         depth. Diff + enqueue only; always complete=False so the caller can
-        never be tempted into a delisting sweep (rule #3) off a partial walk.
+        never be tempted into nominating (rule #3) off a partial walk.
         """
         cm, ct = category
+        cm_text, ct_text = self.category_labels(category)
         client = _build_client(cm, ct, limiter=limiter)
         seen: set[int] = set()
         total: int | None = None
@@ -996,53 +978,22 @@ class SrealityPortal:
                 total = client.result_size
             if not results:
                 break
-            index_entries: list[tuple[int, int | None]] = []
-            for estate in results:
-                sid = _extract_id(estate)
-                if sid is None:
-                    continue
-                index_entries.append((sid, _extract_price(estate)))
-            page_ids = {sid for sid, _ in index_entries if sid not in seen}
-            seen.update(page_ids)
-            price_map = dict(index_entries)
-            # sreality's own index_summary keys on the bigint sreality_id PK
-            # directly (no surrogate "id" field, unlike index_summary_native) —
-            # so touch_listings (also sreality_id-keyed) is the matching call,
-            # same pairing _walk_category already uses.
-            existing = db.index_summary(conn, page_ids) if conn is not None else {}
-            new_ids = [s for s in page_ids if s not in existing]
-            changed = [
-                s for s in page_ids
-                if classify_index_sighting(existing.get(s), price_map.get(s))
-                == "changed"
-            ]
-            unchanged_ids = [
-                s for s in page_ids if s in existing and s not in changed
-            ]
-            if conn is not None and unchanged_ids:
-                db.touch_listings(conn, unchanged_ids)
-            entries = (
-                [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
-                + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
+            rows = {
+                str(sid): (None, _extract_price(estate))
+                for estate in results
+                if (sid := _extract_id(estate)) is not None and sid not in seen
+            }
+            seen.update(int(n) for n in rows)
+            page_counts = portal_runner.reconcile_sightings(
+                conn, self.source, rows, min_change_pct=self.price_change_min_pct,
+                label=f" cm={cm_text} ct={ct_text} offset={offset}",
             )
-            if conn is not None and entries:
-                enqueued += db.enqueue_detail(conn, self.source, entries)
-            found_new += len(new_ids)
-            LOG.info(
-                "PROBE page cm=%s ct=%s offset=%d new=%d changed=%d unchanged=%d",
-                ct, cm, offset, len(new_ids), len(changed), len(unchanged_ids),
-            )
-            if not new_ids:
+            found_new += page_counts["found_new"]
+            enqueued += page_counts["enqueued"]
+            if not page_counts["found_new"]:
                 break
             offset += client.per_page
         return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
-
-    def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
-        cm, ct = category
-        return db.active_count(
-            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct],
-            source=self.source,
-        )
 
     def make_client(self, limiter: RateLimiter) -> SrealityClient:
         return _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)
@@ -1056,28 +1007,18 @@ class SrealityPortal:
         return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        writes = []
         for it in items:
-            if it.payload is not None:
-                it.payload.discovery_seq = it.discovery_seq
-                it.payload.discovered_at = it.discovered_at
-                _record_detail_fetch(conn, it.payload, it.observation_id)
-        return db.write_detail_batch(conn, [it.payload for it in items])
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        sid = int(native_id)
-        db.mark_listing_inactive(conn, sid)
-        db.clear_fetch_failure(conn, sid)
+            fr = it.payload
+            _record_detail_fetch(conn, fr, it.observation_id)
+            if fr.kind == "ok":
+                writes.append(listing_write.from_sreality(
+                    fr.raw, fr.row, fr.images or [],
+                    discovery_seq=it.discovery_seq, discovered_at=it.discovered_at))
+        return listing_write.tally(listing_write.write_listings(conn, writes))
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         db.record_fetch_failure(conn, int(native_id), message)
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'sreality' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
 
 
 def _run_index_walk(
@@ -1102,7 +1043,7 @@ def _run_detail_drain(
 ) -> tuple[int, dict[str, Any]]:
     """Sreality detail-drain via the generic portal_runner (Phase 4): claim from
     listing_detail_queue, fetch on a worker pool, write batched via
-    write_detail_batch. Records run_type='detail' with index_pages=0."""
+    listing_write.write_listings. Records run_type='detail' with index_pages=0."""
     return portal_runner.run_detail_drain(
         SrealityPortal(), max_claims, dry_run, detail_workers, detail_rate,
         run_id=run_id,
@@ -1140,6 +1081,7 @@ def _walk_category_split(
     detail_workers: int,
     enqueue_only: bool = False,
     deadline: float | None = None,
+    min_change_pct: float = 0.0,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
     """Walk one category, splitting large ones by district (okres).
 
@@ -1148,7 +1090,7 @@ def _walk_category_split(
     split only reached ~86%, below the completeness bar). We probe the
     national total and, if over the threshold, walk each district separately
     and union — every district is well under the cap, so the union is complete
-    and mark_inactive can run.
+    and nomination can run.
 
     Returns (seen_ids, counts, result_size, pages_fetched, reached_end). For a
     split walk `reached_end` requires EVERY one of the 77 districts to have been
@@ -1162,7 +1104,7 @@ def _walk_category_split(
     cm_text = parser.CATEGORY_MAIN[category_main]
     ct_text = parser.CATEGORY_TYPE[category_type]
 
-    # --limit runs are partial by definition and never mark_inactive, so
+    # --limit runs are partial by definition and never nominate, so
     # there's no reason to split them.
     result_size: int | None = None
     if cat_limit is None:
@@ -1177,6 +1119,7 @@ def _walk_category_split(
         seen, counts = _walk_category(
             client, conn, cat_limit, dry_run, refetch_budget,
             cat_refetch_cap, detail_workers, enqueue_only=enqueue_only,
+            min_change_pct=min_change_pct,
         )
         rs = client.result_size if client.result_size is not None else result_size
         # A --limit run is a partial view by definition, even when the slice
@@ -1229,6 +1172,7 @@ def _walk_category_split(
             dseen, dcounts = _walk_category(
                 dclient, conn, None, dry_run, refetch_budget,
                 district_cap, detail_workers, enqueue_only=enqueue_only,
+                min_change_pct=min_change_pct,
             )
         except Exception as exc:
             district_reasons[district] = "error"
@@ -1288,6 +1232,7 @@ def _walk_category_split(
             nseen, ncounts = _walk_category(
                 nclient, conn, None, dry_run, refetch_budget,
                 national_cap, detail_workers, enqueue_only=enqueue_only,
+                min_change_pct=min_change_pct,
             )
             added = len(nseen - union)
             union |= nseen
@@ -1440,6 +1385,14 @@ def _index_page_archiver(
     return archive
 
 
+def _failed_fetch_ids(conn: Any, native_ids: list[str]) -> set[str]:
+    """Rule #5: repriced ids with a live listing_fetch_failures row re-queue first."""
+    failed = {str(s) for s in db.active_failure_ids(conn, {int(n) for n in native_ids})}
+    if failed:
+        LOG.info("PLAN priority_retry=%d", len(failed))
+    return failed
+
+
 def _walk_category(
     client: SrealityClient,
     conn: Any,
@@ -1449,10 +1402,11 @@ def _walk_category(
     cat_refetch_cap: int | None = None,
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
     enqueue_only: bool = False,
+    min_change_pct: float = 0.0,
 ) -> tuple[set[int], dict[str, int]]:
     """Walk one category's index, then either fetch+write details (the legacy
-    coupled path) or, when `enqueue_only`, enqueue new/price-changed ids into
-    listing_detail_queue for the async detail-drain (Phase 2 index-walk).
+    coupled path) or, when `enqueue_only`, hand the sightings to the shared
+    portal_runner.reconcile_sightings (touch + enqueue for the async drain).
 
     `refetch_budget` is a single-element mutable list so the global
     cap decrements as each category consumes refetches. `cat_refetch_cap`
@@ -1478,6 +1432,15 @@ def _walk_category(
         index_entries.append((sid, _extract_price(estate)))
 
     seen_ids = {sid for sid, _ in index_entries}
+    if enqueue_only:
+        # sreality native_id is the sreality_id as text; detail_ref is None (the
+        # drain derives the URL from the id).
+        counts.update(portal_runner.reconcile_sightings(
+            conn, SOURCE, {str(sid): (None, price) for sid, price in index_entries},
+            min_change_pct=min_change_pct, retry_first=_failed_fetch_ids,
+        ))
+        return seen_ids, counts
+
     existing = (
         db.index_summary(conn, seen_ids) if conn is not None else {}
     )
@@ -1490,7 +1453,7 @@ def _walk_category(
     to_refetch: list[int] = []
     unchanged = 0
     for sid, idx_price in index_entries:
-        if classify_index_sighting(existing.get(sid), idx_price) == "unchanged":
+        if classify_index_sighting(existing.get(sid), idx_price, min_change_pct) == "unchanged":
             unchanged += 1
         else:
             to_refetch.append(sid)
@@ -1510,25 +1473,6 @@ def _walk_category(
     changed = [s for s in known_ids if s not in failed_ids]
     if priority:
         LOG.info("PLAN priority_retry=%d", len(priority))
-
-    # Phase 2 index-walk: enqueue the whole refetch set (no per-run cap — the
-    # drain is bounded) and return without fetching any detail.
-    if enqueue_only:
-        price_map = dict(index_entries)
-        # sreality native_id is the sreality_id as text; detail_ref is None (the
-        # drain derives the URL from the id). source-generic queue (Phase 4).
-        entries = (
-            [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_FAILURE) for s in priority]
-            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
-            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
-        )
-        if conn is not None and entries:
-            counts["enqueued"] = db.enqueue_detail(conn, "sreality", entries)
-        LOG.info(
-            "ENQUEUE enqueued=%d new=%d changed=%d priority=%d",
-            counts["enqueued"], len(new_ids), len(changed), len(priority),
-        )
-        return seen_ids, counts
 
     caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
     if caps and len(to_refetch) > min(caps):
@@ -1554,9 +1498,9 @@ def _walk_category(
     LOG.info(
         "DETAIL starting refetch=%d workers=%d", total_refetch, detail_workers
     )
-    # Worker threads do the network I/O (client.get_detail + parse + hash);
-    # the main thread serialises DB writes via _write_result against the
-    # single, not-thread-safe psycopg connection. Same pattern as the
+    # Worker threads do the network I/O (client.get_detail + parse); the main
+    # thread hashes and writes via _write_result -> listing_write.write_listings
+    # against the single, not-thread-safe psycopg connection. Same pattern as the
     # image-download phase. The per-category + global caps were already
     # applied to to_refetch above, so concurrency only changes completion
     # order, never which listings run.
@@ -1595,19 +1539,12 @@ class FetchResult:
     row: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
     images: list[dict[str, Any]] | None = None
-    content_hash: str | None = None
     error: BaseException | None = None
     source: str | None = None  # "fetch" | "parse" for kind == "error"
-    # Set post-hoc by SrealityPortal.write_details from the owning DrainItem
-    # (migration 368) — not known at fetch time, which runs before the claim's
-    # discovery_seq is looked up. See db.DetailResult.discovery_seq.
-    discovery_seq: int | None = None
-    # Likewise the claim's enqueued_at (migration 444) — when the walk first saw it.
-    discovered_at: datetime | None = None
 
 
 def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:
-    """Worker: fetch + parse + hash one listing. No DB I/O. Never raises.
+    """Worker: fetch + parse one listing. No DB I/O. Never raises.
 
     Runs on a pool thread, so it must touch neither the psycopg connection
     nor any shared mutable state. Returns everything _write_result needs.
@@ -1631,13 +1568,10 @@ def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:
     try:
         row = parser.parse_listing(raw)
         images = parser.parse_images(raw)
-        h = hashing.content_hash(raw)
     except Exception as exc:
         return FetchResult(sid, "error", error=exc, source="parse")
 
-    return FetchResult(
-        sid, "ok", row=row, raw=raw, images=images, content_hash=h
-    )
+    return FetchResult(sid, "ok", row=row, raw=raw, images=images)
 
 
 def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
@@ -1654,54 +1588,46 @@ def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
         return ("errors", 0)
 
     if dry_run:
+        w = listing_write.from_sreality(
+            fr.raw or {}, fr.row or {"sreality_id": fr.sid}, fr.images or [])
         LOG.info(
             "DRY-RUN id=%d hash=%s images=%d price=%s",
-            fr.sid, (fr.content_hash or "")[:8],
+            fr.sid, w.content_hash[:8],
             len(fr.images or []), (fr.row or {}).get("price_czk"),
         )
         return ("unchanged", 0)
 
     try:
-        result = db.upsert_listing_with_property(conn, fr.row, fr.raw, fr.content_hash)
-        LOG.info("DETAIL id=%d %s", fr.sid, result)
-        new_imgs = db.record_images(conn, fr.sid, fr.images)
-        if new_imgs:
-            LOG.info("IMAGE id=%d inserted=%d", fr.sid, new_imgs)
-        _clear_failure(conn, fr.sid)
-        return (result, new_imgs)
+        [o] = listing_write.write_listings(
+            conn, [listing_write.from_sreality(fr.raw, fr.row, fr.images or [])])
+        LOG.info("DETAIL id=%d %s", fr.sid, o.result)
+        if o.images_inserted:
+            LOG.info("IMAGE id=%d inserted=%d", fr.sid, o.images_inserted)
+        return (o.result, o.images_inserted)
     except Exception as exc:
         LOG.exception("DETAIL id=%d db error: %s", fr.sid, exc)
         _record_failure(conn, fr.sid, "db", exc)
         return ("errors", 0)
 
 
-def _process_one(
-    client: SrealityClient,
-    conn: Any,
-    sid: int,
-    dry_run: bool,
-) -> tuple[str, int]:
-    """Serial fetch+write for one listing. Used by the single-listing paths
-    and tests; the pooled walk calls _fetch_detail / _write_result directly."""
-    return _write_result(conn, _fetch_detail(client, sid), dry_run)
-
-
 def _handle_gone(conn: Any, sid: int) -> tuple[str, int]:
-    """A delisted listing: flip is_active=false and clear any failure row.
+    """A delisted listing: flip is_active=false; the flip also clears any failure row.
 
     A gone detail fetch is evidence of delisting, not a transient failure,
     so it must not accumulate in listing_fetch_failures (which would burn
     the 5-attempt budget and then strand the listing as given_up). Returns
-    the 'gone' outcome so the walk counts it separately from errors.
+    the 'gone' outcome so the walk counts it separately from errors; a flip
+    that failed is an error, recorded so the listing is fetched again.
     """
     LOG.info("DETAIL id=%d gone (is_active=false)", sid)
     if conn is None:
         return ("gone", 0)
     try:
-        db.mark_listing_inactive(conn, sid)
-    except Exception as exc:
+        db.mark_listing_inactive(conn, "sreality", str(sid))
+    except Exception as exc:  # noqa: BLE001
         LOG.warning("could not mark id=%d inactive: %s", sid, exc)
-    _clear_failure(conn, sid)
+        _record_failure(conn, sid, "db", exc)
+        return ("errors", 0)
     return ("gone", 0)
 
 
@@ -1713,16 +1639,6 @@ def _record_failure(conn: Any, sid: int, source: str, exc: BaseException) -> Non
         db.record_fetch_failure(conn, sid, f"{source}: {exc}")
     except Exception as e:
         LOG.warning("could not record failure for id=%d: %s", sid, e)
-
-
-def _clear_failure(conn: Any, sid: int) -> None:
-    """Best-effort: clear an existing failure row. Never raises."""
-    if conn is None:
-        return
-    try:
-        db.clear_fetch_failure(conn, sid)
-    except Exception as e:
-        LOG.warning("could not clear failure for id=%d: %s", sid, e)
 
 
 def _parse_shard(spec: str | None) -> tuple[int, int] | None:
@@ -2104,12 +2020,14 @@ def _classify_image_failure(
         return "source_unavailable"
     if not _is_gone_image_error(error):
         return "transient"
-    if sreality_id is None:
-        # No legacy handle (a post-Gate-2 non-sreality listing). A freshness
-        # check IS a sreality portal fetch, so "is the parent gone?" is simply
-        # unanswerable here. Park this one image rather than guessing: bulk
-        # 'taken_down' would need proof we can't get, and 'transient' would
-        # retry a permanently dead URL forever and count toward suspicious-stop.
+    if sreality_id is None or sreality_id <= 0:
+        # No legacy handle (a post-Gate-2 non-sreality listing), or a crawler
+        # listing's synthetic negative sreality_id: a sreality fetch for it proves
+        # nothing. A freshness check IS a sreality portal fetch, so "is the parent
+        # gone?" is simply unanswerable here. Park this one image rather than
+        # guessing: bulk 'taken_down' would need proof we can't get, and
+        # 'transient' would retry a permanently dead URL forever and count toward
+        # suspicious-stop.
         return "source_unavailable"
     if sreality_id in gone_listings:
         return "taken_down"

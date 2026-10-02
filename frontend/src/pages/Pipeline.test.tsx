@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -17,6 +17,8 @@ import type { Collection, PipelineBoardCard, PipelineStage } from '@/lib/types';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
 import * as brokersApi from '@/lib/brokers';
+import { createMutationCache } from '@/lib/mutationCache';
+import * as toast from '@/lib/toast';
 
 /* Every read the page makes has to be named here: the factories spread the
    real module, so an unnamed one runs for real and fails SOFT (request()
@@ -40,6 +42,11 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchListingCovers: vi.fn(),
     fetchPropertyCollectionMemberSet: vi.fn(),
   };
+});
+
+vi.mock('@/lib/toast', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/toast')>();
+  return { ...actual, pushToast: vi.fn(() => 1) };
 });
 
 /* Decorations (cover photo, broker line) no longer come off the board query —
@@ -203,7 +210,9 @@ const STAGES: PipelineStage[] = [
 ];
 
 function renderBoard(entry = '/pipeline') {
+  // The app's own MutationCache, so a failed write's global toast is real.
   const qc = new QueryClient({
+    mutationCache: createMutationCache(),
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
@@ -600,5 +609,31 @@ describe('<Pipeline> board', () => {
     await waitFor(() =>
       expect(api.removePipelineCard).toHaveBeenCalledWith(42),
     );
+  });
+
+  /* The board writes through the same hook as every funnel, so a refused
+   * removal snaps back from the rollback (the re-read is held open here, so
+   * nothing else could restore it) and says why exactly once. */
+  it('puts a card back when its removal fails, and says why once', async () => {
+    vi.mocked(toast.pushToast).mockClear();
+    let reject!: (e: Error) => void;
+    vi.mocked(api.removePipelineCard).mockReturnValue(
+      new Promise((_res, rej) => {
+        reject = rej;
+      }),
+    );
+    vi.mocked(queries.fetchPipelineBoard)
+      .mockResolvedValueOnce(CARDS)
+      .mockReturnValue(new Promise(() => {}));
+    renderBoard();
+    fireEvent.click(await screen.findByLabelText('Odebrat z pipeline'));
+    fireEvent.click(screen.getByText('Odebrat'));
+    await waitFor(() => expect(api.removePipelineCard).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.queryByText('Sadová')).not.toBeInTheDocument());
+
+    await act(async () => reject(new Error('refused')));
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+    expect(toast.pushToast).toHaveBeenCalledTimes(1);
+    expect(toast.pushToast).toHaveBeenCalledWith('err', 'refused');
   });
 });

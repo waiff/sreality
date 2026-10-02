@@ -16,11 +16,14 @@ consumer needs:
 - optional enum value list with Czech + English labels,
 - legacy aliases so older field names stay readable.
 
-Adding a new filter is a single PR that touches this file and (if it
+Adding a new filter is a single PR that touches this file, the consumer
+models of its agendas (ComparableFilters / WatchdogFilterSpec) and (if it
 needs a DB column) a migration. Every downstream surface — Pydantic
 schemas, agent tool JSON, Watchdog matcher, React FilterForm, browse
-URL serialiser — is either generated from the registry or asserted
-against it in tests, so the registry is genuinely the source of truth.
+URL serialiser — is generated from the registry, compiled from it
+(`toolkit/filter_compiler.py`), or pinned to it by a coverage test; the
+model fields are pinned in both directions, so a filter missing from a
+model fails CI rather than being silently dropped.
 
 The `filter_visibility` table (migration 059) lets the operator turn
 individual (agenda, filter) pairs off from Settings. Use
@@ -31,9 +34,10 @@ filter declared for that agenda (the default-on superset).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from toolkit.measures import PPM2_BASES
 
@@ -380,6 +384,46 @@ COLUMN_CANONICAL_VALUES: dict[str, tuple[str, ...]] = {
     "subtype": tuple(o.value for o in SUBTYPE_OPTIONS),
 }
 
+SqlKind = Literal["eq", "any", "enum_or_unknown", "gte", "lte"]
+
+# Column-backed filters whose SQL is NOT "<column> <kind-op> value": a bucket that expands to
+# several column values, or a bound another filter rewrites. sql_kind() is None for them.
+COMPILED_BY_HOOK: frozenset[str] = frozenset({"building_material", "min_price_czk", "max_price_czk"})
+
+
+def sql_kind(f: FilterDef) -> SqlKind | None:
+    """How a column-backed filter compiles on every surface; None = a named hook per compiler."""
+    if f.pg_column is None or f.id in COMPILED_BY_HOOK:
+        return None
+    if f.type is FilterType.STRING_LIST:
+        unknown = any(o.value == UNKNOWN_FILTER_VALUE for o in f.enum_values or ())
+        return "enum_or_unknown" if unknown else "any"
+    if f.type in (FilterType.INT, FilterType.FLOAT):
+        if f.id.startswith("min_") or f.id.endswith("_min"):
+            return "gte"
+        if f.id.startswith("max_") or f.id.endswith("_max"):
+            return "lte"
+    return "eq"
+
+
+_SELF_NAMED_MATERIALS: tuple[str, ...] = ("cihla", "panel", "smisena")
+
+
+def building_material_values(buckets: Sequence[str]) -> list[str]:
+    """Expand building_material buckets to building_type values (deduped, first-seen order)."""
+    # cihla/panel/smisena map to themselves; ANY other bucket is `ostatni` = every
+    # COLUMN_CANONICAL_VALUES["building_type"] value outside those three. Codegen emits it
+    # per bucket as BUILDING_MATERIAL_BUCKETS, which Browse's buildingMaterialToValues reads.
+    other = [v for v in COLUMN_CANONICAL_VALUES["building_type"]
+             if v not in _SELF_NAMED_MATERIALS]
+    out: list[str] = []
+    for bucket in buckets:
+        for value in ([bucket] if bucket in _SELF_NAMED_MATERIALS else other):
+            if value not in out:
+                out.append(value)
+    return out
+
+
 def subtype_label_cs(slug: str | None) -> str | None:
     """Czech label for a portal-agnostic `subtype` slug, or None. The single
     server-side label source (mirrors the SPA's enums.subtypeLabel, which is
@@ -470,10 +514,6 @@ CATEGORY_CITY_QUALITY = "City quality"
 # relation does not have, and each one would 400 at PostgREST the moment it was
 # set.
 _ALL_AGENDAS = frozenset(Agenda) - frozenset({Agenda.SOLD})
-_BACKEND_AGENDAS = frozenset({
-    Agenda.COMPARABLES, Agenda.ESTIMATION,
-    Agenda.VELOCITY, Agenda.NEIGHBORHOOD,
-})
 _UI_AGENDAS = frozenset({Agenda.BROWSE, Agenda.WATCHDOG})
 
 
@@ -2050,6 +2090,7 @@ def _filter_to_json(f: FilterDef) -> dict[str, Any]:
         ),
         "aliases": list(f.aliases) if f.aliases else [],
         "nullable": f.nullable,
+        "sql_kind": sql_kind(f),
     }
 
 
@@ -2192,6 +2233,10 @@ __all__ = [
     "DISPOSITION_OPTIONS",
     "PRICE_UNIT_OPTIONS",
     "COLUMN_CANONICAL_VALUES",
+    "SqlKind",
+    "COMPILED_BY_HOOK",
+    "sql_kind",
+    "building_material_values",
     "LIFECYCLE_OPTIONS",
     "DISPOSITION_MATCH_OPTIONS",
     "STATUS_OPTIONS",

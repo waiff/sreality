@@ -8,7 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from scraper import idnes_main
+from scraper import idnes_main, portal_runner
 from scraper import portal as portal_mod
 from scraper.idnes_main import IdnesPortal
 from scraper.portal import PortalConfig
@@ -54,7 +54,7 @@ class _Limiter:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
@@ -82,7 +82,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
@@ -111,7 +111,7 @@ def test_drain_only_skips_index(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
@@ -131,10 +131,9 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 # --- IdnesPortal seams ------------------------------------------------------
 
 
-def test_portal_config_and_complete_walk():
+def test_portal_config_and_labels():
     p = _portal()
     assert p.source == "idnes"
-    assert p.supports_complete_walk is True
     assert p.categories() == [{"sale_type": "prodej", "category": "byty"}]
     assert p.category_labels({"sale_type": "prodej", "category": "byty"}) == ("byt", "prodej")
 
@@ -184,7 +183,7 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     )
     assert seen == {a, b, c}
     assert total == 3 and complete is True       # full walk (no max_pages), collected == total
-    assert touched["pks"] == [8103]              # unchanged listing touched by surrogate id
+    assert touched["pks"] == [8102, 8103]        # every sighted known row, by surrogate id
     refs = {e[0]: e for e in captured["entries"]}
     assert refs[a][3] == idnes_main.db.QUEUE_PRIORITY_NEW      # new
     assert refs[b][3] == idnes_main.db.QUEUE_PRIORITY_CHANGED  # changed
@@ -206,7 +205,7 @@ def test_the_numeric_verdict_still_pins_the_coverage_triggers():
     # An unmeasurable total is "unknown", never "complete". The old local
     # _walk_complete returned True here and this test asserted it — that
     # expectation was the DEFECT, not the spec: it let a walk that measured
-    # nothing authorise mark_inactive to delist everything it never reached.
+    # nothing authorise nominating everything it never reached.
     assert portal_mod.walk_is_complete(0, None) is False
     assert portal_mod.walk_is_complete(500, 1000, stopped_early=True) is False
     # Over-collection means the denominator is wrong (overlapping slices or
@@ -231,15 +230,15 @@ def test_walk_category_max_pages_suppresses_complete(monkeypatch):
         {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
     )
     assert pages == 1
-    assert complete is False     # max_pages => partial => never mark_inactive
+    assert complete is False     # max_pages => partial => never nominates
 
 
 def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
-    # A walk cut short must read incomplete, or mark_inactive would delist the
-    # slices it never fetched (rule #3). Under the sliced walk the cut happens
+    # A walk cut short must read incomplete, or it would nominate every row in
+    # the slices it never fetched (rule #3). Under the sliced walk the cut happens
     # between slices as well as between pages, and BOTH must suppress complete:
     # 14 of 15 slices walked is a walk with a hole in it, and a hole is exactly
-    # what the sweep would read as "these listings are gone".
+    # what nomination would read as "these listings went unseen".
     def _page(_html):
         nid = "6a18deadbeefdeadbeef0001"
         return SimpleNamespace(
@@ -418,6 +417,7 @@ def test_delisting_uses_the_runners_default_nomination():
     seam nor an override."""
     p = _portal()
     assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "mark_gone")
     assert not hasattr(p, "presence_candidates")
     assert getattr(p, "seen_key", "native") == "native"
 
@@ -469,36 +469,34 @@ def test_fetch_detail_error():
     assert item.kind == "error" and item.error
 
 
-def test_write_details_ingests_and_counts(monkeypatch):
-    listing = SimpleNamespace(raw={"image_urls": ["u1", "u2"]})
+def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper import listing_write
+    from scraper.listing_write import WriteOutcome
+    from scraper.scraped_listing import ScrapedListing
+
+    listing = ScrapedListing(source="idnes", source_id_native="a",
+                             source_url="https://example.test/a",
+                             raw={"image_urls": ["u1", "u2"]})
     items = [DrainItem("a", "ok", payload={
-        "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"})]
+        "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"},
+        discovery_seq=5)]
     monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(
-        idnes_main.db, "ingest_scraped_listing",
-        lambda _c, _l, discovery_seq=None, discovered_at=None: (8105, "new"))
-    monkeypatch.setattr(idnes_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
-    monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
+    parsed: list[Any] = []
+    monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed",
+                        lambda _c, page_id: parsed.append(page_id))
+    calls: list[list[Any]] = []
+
+    def _write(_c, writes):
+        calls.append(list(writes))
+        return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
+                             len(w.images)) for w in writes]
+
+    monkeypatch.setattr(listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
-    assert counts["new"] == 1
-    assert counts["images_discovered"] == 2
-
-
-def test_mark_gone_flips_listing_inactive(monkeypatch):
-    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
-    # NOT a sreality_id resolved back out of the DB — a post-Gate-2 idnes row has
-    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    monkeypatch.setattr(
-        idnes_main.db, "mark_listing_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
-    )
-    _portal().mark_gone(object(), "a")
-    assert captured == {"source": "idnes", "nid": "a"}
+    assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
+    [[w]] = calls
+    assert (w.source, w.source_id_native, w.discovery_seq) == ("idnes", "a", 5)
+    assert parsed == [9]
 
 
 # --- the empty slice ---------------------------------------------------------

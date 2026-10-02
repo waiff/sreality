@@ -200,12 +200,14 @@ def test_no_runtime_sql_names_a_dropped_claim_column():
         + "\n  ".join(sorted(set(offenders))))
 
 
-def test_both_claim_writes_insert_exactly_the_kept_columns():
+def test_every_claim_write_inserts_exactly_the_kept_columns():
     """`id` and `claim_fingerprint` are the two ends of the kept set that behave
-    differently: one is the serial the INSERT never names, the other is computed in SQL."""
+    differently: one is the serial the INSERT never names, the other is computed in SQL.
+    W3's readings write shares the intake's INSERT, and is held to it here."""
     from location_data import claims_intake, operator_corrections
 
     for label, sql in (("intake", claims_intake._CLAIM_WRITE_SQL),
+                       ("readings", claims_intake._READING_WRITE_SQL),
                        ("operator", operator_corrections._OPERATOR_CLAIM_SQL)):
         columns = re.search(r"INSERT INTO location_claims \(([^)]*)\)", sql)
         assert columns, label

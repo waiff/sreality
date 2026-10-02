@@ -110,6 +110,7 @@ describe('<Brokers> W10a: keepPreviousData', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ categoryMain: 'dum' }),
+        expect.any(AbortSignal),
       ),
     );
 
@@ -170,6 +171,7 @@ describe('<Brokers> company filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ firmIds: [3] }),
+        expect.any(AbortSignal),
       ),
     );
 
@@ -226,6 +228,7 @@ describe('<Brokers> subtype filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ subtypes: ['kancelar'], includeUnknownSubtype: false }),
+        expect.any(AbortSignal),
       ),
     );
     expect(toggle).not.toBeDisabled();
@@ -234,6 +237,7 @@ describe('<Brokers> subtype filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ subtypes: ['kancelar'], includeUnknownSubtype: true }),
+        expect.any(AbortSignal),
       ),
     );
   });
@@ -265,6 +269,7 @@ describe('<Brokers> subtype filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ subtypes: ['kancelar'] }),
+        expect.any(AbortSignal),
       ),
     );
 
@@ -274,6 +279,7 @@ describe('<Brokers> subtype filter', () => {
         expect.objectContaining({
           categoryMain: 'dum', subtypes: [], includeUnknownSubtype: false,
         }),
+        expect.any(AbortSignal),
       ),
     );
   });
@@ -294,6 +300,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ minPriceCzk: 5_000_000, includeUnpriced: false }),
+        expect.any(AbortSignal),
       ),
     );
     expect(toggle).not.toBeDisabled();
@@ -302,6 +309,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ minPriceCzk: 5_000_000, includeUnpriced: true }),
+        expect.any(AbortSignal),
       ),
     );
   });
@@ -319,6 +327,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ categoryType: 'pronajem' }),
+        expect.any(AbortSignal),
       ),
     );
     expect(screen.getByLabelText('Minimální cena')).toHaveAttribute('placeholder', 'Kč/měsíc');
@@ -338,6 +347,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ minPriceCzk: 5_000_000 }),
+        expect.any(AbortSignal),
       ),
     );
 
@@ -345,6 +355,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ categoryType: 'pronajem', minPriceCzk: null, includeUnpriced: false }),
+        expect.any(AbortSignal),
       ),
     );
     expect(screen.getByLabelText('Minimální cena')).toHaveValue('');
@@ -364,6 +375,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ minPriceCzk: 3_000_000 }),
+        expect.any(AbortSignal),
       ),
     );
 
@@ -376,6 +388,7 @@ describe('<Brokers> value filter', () => {
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ categoryType: null, minPriceCzk: null, includeUnpriced: false }),
+        expect.any(AbortSignal),
       ),
     );
   });

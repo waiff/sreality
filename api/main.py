@@ -1,7 +1,7 @@
 """FastAPI service exposing the analytical toolkit + estimate_yield.
 
-Routes return the standard toolkit envelope verbatim. No bespoke
-response shaping; the agent layer consumes the dicts directly.
+Tool routes return the standard toolkit envelope verbatim for the agent
+layer; non-tool routes (e.g. GET /estimations/preview) shape their own.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import uuid
 from datetime import timedelta
 from typing import Any, AsyncIterator, Literal
 
+import psycopg
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -192,7 +193,7 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
 
 
 # Hide the interactive docs + machine-readable schema in prod (openapi_url=None
-# disables Swagger/ReDoc too) so the ~169-route inventory isn't publicly
+# disables Swagger/ReDoc too) so the route inventory isn't publicly
 # enumerable. Opt back in with API_DOCS_ENABLED=1 for local exploration.
 _docs_enabled = os.environ.get("API_DOCS_ENABLED") == "1"
 app = FastAPI(
@@ -219,17 +220,57 @@ if _cors_origins:
     )
 
 
+# The database's "busy right now" error classes: a read cancelled by
+# statement_timeout (57014 — how a lock-blocked reader dies after 120 s, the
+# 2026-09-30 Brokers outage), a lock refused outright (55P03), a deadlock
+# victim (40P01). Retrying CAN help these, so they answer 503 + Retry-After —
+# the one signal the SPA's transient-only retry predicate acts on. Everything
+# else is deterministic and answers 500. Routes that already catch these and
+# refuse with their own contract (toolkit/property_split's structured 409)
+# never reach this handler.
+_DB_BUSY_ERRORS = (
+    psycopg.errors.QueryCanceled,
+    psycopg.errors.LockNotAvailable,
+    psycopg.errors.DeadlockDetected,
+)
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "JSONResponse":
-    logging.exception("Unhandled exception on %s %s", request.method, request.url.path)
     origin = request.headers.get("origin")
     headers: dict[str, str] = {}
     if origin and origin in _cors_origins:
         headers["access-control-allow-origin"] = origin
         headers["vary"] = "Origin"
+
+    if isinstance(exc, _DB_BUSY_ERRORS):
+        logging.warning(
+            "DB busy (%s) on %s %s", type(exc).__name__, request.method, request.url.path
+        )
+        headers["retry-after"] = "5"
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {
+                "code": "db_busy",
+                "message": "Databáze je právě vytížená — zkuste to prosím za chvíli.",
+            }},
+            headers=headers,
+        )
+
+    # A reference the operator can quote from the UI, matched to the full
+    # traceback in the service log. The raw exception text never reaches the
+    # browser: it leaked SQL fragments and psycopg type names into Czech UI
+    # error banners.
+    error_id = uuid.uuid4().hex[:12]
+    logging.exception(
+        "Unhandled exception [%s] on %s %s", error_id, request.method, request.url.path
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{type(exc).__name__}: {exc}"},
+        content={"detail": {
+            "code": "internal_error",
+            "message": f"Neočekávaná chyba serveru (ref {error_id}).",
+        }},
         headers=headers,
     )
 

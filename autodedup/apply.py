@@ -10,8 +10,8 @@
 rule, `survivor_of`) and the properties that would retire into it — or the reasons the group is
 refused (E903). `apply_plan` records that plan (dry run) or executes it through
 `toolkit.property_identity.merge_property_set`, one merge group per engine group (E901), and
-`unapply` undoes groups newest-first, picked by generation, run or time window, each as a loop
-of `detach_listing` over the adverts its merge moved. Nothing here decides
+`unapply` undoes groups newest-first, picked by generation, run or time window, each as ONE
+`detach_listings` call over the adverts its merge moved. Nothing here decides
 anything the engine did not: the groups are read as stored, and every refusal only removes a
 group from the plan.
 
@@ -54,8 +54,9 @@ from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
     AssetLinkConflict,
+    CategoryClash,
     MergeError,
-    detach_listing,
+    detach_listings,
     detach_outcomes,
     merge_property_set,
     survivor_of,
@@ -319,7 +320,7 @@ class GroupPlan:
     # of the involved properties. Re-read inside the group's transaction before it merges.
     listing_ids: list[int] = field(default_factory=list)
     # Which involved property each of those listings sits on — re-recorded over the locked rows
-    # as the group merges, so `unapply` knows which adverts its detach loop moves back (E905).
+    # as the group merges, so `unapply` knows which adverts its detach moves back (E905).
     listings_by_property: dict[int, list[int]] = field(default_factory=dict)
 
     @property
@@ -919,7 +920,7 @@ def _rows_for(
 def _terminal(exc: MergeError) -> bool:
     """E41: a category refusal at the chokepoint is final for this group in this generation;
     a property-state refusal (a concurrent operator merge) is re-planned from fresh state."""
-    return "mismatch" in str(exc)
+    return isinstance(exc, CategoryClash)
 
 
 def group_brief(group: GroupPlan, **extra: Any) -> dict[str, Any]:
@@ -1217,8 +1218,8 @@ def _merge_stands(
 def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
     """Where a group stands now, read before any later merge is named (E905): its survivor's
     status and what it is merged into; its members off the survivor; and, per listing the merge
-    moved off its retired properties, what its detach loop would answer (`detach_outcomes`, the
-    loop's own rule): the ones it would move back, the ones it would report as conflicts, and
+    moved off its retired properties, what its detach would answer (`detach_outcomes`, the
+    writer's own rule): the ones it would move back, the ones it would report as conflicts, and
     `undone` when it would find nothing live at all (someone undid every advert of it)."""
     survivor = target["survivor_id"]
     props = {int(pid): (status, merged_into, merged_at)
@@ -1244,7 +1245,7 @@ def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _moves_nothing_back(state: Mapping[str, Any]) -> bool:
-    """A merge that still stands, none of whose moved listings would move back: its detach loop
+    """A merge that still stands, none of whose moved listings would move back: its detach
     would move nothing, so the live undo is refused."""
     return bool(state["conflicts"]) and not state["back"]
 
@@ -1292,7 +1293,7 @@ def _undo_block(
     """Why a group cannot be undone yet (E905), decided from where it stands (`_undo_state`)
     BEFORE any later engine merge is looked for, so `unapply_first` only ever names an undo
     that would free it. A group someone already undid is never blocked, wherever its survivor
-    has gone since: its detach loop finds nothing live and `unapply` notes the undo as theirs.
+    has gone since: its detach finds nothing live and `unapply` notes the undo as theirs.
     A survivor still active: a group whose moved listings have all left it would move nothing
     back whatever came later; otherwise a LATER live engine merge that put more listings on it
     (and whose own undo would not be refused for moving nothing back) is undone first, or
@@ -1333,12 +1334,12 @@ def unapply(
     run: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
-    detach: Callable[..., dict[str, Any]] = detach_listing,
+    detach: Callable[..., dict[str, Any]] = detach_listings,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Undo the live merge groups a generation (or one of its groups), an apply run (`run`) or
     a time window (`since` <= applied_at < `until`) made — every selector given must hold —
-    newest-first, each as a loop of `detach_listing` over the adverts its merge moved (no
+    newest-first, each as ONE `detach_listings` call over the adverts its merge moved (no
     ruling: an engine undo is not the operator's word); `dry_run=True` only lists them. `dry_run` has
     no default: this writes to production. NOT gated by the scope: undo is the way back, and
     an undone group is free to merge again on a later apply. A group someone else already
@@ -1422,15 +1423,12 @@ def _taken_apart(conn: Any, target: Mapping[str, Any]) -> list[int]:
 def _detach_group(
     conn: Any, target: Mapping[str, Any], detach: Callable[..., dict[str, Any]], undone_by: str,
 ) -> dict[str, Any]:
-    """A group undone as a loop of detaches over the adverts its merge moved (its recorded
+    """A group undone as ONE set detach over the adverts its merge moved (its recorded
     placement); one that moved on since is a conflict, left where it is."""
-    back, conflicts = 0, []
-    for lid in target.get("moved_listings") or []:
-        out = detach(conn, lid, decided_by=undone_by, source=MERGE_SOURCE,
-                     merge_group_id=target["merge_group_id"])["data"]
-        back += int(out["detached"])
-        if not out["detached"] and out["outcome"] != "not_merged":
-            conflicts.append(lid)
+    out = detach(conn, list(target.get("moved_listings") or []), decided_by=undone_by,
+                 source=MERGE_SOURCE, merge_group_id=target["merge_group_id"])["data"]["adverts"]
+    back = sum(int(a["detached"]) for a in out)
+    conflicts = [a["listing_id"] for a in out if not a["detached"] and a["outcome"] != "not_merged"]
     return {"merge_group_id": target["merge_group_id"], "listings_moved_back": back,
             "conflicts": conflicts}
 

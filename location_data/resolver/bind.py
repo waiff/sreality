@@ -46,7 +46,7 @@ from location_data.resolver.composite import (
     resolve_street,
 )
 from location_data.resolver.geo import distance_between
-from location_data.resolver.normalize import STREET_LINE_SEPARATOR, TYP_CP, house_number
+from location_data.resolver.normalize import TYP_CP, house_number
 from location_data.resolver.types import (
     AddressPoint,
     AdminUnit,
@@ -189,14 +189,10 @@ class Constraints:
     # line off `obec_keys`: "Praha 4 - Podolí" and "Praha 4 Podolí" normalise identically.
     obec_lines: tuple[str, ...] = ()
     cast_obce_keys: tuple[str, ...] = ()
-    # S1's match key, and the ONE input R3 (the trigram rung) is allowed to run on. It is set
-    # only for a claim that is one NAME and that the contract does not declare
-    # `claim_confidence: low` — see `street_lines` (W18).
+    # S1's match key, and the ONE input R3 (the trigram rung) is allowed to run on.
     street_key: str | None = None
-    # EVERY street claim, verbatim. `composite.resolve_street` splits each on the portals' own
-    # separators and binds the segments EXACTLY inside the anchoring obec, so a value that
-    # carries no separator is simply one segment and takes the identical path — one matcher,
-    # one answer, and no rung whose reach depends on whether the portal wrote a comma.
+    # EVERY street claim, verbatim: `composite.resolve_street` binds each EXACTLY inside the
+    # anchoring obec — one matcher, one answer.
     street_lines: tuple[str, ...] = ()
     # The domovní číslo and its RÚIAN `typ_so`, TYPED from claim to SQL (D7): "č.ev. 13" is
     # a cottage's evidence number and may only ever match a `č.ev.` point (None: unmarked).
@@ -250,23 +246,11 @@ def collect_constraints(
             if raw.strip():
                 street_lines.append(raw)
                 note("street", claim.id)
-            if STREET_LINE_SEPARATOR.search(raw):
-                # A LINE's number slots belong to whatever segment ends the string
-                # ("…, Mladá Boleslav"), not to the street, so they are not read here — the
-                # binder takes them off the segment that actually bound (W18).
-                continue
             if cp is None:
                 cp, typ = house_number(slots)
             if co is None and slots.get("cislo_orientacni"):
                 co = _as_int(str(slots["cislo_orientacni"]))
-            if key and claim.claim_confidence != "low":
-                # R3's input. A claim the CONTRACT calls `low` is a headline, not an address
-                # field, and a trigram run over prose is how "Byt Slunečná" binds Slunečná
-                # while "Prodej domu Slunečná" (0.429 similarity) binds nothing — coverage
-                # decided by title length, and a wrong street whenever the prose happens to
-                # score. The contract declares the quality; the resolver obeys it, and no
-                # portal is named here.
-                street_key = street_key or key
+            street_key = street_key or key
         elif t == "house_number_cp":
             if cp is None:
                 cp, typ = house_number(slots)
@@ -548,32 +532,21 @@ def bind(
                 )
             )
 
-    # ---- R1 / R2: THE street claim, whatever shape the portal wrote it in (W18).
-    #
-    # One binder for all of them. `composite.resolve_street` splits every claim on the
-    # portals' own separators — a value with no separator is one segment — and matches each
-    # segment EXACTLY against the register inside the anchoring obec, in two tiers: a full-name
+    # ---- R1 / R2: THE street claim (W18). `composite.resolve_street` matches every street
+    # claim EXACTLY against the register inside the anchoring obec, in two tiers: a full-name
     # match wins outright, the type-word-tolerant fold is consulted only when nothing matched
-    # exactly, and two distinct streets across the segments bind nothing at all.
-    #
-    # It was two paths for one round and that was the defect: whether a claim reached the
-    # segment binder or the single-name one turned on whether the portal happened to write a
-    # comma, so a comma-less headline ("Byt Slunečná") fell through to the trigram rung and
-    # bound a street out of prose, while a longer one ("Prodej domu Slunečná", similarity
-    # 0.429) bound nothing. Coverage decided by title length is not a rule.
-    #
-    # A bound street reaches R1 when there is a house number and R2 otherwise — what bound is a
-    # register row either way, and the SHAPE of the string that pointed at it is not a grade.
+    # exactly, and two distinct streets bind nothing at all. A bound street reaches R1 when
+    # there is a house number and R2 otherwise. v5.6 deleted the split on separators: its one
+    # user was bazos' whole headline, and the text reading names the street itself.
     line = (
         resolve_street(constraints.street_lines, constraining_obec_kods, registry)
         if constraining_obec_kods and constraints.street_lines
         else StreetBind()
     )
     if line.street is not None:
-        # The segment's own number first; a listing-wide `house_number_*` claim behind it
-        # (the portals that state the street and the číslo in separate fields). A LINE's
-        # number never reaches the constraints, so it cannot be lent to another claim. The
-        # number travels WITH its type, so a č.ev. can never join a č.p. of the same digits.
+        # The street claim's own number first; a listing-wide `house_number_*` claim behind it
+        # (the portals that state the street and the číslo in separate fields). The number
+        # travels WITH its type, so a č.ev. can never join a č.p. of the same digits.
         cislo_domovni, typ_so = ((line.cislo_domovni, line.typ_so) if line.cislo_domovni
                                  else (constraints.cislo_domovni, constraints.typ_so))
         cislo_orientacni = line.cislo_orientacni or constraints.cislo_orientacni
@@ -601,9 +574,10 @@ def bind(
             out.append(_street_candidate(line.street, "R2", constraints))
 
     # ---- R3: the typo-tolerant rung, and the ONE place a street may be bound by similarity
-    # rather than by identity. It runs only when nothing bound exactly AND the contract calls
-    # this claim an address field — `constraints.street_key` is set for no other kind. A
-    # trigram over a headline is how prose reaches a street it does not name.
+    # rather than by identity. It runs only when nothing bound exactly. (W18 kept it off
+    # bazos' whole headline with `claim_confidence: low`; W3's reading names the street
+    # itself. The pilot never reviewed R3; an offline register check (09-30) of its 42 bazos streets
+    # found 40 exact and one near-miss that is right ("náměstí Fr. Rasche"), so the gate went.)
     bound_exactly = any(c.target_kind == "street" or c.rung in ("R0", "R1") for c in out)
     if (
         constraining_obec_kods

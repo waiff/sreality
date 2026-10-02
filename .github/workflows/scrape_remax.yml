@@ -7,8 +7,8 @@ name: "Scraping: RE/MAX scraper (pilot)"
 # only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk
 # pages each agenda and enqueues new/price-changed ids into listing_detail_queue,
 # then the detail drain fetches each /reality/detail/{id}/ page, parses to a
-# ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0
-# idempotency + singleton property).
+# ScrapedListing, and writes via listing_write.write_listings (the one listing
+# write; new rows land property_id NULL and the straggler-attach births the singleton).
 #
 # One job runs BOTH phases (index walk + bounded drain). The drain is capped per
 # run (operational_limits.max_detail_per_run, default 3000) + a wall-clock budget

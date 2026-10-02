@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from scraper import maxima_main
+from scraper import maxima_main, portal_runner
 from scraper.maxima_main import MaximaPortal
 from scraper.portal import PortalConfig
 
@@ -62,7 +62,7 @@ class _Limiter:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(maxima_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
@@ -88,7 +88,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
 
 
 def _stub_phases(monkeypatch, calls):
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(maxima_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
@@ -117,7 +117,7 @@ def test_drain_only_skips_index(monkeypatch):
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
-    monkeypatch.setattr(maxima_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(portal_runner, "load_config", lambda _source, dry_run=False: _config())
     monkeypatch.setattr(
         maxima_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
@@ -137,7 +137,6 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "maxima"
-    assert p.supports_complete_walk is True
     assert p.categories() == _CATEGORIES
     assert p.category_labels(_CATEGORIES[0]) == ("byt", "prodej")
     assert p.category_labels(_CATEGORIES[3]) == ("byt", "pronajem")
@@ -267,6 +266,13 @@ def test_nomination_is_agenda_grain(monkeypatch):
     assert len(captured) == 1
 
 
+def test_the_drain_owns_the_gone_flip():
+    """The runner flips a gone listing through db.mark_listing_inactive; no
+    portal carries a flip seam of its own."""
+    assert not hasattr(MaximaPortal, "mark_inactive")
+    assert not hasattr(MaximaPortal, "mark_gone")
+
+
 def test_nomination_skips_uncorroborated_empty_page(monkeypatch):
     # The agenda declares 10, the walk collected 2 and then hit an items-less page
     # nothing could corroborate (no pager evidence, short of maxima's own count):
@@ -360,9 +366,9 @@ def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
     monkeypatch.setattr(maxima_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(
         maxima_main.db, "index_summary_native",
-        lambda _c, _s, ids: {b2: {"sreality_id": -2, "price_czk": 5_500_000}} if b2 in ids else {},
+        lambda _c, _s, ids: {b2: {"id": 2, "sreality_id": -2, "price_czk": 5_500_000}} if b2 in ids else {},
     )
-    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(maxima_main.db, "touch_listings_by_id", lambda *a, **k: None)
     enq: list[Any] = []
     monkeypatch.setattr(
         maxima_main.db, "enqueue_detail",
@@ -597,13 +603,3 @@ def test_fetch_detail_gone(monkeypatch):
 
     item = _portal().fetch_detail(_GoneClient(), "b50000001", None)
     assert item.kind == "gone"
-
-
-def test_mark_gone_flips_native(monkeypatch):
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        maxima_main.db, "mark_listing_inactive_native",
-        lambda _c, source, nid: captured.update(source=source, nid=nid),
-    )
-    _portal().mark_gone(object(), "b50000001")
-    assert captured == {"source": "maxima", "nid": "b50000001"}

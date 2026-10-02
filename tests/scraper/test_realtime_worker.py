@@ -1376,7 +1376,7 @@ def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
     assert schedule.bodies_first is False
     assert schedule.bodies_cap == 300
     assert schedule.bodies_budget_share == 1.0
-    assert schedule.backlog_readout is False
+    assert (schedule.backlog_readout, schedule.readings) == (False, False)  # W3: hourly only
     assert schedule.pool is rw._intake_fast_pool()
     # The heartbeat's `last`: what the tick achieved and where it left BOTH keysets.
     assert out == {
@@ -2111,6 +2111,27 @@ def test_a_lane_wedged_behind_its_pass_lock_stays_in_flight(monkeypatch):
     finally:
         rw._PROBE_PASS_LOCK.release()
     assert rw._lane_snapshot(state["lanes"])["probe"]["in_flight_s"] is None
+
+
+def test_the_broker_lane_skips_while_an_abandoned_pass_holds_its_lock(monkeypatch):
+    # The broker lane's lease row goes stale under an abandoned pass, so only this lock keeps
+    # the next tick from opening a connection and draining beside it.
+    monkeypatch.setattr(rw, "_PASS_LOCKS_HELD", {})
+    monkeypatch.setattr(rw, "_BROKER_MAINTENANCE_PASS_LOCK", rw._PassLock("broker_maintenance"))
+
+    def _no_connect(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("a skipped pass must not connect")
+
+    monkeypatch.setattr(rw.db, "connect", _no_connect)
+    state = rw._new_state()
+    assert rw._BROKER_MAINTENANCE_PASS_LOCK.try_enter()  # the abandoned pass's thread
+    try:
+        asyncio.run(rw._broker_maintenance_pass(asyncio.Event(), state))
+        last = state["lanes"]["broker_maintenance"]["last"]
+        assert last["previous_pass_running"] is True and last["skipped"] is True
+        assert rw._lane_snapshot(state["lanes"])["broker_maintenance"]["in_flight_s"] is not None
+    finally:
+        rw._BROKER_MAINTENANCE_PASS_LOCK.release()
 
 
 def test_probe_and_drain_count_a_refused_portal_and_move_on(monkeypatch):

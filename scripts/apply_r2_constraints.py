@@ -129,8 +129,9 @@ def _with_lock_retry(conn: "psycopg.Connection", sql: str, label: str) -> None:
 
     DeadlockDetected is retried alongside LockNotAvailable, and it is not an exotic
     case: ADD FOREIGN KEY takes SHARE ROW EXCLUSIVE on the child AND on listings,
-    while the ingest path locks the same two tables in the opposite order (a new
-    listing's singleton property is created inside the listings-insert transaction).
+    while the ingest path locks the same two tables in the opposite order (the
+    straggler attach creates a singleton property and links its listings in one
+    transaction).
     Either side can be chosen as the deadlock victim. Both errors mean the same
     thing here — someone else held it first — so both just wait and try again.
     """

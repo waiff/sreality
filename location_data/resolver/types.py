@@ -75,11 +75,7 @@ class GranularityRank:
 
 @dataclass(frozen=True, slots=True)
 class Claim:
-    """One `location_claims` row, as the resolver consumes it (01 §4.2).
-
-    The last six fields are no longer SELECTed (W1-b, migration 498). They keep their names
-    and defaults so a fixture can still spell them without a DB column.
-    """
+    """One `location_claims` row, as the resolver consumes it (01 §4.2)."""
 
     id: int
     listing_id: int
@@ -97,14 +93,7 @@ class Claim:
     declared_precision_label: str | None = None
     declared_radius_m: float | None = None
     blur_evidence: str = "none"
-    claim_confidence: str | None = None
     subject_scoped: bool | None = None
-    extractor_id: str = ""
-    declared_confidence: str | None = None
-    page_kind: str = "none"
-    snapshot_id: int | None = None
-    distance_m: int | None = None
-    target_text: str | None = None
 
     @property
     def has_position(self) -> bool:

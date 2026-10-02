@@ -130,16 +130,16 @@ def insert_revision(
                     revision, a.vk, a.is_novostavba, a.attribute, a.czk_per_m2,
                 ))
 
-        cur.execute("refresh materialized view rent_map_choropleth")
-        # Inside the ingest's own transaction, so a rolled-back ingest cannot leave a
-        # stamp claiming freshness the matview does not have. Corollary E's exhibit: this
-        # artifact's freshness depends on someone loading a page, and the registry says so
-        # (host = 'api-request'); the non-concurrent REFRESH above leaves no other trace.
-        scraper_db.stamp_derived_artifact(conn, "rent_map_choropleth")
-        # mf_reference()'s only input (migration 565), read by every Browse and listing
-        # read: CONCURRENTLY, so no reader ever blocks on an ingest.
-        cur.execute("refresh materialized view concurrently rent_map_cells")
-        scraper_db.stamp_derived_artifact(conn, "rent_map_cells")
+        # Both publish through the ONE chokepoint (migration 578): CONCURRENTLY,
+        # so no reader ever blocks on an ingest — rent_map_cells is
+        # mf_reference()'s only input (migration 565), read by every Browse and
+        # listing read. Joining the ingest's own transaction (a savepoint here)
+        # keeps the invariant: a rolled-back ingest leaves no refresh and no
+        # stamp claiming freshness the matview does not have. The registry still
+        # says host = 'api-request' — this artifact's freshness depends on
+        # someone loading a page.
+        scraper_db.refresh_matview(conn, "rent_map_choropleth")
+        scraper_db.refresh_matview(conn, "rent_map_cells")
 
     LOG.info("rent map: ingested revision %d (%d territories, %d adjustments)",
              revision, territory_count, len(parsed.adjustments))

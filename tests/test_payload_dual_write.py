@@ -77,6 +77,29 @@ def appended(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 _PAGE = "<html><body><h1>Byt 3+1</h1></body></html>\n"
 
 
+def _listing(source: str, native: str, raw: dict[str, Any] | None = None) -> Any:
+    from scraper.scraped_listing import ScrapedListing
+
+    return ScrapedListing(source=source, source_id_native=native,
+                          source_url=f"https://{source}.example.test/{native}",
+                          raw=raw if raw is not None else {"image_urls": []})
+
+
+def _stub_writer(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """The one listing write, stubbed: records each ListingWrite, writes nothing."""
+    from scraper import listing_write
+
+    writes: list[Any] = []
+
+    def _write(_conn: Any, ws: Any) -> list[Any]:
+        writes.extend(ws)
+        return [listing_write.WriteOutcome(w.source, w.source_id_native, 7, "new", 1,
+                                           w.content_hash, 0) for w in ws]
+
+    monkeypatch.setattr(listing_write, "write_listings", _write)
+    return writes
+
+
 def _archive(conn: _FakeConn, **kwargs: Any) -> int | None:
     return db.upsert_portal_raw_page(
         conn,
@@ -189,15 +212,12 @@ def test_every_html_portal_archives_one_body_per_detail_write(
     from scraper.portal_runner import DrainItem
 
     module = importlib.import_module(f"scraper.{module_name}_main")
-    monkeypatch.setattr(module.db, "ingest_scraped_listing", lambda *a, **k: (7, "new"))
-    monkeypatch.setattr(module.db, "record_media", lambda *a, **k: 0)
+    _stub_writer(monkeypatch)
     monkeypatch.setattr(module.db, "mark_portal_page_parsed", lambda *a, **k: None)
 
-    class _Listing:
-        raw = {"image_urls": []}
-
     item = DrainItem("42", "ok", {
-        "url": "https://x/y", "html": _PAGE, "status": 200, "listing": _Listing(),
+        "url": "https://x/y", "html": _PAGE, "status": 200,
+        "listing": _listing(module_name, "42"),
     })
     conn = _FakeConn()
     # write_details reads only module-level SOURCE, so skip the PortalConfig.
@@ -221,15 +241,12 @@ def test_a_replayed_batch_re_appends_the_SAME_bytes(
     from scraper import idnes_main
     from scraper.portal_runner import DrainItem
 
-    monkeypatch.setattr(idnes_main.db, "ingest_scraped_listing", lambda *a, **k: (7, "new"))
-    monkeypatch.setattr(idnes_main.db, "record_media", lambda *a, **k: 0)
+    _stub_writer(monkeypatch)
     monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
 
-    class _Listing:
-        raw = {"image_urls": []}
-
     items = [DrainItem("42", "ok", {
-        "url": "https://x/y", "html": _PAGE, "status": 200, "listing": _Listing(),
+        "url": "https://x/y", "html": _PAGE, "status": 200,
+        "listing": _listing("idnes", "42"),
     })]
     conn = _FakeConn()
     portal = object.__new__(idnes_main.IdnesPortal)
@@ -254,11 +271,11 @@ def test_sreality_detail_archives_the_unwrapped_untrimmed_estate_json(
     from scraper import main as scraper_main
     from scraper.portal_runner import DrainItem
 
-    monkeypatch.setattr(scraper_main.db, "write_detail_batch", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_main.listing_write, "write_listings", lambda *a, **k: [])
     raw = {"name": "Byt 3+1", "locality": {"value": "Praha"}, "_embedded": {"x": [1]}}
     conn = _FakeConn()
     items = [
-        DrainItem("1", "ok", scraper_main.FetchResult(1, "ok", raw=raw)),
+        DrainItem("1", "ok", scraper_main.FetchResult(1, "ok", row={"sreality_id": 1}, raw=raw)),
         DrainItem("2", "gone", scraper_main.FetchResult(2, "gone")),
         DrainItem("3", "error", scraper_main.FetchResult(3, "error", source="fetch")),
     ]
@@ -344,9 +361,9 @@ def test_sreality_probe_category_never_archives(
             return [{"hash_id": 7, "price_czk": 1}]
 
     monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _Client())
-    monkeypatch.setattr(scraper_main.db, "index_summary", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(scraper_main.db, "enqueue_detail", lambda *a, **k: 1)
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(scraper_main.db, "touch_listings_by_id", lambda *a, **k: None)
     conn = _FakeConn()
 
     scraper_main.SrealityPortal().probe_category(
@@ -387,7 +404,6 @@ def test_remax_page_capped_probe_still_never_archives(
     monkeypatch.setattr(remax_main, "RemaxClient", _Client)
     monkeypatch.setattr(remax_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(remax_main.db, "enqueue_detail", lambda *a, **k: 0)
-    monkeypatch.setattr(remax_main.db, "touch_listings", lambda *a, **k: None)
     monkeypatch.setattr(remax_main.db, "index_archive_week", lambda: "2026w33")
     monkeypatch.setattr(remax_main.db, "fresh_index_page_keys", lambda *a, **k: set())
 
@@ -413,16 +429,10 @@ def test_bezrealitky_archives_the_query_beside_the_data(
     from scraper.portal import PortalConfig
     from scraper.portal_runner import DrainItem
 
-    monkeypatch.setattr(
-        bezrealitky_main.db, "ingest_scraped_listing", lambda *a, **k: (7, "new"),
-    )
-    monkeypatch.setattr(bezrealitky_main.db, "record_media", lambda *a, **k: 0)
+    _stub_writer(monkeypatch)
 
     advert = {"id": "abc", "price": 1, "address": "Dlouhá 1"}
-
-    class _Listing:
-        source_id_native = "abc"
-        raw = {**advert, "image_urls": ["https://img/1.jpg"]}
+    listing = _listing("bezrealitky", "abc", raw={**advert, "image_urls": ["https://img/1.jpg"]})
 
     conn = _FakeConn()
     portal = bezrealitky_main.BezrealitkyPortal(PortalConfig(
@@ -431,7 +441,7 @@ def test_bezrealitky_archives_the_query_beside_the_data(
         split_threshold=None,
     ))
     portal.write_details(
-        conn, [DrainItem("abc", "ok", {"listing": _Listing(), "advert": advert})],
+        conn, [DrainItem("abc", "ok", {"listing": listing, "advert": advert})],
     )
 
     assert len(appended) == 1
@@ -456,21 +466,15 @@ def test_bezrealitky_skips_the_archive_when_the_verbatim_advert_is_absent(
     from scraper.portal import PortalConfig
     from scraper.portal_runner import DrainItem
 
-    monkeypatch.setattr(
-        bezrealitky_main.db, "ingest_scraped_listing", lambda *a, **k: (7, "new"),
-    )
-    monkeypatch.setattr(bezrealitky_main.db, "record_media", lambda *a, **k: 0)
-
-    class _Listing:
-        source_id_native = "abc"
-        raw = {"id": "abc", "image_urls": []}
+    _stub_writer(monkeypatch)
+    listing = _listing("bezrealitky", "abc", raw={"id": "abc", "image_urls": []})
 
     conn = _FakeConn()
     portal = bezrealitky_main.BezrealitkyPortal(PortalConfig(
         source="bezrealitky", supports_complete_walk=True, categories=[],
         split_threshold=None,
     ))
-    portal.write_details(conn, [DrainItem("abc", "ok", {"listing": _Listing()})])
+    portal.write_details(conn, [DrainItem("abc", "ok", {"listing": listing})])
 
     assert appended == []
 

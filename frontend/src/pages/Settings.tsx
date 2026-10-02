@@ -51,6 +51,7 @@ import {
   type ClipTaggingRegionsPayload,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
+import { cachePatch, useOptimisticWrite } from '@/lib/useOptimisticWrite';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton, Switch, Field } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
@@ -830,45 +831,40 @@ function RegionToggleGrid({
 /* Hodnocení stavu — kraje (per-kraj condition-scoring toggles)          */
 /* -------------------------------------------------------------------- */
 
+const CONDITION_REGIONS_KEY = ['admin', 'condition-regions'] as const;
+
 function ConditionRegionsSection() {
-  const qc = useQueryClient();
   const q = useQuery({
-    queryKey: ['admin', 'condition-regions'],
+    queryKey: CONDITION_REGIONS_KEY,
     queryFn: getConditionScoringRegions,
   });
   const [error, setError] = useState<string | null>(null);
 
-  const mut = useMutation({
+  // Optimistic; the failure message is shown inline, so this write owns it.
+  const mut = useOptimisticWrite({
+    mutationKey: ['write', 'admin', 'condition-regions'],
     mutationFn: (ids: number[]) => updateConditionScoringRegions(ids),
-    onMutate: async (ids: number[]) => {
-      setError(null);
-      const key = ['admin', 'condition-regions'] as const;
-      await qc.cancelQueries({ queryKey: key });
-      const prev = qc.getQueryData<{ data: ConditionScoringRegionsPayload }>(key);
-      if (prev) {
-        const on = new Set(ids);
-        qc.setQueryData(key, {
-          data: {
-            ...prev.data,
-            enabled_region_ids: ids,
-            regions: prev.data.regions.map((r) => ({
-              ...r,
-              enabled: on.has(r.id),
-            })),
-          },
-        });
-      }
-      return { prev };
-    },
-    onError: (err: Error, _ids, ctx) => {
-      if (ctx?.prev) {
-        qc.setQueryData(['admin', 'condition-regions'], ctx.prev);
-      }
-      setError(err.message);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['admin', 'condition-regions'] });
-    },
+    patch: (ids) => [
+      cachePatch<{ data: ConditionScoringRegionsPayload }>(
+        { queryKey: CONDITION_REGIONS_KEY, exact: true },
+        (prev) => {
+          if (!prev) return prev;
+          const on = new Set(ids);
+          return {
+            data: {
+              ...prev.data,
+              enabled_region_ids: ids,
+              regions: prev.data.regions.map((r) => ({
+                ...r,
+                enabled: on.has(r.id),
+              })),
+            },
+          };
+        },
+      ),
+    ],
+    revalidate: [CONDITION_REGIONS_KEY],
+    onError: (err) => setError(err.message),
   });
 
   if (q.error) return <ErrorBanner message={q.error.message} />;
@@ -880,6 +876,7 @@ function ConditionRegionsSection() {
 
   const toggle = (id: number, next: boolean) => {
     const current = regions.filter((r) => r.enabled).map((r) => r.id);
+    setError(null);
     mut.mutate(next ? [...current, id] : current.filter((i) => i !== id));
   };
 
@@ -902,40 +899,37 @@ function ConditionRegionsSection() {
 /* CLIP tagging — priority kraje (per-kraj drain priority)               */
 /* -------------------------------------------------------------------- */
 
+const CLIP_REGIONS_KEY = ['admin', 'clip-regions'] as const;
+
 function ClipRegionsSection() {
-  const qc = useQueryClient();
   const q = useQuery({
-    queryKey: ['admin', 'clip-regions'],
+    queryKey: CLIP_REGIONS_KEY,
     queryFn: getClipTaggingRegions,
   });
   const [error, setError] = useState<string | null>(null);
 
-  const mut = useMutation({
+  // Optimistic; the failure message is shown inline, so this write owns it.
+  const mut = useOptimisticWrite({
+    mutationKey: ['write', 'admin', 'clip-regions'],
     mutationFn: (ids: number[]) => updateClipTaggingRegions(ids),
-    onMutate: async (ids: number[]) => {
-      setError(null);
-      const key = ['admin', 'clip-regions'] as const;
-      await qc.cancelQueries({ queryKey: key });
-      const prev = qc.getQueryData<{ data: ClipTaggingRegionsPayload }>(key);
-      if (prev) {
-        const on = new Set(ids);
-        qc.setQueryData(key, {
-          data: {
-            ...prev.data,
-            priority_region_ids: ids,
-            regions: prev.data.regions.map((r) => ({ ...r, priority: on.has(r.id) })),
-          },
-        });
-      }
-      return { prev };
-    },
-    onError: (err: Error, _ids, ctx) => {
-      if (ctx?.prev) qc.setQueryData(['admin', 'clip-regions'], ctx.prev);
-      setError(err.message);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['admin', 'clip-regions'] });
-    },
+    patch: (ids) => [
+      cachePatch<{ data: ClipTaggingRegionsPayload }>(
+        { queryKey: CLIP_REGIONS_KEY, exact: true },
+        (prev) => {
+          if (!prev) return prev;
+          const on = new Set(ids);
+          return {
+            data: {
+              ...prev.data,
+              priority_region_ids: ids,
+              regions: prev.data.regions.map((r) => ({ ...r, priority: on.has(r.id) })),
+            },
+          };
+        },
+      ),
+    ],
+    revalidate: [CLIP_REGIONS_KEY],
+    onError: (err) => setError(err.message),
   });
 
   if (q.error) return <ErrorBanner message={q.error.message} />;
@@ -947,6 +941,7 @@ function ClipRegionsSection() {
 
   const toggle = (id: number, next: boolean) => {
     const current = regions.filter((r) => r.priority).map((r) => r.id);
+    setError(null);
     mut.mutate(next ? [...current, id] : current.filter((i) => i !== id));
   };
 
@@ -1360,17 +1355,18 @@ function WorkflowDetail({ doc }: { doc: WorkflowDoc }) {
 /* Filter availability (PR 1 / migration 059)                            */
 /* -------------------------------------------------------------------- */
 
+const FILTER_SCHEMA_KEY = ['admin', 'filter-schema'] as const;
+
 function FilterVisibilitySection({ infoExpanded }: { infoExpanded: boolean }) {
-  const qc = useQueryClient();
   const schemaQ = useQuery({
-    queryKey: ['admin', 'filter-schema'],
+    queryKey: FILTER_SCHEMA_KEY,
     queryFn: getFilterSchema,
   });
 
-  // Pending writes that haven't returned yet keep optimistic UI feedback.
-  const [pending, setPending] = useState<Set<string>>(new Set());
-
-  const mut = useMutation({
+  /* Optimistic, pending per switch. No onError: a refused toggle snaps back
+   * AND says why through the global toast. */
+  const mut = useOptimisticWrite({
+    mutationKey: ['write', 'admin', 'filter-visibility'],
     mutationFn: ({
       agenda, filterId, enabled,
     }: {
@@ -1378,36 +1374,20 @@ function FilterVisibilitySection({ infoExpanded }: { infoExpanded: boolean }) {
       filterId: string;
       enabled: boolean;
     }) => setFilterVisibility(agenda, filterId, enabled),
-    onMutate: async ({ agenda, filterId, enabled }) => {
-      const key = ['admin', 'filter-schema'] as const;
-      await qc.cancelQueries({ queryKey: key });
-      const prev = qc.getQueryData<typeof schemaQ.data>(key);
-      if (prev) {
-        qc.setQueryData(key, {
+    patch: ({ agenda, filterId, enabled }) => [
+      cachePatch<typeof schemaQ.data>({ queryKey: FILTER_SCHEMA_KEY, exact: true }, (prev) =>
+        prev && {
           ...prev,
           filters: prev.filters.map((f) =>
             f.id === filterId
               ? { ...f, visibility: { ...f.visibility, [agenda]: enabled } }
               : f,
           ),
-        });
-      }
-      setPending((p) => new Set(p).add(`${agenda}|${filterId}`));
-      return { prev };
-    },
-    onError: (_err, _vars, ctx) => {
-      if (ctx?.prev) {
-        qc.setQueryData(['admin', 'filter-schema'], ctx.prev);
-      }
-    },
-    onSettled: (_data, _err, { agenda, filterId }) => {
-      setPending((p) => {
-        const next = new Set(p);
-        next.delete(`${agenda}|${filterId}`);
-        return next;
-      });
-      qc.invalidateQueries({ queryKey: ['admin', 'filter-schema'] });
-    },
+        },
+      ),
+    ],
+    revalidate: [FILTER_SCHEMA_KEY],
+    pendingKey: ({ agenda, filterId }) => `${agenda}|${filterId}`,
   });
 
   if (schemaQ.error) return <ErrorBanner message={schemaQ.error.message} />;
@@ -1451,7 +1431,7 @@ function FilterVisibilitySection({ infoExpanded }: { infoExpanded: boolean }) {
                   category={category}
                   filters={filtersByCategory.get(category)!}
                   agendas={agendas}
-                  pending={pending}
+                  pendingFor={mut.pendingFor}
                   infoExpanded={infoExpanded}
                   onToggle={(agenda, filterId, enabled) =>
                     mut.mutate({ agenda, filterId, enabled })
@@ -1473,14 +1453,14 @@ function FilterCategoryRows({
   category,
   filters,
   agendas,
-  pending,
+  pendingFor,
   infoExpanded,
   onToggle,
 }: {
   category: string;
   filters: FilterSchemaEntry[];
   agendas: Agenda[];
-  pending: Set<string>;
+  pendingFor: (key: string) => boolean;
   infoExpanded: boolean;
   onToggle: (agenda: Agenda, filterId: string, enabled: boolean) => void;
 }) {
@@ -1517,7 +1497,7 @@ function FilterCategoryRows({
               );
             }
             const enabled = f.visibility[a];
-            const isPending = pending.has(`${a}|${f.id}`);
+            const isPending = pendingFor(`${a}|${f.id}`);
             return (
               <td key={a} className="text-center px-2 py-2">
                 <Switch

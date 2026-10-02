@@ -91,8 +91,9 @@ _FIELDS: dict[str, FieldSpec] = {
         hashed=False,
     ),
     # `raw_json` is not in _HASH_FIELDS, so this is snapshot-free like media. Attribution
-    # itself is NOT done here: the resolver is queue-driven and `ingest_scraped_listing`
-    # only enqueues when the content hash changes — which writing raw_json does not. The
+    # itself is NOT done here: the resolver is queue-driven and the writer (`listing_write`)
+    # enqueues on a content change or a broker-fingerprint change; a `raw_json` heal does
+    # neither. The
     # daily full sweep enumerates resolve_brokers._BROKER_SOURCES, so remax is picked up
     # there (or run resolve_brokers_full.yml to attribute immediately).
     "broker": FieldSpec(

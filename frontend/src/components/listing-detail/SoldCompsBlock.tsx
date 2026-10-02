@@ -196,7 +196,7 @@ function SoldComps({
 
   const coverageQ = useQuery<SoldCoverage | null, Error>({
     queryKey: ['sold-coverage', lat, lng],
-    queryFn: () => fetchSoldCoverage(lat, lng),
+    queryFn: ({ signal }) => fetchSoldCoverage(lat, lng, { signal }),
     staleTime: 5 * 60_000,
   });
 
@@ -225,7 +225,7 @@ function SoldComps({
    * make two independent reads serial for nothing. */
   const rowsQ = useQuery<SoldComparable[], Error>({
     queryKey: ['sold-comps', lat, lng, radiusM, filters],
-    queryFn: () => fetchSoldComparables(lat, lng, radiusM, filters),
+    queryFn: ({ signal }) => fetchSoldComparables(lat, lng, radiusM, filters, { signal }),
     staleTime: 5 * 60_000,
   });
 

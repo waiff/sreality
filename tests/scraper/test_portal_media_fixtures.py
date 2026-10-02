@@ -296,14 +296,13 @@ def _resolve_brokers_module():
 
 
 def test_remax_is_wired_end_to_end_for_broker_attribution():
-    """Three registries had to agree or nothing was ever attributed: the ingest
-    enqueue allow-list, the resolver's source list, and the per-source SQL in
+    """Three registries had to agree or nothing was ever attributed: the listing
+    writer's enqueue allow-list, the resolver's source list, and the per-source SQL in
     _attribute(). They are now ONE config row (toolkit.broker_sources) that all
     three derive from — this asserts the derivation actually reaches all three."""
-    from scraper.db import BROKER_ATTRIBUTED_SOURCES
-    from toolkit.broker_sources import BROKER_SOURCES
+    from toolkit.broker_sources import BROKER_SOURCE_NAMES, BROKER_SOURCES
 
-    assert "remax" in BROKER_ATTRIBUTED_SOURCES
+    assert "remax" in BROKER_SOURCE_NAMES
 
     module = _resolve_brokers_module()
 
@@ -407,13 +406,15 @@ def test_mmreality_fixture_carries_no_person_shaped_data():
 
 
 def test_mmreality_is_wired_end_to_end_for_broker_attribution():
-    """The same three-registry check remax gets (D3's part C): ingest enqueue,
+    """The same three-registry check remax gets (D3's part C): the writer's enqueue,
     the sweep's source scan, and the per-source SQL — all derived from the one
     config row, so a landed row is a portal that actually attributes."""
-    from scraper.db import BROKER_ATTRIBUTED_SOURCES, _BROKER_FINGERPRINT_KEYS
-    from toolkit.broker_sources import BROKER_SOURCES
+    from toolkit.broker_sources import (
+        BROKER_FINGERPRINT_KEYS, BROKER_FINGERPRINTED_SOURCES, BROKER_SOURCE_NAMES,
+        BROKER_SOURCES,
+    )
 
-    assert "mmreality" in BROKER_ATTRIBUTED_SOURCES
+    assert "mmreality" in BROKER_SOURCE_NAMES
 
     module = _resolve_brokers_module()
 
@@ -422,10 +423,11 @@ def test_mmreality_is_wired_end_to_end_for_broker_attribution():
     (mmreality,) = [c for c in BROKER_SOURCES if c.source == "mmreality"]
     assert len(mmreality.statements()) == 2
     assert sum("l.source = 'mmreality'" in s for s in module._ATTRIBUTION_SQL) == 2
-    # ...and the ingest side can SEE a broker-only change on this portal: the
+    # ...and the writer can SEE a broker-only change on this portal: the
     # fingerprint allowlist has to carry mmreality's own key, or a broker swap on a
     # page whose content hash is unchanged never re-enqueues.
-    assert mmreality.id_key in _BROKER_FINGERPRINT_KEYS
+    assert "mmreality" in BROKER_FINGERPRINTED_SOURCES
+    assert mmreality.id_key in BROKER_FINGERPRINT_KEYS
 
 
 def test_mmreality_real_house_page_does_not_call_its_plot_an_interior_area():

@@ -35,8 +35,9 @@ export interface UseInfiniteListOptions<
   TPage extends InfiniteListPage<TRow> = InfiniteListPage<TRow>,
 > {
   queryKey: QueryKey;
-  /* Receives the cursor for the page to load (null for the first page). */
-  queryFn: (cursor: unknown | null) => Promise<TPage>;
+  /* Receives the cursor for the page to load (null for the first page), and
+   * React Query's signal so a cancelled page aborts its request. */
+  queryFn: (cursor: unknown | null, signal: AbortSignal) => Promise<TPage>;
   pageSize: number;
   getRowId: (row: TRow) => string | number;
   enabled?: boolean;
@@ -98,7 +99,7 @@ export function useInfiniteList<
 
   const query = useInfiniteQuery({
     queryKey,
-    queryFn: ({ pageParam }) => queryFn((pageParam as unknown) ?? null),
+    queryFn: ({ pageParam, signal }) => queryFn((pageParam as unknown) ?? null, signal),
     initialPageParam: null as unknown,
     getNextPageParam: (lastPage: TPage) =>
       lastPage.rows.length < pageSize

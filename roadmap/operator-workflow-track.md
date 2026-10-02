@@ -4,7 +4,57 @@
 
 User-facing features that don't fit the analytical, estimation, UI,
 map, or scraper tracks. Operator-scoped (single shared identity, no
-per-user accounts — matches today's bearer-token model).
+per-user accounts — matches today's bearer-token model) *(superseded:
+per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
+
+### Rule #18: an executed no-orphan merge test (done, 2026-10-01)
+- **Done:** `tests/test_property_carriers_live.py` (PR 0 #1664, extended by the
+  `PROPERTY_CARRIERS` PR) merges and detaches through the public writers, one test per
+  carrier over two accounts, and asserts the retired property is left holding nothing; a
+  census offline (migrations) and live (replayed schema) fails on any column naming a
+  property that is neither carried nor in `NOT_CARRIED`. See "Merge chokepoint deepened"
+  below.
+
+### Merge chokepoint deepened: PROPERTY_CARRIERS, properties_changed, detach_listings (in progress, 2026-10)
+- **Done:** PR 0 #1664: an executed live baseline per carrier (two strict xfails pin
+  the dispatch-send abort and the chained-detach double card). PR 1:
+  `toolkit/property_carriers.py` — ONE ordered `PROPERTY_CARRIERS` list replaces the
+  `toolkit/operator_state.py` registry (Phase U2.6b below), `toolkit/dismissal_identity.py`
+  and the inline asset/pipeline calls; `NOT_CARRIED` names every other property column,
+  enforced by a census offline (migrations) and live (replayed schema);
+  `merge_properties` became the private `_merge_pair` under the set's one lock and gate;
+  typed `CategoryClash`; the `_Ledger` fake raises on SQL it does not model. PR 2:
+  `properties_changed` (`scripts/recompute_property_stats.py`) — ONE after-step (scoped
+  recompute → Browse patch → broker queue) shared by the merge, the detach and the dirty
+  drain (one commit per slice, was three); merges, detaches and splits now
+  reach `brokers.property_count` on the broker drain's cadence instead of the daily sweep.
+  PR 3: set-shaped `detach_listings` — one lock up front, each advert re-planned in order,
+  rulings once (movers vs stayers, never between two movers), one after-step per call;
+  the split detaches its movers in ONE call
+  (1 + J recomputes for J joined units, was M + J) and its `restore_must_not_link` is proven
+  to write nothing (deleted in follow-up F1). PR 4: the dispatch collapse keeps its sends —
+  `Dispatches` re-points a collapsed row's `channel_sends` onto the kept twin first, so a
+  delivered alert no longer aborts the merge (`channel_sends_check`; live test 3b un-xfailed).
+  PR 6: the engine's undo on the set form — `unapply` and `legacy_retire` detach each group in ONE
+  `detach_listings` call (the injected `detach=` takes the set); the one-advert adapter is deleted.
+- **Next:** a chained detach restores one card (PR 5, draft #1681 — needs an operator decision:
+  best-effort card identity inferred from the ledgers, or a stable card id via an additive migration).
+  After PR 2 deploys, `dirty_broker_listings` depth steps up after merges (the fix
+  working); `property_sweep_last_complete` should stay fresh.
+
+### Rule #22: converge the kanban + extension pipeline copies (partly done, 2026-10-01)
+- **Done (2026-10-01):** the kanban's move/remove no longer re-implement the hook —
+  `pages/Pipeline.tsx` calls `const { move, remove } = usePipelineCard()` and passes the
+  `property_id` per call (the hook takes it at call time now), so one instance serves the
+  whole board's drops and trashes (see "One optimistic-write hook" under Phase U-PIPE below).
+  The kanban's shape (drag to move, own trash + two-step confirm to remove) stays sanctioned.
+- **Owed (not built):** the board tints column headers + stage-editor swatches with its own
+  `stageColor` (grey fallback) instead of `stageAccent` (copper) — converge, or record the
+  grey fallback as deliberate. The extension hand-copies the funnel SVG (forced: no React)
+  plus `stageBadge` and `stageAccent` (not forced: pure TS it could import from
+  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`) — import it. Then
+  rule #22 (CLAUDE.md + architecture) drops the remaining exceptions (origin: Phase U-PIPE
+  3i below).
 
 ### Phase U2.6: Collections + tags + notes (done)
 Operator watchlists, freeform coloured tags, and per-listing journal
@@ -74,7 +124,10 @@ pipeline (Phase U-PIPE) plugs into next.
   collision-collapse; APPEND moves all), so nothing orphans onto a
   merged_away property — invariant by construction. Unmerge/split are
   best-effort (state stays on the surviving/anchor property). Adding a
-  future property-anchored operator-state table = one registry line.
+  future property-anchored operator-state table = one registry line
+  *(superseded 2026-10-01: one `CurationTable(...)` line in
+  `PROPERTY_CARRIERS`, or one adapter for any other shape — rule #18;
+  see "Merge chokepoint deepened" above)*.
 - API re-keyed to property grain: `/collections/{id}/properties`,
   `/properties/{id}/tags`, `/properties/{id}/notes`. Frontend Browse
   tag filter + CurationBlock + CollectionDetail operate on
@@ -352,6 +405,25 @@ to advance a deal without opening the listing page. It now opens a shared menu.
   pre-drag stage; and the board's rollback lived in `onError`, which opts a
   mutation out of the app's global error toast (`main.tsx`) — a failed drag
   snapped back with no explanation. Rollback now rides `onSettled`.
+- **One optimistic-write hook** (done, 2026-10-01): `lib/useOptimisticWrite`
+  (hold → patch → rollback in `onSettled` → revalidate; per-key `pendingFor`
+  from one pending index per MutationCache, so a write re-renders only the
+  rows that asked about its key — a Browse hover no longer scans the
+  MutationCache once per hook per row) replaces `lib/optimisticCache` and
+  every hand-rolled copy — the kanban's own `move`/`remove` (now
+  `usePipelineCard` with the id per call), dismissals, border cases, the
+  autodedup verdict overlay, the Settings toggles, the training-set marks,
+  the preset reorder, the exam-review edits. 23 toast-only `onError`s deleted
+  (the global toast already said it); `lib/browseKeys` / `lib/autodedupKeys` /
+  `trainingSetKeys` factories feed both readers and sweeps. Side fixes: a
+  failed filter-visibility toggle and a failed preset reorder now say why; a
+  failed dismissal re-reads the lists and a failed training-set mark its row
+  page (no resurrected neighbour, no erased move or note); the funnel and the
+  header pill stay busy while their menu writes (`aria-disabled`, never
+  `disabled`, so the menu's focus hand-back still lands on them); the no-price
+  count is now a Browse surface — merges, splits/links, cohort-scoped
+  collection and pipeline writes, and dismissals re-read it (it went stale
+  before).
 - **Badge projections fixed.** `fetchPipelineStages` never selected `code` and
   `fetchPropertyPipeline` never selected `stage_code`, though migration 377
   exposes both: the same property badged "9" on a card and "5" in its own
@@ -614,7 +686,10 @@ any newly-scraped listings.
   estimation row that lives on the existing `/estimation/:id` page.
 - Backend: `api/notifications.py` owns the `WatchdogFilterSpec`
   Pydantic model, the SQL-clause renderer (mirrors
-  `_shared_filter_where` semantics), and the matcher loop spawned via
+  `_shared_filter_where` semantics — *superseded 2026-10-01: both now
+  compile from `toolkit/filter_compiler.py`; see the Rule 16 bullet
+  below*),
+  and the matcher loop spawned via
   FastAPI's lifespan context manager. `api/routes/notifications.py`
   exposes the standard bearer-gated CRUD + dispatch endpoints. The
   matcher reads its cadence and the watermark from `app_settings`
@@ -626,17 +701,40 @@ any newly-scraped listings.
   price, when it fired, the watchdog name, an "estimation" column
   that streams the yield once the background task completes, and a
   per-row "Run estimation" button.
+- ✅ Rule 16: one filter compiler, `toolkit/filter_compiler.py`; the Watchdog + every
+  cohort compile the registry (`sql_kind` + one hook table; Browse's TS pinned to the same
+  `sql_kind`); −12 dead `ComparableFilters` fields; `subscriptions_failed` in the matcher
+  stats (cleanup/filter-compiler, C4 PR 1).
+- ✅ M1: the Watchdog honours `building_material` and `min/max_garden_area` again (lost by
+  merge f2d7b359; `extra='ignore'`); `ComparableFilters` gains the garden pair; both models
+  now EQUAL their agendas by test; Browse reads the generated `BUILDING_MATERIAL_BUCKETS`
+  (fix/watchdog-dropped-filters, C4 PR 2).
+
+**Next (filter definition, tracked from C4)**
+
+- M2: the agent advertises 10 COMPARABLES ids that `_FCR_OVERRIDE_FIELDS` drops — changes
+  agent cohorts, needs an operator ruling, own PR.
+- The agent's null `category_type` path (`api/agent.py`) — same posture as M2.
+- M3: center+radius is a circle in Python and a bounding square in Browse.
+- M4: `tom_days` reaches Stats but not the Browse list.
+- M7: integer area params in the browse RPCs. M11: canonical-advert row vs property rollup.
+- Browse's TS dispatch switches to `sql_kind` (drops `isMinId`/`isMaxId` + the duplicated
+  dispatch).
+- The NEIGHBORHOOD agenda over-declares ~30 filters `toolkit/neighborhoods.py` never reads.
 
 **What's deferred**
 
 - Email / SMS / push channels. `notification_dispatches.channel` is
   CHECK-bounded to `'in_app'` only; a future migration adds the new
-  enum values and the dispatch worker grows a fan-out branch.
+  enum values and the dispatch worker grows a fan-out branch
+  *(superseded: email + Telegram deliver through the `channel_sends`
+  ledger, migration 207, not a widened `channel` — rule #16)*.
 - 5-minute scrape cadence (Shape A from the original proposal).
   Today's nightly cron still applies; the matcher loop honestly
   surfaces "no fresh listings" between scrapes. A new
   `.github/workflows/scrape_probe.yml` is a separate slice.
-- Per-user identity (one shared operator stays the model).
+- Per-user identity (one shared operator stays the model)
+  *(superseded: per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
 
 **Original brief (kept below as the design rationale)**
 

@@ -18,6 +18,7 @@ vi.mock('./brokers', async (importOriginal) => ({
 }));
 
 import { DEFAULT_FILTERS } from './filters';
+import { ApiError } from './api';
 import { supabase } from './supabase';
 import {
   BROWSE_SELECT_COLUMNS,
@@ -48,10 +49,11 @@ import {
 import { fetchBrokerListingIds, type ListingBroker } from './brokers';
 import type { DistrictChip } from './filters';
 
-/* THE PostgREST stand-in for this file: every builder method chains, `.in()`
- * records the ids it was handed, and awaiting the chain — or `.range()`, which
- * fetchAllRows drives — answers with the rows registered for that relation, or
- * with `error`. `.rpc()` answers the same way and records its argument object. */
+/* THE PostgREST stand-in for this file: every builder method chains (including
+ * the `.retry()` / `.abortSignal()` pgRead sets, and the `.range()` fetchAllRows
+ * drives), `.in()` records the ids it was handed, and awaiting the chain answers
+ * with the rows registered for that relation, or with `error` as a 500.
+ * `.rpc()` answers the same way and records its argument object. */
 const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) => {
   const inIds: number[][] = [];
   const rpcArgs: Array<Record<string, unknown>> = [];
@@ -59,12 +61,13 @@ const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) =
     const data = rows[relation] ?? [];
     const answer = () =>
       Promise.resolve(
-        error ? { data: null, error } : { data, error: null, count: data.length },
+        error
+          ? { data: null, error, count: null, status: 500, statusText: '' }
+          : { data, error: null, count: data.length, status: 200, statusText: 'OK' },
       );
     const page: unknown = new Proxy(() => {}, {
       get: (_t, prop) => {
         if (prop === 'then') return (resolve: (v: unknown) => void) => answer().then(resolve);
-        if (prop === 'range') return answer;
         if (prop === 'in') {
           return (_column: string, ids: number[]) => {
             inIds.push(ids);
@@ -548,22 +551,47 @@ describe('Browse select-lists carry the measure with its published basis', () =>
  * function call its Content-Range total is `*`, which the client parses to NaN.
  * Driven through the real client against a stubbed PostgREST, so the parse that
  * produced the NaN is the one under test. */
+/* A refused answer as it arrives on the wire. Every count read is `head: true`,
+ * which supabase-js sends as an HTTP HEAD, and a HEAD response carries no body,
+ * so a count's SQLSTATE never reaches the client: only its status does. */
+const failed = (status: number, body: object) => (init: RequestInit) =>
+  ({
+    ok: false,
+    status,
+    statusText: '',
+    headers: new Headers(),
+    text: async () => (init.method === 'HEAD' ? '' : JSON.stringify(body)),
+  }) as unknown as Response;
+/* An exact count that never answers: it settles only when its signal aborts,
+ * on our own budget or the caller's say. */
+const STALLS = (init: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+  });
+
 describe('the Browse cohort total is always a number', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  /* Production as observed: the exact count is aborted at the client budget; a
-   * planned count carries a total only when it reads a relation. */
-  const stubPostgrest = (relationEstimate: string) => {
+  /* Production as observed: the exact count misses its 2.5 s client budget;
+   * a planned count carries a total only when it reads a relation. Every
+   * deadline runs 100x faster here, so the real budget path is exercised
+   * without a 2.5 s wait per case, and `budgets` records the unscaled values. */
+  const stubPostgrest = (
+    relationEstimate: string,
+    exact: (init: RequestInit) => Response | Promise<Response> = STALLS,
+  ) => {
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const budgets = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation((ms: number) => realTimeout(ms / 100));
     const planned: string[] = [];
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const path = new URL(String(input)).pathname;
-      const prefer = new Headers(init?.headers).get('Prefer') ?? '';
-      if (prefer.includes('count=exact')) {
-        throw new DOMException('signal timed out', 'AbortError');
-      }
+      const prefer = new Headers(init.headers).get('Prefer') ?? '';
+      if (prefer.includes('count=exact')) return exact(init);
       if (prefer.includes('count=planned')) planned.push(path);
       const total = path.includes('/rpc/') ? '*' : relationEstimate;
       return {
@@ -574,19 +602,22 @@ describe('the Browse cohort total is always a number', () => {
         text: async () => '',
       } as unknown as Response;
     });
-    return planned;
+    vi.stubGlobal('fetch', fetch);
+    return { planned, budgets, fetch };
   };
 
-  it('falls back to the estimate of the plain relation, never NaN', async () => {
-    const planned = stubPostgrest('72');
+  it('falls back to the estimate of the plain relation when the exact count misses its budget', async () => {
+    const { planned, budgets, fetch } = stubPostgrest('72');
     const total = await fetchBrowseCount(DEFAULT_FILTERS);
     expect(Number.isFinite(total.value)).toBe(true);
     expect(total).toEqual({ value: 72, precise: false });
     expect(planned).toEqual(['/rest/v1/browse_list']);
+    expect(budgets).toHaveBeenCalledWith(2500);
+    expect(fetch.mock.calls[0][1]?.method).toBe('HEAD');
   });
 
   it('estimates the listing-grain feed from its plain view too', async () => {
-    const planned = stubPostgrest('15');
+    const { planned } = stubPostgrest('15');
     const total = await fetchBrowseCount({ ...DEFAULT_FILTERS, portals: ['bazos'] });
     expect(total).toEqual({ value: 15, precise: false });
     expect(planned).toEqual(['/rest/v1/listing_feed_public']);
@@ -595,6 +626,35 @@ describe('the Browse cohort total is always a number', () => {
   it('fails the count, which the header shows as an error, when there is no number at all', async () => {
     stubPostgrest('*');
     await expect(fetchBrowseCount(DEFAULT_FILTERS)).rejects.toThrow(/count unavailable/);
+  });
+
+  /* A caller abort is a cancellation, not "too slow": no estimate is asked for. */
+  it('cancels, never estimating, when the caller aborts during the exact count', async () => {
+    const { planned, budgets, fetch } = stubPostgrest('72');
+    budgets.mockRestore();
+    const ctrl = new AbortController();
+    const p = fetchBrowseCount(DEFAULT_FILTERS, { signal: ctrl.signal });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+    ctrl.abort();
+    const err = await p.catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(ApiError);
+    expect((err as Error).name).toBe('AbortError');
+    expect(planned).toEqual([]);
+  });
+
+  /* Only "too slow" earns the estimate. A refused or malformed exact count is a
+   * real failure; answering it with a different relation's estimate hid it. */
+  it('does not answer a failed exact count with an estimate', async () => {
+    const { planned } = stubPostgrest(
+      '72',
+      failed(400, { code: 'PGRST100', message: 'failed to parse filter' }),
+    );
+    await expect(fetchBrowseCount(DEFAULT_FILTERS)).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 400,
+      kind: 'http',
+    });
+    expect(planned).toEqual([]);
   });
 });
 

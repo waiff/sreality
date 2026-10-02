@@ -97,10 +97,9 @@ def test_main_rejects_unmapped_scope(monkeypatch):
 # --- BazosPortal seams ------------------------------------------------------
 
 
-def test_portal_complete_walk_and_per_scope_labels():
+def test_portal_per_scope_labels():
     p = _portal([_BYT_SALE, _BYT_RENT])
     assert p.source == "bazos"
-    assert p.supports_complete_walk is True
     assert p.categories() == [_BYT_SALE, _BYT_RENT]
     # labels come from each scope dict, not a fixed instance attr
     assert p.category_labels(_BYT_SALE) == ("byt", "prodej")
@@ -186,6 +185,7 @@ def test_nomination_happens_for_every_category_every_run(monkeypatch):
     assert p.presence_candidates(object(), _BYT_RENT, {"b"}) == ([], 1, {"subtype": None})
     assert calls == ["prodej", "pronajem"]
     assert not hasattr(bazos_main.BazosPortal, "mark_inactive")
+    assert not hasattr(bazos_main.BazosPortal, "mark_gone")
 
 
 def test_active_count_source_scoped(monkeypatch):
@@ -199,16 +199,6 @@ def test_active_count_source_scoped(monkeypatch):
     assert _portal().active_count(object(), _BYT_RENT) == 42
     assert captured == {"cm": "byt", "ct": "pronajem", "source": "bazos",
                         "subtype": None, "scope_subtype": True}
-
-
-def test_mark_gone_flips_native_inactive(monkeypatch):
-    gone: dict[str, Any] = {}
-    monkeypatch.setattr(
-        bazos_main.db, "mark_listing_inactive_native",
-        lambda _c, src, nid: gone.update(src=src, nid=nid),
-    )
-    _portal().mark_gone(object(), "216945145")
-    assert gone == {"src": "bazos", "nid": "216945145"}
 
 
 class _IdxClient:
@@ -278,7 +268,6 @@ def test_walk_category_page_capped_is_not_an_end(monkeypatch):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page1]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     p = BazosPortal(categories=[_BYT_SALE], max_pages=1)
     _seen, _counts, result_size, _pages, reached_end = p.walk_category(
@@ -303,7 +292,6 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     return _portal().walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
@@ -386,7 +374,6 @@ def _walk(monkeypatch, pages, *, client=None):
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     result = _portal().walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
@@ -589,18 +576,33 @@ def test_fetch_detail_error():
     assert item.kind == "error" and item.error
 
 
-def test_write_details_ingests_and_counts(monkeypatch):
-    listing = SimpleNamespace(raw={"image_urls": ["u1", "u2"]})
+def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
+    from scraper import listing_write
+    from scraper.listing_write import WriteOutcome
+    from scraper.scraped_listing import ScrapedListing
+
+    listing = ScrapedListing(source="bazos", source_id_native="a",
+                             source_url="https://example.test/a",
+                             raw={"image_urls": ["u1", "u2"]})
     items = [DrainItem("a", "ok", payload={
-        "listing": listing, "html": "<h>", "status": 200, "url": "/a"})]
+        "listing": listing, "html": "<h>", "status": 200, "url": "/a"},
+        discovery_seq=5)]
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(
-        bazos_main.db, "ingest_scraped_listing",
-        lambda _c, _l, discovery_seq=None, discovered_at=None: (8105, "new"))
-    monkeypatch.setattr(bazos_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
-    monkeypatch.setattr(bazos_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
+    parsed: list[Any] = []
+    monkeypatch.setattr(bazos_main.db, "mark_portal_page_parsed",
+                        lambda _c, page_id: parsed.append(page_id))
+    calls: list[list[Any]] = []
+
+    def _write(_c, writes):
+        calls.append(list(writes))
+        return [WriteOutcome(w.source, w.source_id_native, 8105, "new", 1, w.content_hash,
+                             len(w.images)) for w in writes]
+
+    monkeypatch.setattr(listing_write, "write_listings", _write)
     counts = _portal().write_details(object(), items)
-    assert counts["new"] == 1
-    assert counts["images_discovered"] == 2
+    assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
+    [[w]] = calls
+    assert (w.source, w.source_id_native, w.discovery_seq) == ("bazos", "a", 5)
+    assert parsed == [9]
 
 

@@ -1,5 +1,10 @@
 import type { Disposition } from './types';
-import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL, filterById } from './filterRegistry.generated';
+import {
+  BUILDING_MATERIAL_BUCKETS,
+  FURNISHED_CANONICAL,
+  OWNERSHIP_CANONICAL,
+  filterById,
+} from './filterRegistry.generated';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -23,9 +28,8 @@ export type CategoryMain = 'byt' | 'dum' | 'komercni' | 'pozemek' | 'ostatni';
  * price scales, so mixing them would make the price tooling cross-scale. */
 export type CategoryType = 'pronajem' | 'prodej' | 'drazba' | 'podil';
 
-/* Building material buckets surfaced in the filter panel. Maps to
- * one or more sreality building_type values via BUILDING_MATERIAL_VALUES
- * below. */
+/* Building material buckets surfaced in the filter panel. Each maps to
+ * one or more building_type values via the generated BUILDING_MATERIAL_BUCKETS. */
 export type BuildingMaterial = 'cihla' | 'panel' | 'smisena' | 'ostatni';
 
 /* Map-viewport rectangle. west < east, south < north, all WGS84
@@ -400,34 +404,18 @@ export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
 
-/* The "Ostatní" bucket expands to every building_type value that isn't in the
- * explicit three — read off the registry, so a construction added to the canon
- * is reachable the moment it exists (the hand-kept list left ceskereality's
- * `jina`, 8,223 active rows, selectable by nothing). Listings with a NULL
- * building_type fall out of any non-null selection — matching how furnished /
- * ownership filters already behave. */
-export const BUILDING_MATERIAL_OTHER_VALUES: ReadonlyArray<string> = (
-  filterById('building_type_match')?.enum_values ?? []
-)
-  .map((o) => String(o.value))
-  .filter((v) => v !== 'cihla' && v !== 'panel' && v !== 'smisena');
-
-const buildingMaterialBucketToValues = (
-  m: BuildingMaterial,
-): readonly string[] => {
-  if (m === 'cihla')   return ['cihla'];
-  if (m === 'panel')   return ['panel'];
-  if (m === 'smisena') return ['smisena'];
-  return BUILDING_MATERIAL_OTHER_VALUES;
-};
-
 /* Expand a multi-select of operator-friendly buckets into the union of
- * granular `building_type` values to match against (deduped). Empty in,
- * empty out — the caller skips the predicate entirely in that case. */
+ * granular `building_type` values to match against (deduped). The expansion
+ * is generated from toolkit.filter_registry.building_material_values, the one
+ * the Watchdog matcher runs; "Ostatní" (and any unknown bucket) is every canon
+ * value outside the explicit three. A NULL building_type falls out of any
+ * selection. Empty in, empty out — the caller skips the predicate entirely. */
 export const buildingMaterialToValues = (
   materials: readonly BuildingMaterial[],
 ): readonly string[] => [
-  ...new Set(materials.flatMap((m) => buildingMaterialBucketToValues(m))),
+  ...new Set(
+    materials.flatMap((m) => BUILDING_MATERIAL_BUCKETS[m] ?? BUILDING_MATERIAL_BUCKETS.ostatni),
+  ),
 ];
 
 /* Read off the registry, like CONDITION_VALUES below: this list is what
@@ -1544,18 +1532,19 @@ export function applyRegistryUpdates(
  * `unsupported` so the UI can tell the operator what won't be watched.
  *
  * Honoured (mapped): category, disposition, district chips, price / price-per-m²
- * / MF-yield / area / usable / estate bounds, tri-state amenities, furnished,
- * ownership, portals, condition_match, parking-lots min, condition-level mins,
- * the price-history mins (distinct-site / price-drop / price-rise count, max
- * price-drop %), and ALL the city-quality predicates (index rules, population
- * min/max, near-city proximity). center+radius → lat/lng/radius_m.
+ * / MF-yield / area / usable / estate / garden bounds, building material,
+ * tri-state amenities, furnished, ownership, portals, condition_match,
+ * parking-lots min, condition-level mins, the price-history mins (distinct-site
+ * / price-drop / price-rise count, max price-drop %), and the city-quality
+ * predicates (index rules, population min/max, the near-* minimums).
+ * center+radius → lat/lng/radius_m.
  *
  * NOT honoured by the matcher (reported as unsupported when set): listing
  * `status`, the last-seen / first-seen / time-on-market day ranges and the
  * `recently added/changed` presets (a watchdog already fires on brand-new /
  * changed listings, so a recency window is redundant there), the map `bounds`
- * viewport (use a district chip or center+radius instead), `buildingMaterial`,
- * `garden_area` bounds, `tags` and `collections`. */
+ * viewport (use a district chip or center+radius instead), `tags` and
+ * `collections`. */
 
 const UNSUPPORTED_LABELS: ReadonlyArray<{
   test: (f: ListingFilters) => boolean;
@@ -1574,8 +1563,6 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
     label: 'recently added/changed',
   },
   { test: (f) => f.tomDaysMin != null || f.tomDaysMax != null, label: 'time on market' },
-  { test: (f) => f.buildingMaterial.length > 0, label: 'building material' },
-  { test: (f) => f.gardenAreaMin != null || f.gardenAreaMax != null, label: 'garden area' },
   { test: (f) => f.tags.length > 0, label: 'tags' },
   { test: (f) => f.priceGrowthRules.length > 0, label: 'market growth (datasets)' },
   { test: (f) => f.withEstimates, label: 'with estimates' },
@@ -1631,6 +1618,9 @@ export function filtersToWatchdogSpec(
     max_usable_area: f.usableAreaMax,
     min_estate_area: f.estateAreaMin,
     max_estate_area: f.estateAreaMax,
+    building_material: f.buildingMaterial.length ? [...f.buildingMaterial] : null,
+    min_garden_area: f.gardenAreaMin,
+    max_garden_area: f.gardenAreaMax,
     has_balcony: triToBoolNullable(f.hasBalcony),
     has_lift: triToBoolNullable(f.hasLift),
     has_parking: triToBoolNullable(f.hasParking),

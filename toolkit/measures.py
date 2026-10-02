@@ -469,10 +469,11 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         hits=2,
         measure="ppm2",
         kind=KIND_CALLS,
-        why="The rule-16 shared matcher emits `measure_price_per_m2(...)` via "
-        "per_m2_sql(); the two literals are the docstring explaining why an "
-        "unpinned category_main refuses to label a cohort — it admits plots "
-        "(a rate per m² of PLOT) beside flats (a rate per m² of FLOOR).",
+        why="build_query projects `measure_price_per_m2(...)` via per_m2_sql(); "
+        "the filter bound is compiled in toolkit/filter_compiler.py. The two "
+        "literals are the docstring explaining why an unpinned category_main "
+        "refuses to label a cohort — it admits plots (a rate per m² of PLOT) "
+        "beside flats (a rate per m² of FLOOR).",
     ),
     RegisteredSite(
         path="toolkit/region_annotations.py",

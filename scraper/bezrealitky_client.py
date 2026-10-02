@@ -125,7 +125,7 @@ class BezrealitkyClient(BasePortalClient):
         a portals config descriptor can group several estate types that
         canonicalise to the same `category_main` (e.g. KANCELAR +
         NEBYTOVY_PROSTOR both → 'komercni') into ONE walk — required so the
-        source-scoped `mark_inactive` (which keys on canonical cm/ct) sees the
+        source-scoped nomination (which keys on canonical cm/ct) sees the
         union of seen ids, not two disjoint subsets that would mutually delist.
 
         `include_imports` defaults to True (the listAdverts API default + what

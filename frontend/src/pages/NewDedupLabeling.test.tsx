@@ -1151,6 +1151,13 @@ describe('<NewDedupLabeling>', () => {
     );
     renderPage();
     await waitFor(() => expect(screen.getAllByPlaceholderText('tag…')).toHaveLength(3));
+    // Decide once the photos are on screen, i.e. in the page's photo cache: the
+    // property is that a decision never re-fetches a photo the page already
+    // holds. Deciding earlier raced the cache's own commit (the old per-row
+    // pending setState happened to force it inside the click's act()).
+    await waitFor(() =>
+      expect(document.querySelectorAll('img').length).toBeGreaterThanOrEqual(3),
+    );
     const imageCallsBefore = vi.mocked(queries.fetchImagesByImageIds).mock.calls.length;
 
     setStateOn(0, 'positive');

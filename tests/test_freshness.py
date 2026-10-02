@@ -14,7 +14,17 @@ from typing import Any
 import pytest
 import requests
 
-from scraper import freshness, hashing
+from scraper import freshness
+from scraper.hashing import digest, sreality_hash_doc
+from scraper.listing_write import SnapshotRef, WriteOutcome
+
+
+def content_hash(raw: dict[str, Any]) -> str:
+    return digest(sreality_hash_doc(raw))
+
+
+def _snap(raw: dict[str, Any], snapshot_id: int = 7) -> SnapshotRef:
+    return SnapshotRef(id=snapshot_id, content_hash=content_hash(raw), raw_json=raw)
 
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "sample_listing.json"
@@ -74,19 +84,25 @@ class _FakeConn:
 
 def _patch_db(
     monkeypatch: pytest.MonkeyPatch,
-    prev: dict[str, Any] | None,
-    new_snap_id: int | None = 99,
+    prev: SnapshotRef | None,
+    new_snap_id: int = 99,
 ) -> dict[str, list]:
     """Stub all DB helpers. Returns a dict of recorded calls."""
-    calls: dict[str, list] = {
-        "log": [], "upsert": [], "images": [],
-    }
+    calls: dict[str, list] = {"log": [], "upsert": [], "flip": []}
     monkeypatch.setattr(
-        freshness, "_fetch_prev_snapshot", lambda c, sid: prev
+        freshness.listing_write, "latest_snapshot", lambda c, source, native: prev
     )
     monkeypatch.setattr(
-        freshness, "_fetch_latest_snapshot_id", lambda c, sid: new_snap_id
+        freshness.db, "mark_listing_inactive",
+        lambda _c, source, nid: calls["flip"].append((source, nid)) or True,
     )
+
+    def _write_listings(_c: Any, writes: list[Any]) -> list[WriteOutcome]:
+        calls["upsert"].extend(writes)
+        return [WriteOutcome("sreality", w.source_id_native, 1, "updated", new_snap_id,
+                             w.content_hash, 0) for w in writes]
+
+    monkeypatch.setattr(freshness.listing_write, "write_listings", _write_listings)
     monkeypatch.setattr(
         freshness, "_insert_log",
         lambda c, sid, o, prev_hash, new_hash, error: calls["log"].append(
@@ -94,22 +110,13 @@ def _patch_db(
              "new_hash": new_hash, "error": error}
         ),
     )
-    monkeypatch.setattr(
-        freshness.db, "upsert_listing",
-        lambda c, row, raw, h: calls["upsert"].append({"hash": h, "row": row}) or "updated",
-    )
-    monkeypatch.setattr(
-        freshness.db, "record_images",
-        lambda c, sid, imgs: calls["images"].append({"count": len(list(imgs))}) or 0,
-    )
     return calls
 
 
 def test_unchanged_writes_log_no_listings_writes(monkeypatch):
     raw = _load_raw()
-    h = hashing.content_hash(raw)
-    prev = {"id": 7, "content_hash": h, "raw_json": raw}
-    calls = _patch_db(monkeypatch, prev)
+    h = content_hash(raw)
+    calls = _patch_db(monkeypatch, _snap(raw))
 
     client = _StubClient(raw=raw)
     conn = _FakeConn()
@@ -123,7 +130,6 @@ def test_unchanged_writes_log_no_listings_writes(monkeypatch):
     assert res["error_message"] is None
 
     assert calls["upsert"] == []
-    assert calls["images"] == []
     assert len(calls["log"]) == 1
     assert calls["log"][0]["outcome"] == "unchanged"
     # No raw SQL hit our fake conn either (helpers monkeypatched).
@@ -132,15 +138,15 @@ def test_unchanged_writes_log_no_listings_writes(monkeypatch):
 
 def test_updated_writes_snapshot_and_reports_diff(monkeypatch):
     prev_raw = _load_raw()
-    prev_hash = hashing.content_hash(prev_raw)
+    prev = _snap(prev_raw)
+    prev_hash = prev.content_hash
 
     new_raw = copy.deepcopy(prev_raw)
     new_raw["price_czk"] = 22500
     new_raw["price_summary_czk"] = 22500
-    new_hash = hashing.content_hash(new_raw)
+    new_hash = content_hash(new_raw)
     assert new_hash != prev_hash
 
-    prev = {"id": 7, "content_hash": prev_hash, "raw_json": prev_raw}
     calls = _patch_db(monkeypatch, prev, new_snap_id=42)
 
     client = _StubClient(raw=new_raw)
@@ -154,17 +160,16 @@ def test_updated_writes_snapshot_and_reports_diff(monkeypatch):
     assert "price_czk" in res["what_changed"]
 
     assert len(calls["upsert"]) == 1
-    assert calls["upsert"][0]["hash"] == new_hash
-    assert len(calls["images"]) == 1
+    [w] = calls["upsert"]
+    assert (w.source, w.source_id_native, w.content_hash) == (
+        "sreality", str(new_raw["hash_id"]), new_hash)
+    assert len(w.images) == len(new_raw.get("advert_images") or [])
     assert len(calls["log"]) == 1
     assert calls["log"][0]["outcome"] == "updated"
 
 
 def test_404_marks_inactive_and_logs_gone(monkeypatch):
-    prev_raw = _load_raw()
-    prev_hash = hashing.content_hash(prev_raw)
-    prev = {"id": 7, "content_hash": prev_hash, "raw_json": prev_raw}
-    calls = _patch_db(monkeypatch, prev)
+    calls = _patch_db(monkeypatch, _snap(_load_raw()))
 
     resp = requests.Response()
     resp.status_code = 404
@@ -177,11 +182,8 @@ def test_404_marks_inactive_and_logs_gone(monkeypatch):
     assert res["snapshot_id"] is None
     assert res["new_hash"] is None
     assert calls["upsert"] == []
-    assert calls["images"] == []
-    assert any("UPDATE listings" in sql for sql, _ in conn.executions)
-    assert any("is_active = false" in sql for sql, _ in conn.executions)
-    # the flip stamps the delisting moment (migration 175)
-    assert any("inactive_at = now()" in sql for sql, _ in conn.executions)
+    # the one guarded flip writer: inactive_at once, dirty mark, failure row cleared
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 
@@ -197,6 +199,7 @@ def test_410_also_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 
@@ -214,15 +217,12 @@ def test_listing_gone_error_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
-    assert any("is_active = false" in sql for sql, _ in conn.executions)
+    assert calls["flip"] == [("sreality", "2836292428")]
     assert calls["log"][0]["outcome"] == "gone"
 
 
 def test_500_treated_as_fetch_error(monkeypatch):
-    prev_raw = _load_raw()
-    prev_hash = hashing.content_hash(prev_raw)
-    prev = {"id": 7, "content_hash": prev_hash, "raw_json": prev_raw}
-    calls = _patch_db(monkeypatch, prev)
+    calls = _patch_db(monkeypatch, _snap(_load_raw()))
 
     resp = requests.Response()
     resp.status_code = 500
@@ -258,16 +258,11 @@ def test_db_write_failure_is_fetch_error(monkeypatch):
     new_raw["price_czk"] = 22500
     new_raw["price_summary_czk"] = 22500
 
-    prev = {
-        "id": 7,
-        "content_hash": hashing.content_hash(prev_raw),
-        "raw_json": prev_raw,
-    }
-    calls = _patch_db(monkeypatch, prev)
+    calls = _patch_db(monkeypatch, _snap(prev_raw))
 
     def boom(*a, **k):
         raise RuntimeError("db down")
-    monkeypatch.setattr(freshness.db, "upsert_listing", boom)
+    monkeypatch.setattr(freshness.listing_write, "write_listings", boom)
 
     client = _StubClient(raw=new_raw)
     conn = _FakeConn()
@@ -280,7 +275,7 @@ def test_db_write_failure_is_fetch_error(monkeypatch):
 
 def test_no_prior_snapshot_treats_as_updated(monkeypatch):
     raw = _load_raw()
-    new_hash = hashing.content_hash(raw)
+    new_hash = content_hash(raw)
     calls = _patch_db(monkeypatch, prev=None, new_snap_id=1)
 
     client = _StubClient(raw=raw)
@@ -307,12 +302,7 @@ def test_image_changes_appear_in_what_changed(monkeypatch):
     added["order"] = len(images) + 1
     images.append(added)
 
-    prev = {
-        "id": 7,
-        "content_hash": hashing.content_hash(prev_raw),
-        "raw_json": prev_raw,
-    }
-    _patch_db(monkeypatch, prev)
+    _patch_db(monkeypatch, _snap(prev_raw))
 
     client = _StubClient(raw=new_raw)
     conn = _FakeConn()
@@ -331,12 +321,7 @@ def test_resigned_image_url_is_unchanged(monkeypatch):
         pytest.skip("fixture has no images to mutate")
     images[0]["url"] = images[0]["url"] + "?changed"
 
-    prev = {
-        "id": 7,
-        "content_hash": hashing.content_hash(prev_raw),
-        "raw_json": prev_raw,
-    }
-    _patch_db(monkeypatch, prev)
+    _patch_db(monkeypatch, _snap(prev_raw))
 
     client = _StubClient(raw=new_raw)
     conn = _FakeConn()

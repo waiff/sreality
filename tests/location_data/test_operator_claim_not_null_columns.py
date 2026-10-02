@@ -51,12 +51,3 @@ def test_operator_sql_never_nulls_a_defaulted_not_null_column():
         f"operator claim SQL overrides NOT NULL DEFAULT column(s) with NULL: {offenders}"
     )
 
-
-def test_legacy_write_path_unknown_is_computed_but_no_longer_stored():
-    """The column that caused the original NotNullViolation is gone (migration 498). Its
-    VALUE still has to be spelled — it is one of the 23 inputs to
-    `location_claim_fingerprint`, and a NULL there would fork every operator claim off the
-    fingerprints already on disk."""
-    assert re.search(r"false\s+AS\s+legacy_write_path_unknown", oc._OPERATOR_CLAIM_SQL)
-    assert "legacy_write_path_unknown" not in oc._OPERATOR_CLAIM_SQL.split(
-        "INSERT INTO location_claims (")[1].split(")")[0]

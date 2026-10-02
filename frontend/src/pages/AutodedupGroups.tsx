@@ -68,6 +68,7 @@ import VerdictNotes, {
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import MemberRow from '@/components/autodedup/MemberRow';
 import {
@@ -149,7 +150,7 @@ export default function AutodedupGroups() {
   const [urlFilters, setFilters] = useUrlFilters<GroupFilterState>(EMPTY_FILTERS);
   const filters = useMemo(() => sanitizeGroupFilters(urlFilters), [urlFilters]);
   const [openKey, setOpenKey] = useState<number | null>(null);
-  const { overlay, submit, submitSplit, pendingKey, splitErrors, splitResults } =
+  const { overlay, submit, submitSplit, isPending, splitErrors, splitResults } =
     useVerdictOverlay();
   /* The reason chips and the note, at page level for the same reason the
    * assignments are: the card and the dialog edit one decision. */
@@ -163,7 +164,7 @@ export default function AutodedupGroups() {
   const { latest } = useAutodedupGenerations();
 
   const list = useInfiniteList<AutodedupGroup, GroupsPage>({
-    queryKey: ['autodedup', 'groups', filters],
+    queryKey: autodedupKeys.groups(filters),
     queryFn: async (cursor) => {
       const res = await getAutodedupGroups(toQuery(filters, (cursor as string | null) ?? null));
       return {
@@ -229,7 +230,7 @@ export default function AutodedupGroups() {
             notes.annotationOf(splitNoteKey, null),
           ),
         ),
-      pending: pendingKey === key,
+      pending: isPending(key),
       annotation: notes.annotationOf(splitNoteKey, null),
       setAnnotation: (next) => notes.setAnnotation(splitNoteKey, next),
       error: splitErrors[key],
@@ -350,7 +351,7 @@ export default function AutodedupGroups() {
               eager={i < 2}
               blind={blind}
               verdict={overlay[String(group.cluster_key)] ?? group.verdict}
-              pending={pendingKey === String(group.cluster_key)}
+              pending={isPending(String(group.cluster_key))}
               notes={notes}
               onVerdict={(value, annotation) =>
                 submit(String(group.cluster_key), {
@@ -550,7 +551,7 @@ function GroupDialog({
   onClose: () => void;
 }) {
   const detail = useQuery({
-    queryKey: ['autodedup', 'group', clusterKey, generation],
+    queryKey: autodedupKeys.group(clusterKey, generation),
     queryFn: () => getAutodedupGroup(clusterKey, generation),
   });
   const data = detail.data?.data ?? null;

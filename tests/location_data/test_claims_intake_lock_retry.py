@@ -26,7 +26,7 @@ BASE_TS = datetime(2026, 9, 14, 9, 0, tzinfo=UTC)
 def _record(listing_id: int) -> tuple[Any, ...]:
     """One scan row in the selection's column order, with no stored body."""
     return (listing_id, "sreality", f"n{listing_id}", dict(SREALITY_POST_CUTOVER), BASE_TS,
-            None, False, None, None, None, 1, None)
+            None, False, None, None, 1, None)
 
 
 class _Cursor:

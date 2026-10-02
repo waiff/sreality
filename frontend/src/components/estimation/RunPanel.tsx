@@ -997,12 +997,13 @@ function comparableId(c: ComparableUsed): number {
  * listing_id-keyed row and a sreality_id-keyed row can never collide. */
 async function fetchComparableListings(
   comps: ComparableUsed[],
+  signal?: AbortSignal,
 ): Promise<Map<number, ListingPublic>> {
   const lids = comps.filter((c) => c.listing_id != null).map((c) => c.listing_id!);
   const sids = comps.filter((c) => c.listing_id == null).map((c) => c.sreality_id!);
   const [byLid, bySid] = await Promise.all([
-    fetchListingsForListingIds(lids),
-    fetchListingsByIds(sids),
+    fetchListingsForListingIds(lids, { signal }),
+    fetchListingsByIds(sids, { signal }),
   ]);
   /* byLid is already keyed by row.id, bySid by row.sreality_id — both equal
    * comparableId() for their respective comps, so a plain merge is safe. */
@@ -1052,7 +1053,7 @@ function useComparableImages(
 
   const legacyQ = useQuery<Map<number, ImagePublic[]>, Error>({
     queryKey: ['estimation-comparables', 'images-legacy', idsKey(sids)],
-    queryFn: () => fetchImagesByListingIds(sids, COMPARABLE_PHOTOS_PER_ID),
+    queryFn: ({ signal }) => fetchImagesByListingIds(sids, COMPARABLE_PHOTOS_PER_ID, { signal }),
     enabled: sids.length > 0,
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
@@ -1089,7 +1090,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
 
   const listingsQ = useQuery<Map<number, ListingPublic>, Error>({
     queryKey: ['estimation-comparables', 'listings', cids.join(',')],
-    queryFn: () => fetchComparableListings(comps),
+    queryFn: ({ signal }) => fetchComparableListings(comps, signal),
     enabled: comps.length > 0,
     staleTime: 60_000,
   });

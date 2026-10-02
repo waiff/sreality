@@ -493,7 +493,6 @@ def test_factory_validates_lease_n():
 class _WiringPortal:
     source = "fake"
     index_rate = 1.5
-    supports_complete_walk = False
 
     def categories(self) -> list[Any]:
         return []
@@ -511,9 +510,6 @@ class _WiringPortal:
 
         return _C()
 
-    def claimable_count(self, conn: Any) -> int:
-        return 0
-
 
 def test_runner_builds_limiter_through_the_factory(monkeypatch):
     calls: list[tuple[str, float, bool]] = []
@@ -523,6 +519,7 @@ def test_runner_builds_limiter_through_the_factory(monkeypatch):
         return RateLimiter(rate)
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", _recorder)
+    monkeypatch.setattr(portal_runner.db, "claimable_counts", lambda _c, _s=None: {})
     portal = _WiringPortal()
     portal_runner.run_index_walk(portal, dry_run=True)
     portal_runner.run_detail_drain(portal, 0, True, 1, 2.5)
