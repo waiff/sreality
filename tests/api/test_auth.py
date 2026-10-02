@@ -20,6 +20,7 @@ jwt = pytest.importorskip("jwt")  # PyJWT (api extra)
 
 from api import curation as api_curation
 from api import dependencies as deps
+from api import feedback as api_feedback
 from api import main as api_main
 from api import maps as api_maps
 from api import pipeline as api_pipeline
@@ -122,6 +123,18 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "get_estimation_run", fake_get_run)
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
     monkeypatch.setattr(api_main, "update_scenario", fake_update_scenario)
+    monkeypatch.setattr(api_main, "estimation_run_visible", lambda conn, run_id: True)
+    monkeypatch.setattr(
+        api_main, "get_trace_payload",
+        lambda conn, run_id, step_n: {"step_n": step_n, "full_output": {}, "captured_at": None},
+    )
+    monkeypatch.setattr(api_feedback, "list_feedback_for_run", lambda conn, run_id: [])
+    monkeypatch.setattr(
+        api_feedback, "insert_feedback",
+        lambda conn, *, estimation_run_id, feedback_text, initial_status: {
+            "id": 1, "estimation_run_id": estimation_run_id, "status": initial_status,
+        },
+    )
     monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake_parse_url)
 
     # Curation endpoints — gated coverage only; functional tests live in
@@ -256,6 +269,7 @@ _CREATE_TAG_BODY = {"name": "hot", "color": "brick"}
 _PATCH_TAG_BODY = {"name": "renamed", "color": "sage"}
 _ATTACH_TAG_BODY = {"tag_id": 1}
 _PIPELINE_CARD_BODY = {"property_id": 1}
+_FEEDBACK_BODY = {"feedback_text": "too broad", "kick_off_refinement": False}
 
 
 def _gated_calls(client) -> list:
@@ -288,7 +302,9 @@ def _jwt_gated_calls() -> list:
     in the hydration sprint's W-1c: on the service-role pair they were
     RLS-exempt behind a token that ships in the public SPA bundle, so any
     holder could read or delete another account's curation. api/curation.py's
-    header states the rule; this list is its test-side twin. Nothing in it may
+    header states the rule; this list is its test-side twin. The estimation
+    trace-payload + feedback routes followed on 2026-10-02 for the same reason
+    (any account's trace, and refiner LLM spend on any run). Nothing in it may
     move back to _gated_calls."""
     return [
         ("GET",    "/pipeline/stages", None),
@@ -298,6 +314,9 @@ def _jwt_gated_calls() -> list:
         ("POST",   "/estimations", _CREATE_ESTIMATION_BODY),
         ("GET",    "/estimations/1", None),
         ("PATCH",  "/estimations/1/scenario", {"rent_czk": 15000}),
+        ("GET",    "/estimations/1/trace/1/payload", None),
+        ("GET",    "/estimations/1/feedback", None),
+        ("POST",   "/estimations/1/feedback", _FEEDBACK_BODY),
         ("GET",    "/collections", None),
         ("POST",   "/collections/1/properties", _ADD_PROPERTIES_BODY),
         ("DELETE", "/collections/1/properties/2", None),

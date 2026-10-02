@@ -3,7 +3,8 @@
  * Two auth shapes, matching the backend gate each route actually uses:
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
- *    Collections list, Pipeline, Watchdog subscriptions, /estimations,
+ *    Collections list, Pipeline, Watchdog subscriptions, /estimations (incl.
+ *    trace payload + feedback since 2026-10-02),
  *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
@@ -412,7 +413,7 @@ export const getTracePayload = (
   runId: number,
   stepN: number,
 ): Promise<TracePayload> =>
-  request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`);
+  request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`, { jwt: true });
 
 /* Phase AI slice B — feedback capture. POST inserts a new
  * `estimation_feedback` row and (default) fires the slice C
@@ -434,6 +435,7 @@ export const listEstimationFeedback = (
 ): Promise<{ data: EstimationFeedback[] }> =>
   request<{ data: EstimationFeedback[] }>(
     `/estimations/${runId}/feedback`,
+    { jwt: true },
   );
 
 export const submitEstimationFeedback = (
@@ -443,6 +445,7 @@ export const submitEstimationFeedback = (
   request<FeedbackResponse>(`/estimations/${runId}/feedback`, {
     method: 'POST',
     json: input,
+    jwt: true,
   });
 
 export const decideRefinement = (

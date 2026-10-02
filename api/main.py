@@ -48,6 +48,7 @@ from api import feedback as feedback_module
 from api import refiner as refiner_module
 from api.estimation_runs import (
     create_estimation_run,
+    estimation_run_visible,
     get_estimation_run,
     get_trace_payload,
     latest_rent_estimations_by_listing,
@@ -968,9 +969,10 @@ def patch_estimation_scenario(
 def get_estimation_trace_payload(
     run_id: int,
     step_n: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
+    """RLS-only read: migration 292's policy on `estimation_trace_payloads` hides
+    another account's step, so a foreign run answers the same 404 as a missing one."""
     payload = get_trace_payload(conn, run_id, step_n)
     if payload is None:
         raise HTTPException(
@@ -983,10 +985,9 @@ def get_estimation_trace_payload(
 @app.get("/estimations/{run_id}/feedback")
 def list_estimation_feedback(
     run_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
-    if get_estimation_run(conn, run_id) is None:
+    if not estimation_run_visible(conn, run_id):
         raise HTTPException(status_code=404, detail="estimation run not found")
     return {"data": feedback_module.list_feedback_for_run(conn, run_id)}
 
@@ -995,9 +996,9 @@ def list_estimation_feedback(
 def post_estimation_feedback(
     run_id: int,
     body: s.CreateFeedbackIn,
-    conn: Any = Depends(deps.get_db_conn),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    service_conn: Any = Depends(deps.get_db_conn),
     llm_client: Any = Depends(deps.get_llm_client),
-    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     """Persist operator feedback on a run.
 
@@ -1006,14 +1007,22 @@ def post_estimation_feedback(
     pair; otherwise the row sits in `submitted` for a later batch
     run. Refiner failures persist as `status='failed'` on the
     feedback row — the operator still sees their note in the UI.
+
+    Two connections. The tenant `conn` is the GATE: a run RLS hides from the
+    caller 404s before any write or LLM spend. The writes ride `service_conn`
+    (the connection `llm_client` meters on): the refiner reads `skills` /
+    `app_settings` and inserts `skill_refinements`, none granted to
+    `authenticated`, and that insert's FK onto `estimation_feedback` needs the
+    feedback row COMMITTED, which the request-long tenant transaction cannot do
+    mid-request. Migration 292's trigger still stamps the feedback row with the
+    run's account, and `llm_calls` attributes through `estimation_run_id`.
     """
-    run = get_estimation_run(conn, run_id)
-    if run is None:
+    if not estimation_run_visible(conn, run_id):
         raise HTTPException(status_code=404, detail="estimation run not found")
 
     initial_status = "refining" if body.kick_off_refinement else "submitted"
     row = feedback_module.insert_feedback(
-        conn,
+        service_conn,
         estimation_run_id=run_id,
         feedback_text=body.feedback_text,
         initial_status=initial_status,
@@ -1022,11 +1031,12 @@ def post_estimation_feedback(
     refinement: dict[str, Any] | None = None
     if body.kick_off_refinement:
         from api.refiner import run_refinement
+        run = get_estimation_run(conn, run_id)
         refinement, terminal_status = run_refinement(
-            conn, llm_client, feedback=row, run=run,
+            service_conn, llm_client, feedback=row, run=run,
         )
         feedback_module.update_feedback_status(
-            conn,
+            service_conn,
             row["id"],
             status=terminal_status,
             refinement_id=refinement["id"] if refinement else None,

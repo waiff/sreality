@@ -107,6 +107,31 @@ describe('estimation subject identity', () => {
   });
 });
 
+describe('estimation trace payload + feedback', () => {
+  /* Tenant-scoped since 2026-10-02 (api/main.py, tenant_conn): the static bundle
+   * token is a 401 there — it used to read any account's trace payloads and
+   * spend refiner LLM credit on any run. */
+  it('sends the caller JWT on all three routes, never the bundle token', async () => {
+    vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({
+      data: { session: { access_token: 'USER-JWT' } },
+      error: null,
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    const { urls, headers } = captureFetch();
+    const api = await loadApi();
+    await api.getTracePayload(7, 2);
+    await api.listEstimationFeedback(7);
+    await api.submitEstimationFeedback(7, { feedback_text: 'too broad' });
+    expect(urls.map((u) => new URL(u).pathname)).toEqual([
+      '/estimations/7/trace/2/payload',
+      '/estimations/7/feedback',
+      '/estimations/7/feedback',
+    ]);
+    expect(headers.map((h) => h.Authorization)).toEqual([
+      'Bearer USER-JWT', 'Bearer USER-JWT', 'Bearer USER-JWT',
+    ]);
+  });
+});
+
 describe('postAutodedupVerdict', () => {
   /* THE STORED ROW IS NESTED. `POST /autodedup/verdict` answers
    * `{"data": {"verdict": {…row…}, "must_not_link": bool}}`; taking `data`

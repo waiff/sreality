@@ -244,6 +244,18 @@ _RLS_ONLY_ALLOWLIST: dict[str, str] = {
         "(own account OR SYSTEM OR platform admin), which no route-side `= %s` can restate"
     ),
     "PATCH /estimations/{run_id}/scenario": "UPDATE by id — migration 291 USING clause",
+    "GET /estimations/{run_id}/trace/{step_n}/payload": (
+        "RLS-only read (migration 292 on `estimation_trace_payloads`, the run's three arms)"
+    ),
+    "GET /estimations/{run_id}/feedback": (
+        "RLS-only read (migration 292 on `estimation_feedback`) behind an RLS run probe"
+    ),
+    "POST /estimations/{run_id}/feedback": (
+        "the tenant conn is the GATE (RLS probe of the run, 404 before any write or LLM "
+        "spend); the writes ride the service-role conn because the refiner's "
+        "`skill_refinements` FK needs the feedback row committed. Its account is "
+        "trigger-derived from the parent run (migration 292), never named by the route"
+    ),
     "GET /pipeline/stages": (
         "pure display read; `pipeline.list_stages` took no account as of W3 — migration "
         "294's policy on `pipeline_stages` is the scope"
@@ -325,3 +337,26 @@ def test_route_scope_census_is_not_vacuous() -> None:
         "rather than leave a stale exemption that could cover a future route:\n  "
         + "\n  ".join(stale)
     )
+
+
+# The three estimation child routes the 2026-10-01 review found on the service-role
+# connection behind the bundle-public static token: any holder could read any
+# account's trace payloads and spend refiner LLM credit on any run. They must stay
+# on the tenant connection, and the static token must not be their gate.
+_ESTIMATION_CHILD_ROUTES: tuple[tuple[str, str], ...] = (
+    ("GET", "/estimations/{run_id}/trace/{step_n}/payload"),
+    ("GET", "/estimations/{run_id}/feedback"),
+    ("POST", "/estimations/{run_id}/feedback"),
+)
+
+
+def test_estimation_child_routes_ride_the_tenant_connection() -> None:
+    by_key = {(m, p): _reachable_calls(r.dependant) for m, p, r in _api_routes()}
+    for key in _ESTIMATION_CHILD_ROUTES:
+        assert key in by_key, f"{key} is not mounted — the census below would be vacuous"
+        calls = by_key[key]
+        assert tenant_pool.tenant_conn in calls, f"{key} left the tenant connection"
+        assert deps.verify_jwt in calls, f"{key} no longer verifies a real JWT"
+        assert deps.require_token not in calls, (
+            f"{key} accepts the static bundle token again — it proves only 'loaded the SPA'"
+        )
