@@ -11,7 +11,7 @@ still closes through a sixth portal whose 5 % cross-portal slack covers the 2 % 
 
 The relation is memoised because the clusterer asks the same question many times: every union
 re-reads the merged member set, and a 32-member group is 496 pairs. A pair the engine never
-scored carries no feature row, so the two image facts simply do not apply to it — the same
+scored carries no feature row, so the image fact simply does not apply to it — the same
 reading `distinguishing_facts(..., feats=None)` gives, and the permissive direction, stated
 here so nobody reads this class as a strict bound.
 """
