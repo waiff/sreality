@@ -243,7 +243,7 @@ job clock, and the one that finished covered 2 of 10 categories and 13% of the b
 in ~2.3s each for exactly 20 requests, then one stalls for ~390 SECONDS and returns 200 — no
 429, no error, no retry, so every rail we own stays quiet. Twenty-four such stalls consumed 143
 of one 160-minute run. A residential IP shows no stall over 26 consecutive requests (0.62
-pages/s vs 0.047), so idnes now sets `USE_PROXY` like the two Cloudflare portals — but with
+pages/s vs 0.047), so idnes now sets `USE_PROXY` like ceskereality and mmreality — but with
 `PROXY_REQUIRED = False`, because idnes only *degrades* without the proxy where they hard-403,
 and skipping a slow portal trades degraded data for none.
 **The walk is SLICED, and the slices are REMEMBERED.** Each category is walked as the 14
@@ -408,8 +408,10 @@ page check (rule #3, source-scoped) even when the declared counts add up short �
 whole point of the 2026-09-08 structural gate, since one 87-row Karlovarský slice collecting 86
 had been vetoing a 20,964-row category. The detail URL carries the category, so the drain derives each listing's category from
 its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
-The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
-robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
+The client rides the residential proxy (`USE_PROXY`) with the shared Chrome browser `User-Agent` plus
+matching `sec-ch-ua` client hints (`CLIENT_HINTS` — since 2026-09-29 the site's own nginx 403s a hint-less
+Chrome UA), at a polite rate. The site's robots.txt disallows generic bots; sending browser-like headers is
+an operator-owned posture (decided 2026-10-02). NOTE: ceskereality ALSO has an on-demand URL parser
 (`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
 preview — a separate entry point unchanged by the scheduled scraper.
 

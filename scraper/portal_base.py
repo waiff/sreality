@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,50 @@ _BASE_HEADERS: dict[str, str] = {
         "Chrome/148.0.0.0 Safari/537.36"
     ),
 }
+
+
+_CHROME_MAJOR = re.compile(r"Chrome/(\d+)")
+# UAs whose real client hints differ from desktop Google Chrome's (mobile flag,
+# platform or brand), so desktop-Chrome hints would contradict them.
+_NOT_DESKTOP_CHROME = ("Android", "Mobile", "CrOS", "Edg/", "HeadlessChrome")
+# Chromium's GREASE brand: name, version and list order are all seeded by the major.
+_GREASE_CHARS = (" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_")
+_GREASE_VERSIONS = ("8", "99", "24")
+_GREASE_ORDERS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def _sec_ch_ua(major: int) -> str:
+    """The sec-ch-ua brand list desktop Google Chrome of this major version sends."""
+    grease = (
+        f'"Not{_GREASE_CHARS[major % 11]}A{_GREASE_CHARS[(major + 1) % 11]}Brand";'
+        f'v="{_GREASE_VERSIONS[major % 3]}"'
+    )
+    brands = ["", "", ""]
+    order = _GREASE_ORDERS[major % 6]
+    brands[order[0]] = grease
+    brands[order[1]] = f'"Chromium";v="{major}"'
+    brands[order[2]] = f'"Google Chrome";v="{major}"'
+    return ", ".join(brands)
+
+
+def client_hints(user_agent: str) -> dict[str, str]:
+    """Desktop Chrome's low-entropy client hints for this UA ({} unless desktop Google Chrome)."""
+    match = _CHROME_MAJOR.search(user_agent)
+    if match is None or any(token in user_agent for token in _NOT_DESKTOP_CHROME):
+        return {}
+    if "Windows NT" in user_agent:
+        platform = "Windows"
+    elif "Macintosh" in user_agent:
+        platform = "macOS"
+    elif "Linux" in user_agent:
+        platform = "Linux"
+    else:
+        platform = "Windows"
+    return {
+        "sec-ch-ua": _sec_ch_ua(int(match.group(1))),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": f'"{platform}"',
+    }
 
 
 class ListingGoneError(Exception):
@@ -85,6 +130,11 @@ class BasePortalClient:
     # "without it, do not bother". Default True preserves the two incumbents.
     PROXY_REQUIRED: bool = True
     PROXY_ENV = "SCRAPER_PROXY_URL"
+    # Opt-in: send the Chrome client hints (sec-ch-ua*) derived from the UA. A
+    # Chrome UA without them is the bot signature ceskereality's nginx started
+    # rejecting on 2026-09-29 (403 on every request); a real Chrome sends them on
+    # every HTTPS request. Per portal, so a healthy portal's request profile stays unchanged.
+    CLIENT_HINTS: bool = False
 
     def __init__(
         self,
@@ -105,6 +155,8 @@ class BasePortalClient:
         headers = {**_BASE_HEADERS, "Accept": self.ACCEPT}
         if self.USER_AGENT is not None:
             headers["User-Agent"] = self.USER_AGENT
+        if self.CLIENT_HINTS:
+            headers.update(client_hints(headers["User-Agent"]))
         self._session.headers.update(headers)
         if self.USE_PROXY:
             proxy = os.environ.get(self.PROXY_ENV)

@@ -6,12 +6,16 @@ feed), so this returns raw HTML for `scraper.ceskereality_parser`. The shared
 retry/backoff + adaptive throttle (`RateLimiter` + `penalize()` on 429/403) +
 `ListingGoneError` on a 404/410 all live in `scraper.portal_base.BasePortalClient`.
 
-Two ceskereality specifics live here:
-  - **Residential egress** (`USE_PROXY`): ceskereality's Cloudflare edge throttles
-    our datacenter (GitHub-Actions) IP into degraded pages, so every request routes
-    through the residential proxy in `SCRAPER_PROXY_URL`. With a residential exit IP
-    we use the shared BROWSER User-Agent (most natural; the honest-bot UA both got
-    throttled and is moot once we're proxied).
+Three ceskereality specifics live here:
+  - **Residential egress** (`USE_PROXY`): the site (its own nginx at a Czech host,
+    not Cloudflare) hard-403s our datacenter (GitHub-Actions) IP, so every request
+    routes through the residential proxy in `SCRAPER_PROXY_URL`. With a residential
+    exit IP we use the shared BROWSER User-Agent (most natural; the honest-bot UA
+    both got throttled and is moot once we're proxied).
+  - **Client hints** (`CLIENT_HINTS`): since 2026-09-29 the site's nginx 403s a
+    Chrome UA that arrives over HTTP/1.1 without the sec-ch-ua client hints (a
+    proxy cannot fix a header rule), so this client sends them, derived from the
+    shared UA.
   - **The kraj search URLs**: the 12-page cap is NOT site-wide — it applies to
     UNFILTERED category URLs only (`/prodej/byty/?strana=13` 404s, but
     `/prodej/byty/stredocesky-kraj/?strana=13` is fine and that slice pages to 50
@@ -121,10 +125,12 @@ def detail_url(path_or_url: str) -> str:
 
 class CeskerealityClient(BasePortalClient):
     ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    # Route through the residential proxy (SCRAPER_PROXY_URL) — the site throttles
+    # Route through the residential proxy (SCRAPER_PROXY_URL) — the site hard-403s
     # our datacenter IP. With a residential exit, the shared browser UA is most
     # natural, so no USER_AGENT override.
     USE_PROXY = True
+    # Its nginx 403s a Chrome UA without sec-ch-ua hints since 2026-09-29.
+    CLIENT_HINTS = True
 
     def fetch_search(self, url: str) -> tuple[str, int]:
         """Fetch one search-results page (any region host / facet path / page)."""

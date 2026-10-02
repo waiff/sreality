@@ -147,7 +147,8 @@ both index walk + detail drain in one job via `bezrealitky_main`). The maxima sc
 `scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", cron `50 */6` + dispatch —
 every request via the residential `SCRAPER_PROXY_URL` (CF 403s datacenter IPs; `USE_PROXY` +
 `PROXY_REQUIRED=True` so the worker skips it when unset — idnes is proxied too but sets
-`PROXY_REQUIRED=False`, being throttled rather than blocked);
+`PROXY_REQUIRED=False`, being throttled rather than blocked; ceskereality (own nginx, not CF) is the one
+portal with `CLIENT_HINTS=True`: since 09-29 it 403s a Chrome UA without sec-ch-ua hints, no proxy fixes);
 runs both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
 scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
 phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
