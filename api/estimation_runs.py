@@ -1147,6 +1147,22 @@ def estimation_run_visible(conn: "psycopg.Connection", run_id: int) -> bool:
         return cur.fetchone() is not None
 
 
+def estimation_run_owned(conn: "psycopg.Connection", run_id: int) -> bool:
+    """Is the run one of the caller's OWN accounts' — not merely visible?
+
+    `estimation_run_visible` also passes migration 291's shared SYSTEM arm, where
+    every pre-tenancy run sits: a child row a non-admin writes there is stamped
+    SYSTEM (migration 292) and so readable by every account. Errors raise.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM estimation_runs "
+            "WHERE id = %s AND account_id IN (SELECT current_account_ids())",
+            (run_id,),
+        )
+        return cur.fetchone() is not None
+
+
 def update_scenario(
     conn: "psycopg.Connection",
     run_id: int,

@@ -48,6 +48,7 @@ from api import feedback as feedback_module
 from api import refiner as refiner_module
 from api.estimation_runs import (
     create_estimation_run,
+    estimation_run_owned,
     estimation_run_visible,
     get_estimation_run,
     get_trace_payload,
@@ -996,44 +997,46 @@ def list_estimation_feedback(
 def post_estimation_feedback(
     run_id: int,
     body: s.CreateFeedbackIn,
-    conn: Any = Depends(tenant_pool.tenant_conn),
-    service_conn: Any = Depends(deps.get_db_conn),
-    llm_client: Any = Depends(deps.get_llm_client),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    """Persist operator feedback on a run.
+    """Persist feedback on a run; for an admin, optionally refine the skill.
 
-    When `kick_off_refinement=true` we fire the slice C refiner
-    synchronously and return the resulting (feedback, refinement)
-    pair; otherwise the row sits in `submitted` for a later batch
-    run. Refiner failures persist as `status='failed'` on the
-    feedback row — the operator still sees their note in the UI.
+    The note itself is a tenant write: a short tenant transaction gates on the
+    run (404 before any write), inserts the row (migration 292's trigger stamps
+    the run's account; its WITH CHECK backs the gate) and COMMITS. A non-admin
+    may write only on a run of their OWN account — the SYSTEM arm would publish
+    the note to every account.
 
-    Two connections. The tenant `conn` is the GATE: a run RLS hides from the
-    caller 404s before any write or LLM spend. The writes ride `service_conn`
-    (the connection `llm_client` meters on): the refiner reads `skills` /
-    `app_settings` and inserts `skill_refinements`, none granted to
-    `authenticated`, and that insert's FK onto `estimation_feedback` needs the
-    feedback row COMMITTED, which the request-long tenant transaction cannot do
-    mid-request. Migration 292's trigger still stamps the feedback row with the
-    run's account, and `llm_calls` attributes through `estimation_run_id`.
+    The refiner is admin-only (`kick_off_refinement` from anyone else stores
+    the row as `submitted`): it is unmetered LLM spend, and its row carries the
+    platform skill prompt that only `require_admin` routes otherwise return. It
+    rides a service-role connection opened after the commit — it reads
+    `skills` / `app_settings` and inserts `skill_refinements` (no
+    `authenticated` grant), whose FK needs the feedback row committed — so no
+    tenant transaction is held across the LLM call (the W1-1 boundary
+    `post_estimations` keeps too). Refiner failures persist as
+    `status='failed'` on the feedback row.
     """
-    if not estimation_run_visible(conn, run_id):
-        raise HTTPException(status_code=404, detail="estimation run not found")
+    admin = deps.is_admin(claims)
+    refine = body.kick_off_refinement and admin
+    gate = estimation_run_visible if admin else estimation_run_owned
+    with tenant_pool.tenant_transaction(claims) as conn:
+        if not gate(conn, run_id):
+            raise HTTPException(status_code=404, detail="estimation run not found")
+        row = feedback_module.insert_feedback(
+            conn,
+            estimation_run_id=run_id,
+            feedback_text=body.feedback_text,
+            initial_status="refining" if refine else "submitted",
+        )
+        run = get_estimation_run(conn, run_id) if refine else None
+    if not refine:
+        return {"feedback": row, "refinement": None}
 
-    initial_status = "refining" if body.kick_off_refinement else "submitted"
-    row = feedback_module.insert_feedback(
-        service_conn,
-        estimation_run_id=run_id,
-        feedback_text=body.feedback_text,
-        initial_status=initial_status,
-    )
-
-    refinement: dict[str, Any] | None = None
-    if body.kick_off_refinement:
-        from api.refiner import run_refinement
-        run = get_estimation_run(conn, run_id)
+    from api.refiner import run_refinement
+    with deps.open_background_conn() as service_conn:
         refinement, terminal_status = run_refinement(
-            service_conn, llm_client, feedback=row, run=run,
+            service_conn, deps.get_llm_client(service_conn), feedback=row, run=run,
         )
         feedback_module.update_feedback_status(
             service_conn,
@@ -1041,9 +1044,9 @@ def post_estimation_feedback(
             status=terminal_status,
             refinement_id=refinement["id"] if refinement else None,
         )
-        row["status"] = terminal_status
-        if refinement:
-            row["refinement_id"] = refinement["id"]
+    row["status"] = terminal_status
+    if refinement:
+        row["refinement_id"] = refinement["id"]
     return {"feedback": row, "refinement": refinement}
 
 

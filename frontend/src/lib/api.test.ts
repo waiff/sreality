@@ -108,9 +108,9 @@ describe('estimation subject identity', () => {
 });
 
 describe('estimation trace payload + feedback', () => {
-  /* Tenant-scoped since 2026-10-02 (api/main.py, tenant_conn): the static bundle
-   * token is a 401 there — it used to read any account's trace payloads and
-   * spend refiner LLM credit on any run. */
+  /* Tenant-scoped since 2026-10-02 (api/main.py: the tenant pool): the static
+   * bundle token is a 401 there — it used to read any account's trace payloads
+   * and spend refiner LLM credit on any run. */
   it('sends the caller JWT on all three routes, never the bundle token', async () => {
     vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({
       data: { session: { access_token: 'USER-JWT' } },

@@ -570,7 +570,9 @@ rules. Identify which one a task belongs to before you start.
   since migration 290), `/buildings*` (`building_runs` has tenant RLS since migration 291),
   and `POST /notifications/dispatches/{id}/estimate` (returns any account's dispatch and
   starts a run for it) — owed as `roadmap/public-release-track.md` item 11, an open list.
-  The estimation trace payload and both `/feedback` routes moved to `tenant_conn` 2026-10-02.
+  The estimation trace payload and both `/feedback` routes moved onto the tenant pool
+  2026-10-02; the feedback POST's refiner is admin-only (the `database` skill's
+  `references/tenancy.md`, named exception).
 - Every PostgREST read runs as `authenticated`; `anon` is granted nothing (Phase 0,
   migrations 299/331). The SPA reads the `*_public` views; the Browse/map read models
   `browse_list` (an UNLOGGED table rebuilt blue-green) and `properties_map_mv` — plain

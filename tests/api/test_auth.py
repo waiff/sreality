@@ -10,6 +10,7 @@ below deletes it to prove the 503 path.)
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import pytest
@@ -124,6 +125,14 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
     monkeypatch.setattr(api_main, "update_scenario", fake_update_scenario)
     monkeypatch.setattr(api_main, "estimation_run_visible", lambda conn, run_id: True)
+    monkeypatch.setattr(api_main, "estimation_run_owned", lambda conn, run_id: True)
+    # POST /estimations/{id}/feedback opens its own short tenant transaction in the
+    # handler (verify_jwt stays its route dependency, so this census still gates it).
+    @contextlib.contextmanager
+    def _stub_tenant_transaction(claims: dict):
+        yield object()
+
+    monkeypatch.setattr(tenant_pool, "tenant_transaction", _stub_tenant_transaction)
     monkeypatch.setattr(
         api_main, "get_trace_payload",
         lambda conn, run_id, step_n: {"step_n": step_n, "full_output": {}, "captured_at": None},

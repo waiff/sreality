@@ -38,11 +38,12 @@ def get_db_conn() -> "Iterator[psycopg.Connection]":
 
 @contextlib.contextmanager
 def open_background_conn() -> "Iterator[psycopg.Connection]":
-    """Open a dedicated DB connection for a FastAPI BackgroundTask.
+    """Open a dedicated service-role DB connection outside dependency injection.
 
     The request-scoped `get_db_conn` connection is closed once the HTTP
     response is sent, so background work that runs after the response
-    must open its own.
+    must open its own. A route that may touch the service role only after
+    an in-handler gate passes opens it here too, rather than as a dependency.
     """
     conn = db.connect(
         attempts=_API_CONNECT_ATTEMPTS, retry_delay=_API_CONNECT_RETRY_DELAY
@@ -304,11 +305,16 @@ def account_scope(
     return [str(account_id), SYSTEM_ACCOUNT_ID]
 
 
+def is_admin(claims: dict) -> bool:
+    """The is_admin claim, top-level or under app_metadata — require_admin's test."""
+    meta = claims.get("app_metadata") or {}
+    return claims.get("is_admin") is True or meta.get("is_admin") is True
+
+
 def require_admin(claims: dict = Depends(verify_jwt)) -> dict:
     """Gate admin-only routes on the is_admin claim (stamped onto the JWT's
     app_metadata from the admins table). Requires a real Supabase JWT — see
     verify_jwt's docstring."""
-    meta = claims.get("app_metadata") or {}
-    if claims.get("is_admin") is not True and meta.get("is_admin") is not True:
+    if not is_admin(claims):
         raise HTTPException(status_code=403, detail="Admin only")
     return claims

@@ -16,6 +16,8 @@ the DB gate's shared-market blind spot. Add the prefix here when you add the rou
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -178,6 +180,8 @@ def test_no_route_is_unauthenticated_by_accident() -> None:
 # that doubles in size for a class it cannot judge is a gate that cries wolf, and a
 # gate that cries wolf gets disabled. The account each of them resolves by hand is
 # the subject of the second arm of `tests/api/test_account_scope_census.py`.
+# `POST /estimations/{run_id}/feedback` sits outside it the same way (it opens its own
+# short `tenant_transaction`); the last test in this file holds that route instead.
 
 # Every entry is a deliberate, reviewable decision — adding one should take an
 # argument, not a reflex. The reason must say what scopes the route INSTEAD.
@@ -249,12 +253,6 @@ _RLS_ONLY_ALLOWLIST: dict[str, str] = {
     ),
     "GET /estimations/{run_id}/feedback": (
         "RLS-only read (migration 292 on `estimation_feedback`) behind an RLS run probe"
-    ),
-    "POST /estimations/{run_id}/feedback": (
-        "the tenant conn is the GATE (RLS probe of the run, 404 before any write or LLM "
-        "spend); the writes ride the service-role conn because the refiner's "
-        "`skill_refinements` FK needs the feedback row committed. Its account is "
-        "trigger-derived from the parent run (migration 292), never named by the route"
     ),
     "GET /pipeline/stages": (
         "pure display read; `pipeline.list_stages` took no account as of W3 — migration "
@@ -341,22 +339,39 @@ def test_route_scope_census_is_not_vacuous() -> None:
 
 # The three estimation child routes the 2026-10-01 review found on the service-role
 # connection behind the bundle-public static token: any holder could read any
-# account's trace payloads and spend refiner LLM credit on any run. They must stay
-# on the tenant connection, and the static token must not be their gate.
-_ESTIMATION_CHILD_ROUTES: tuple[tuple[str, str], ...] = (
+# account's trace payloads and spend refiner LLM credit on any run. The two reads ride
+# the request's tenant connection. The POST opens a SHORT tenant transaction in its
+# handler instead (gate + insert, committed), then the admin-only refiner on a
+# service-role connection — so it must reach neither the request-long `tenant_conn`
+# (its transaction would sit open across the LLM call, the W1-1 boundary) nor a
+# service-role dependency (opened before the gate could refuse a foreign run).
+_ESTIMATION_CHILD_READS: tuple[tuple[str, str], ...] = (
     ("GET", "/estimations/{run_id}/trace/{step_n}/payload"),
     ("GET", "/estimations/{run_id}/feedback"),
-    ("POST", "/estimations/{run_id}/feedback"),
 )
+_FEEDBACK_POST = ("POST", "/estimations/{run_id}/feedback")
 
 
 def test_estimation_child_routes_ride_the_tenant_connection() -> None:
-    by_key = {(m, p): _reachable_calls(r.dependant) for m, p, r in _api_routes()}
-    for key in _ESTIMATION_CHILD_ROUTES:
-        assert key in by_key, f"{key} is not mounted — the census below would be vacuous"
-        calls = by_key[key]
-        assert tenant_pool.tenant_conn in calls, f"{key} left the tenant connection"
+    routes = {(m, p): r for m, p, r in _api_routes()}
+    for key in (*_ESTIMATION_CHILD_READS, _FEEDBACK_POST):
+        assert key in routes, f"{key} is not mounted — the census below would be vacuous"
+        calls = _reachable_calls(routes[key].dependant)
         assert deps.verify_jwt in calls, f"{key} no longer verifies a real JWT"
         assert deps.require_token not in calls, (
             f"{key} accepts the static bundle token again — it proves only 'loaded the SPA'"
         )
+    for key in _ESTIMATION_CHILD_READS:
+        calls = _reachable_calls(routes[key].dependant)
+        assert tenant_pool.tenant_conn in calls, f"{key} left the tenant connection"
+
+    post = routes[_FEEDBACK_POST]
+    calls = _reachable_calls(post.dependant)
+    for held_too_early in (tenant_pool.tenant_conn, deps.get_db_conn, deps.get_llm_client):
+        assert held_too_early not in calls, (
+            f"{_FEEDBACK_POST} depends on {held_too_early.__name__} again — see the "
+            "comment above for why it must open its connections in the handler"
+        )
+    assert "tenant_pool.tenant_transaction(" in inspect.getsource(post.endpoint), (
+        f"{_FEEDBACK_POST} no longer gates on a tenant transaction"
+    )

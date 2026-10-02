@@ -179,6 +179,33 @@ and that list mirrors migration 291's three-arm policy (own account OR SYSTEM OR
 admin) rather than inventing a second tenancy definition. It never widens and never returns
 empty: an unresolvable account narrows to `[SYSTEM]`, a missing or bad credential raises.
 
+**Named exception — `POST /estimations/{run_id}/feedback`: a short tenant transaction, then
+admin-only service-role work.** The route does not take `tenant_conn`; it opens
+`tenant_pool.tenant_transaction(claims)` in the handler, for three reasons:
+
+- *The write gate is narrower than the read policy.* `estimation_runs`' three-arm read policy
+  (migration 291) passes every SYSTEM run, and migration 292's trigger stamps a child row with
+  its parent's account, so a non-admin's note on a SYSTEM run would be readable by every
+  account. A non-admin's gate is therefore `estimation_run_owned`
+  (`account_id IN (SELECT current_account_ids())`: the same one definition, minus the SYSTEM
+  arm); an admin's is `estimation_run_visible` (plain RLS). Both probes are strict: an error
+  raises. `_fetch_run`'s stub-on-error would read as "visible" and must never be a gate.
+- *The note is a shape-2 write.* The gate and the `INSERT` share the short tenant transaction.
+  The 292 trigger derives the account, and `WITH CHECK` backs the gate. The route names no
+  account.
+- *The refiner rides the service role, after the commit, and only for an admin.* It reads
+  `skills` / `app_settings` and inserts `skill_refinements` (none granted to `authenticated`),
+  and that insert's FK onto `estimation_feedback` needs the note committed. Running it after
+  the block also means no pooler backend sits idle in a tenant transaction across the LLM call
+  (the W1-1 boundary `POST /estimations` keeps too). The service connection opens only after
+  the gate passes. Admin-only, because the refiner is unmetered LLM spend and its row carries
+  the platform skill prompt; a non-admin's `kick_off_refinement` stores the note as
+  `submitted`.
+
+The route-scope census excludes it structurally (it reaches `verify_jwt`, not `tenant_conn`).
+`test_estimation_child_routes_ride_the_tenant_connection` holds its shape instead, and
+`tests/api/test_estimation_child_routes_tenancy.py` holds its behaviour.
+
 ### The two test rules that would have caught #917
 
 The outage survived seven weeks because three guards looked away at once, and two of them
@@ -201,7 +228,8 @@ an assertion, and outlived the behaviour it described. A comment is not a rail.
   app; every route on a tenant connection must either reach `require_account_id` or appear in
   `_RLS_ONLY_ALLOWLIST` with a reason naming what scopes it instead. Routes that reach
   `verify_jwt` on the service-role connection (`/brokers/*`, `POST /estimations`) are excluded
-  structurally, not enumerated. It has its own non-vacuity sentinel.
+  structurally, not enumerated, and so is the named exception above. It has its own
+  non-vacuity sentinel.
 - `tests/api/test_account_scope_census.py` — the ACCOUNT-SCOPE CENSUS, one layer down: no
   `account_id`/`account_ids` parameter in `api/` defaults to `None`, and every hand-rolled
   `resolve_account_id` call is enumerated with a reason. Both arms declare their blind spots.

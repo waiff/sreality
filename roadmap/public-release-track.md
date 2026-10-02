@@ -625,15 +625,17 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
     /estimations/{run_id}/trace/{step_n}/payload` and `GET` + `POST /estimations/{run_id}/feedback`
     ran service-role behind the SPA-bundle `VITE_API_TOKEN` alone, so any holder could read any
     account's trace payloads and post feedback on any run (by default spending refiner LLM credit).
-    They now take `tenant_pool.tenant_conn` (no `require_token`): the reads are RLS-only (migration
-    292 on `estimation_trace_payloads` / `estimation_feedback`), a foreign run 404s and the static
-    token 401s. `POST` gates on a strict RLS probe of the run (`estimation_run_visible`, 404 before
-    any write or LLM spend), then writes the feedback row + runs the refiner on the service-role
-    connection — the refiner's `skills` / `app_settings` / `skill_refinements` have no
-    `authenticated` grant, and the `skill_refinements → estimation_feedback` FK needs the feedback
-    row committed, which the request-long tenant transaction cannot do; migration 292's trigger
-    still stamps the run's account. SPA `getTracePayload` / `listEstimationFeedback` /
-    `submitEstimationFeedback` send `jwt: true`. Census: `tests/api/test_admin_route_coverage.py`;
+    The two reads now take `tenant_pool.tenant_conn` (no `require_token`): RLS-only (migration 292
+    on `estimation_trace_payloads` / `estimation_feedback`), a foreign run 404s and the static token
+    401s. `POST` takes `verify_jwt` and opens a SHORT `tenant_pool.tenant_transaction`: a strict
+    probe of the run (404 before any write; a non-admin must OWN the run, since a note on a SYSTEM
+    run would be stamped SYSTEM and readable by every account) plus the note's `INSERT`, committed.
+    The refiner is admin-only (unmetered LLM spend, and its row carries the platform skill prompt;
+    a non-admin's `kick_off_refinement` stores the note as `submitted`) and runs afterwards on a
+    service-role connection, so no tenant transaction sits open across the LLM call. Doctrine:
+    the `database` skill's `references/tenancy.md`, named exception. SPA `getTracePayload` /
+    `listEstimationFeedback` / `submitEstimationFeedback` send `jwt: true`. Census:
+    `tests/api/test_admin_route_coverage.py`;
     behaviour: `tests/api/test_estimation_child_routes_tenancy.py`. **Still owed, same shape:**
     `/filter-presets*` (`api/routes/filter_presets.py` → `api/filter_presets.py` `list_presets`
     selects every row; `filter_presets` is account-scoped with RLS since migration 290),

@@ -417,9 +417,9 @@ export const getTracePayload = (
 
 /* Phase AI slice B — feedback capture. POST inserts a new
  * `estimation_feedback` row and (default) fires the slice C
- * refiner inline; the response carries the (feedback, refinement)
- * pair so the UI can show the proposed prompt without a second
- * round-trip. */
+ * refiner inline — for an admin caller only; anyone else's note is
+ * stored as `submitted` with `refinement: null`. The response
+ * carries the (feedback, refinement) pair. */
 export interface CreateFeedbackIn {
   feedback_text: string;
   kick_off_refinement?: boolean;
