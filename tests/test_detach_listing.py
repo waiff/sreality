@@ -95,7 +95,7 @@ def test_an_advert_goes_back_to_its_origin_across_a_chain_of_merges():
     assert [e["undone_by"] for e in db.events if e["listing"] == 2] == [OP, OP]
     # the whole path goes to the carriers: 20 -> 10 -> 5; the pipeline restores 20's card and
     # drops the one that followed where it sits now unless it may carry another deal
-    # (test_property_carriers, live 4b to 4j)
+    # (test_property_carriers, live 4b to 4m)
     (step,) = _restores(db)
     assert (step.restored, step.left, [h.survivor for h in step.undo]) == (20, 5, [10, 5])
     assert step.left != step.undo[0].survivor
