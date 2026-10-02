@@ -1359,8 +1359,8 @@ renumber.** Navigate by area:
     rows `undone_at`/`undone_by` (never deleted). Then, for the operator, the rulings ONCE
     (`_rule_detached`: each moved advert `different` from every advert still on the property it
     left after ALL moves, never from another that moved in the call), then `properties_changed`
-    ONCE over every property left and reached. `detach_listing` is its one-advert adapter, kept
-    for the engine's per-advert undo loops below. An unknown advert refuses the whole set before
+    ONCE over every property left and reached. The engine's undo calls it ONCE per group
+    (below). An unknown advert refuses the whole set before
     anything moves; an empty set is a no-op. An advert NO standing merge moved (an ingest-time grouping, ~15.9k `native_multi` properties)
     is, while ANOTHER such own advert stays, a BIRTH through the one birth path (`split_native`,
     the operator's only: any other source answers `propose_only`, decision 9): the property
@@ -1371,12 +1371,12 @@ renumber.** Navigate by area:
     migration) — so the new record IS the advert's origin, and a later merge of the two
     (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
     property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
-    detach, `unapply` loop included, can leave an active property with no advert. No carrier
+    detach, `unapply`'s included, can leave an active property with no advert. No carrier
     runs on a native split: operator state, the pipeline card and the asset link stay on the
     property left (rules 18, 22).
     Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
-    undo covers both kinds. A group comes apart as a
-    loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
+    undo covers both kinds. A group comes apart as
+    one `detach_listings` call scoped to it (`merge_group_id=`: only while that merge is the newest to
     move the advert, else a conflict left in place) — `unmerge_group`,
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
     back every original property and asset link in any order (one asset held twice in a chained
@@ -1492,8 +1492,8 @@ renumber.** Navigate by area:
     deadline rolls back and halves its rate. The
     batch `apply` and `unapply` modes stay until the lane has run three live days and checkpoint
     C2 passes (the undo path after that is an open operator decision, `roadmap/autodedup.md`);
-    `legacy_retire` until W8. **The engine's only detaches** are two `detach_listing` loops that
-    write no ruling: `mode=unapply` over its own groups (below), and `retire_legacy=1`
+    `legacy_retire` until W8. **The engine's only detaches** are two `detach_listings` callers, one
+    call per group, that write no ruling: `mode=unapply` over its own groups (below), and `retire_legacy=1`
     (`autodedup/legacy_retire.py`), which, in the same dispatch and under the same `dry_run` as
     an apply, first undoes the removed engine's still-intact `source='auto'` merges whose adverts
     all sit in the scope's blocks and deal types (or whose merge mixed deal types), unless an
@@ -1512,7 +1512,7 @@ renumber.** Navigate by area:
     with `source='autodedup'` (migration 558 widened `property_merge_events.source`; that is
     the whole record of who merged), ONE `merge_group_id` per engine group inside one
     transaction, so each group is undoable as a unit (`mode=unapply`, newest-first, by
-    generation, run or time window: a loop of `detach_listing` over the adverts the group's
+    generation, run or time window: one `detach_listings` call over the adverts the group's
     merge moved, from the placement its ledger row recorded; the dry run reads each detach's
     answer from `detach_outcomes`). A dry run is the default and writes only
     its own ledger, `autodedup.applied_merges`; a live run refuses — recording why — any group
