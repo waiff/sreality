@@ -506,9 +506,10 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
 
 @pytest.mark.skipif(not (S14_TRIAL_RUN / "clusters.json").is_file() or not TRIAL.is_file(),
                     reason="the W14 offline data pack is not on this machine")
-def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
-    """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). Every
-    stored row decides identically and the groups are the same member sets under the same keys."""
+def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
+    """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
+    took the room tag out of every refusal, so a stored row whose tag sat at or above the
+    0.90 floor (or was unknown) decides identically, and every row that moved had it below."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -519,6 +520,9 @@ def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
         mnl if S14.operator_must_not_link else frozenset())
     decided = lambda rows: {(r["lo"], r["hi"]): (r["zone"], r["reason"], r["certificate"],  # noqa: E731
                                                  r["veto"], round(r["score"], 9)) for r in rows}
-    assert decided(read_pairs(tmp_path)) == decided(read_pairs(S14_TRIAL_RUN))
-    groups = lambda d: json.loads((d / "clusters.json").read_text())["clusters"]  # noqa: E731
-    assert groups(tmp_path) == groups(S14_TRIAL_RUN)
+    stored = read_pairs(S14_TRIAL_RUN)
+    now, then = decided(read_pairs(tmp_path)), decided(stored)
+    assert now.keys() == then.keys()
+    tag = {(r["lo"], r["hi"]): r["feats"].get("tag_room_clip_min2") for r in stored}
+    below = {key for key, slot in tag.items() if slot and slot[1] and slot[0] < 0.90}
+    assert {key for key in now if now[key] != then[key]} <= below

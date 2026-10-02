@@ -347,8 +347,8 @@ class Settings:
     # a difference that is INFERRED rather than stated, nor on one a known vocabulary or geocode
     # ambiguity explains. Promotion keeps reading every fact strictly — it has no positive
     # evidence to fall back on. Each limb names a measured loss class of the W14 arms:
-    #   image facts   — `interior` and `floorplan` are a CLIP similarity and a model flag, not
-    #                   anything either advert states (9 labelled duplicates).
+    #   image facts   — `floorplan` is a model flag, not anything either advert states
+    #                   (9 labelled duplicates, measured with `interior`, deleted by E929).
     #   street metres — two names for one corner building, pins 0.1-4 m apart (3 duplicates,
     #                   and the town probe's `street_kills_a_merge` worked example).
     #   total floors  — a one-storey gap across a boundary the camps cannot place is the same
@@ -830,9 +830,8 @@ class Settings:
     # A price or area that did not move is the strongest sign that one advert was posted twice,
     # so the stored number may only speak where a second stated number speaks with it.
     d43_house_number_move_tol: float = 0.002
-    # E243: the interior room match was measured in the HAZARD cell — one address point and
-    # ZERO tight non-catalogue frames in common. Two galleries that share a photograph are
-    # outside the cell the floor was cut in, so the floor does not apply to them.
+    # E243, INERT since E929: it narrowed the `interior` tag fact, which is deleted (a tag is
+    # never a fact). The key stays so every stored seed still loads (N1).
     d43_interior_requires_no_tight_photo: bool = False
     # E244: a commercial letting plan that PRICES each numbered space has said, per space,
     # an area and a rent — so the advert carrying the plan is one of its rows, and two adverts
@@ -1007,8 +1006,7 @@ class Settings:
     # (Koldům 1580: sreality 12, ceskereality 11, bažoš 0 — every body `v 1. nadzemním
     # podlaží`) are not read.
     d43_floor_column_body_prevails: bool = False
-    # E289: a same-portal re-post of ONE text at one area, never on sale together with its
-    # predecessor, may re-shoot its gallery; the `interior` image fact is not read there.
+    # E289, INERT since E929: it narrowed the deleted `interior` tag fact. Kept for N1.
     d43_interior_sequential_repost: bool = False
     # E290: E180's sequential excuse reaches the SAME-FEED one-storey limb too: one ceskereality
     # advert re-posted a day later with its storey column 5 -> 6 is one flat (Bohnice,

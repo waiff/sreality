@@ -376,32 +376,6 @@ def test_the_printed_area_does_not_prevail_across_two_printed_storeys() -> None:
     assert "area" not in names(a, c, cfg, PROMOTE)
 
 
-# --- E289: Český Jiřetín, a re-post that re-shot its gallery ---------------------------------
-JIRETIN = ("Hledáte pro sebe nové bydlení v rodinném domě, které by bylo možné kombinovat s "
-           "podnikáním? BONO reality Vám v zastoupení vlastníka nemovitosti nabízí ke koupi "
-           "víceúčelovou stavbu, která nabízí jak rodinné bydlení v prvním patře, tak také "
-           "komerční v podobě restaurace v přízemí. Nemovitost se nachází v obci Český Jiřetín.")
-INTERIOR = {"tag_room_clip_min2": (0.872, True)}
-
-
-def jiretin(listing_id: int, main: str, first: int, last: int, price: float) -> Listing:
-    return advert(listing_id, "bazos", JIRETIN, first, last, category_main=main,
-                  area_m2=108.0, price=price, disposition="3+1")
-
-
-def test_E289_a_one_text_re_post_may_re_shoot_its_gallery() -> None:
-    a, b = jiretin(205238, "komercni", 0, 4, 5650000.0), jiretin(15464113, "dum", 70, 110, 5350000.0)
-    assert "interior" in names(a, b, S12, feats=INTERIOR)
-    assert "interior" not in names(a, b, variant(d43_interior_sequential_repost=True),
-                                   feats=INTERIOR)
-
-
-def test_E289_two_galleries_on_sale_together_keep_the_interior_fact() -> None:
-    a, b = jiretin(205238, "komercni", 0, 90, 5650000.0), jiretin(15464113, "dum", 70, 110, 5650000.0)
-    assert "interior" in names(a, b, variant(d43_interior_sequential_repost=True),
-                               feats=INTERIOR)
-
-
 # --- E290: Bohnice, Kostřínská 583/6 ----------------------------------------------------------
 KOSTRINSKA = ("Nabízíme k prodeji byt 2+kk o užitné ploše 42 m², situovaný v panelovém domě s "
               "výtahem v klidné a dobře dostupné části Prahy 8 – Bohnicích. Byt v osobním "
