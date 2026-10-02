@@ -301,6 +301,12 @@ Independent of the analytical, UI, and map tracks.
   completed as gone; an all-NULL seen set no longer nominates the whole scope; a crawler image's 404
   no longer runs a sreality freshness fetch), the ~430-line dead absence sweep and all nine
   `mark_gone` adapters deleted.
+- 2026-10-02 (operator decision 2, option 1): the rows that sreality fetch falsely delisted get a
+  real page check on their own portal. `scripts/renominate_false_gone_crawler_rows.py` via
+  `renominate_false_gone.yml` (dry run default; `apply`, per-source `limit`, `source`) queues each at
+  `QUEUE_PRIORITY_VERIFY`; a live page reactivates, a gone one stays put. Prod 2026-10-01: 7,023
+  crawler rows carry the sreality `gone` verdict, 5,884 inactive, 2,061 with the flip signature.
+  **Next:** dispatch it once it is on `main` — dry run, then `apply` — and read the drains' reactivations.
 
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
