@@ -310,7 +310,9 @@ Independent of the analytical, UI, and map tracks.
   writer also re-stamped rows their portal had long closed (pages ceskereality/realitymix/mmreality
   still answer with HTTP 200). **Next:** once on `main`: dry run → `apply` with `limit=25` → once the
   drains ran, `readout_since` = the time the apply log prints; release (`limit=all`) only if
-  `written_unseen=0`, the `CHECK` rows open as real detail pages and erroring + given-up is
+  `written_unseen=0`, every `CHECK` row opens as a live detail page (all ceskereality/
+  realitymix/mmreality rows, plus any whose filled `raw_json` values, spec cells, images or
+  price dropped — content, since the HTML parsers' key set is fixed) and erroring + given-up is
   negligible (else first make the `enqueue_presence_checks` re-arm skip inactive listings — it
   re-arms given-up rows forever). Finish every pass within 7 days: the "already read as gone" skip
   and the readout read `detail_queue_completions` (7-day retention); a later pass only re-fetches.

@@ -209,34 +209,106 @@ def test_readout_and_apply_are_refused_together(monkeypatch: pytest.MonkeyPatch)
     assert ren.main() == 2
 
 
-def test_the_readout_reports_per_source_and_flags_rows_that_lost_keys(
+_BASELINE = datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc)
+
+
+def _reactivated(source: str, nid: str, **measures: Any) -> ren.ReactivatedRow:
+    """A PILOT_REACTIVATED_SQL row; every measure equal now/before unless overridden."""
+    row = {"price_now": 4_000_000, "price_before": 4_000_000, "baseline_at": _BASELINE,
+           "fields_now": 7, "fields_before": 7, "params_now": 18, "params_before": 18,
+           "images_now": 12, "images_before": 12} | measures
+    return ren.ReactivatedRow(source, nid, f"https://{source}.example/{nid}", **row)
+
+
+def test_the_readout_reports_per_source_and_flags_rows_that_lost_content(
         caplog: pytest.LogCaptureFixture) -> None:
     conn = _LedgerConn([])
-    conn.summary = [("bazos", 1, 2, 3, 10, 7, 0, 4, 3), ("mmreality", 0, 0, 0, 5, 5, 2, 0, 0)]
+    conn.summary = [("bazos", 1, 2, 3, 10, 7, 0, 4, 3), ("idnes", 0, 0, 0, 5, 5, 2, 0, 0)]
     conn.reactivated = [
-        ("mmreality", "mm1", "https://mm.example/1", 9, 31, 1_000, 2_000),
-        ("mmreality", "mm2", "https://mm.example/2", 31, 31, 2_000, 2_000),
+        _reactivated("idnes", "id1"),
+        _reactivated("idnes", "id2", params_now=0, images_now=0),
     ]
     since = datetime.now(timezone.utc) - timedelta(hours=3)
     with caplog.at_level("INFO", logger=ren.LOG.name):
         out = ren.readout(conn, since=since, source=None, max_rows=50)
     assert out["bazos"] == ren.SourceReadout(1, 2, 3, 10, 7, 0, 4, 3)
-    assert out["mmreality"].written_unseen == 2
-    assert [p for _, p in conn.executed] == [
-        {"since": since, "source": None, "verify": db.QUEUE_PRIORITY_VERIFY},
-        {"since": since, "source": None, "verify": db.QUEUE_PRIORITY_VERIFY, "max_rows": 50},
-    ]
+    assert out["idnes"].written_unseen == 2
+    params = {"since": since, "source": None, "verify": db.QUEUE_PRIORITY_VERIFY}
+    assert [p for _, p in conn.executed] == [params, params]
     assert conn.inserts() == []
     msgs = [r.getMessage() for r in caplog.records]
     assert ("READOUT source=bazos pending=1 erroring=2 given_up=3 written=10 reactivated=7 "
             "written_unseen=0 gone=4 gave_up=3") in msgs
     # rows = queue (1+2+3) + written + gone across sources; failing = erroring + given_up.
     assert "READOUT TOTAL rows=25 reactivated=12 gone=4 erroring_or_given_up=5 (20.0%)" in msgs
-    assert any(r.levelname == "WARNING" and "source=mmreality written_unseen=2" in r.getMessage()
+    assert any(r.levelname == "WARNING" and "source=idnes written_unseen=2" in r.getMessage()
                for r in caplog.records)
+    assert any(m.startswith("READOUT CHECK rows=1 of reactivated=2 ") for m in msgs)
     rows = [m for m in msgs if m.startswith("READOUT ROW source=")]
-    assert " CHECK " in rows[0] and "native_id=mm1" in rows[0]
-    assert " CHECK " not in rows[1]
+    # The CHECK row lists first, whatever the SQL order.
+    assert rows == [
+        "READOUT ROW source=idnes native_id=id2 fields=7/7 params=0/18 images=0/12 "
+        "price=4000000/4000000 baseline=2026-09-20 CHECK=fewer_params,fewer_images "
+        "url=https://idnes.example/id2",
+        "READOUT ROW source=idnes native_id=id1 fields=7/7 params=18/18 images=12/12 "
+        "price=4000000/4000000 baseline=2026-09-20 url=https://idnes.example/id1",
+    ]
+
+
+def test_a_fixed_shape_page_read_as_live_is_flagged_by_its_content() -> None:
+    # The review's case: an HTML parser builds the same seven keys for an archive page as
+    # for a live advert, so a key count never drops. The emptied values do.
+    same = _reactivated("remax", "re1")
+    assert ren.check_reasons(same) == []
+    assert ren.check_reasons(same._replace(fields_now=4)) == ["fewer_fields"]
+    assert ren.check_reasons(same._replace(params_now=2)) == ["fewer_params"]
+    assert ren.check_reasons(same._replace(params_now=None)) == ["fewer_params"]
+    assert ren.check_reasons(same._replace(images_now=0)) == ["fewer_images"]
+    assert ren.check_reasons(same._replace(price_now=None)) == ["price_lost"]
+    assert ren.check_reasons(same._replace(price_now=0)) == ["price_lost"]
+    # More content, or a measure the portal never had (no `params` in a JSON payload), is fine.
+    assert ren.check_reasons(same._replace(images_now=15, params_now=None,
+                                           params_before=None)) == []
+    assert ren.check_reasons(same._replace(price_now=3_500_000)) == []
+
+
+def test_no_earlier_snapshot_means_nothing_to_compare_so_it_is_opened() -> None:
+    row = _reactivated("bazos", "ba1", baseline_at=None, fields_before=None,
+                       params_now=None, params_before=None, images_before=None,
+                       price_before=None)
+    assert ren.check_reasons(row) == ["no_baseline"]
+
+
+@pytest.mark.parametrize("source", sorted(ren.HTTP_200_ON_REMOVAL))
+def test_every_row_of_a_portal_answering_removed_urls_with_200_is_opened(source: str) -> None:
+    assert ren.HTTP_200_ON_REMOVAL == {"ceskereality", "mmreality", "realitymix"}
+    assert ren.check_reasons(_reactivated(source, "x1")) == ["removed_url_200"]
+
+
+def test_the_row_list_cut_keeps_check_rows_and_warns_when_one_is_hidden(
+        caplog: pytest.LogCaptureFixture) -> None:
+    conn = _LedgerConn([])
+    conn.reactivated = ([_reactivated("idnes", f"ok{i}") for i in range(3)]
+                        + [_reactivated("idnes", f"bad{i}", images_now=0) for i in range(3)])
+    since = datetime.now(timezone.utc) - timedelta(hours=3)
+    with caplog.at_level("INFO", logger=ren.LOG.name):
+        ren.readout(conn, since=since, max_rows=2)
+    shown = [m for m in (r.getMessage() for r in caplog.records)
+             if m.startswith("READOUT ROW source=")]
+    assert [m.split()[3] for m in shown] == ["native_id=bad0", "native_id=bad1"]
+    assert any(r.levelname == "WARNING" and "cut at 2 of 6 rows" in r.getMessage()
+               and "1 CHECK rows not shown" in r.getMessage() for r in caplog.records)
+
+
+def test_the_readout_measures_content_not_top_level_keys() -> None:
+    rows = " ".join(ren.PILOT_REACTIVATED_SQL.split())
+    filled = "WHERE e.value NOT IN ('null', '\"\"', '[]', '{}')"
+    for side in ("l", "b"):
+        assert f"jsonb_each({side}.raw_json) e {filled}" in rows
+        assert f"jsonb_each({side}.raw_json->'params') e {filled}" in rows
+        assert f"jsonb_array_length({side}.raw_json->'image_urls')" in rows
+    assert "jsonb_object_keys" not in rows
+    assert "LIMIT %(max_rows)s" not in rows
 
 
 def test_a_readout_older_than_the_completion_ledger_warns(

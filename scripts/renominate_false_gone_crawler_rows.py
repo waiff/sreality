@@ -52,12 +52,19 @@ walk, no `is_active` check) ever touches again -- an inactive row would cycle th
 
 THE READOUT (`--readout-since`, read-only; the timestamp an apply run prints). Per source:
 the job's queue rows still pending / erroring / given up, and its completions -- written,
-reactivated, written WITHOUT moving `last_seen_at` (must be 0), gone, gave up. Then each
-reactivated row with its `raw_json` key count and price now against its last snapshot from
-before the check, so an archive or substitute card read as a live page stands out (fewer
-keys, other price). Release the rest only if `written_unseen` is 0, the reactivated rows
-look like detail pages, and the erroring + given-up share is negligible (else first make
-the re-arm skip inactive listings). Completions keep 7 days, so read it back within a week.
+reactivated, written WITHOUT moving `last_seen_at` (must be 0), gone, gave up. Then one
+READOUT ROW per reactivated row: its payload now against its last snapshot from before the
+check, each pair now/before -- filled top-level `raw_json` values, filled spec cells
+(`raw_json.params`), image URLs, price. The measures are CONTENT, not shape: the HTML
+parsers build a fixed set of top-level keys whatever page they read, so an archive page or
+a substitute card read as live shows as values gone empty, not as fewer keys. A row is
+flagged CHECK, with its reasons, when a measure dropped, the price was lost, no earlier
+snapshot exists to compare against, or its source is one of the three that answer a removed
+URL with HTTP 200 (`HTTP_200_ON_REMOVAL`): every ceskereality, realitymix and mmreality row
+is opened whatever its measures say -- at most 25 each in the pilot. CHECK rows list first.
+Release the rest only if `written_unseen` is 0, every CHECK row opens as that listing's live
+detail page, and the erroring + given-up share is negligible (else first make the re-arm
+skip inactive listings). Completions keep 7 days, so read it back within a week.
 
 Measured 2026-10-01 (read-only): 7,023 crawler rows carry the sreality 'gone' verdict;
 5,884 are inactive; 2,061 match the flip signature -- the upper bound above.
@@ -71,7 +78,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from scraper import db
 
@@ -166,47 +173,60 @@ SELECT COALESCE(d.source, w.source) AS source,
  ORDER BY 1
 """
 
-# Each reactivated job row against its last snapshot from before the check, fewest-keys
-# delta first: an archive page or substitute card parsed as live carries fewer keys.
+# Each reactivated job row's payload against its last snapshot from before the check, as
+# CONTENT: values that carry something (a fixed-shape parser fills its keys with null / "" /
+# [] / {} when the page lacks the content), filled spec cells, image URLs.
 PILOT_REACTIVATED_SQL = """
-SELECT r.source, r.native_id, r.source_url, r.keys_now, r.keys_before,
-       r.price_now, r.price_before
-  FROM (
-    SELECT l.source,
-           l.source_id_native AS native_id,
-           l.source_url,
-           CASE WHEN jsonb_typeof(l.raw_json) = 'object'
-                THEN (SELECT count(*) FROM jsonb_object_keys(l.raw_json)) END AS keys_now,
-           CASE WHEN jsonb_typeof(b.raw_json) = 'object'
-                THEN (SELECT count(*) FROM jsonb_object_keys(b.raw_json)) END AS keys_before,
-           l.price_czk AS price_now,
-           b.price_czk AS price_before
-      FROM (SELECT c.source, c.native_id, min(c.enqueued_at) AS enqueued_at
-              FROM detail_queue_completions c
-             WHERE c.outcome = 'written'
-               AND c.priority = %(verify)s
-               AND c.enqueued_at >= %(since)s
-               AND c.source <> 'sreality'
-               AND (%(source)s::text IS NULL OR c.source = %(source)s::text)
-             GROUP BY c.source, c.native_id) c
-      JOIN listings l
-        ON l.source = c.source AND l.source_id_native = c.native_id
-      LEFT JOIN LATERAL (
-            SELECT s.raw_json, s.price_czk
-              FROM listing_snapshots s
-             WHERE s.listing_id = l.id
-               AND s.scraped_at < c.enqueued_at
-             ORDER BY s.scraped_at DESC
-             LIMIT 1
-           ) b ON true
-     WHERE l.is_active = true
-       AND l.sreality_id < 0
-       AND EXISTS (SELECT 1 FROM listing_freshness_checks f
-                    WHERE f.sreality_id = l.sreality_id AND f.outcome = 'gone')
-  ) r
- ORDER BY r.source, r.keys_now - r.keys_before NULLS FIRST, r.native_id
- LIMIT %(max_rows)s
+SELECT l.source,
+       l.source_id_native AS native_id,
+       l.source_url,
+       l.price_czk AS price_now,
+       b.price_czk AS price_before,
+       b.scraped_at AS baseline_at,
+       CASE WHEN jsonb_typeof(l.raw_json) = 'object'
+            THEN (SELECT count(*) FROM jsonb_each(l.raw_json) e
+                   WHERE e.value NOT IN ('null', '""', '[]', '{}')) END AS fields_now,
+       CASE WHEN jsonb_typeof(b.raw_json) = 'object'
+            THEN (SELECT count(*) FROM jsonb_each(b.raw_json) e
+                   WHERE e.value NOT IN ('null', '""', '[]', '{}')) END AS fields_before,
+       CASE WHEN jsonb_typeof(l.raw_json->'params') = 'object'
+            THEN (SELECT count(*) FROM jsonb_each(l.raw_json->'params') e
+                   WHERE e.value NOT IN ('null', '""', '[]', '{}')) END AS params_now,
+       CASE WHEN jsonb_typeof(b.raw_json->'params') = 'object'
+            THEN (SELECT count(*) FROM jsonb_each(b.raw_json->'params') e
+                   WHERE e.value NOT IN ('null', '""', '[]', '{}')) END AS params_before,
+       CASE WHEN jsonb_typeof(l.raw_json->'image_urls') = 'array'
+            THEN jsonb_array_length(l.raw_json->'image_urls') END AS images_now,
+       CASE WHEN jsonb_typeof(b.raw_json->'image_urls') = 'array'
+            THEN jsonb_array_length(b.raw_json->'image_urls') END AS images_before
+  FROM (SELECT c.source, c.native_id, min(c.enqueued_at) AS enqueued_at
+          FROM detail_queue_completions c
+         WHERE c.outcome = 'written'
+           AND c.priority = %(verify)s
+           AND c.enqueued_at >= %(since)s
+           AND c.source <> 'sreality'
+           AND (%(source)s::text IS NULL OR c.source = %(source)s::text)
+         GROUP BY c.source, c.native_id) c
+  JOIN listings l
+    ON l.source = c.source AND l.source_id_native = c.native_id
+  LEFT JOIN LATERAL (
+        SELECT s.raw_json, s.price_czk, s.scraped_at
+          FROM listing_snapshots s
+         WHERE s.listing_id = l.id
+           AND s.scraped_at < c.enqueued_at
+         ORDER BY s.scraped_at DESC
+         LIMIT 1
+       ) b ON true
+ WHERE l.is_active = true
+   AND l.sreality_id < 0
+   AND EXISTS (SELECT 1 FROM listing_freshness_checks f
+                WHERE f.sreality_id = l.sreality_id AND f.outcome = 'gone')
+ ORDER BY l.source, l.source_id_native
 """
+
+# They answer a removed listing's URL with HTTP 200 (archive page, substitute cards), and
+# their gone markers were proven only on fresh removals: every reactivated row is opened.
+HTTP_200_ON_REMOVAL = frozenset({"ceskereality", "mmreality", "realitymix"})
 
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_LIMIT = 25
@@ -284,6 +304,47 @@ def run(conn: Any, *, apply: bool, limit: int | None, batch_size: int,
     return tallies
 
 
+class ReactivatedRow(NamedTuple):
+    """One PILOT_REACTIVATED_SQL row; each `_now`/`_before` pair is a content measure."""
+    source: str
+    native_id: str
+    url: str | None
+    price_now: int | None
+    price_before: int | None
+    baseline_at: datetime | None
+    fields_now: int | None
+    fields_before: int | None
+    params_now: int | None
+    params_before: int | None
+    images_now: int | None
+    images_before: int | None
+
+
+def _dropped(now: int | None, before: int | None) -> bool:
+    return bool(before) and (now is None or now < before)
+
+
+def check_reasons(row: ReactivatedRow) -> list[str]:
+    """Why this reactivated row must be opened before the release; empty when it need not be."""
+    reasons: list[str] = []
+    if row.source in HTTP_200_ON_REMOVAL:
+        reasons.append("removed_url_200")
+    if row.fields_before is None:
+        reasons.append("no_baseline")
+    for name, now, before in (("fields", row.fields_now, row.fields_before),
+                              ("params", row.params_now, row.params_before),
+                              ("images", row.images_now, row.images_before)):
+        if _dropped(now, before):
+            reasons.append(f"fewer_{name}")
+    if row.price_before and not row.price_now:
+        reasons.append("price_lost")
+    return reasons
+
+
+def _pair(now: Any, before: Any) -> str:
+    return f"{'-' if now is None else now}/{'-' if before is None else before}"
+
+
 @dataclass(frozen=True)
 class SourceReadout:
     pending: int
@@ -307,7 +368,7 @@ def readout(conn: Any, *, since: datetime, source: str | None = None,
     with conn.cursor() as cur:
         cur.execute(PILOT_SUMMARY_SQL, params)
         summary = cur.fetchall()
-        cur.execute(PILOT_REACTIVATED_SQL, {**params, "max_rows": max_rows})
+        cur.execute(PILOT_REACTIVATED_SQL, params)
         reactivated = cur.fetchall()
     out: dict[str, SourceReadout] = {}
     for src, *counts in summary:
@@ -329,14 +390,26 @@ def readout(conn: Any, *, since: datetime, source: str | None = None,
              checked, sum(r.reactivated for r in out.values()),
              sum(r.gone for r in out.values()), failing,
              100.0 * failing / checked if checked else 0.0)
-    for src, nid, url, keys_now, keys_before, price_now, price_before in reactivated:
-        fewer = keys_now is None or keys_before is None or keys_now < keys_before
-        LOG.info("READOUT ROW source=%s native_id=%s keys_now=%s keys_before=%s "
-                 "price_now=%s price_before=%s%s url=%s",
-                 src, nid, keys_now, keys_before, price_now, price_before,
-                 " CHECK" if fewer else "", url)
-    if len(reactivated) >= max_rows:
-        LOG.info("READOUT ROW list cut at %d rows (fewest-keys delta first)", max_rows)
+    flagged = [(row, check_reasons(row)) for row in map(ReactivatedRow._make, reactivated)]
+    flagged.sort(key=lambda pair: not pair[1])
+    n_check = sum(1 for _, why in flagged if why)
+    LOG.info("READOUT CHECK rows=%d of reactivated=%d -- open every one before releasing; "
+             "pairs are now/before (before = the last snapshot from before the check)",
+             n_check, len(flagged))
+    for row, why in flagged[:max_rows]:
+        LOG.info("READOUT ROW source=%s native_id=%s fields=%s params=%s images=%s price=%s "
+                 "baseline=%s%s url=%s",
+                 row.source, row.native_id, _pair(row.fields_now, row.fields_before),
+                 _pair(row.params_now, row.params_before),
+                 _pair(row.images_now, row.images_before),
+                 _pair(row.price_now, row.price_before),
+                 row.baseline_at.date().isoformat() if row.baseline_at else "-",
+                 f" CHECK={','.join(why)}" if why else "", row.url)
+    if len(flagged) > max_rows:
+        hidden = max(0, n_check - max_rows)
+        (LOG.warning if hidden else LOG.info)(
+            "READOUT ROW list cut at %d of %d rows (CHECK rows first); %d CHECK rows not "
+            "shown -- re-run per --source", max_rows, len(flagged), hidden)
     return out
 
 

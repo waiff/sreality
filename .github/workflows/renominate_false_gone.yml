@@ -13,10 +13,14 @@ name: "Ops: re-check crawler listings a sreality check falsely delisted"
 # mmreality answer such URLs with HTTP 200 (archive page, substitute card). So:
 #   1. apply=true with the default limit=25 (per source). The log prints a readout_since.
 #   2. Once the drains have run, dispatch again with that readout_since (read-only). Stop
-#      unless written_unseen=0 on every source, the "READOUT ROW ... CHECK" rows (fewer
-#      raw_json keys than the row's snapshot from before) are real detail pages when opened,
-#      and erroring_or_given_up is negligible -- a given-up row on an inactive listing is
-#      re-armed by every walk, forever (fix the re-arm in db.enqueue_presence_checks first).
+#      unless written_unseen=0 on every source, every "READOUT ROW ... CHECK=" row opens as
+#      that listing's live detail page, and erroring_or_given_up is negligible -- a given-up
+#      row on an inactive listing is re-armed by every walk, forever (fix the re-arm in
+#      db.enqueue_presence_checks first). CHECK marks EVERY ceskereality, realitymix and
+#      mmreality row (removed_url_200, at most 25 each), plus any row whose filled raw_json
+#      values, spec cells or image URLs dropped against its snapshot from before, whose price
+#      was lost, or that has no such snapshot. Content, not key counts: the HTML parsers
+#      build the same keys for an archive page as for a live one.
 #   3. Release the rest: apply=true, limit=all.
 # Finish all passes within 7 days of the first: the "already read as gone by its portal"
 # skip reads detail_queue_completions, which keeps 7 days, so a later pass re-fetches those
