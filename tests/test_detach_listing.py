@@ -1,5 +1,5 @@
-"""The one undo: `toolkit.property_identity.detach_listings` (and `detach_listing`, its
-one-advert adapter) and the origins route over it (decision 8). Over the stateful fake in
+"""The one undo: `toolkit.property_identity.detach_listings` (one advert at a time through
+`_detach`, then whole sets) and the origins route over it (decision 8). Over the stateful fake in
 tests/_property_ledger.py, so a merge and its undo replay end to end here (and in
 tests/test_property_merge_set.py), each carrier recorded at the seam and each after-step in
 `db.changed`; executed: tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
@@ -19,7 +19,6 @@ from toolkit import property_carriers as carriers
 from toolkit.property_carriers import DetachStep, Hop
 from toolkit.property_identity import (
     MergeError,
-    detach_listing,
     detach_listings,
     merge_property_set,
 )
@@ -44,6 +43,12 @@ def _verdicts(db: _Ledger) -> list[tuple[int, int, str, str]]:
             for r in _appended(db)]
 
 
+def _detach(db: _Ledger, lid: int, **kw: Any) -> dict[str, Any]:
+    """ONE advert through the set writer: its answer, plus the call's `rulings_written`."""
+    data = detach_listings(db, [lid], **kw)["data"]
+    return {**data["adverts"][0], "rulings_written": data["rulings_written"]}
+
+
 def _restores(db: _Ledger, name: str = "pipeline") -> list[DetachStep]:
     """The steps one carrier was handed by a detach (only one that reactivated a property)."""
     return [step for kind, carrier, step in db.carried if kind == "detach" and carrier == name]
@@ -52,9 +57,9 @@ def _restores(db: _Ledger, name: str = "pipeline") -> list[DetachStep]:
 def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
     db = _Ledger({1: 10, 2: 20, 3: 20})
     group = _merged(db, [10, 20])["merge_group_id"]
-    out = detach_listing(db, 2, decided_by=OP, reason="jiné patro")["data"]
+    out = _detach(db, 2, decided_by=OP, reason="jiné patro")
     assert out == {**out, "detached": True, "outcome": "detached", "listing_id": 2,
-                   "survivor_property_id": 10, "restored_property_id": 20,
+                   "left_property_id": 10, "restored_property_id": 20,
                    "reactivated": True, "merge_group_ids": [group]}
     assert db.listings == {1: 10, 2: 20, 3: 10} and db.props[20] == "active"
     # the ledger keeps every row; the restored property's card comes from THAT merge's snapshot
@@ -62,7 +67,7 @@ def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
     assert _restores(db) == [DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),),
                                         source="operator")]
     # its sibling joins it without reactivating (or restoring) anything a second time
-    assert not detach_listing(db, 3, decided_by=OP)["data"]["reactivated"]
+    assert not _detach(db, 3, decided_by=OP)["reactivated"]
     assert db.listings == {1: 10, 2: 20, 3: 20}
     assert len(_restores(db)) == 1
 
@@ -70,13 +75,13 @@ def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
 def test_a_second_detach_and_a_native_advert_are_no_ops_that_say_so():
     db = _Ledger({1: 10, 2: 20})
     _merged(db, [10, 20])
-    detach_listing(db, 2, decided_by=OP)
+    _detach(db, 2, decided_by=OP)
     rulings = len(_verdicts(db))
     for lid, where in ((2, 20), (1, 10)):
-        again = detach_listing(db, lid, decided_by=OP)["data"]
+        again = _detach(db, lid, decided_by=OP)
         assert (again["detached"], again["outcome"], again["rulings_written"]) == (
             False, "not_merged", 0)
-        assert again["restored_property_id"] == again["survivor_property_id"] == where
+        assert again["restored_property_id"] == again["left_property_id"] == where
     assert len(_verdicts(db)) == rulings
 
 
@@ -89,7 +94,7 @@ def test_an_advert_goes_back_to_its_origin_across_a_chain_of_merges():
     # with the merge that took each advert from its origin: the oldest that stands
     assert pi.listing_origins(db, [1, 2, 9]) == {1: (10, "autodedup", T0),
                                                  2: (20, "operator", T0)}
-    out = detach_listing(db, 2, decided_by=OP)["data"]
+    out = _detach(db, 2, decided_by=OP)
     assert out["restored_property_id"] == 20 and len(out["merge_group_ids"]) == 2
     assert db.listings == {1: 5, 2: 20, 9: 5}
     assert [e["undone_by"] for e in db.events if e["listing"] == 2] == [OP, OP]
@@ -105,9 +110,9 @@ def test_a_group_scoped_detach_undoes_only_that_merge_while_it_is_the_newest():
     first = _merged(db, [10, 20], source="autodedup")["merge_group_id"]
     second = _merged(db, [5, 10], source="autodedup")["merge_group_id"]
     scoped = {"decided_by": "autodedup-unapply:r", "source": "autodedup"}
-    moved_on = detach_listing(db, 2, merge_group_id=first, **scoped)["data"]
+    moved_on = _detach(db, 2, merge_group_id=first, **scoped)
     assert moved_on["outcome"] == "moved_on" and db.listings[2] == 5
-    back = detach_listing(db, 2, merge_group_id=second, **scoped)["data"]
+    back = _detach(db, 2, merge_group_id=second, **scoped)
     assert back["restored_property_id"] == 10 and back["merge_group_ids"] == [second]
     assert db.props[10] == "active" and db.listings[2] == 10
     assert back["rulings_written"] == 0 and db.sql("autodedup.") == [], "an engine undo rules nothing"
@@ -117,16 +122,16 @@ def test_an_advert_moved_outside_the_ledger_stays_and_a_missing_one_is_an_error(
     db = _Ledger({1: 10, 2: 20, 7: 70})
     _merged(db, [10, 20])
     db.listings[2] = 70
-    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "moved_since"
+    assert _detach(db, 2, decided_by=OP)["outcome"] == "moved_since"
     assert db.listings[2] == 70
     # moved by a concurrent merge between the ledger read and the property locks: left there
     db.listings[2], dispatch = 10, db.dispatch
     db.dispatch = lambda s, p: (db.listings.update({2: 70}) if "FOR UPDATE" in s
                                 else None) or dispatch(s, p)
-    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "moved_since"
+    assert _detach(db, 2, decided_by=OP)["outcome"] == "moved_since"
     assert db.listings[2] == 70 and db.sql("UPDATE property_merge_events SET undone_at") == []
     with pytest.raises(MergeError):
-        detach_listing(db, 99, decided_by=OP)
+        _detach(db, 99, decided_by=OP)
 
 
 def test_an_origin_a_later_merge_retired_elsewhere_is_left_merged_and_the_advert_stays():
@@ -135,12 +140,12 @@ def test_an_origin_a_later_merge_retired_elsewhere_is_left_merged_and_the_advert
     second time: nothing moves, and the outcome says why (rule 22)."""
     db = _Ledger({1: 10, 31: 30, 32: 30, 9: 5}, first_seen={5: T0 - timedelta(days=9)})
     _merged(db, [10, 30])
-    assert detach_listing(db, 31, decided_by=OP)["data"]["reactivated"]
+    assert _detach(db, 31, decided_by=OP)["reactivated"]
     _merged(db, [5, 30], source="autodedup")
     restores = len(_restores(db))
     # x1 may go back to 30 from 5; x2 may not from 10 while that merge stands
     assert pi.detach_outcomes(db, [31, 32]) == {31: "detached", 32: "origin_moved_on"}
-    out = detach_listing(db, 32, decided_by=OP)["data"]
+    out = _detach(db, 32, decided_by=OP)
     assert (out["detached"], out["outcome"], out["rulings_written"]) == (
         False, "origin_moved_on", 0)
     assert db.listings[32] == 10 and db.props[30] == "merged_away" and db.into[30] == 5
@@ -150,7 +155,7 @@ def test_an_origin_a_later_merge_retired_elsewhere_is_left_merged_and_the_advert
     dispatch = db.dispatch
     db.dispatch = lambda s, p: (db.into.update({30: 7}) if "FOR UPDATE" in s
                                 else None) or dispatch(s, p)
-    assert detach_listing(db, 31, decided_by=OP)["data"]["outcome"] == "origin_moved_on"
+    assert _detach(db, 31, decided_by=OP)["outcome"] == "origin_moved_on"
     assert db.listings[31] == 5
 
 
@@ -161,10 +166,10 @@ def test_the_asset_link_a_merge_carried_goes_back_with_its_property(same_asset):
     db = _Ledger({1: 10, 2: 20, 3: 20}, assets={20: 7, **({10: 7} if same_asset else {})})
     group = _merged(db, [10, 20])["merge_group_id"]
     assert db.assets == {10: 7, 20: None}
-    detach_listing(db, 2, decided_by=OP)
+    _detach(db, 2, decided_by=OP)
     assert db.assets == {10: 7 if same_asset else None, 20: 7}
     assert (7, 20, "linked", f"detach {group}") in db.asset_events
-    detach_listing(db, 3, decided_by=OP)
+    _detach(db, 3, decided_by=OP)
     assert db.assets == {10: 7 if same_asset else None, 20: 7}
 
 
@@ -172,7 +177,7 @@ def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_st
     db = _Ledger({1: 10, 2: 10, 3: 20})
     _merged(db, [10, 20])
     db.log.clear()
-    out = detach_listing(db, 3, decided_by=OP, reason="jiné patro")["data"]
+    out = _detach(db, 3, decided_by=OP, reason="jiné patro")
     note = "operator detach from 10: jiné patro"
     assert _verdicts(db) == [(1, 3, "different", note), (2, 3, "different", note)]
     assert out["rulings_written"] == 2
@@ -189,7 +194,7 @@ def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_changes_both_on
     group = _merged(db, [10, 20])["merge_group_id"]
     for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
         seen.clear()
-    detach_listing(db, 2, decided_by=OP)
+    _detach(db, 2, decided_by=OP)
     step = DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),), source="operator")
     walked = [s for s, _p in db.log if s.startswith("carrier:") or s.startswith("WITH carried AS")]
     assert walked == [f"carrier:{c.name}" for c in reversed(carriers.PROPERTY_CARRIERS)
@@ -223,7 +228,7 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(ba
     _merged(db, [60, 10, 80])
     assert len(set(db.listings.values())) == 3 and db.assets[60] == 7
     for lid in sorted(pi.listing_origins(db, list(original)), reverse=backwards):
-        detach_listing(db, lid, decided_by=OP)
+        _detach(db, lid, decided_by=OP)
     assert db.listings == original and set(db.props.values()) == {"active"}
     assert {pid: a for pid, a in db.assets.items() if a} == links
     assert all(e["undone_by"] for e in db.events), "a detach left a live ledger row behind"
@@ -240,11 +245,11 @@ def test_a_native_advert_is_born_a_new_record_through_the_one_birth_path():
 
     db = _Ledger({1: 10, 2: 10, 3: 10})
     assert pi.detach_outcomes(db, [1, 2, 3]) == dict.fromkeys((1, 2, 3), "split_native")
-    out = detach_listing(db, 2, decided_by=OP, reason="jiné patro")["data"]
+    out = _detach(db, 2, decided_by=OP, reason="jiné patro")
     born = out["restored_property_id"]
     assert born not in (None, 10) and db.listings == {1: 10, 2: born, 3: 10}
     assert out == {**out, "detached": True, "outcome": "split_native", "listing_id": 2,
-                   "survivor_property_id": 10, "reactivated": False, "rulings_written": 2}
+                   "left_property_id": 10, "reactivated": False, "rulings_written": 2}
     (birth,) = [(s, p) for s, p in db.log if "INSERT INTO properties" in s]
     assert birth == (" ".join(NEW_SINGLETONS_SQL.split()), {"ids": [2]})
     (row,) = db.events
@@ -257,7 +262,7 @@ def test_a_native_advert_is_born_a_new_record_through_the_one_birth_path():
     assert pi.listing_origins(db, [2]) == {} and pi.detach_outcomes(db, [2]) == {2: "not_merged"}
     note = "operator detach from 10: jiné patro"
     assert _verdicts(db) == [(1, 2, "different", note), (2, 3, "different", note)]
-    again = detach_listing(db, 2, decided_by=OP)["data"]
+    again = _detach(db, 2, decided_by=OP)
     assert (again["detached"], again["outcome"], again["restored_property_id"]) == (
         False, "not_merged", born)
     assert len(db.events) == 1 and len(_verdicts(db)) == 2
@@ -265,7 +270,7 @@ def test_a_native_advert_is_born_a_new_record_through_the_one_birth_path():
 
 def test_a_native_split_takes_the_merges_lock_order_and_leaves_curation_behind():
     db = _Ledger({1: 10, 2: 10})
-    detach_listing(db, 2, decided_by=OP)
+    _detach(db, 2, decided_by=OP)
     order = [s for s, _p in db.log]
     lock = next(i for i, s in enumerate(order) if s.endswith("FOR UPDATE"))
     move = next(i for i, s in enumerate(order) if s.startswith("UPDATE listings SET property_id"))
@@ -284,11 +289,11 @@ def test_a_split_advert_merged_back_is_detached_to_its_new_record():
     """The round trip: the operator (or the engine) merges the two records again through the
     one merge; a detach then returns the advert to the record it was born on."""
     db = _Ledger({1: 10, 2: 10})
-    born = detach_listing(db, 2, decided_by=OP)["data"]["restored_property_id"]
+    born = _detach(db, 2, decided_by=OP)["restored_property_id"]
     merged = _merged(db, [10, born], source="autodedup")
     assert merged["survivor_id"] == 10 and db.listings == {1: 10, 2: 10}
     assert pi.listing_origins(db, [1, 2]) == {2: (born, "autodedup", T0)}
-    back = detach_listing(db, 2, decided_by=OP)["data"]
+    back = _detach(db, 2, decided_by=OP)
     assert (back["outcome"], back["restored_property_id"], back["reactivated"]) == (
         "detached", born, True)
     assert db.listings == {1: 10, 2: born} and db.props[born] == "active"
@@ -302,14 +307,14 @@ def test_only_the_operator_splits_a_native_advert_and_a_group_undo_never_does():
     scoped = {"decided_by": "autodedup-unapply:r", "source": "autodedup"}
     assert pi.detach_outcomes(db, [1, 2], merge_group_id=group) == {1: "not_merged",
                                                                     2: "not_merged"}
-    assert detach_listing(db, 1, merge_group_id=group, **scoped)["data"]["outcome"] == "not_merged"
+    assert _detach(db, 1, merge_group_id=group, **scoped)["outcome"] == "not_merged"
     events, db.log[:] = list(db.events), []
-    out = detach_listing(db, 1, decided_by="autodedup-reconcile", source="autodedup")["data"]
+    out = _detach(db, 1, decided_by="autodedup-reconcile", source="autodedup")
     assert (out["detached"], out["outcome"], out["restored_property_id"]) == (
         False, "propose_only", 10)
     assert db.events == events and db.listings == {1: 10, 2: 10, 3: 10}
     assert not any("INSERT INTO properties" in s or s.startswith("UPDATE") for s, _p in db.log)
-    assert detach_listing(db, 1, decided_by=OP)["data"]["outcome"] == "split_native"
+    assert _detach(db, 1, decided_by=OP)["outcome"] == "split_native"
 
 
 def test_the_last_own_advert_stays_while_merged_adverts_share_its_property():
@@ -321,12 +326,12 @@ def test_the_last_own_advert_stays_while_merged_adverts_share_its_property():
         db = _Ledger({1: 10, 2: 20})
         group = _merged(db, [10, 20], source=source)["merge_group_id"]
         assert pi.detach_outcomes(db, [1, 2]) == {1: "last_native", 2: "detached"}
-        out = detach_listing(db, 1, decided_by=OP)["data"]
+        out = _detach(db, 1, decided_by=OP)
         assert (out["detached"], out["outcome"], out["rulings_written"]) == (
             False, "last_native", 0)
         assert db.listings == {1: 10, 2: 10} and len(db.events) == 1
         undo = {"merge_group_id": group, "source": "autodedup"} if source == "autodedup" else {}
-        assert detach_listing(db, 2, decided_by=OP, **undo)["data"]["outcome"] == "detached"
+        assert _detach(db, 2, decided_by=OP, **undo)["outcome"] == "detached"
         assert db.listings == {1: 10, 2: 20} and db.props == {10: "active", 20: "active"}
         assert pi.detach_outcomes(db, [1]) == {1: "not_merged"}
 
@@ -341,14 +346,14 @@ def test_a_native_split_replans_under_the_lock():
         db.dispatch = lambda s, p: (change() if "FOR UPDATE" in s else None) or dispatch(s, p)
 
     meanwhile(lambda: db.listings.update({1: 70}))
-    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "not_merged"
+    assert _detach(db, 2, decided_by=OP)["outcome"] == "not_merged"
     db.listings[1] = 10
     meanwhile(lambda: db.events.append({"id": 99, "group": "g", "survivor": 10, "listing": 1,
                                         "prev": 70, "source": "operator", "undone_by": None}))
-    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "last_native"
+    assert _detach(db, 2, decided_by=OP)["outcome"] == "last_native"
     db.events.clear()
     meanwhile(lambda: db.listings.update({2: 70}))
-    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "moved_since"
+    assert _detach(db, 2, decided_by=OP)["outcome"] == "moved_since"
     assert db.events == [] and _verdicts(db) == [] and set(db.props) == {10, 70}
 
 

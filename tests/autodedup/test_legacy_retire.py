@@ -1,9 +1,9 @@
 """A2 (temporary, deleted in W8): the old engine's merges undone in the apply scope's blocks.
 
 Over test_apply's stateful fake (`FakeDb`, whose `location` is `listing_location`), extended with
-the area and the three reads the retire step runs. Its detach mimics the toolkit's contract
-(`_detach_plan`, `_origin_gone`) and records every call; the one test over the REAL
-`detach_listing` shows the arguments the step passes write no ruling.
+the area and the three reads the retire step runs. Its set detach mimics the toolkit's contract
+(`_detach_plan`, `_origin_gone`) and records every advert it is handed; the one test over the
+REAL `detach_listings` shows the arguments the step passes write no ruling.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 
@@ -24,7 +24,7 @@ from tests._property_ledger import _Ledger, ledger_carriers  # noqa: F401 — th
 from toolkit.property_identity import (
     _detach_plan,
     _origin_gone,
-    detach_listing,
+    detach_listings,
     merge_property_set,
 )
 
@@ -100,40 +100,55 @@ class RetireDb(FakeDb):
         return super().dispatch(sql, p)
 
     def detach_recording(self, calls: list[dict[str, Any]]) -> Any:
-        """The toolkit's per-advert detach, faked, stamping `undone_by` and writing a ruling
-        only for the operator (as `detach_listing` does)."""
-        def detach(conn: "RetireDb", listing_id: int, *, decided_by: str,
+        """The toolkit's set detach, faked: each advert in the caller's order inside one
+        transaction, recorded, `undone_by` stamped, a ruling written only for the operator (as
+        `detach_listings` does)."""
+        def detach(conn: "RetireDb", listing_ids: Sequence[int], *, decided_by: str,
                    reason: str | None = None, source: str = "operator",
                    merge_group_id: str | None = None) -> dict[str, Any]:
-            calls.append({"listing_id": listing_id, "decided_by": decided_by, "source": source,
-                          "merge_group_id": merge_group_id})
-            reactivated = False
+            adverts = []
             with conn.transaction():
-                current = conn.listings[listing_id]["property_id"]
-                moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
-                         for e in conn.events if e["listing"] == listing_id and not e["undone"]]
-                here = [lid for lid, row in conn.listings.items() if row["property_id"] == current]
-                merged = {e["listing"] for e in conn.events if not e["undone"]}
-                outcome, undo, target = _detach_plan(current, moves, merge_group_id,
-                                                     (len(here), len(set(here) - merged)))
-                if outcome == "detached" and _origin_gone(
-                        (conn.properties[target]["status"],
-                         conn.properties[target]["merged_into"]), undo):
-                    outcome = "origin_moved_on"
-                if outcome == "detached":
-                    conn.listings[listing_id]["property_id"] = target
-                    for e in conn.events:
-                        if e["id"] in {m[0] for m in undo}:
-                            e.update(undone=True, undone_by=decided_by)
-                    back = conn.properties[target]
-                    if back["status"] == "merged_away":
-                        back.update(status="active", merged_into=None, merged_at=None)
-                        reactivated = True
-                    if source == "operator":
-                        conn.verdicts.append({"kind": "pair", "verdict": "different"})
-            return {"data": {"detached": outcome == "detached", "outcome": outcome,
-                             "reactivated": reactivated}}
+                for listing_id in dict.fromkeys(listing_ids):
+                    calls.append({"listing_id": listing_id, "decided_by": decided_by,
+                                  "source": source, "merge_group_id": merge_group_id})
+                    reactivated = False
+                    current = conn.listings[listing_id]["property_id"]
+                    moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
+                             for e in conn.events if e["listing"] == listing_id and not e["undone"]]
+                    here = [lid for lid, row in conn.listings.items()
+                            if row["property_id"] == current]
+                    merged = {e["listing"] for e in conn.events if not e["undone"]}
+                    outcome, undo, target = _detach_plan(current, moves, merge_group_id,
+                                                         (len(here), len(set(here) - merged)))
+                    if outcome == "detached" and _origin_gone(
+                            (conn.properties[target]["status"],
+                             conn.properties[target]["merged_into"]), undo):
+                        outcome = "origin_moved_on"
+                    if outcome == "detached":
+                        conn.listings[listing_id]["property_id"] = target
+                        for e in conn.events:
+                            if e["id"] in {m[0] for m in undo}:
+                                e.update(undone=True, undone_by=decided_by)
+                        back = conn.properties[target]
+                        if back["status"] == "merged_away":
+                            back.update(status="active", merged_into=None, merged_at=None)
+                            reactivated = True
+                        if source == "operator":
+                            conn.verdicts.append({"kind": "pair", "verdict": "different"})
+                    adverts.append({"listing_id": listing_id, "detached": outcome == "detached",
+                                    "outcome": outcome, "reactivated": reactivated})
+            return {"data": {"adverts": adverts}}
         return detach
+
+
+def _stays(base: Any, stays: int, outcome: str) -> Any:
+    """`base`, except that advert `stays` is answered `outcome` and left where it is, in the
+    set's order (the adverts before it already moved, inside the group's transaction)."""
+    def detach(conn: RetireDb, lids: Sequence[int], **kw: Any) -> dict[str, Any]:
+        return {"data": {"adverts": [
+            {"listing_id": lid, "detached": False, "outcome": outcome, "reactivated": False}
+            if lid == stays else base(conn, [lid], **kw)["data"]["adverts"][0] for lid in lids]}}
+    return detach
 
 
 def _intact_pair(db: RetireDb, survivor: int, retired: int, lid: int,
@@ -253,7 +268,7 @@ def test_the_dry_run_counts_reproduce_the_probe_and_write_nothing() -> None:
     assert out["undone_by"] == STAMP and out["category_types"] == ["prodej"]
 
 
-def test_the_live_run_detaches_newest_first_in_ledger_order_and_writes_no_ruling() -> None:
+def test_the_live_run_detaches_each_group_in_one_call_newest_first_and_writes_no_ruling() -> None:
     db = RetireDb()
     older = _intact_pair(db, 100, 200, 1)
     db.advert(10, 300)
@@ -261,8 +276,16 @@ def test_the_live_run_detaches_newest_first_in_ledger_order_and_writes_no_ruling
     db.advert(11, 510)
     newer = db.merged(300, 520, 510)                   # ledger order 12, then 11
     calls: list[dict[str, Any]] = []
+    sets: list[tuple[str | None, list[int]]] = []
+    base = db.detach_recording(calls)
+
+    def detach(conn: RetireDb, lids: Sequence[int], **kw: Any) -> dict[str, Any]:
+        sets.append((kw["merge_group_id"], list(lids)))
+        return base(conn, lids, **kw)
+
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
-                          detach=db.detach_recording(calls))
+                          detach=detach)
+    assert sets == [(newer, [12, 11]), (older, [2])]   # one call per group, all its movers
     assert [(c["listing_id"], c["merge_group_id"]) for c in calls] == [
         (12, newer), (11, newer), (2, older)]
     assert {(c["decided_by"], c["source"]) for c in calls} == {(STAMP, L.LEGACY_SOURCE)}
@@ -281,9 +304,9 @@ def test_the_arguments_it_passes_write_no_ruling_through_the_real_detach() -> No
     db = _Ledger({1: 10, 2: 20})
     group = merge_property_set(db, [10, 20], source="auto", reason="legacy")["data"][
         "merge_group_id"]
-    out = detach_listing(db, 2, decided_by=STAMP, source=L.LEGACY_SOURCE,
-                         merge_group_id=group)["data"]
-    assert out["detached"] and out["rulings_written"] == 0
+    out = detach_listings(db, [2], decided_by=STAMP, source=L.LEGACY_SOURCE,
+                          merge_group_id=group)["data"]
+    assert out["adverts"][0]["detached"] and out["rulings_written"] == 0
     assert db.sql("autodedup.verdicts") == [] and db.sql("autodedup.must_not_link") == []
     assert [e["undone_by"] for e in db.events] == [STAMP]
 
@@ -296,13 +319,7 @@ def test_a_group_whose_detach_refuses_rolls_back_whole_and_the_run_goes_on() -> 
     db.advert(12, 400)
     newer = db.merged(300, 400)
     calls: list[dict[str, Any]] = []
-    base = db.detach_recording(calls)
-
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
-        if lid == 12:
-            return {"data": {"detached": False, "outcome": "moved_since"}}
-        return base(conn, lid, **kw)
-
+    detach = _stays(db.detach_recording(calls), 12, "moved_since")
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
                           detach=detach)
     by = {x["merge_group_id"]: x["outcome"] for x in out["groups"]}
@@ -320,9 +337,9 @@ def test_a_group_that_changed_since_selection_is_refused_over_a_fresh_read() -> 
     calls: list[dict[str, Any]] = []
     base = db.detach_recording(calls)
 
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
+    def detach(conn: RetireDb, lids: list[int], **kw: Any) -> dict[str, Any]:
         conn.listings[2]["property_id"] = 900          # the older group's advert moves away
-        return base(conn, lid, **kw)
+        return base(conn, lids, **kw)
 
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
                           detach=detach)
@@ -343,9 +360,9 @@ def test_a_group_the_operator_split_in_part_since_selection_is_left_to_them() ->
     calls: list[dict[str, Any]] = []
     base = db.detach_recording(calls)
 
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
-        operator(conn, 3, decided_by="operator", merge_group_id=older)
-        return base(conn, lid, **kw)
+    def detach(conn: RetireDb, lids: list[int], **kw: Any) -> dict[str, Any]:
+        operator(conn, [3], decided_by="operator", merge_group_id=older)
+        return base(conn, lids, **kw)
 
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
                           detach=detach)
@@ -373,12 +390,12 @@ def test_a_crash_publishes_what_was_undone_and_re_raises(tmp_path: Path, monkeyp
     newer = _intact_pair(db, 500, 600, 5)
     base = db.detach_recording([])
 
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
-        if lid == 4:
+    def detach(conn: RetireDb, lids: list[int], **kw: Any) -> dict[str, Any]:
+        if 4 in lids:
             raise RuntimeError("canceling statement due to statement timeout")
-        return base(conn, lid, **kw)
+        return base(conn, lids, **kw)
 
-    monkeypatch.setattr(L, "detach_listing", detach)
+    monkeypatch.setattr(L, "detach_listings", detach)
     page = tmp_path / "step_summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
     with pytest.raises(RuntimeError, match="statement timeout"):
@@ -475,7 +492,7 @@ def test_live_the_old_merge_is_undone_before_the_plan_reads_the_area(
     _intact_pair(db, 100, 200, 1)                      # adverts 1 and 2 on property 100
     db.group(10, [1, 2])                               # the engine groups the same two
     detached: list[dict[str, Any]] = []
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording(detached))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording(detached))
     merged: list[dict[str, Any]] = []
     original = A.apply_plan
     monkeypatch.setattr(A, "apply_plan",
@@ -507,7 +524,7 @@ def test_1_a_group_the_operator_split_in_part_before_selection_is_reported_not_r
     db.advert(2, 200)                                  # X
     db.advert(3, 200)                                  # Y
     g = db.merged(100, 200)
-    db.detach([])(db, 2, decided_by="operator")        # no merge_group_id: X back to 200
+    db.detach([])(db, [2], decided_by="operator")        # no merge_group_id: X back to 200
     calls: list[dict[str, Any]] = []
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
                           detach=db.detach_recording(calls))
@@ -615,7 +632,7 @@ def test_2_a_generation_with_nothing_to_re_merge_undoes_nothing(
     _intact_pair(db, 100, 200, 1)
     db.group(10, [1, 2])
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording(calls))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording(calls))
     for dry_run in ("1", "0"):
         with pytest.raises(SystemExit, match="no proposed group inside the scope"):
             A.run_apply(_factory(db), {"generation": "g21-typo", "retire_legacy": "1",
@@ -634,7 +651,7 @@ def test_3_listing_ids_are_refused_and_the_cap_is_counted_not_hidden(
     second = _intact_pair(db, 300, 400, 3)
     db.group(10, [1, 2])
     db.group(20, [3, 4])
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     merged: list[dict[str, Any]] = []
     original = A.apply_plan
     monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
@@ -674,7 +691,7 @@ def _by(out: dict[str, Any]) -> dict[str, str]:
 
 
 def _wire(db: RetireDb, monkeypatch: Any) -> list[dict[str, Any]]:
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     merged: list[dict[str, Any]] = []
     original = A.apply_plan
     monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
@@ -762,7 +779,7 @@ def test_r3_the_engine_holding_a_whole_group_outside_the_scope_keeps_it_for_w6(
     assert f"skipped:{L.ENGINE_AGREES} (10: {A.OUT_BLOCKS})" in page.read_text()
 
     # live, the same: the two stay merged, the rest come apart
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     merged: list[dict[str, Any]] = []
     original = A.apply_plan
     monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
@@ -840,7 +857,7 @@ def test_r2_4_later_passes_report_what_they_read_and_the_pass_cap_says_so() -> N
     db.advert(2, 200)
     db.advert(4, 200)
     g1 = db.merged(100, 200)
-    db.detach([])(db, 2, decided_by="operator")
+    db.detach([])(db, [2], decided_by="operator")
     db.advert(3, 50)
     g2 = db.merged(50, 100)
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
@@ -882,12 +899,12 @@ def test_r2_4_a_crash_on_pass_2_reports_its_leftovers_not_attempted(
     h2 = db.merged(1050, 1100)
     base = db.detach_recording([])
 
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
+    def detach(conn: RetireDb, lids: list[int], **kw: Any) -> dict[str, Any]:
         if kw["merge_group_id"] in (g1, h1):
             raise RuntimeError("canceling statement due to statement timeout")
-        return base(conn, lid, **kw)
+        return base(conn, lids, **kw)
 
-    monkeypatch.setattr(L, "detach_listing", detach)
+    monkeypatch.setattr(L, "detach_listings", detach)
     with pytest.raises(RuntimeError):
         L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
     body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
@@ -936,14 +953,7 @@ def test_r2_5_a_refused_group_is_never_counted_as_undone(
     db.group(10, [1, 2])
     db.group(20, [3, 4, 5, 9])
     _wire(db, monkeypatch)
-    base = db.detach_recording([])
-
-    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
-        if lid == 5:
-            return {"data": {"detached": False, "outcome": "moved_since"}}
-        return base(conn, lid, **kw)
-
-    monkeypatch.setattr(L, "detach_listing", detach)
+    monkeypatch.setattr(L, "detach_listings", _stays(db.detach_recording([]), 5, "moved_since"))
     live = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0",
                                       "max_clusters_per_run": "1"}, tmp_path)
     assert live["deferred"] == [20]
@@ -1017,7 +1027,7 @@ def test_the_area_is_read_once_per_dispatch_and_every_read_is_timed(tmp_path: Pa
     newer = db.merged(50, 100)                         # a chain: two passes, re-checks
     page = tmp_path / "s.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     out = L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
     assert _by(out) == {newer: "retired", older: "retired"} and out["passes"] == 2
     assert db.statements.count(L.AREA_SQL) == 1
@@ -1049,7 +1059,7 @@ def test_a_read_that_fails_is_still_timed_in_what_is_published(tmp_path: Path,
         return original(sql, p)
 
     monkeypatch.setattr(db, "dispatch", dispatch)
-    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     with pytest.raises(RuntimeError, match="statement timeout"):
         L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
     body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())

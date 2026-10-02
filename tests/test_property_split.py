@@ -474,7 +474,7 @@ def test_the_statement_writes_only_through_the_chokepoint():
                    "restore_must_not_link("):
         assert writer in inspect.getsource(ps.split_property) + inspect.getsource(ps._join)
     assert ps.listing_places is pi.listing_places and not hasattr(ps, "_PLACES_SQL")
-    assert not hasattr(ps, "detach_listing"), "the split detaches its movers as ONE set"
+    assert src.count("detach_listings(") == 1, "the split detaches its movers as ONE set"
 
 
 @pytest.mark.parametrize(("listings", "separate", "joins"), [

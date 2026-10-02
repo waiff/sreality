@@ -6,7 +6,7 @@ list what was merged, or link properties as one asset without collapsing them.
 Nothing in this module decides *whether* two properties are the same.
 
 The one merge and the one undo live in `toolkit.property_identity` (`merge_property_set` /
-`detach_listing` — the survivor rule, the asset-link carry, operator state, pipeline
+`detach_listings` — the survivor rule, the asset-link carry, operator state, pipeline
 reconcile, browse sync, the `property_merge_events` ledger and, for the operator, the
 rulings of decision 8); the operator's split statement composes them in
 `toolkit.property_split` (E919); asset links live in `toolkit.asset_identity`. This module is
