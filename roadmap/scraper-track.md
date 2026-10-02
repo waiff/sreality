@@ -5,13 +5,18 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
-### ceskereality hard-403 — Chrome client hints (2026-10-02, fix built, recovery owed)
-- 2026-10-02: every ceskereality request 403s since 09-29 — its nginx rejects a Chrome UA without
-  sec-ch-ua hints (a header rule, not IP/proxy); fix built: `CLIENT_HINTS=True` (200 proven only from a
-  residential IP, unverified via the prod proxy). Both Actions workflows disabled by hand meanwhile.
-  **Owed:** canary = `gh workflow enable` + dispatch one bounded run at once (crons re-arm on enable),
-  also fetch one img.ceskereality.cz image (bare-requests download, no hints); only after a green
-  canary reset its `portal_rate_state` row + lift the two `app_settings` kill switches.
+### ceskereality hard-403 — Chrome client hints (2026-10-02, recovered)
+- 2026-10-02: every ceskereality request 403'd from 09-29 07:37Z (last 200) until 10-02 — the site's own
+  nginx (not Cloudflare) rejects a Chrome UA arriving over HTTP/1.1 without `sec-ch-ua` client hints (a
+  header rule, not IP/proxy). Fixed by #1685: `BasePortalClient.CLIENT_HINTS` opt-in derives the hints from
+  the UA; only `CeskerealityClient` opts in (census test). Canary drain through the prod proxy (run
+  36995661138): 0×403, 5/5 pages, errors=0 → `portal_rate_state` reset, both `app_settings` kill switches
+  lifted, both workflows re-enabled, full walk dispatched 10:30Z. img.ceskereality.cz needs no hints.
+- **Next:** the on-demand URL parser (`source_parsers/common.py`, honest bot UA) and
+  `scripts/verify_outbound_urls.py` (unproxied HEAD) still 403 on ceskereality — pre-existing exposure;
+  new ceskereality rows/day fell 800→2 on 09-26..09-29 BEFORE the wall, unexplained; a fully blocked walk
+  ends green (`errors=0`, `walk_coverage='complete'` with collected=0) and the drain budget is not enforced
+  inside a chunk — observability follow-ups from the 10-02 review.
 
 ### The sighting diff lives once — `portal_runner.reconcile_sightings` (2026-10-01, done)
 - **Moved:** the index-walk diff (clamp → `index_summary_native` → touch → `classify_index_sighting`
