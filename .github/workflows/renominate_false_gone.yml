@@ -7,9 +7,24 @@ name: "Ops: re-check crawler listings a sreality check falsely delisted"
 # so a live page reactivates it and a gone page leaves it inactive with its inactive_at
 # untouched. apply=false (the default) only prints the per-source counts.
 #
+# PILOT FIRST. The selection (2,061 rows on 2026-10-01) is an UPPER BOUND: the old writer
+# also re-stamped rows their own portal had closed long before, and for those this is the
+# first time the drain reads a page removed weeks ago -- ceskereality, realitymix and
+# mmreality answer such URLs with HTTP 200 (archive page, substitute card). So:
+#   1. apply=true with the default limit=25 (per source). The log prints a readout_since.
+#   2. Once the drains have run, dispatch again with that readout_since (read-only). Stop
+#      unless written_unseen=0 on every source, the "READOUT ROW ... CHECK" rows (fewer
+#      raw_json keys than the row's snapshot from before) are real detail pages when opened,
+#      and erroring_or_given_up is negligible -- a given-up row on an inactive listing is
+#      re-armed by every walk, forever (fix the re-arm in db.enqueue_presence_checks first).
+#   3. Release the rest: apply=true, limit=all.
+# Finish all passes within 7 days of the first: the "already read as gone by its portal"
+# skip reads detail_queue_completions, which keeps 7 days, so a later pass re-fetches those
+# pages (no data harm -- the rows are already inactive -- just wasted requests). The
+# readout reads the same ledger, so read it back within the week too.
+#
 # Non-destructive: it only adds queue rows, deduplicated against rows already queued; the
 # drains do every write through their usual paths (rule 3: page-verified, never deleted).
-# Re-running is safe: queued rows and rows the drain has since read as gone are skipped.
 # NOT a portal ingest workflow, so it carries no `# portal:` tag.
 #
 # Required GitHub secret: SUPABASE_DB_URL.
@@ -23,9 +38,9 @@ on:
         default: false
         type: boolean
       limit:
-        description: "Max rows enqueued PER SOURCE this run, newest flip first (blank = all)"
+        description: "Max rows enqueued PER SOURCE, newest flip first. 25 = the pilot; 'all' = release the rest"
         required: false
-        default: ""
+        default: "25"
         type: string
       source:
         description: "One crawler source (blank = every source but sreality)"
@@ -42,6 +57,11 @@ on:
           - mmreality
           - realitymix
           - remax
+      readout_since:
+        description: "Read-only readout of the rows queued since this UTC time (the apply log prints it); leave apply=false"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: renominate-false-gone
@@ -73,14 +93,22 @@ jobs:
           IN_APPLY: ${{ inputs.apply }}
           IN_LIMIT: ${{ inputs.limit }}
           IN_SOURCE: ${{ inputs.source }}
+          IN_READOUT_SINCE: ${{ inputs.readout_since }}
         run: |
           set -euo pipefail
           IN_LIMIT="${IN_LIMIT// /}"
           case "$IN_LIMIT" in
-            *[!0-9]*) echo "::error::limit must be a positive whole number (or blank)"; exit 1 ;;
+            all|ALL) ;;
+            ""|*[!0-9]*) echo "::error::limit must be a positive whole number or 'all'"; exit 1 ;;
           esac
-          ARGS=""
-          if [ -n "$IN_LIMIT" ]; then ARGS="$ARGS --limit $IN_LIMIT"; fi
-          if [ -n "$IN_SOURCE" ]; then ARGS="$ARGS --source $IN_SOURCE"; fi
-          if [ "$IN_APPLY" = "true" ]; then ARGS="$ARGS --apply"; fi
-          python -m scripts.renominate_false_gone_crawler_rows $ARGS
+          case "$IN_READOUT_SINCE" in
+            *[!0-9TZ:+.\ -]*) echo "::error::readout_since must be an ISO timestamp, e.g. 2026-10-02T10:00Z"; exit 1 ;;
+          esac
+          if [ -n "$IN_READOUT_SINCE" ] && [ "$IN_APPLY" = "true" ]; then
+            echo "::error::readout_since only reads; dispatch it with apply=false"; exit 1
+          fi
+          ARGS=(--limit "$IN_LIMIT")
+          if [ -n "$IN_SOURCE" ]; then ARGS+=(--source "$IN_SOURCE"); fi
+          if [ -n "$IN_READOUT_SINCE" ]; then ARGS+=(--readout-since "$IN_READOUT_SINCE"); fi
+          if [ "$IN_APPLY" = "true" ]; then ARGS+=(--apply); fi
+          python -m scripts.renominate_false_gone_crawler_rows "${ARGS[@]}"

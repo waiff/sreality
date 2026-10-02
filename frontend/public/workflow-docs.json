@@ -3624,10 +3624,10 @@
         },
         {
           "name": "limit",
-          "description": "Max rows enqueued PER SOURCE this run, newest flip first (blank = all)",
+          "description": "Max rows enqueued PER SOURCE, newest flip first. 25 = the pilot; 'all' = release the rest",
           "required": false,
           "type": "string",
-          "default": "",
+          "default": "25",
           "options": null
         },
         {
@@ -3647,6 +3647,14 @@
             "realitymix",
             "remax"
           ]
+        },
+        {
+          "name": "readout_since",
+          "description": "Read-only readout of the rows queued since this UTC time (the apply log prints it); leave apply=false",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
         }
       ],
       "secrets": [

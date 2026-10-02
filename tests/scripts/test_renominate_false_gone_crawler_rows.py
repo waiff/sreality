@@ -2,12 +2,14 @@
 
 Hermetic: a ledger-style fake conn keeps a `queue` keyed (source, native_id). The selection
 reports a row as `queued` when the fake queue already holds it, and the enqueue INSERT adds
-to it, so a second run over the same state is observable. The selection SQL itself is
+to it, so a second run over the same state is observable. The selection and readout SQL are
 PREPAREd against the real schema by tests/test_sql_schema_prepare.py.
 """
 
 from __future__ import annotations
 
+import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -38,6 +40,10 @@ class _Cur:
                 for src, nid, url, price, rechecked in self._conn.false_gone
                 if want is None or src == want
             ]
+        elif s == " ".join(ren.PILOT_SUMMARY_SQL.split()):
+            self._rows = list(self._conn.summary)
+        elif s == " ".join(ren.PILOT_REACTIVATED_SQL.split()):
+            self._rows = list(self._conn.reactivated)
         elif s.startswith("INSERT INTO listing_detail_queue"):
             source = params["source"]
             for nid, prio in zip(params["nids"], params["prios"]):
@@ -58,6 +64,8 @@ class _LedgerConn:
         self.false_gone = false_gone
         self.queue: dict[tuple[str, str], int] = dict(queue or {})
         self.executed: list[tuple[str, Any]] = []
+        self.summary: list[tuple[Any, ...]] = []
+        self.reactivated: list[tuple[Any, ...]] = []
 
     def transaction(self) -> Any:
         raise AssertionError("the re-nomination opens no transaction of its own")
@@ -172,3 +180,84 @@ def test_the_selection_is_the_false_gone_signature() -> None:
     ):
         assert clause in sql, clause
     assert "DELETE" not in sql.upper() and "UPDATE" not in sql.upper()
+
+
+def test_the_cli_defaults_to_the_25_row_pilot_and_all_must_be_typed() -> None:
+    ap = ren._build_parser()
+    assert ap.parse_args([]).limit == ren.DEFAULT_LIMIT == 25
+    assert ap.parse_args(["--limit", "all"]).limit is None
+    assert ap.parse_args(["--limit", "ALL"]).limit is None
+    assert ap.parse_args(["--limit", "300"]).limit == 300
+    for bad in ("0", "-3", "", "everything"):
+        with pytest.raises(SystemExit):
+            ap.parse_args(["--limit", bad])
+
+
+def test_a_readout_timestamp_without_an_offset_is_utc() -> None:
+    ap = ren._build_parser()
+    assert ap.parse_args(["--readout-since", "2026-10-02T10:00"]).readout_since == datetime(
+        2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+    assert ap.parse_args(["--readout-since", "2026-10-02T10:00Z"]).readout_since == datetime(
+        2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--readout-since", "yesterday"])
+
+
+def test_readout_and_apply_are_refused_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["ren", "--apply", "--readout-since", "2026-10-02T10:00"])
+    monkeypatch.setattr(ren.db, "connect", lambda *a, **k: pytest.fail("must not connect"))
+    assert ren.main() == 2
+
+
+def test_the_readout_reports_per_source_and_flags_rows_that_lost_keys(
+        caplog: pytest.LogCaptureFixture) -> None:
+    conn = _LedgerConn([])
+    conn.summary = [("bazos", 1, 2, 3, 10, 7, 0, 4, 3), ("mmreality", 0, 0, 0, 5, 5, 2, 0, 0)]
+    conn.reactivated = [
+        ("mmreality", "mm1", "https://mm.example/1", 9, 31, 1_000, 2_000),
+        ("mmreality", "mm2", "https://mm.example/2", 31, 31, 2_000, 2_000),
+    ]
+    since = datetime.now(timezone.utc) - timedelta(hours=3)
+    with caplog.at_level("INFO", logger=ren.LOG.name):
+        out = ren.readout(conn, since=since, source=None, max_rows=50)
+    assert out["bazos"] == ren.SourceReadout(1, 2, 3, 10, 7, 0, 4, 3)
+    assert out["mmreality"].written_unseen == 2
+    assert [p for _, p in conn.executed] == [
+        {"since": since, "source": None, "verify": db.QUEUE_PRIORITY_VERIFY},
+        {"since": since, "source": None, "verify": db.QUEUE_PRIORITY_VERIFY, "max_rows": 50},
+    ]
+    assert conn.inserts() == []
+    msgs = [r.getMessage() for r in caplog.records]
+    assert ("READOUT source=bazos pending=1 erroring=2 given_up=3 written=10 reactivated=7 "
+            "written_unseen=0 gone=4 gave_up=3") in msgs
+    # rows = queue (1+2+3) + written + gone across sources; failing = erroring + given_up.
+    assert "READOUT TOTAL rows=25 reactivated=12 gone=4 erroring_or_given_up=5 (20.0%)" in msgs
+    assert any(r.levelname == "WARNING" and "source=mmreality written_unseen=2" in r.getMessage()
+               for r in caplog.records)
+    rows = [m for m in msgs if m.startswith("READOUT ROW source=")]
+    assert " CHECK " in rows[0] and "native_id=mm1" in rows[0]
+    assert " CHECK " not in rows[1]
+
+
+def test_a_readout_older_than_the_completion_ledger_warns(
+        caplog: pytest.LogCaptureFixture) -> None:
+    since = datetime.now(timezone.utc) - timedelta(days=db.COMPLETION_RETENTION_DAYS + 1)
+    with caplog.at_level("INFO", logger=ren.LOG.name):
+        ren.readout(_LedgerConn([]), since=since)
+    assert any(r.levelname == "WARNING" and "undercount" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_the_readout_finds_the_job_rows_without_the_flip_signature() -> None:
+    summary = " ".join(ren.PILOT_SUMMARY_SQL.split())
+    rows = " ".join(ren.PILOT_REACTIVATED_SQL.split())
+    for sql in (summary, rows):
+        for clause in ("f.outcome = 'gone'", "source <> 'sreality'",
+                       "c.priority = %(verify)s", "c.enqueued_at >= %(since)s"):
+            assert clause in sql, clause
+        # A reactivated row's inactive_at is NULL, so the signature cannot find it.
+        assert "inactive_at" not in sql
+        assert not any(w in sql.upper() for w in ("DELETE", "UPDATE", "INSERT"))
+    assert "q.priority = %(verify)s AND q.enqueued_at >= %(since)s" in summary
+    assert "j.last_seen_at < c.enqueued_at" in summary
+    assert "s.scraped_at < c.enqueued_at" in rows
