@@ -3604,6 +3604,70 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_stale_images.yml"
     },
     {
+      "filename": "renominate_false_gone.yml",
+      "name": "Ops: re-check crawler listings a sreality check falsely delisted",
+      "description": "Runs scripts/renominate_false_gone_crawler_rows.py (operator decision 2026-10-02): crawler listings (bazos, idnes, ...) carry a synthetic negative sreality_id, and until item 3 a sreality freshness fetch of that id read \"not found\" and flipped them inactive. This sends each such row to its OWN portal's detail drain as a presence check (QUEUE_PRIORITY_VERIFY), so a live page reactivates it and a gone page leaves it inactive with its inactive_at untouched. apply=false (the default) only prints the per-source counts.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "apply",
+          "description": "false = count only. true = enqueue the page checks.",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "Max rows enqueued PER SOURCE, newest flip first. 25 = the pilot; 'all' = release the rest",
+          "required": false,
+          "type": "string",
+          "default": "25",
+          "options": null
+        },
+        {
+          "name": "source",
+          "description": "One crawler source (blank = every source but sreality)",
+          "required": false,
+          "type": "choice",
+          "default": "",
+          "options": [
+            "",
+            "bazos",
+            "bezrealitky",
+            "ceskereality",
+            "idnes",
+            "maxima",
+            "mmreality",
+            "realitymix",
+            "remax"
+          ]
+        },
+        {
+          "name": "readout_since",
+          "description": "Read-only readout of the rows queued since this UTC time (the apply log prints it); leave apply=false",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "renominate-false-gone",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/renominate_false_gone.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/renominate_false_gone.yml"
+    },
+    {
       "filename": "reparse.yml",
       "name": "Ops: re-parse stored rows through the portal's own parser",
       "description": "The ONE re-parse seam (`scripts/reparse.py`) — the dispatch that carries a parser fix back to rows already in `listings`, replacing the one-off `backfill_*.py` family. It re-runs the portal's OWN `parse_detail` / `parse_advert` / `parse_listing` over the substrate declared for that portal — `portal_raw_pages.html` on the seven HTML portals (100 % coverage, inactive rows included, staged in the same drain transaction that writes the row, so it cannot lag it) and `listings.raw_json` on sreality + bezrealitky, which stage no body at all. No fetch, no R2, no network.",

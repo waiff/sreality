@@ -301,6 +301,21 @@ Independent of the analytical, UI, and map tracks.
   completed as gone; an all-NULL seen set no longer nominates the whole scope; a crawler image's 404
   no longer runs a sreality freshness fetch), the ~430-line dead absence sweep and all nine
   `mark_gone` adapters deleted.
+- 2026-10-02 (operator decision 2, option 1): the rows that sreality fetch falsely delisted get a
+  real page check on their own portal. `scripts/renominate_false_gone_crawler_rows.py` via
+  `renominate_false_gone.yml` (dry run default; `apply`, per-source `limit` defaulting to the 25-row
+  pilot, `source`, read-only `readout_since`) queues each at `QUEUE_PRIORITY_VERIFY`; a live page
+  reactivates, a gone one stays put. Prod 2026-10-01: 7,023 crawler rows carry the sreality `gone`
+  verdict, 5,884 inactive, 2,061 with the flip signature — an UPPER BOUND, since the unguarded old
+  writer also re-stamped rows their portal had long closed (pages ceskereality/realitymix/mmreality
+  still answer with HTTP 200). **Next:** once on `main`: dry run → `apply` with `limit=25` → once the
+  drains ran, `readout_since` = the time the apply log prints; release (`limit=all`) only if
+  `written_unseen=0`, every `CHECK` row opens as a live detail page (all ceskereality/
+  realitymix/mmreality rows, plus any whose filled `raw_json` values, spec cells, images or
+  price dropped — content, since the HTML parsers' key set is fixed) and erroring + given-up is
+  negligible (else first make the `enqueue_presence_checks` re-arm skip inactive listings — it
+  re-arms given-up rows forever). Finish every pass within 7 days: the "already read as gone" skip
+  and the readout read `detail_queue_completions` (7-day retention); a later pass only re-fetches.
 
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
