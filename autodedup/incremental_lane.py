@@ -1003,7 +1003,7 @@ class SqlFacts:
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
     def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
-        """The CLIP vectors of a gallery `facts` read without them (E932), and nothing else."""
+        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else."""
         wanted = sorted({int(i) for i in image_ids})
         encoded = {int(row["image_id"]): encode_clip(row["embedding"])
                    for row in self._dicts_over(COHORT_CLIP_SQL, wanted, model=self.clip_model)}

@@ -553,7 +553,7 @@ class Store(Protocol):
 class FactSource(Protocol):
     """The read-only half: listing facts and galleries out of `public` (D4 — never written)."""
 
-    # E932: `clip=False` hands every gallery over without its CLIP vectors, and `vectors`
+    # E933: `clip=False` hands every gallery over without its CLIP vectors, and `vectors`
     # reads them for a set of images afterwards.
     def facts(self, ids: Iterable[int], *, clip: bool = True
               ) -> dict[int, tuple[Listing, list[Image]]]: ...
@@ -829,7 +829,7 @@ class _Working:
         self.listings: dict[int, Listing] = {}
         self.images: dict[int, list[Image]] = {}
         self.fps: dict[int, Fingerprint] = {}
-        # E932: who carries CLIP vectors. A gallery is fetched without them unless asked: the
+        # E933: who carries CLIP vectors. A gallery is fetched without them unless asked: the
         # probe-key neighbourhood is O(store) a pass and no fingerprint, key, guard, digest or
         # census reads one. The claim (its refresh records their PRESENCE, E92) and the scored
         # endpoints ask.
@@ -1253,7 +1253,7 @@ def run_pass(
                for i in endpoints if i in working.fps}
     # A stored decision stands while neither side's digest moved and neither side was refreshed.
     # Only the pairs it does not cover are decided, and only their two sides read photographs —
-    # the features the CLIP vectors, E93's hold their presence — so only they carry them (E932).
+    # the features the CLIP vectors, E93's hold their presence — so only they carry them (E933).
     decide: set[tuple[int, int]] = set()
     for lo, hi in wanted:
         if lo not in working.fps or hi not in working.fps:

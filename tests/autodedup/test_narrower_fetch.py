@@ -1,11 +1,11 @@
-"""E932: the probe-key neighbourhood is read without CLIP vectors; the claim and the scored
+"""E933: the probe-key neighbourhood is read without CLIP vectors; the claim and the scored
 endpoints carry them.
 
 The world is `lane_world`'s nine listings with a CLIP vector on every photograph, plus two
 listings that share every probe key but sit seven and eight floors up: the rule floor vetoes
 every pair they could form with the nine, so once both are stored they are in every later
 pass's neighbourhood and the sides of one wanted pair — their own, whose decision stands. That
-is the read E932 removes, and the parity below is that removing it moves no decision.
+is the read E933 removes, and the parity below is that removing it moves no decision.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def _dataset(conn: FakePg) -> Dataset:
 
 
 class _EveryVector:
-    """The read before E932: every gallery the pass fetches carries its vectors."""
+    """The read before E933: every gallery the pass fetches carries its vectors."""
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
@@ -189,7 +189,7 @@ def _ids(statements: list[tuple[str, dict[str, Any]]], sql: str) -> set[int]:
 
 
 def test_the_narrower_fetch_decides_exactly_what_the_full_fetch_decides() -> None:
-    """Both fact sources, both stores, the read before E932 and the read after: the pairs —
+    """Both fact sources, both stores, the read before E933 and the read after: the pairs —
     zone, score, families, veto, both digests and the evidence — and the groups are equal row
     for row. The evidence column is the one with teeth: a gallery whose vectors were skipped
     reads `n_clip = 0` and HOLDS a photo-dependent merge (E93), which the control shows."""
@@ -235,7 +235,7 @@ def test_the_vector_read_names_the_claim_and_the_scored_endpoints_only() -> None
     """Per pass, `COHORT_CLIP_SQL` reads the photographs of the claimed listings (their refresh
     records the vectors' presence) and of the two sides of every pair the pass DECIDES — never
     those of a neighbourhood listing, nor of the sides of a wanted pair whose stored decision
-    stands. The read before E932 carried all of them, every pass."""
+    stands. The read before E933 carried all of them, every pass."""
     conn = _world()
     passes, statements = _drain(SqlStore(conn, GEN, store_floor=0.0), SqlFacts(conn), conn)
     full = _world()

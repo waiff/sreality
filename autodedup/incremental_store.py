@@ -270,7 +270,7 @@ class CohortFacts:
         return out
 
     def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
-        """The CLIP vectors `facts` would have carried for these images (E932)."""
+        """The CLIP vectors `facts` would have carried for these images (E933)."""
         wanted = set(image_ids)
         return {image.image_id: image.clip
                 for listing_id, bucket in self.ds.images_by_listing.items()
