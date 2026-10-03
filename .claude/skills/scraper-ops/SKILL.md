@@ -168,9 +168,9 @@ locally. The properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20) and
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue, within a `--max-seconds` budget: on exhaustion it clean-stops
-at a batch boundary, clears only the swept id range, exits RED, and leaves the completion stamp
-unwritten so the `property_maintenance` check alarms). The visual-signal producers run alongside:
+property + clears the dirty queue under a `--max-seconds` budget; a budget stop clears only the range it
+swept and saves `app_settings.property_sweep_cursor`, where the next run resumes the cycle (if <36h old);
+a resumed run that stops again exits RED; only a whole cycle stamps completion). The visual-signal producers run alongside:
 `compute_image_phash.yml` (hourly pHash BACKSTOP only — the image drain hashes the bytes in hand and writes `phash` in the
 `storage_path` UPDATE, so this job takes just `phash IS NULL` rows: `IMAGES done phash_missed` + re-master re-arms), `clip_tag.yml`
 (`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into `image_clip_tags` + a 512-d vector into `image_clip_embeddings`),
