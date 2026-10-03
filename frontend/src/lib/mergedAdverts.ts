@@ -1,14 +1,15 @@
 /* The merged-adverts section on the property page and the proposed-splits page:
  * their query keys, their words for a merge's origin, a split's outcome and where
  * a unit landed, and the refresh after a split. Both write through ONE route,
- * `POST /properties/{id}/split` (E919): a row's 'Rozdělit' separates that one
- * advert (back to the property the merge ledger says it came from, or one no
- * merge brought to a new record; offered on every row that would move,
- * `splittable`), and a proposal card states its whole partition in one call. */
+ * `POST /properties/{id}/split` (E919), and both state a whole partition in one
+ * call: the property page as letters over its adverts (`splitPlan` — every letter
+ * group but the one keeping the record leaves as one property), a proposal card
+ * as ticks. */
 
 import type { QueryClient } from '@tanstack/react-query';
 
-import type { SplitUnit } from '@/lib/api';
+import type { SplitStatement, SplitUnit } from '@/lib/api';
+import { distinctUnits, unitOf, type UnitMap } from '@/components/autodedup/UnitSplit';
 
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { revalidateCollections } from '@/lib/collectionCache';
@@ -57,15 +58,71 @@ const UNMOVED: Record<string, string> = {
   origin_moved_on: 'nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam',
   last_native: 'je to poslední vlastní inzerát nemovitosti; oddělte místo něj sloučené inzeráty',
   propose_only: 'engine rozdělení jen navrhuje',
+  shared_origin: 'přišel ze stejné nemovitosti jako inzerát s jiným písmenem a vrátily by se do ní spolu',
 };
 
 export function unmovedReason(outcome: string): string {
   return UNMOVED[outcome] ?? outcome;
 }
 
-/* A native split of the advert the header speaks with: what stays behind (rules 18, 22). */
-export const STATE_STAYS =
-  'Poznámky, štítky, kolekce a karta v pipeline zůstanou u zbylých inzerátů této nemovitosti.';
+/* What a split never moves: the operator's state is the property record's (rules 18, 22). */
+export function stateStays(propertyId: number): string {
+  return `Poznámky, štítky, kolekce a zařazení v pipeline zůstanou u nemovitosti #${propertyId}.`;
+}
+
+export interface PlanGroup {
+  letter: string;
+  /* Ascending. */
+  listingIds: number[];
+}
+
+export interface SplitPlan {
+  /* Every advert shown, each leaving group one unit; no reason, no confirm. */
+  statement: SplitStatement;
+  kept: PlanGroup;
+  /* Letter order. */
+  leaving: PlanGroup[];
+}
+
+/* The property page's letters as the ONE split statement. The letters say which
+ * adverts are one property; they do not say which one stays: the server keeps
+ * the record with the unit not sent in `separate`, and refuses (`cannot_move`
+ * `last_native`) when that unit holds none of the property's own adverts while
+ * another does. So the group with the most own adverts (no merge brought them)
+ * stays, the earliest letter on a tie, the canonical advert's group when none is
+ * own; every other group leaves as one unit. `keep_together` is false: the
+ * statement rules nothing among the adverts that stay. */
+export function splitPlan(
+  adverts: readonly number[],
+  units: UnitMap,
+  own: ReadonlySet<number>,
+  canonicalListingId: number,
+): SplitPlan {
+  const groups: PlanGroup[] = distinctUnits(
+    adverts.map((id) => ({ listing_id: id })),
+    units,
+  ).map((letter) => ({
+    letter,
+    listingIds: adverts.filter((id) => unitOf(units, id) === letter).sort((a, b) => a - b),
+  }));
+  const owned = (g: PlanGroup) => g.listingIds.filter((id) => own.has(id)).length;
+  let kept: PlanGroup | undefined;
+  for (const g of groups) if (owned(g) > (kept ? owned(kept) : 0)) kept = g;
+  kept ??=
+    groups.find((g) => g.listingIds.includes(canonicalListingId)) ??
+    groups[0] ??
+    { letter: 'A', listingIds: [] };
+  const leaving = groups.filter((g) => g !== kept);
+  return {
+    statement: {
+      adverts: [...adverts],
+      separate: leaving.map((g) => g.listingIds),
+      keep_together: false,
+    },
+    kept,
+    leaving,
+  };
+}
 
 /* Where a split left one unit, as the link's words: the property it stays on,
  * a new record, the property it came from, or the record two landings joined. */

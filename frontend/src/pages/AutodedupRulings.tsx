@@ -19,8 +19,8 @@
  * A withdrawal is a newer `unsure`. The lane reads the newest word on its next
  * pass. It never splits a property (decision 9) and merges only inside its
  * scope, so where a ruling and a property disagree the row offers the existing
- * split (the operator's split statement, `POST /properties/{id}/split`, as the
- * property page's row split sends it) or merge (`POST /properties/merge`), each
+ * split (the operator's split statement, `POST /properties/{id}/split`, with the
+ * one advert the ruling names leaving) or merge (`POST /properties/merge`), each
  * behind a second click. */
 
 import { useMemo, useState } from 'react';
@@ -737,8 +737,9 @@ function Consequence({ row }: { row: RulingPairRow }) {
         const res = await mergePropertySet([row.property_lo!, row.property_hi!]);
         return `Sloučeno do nemovitosti #${res.survivor_id}.`;
       }
-      /* The one split statement (E919), as the property page's row split sends it:
-       * every advert the property holds, read at the click, the named one leaving and
+      /* The one split statement (E919) with one advert leaving (the property page
+       * states a whole partition by letters; this ruling names one advert): every
+       * advert the property holds, read at the click, the named one leaving and
        * the rest not ruled among themselves. The count the confirm named is the
        * operator's view; a property that has changed since is re-read, never ruled. */
       const origins = await fetchPropertyOrigins(row.property_lo!);
