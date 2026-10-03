@@ -298,3 +298,4 @@ nor are the email/Telegram channels (rule #16). Don't start out-of-scope work wi
 | Dashboards, admin panels, apps, tools — interface/UI design craft | `.claude/skills/interface-design` |
 | Full rule rationale, per-portal data sources, territory deep-dives | `docs/architecture.md` |
 | Sequencing / what's next | `ROADMAP.md` → `roadmap/<track>.md` |
+| Vocabulary: property, ad, canonical ad, merge, split, survivor, curation | `GLOSSARY.md` |
