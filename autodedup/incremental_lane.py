@@ -368,9 +368,20 @@ MAX_SCHEMA_MB: float = 800.0
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
+# How many listing ids one fact statement set carries (`SqlFacts.facts`). The pass re-reads the
+# WHOLE probe-key neighbourhood of its claim every pass, and a bootstrap's neighbourhood grows
+# with the store (~3,300 listings and ~40,000 images with a ~kB CLIP vector each by the eighth
+# pass of a dense scope), so unsliced the galleries' reads were the statements that grew towards
+# STATEMENT_TIMEOUT_MS. Every cohort statement is a plain `= any(ids)` filter ordered within a
+# listing, so slices of whole listings read exactly what the whole array would.
+FACT_CHUNK: int = 500
 STATEMENT_TIMEOUT_MS: int = 120_000
 LOCK_TIMEOUT_MS: int = 5_000
-IDLE_TIMEOUT_MS: int = 300_000
+# Above the pass's own deadline (PASS_DEADLINE_S) and under the lease (LEASE_TTL_S): the scoring
+# loop is DB-silent by design (no statement between the endpoint reads and `upsert_pairs`) and
+# the deadline already bounds it, so an idle guard tighter than the deadline bites a HEALTHY
+# pass — at 300 s it terminated every bootstrap pass past the seventh on the worker (2026-10-02).
+IDLE_TIMEOUT_MS: int = 1_200_000
 _EPOCH: str = "epoch"
 
 
@@ -944,17 +955,24 @@ class SqlFacts:
             names = [column[0] for column in cur.description]
             return [dict(zip(names, row)) for row in rows]
 
+    def _dicts_over(self, sql: str, ids: Sequence[int], **params: Any) -> list[dict[str, Any]]:
+        """`_dicts` over `ids` in FACT_CHUNK slices, concatenated."""
+        rows: list[dict[str, Any]] = []
+        for start in range(0, len(ids), FACT_CHUNK):
+            rows.extend(self._dicts(sql, {"ids": list(ids[start:start + FACT_CHUNK]), **params}))
+        return rows
+
     def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
         wanted = sorted({int(i) for i in ids})
         if not wanted:
             return {}
         locations = {int(row["listing_id"]): row
-                     for row in self._dicts(COHORT_LOCATION_SQL, {"ids": wanted})}
+                     for row in self._dicts_over(COHORT_LOCATION_SQL, wanted)}
         history: dict[int, list[dict[str, Any]]] = {}
-        for row in self._dicts(COHORT_PRICE_HISTORY_SQL, {"ids": wanted}):
+        for row in self._dicts_over(COHORT_PRICE_HISTORY_SQL, wanted):
             history.setdefault(int(row["listing_id"]), []).append(row)
         listings: dict[int, Listing] = {}
-        for row in self._dicts(COHORT_LISTINGS_SQL, {"ids": wanted}):
+        for row in self._dicts_over(COHORT_LISTINGS_SQL, wanted):
             listing_id = int(row["id"])
             # `block` is the COHORT's draw label (a reporting field the engine never reads —
             # decisions key on the fingerprint's `block_key`), and a real-time arrival belongs
@@ -962,7 +980,12 @@ class SqlFacts:
             listings[listing_id] = Listing.from_json(build_listing_record(
                 row, block="", location=locations.get(listing_id),
                 history=history.get(listing_id, ())))
-        galleries = self._galleries(wanted)
+        # One statement set per slice of whole listings: a listing's frames, their vectors,
+        # tags and hash counts all key by listing or image, and the counters `_galleries`
+        # adds up are per frame, so the slices read what the whole array would.
+        galleries: dict[int, list[Image]] = {}
+        for start in range(0, len(wanted), FACT_CHUNK):
+            galleries.update(self._galleries(wanted[start:start + FACT_CHUNK]))
         self.reads += len(listings)
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
@@ -1957,15 +1980,39 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def _halve_rate_after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
+                            rate_per_s: float, original: BaseException) -> None:
+    """E913's halving for a pass that RAISED. Through `fresh_conn` when the caller gave one
+    (the pass's own connection may be the one the server terminated), else on `conn`; a
+    failure is noted on `original` rather than replacing it — the raise is the signal."""
+    try:
+        if fresh_conn is None:
+            _write_rate(conn, generation, rate_per_s / 2.0, "halved")
+            return
+        fresh = fresh_conn()
+        try:
+            _write_rate(fresh, generation, rate_per_s / 2.0, "halved")
+        finally:
+            close = getattr(fresh, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:  # noqa: BLE001 — best effort
+        original.add_note(f"halving {pass_rate_key(generation)} after the raise also failed "
+                          f"({type(exc).__name__}: {exc}); the next pass claims the same size")
+
+
 def run_incremental(conn_factory: Callable[[], Any], *,
-                    deadline_s: float | None = None) -> dict[str, Any]:
+                    deadline_s: float | None = None,
+                    fresh_conn: Callable[[], Any] | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
     above 0. The pass decides, groups and commits; then, outside the bootstrap phase and inside
     what is left of its time, the reconcile turns the groups it re-clustered into production
     merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
-    is re-cut. A pass past its deadline rolls back and halves its rate (E913)."""
+    is re-cut. A pass past its deadline rolls back and halves its rate (E913); so does a pass
+    that RAISED, written through `fresh_conn` — a factory for a NEW connection, since its own
+    may be dead — or on its own connection when the caller gives none (E930)."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2049,6 +2096,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         except RetireRefusal as exc:
             # The transaction rolled back on the way out: nothing written, no cursor moved.
             raise SystemExit(str(exc)) from exc
+        except Exception as exc:
+            # E930: the pass RAISED (a backend the server terminated, a cancelled statement, a
+            # Python error). It rolled back and moved no cursor, so the next pass would claim
+            # the IDENTICAL batch at the identical size and fail the same way for ever
+            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does.
+            _halve_rate_after_raise(fresh_conn, conn, generation, rate_per_s, exc)
+            raise
         if stopped:
             # E913: the next pass claims half as much.
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")

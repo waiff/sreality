@@ -222,16 +222,22 @@ def test_the_engines_deadline_sits_inside_every_bound_around_it() -> None:
 
 def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """No argument, no wrapper: the pass runs under the scope and scorer its generation was
-    seeded with, and under the engine's own deadline (E913, E914)."""
+    """No switch, no wrapper: the pass runs under the scope and scorer its generation was
+    seeded with, and under the engine's own deadline (E913, E914). The one thing handed in
+    beside the connection is a factory for a FRESH, bounded connect (E930): the halving a
+    RAISED pass writes may not have a live connection of its own."""
     conn = _Conn()
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    connects: list[dict[str, Any]] = []
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
     _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _summary())
 
     last = rw._autodedup_sync()
 
-    assert seen["kwargs"] == {} and seen["conn"] is conn
+    assert set(seen["kwargs"]) == {"fresh_conn"} and seen["conn"] is conn
+    seen["kwargs"]["fresh_conn"]()
+    assert connects == [{}, {"attempts": 1,
+                             "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
     assert conn.executed == [RT_STORE_PRESENT_SQL]
     assert conn.closed
     assert last == {

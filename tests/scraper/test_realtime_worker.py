@@ -2414,3 +2414,37 @@ def test_the_worker_starts_the_watchdog_and_pins_its_executor():
     src = inspect.getsource(rw._amain)
     assert "target=_watchdog" in src and "daemon=True" in src
     assert "set_default_executor(ThreadPoolExecutor(max_workers=LANE_EXECUTOR_THREADS))" in src
+
+
+def test_the_autodedup_pass_hands_the_lane_a_fresh_connection_factory(monkeypatch):
+    """E930: a RAISED pass halves its rate through a connection of its own (the pass's may be
+    the one the server terminated), so the lane is handed a factory that OPENS one, bounded to
+    a single attempt — never the pass's connection again."""
+    from autodedup import incremental_lane
+
+    opened: list[dict[str, Any]] = []
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    def connect(**kwargs: Any) -> _Conn:
+        opened.append(dict(kwargs))
+        return _Conn()
+
+    monkeypatch.setattr(rw.db, "connect", connect)
+    monkeypatch.setattr(rw, "_autodedup_store_present", lambda conn: True)
+    seen: dict[str, Any] = {}
+
+    def fake_run(conn_factory, **kwargs):
+        seen["conn"] = conn_factory()
+        seen["fresh"] = kwargs["fresh_conn"]()
+        return {"counts": {}, "aborted": ""}
+
+    monkeypatch.setattr(incremental_lane, "run_incremental", fake_run)
+    last = rw._autodedup_sync()
+
+    assert last["errors"] == 0 and last["skipped"] == 0
+    assert seen["fresh"] is not seen["conn"]
+    assert len(opened) == 2 and opened[1] == {
+        "attempts": 1, "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}
