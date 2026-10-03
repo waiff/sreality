@@ -5,14 +5,30 @@
  * sale flat), rendered by the SHAPE of the one result, and the comparables
  * estimation for sale apartments as the deeper tool / fallback.
  *
- * Index/search pages → small per-card badges (see index_overlay.ts).
+ * Index/search pages → per-card controls + yield badges and the corner dock
+ * (see index_overlay.ts).
  *
  * All network calls go through chrome.runtime.sendMessage to the background
  * worker (host_permissions + the portal's CORS don't apply there). */
 
 import styles from './styles.css?inline';
 import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
-import { EXTENSION_RELOADED_DETAIL, mfYieldText, runIndexOverlay } from './index_overlay';
+import {
+  COLLECTION_SAVE_LABEL,
+  bellIconSvg,
+  bookmarkIconSvg,
+  eyeOffIconSvg,
+  funnelIconSvg,
+  sortCollections,
+  stageAccent,
+  stageBadge,
+} from './glyphs';
+import {
+  EXTENSION_RELOADED_DETAIL,
+  mfYieldText,
+  runIndexOverlay,
+  type IndexOverlayHandle,
+} from './index_overlay';
 import type {
   AgentQuota,
   ApiMessage,
@@ -104,6 +120,10 @@ const APP_BASE_URL = ((raw: string): string => {
   if (t === '') return '';
   return (/^https?:\/\//i.test(t) ? t : `https://${t}`).replace(/\/$/, '');
 })(import.meta.env.VITE_APP_BASE_URL ?? '');
+
+/* The app's collections page — the "Spravovat kolekce" link of both save
+ * checklists (the panel's and the search-page cards'). Null → link hidden. */
+const COLLECTIONS_URL = APP_BASE_URL ? `${APP_BASE_URL}/collections` : null;
 
 type Phase = 'loading' | 'deactivated' | 'active' | 'error' | 'signed_out';
 
@@ -255,26 +275,8 @@ function parseNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/* The SPA's <FunnelIcon> (icons.tsx) hand-reproduced as inline SVG — the shared
- * "pipeline" glyph on every surface (a funnel with three arrows; filled body =
- * in-pipeline). The extension can't import the SPA's React component (separate
- * territory, classic content script), so this mirrors it by value, like the
- * palette in styles.css. */
-function funnelIconSvg(filled: boolean): string {
-  const f = filled ? 'currentColor' : 'none';
-  return (
-    '<svg class="pipeline-icon" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<line x1="7.5" y1="2" x2="7.5" y2="5.5"/><polyline points="6.2,4 7.5,5.7 8.8,4"/>' +
-    '<line x1="12" y1="2" x2="12" y2="5.5"/><polyline points="10.7,4 12,5.7 13.3,4"/>' +
-    '<line x1="16.5" y1="2" x2="16.5" y2="5.5"/><polyline points="15.2,4 16.5,5.7 17.8,4"/>' +
-    `<path d="M4 8 H20 L13.5 15 V21 H10.5 V15 Z" fill="${f}"/></svg>`
-  );
-}
-
-/* The SPA's <PencilIcon>/<TrashIcon> (icons.tsx), same hand-reproduction as
- * funnelIconSvg above — used on the note edit/delete row buttons. */
+/* The SPA's <PencilIcon>/<TrashIcon> (icons.tsx), hand-reproduced like the
+ * marks in glyphs.ts — used on the note edit/delete row buttons. */
 const PENCIL_ICON_SVG =
   '<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1" ' +
   'stroke-linejoin="round" aria-hidden="true">' +
@@ -287,35 +289,6 @@ const TRASH_ICON_SVG =
   '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>' +
   '<line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
 
-/* The stage's accent, mirroring the SPA's lib/pipelineStage.ts:stageAccent —
- * the operator's stage colour, copper when the stage has none (copper is THE
- * deal-tracking accent, rule #22). Values come from styles.css's --tag-* vars,
- * which mirror the SPA palette by value. */
-const STAGE_COLORS = new Set([
-  'copper', 'sage', 'brick', 'ochre', 'slate', 'plum', 'teal', 'sand',
-]);
-
-function stageAccent(color: string | null | undefined): { fg: string; soft: string } {
-  return color && STAGE_COLORS.has(color)
-    ? { fg: `var(--tag-${color})`, soft: `var(--tag-${color}-soft)` }
-    : { fg: 'var(--copper)', soft: 'var(--copper-soft)' };
-}
-
-/* The funnel badge, mirroring lib/pipelineStage.ts:stageBadge — the operator's
- * own short code, else the stage's 1-based ordinal among the live stages, else
- * nothing (stage list not loaded / stage archived). Never derived from
- * `position`: the live board reuses "9" across its three closed stages. */
-function stageBadge(
-  code: string | null | undefined,
-  stageId: number | null | undefined,
-  stages: PipelineStage[] | null,
-): string | null {
-  if (code) return code;
-  if (stageId == null || stages == null) return null;
-  const idx = stages.findIndex((s) => s.id === stageId);
-  return idx < 0 ? null : String(idx + 1);
-}
-
 /* Immutably set the listing's pipeline membership on a state update. */
 function withPipeline(
   prev: PanelState, membership: PortalListing['pipeline'],
@@ -324,21 +297,7 @@ function withPipeline(
   return { ...prev, listing: { ...prev.listing, pipeline: membership } };
 }
 
-/* The trigger's name and the checklist's, in the SPA's words
- * (CollectionSaveMenu's COLLECTION_SAVE_LABEL) — one verb on both surfaces. */
-const COLLECTION_SAVE_LABEL = 'Uložit do kolekce';
 const COLLECTION_MENU_ID = 'collection-menu';
-
-/* The checklist's order, the SPA menu's: monitored collections first, then by
- * name. Never the server's order — GET /collections sorts by updated_at, which
- * every add/remove bumps, so the row just clicked would jump to the top. */
-function sortCollections(collections: ExtCollection[]): ExtCollection[] {
-  return [...collections].sort(
-    (a, b) =>
-      Number(b.monitoring_enabled) - Number(a.monitoring_enabled)
-      || a.name.localeCompare(b.name),
-  );
-}
 
 /* The collection list as the panel draws it — compared this way rather than as
  * whole API rows, which also carry an `updated_at` that every add/remove bumps
@@ -346,45 +305,6 @@ function sortCollections(collections: ExtCollection[]): ExtCollection[] {
 function collectionsKey(collections: ExtCollection[]): string {
   return JSON.stringify(
     sortCollections(collections).map((c) => [c.id, c.name, c.monitoring_enabled]),
-  );
-}
-
-/* The SPA's <CollectionMark> (a bookmark; filled = in at least one collection)
- * hand-reproduced — the collection glyph on every surface, and deliberately not
- * the funnel: collections are many-to-many groupings, the pipeline is the one
- * deal state (rule #22), and the two must never look alike. */
-function bookmarkIconSvg(filled: boolean): string {
-  const f = filled ? 'currentColor' : 'none';
-  return (
-    `<svg class="collection-icon" viewBox="0 0 16 16" fill="${f}" ` +
-    'stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M4 2.5 H12 V13.5 L8 10.75 L4 13.5 Z" stroke-linecap="round"/></svg>'
-  );
-}
-
-/* The bell that marks a MONITORED collection in the checklist (the SPA menu's
- * BellGlyph): membership there is what turns into change alerts. */
-function bellIconSvg(): string {
-  return (
-    '<svg class="coll-bell-icon" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M6 9 a6 6 0 0 1 12 0 c0 5 1.5 6.5 2.5 7.5 H3.5 C4.5 15.5 6 14 6 9 Z"/>' +
-    '<path d="M10 20 a2 2 0 0 0 4 0"/></svg>'
-  );
-}
-
-/* The SPA's <EyeOffIcon> (icons.tsx) hand-reproduced — the extension can't
- * import the SPA's React component. `filled` = dismissed. */
-function eyeOffIconSvg(filled: boolean): string {
-  const fill = filled ? ' fill="currentColor" fill-opacity="0.25"' : '';
-  return (
-    '<svg class="collection-icon" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M2.5 12 C5 7.5 8.3 5.5 12 5.5 S19 7.5 21.5 12 C19 16.5 15.7 18.5 12 18.5 ' +
-    `S5 16.5 2.5 12 Z"${fill}/>` +
-    '<circle cx="12" cy="12" r="3"/><line x1="4" y1="20" x2="20" y2="4"/></svg>'
   );
 }
 
@@ -1237,10 +1157,10 @@ function mountPanel(): {
 
     /* Creating, renaming and monitoring settings stay in the app, as they do on
      * its listing page — the checklist only files the property. */
-    if (APP_BASE_URL) {
+    if (COLLECTIONS_URL != null) {
       const manage = document.createElement('a');
       manage.className = 'coll-link coll-manage';
-      manage.href = `${APP_BASE_URL}/collections`;
+      manage.href = COLLECTIONS_URL;
       manage.target = '_blank';
       manage.rel = 'noopener';
       manage.textContent = state.collections?.length === 0
@@ -1768,8 +1688,28 @@ let patchTimer: ReturnType<typeof setTimeout> | null = null;
 let renderEpoch = 0;
 
 function setState(updater: (prev: PanelState) => PanelState): void {
+  const shown = state.listing;
   state = updater(state);
   render(state);
+  /* On a search page the same property is also drawn on its card(s): a change
+   * to its pipeline / collections / dismissal made here repaints them. */
+  if (state.listing != null && state.listing !== shown) indexOverlay?.sync(state.listing);
+}
+
+/* The other direction: a write made on a search-page card settled. The panel
+ * takes it only while it shows that same property. */
+function onCardWrite(listing: PortalListing): void {
+  const shown = (state as PanelState | undefined)?.listing;
+  if (shown?.property_id == null || shown.property_id !== listing.property_id) return;
+  setState((prev) => (prev.listing == null ? prev : {
+    ...prev,
+    listing: {
+      ...prev.listing,
+      pipeline: listing.pipeline,
+      collection_ids: listing.collection_ids,
+      dismissed: listing.dismissed,
+    },
+  }));
 }
 
 /* setState, but a no-op once the panel it was captured for has been replaced. */
@@ -2456,6 +2396,7 @@ async function onSignIn(): Promise<void> {
     }));
     return;
   }
+  indexOverlay?.sessionChanged();
   await openPanel(ref, panelUrl);
 }
 
@@ -2473,6 +2414,8 @@ async function onSignOut(): Promise<void> {
     ...prev, phase: 'signed_out', authEmail: null, listing: null, errorMessage: null,
     collections: null, stages: null, collectionsOpen: false,
   }));
+  // The search-page cards under the panel were drawn for that account too.
+  indexOverlay?.sessionChanged();
 }
 
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
@@ -2621,7 +2564,7 @@ function routeKey(url: string): string {
 }
 
 let lastRouteKey: string | null = null;
-let stopIndexOverlay: (() => void) | null = null;
+let indexOverlay: IndexOverlayHandle | null = null;
 
 function renderForUrl(url: string): void {
   const key = routeKey(url);
@@ -2631,9 +2574,9 @@ function renderForUrl(url: string): void {
    * when the new page opens no panel of its own (detail → index). */
   renderEpoch++;
 
-  if (stopIndexOverlay != null) {
-    stopIndexOverlay();
-    stopIndexOverlay = null;
+  if (indexOverlay != null) {
+    indexOverlay.stop();
+    indexOverlay = null;
   }
 
   const ref = detailRef(url);
@@ -2646,13 +2589,13 @@ function renderForUrl(url: string): void {
 
   document.getElementById(HOST_ELEMENT_ID)?.remove();
   if (portalForHost(window.location.hostname) != null) {
-    runIndexOverlay(call, openPanel)
-      .then((stop) => {
+    runIndexOverlay(call, openPanel, { collectionsUrl: COLLECTIONS_URL, onCardWrite })
+      .then((overlay) => {
         /* Another route change landed while the overlay was starting — adopt
          * nothing, or its observer outlives the page it was scanning. Keyed on
          * the route, not renderEpoch, which an index-badge click also bumps. */
-        if (lastRouteKey !== key) stop();
-        else stopIndexOverlay = stop;
+        if (lastRouteKey !== key) overlay.stop();
+        else indexOverlay = overlay;
       })
       .catch((err: unknown) => {
         console.error('[mf-ext] index overlay failed', err);

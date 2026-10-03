@@ -5,33 +5,9 @@
  * the one shadow is the float-lift that detaches the panel from the busy host
  * page. The panel reads as a valuation slip clipped to the corner. */
 
+@import './tokens.css';
+
 :host {
-  /* Mirrored civic-archive tokens (keep aligned with the SPA). */
-  --bg: #f7f3ec;          /* aged paper — the panel surface */
-  --ink: #1c1c1c;         /* primary text + the card edge */
-  --ink-3: #555;          /* secondary text */
-  --ink-4: #8a8a8a;       /* tertiary / metadata */
-  --rule: #d8d3c5;        /* hairline pencil rule */
-  --rule-strong: #1c1c1c; /* the archival card border */
-  --copper: #b3592d;      /* the one accent — yield, actions, the index-mark */
-  --copper-soft: #f3eadf; /* copper wash — the header band */
-  /* Derived shades (extension-only). */
-  --bg-sunk: #f1ebde;     /* a hair darker paper — groups the estimate slip */
-  --paper: #fffdf8;       /* fresh near-white paper — input fields */
-  --copper-deep: #9a4b25; /* copper hover */
-  /* Pipeline-stage palette, mirrored BY VALUE from the SPA's globals.css
-     `--color-tag-*` light-theme tokens (the panel is light-only). The stage
-     badge + pill take the operator's stage colour here exactly as they do in
-     the SPA, so one stage never reads copper in the panel and teal in Browse.
-     Keep in step with globals.css if a colour is ever retuned. */
-  --tag-copper: #b3592d; --tag-copper-soft: #f3eadf;
-  --tag-sage:   #5e7a4a; --tag-sage-soft:   rgba(94, 122, 74, 0.10);
-  --tag-brick:  #a04b3d; --tag-brick-soft:  rgba(160, 75, 61, 0.10);
-  --tag-ochre:  #b58438; --tag-ochre-soft:  rgba(181, 132, 56, 0.10);
-  --tag-slate:  #4a5b73; --tag-slate-soft:  rgba(74, 91, 115, 0.10);
-  --tag-plum:   #7a4664; --tag-plum-soft:   rgba(122, 70, 100, 0.10);
-  --tag-teal:   #2e6f7c; --tag-teal-soft:   rgba(46, 111, 124, 0.10);
-  --tag-sand:   #9c8c5e; --tag-sand-soft:   rgba(156, 140, 94, 0.10);
   all: initial;
 }
 
