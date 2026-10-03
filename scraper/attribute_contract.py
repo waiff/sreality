@@ -102,6 +102,14 @@ def _cell(producer: Producer, *keys: str, absence: Absence = "unknown",
 # one place, and so flipping one is visibly a per-field edit, never a sweep.
 _UNGATED = Gate(passed=False, note="awaiting the W7 bake-off panel (R7: >= 95 %)")
 
+# General ruling 3 (2026-09-30) + the operator's flat answers (2026-10-01): every plot
+# cell is still read verbatim, but what it holds passes `scraper.area.stated_plot` at the
+# contract boundary. The producer stays `structured` ON PURPOSE: `none` / `text` would
+# make the column preserve-if-null (`db._preserved_columns`), so a stored echo would
+# never clear and a real house plot would freeze.
+_PLOT_NOTE = ("ruling 3: never a plot on a byt; on komerční declined when it equals the "
+              "usable / labelled headline figure (scraper.area.stated_plot)")
+
 
 # sreality paints the sale STATUS over the condition / building-type NAME on a reserved or
 # sold advert, and spells "not specified" as a leading dash. Both are absence, not value.
@@ -142,7 +150,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "condition": _cell("structured", "building_condition", sentinels=_SREALITY_UNSET),
         "energy_rating": _cell("structured", "energy_efficiency_rating_cb",
                                sentinels=_SREALITY_UNSET),
-        "estate_area": _cell("structured", "estate_area"),
+        "estate_area": _cell("structured", "estate_area", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "usable_area"),
         "garden_area": _cell("structured", "garden_area"),
         "category_sub_cb": _cell("structured", "category_sub_cb"),
@@ -176,7 +184,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "construction", sentinels=("UNDEFINED",)),
         "condition": _cell("structured", "condition", sentinels=("UNDEFINED",)),
         "energy_rating": _cell("structured", "penb"),
-        "estate_area": _cell("structured", "surfaceLand"),
+        "estate_area": _cell("structured", "surfaceLand", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "surface"),
         "garden_area": _cell("structured", "frontGarden",
                              note="a front yard, not a parcel"),
@@ -217,7 +225,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "construction", sentinels=("neuvedeno",)),
         "condition": _cell("structured", "condition", sentinels=("neuvedeno",)),
         "energy_rating": _cell("structured", "energyClassification"),
-        "estate_area": _cell("structured", "parcelArea"),
+        "estate_area": _cell("structured", "parcelArea", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "usableArea"),
         "garden_area": _cell("structured", "gardenArea"),
         "category_sub_cb": _cell("none", gap=None),
@@ -268,7 +276,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "konstrukce"),
         "condition": _cell("structured", "stav nemovitosti"),
         "energy_rating": _cell("structured", "energetická náročnost"),
-        "estate_area": _cell("structured", "plocha pozemku"),
+        "estate_area": _cell("structured", "plocha pozemku", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "plocha užitná"),
         "garden_area": _cell("none", gap=None),
         "category_sub_cb": _cell("none", gap=None),
@@ -317,7 +325,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "konstrukce budovy"),
         "condition": _cell("structured", "stav bytu", "stav budovy"),
         "energy_rating": _cell("structured", "penb"),
-        "estate_area": _cell("structured", "plocha pozemku"),
+        "estate_area": _cell("structured", "plocha pozemku", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "užitná plocha"),
         "garden_area": _cell("structured", "plocha zahrady"),
         "category_sub_cb": _cell("none", gap=None),
@@ -352,7 +360,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "penb",
                                note="a whole-page `PENB: X` scan is the last resort"),
-        "estate_area": _cell("structured", "plocha pozemku"),
+        "estate_area": _cell("structured", "plocha pozemku", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "plocha užitná"),
         "garden_area": _cell("none", gap=None),
         "category_sub_cb": _cell("none", gap=None),
@@ -392,7 +400,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "energetická náročnost budovy"),
-        "estate_area": _cell("structured", "plocha parcely"),
+        "estate_area": _cell("structured", "plocha parcely", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "užitná plocha"),
         # The live key is `zahrada`; `areas_from_params` used to read `plocha zahrady`,
         # which realitymix emits on no row, so the column was 0-filled on all 48,763. The
@@ -432,7 +440,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "energeticka narocnost budovy"),
-        "estate_area": _cell("structured", "plocha parcely"),
+        "estate_area": _cell("structured", "plocha parcely", note=_PLOT_NOTE),
         "usable_area": _cell("structured", "uzitna plocha"),
         "garden_area": _cell("structured", "plocha zahrady"),
         "category_sub_cb": _cell("none", gap=None),

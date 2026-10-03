@@ -2521,6 +2521,36 @@ renumber.** Navigate by area:
     declines the measure rather than stamping a basis for a value the row cannot store, which
     is also what keeps the heal's first batch from aborting on a 22003.
 
+    **A figure in the plot box is not always a plot** (general ruling 3, 2026-09-30; the
+    operator's flat answers, 2026-10-01; PR #1668). On 14 of 14 live pages the readers opened
+    (idnes, realitymix, mmreality; ceskereality answered 403 and was read from its stored
+    pages) the portal itself prints ONE figure in the plot box and the floor-area box — a
+    10 m² cellar with a 10 m² "plot", an 852 m² hall whose "Plocha parcely" is its own
+    footprint while the real 6 841 m² parcel sits only in the prose. We stored what the page
+    said and every per-portal key map was right; what was missing was one rule, so it is one
+    function, `scraper.area.stated_plot(category_main, plot, usable, headline, headline_basis)`,
+    called at ONE site for every portal that crosses the ScrapedListing contract
+    (`ScrapedListing.__post_init__`, the last point before `content_hash`, so the declined
+    value is hashed as absence like every other refused measure — rules 2/8) and once more in
+    sreality's `parse_listing`, whose row never crosses the contract (the same function, not a
+    copy — rule 21). The rule: on a **byt** the plot is ALWAYS absent (a flat has no parcel of
+    its own; what ceskereality's 3,185 active flat plots held was the doubled floor figure, the
+    placeholder 1 or the whole building's parcel); on **komerční** a plot equal — at the
+    column's 0.1 m², half up — to the usable measure or to a headline whose basis is a
+    LABELLED interior measure (`usable` / `floor` / `total`) is absent (1,383 ceskereality, 651
+    idnes, 427 realitymix, 53 mmreality active rows); **dum**, pozemek and ostatni are
+    untouched (the operator kept the house rule as it is — a garage's parcel really is its
+    footprint). Never compared: a title / prose fallback (`unknown`: "Prodej areálu 3 400 m²"
+    IS the site, and the real parcel would be dropped) and zastavěná plocha (a building may
+    cover its whole parcel). The contract cells stay `structured` with a note only — `none` /
+    `text` would make the column preserve-if-null (`db._preserved_columns`) and freeze every
+    stored echo. Each affected LIVE row clears at its next detail fetch with one genuine
+    snapshot; a STORED echo clears only by migration 583 (PR #1669, destructive, the 573
+    pattern: byt = every stored plot, komerční = the equality rule, active AND inactive),
+    because `scripts/reparse.py` never blanks. Named residual: the reverse case (idnes
+    19082282, a campsite's 8 616 m² land typed into the usable box) keeps the wrong area and
+    loses the true plot.
+
     **The area NUMBER has one grammar too** (the scraper track's W19, 2026-09-17 — not
     the location program's). Picking the right measure is only half the rule; reading the
     figure is the other half, and it was **five private copies** of a regex until now — four
@@ -2684,7 +2714,10 @@ renumber.** Navigate by area:
     without a word. The fix is the name, **not** a writer change. **The writer rule, stated once:** a
     parser fills `estate_area` ONLY from a parcel cell the page itself LABELS — sreality,
     bezrealitky, idnes, ceskereality, maxima and (from W21) mmreality all do, land rows
-    included, and that is faithful reporting rather than duplication. What no parser may do is
+    included, and that is faithful reporting rather than duplication — **and only when what
+    that cell holds is a plot at all** (general ruling 3, above): never on a byt, and on
+    komerční not when it merely repeats the usable / labelled headline figure
+    (`scraper.area.stated_plot`, at the contract boundary). What no parser may do is
     SYNTHESISE the column from `area_m2` for the four portals whose land pages carry no parcel
     label: that would copy the headline into a second column on 32k rows, leave every future
     portal to remember the rule, and make the data lie in order to spare the reader a function
