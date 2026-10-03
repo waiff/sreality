@@ -500,6 +500,10 @@ _TEXT_EXTRACT_PASS_LOCK = _PassLock("text_extract")
 AUTODEDUP_INTERVAL_SETTING = "realtime_autodedup_interval_seconds"
 # Longest refusal/abort text carried into the heartbeat row.
 AUTODEDUP_REASON_CHARS = 300
+# One connect attempt for the one write a RAISED pass makes after its own connection may have
+# died (its halved rate, E930): bounded, so a pooler that black-holes connects cannot hold the
+# lane's thread for db.connect's default three attempts at 130 s each.
+AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS = 10
 _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # log-once-per-process guard: the autodedup store is absent.
 _AUTODEDUP_STORE_WARNED = False
@@ -2140,7 +2144,11 @@ def _autodedup_sync() -> dict[str, Any]:
                 return _autodedup_outcome(started, skipped="store_absent")
             _AUTODEDUP_STORE_WARNED = False
             try:
-                summary = incremental_lane.run_incremental(lambda: conn)
+                summary = incremental_lane.run_incremental(
+                    lambda: conn,
+                    fresh_conn=lambda: db.connect(
+                        attempts=1,
+                        connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS))
             except SystemExit as exc:
                 return _autodedup_outcome(started, refused=str(exc))
             return _autodedup_outcome(started, summary=summary)
