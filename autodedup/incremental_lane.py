@@ -35,11 +35,11 @@ import json
 import os
 import socket
 import time
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
+from typing import Any, Callable, ContextManager, Iterable, Iterator, Mapping, Sequence
 
 from autodedup import reconcile, rt_lease
 from autodedup.dataset import Image, Listing
@@ -84,6 +84,7 @@ from autodedup.incremental import (
     PassDeadline,
     SET_CAP,
     WorkItem,
+    _in_time,
     bootstrap_key,
     key_token,
     run_pass_bounded,
@@ -925,9 +926,15 @@ class SqlFacts:
     it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
-                 population: Mapping[int, int] | None = None, clip: bool = True) -> None:
+                 population: Mapping[int, int] | None = None, clip: bool = True,
+                 deadline: float | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
+        # The pass's own deadline (a `time.perf_counter()` instant, E913), read between the
+        # FACT_CHUNK slices of every read (E931): a slow read is four statement sets of up to
+        # STATEMENT_TIMEOUT_MS a slice, and the pass reads its clock nowhere else until the
+        # step after. The cut bounds its own reads (`_cut_bound`) and leaves this unset.
+        self.deadline = deadline
         # A population handed in INSTEAD of the table, for the one caller that is about to
         # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
         # builds the fingerprints it is cut from on exactly those counts. The pass never
@@ -955,11 +962,19 @@ class SqlFacts:
             names = [column[0] for column in cur.description]
             return [dict(zip(names, row)) for row in rows]
 
+    def _slices(self, ids: Sequence[int]) -> Iterator[list[int]]:
+        """`ids` in FACT_CHUNK slices of whole listings, the deadline read before each: past
+        it the read stops at a slice boundary and raises `PassDeadline` for the pass's
+        transaction to roll back, as the pass's own between-step checks do."""
+        for start in range(0, len(ids), FACT_CHUNK):
+            _in_time(self.deadline)
+            yield list(ids[start:start + FACT_CHUNK])
+
     def _dicts_over(self, sql: str, ids: Sequence[int], **params: Any) -> list[dict[str, Any]]:
         """`_dicts` over `ids` in FACT_CHUNK slices, concatenated."""
         rows: list[dict[str, Any]] = []
-        for start in range(0, len(ids), FACT_CHUNK):
-            rows.extend(self._dicts(sql, {"ids": list(ids[start:start + FACT_CHUNK]), **params}))
+        for ids_slice in self._slices(ids):
+            rows.extend(self._dicts(sql, {"ids": ids_slice, **params}))
         return rows
 
     def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
@@ -984,8 +999,8 @@ class SqlFacts:
         # tags and hash counts all key by listing or image, and the counters `_galleries`
         # adds up are per frame, so the slices read what the whole array would.
         galleries: dict[int, list[Image]] = {}
-        for start in range(0, len(wanted), FACT_CHUNK):
-            galleries.update(self._galleries(wanted[start:start + FACT_CHUNK]))
+        for ids_slice in self._slices(wanted):
+            galleries.update(self._galleries(ids_slice))
         self.reads += len(listings)
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
@@ -1980,25 +1995,32 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
-def _halve_rate_after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
-                            rate_per_s: float, original: BaseException) -> None:
-    """E913's halving for a pass that RAISED. Through `fresh_conn` when the caller gave one
-    (the pass's own connection may be the one the server terminated), else on `conn`; a
-    failure is noted on `original` rather than replacing it — the raise is the signal."""
+def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
+                 rate_per_s: float, holder: str, original: BaseException) -> None:
+    """What a pass that RAISED still owes, on ONE connection: E913's halving (E930) and its
+    lease's release (E931). Through `fresh_conn` when the caller gave one — the pass's own
+    connection may be the one the server terminated, and a lease that connection cannot
+    release sits until its TTL, skipping every pass of the next ~35 min as "leased" — else on
+    `conn`. The release tries the pass's own connection first and the fresh one only when
+    that fails, so a live pass releases the way every other end of a run does. Best effort:
+    a failure is noted on `original` rather than replacing it — the raise is the signal."""
+    fresh: Any = None
     try:
-        if fresh_conn is None:
-            _write_rate(conn, generation, rate_per_s / 2.0, "halved")
-            return
-        fresh = fresh_conn()
         try:
-            _write_rate(fresh, generation, rate_per_s / 2.0, "halved")
-        finally:
-            close = getattr(fresh, "close", None)
-            if callable(close):
+            if fresh_conn is not None:
+                fresh = fresh_conn()
+            _write_rate(fresh if fresh is not None else conn, generation, rate_per_s / 2.0,
+                        "halved")
+        except Exception as exc:  # noqa: BLE001 — best effort
+            original.add_note(f"halving {pass_rate_key(generation)} after the raise also "
+                              f"failed ({type(exc).__name__}: {exc}); the next pass claims "
+                              "the same size")
+        rt_lease.release_after(conn, holder, original, fallback=fresh)
+    finally:
+        close = getattr(fresh, "close", None)
+        if callable(close):
+            with suppress(Exception):
                 close()
-    except Exception as exc:  # noqa: BLE001 — best effort
-        original.add_note(f"halving {pass_rate_key(generation)} after the raise also failed "
-                          f"({type(exc).__name__}: {exc}); the next pass claims the same size")
 
 
 def run_incremental(conn_factory: Callable[[], Any], *,
@@ -2061,7 +2083,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
-        facts = SqlFacts(conn)
+        facts = SqlFacts(conn, deadline=deadline)
         work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
                        pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
         result = None
@@ -2100,8 +2122,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             # E930: the pass RAISED (a backend the server terminated, a cancelled statement, a
             # Python error). It rolled back and moved no cursor, so the next pass would claim
             # the IDENTICAL batch at the identical size and fail the same way for ever
-            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does.
-            _halve_rate_after_raise(fresh_conn, conn, generation, rate_per_s, exc)
+            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does,
+            # and release the lease there too (E931): on a dead connection the `finally`
+            # below could not, and the lease then sat until its TTL (2,400 s), so the next
+            # passes were skipped "leased" for up to ~35 min. Settled here on both counts —
+            # attempted on the pass's connection, then the fresh one, and noted on the raise
+            # when neither could — so the `finally` releases nothing twice.
+            _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc)
+            leased = False
             raise
         if stopped:
             # E913: the next pass claims half as much.
