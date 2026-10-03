@@ -15,6 +15,7 @@ import MergedAdvertsSection, { COLLAPSED_THUMBS } from './MergedAdvertsSection';
 import * as api from '@/lib/api';
 import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
+import { fmtCzk } from '@/lib/format';
 import * as queries from '@/lib/queries';
 import { stateStays } from '@/lib/mergedAdverts';
 import * as toast from '@/lib/toast';
@@ -342,6 +343,14 @@ const LABEL: Record<number, string> = {
   404: 'Nemovitost inzerátu Českéreality #404',
   505: 'Nemovitost inzerátu Bezrealitky #505',
 };
+/* A plan line names an advert as its row does: portal and price. */
+const AD: Record<number, string> = {
+  101: `Sreality ${fmtCzk(5_000_000)}`,
+  202: `iDNES Reality ${fmtCzk(5_200_000)}`,
+  303: `Bazoš ${fmtCzk(5_200_000)}`,
+  404: `Českéreality ${fmtCzk(5_200_000)}`,
+  505: `Bezrealitky ${fmtCzk(5_200_000)}`,
+};
 const STALE =
   'Nemovitost se mezitím změnila — načteno znovu, nic se nezapsalo. Zkontrolujte písmena a rozdělte znovu.';
 
@@ -414,8 +423,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
 
     fireEvent.change(idnes, { target: { value: 'B' } });
     expect(planLines()).toEqual([
-      'A — zůstává v nemovitosti #42: Sreality #101',
-      'B — odejde jako jedna nemovitost: iDNES Reality #202',
+      `A — zůstává v nemovitosti #42: ${AD[101]}`,
+      `B — odejde jako jedna nemovitost: ${AD[202]}`,
     ]);
     expect(panel().textContent).toContain(
       'každá dvojice inzerátů napříč písmeny se uloží jako „různé“ a dostane trvalý zákaz spojení; inzeráty se stejným písmenem zůstanou spolu jako jedna nemovitost.',
@@ -433,8 +442,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
     await assign({ 303: 'B', 404: 'B' });
     expect(within(screen.getByLabelText(LABEL[303])).getAllByRole('option')).toHaveLength(4);
     expect(planLines()).toEqual([
-      'A — zůstává v nemovitosti #42: Sreality #101, iDNES Reality #202',
-      'B — odejde jako jedna nemovitost: Bazoš #303, Českéreality #404',
+      `A — zůstává v nemovitosti #42: ${AD[101]}, ${AD[202]}`,
+      `B — odejde jako jedna nemovitost: ${AD[303]}, ${AD[404]}`,
     ]);
     splitNow();
     await waitFor(() =>
@@ -452,9 +461,9 @@ describe('<MergedAdvertsSection> the split letters', () => {
     setup({ sources: [FOUR[0], FOUR[3], FOUR[1], FOUR[2]] });
     await assign({ 404: 'C', 202: 'B', 303: 'C' });
     expect(planLines()).toEqual([
-      'A — zůstává v nemovitosti #42: Sreality #101',
-      'B — odejde jako jedna nemovitost: iDNES Reality #202',
-      'C — odejde jako jedna nemovitost: Bazoš #303, Českéreality #404',
+      `A — zůstává v nemovitosti #42: ${AD[101]}`,
+      `B — odejde jako jedna nemovitost: ${AD[202]}`,
+      `C — odejde jako jedna nemovitost: ${AD[303]}, ${AD[404]}`,
     ]);
     splitNow();
     await waitFor(() =>
@@ -471,8 +480,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
     setup({ sources: FOUR });
     await assign({ 101: 'B', 202: 'B' });
     expect(planLines()).toEqual([
-      'A — odejde jako jedna nemovitost: Bazoš #303, Českéreality #404',
-      'B — zůstává v nemovitosti #42: Sreality #101, iDNES Reality #202',
+      `A — odejde jako jedna nemovitost: ${AD[303]}, ${AD[404]}`,
+      `B — zůstává v nemovitosti #42: ${AD[101]}, ${AD[202]}`,
     ]);
     splitNow();
     await waitFor(() =>
@@ -492,8 +501,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
     await assign({ 101: 'B' });
     expect(screen.queryByText('vlastní inzerát')).toBeNull();
     expect(planLines()).toEqual([
-      'A — odejde jako jedna nemovitost: iDNES Reality #202',
-      'B — zůstává v nemovitosti #42: Sreality #101',
+      `A — odejde jako jedna nemovitost: ${AD[202]}`,
+      `B — zůstává v nemovitosti #42: ${AD[101]}`,
     ]);
     splitNow();
     await waitFor(() =>
@@ -517,8 +526,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
     setup({ sources: FOUR });
     await assign({ 303: 'B', 404: 'B' });
     expect(planLines()).toEqual([
-      'A — odejde jako jedna nemovitost: Sreality #101, iDNES Reality #202',
-      'B — zůstává v nemovitosti #42: Bazoš #303, Českéreality #404',
+      `A — odejde jako jedna nemovitost: ${AD[101]}, ${AD[202]}`,
+      `B — zůstává v nemovitosti #42: ${AD[303]}, ${AD[404]}`,
     ]);
     expect(within(rowOf('Bazoš')).getByText('vlastní inzerát')).toHaveAttribute(
       'title',
@@ -541,9 +550,9 @@ describe('<MergedAdvertsSection> the split letters', () => {
     setup({ sources: FOUR });
     await assign({ 101: 'B', 303: 'C' });
     expect(planLines()).toEqual([
-      'A — odejde jako jedna nemovitost: iDNES Reality #202, Českéreality #404',
-      'B — zůstává v nemovitosti #42: Sreality #101',
-      'C — odejde jako jedna nemovitost: Bazoš #303',
+      `A — odejde jako jedna nemovitost: ${AD[202]}, ${AD[404]}`,
+      `B — zůstává v nemovitosti #42: ${AD[101]}`,
+      `C — odejde jako jedna nemovitost: ${AD[303]}`,
     ]);
     splitNow();
     await waitFor(() =>
@@ -675,8 +684,8 @@ describe('<MergedAdvertsSection> the split letters', () => {
     await act(() => qc.invalidateQueries({ queryKey: ['merged-adverts', 'origins', 42] }));
     await waitFor(() =>
       expect(planLines()).toEqual([
-        'A — odejde jako jedna nemovitost: Sreality #101, iDNES Reality #202',
-        'B — zůstává v nemovitosti #42: Bazoš #303, Českéreality #404',
+        `A — odejde jako jedna nemovitost: ${AD[101]}, ${AD[202]}`,
+        `B — zůstává v nemovitosti #42: ${AD[303]}, ${AD[404]}`,
       ]),
     );
     expect(within(panel()).queryByRole('button', { name: 'Přesto rozdělit' })).toBeNull();
@@ -775,7 +784,7 @@ describe('<MergedAdvertsSection> the split letters', () => {
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
     await assign({ 202: 'B', 303: 'C', 404: 'C', 505: 'D' });
     // One own advert under A, one under B: the earlier letter keeps the property.
-    expect(planLines()[0]).toBe('A — zůstává v nemovitosti #42: Sreality #101');
+    expect(planLines()[0]).toBe(`A — zůstává v nemovitosti #42: ${AD[101]}`);
     splitNow();
     await waitFor(() =>
       expect(api.splitProperty).toHaveBeenCalledWith(42, {

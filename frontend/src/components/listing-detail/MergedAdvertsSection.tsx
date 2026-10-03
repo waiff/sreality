@@ -139,6 +139,12 @@ export default function MergedAdvertsSection({
     const s = sources.find((x) => x.id === listingId);
     return s ? (portalLabel(s.source) ?? s.source) : '';
   };
+  /* The plan names an advert the way its row does (portal and price): the
+   * operator reads the rows, and a listing id appears on none of them. */
+  const priceOf = (listingId: number): string => {
+    const s = sources.find((x) => x.id === listingId);
+    return s ? priceLabel(s.price_czk, detailsQ.data?.get(listingId)?.category_type) : '';
+  };
 
   /* Who stays is decided by which adverts are the property's own, so no letter
    * is offered before the origins are read. */
@@ -260,6 +266,7 @@ export default function MergedAdvertsSection({
           propertyId={propertyId}
           plan={plan}
           portalOf={portalOf}
+          priceOf={priceOf}
           reason={reason}
           onReason={setReason}
           pending={split.isPending}
@@ -663,6 +670,7 @@ function SplitPanel({
   propertyId,
   plan,
   portalOf,
+  priceOf,
   reason,
   onReason,
   pending,
@@ -674,6 +682,7 @@ function SplitPanel({
   propertyId: number;
   plan: SplitPlan;
   portalOf: (listingId: number) => string;
+  priceOf: (listingId: number) => string;
   reason: string;
   onReason: (reason: string) => void;
   pending: boolean;
@@ -705,7 +714,9 @@ function SplitPanel({
               <Fragment key={id}>
                 {i > 0 && ', '}
                 <span className="text-[0.68rem] tracking-[0.06em] uppercase">{portalOf(id)}</span>{' '}
-                <span className="font-mono tabular-nums">#{id}</span>
+                <span className="font-mono tabular-nums" title={`inzerát #${id}`}>
+                  {priceOf(id)}
+                </span>
               </Fragment>
             ))}
           </li>
