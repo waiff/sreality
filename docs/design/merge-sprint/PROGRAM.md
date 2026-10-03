@@ -1,8 +1,8 @@
 # MERGE SPRINT — one property, built from its ads
 
 **Program document. This file is the program's source of truth.**
-Status: decisions taken by the operator in a design interview on 2026-10-02/03 (four rounds; 47 of 48
-questions answered, Q48 open, one new question Q49 open, Q51 answered: §8). **Plan awaiting approval; only W0 is approved
+Status: decisions taken by the operator in a design interview on 2026-10-02/03 (four rounds; all 48
+questions answered, and the later Q49 and Q51: §8). **Plan awaiting approval; only W0 is approved
 to build.** Rules MS1–MS23 are binding once approved and supersede any design text, code comment or
 docstring that differs. Design detail per wave (inputs, not rules) is kept outside the repo in
 `~/merge-sprint-artifacts/`: `wf2/` designs and their skeptics, `wf3/` the non-interference check,
@@ -34,11 +34,12 @@ resolutions in `wf2/critic.md` §2 apply; where they differ, the rule wins.
 Every wave is tested against this sentence. Work that does not serve it is cut (§9).
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path beside
-an old one. Estimate for code, tests and workflows: about **+3,200 / −12,600 lines**, plus −21,000
-lines of data files; **−7 tables, +1**; about **1.5 GB** freed in the database, 1.15 GB of it two
-indexes nothing has ever used. Not counted: about 730 lines of migration text that restate views.
-About 7,700 of the removed lines depend on the open question Q48. Every wave removes more than it adds
-except W0 (a hotfix: +600 / −140 with its tests and docs) and W2a (about even).
+an old one. Estimate for code, tests and workflows: about **+3,200 / −4,900 lines**; **−3 tables, +1**;
+about **1.5 GB** dropped from the database, 1.15 GB of it two indexes nothing has ever used, while the
+Browse read models grow by roughly 0.2 GB (the two portal lists, the nine per-portal dates and their
+indexes). Not counted: about 750 lines of migration text that restate views. Our own condition grades
+stay for now (Q48, §9). Every wave removes more than it adds except W0 (a hotfix: +630 / −150 with its
+tests and docs) and W2a (+220 / −185).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -74,14 +75,21 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
   remembered from merge time except which ad moved where and the carry record (MS14). *(Q1 was left
   blank; taken as yes because every later answer relies on it.)*
 - **MS3 — Ads are untouched.** A merge or split changes only which property an ad belongs to, plus the
-  user's rulings. Never an ad's facts or history. A test over the code pins it.
+  user's rulings. Never an ad's facts or history. A test over the code pins it: the census of every
+  write into ads (`tests/scraper/test_listing_write_census.py`). One named exception, paused and never
+  run by a merge or split: the grading job that copies a graded ad's two grades onto the other ads of
+  its property (`propagate_condition_levels`, in that census as paused). It stays off with the grades
+  (MS4); resuming it needs the operator.
 
 ### What a property shows
-- **MS4 — Condition. Pending Q48.** Our own condition grades go: the two 1–5 grades, the stored scores
-  and extracted clues, the jobs that made them, the two grade filters, and the bulk-AI interface only
-  they used. The one condition filter left works on the portal's own text ("novostavba", "před
-  rekonstrukcí"), which is an ad field. **Not touched:** the AI ad summaries with their grade, and the
-  photo-comparison tool. Rule 14 becomes "no derived condition column, score or filter".
+- **MS4 — Condition: our own grades stay for now, untouched (Q48 b).** This sprint changes nothing in
+  condition grading: the two 1–5 grades on ads and properties, the stored scores and extracted clues,
+  the paused jobs that made them, the two grade filters, the bulk-AI interface and the estimator's
+  instructions. With no prompt rewrite, the two stale prompt suggestions stay as they are (Q43). A
+  property's grades keep following its speaking ad, as today, so MS5 moves them (§10) *(default)*. The
+  portal's condition text stays an ad field, the speaking ad's (MS11). The AI ad summaries and the
+  photo-comparison tool are untouched too (Q41, Q42). The grade removal in the design inputs
+  (`wf2/design_condition.md`; the grade parts of the critic's C4 and D) is void.
 - **MS5 — One ad speaks.** Order: active ads first; then ads with a map point
   (`listing_location.geom` present); then, among active ads, the earliest `first_seen_at`; among
   inactive ads, the latest `last_seen_at`; then portal trust; then id. One function, spelled once.
@@ -110,13 +118,14 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 
 | Field | Rule |
 |---|---|
-| Price, price per m², area, layout, floor, category, description, photos, link, furnished, condition text, map point, address | the speaking ad (MS5) |
+| Price, price per m², area, layout, floor, category, description, photos, link, furnished, condition text, our two condition grades (MS4), map point, address | the speaking ad (MS5) |
 | Building type, ownership, energy rating, usable / plot / garden area, parking spaces | the first ad in the speaking order that states it (today's rule, kept) |
 | Balcony, lift, parking, terrace, garage, cellar | yes if any ad says yes (MS6) |
 | Brokers | MS7 |
 | Portals | every portal with an ad; portals with an active ad kept separately (MS19) |
 | Active | any ad active |
 | First seen / last seen / days on market | earliest ad / latest ad / the span between |
+| Newest ad on each portal | when the property's newest ad on that portal was first seen, active or not; empty when it has no ad there (MS19) |
 | Price changes, price drops, total change | the speaking ad and its same-portal predecessors (MS10) |
 | Lowest active price | MS8 |
 | MF rent and yield | computed from the fields above |
@@ -183,8 +192,16 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
   any of them *(default, as today)*. A broker filter works the same over that broker's ads; portal and
   broker together mean one ad satisfies both. One rule on Browse list, count, map, Stats and Watchdog.
   A row shows the speaking ad's facts; its portal badge lists the portals where the property has an
-  active ad, or, when none is active, all its portals marked ended. **Pending Q49:** the per-ad
-  Browse lane and its "newest on this portal" order are deleted.
+  active ad, or, when none is active, all its portals marked ended. **Newest first (Q49 b):** with
+  exactly one portal P selected, "Newest first" and "Oldest first" order properties by when their
+  newest ad on P was first seen, active or not, so a property advertised on P again rises to the top
+  *(its newest ad on P, not its first: default)*. With no portal or several portals they order by when
+  the property was first seen *(default)*; a broker filter changes neither rule. Every portal uses our
+  own first sighting, bazos and ceskereality too, whose August order followed the portal's own date
+  *(default)*. Only the order changes: every filter, "added in the last N days" included, keeps its
+  meaning on every surface. Rows keep the property's own dates; a header chip names the order, and a
+  card whose date on P differs from its first seen shows both *(default)*. The per-ad Browse lane is
+  deleted.
 - **MS20 — Estimation subject = the property**, through one lookup. Recorded, not built here (§9).
 
 ### Housekeeping
@@ -199,6 +216,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 ## 3. What this program never does
 
 - Writes an ad's facts or history on a merge or split.
+- Changes our condition-grading code, its tables or its filters (MS4).
 - Remembers property facts from merge time.
 - Deletes a note, pipeline card, collection entry, tag or hide of any account.
 - Adds a flag, a setting or a second path beside an old one.
@@ -211,50 +229,63 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | Wave | Content | Engine path | Needs | Lines (≈) |
 |---|---|---|---|---|
 | **W0** | Daily recompute resumes where the last run stopped (draft PR #1695) | no, but a shared file | dedup session's OK to merge before its PR #1655 | +630 / −150 |
-| **W1a** | Condition grades out: code, workflows, data files, filters, screens; the data-quality view restated; estimator instructions changed first, by a guarded data update that also dismisses two stale suggestions | two recompute lines; AI-provider classes the engine's judge imports | **Q48**; #1655 | +40 / −7,700 |
 | **W1b** | Asset links and the pipeline note field out (code) | yes | #1655 | 0 / −840 |
-| **W2a** | Recompute: speaking-ad order, amenity union, the two portal lists, price lineage; stops writing two write-only columns; keeps #1655's share-sale rule | yes | #1655; W1a if Q48 = drop | +180 / −185 |
+| **W2a** | Recompute: speaking-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage; stops writing two write-only columns; keeps #1655's share-sale rule; realitymix joins the portal list | yes | #1655; its additive migration (nine `properties` date columns) applied before merge | +220 / −185 |
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 | no | — | +360 / −480 |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | #1655 | +330 / −655 |
 | **W4** | One split dialog (stays / goes / both), curation routing; three dialogs and the split undo deleted | yes | W3 | +1,400 / −1,740 |
-| **W5** | One read-model rewrite, the one portal rule, broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle after W2a; **Q49** | +175 / −890 |
-| **W6** | The destructive window (§6), with its registry and test edits | registry only | W1–W5 live | database |
+| **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle after W2a | +290 / −870 |
+| **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live | database |
 
 **Order.** Before the dedup session's review closes (2026-10-06 13:45 UTC): W0 and W2b. After its
-"C2 CLOSED" line: W1a, W1b and W2a back to back; then W3 and W4 back to back; then W5; then W6 on the
+"C2 CLOSED" line: W1b and W2a back to back; then W3 and W4 back to back; then W5; then W6 on the
 first 05:20 UTC window after W5 is live. Everything is built in worktrees ahead of time and waits.
 
 **Every wave** is built in its own worktree by a builder with two adversarial reviewers, ships as one
 PR with its tests and docs, states adds against deletes, and is confirmed on Railway after merge. A
 failing test, a merge conflict or a red gate stops the wave and is reported.
 
-**Rule edits.** CLAUDE.md is at its 300-line limit, so each edit is net zero: W1a rewrites rule 14 two
-lines shorter and drops "condition scores" from line 25; W1b drops the asset link from rule 18; W2a
-adds one line to rule 15; W3 replaces rule 22's "lossless restore" clause; W4 rewrites rule 18's last
-sentence; W5 adds one line to rule 16.
+**Rule edits.** CLAUDE.md has 291 of its 300 lines on main (PR #1697, 2026-10-03; CI's docs budget
+fails above 300). Each wave's edit is net zero except W5 (+1); rule 14 and the "Derived — condition
+scores" line stay (MS4). W1b drops the asset link from rule 18. W2a puts the speaking ad and the
+amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. W3 replaces rule 22's
+"lossless restore" clause and rule 18's detach sentence with the carry record. W4 rewrites rule 15's
+"or a refusal" and rule 18's split sentence. W5 adds the portal rule to rule 16; the one-portal
+"Newest first" and its per-portal columns go to `docs/architecture.md` (rules 16 and 21), not CLAUDE.md.
 
 ## 5. Gates
 
 - **Rule 0: code before drops.** Nothing is dropped before the code that stops naming it is live on the
-  API and the worker. Asset links, the pipeline note and several recompute columns are read inside
-  every merge; dropping them early would fail every merge.
+  API, the worker and the scheduled scrapers. Asset links, the pipeline note and two recompute columns
+  are read or written inside every merge, and every saved ad writes `discovery_seq`; dropping them
+  early would fail every merge or every save.
 - **W0:** a completion stamp appears within two runs and the saved position clears.
-- **W2a:** rolled out by a one-off script, not a migration: it queues the roughly 64,000 properties
-  with two or more ads, at most 2,000 per maintenance tick, off-peak, pausing while the engine is
-  bootstrapping. After it, a 1 % sample shows 0 properties whose stored speaking ad differs from the
-  rule. Single-ad properties get their portal lists from the next full recompute cycle.
+- **W2a:** its nine date columns exist in production before the code merges (an additive migration,
+  confirmed by a catalog read). The fill is a one-off script, not a migration: it queues the roughly
+  64,000 properties with two or more ads, at most 2,000 per maintenance tick, off-peak, pausing while
+  the engine is bootstrapping. After it, a 1 % sample shows 0 properties whose stored speaking ad,
+  portal lists or per-portal dates differ from the rule, and reports how many changed their condition
+  grades (expected: about 1.7 % of properties with two or more ads). Single-ad properties get their
+  portal lists and dates from the next full recompute cycle.
 - **W3:** the carry write adds at most 100 ms at the 95th percentile; no new failed engine merge in
   the first 24 hours; the count invariant (MS14) passes.
 - **W4:** the count invariant runs on production before and after the release; a two-account live
   test passes for every curation table.
-- **W5:** one full recompute cycle has completed since W2a; a sample that includes single-ad
-  properties shows 0 whose stored portal lists differ from their ads; one fixture pins the portal rule
-  in both the database and the browser; every read-model object changes in one transaction, off-peak,
-  never while a recompute runs; order agreed with the street-filter session (migrations 584, 585) and
-  with the dedup session's legacy-deletion wave.
+- **W5:** one full recompute cycle has completed since W2a; a sample of active properties that
+  includes single-ad ones shows 0 whose stored portal lists or per-portal dates differ from their ads,
+  and 0 where a portal is listed without its date or dated without being listed; one fixture pins the
+  portal rule in both the database and the browser; on a shadow copy, off-peak, the nine per-portal
+  indexes add at most 30 s to a rebuild, the whole new rebuild stays within 1.25 times today's (7 days:
+  median 255 s, p90 751 s), every new index serves a measured page or count or is not built, and a
+  24-row "Newest first" page for the largest and the smallest portal (idnes, maxima) reads that
+  portal's index with no sort step; every read-model object changes in one transaction, off-peak,
+  never while a recompute runs, both read models are rebuilt once before the code merges, and the two
+  Stats/map functions are restated from their live bodies; order agreed with the street-filter session
+  (its 585 restates both functions) and with the dedup session's legacy-deletion wave.
 - **W6:** each object re-checked on the day: no view or function depends on it, and no cascade is
   used; backup to R2 read back; engine paused; 05:20–05:30 UTC; a 5-second lock limit with retries;
-  indexes dropped outside the transaction, after a query plan shows the Watchdog does not use them;
+  indexes dropped outside the transaction, after a query plan shows the Watchdog does not use them and
+  the feed index's scan count has not moved since W5 went live;
   the pipeline note field is skipped if a single card holds a note.
 - **Migrations** are numbered 586–599.
 
@@ -262,16 +293,16 @@ sentence; W5 adds one line to rule 16.
 
 | Group | What it is | Objects |
 |---|---|---|
-| Condition grades (**pending Q48**) | our own scoring, dead since 18 June | `listing_condition_scores`, `listing_marker_extractions`, `condition_score_batches`, `condition_score_batch_requests`; 4 ad columns; 2 property columns; 7 settings rows; 2 bookkeeping rows |
 | Status log | the stored on/off-market log, replaced by MS9 | `property_status_events`, its view, trigger and function |
 | Asset links | "same building" links, never used | `assets`, `asset_membership_events`, `properties.asset_id` |
 | Pipeline note field | a field nothing can write | `property_pipeline.note` |
-| Per-ad Browse lane (**pending Q49**) | the "one portal's own page" machinery | `listings.discovery_seq`, `listing_detail_queue.discovery_seq`, its sequence, `listings_portal_feed_idx`, `listing_feed_public`, `listing_feed_visible()` |
+| Per-ad Browse lane | the "one portal's own page" machinery, replaced by MS19's one-portal "Newest first" | `listing_feed_visible()`, then `listing_feed_public`; the `listing_ids_filter` parameter of `browse_map_cells` (the function re-created with its grants); `listings_portal_feed_idx` (136 MB, dropped concurrently, outside the transaction); `listing_detail_queue.discovery_seq` with its default and `listings.discovery_seq`, then the sequence `listing_discovery_seq` |
 | Write-only columns | written by the recompute, read by nothing | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
 | Never-used indexes | built for an old Browse path | `properties_cat_last_seen_keyset_idx`, `properties_last_seen_keyset_idx` (1.15 GB) |
 
 **Never dropped by this sprint:** any curation table; the pipeline history; `properties.all_sources` /
-`active_sources`; `listings.published_at`; the AI summary cache; anything on the leave list in §7.
+`active_sources`; `listings.published_at` and `listings.discovered_at`; the AI summary cache; our
+condition grades with their scores, jobs and settings (MS4); anything on the leave list in §7.
 
 ## 7. Coordination with the parallel dedup session (MS22)
 
@@ -301,40 +332,53 @@ that session; the two never-used indexes come from migrations 198 and 275.
 
 ## 8. Open items
 
-1. **Q48, unanswered: our condition grades also feed the estimator.** Its instructions have a section
-   on the two grades and it can filter comparables by grade; 4 of 104 estimates ever did, and grades
-   exist for 7 % of ads. (a) Drop them: W1a runs, the estimator's instructions lose that section and
-   use the portal's condition text and the AI summaries instead. (b) Keep them for now: W1a and the
-   first row of §6 fall away and the program shrinks to about +3,160 / −4,900 lines. W1a does not
-   start until this is answered.
-2. **Q49, new: may the "newest on this portal" order go?** Under a portal filter, "Newest first" will
-   sort by when the property was first seen on any portal, so a known property newly advertised on
-   that portal does not rise to the top, and a row may show another portal's price, photo and link.
-   This retires the August "one portal's own page". (a) Accept. (b) Keep a per-portal "first seen
-   here" sort, which costs a stored date per property and portal. W5's deletion of the per-ad lane
-   does not start until this is answered.
+1. **Q48, answered 2026-10-03: (b), keep our condition grades for now.** W1a and the condition row
+   of §6 are cut; nothing in condition grading changes (MS4). A property's grades keep following its
+   speaking ad: on a 2 % sample the new order (MS5) changes them on about 1,200 properties (about 850
+   lose them although another of their ads is graded, 250 take another ad's, 100 gain), almost all
+   with no active ad. Taking the grades from the first graded ad instead would differ on about 1,600
+   properties and separate a property's grades from its condition text; it is not done *(default)*.
+2. **Q49, answered 2026-10-03: (b).** With exactly one portal selected, "Newest first" orders by when
+   the property's newest ad on that portal was first seen (MS19). It is stored as one date per property
+   and portal: nine `properties` columns written by the recompute (W2a), copied into `browse_list` with
+   one index each (W5). The August machinery still goes: `discovery_seq` is empty on 54 % of ads and
+   does not follow the portal's own order inside one index walk, and its 136 MB index is written on
+   almost every update of an ad. Known prices: nine more indexes on every Browse rebuild (W5 measures
+   them first); a tenth portal needs its own date column before it can be offered (a test fails until
+   it has one); a bazos ad its seller bumps no longer rises. Today the new order differs from (a) for
+   about 18 properties a day (55 of 17,672 ads first seen in three days joined an older property, 40
+   of them re-listed on the same portal); the number grows when the engine's area widens. Its defaults
+   are in item 4.
 3. **Q51, answered 2026-10-03: (a).** The health check on the daily recompute now warns at 52 hours
    and fails at 56 hours since the last complete cycle (was 26 and 30), sized for a two-run cycle. It is
    part of W0's PR. Known price: a recompute that dies silently is flagged after about two days.
 4. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
    each ad's row keeping its broker; the Rulings page keeping its confirm; several portals meaning
-   any of them; alert events outside the carry record; the price-move list showing every ad.
+   any of them; alert events outside the carry record; the price-move list showing every ad; a
+   property's condition grades following its speaking ad; under one portal, "Newest first" following
+   that portal's newest ad, and the property's first seen with no portal or several; our own first
+   sighting on every portal, bazos and ceskereality included; a card showing its date on the selected
+   portal when that differs from its first seen.
 5. **The repair merge of properties 310481 and 876074 is still not done.** The operator chose "your
    request" (Q26); the permission layer blocked it. Either click it in Browse or allow the request in
    an interactive session. Until then the extension shows no note on the re-listed ads.
-6. **Glossary PR #1688** merges before W1a; until then MS1 points at a file not yet on main.
+6. **Glossary PR #1688** merges before W1b; until then MS1 points at a file not yet on main.
 7. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). They are
    W4's first real cases; until W4 ships the existing split is used.
 
 ## 9. Cut from scope (reported, not built)
 
-- **The estimation subject lookup (MS20).** Its own design and approval. Until then estimation
-  comparables read amenity and portal filters per ad, a named exception to rule 16.
+- **The estimation subject lookup (MS20).** Its own design and approval; it keeps giving the
+  estimator the subject's two condition grades (MS4). Until then estimation comparables read amenity
+  and portal filters per ad, a named exception to rule 16.
 - **A notice to other accounts after a split.** Worth revisiting when a second real account curates a
   property with two or more ads, or when splitting opens beyond admins.
 - **The lowest active price on Browse rows.**
 - **The broker count book's seven-day rule.**
 - **Widening the engine's area.** The dedup track's call.
+- **Removing our own condition grades** (Q48 b). Its inventory (about −7,700 lines, 21,000 data
+  lines, 4 tables, 6 columns, 7 settings rows) stays in `wf2/design_condition.md`. Resuming the paused
+  grading jobs is a separate decision (MS3).
 
 ## 10. Risks
 
@@ -344,8 +388,31 @@ that session; the two never-used indexes come from migrations 198 and 275.
 - **More work inside every merge** (the carry record) against the engine's 25-second limit per merge.
 - **Speaking-ad changes** restart price-alert clocks on about 3,600 properties with an active ad. No
   alert is replayed. Properties with no active ad are re-measured in W2a's sample.
+- **Our condition grades move with the speaking ad** on about 1,200 properties (about 850 lose them),
+  nearly all with no active ad. Every surface reads the speaking ad's grades, so Browse, Stats, the
+  map, the Watchdog and the estimator's comparables still agree.
 - **Browse counts move.** One portal now counts properties, not ads; several portals gain the
   properties the old rule hid.
-- **Browse tabs left open from before W5** show an error until reloaded.
-- **Three sessions edit nearby files:** this one, the dedup session (#1655) and the street-filter
-  session.
+- **Browse tabs left open from before W5** fail until reloaded in two places: a broker filter from W5
+  on (its route is replaced), and the map and a one-portal list from W6 on (W6 drops the per-ad view
+  and the map's ad-id parameter). W5 changes no database function's parameters.
+- **Browse rebuilds get heavier.** W5 adds the two portal lists, nine per-portal dates and nine
+  per-portal indexes (about 43 MB; each is one full pass over the ~280 MB table, even for a portal with
+  500 rows) to a rebuild that runs every 15 minutes and already reads about 586,000 blocks a run
+  (7 days: median 255 s, p90 751 s, 8 of 617 runs failed, the slowest at the 1,800 s cap). W5's gate
+  measures it on a shadow copy first.
+- **Ties inside one save batch.** 93 % of idnes's and bazos's ads first seen in the last 24 hours share
+  that time with another ad (up to 62 in one batch on bazos). Inside a batch rows fall back to property
+  number: new properties then follow the portal's own ad numbering on most portals, and a property
+  advertised again comes last in its batch.
+- **Order and filter can disagree under one portal.** A property advertised there again can lead
+  "Newest first" while "added in the last N days" leaves it out; rule 16 keeps the filter's meaning.
+- **A tenth portal** needs its date column on `properties` and the read models before it can be
+  offered; a test fails until it has one.
+- **Three sessions edit nearby files:** this one, the dedup session (#1655, which makes the recompute
+  statement an f-string; whichever lands second rebases) and the street-filter session. That session's
+  584 is applied (2026-10-03); its 585 (unmerged) restates `browse_stats_properties` and
+  `browse_map_cells` with unchanged parameters, so W5 restates both from what is live; its untracked
+  `586_chip_codes_and_watchdog_removal.sql` (seen 2026-10-03) sits in this sprint's 586–599 block and
+  must be renumbered before W2a's migration takes a number; its uncommitted edits touch `queries.ts`,
+  `filters.ts`, `brokers.ts` and `BrowseExperience.tsx`, all W5 files.
