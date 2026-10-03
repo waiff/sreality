@@ -1,7 +1,7 @@
 -- 584_serve_street_code.sql -- the street code is SERVED: `ulice_id` (= listing_location.ulice_kod)
 -- appended LAST to the five relations a location chip filters, and so to both read models.
 --
--- WHY. Operator ruling 2026-10-02 (rule 25: "a field is added only by operator ruling"): the
+-- WHY. Operator ruling 2026-10-02, Q1 (rule 25: "a field is added only by operator ruling"): the
 -- street becomes the fifth chip level (kraj, okres, obec, cast_obce, ulice), so the RÚIAN street
 -- code every resolved listing already carries in `listing_location.ulice_kod` (migration 501;
 -- `street_name IS NOT NULL <=> ulice_kod IS NOT NULL` since resolver W18) must reach the relations
@@ -20,12 +20,15 @@
 -- line appended; tests/test_location_w3_projection.py holds the prefix.
 --
 -- THE ORDER, and why each step sits where it does (522/535/561/566/567's recipe):
---   0. Preconditions, before any lock or DDL: the two dismissal-aware map/list sources are the
---      bodies this file was written against (md5 of prosrc, as read live 2026-10-02).
+--   0. Preconditions, before any lock or DDL: the two dismissal-aware map/list sources and the
+--      two rebuild functions steps 4-5 force are the bodies this file was written against (md5
+--      of prosrc, as read live 2026-10-02).
 --   1. Both rebuild advisory locks, queued (lock_timeout 0) behind an in-flight rebuild; from
---      then on every pg_cron tick self-skips in milliseconds and the DDL is uncontended. Then
---      fail fast (5 s, the hot-table rule) -- apply_migration.yml re-runs the file on a lock
---      timeout and every statement is idempotent.
+--      then on every pg_cron tick self-skips in milliseconds and the DDL is uncontended. The
+--      wait runs under a 1900 s statement budget: a pg_cron list rebuild may hold its key up to
+--      its own 1800 s cap, and apply_migration.yml retries a LOCK timeout only, never a
+--      statement timeout. Then fail fast (5 s, the hot-table rule) -- the workflow re-runs the
+--      file on a lock timeout and every statement is idempotent.
 --   2. TX A: properties_public, pipeline_board_public (reads properties_public, so after it),
 --      listing_feed_public. No read model is involved; readers see the column at COMMIT.
 --   3. TX B: `browse_list` gains the column FIRST, then browse_projection. Two reasons. (a)
@@ -48,9 +51,12 @@
 --      throw away a finished rebuild at its final rename).
 --   6. Post-conditions, the locks still held; 7. unlock, PostgREST schema reload.
 --
--- APPLY OFF-HOURS via apply_migration.yml: the map serves NULL streets for its ~4-minute
--- rebuild and Browse waits up to one list rebuild (~17 min, 2026-10-02) for a street code it
--- does not read yet. ROLLBACK: none needed (additive); removing a view column is DROP + CREATE.
+-- APPLY OFF-HOURS via apply_migration.yml: the map serves NULL streets for its rebuild and
+-- Browse waits one list rebuild for a street code it does not read yet (pg_cron, 24 h to
+-- 2026-10-03: map p50 204 s, max 316 s; list p50 256 s, but 20-28 min under daytime load and
+-- one run cancelled at its 1800 s cap). The job's own cap is 60 minutes, which one queued
+-- lock wait plus a slow forced rebuild can exceed: dispatch right after a list rebuild ends.
+-- ROLLBACK: none needed (additive); removing a view column is DROP + CREATE.
 --
 -- ci-allow-dynamic: properties_map_visible -- step 3's bridge is created only while
 -- properties_map_mv lacks ulice_id (so a re-run stays idempotent), which needs EXECUTE. It is
@@ -59,8 +65,9 @@
 
 -- ---------------------------------------------------------------------------
 -- 0. Preconditions. md5(prosrc) is the body as Postgres stores it. properties_map_visible may
---    also be the bridge (a re-run after step 3 committed and before step 4 did). Skipped in the
---    CI schema-replay container (522 §5's probe: corpus < 100k properties).
+--    also be the bridge (a re-run after step 3 committed and before step 4 did); the two
+--    rebuild functions are 522's (steps 4-5 rely on their blue-green swap and their xact key).
+--    Skipped in the CI schema-replay container (522 §5's probe: corpus < 100k properties).
 -- ---------------------------------------------------------------------------
 set statement_timeout = '900s';
 
@@ -87,18 +94,28 @@ begin
     raise exception '584 refused: properties_map_visible() is neither 561''s body nor this '
                     'file''s bridge (md5 %)', map_md5;
   end if;
+  if (select md5(prosrc) from pg_proc where oid = to_regprocedure('public.rebuild_browse_list()'))
+     is distinct from '1386c849579ec1e490f0ad3447f9c895' then
+    raise exception '584 refused: rebuild_browse_list() is not 522''s body';
+  end if;
+  if (select md5(prosrc) from pg_proc where oid = to_regprocedure('public.rebuild_properties_map_mv()'))
+     is distinct from 'e18ea5161c8af9ceab5b07a62b6dc37d' then
+    raise exception '584 refused: rebuild_properties_map_mv() is not 522''s body';
+  end if;
 end
 $pre$;
 
 -- ---------------------------------------------------------------------------
 -- 1. Both rebuild locks first, queued; then fail fast.
 -- ---------------------------------------------------------------------------
+set statement_timeout = '1900s';
 set lock_timeout = 0;
 
 select pg_advisory_lock(hashtext('rebuild_browse_list'));
 select pg_advisory_lock(hashtext('rebuild_properties_map_mv'));
 
 set lock_timeout = '5s';
+set statement_timeout = '900s';
 
 -- ---------------------------------------------------------------------------
 -- 2. TX A -- the three views no read model materializes.
@@ -497,13 +514,18 @@ select public.rebuild_browse_list();
 --    too); the DATA only on production.
 --
 --    The fill is checked ROW BY ROW, not as count(browse_list) = count(browse_projection):
---    browse_list is a snapshot taken when the rebuild's CTAS began (~17 min ago), and the
---    location drain re-resolves ~20k rows per 10 minutes (2026-10-02), so two counts taken
---    minutes apart differ by design and an equality would be a false red. Instead: every
---    browse_list row whose listing_location row was last written well before the rebuild
---    began (resolved_at is stamped by the one upsert on every write; 15 min of margin for a
---    write transaction that committed late) carries exactly that row's ulice_kod. A
---    misaligned or unfilled column fails this on ~150k rows; drift cannot fail it.
+--    browse_list is a snapshot taken when step 5's CTAS began, and the location drain
+--    re-resolves ~20k rows per 10 minutes (2026-10-02), so two counts taken minutes apart
+--    differ by design and an equality would be a false red. Instead: every browse_list row
+--    whose listing_location row was last written well before the rebuild began (resolved_at
+--    is stamped by the one upsert on every write; 15 min of margin for a write transaction
+--    that committed late) carries exactly that row's ulice_kod. A misaligned or unfilled
+--    column fails this on ~150k rows; drift cannot fail it. "Began" is the rebuild's own
+--    `last_succeeded_at`: it stamps now(), the START of its statement's transaction.
+--
+--    Every served code must name a ruian_streets row of SOME version (a code the register
+--    never held = a misaligned column). One the register has since retired is not a failure
+--    after all the DDL committed -- a registry refresh may retire a street -- only a NOTICE.
 -- ---------------------------------------------------------------------------
 do $post$
 declare
@@ -515,6 +537,7 @@ declare
   n_wrong bigint;
   n_filled bigint;
   n_unknown bigint;
+  n_retired bigint;
 begin
   foreach rel in array array['browse_projection', 'browse_list', 'properties_map_mv',
                              'listing_feed_public', 'properties_public',
@@ -534,6 +557,7 @@ begin
   end if;
   perform * from public.browse_list_visible() limit 1;
   perform * from public.properties_map_visible() limit 1;
+  perform * from public.listing_feed_visible() limit 1;
 
   select count(*) = 100000 into populated
     from (select 1 from public.properties limit 100000) probe;
@@ -542,8 +566,11 @@ begin
     return;
   end if;
 
-  select last_succeeded_at - make_interval(secs => last_duration_ms / 1000.0)
-    into started from public.derived_artifacts where name = 'browse_list';
+  select last_succeeded_at into started from public.derived_artifacts where name = 'browse_list';
+  if started is null or started < now() - interval '70 minutes' then
+    raise exception '584 did not land: derived_artifacts carries no stamp of step 5''s '
+                    'browse_list rebuild (last_succeeded_at %)', started;
+  end if;
 
   select count(*), count(*) filter (where b.ulice_id is distinct from ll.ulice_kod)
     into n_checked, n_wrong
@@ -553,9 +580,11 @@ begin
 
   select count(*) filter (where b.ulice_id is not null),
          count(*) filter (where b.ulice_id is not null and not exists (
+           select 1 from public.ruian_streets s where s.code = b.ulice_id)),
+         count(*) filter (where b.ulice_id is not null and not exists (
            select 1 from public.ruian_streets s
             where s.code = b.ulice_id and s.valid_to is null))
-    into n_filled, n_unknown
+    into n_filled, n_unknown, n_retired
     from public.browse_list b;
 
   if n_wrong > 0 or n_checked = 0 or n_filled = 0 then
@@ -564,8 +593,12 @@ begin
                     n_wrong, n_checked, n_filled;
   end if;
   if n_unknown > 0 then
-    raise exception '584 did not land: % browse_list rows carry a ulice_id that is no current '
-                    'ruian_streets code', n_unknown;
+    raise exception '584 did not land: % browse_list rows carry a ulice_id the register never '
+                    'held (no ruian_streets row of any version)', n_unknown;
+  end if;
+  if n_retired > n_unknown then
+    raise notice '584: % browse_list rows carry a street code the register has since retired '
+                 '(ruian_streets.valid_to set)', n_retired - n_unknown;
   end if;
 
   raise notice '584: browse_list % rows with a street code; % settled rows checked, 0 disagree '

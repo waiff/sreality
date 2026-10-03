@@ -269,12 +269,12 @@ nothing.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entir
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
-**Appending a column to `browse_projection`** (migration 584's recipe): take both rebuild advisory
-locks; in ONE transaction `alter table browse_list add column` FIRST (the positional
-`sync_browse_list` insert and `browse_list_visible()`'s `l.*` must never see the table narrower
-than the view), then the view, then bridge `properties_map_visible()` with `null::<type> as <col>`
-(a matview cannot be altered); then force `rebuild_properties_map_mv()` + restore the source in one
-transaction, then force `rebuild_browse_list()`. Append LAST, every body verbatim from its latest definer.
+**Appending a column to `browse_projection`** (migration 584's recipe; append LAST, each body verbatim from its
+latest definer): take both rebuild advisory locks (`statement_timeout` > the 1800 s cron cap); in ONE transaction
+`alter table browse_list add column` FIRST (the positional `sync_browse_list` insert and `browse_list_visible()`'s
+`l.*` must never see it narrower than the view), the view, then bridge `properties_map_visible()` with
+`null::<type> as <col>` ONLY while the matview lacks the column (EXECUTE + `-- ci-allow-dynamic:`; a static bridge
+breaks re-runs); then, `lock_timeout 0` under the held re-entrant keys, force the map rebuild + restore its source, then the list's.
 
 **A property row is its canonical advert's** (migration 561): `properties.repr_listing_ref_id` =
 rank 1 of `property_canonical_listings(property_id)` (active, trust, last seen, id), written by

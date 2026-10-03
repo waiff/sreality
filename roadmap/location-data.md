@@ -1139,7 +1139,9 @@ component is slimmed twice — each wave rewrites one component and slims its st
   RÚIAN unit at the level picked, the street the fifth level. PR-A (migration 584, DB only, no behaviour
   change): `ulice_id` (= `listing_location.ulice_kod`) served last on browse_projection /
   properties_public / pipeline_board_public / listing_feed_public and both read models. Next: measure
-  the read paths, then the chip arm + resolver street binder (585), then the name-only chips (586).
+  the read paths; then 585 (the street chip arm + the resolver's street binder); then 586 (the 10
+  name-only preset chips stamped with their kraj codes; the two inactive watchdogs removed after a
+  backup); then the Brokers / Outreach / Datasets region-search parity (587).
 - **Owed — two copies the subtraction mandate still carries** (rules-wording audit, 2026-10-01; rule 25
   now reads as practised: a net-positive location PR says why in its body, and the operator rules on
   it). `operator_corrections.py`'s write is its own transcription of the 18-column claim INSERT, the
