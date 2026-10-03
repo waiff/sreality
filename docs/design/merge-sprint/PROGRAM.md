@@ -15,6 +15,7 @@ resolutions in `wf2/critic.md` §2 apply; where they differ, the rule wins.
   (MS5).
 - *Curation*: what a user puts on a property: notes, a pipeline card (the entry on the deal board),
   collections, tags, a dismissal (the account hides the property from its own Browse).
+- *Letter*: in a split the user gives each ad a letter; each letter becomes one property (MS18).
 - *Fold*: two items of one kind, such as one user's two pipeline cards, become one.
 - *Carry record*: what a merge writes down about every user item it moved or folded, so a split can
   send it back.
@@ -163,27 +164,34 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
   says so; nothing is copied.
 
 ### Split
-- **MS18 — One dialog, two parts.** The user ticks the ads that leave; the ads that stay together keep
-  the property: its number, its page and everything marked "stays" *(as described in Q24)*. Leaving
-  ads return to the property they came from when it is still free, otherwise to a new property; if
-  they land on two or more properties those are merged into the oldest. Separating three units takes
-  two splits. Before the click the dialog shows where each part and each item will land; the preview
-  is a read (`split-plan`), and the write re-checks it and refuses if anything changed.
-  - **Per item, the acting user chooses stays, goes, or both.** Preselected: a note goes with the ad
-    it was written on; other curation goes back to the property its oldest standing carry row names,
-    when this split gives that property ads back; anything else stays.
-  - **"Both" is a copy**, a new row on the other part: a note keeps its text, date and origin ad; a
-    pipeline card keeps its stage and gets a new added-date, last in its column, as a second
-    independent card; a collection entry and a tag are dated now, so collection alerts start at the
-    split; a hide is a new active hide dated now.
-  - **Folded items** are re-created on the part that gets their origin back, only while the item they
-    folded into still exists. After routing, the existing rule that a live pipeline card lifts the
-    same account's hide runs on both properties, and MS13 settles two cards of one account.
-  - **Rulings:** a split records only "different" between the two parts. It has no undo of its own; a
-    mistaken split is fixed by a one-click merge.
+- **MS18 — One split dialog, by letters.** The user gives each ad a letter; ads with the same letter
+  are one property after the split, so three units are one split (the operator's request of
+  2026-10-03; the letters are on the property page since PR #1699). One letter keeps the property,
+  meaning its number and its page: the letter holding most of the ads the property started with, the
+  earliest letter on a tie *(the rule decides, not the user: default)*. Every other letter's ads leave
+  together: back to the property they came from when it is still free, otherwise to a new property;
+  ads of one letter that land on two or more properties are merged into the oldest. Before the click
+  the dialog shows where each letter and each item will land; the preview is a read (`split-plan`),
+  and the write re-checks it and refuses if anything changed.
+  - **Per item, the acting user picks the letter that gets it and may add a copy for any other
+    letter** *(Q24; Q40's "stays, goes or both", said for any number of letters)*. Preselected: a note
+    goes with the ad it was written on; other curation goes back to the property its oldest standing
+    carry row names, when this split gives that property ads back; anything else stays with the letter
+    that keeps the property.
+  - **A copy is a new row** on the other letter's property: a note keeps its text, date and origin
+    ad; a pipeline card keeps its stage and gets a new added-date, last in its column, as a second
+    independent pipeline card; a collection entry and a tag are dated now, so collection alerts start
+    at the split; a dismissal is a new active dismissal dated now.
+  - **Folded items** are re-created on the letter that gets their origin back, only while the item
+    they folded into still exists. After routing, the existing rule that a live pipeline card lifts
+    the same account's dismissal runs on every property the split touched, and MS13 settles two
+    pipeline cards of one account.
+  - **Rulings:** a split records only "different", between ads with different letters. Ads with the
+    same letter get no ruling: they stay or leave together, and nothing stops them from being merged
+    later. A split has no undo of its own; a mistaken split is fixed by a one-click merge.
   - **Other accounts** cannot be asked at the moment of a split. Their items follow the preselection,
     are never copied, never deleted and never shown to the person splitting. No notice (Q33).
-  - **The toast** after a split says where each part landed and which of the acting account's items
+  - **The toast** after a split says where each letter landed and which of the acting account's items
     went or were copied.
 
 ### Filters
@@ -234,7 +242,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage; stops writing two write-only columns; keeps #1655's share-sale rule; realitymix joins the portal list | yes | #1655; its additive migration (nine `properties` date columns) applied before merge | +220 / −185 |
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 | no | — | +360 / −480 |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | #1655 | +330 / −655 |
-| **W4** | One split dialog (stays / goes / both), curation routing; three dialogs and the split undo deleted | yes | W3 | +1,400 / −1,740 |
+| **W4** | One split dialog by letters, grown from the letter split already on the property page (PR #1699): the preview, curation routing per letter with copies; the Proposed-splits and Rulings split dialogs, "keep together", the "same" rulings inside a letter and the split undo deleted | yes | W3 | +1,400 / −1,740 |
 | **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle after W2a | +290 / −870 |
 | **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live | database |
 
@@ -271,7 +279,7 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
 - **W3:** the carry write adds at most 100 ms at the 95th percentile; no new failed engine merge in
   the first 24 hours; the count invariant (MS14) passes.
 - **W4:** the count invariant runs on production before and after the release; a two-account live
-  test passes for every curation table.
+  test passes for every curation table, on a split into two letters and into three.
 - **W5:** one full recompute cycle has completed since W2a; a sample of active properties that
   includes single-ad ones shows 0 whose stored portal lists or per-portal dates differ from their ads,
   and 0 where a portal is listed without its date or dated without being listed; one fixture pins the
@@ -316,7 +324,8 @@ that session; the two never-used indexes come from migrations 198 and 275.
   `generation` column; `properties.published_at` and `publish_reason`.
 - **This sprint changes the engine's path in four ways**, all accepted by that session in writing:
   asset links go; a new canonical-ad order; a carry record inside every merge; one split dialog, which
-  removes its Proposed-splits page's batch run, "keep together" and "Vrátit". These replace three of
+  removes its Proposed-splits page's batch run, "keep together" and "Vrátit". The dialog grows from
+  that session's letter split (PR #1699: `MergedAdvertsSection.tsx`, `splitPlan`), not beside it. These replace three of
   that session's recorded decisions.
 - **Its conditions, adopted:** its PR #1655 (share sales) merges before any sprint PR that touches
   `recompute_property_stats.py`, `property_identity.py`, `room_taxonomy.py` or `apply.py`, or the
@@ -354,7 +363,8 @@ that session; the two never-used indexes come from migrations 198 and 275.
    and fails at 56 hours since the last complete cycle (was 26 and 30), sized for a two-run cycle. It is
    part of W0's PR. Known price: a recompute that dies silently is flagged after about two days.
 4. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
-   each ad's row keeping its broker; the Rulings page keeping its confirm; several portals meaning
+   each ad's row keeping its broker; the Rulings page keeping its confirm; in a split, the rule and
+   not the user choosing which letter keeps the property; several portals meaning
    any of them; alert events outside the carry record; the price-move list showing every ad; a
    property's condition grades following its canonical ad; under one portal, "Newest first" following
    that portal's newest ad, and the property's first seen with no portal or several; our own first
@@ -364,8 +374,9 @@ that session; the two never-used indexes come from migrations 198 and 275.
    request" (Q26); the permission layer blocked it. Either click it in Browse or allow the request in
    an interactive session. Until then the extension shows no note on the re-listed ads.
 6. **Glossary PR #1688** merges before W1b; until then MS1 points at a file not yet on main.
-7. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). They are
-   W4's first real cases; until W4 ships the existing split is used.
+7. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). The
+   letter split on the property page can separate them today; until W4 ships, all curation stays on
+   the property that keeps its number and a split still records "same" inside a letter.
 
 ## 9. Cut from scope (reported, not built)
 
