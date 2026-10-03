@@ -239,6 +239,18 @@ update autodedup.applied_merges
    and undone_at is null
 """
 
+LEDGER_CLOSE_PAIRS_SQL = """
+update autodedup.applied_merges
+   set undone_at = now(),
+       undone_by = %(undone_by)s::text,
+       undo_result = %(undo_result)s::jsonb
+ where survivor_property_id = %(survivor_property_id)s::bigint
+   and retired_property_id = any(%(retired_property_ids)s::bigint[])
+   and not dry_run
+   and outcome = 'applied'
+   and undone_at is null
+"""
+
 # ------------------------------------------------------------------ A9: the lane's reconcile
 #
 # The real-time lane reconciles the groups a pass re-clustered plus a slice swept past its own

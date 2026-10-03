@@ -1081,6 +1081,12 @@ def apply_group(
             group.survivor_id = int(data["survivor_id"])
             group.retired_ids = [int(r) for r in data["retired_ids"]]
             moved = [len(group.listings_by_property.get(r, ())) for r in group.retired_ids]
+            # Each retired property was active, so its pair's earlier merge no longer stood (E934).
+            _exec(conn, S.LEDGER_CLOSE_PAIRS_SQL, {
+                "survivor_property_id": group.survivor_id,
+                "retired_property_ids": group.retired_ids, "undone_by": EXTERNAL_UNDO,
+                "undo_result": json.dumps({"noted_by": run_id, "merged_again_by": group_id},
+                                          sort_keys=True)})
             _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                 run_id, generation, group, dry_run=False, outcome="applied",
                 merge_group_id=group_id, moved=moved))

@@ -294,6 +294,15 @@ class FakeDb:
                     r.update(undone_at=T0, undone_by=p["undone_by"],
                              undo_result=json.loads(p["undo_result"]))
             return []
+        if sql == S.LEDGER_CLOSE_PAIRS_SQL:
+            for r in self.ledger:
+                if (r["survivor_property_id"] == p["survivor_property_id"]
+                        and r["retired_property_id"] in p["retired_property_ids"]
+                        and not r["dry_run"] and r["outcome"] == "applied"
+                        and r["undone_at"] is None):
+                    r.update(undone_at=self.now, undone_by=p["undone_by"],
+                             undo_result=json.loads(p["undo_result"]))
+            return []
         raise AssertionError(f"unknown statement: {sql[:80]!r}")
 
     def _ledger_insert(self, p: dict[str, Any]) -> list[tuple]:
@@ -1696,23 +1705,80 @@ def test_a_merge_taken_apart_outside_the_engine_is_planned_again_unless_ruled(
     assert group.reasons == (RULED_APART if ruled else [])
 
 
-def test_the_same_pair_merges_again_once_its_old_ledger_row_is_closed() -> None:
-    # As above, unruled. g12's row for (100, 200) is still live: only `unapply` closes it, and
-    # the ledger's live-pair index (migration 558; the fake's check stands in for it) refuses a
-    # second one, so the merge rolls back and the group is filed failed. Once `unapply` notes
-    # the undo as someone else's, the pair merges again.
+def _pair_rows(db: FakeDb, survivor: int, retired: int) -> list[dict[str, Any]]:
+    """The applied ledger rows of one (survivor, retired) pair, oldest first."""
+    return [r for r in db.ledger if r["outcome"] == "applied"
+            and (r["survivor_property_id"], r["retired_property_id"]) == (survivor, retired)]
+
+
+def test_the_same_pair_merged_again_closes_its_stale_live_row() -> None:
+    # As above, unruled. g12's row for (100, 200) is still live — an undo outside the engine
+    # leaves it so — and the ledger's live-pair index (migration 558; the fake's check stands
+    # in for it) allows one live row per pair. The merge that records the pair again closes the
+    # old row as someone else's undo, in its own transaction (E934); a dry run closes nothing.
     db = FakeDb()
     scope, calls = _applied_two(db)
-    db.undo_group(calls[0]["merge_group_id"])
-    with pytest.raises(AssertionError, match="live \\(survivor, retired\\) pair"):
-        A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
-    assert db.listings[11]["property_id"] == 200
-    assert [r["outcome"] for r in db.ledger if r["cluster_key"] == 10] == ["applied", "failed"]
-    A.unapply(db, GEN, dry_run=False, cluster_key=10, detach=db.detach([]))
-    assert [r["undone_by"] for r in db.ledger if r["merge_group_id"]
-            == calls[0]["merge_group_id"]] == [A.EXTERNAL_UNDO]
-    result = A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
+    old = calls[0]["merge_group_id"]
+    db.undo_group(old)
+    plan = A.plan_apply(db, GEN, scope)
+    A.apply_plan(db, plan, dry_run=True)
+    assert [r["undone_at"] for r in _pair_rows(db, 100, 200)] == [None]
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge([]), run_id="run-again")
     assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    (new,) = [brief["merge_group_id"] for brief in result["applied"]]
+    first, second = _pair_rows(db, 100, 200)
+    assert (first["merge_group_id"], first["undone_by"]) == (old, A.EXTERNAL_UNDO)
+    assert first["undone_at"] is not None
+    assert first["undo_result"] == {"noted_by": "run-again", "merged_again_by": new}
+    assert (second["merge_group_id"], second["undone_at"]) == (new, None)
+
+
+def test_only_the_pair_merged_again_is_closed() -> None:
+    # g12 retired 200 (11) and 300 (12) into 100 (10). The operator split 11 off — 200 is
+    # active again — and g13 merges 200 into 100 once more: g12's row for (100, 200) is
+    # closed; its row for (100, 300), whose merge still stands, stays live and untouched.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    db.prop(100, first=T0 - timedelta(days=5))
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    merged: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(merged))
+    old = merged[0]["merge_group_id"]
+    db.detach([])(db, [11], decided_by="operator", merge_group_id=old)
+    assert db.properties[200]["status"] == "active" and db.listings[12]["property_id"] == 100
+    standing = copy.deepcopy(_pair_rows(db, 100, 300))
+    db.group(10, [10, 11], gen="g13")
+    result = A.apply_plan(db, A.plan_apply(db, "g13", scope), dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    assert _pair_rows(db, 100, 300) == standing and standing[0]["undone_at"] is None
+    assert [(r["merge_group_id"] == old, r["undone_by"]) for r in _pair_rows(db, 100, 200)] == [
+        (True, A.EXTERNAL_UNDO), (False, None)]
+
+
+def test_a_split_ruled_same_again_merges_the_same_pair_and_closes_its_old_row() -> None:
+    # The operator's change of mind, end to end: the engine merged 200 (11) into 100 (10); the
+    # operator split 11 off (200 active again, 10 x 11 ruled different) and later ruled the
+    # pair "same" — the newest word wins and his must-not-link is retracted. The engine's group
+    # {10, 11} merges the same pair again: g12's row is closed as someone else's undo, and the
+    # new row is the pair's one live row (E934).
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    old = calls[0]["merge_group_id"]
+    db.undo_group(old)
+    _split_rulings(db, [10], [11])
+    assert _only(A.plan_apply(db, GEN, scope)).reasons == RULED_APART
+    db.verdicts.append({"kind": "pair", "lo": 10, "hi": 11, "verdict": "same"})
+    db.mnl.remove((10, 11, "operator"))  # a `same` retracts the operator's own veto
+    plan = A.plan_apply(db, GEN, scope)
+    assert [(g.survivor_id, g.retired_ids, g.reasons) for g in plan.groups] == [
+        (100, [200], [])]
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    rows = _pair_rows(db, 100, 200)
+    assert [(r["merge_group_id"] == old, r["undone_by"]) for r in rows] == [
+        (True, A.EXTERNAL_UNDO), (False, None)]
+    assert [r for r in rows if r["undone_at"] is None] == rows[1:]
 
 
 def test_a_split_off_property_takes_a_re_list_of_its_flat() -> None:
