@@ -33,6 +33,7 @@ W3_S3 = "504_location_w3_one_code_predicate.sql"
 W3_S4 = "506_location_w3_s4_deletions.sql"
 W4A = "507_location_w4a_readers.sql"
 W4C = "508_location_w4c_legacy_drops.sql"
+STREET = "584_serve_street_code.sql"
 
 # What S4 removes from each view it re-creates. `obec` SURVIVES on the two views
 # the pipeline board reads: the board's town sort orders by the TOWN, which is
@@ -165,11 +166,13 @@ def _columns(sql: str, view: str) -> list[str]:
 
 # Every (migration, view) pair in the W3 sprint that re-creates a serving view.
 # S3 (504) appends the fourth chip level, `cast_obce_id`, to the two views a
-# place-filtering surface reads.
+# place-filtering surface reads; 584 the fifth, `ulice_id`, to four.
 _WIDENING_STEPS = [(W3, v) for v in _WIDENED] + [
     (W3_S3, "properties_public"),
     (W3_S3, "pipeline_board_public"),
-]
+] + [(STREET, v) for v in (
+    "browse_projection", "listing_feed_public", "properties_public", "pipeline_board_public",
+)]
 
 
 @pytest.mark.parametrize("after,view", _WIDENING_STEPS)

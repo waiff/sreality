@@ -359,7 +359,9 @@ nothing else.
   `autodedup.rt_lease`. `rt_seed` holds that lease through its transaction, and a LIVE dispatched
   `apply` / `unapply` holds it for its run, so a worker pass that fires meanwhile is a green
   `skipped: leased`; every refusal names the holder, and `release_lease=<holder>` ends the lease a
-  dead writer left. The brake: set the interval to 0, then `mode=unapply` (by `run=rt:<holder>` or
+  dead writer left (a pass whose own connection the server terminated releases its lease itself,
+  over the fresh connection it halves its rate on — E931; `release_lease` is for a worker that died
+  with the row). The brake: set the interval to 0, then `mode=unapply` (by `run=rt:<holder>` or
   a `since=` window) — a live `apply` or `unapply` REFUSES while the interval is above 0, because
   the lane's next sweep would re-merge what it undoes.
 - **The engine bounds its own time (E913).** A pass reads its deadline (1,050 s) between steps and

@@ -8,6 +8,7 @@ reconcile (A9, E911) and the in-DB calibration (A10, E912) have their own sectio
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,7 +30,7 @@ from autodedup.incremental_store import MemoryStore
 from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.incremental_store import CohortFacts, Schedule
 from autodedup.settings import Settings
-from tests.autodedup.fake_pg import FakePg
+from tests.autodedup.fake_pg import FakePg, _Cursor
 from tests.autodedup.test_apply import FakeDb, _pair_group
 from tests.autodedup.test_incremental import _listing
 
@@ -1098,6 +1099,11 @@ def test_a_failed_halving_write_keeps_the_original_raise(tmp_path, monkeypatch) 
     notes = getattr(raised.value, "__notes__", [])
     assert any("halving" in note and "pooler down" in note for note in notes)
     assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+    # E931: no fresh connection to fall back on, and none needed — the pass's own is live.
+    from autodedup import rt_lease
+
+    assert rt_lease.current(conn)["live"] is False
+    assert not any("rt_lease" in note for note in notes)
 
 
 def test_a_refusal_never_halves_the_rate(tmp_path, monkeypatch) -> None:
@@ -1143,3 +1149,181 @@ def test_the_fact_reads_are_sliced_by_whole_listings(tmp_path, monkeypatch) -> N
             sliced_facts.hashes_unmeasured) == (
         whole_facts.images_with_phash, whole_facts.images_unmeasured,
         whole_facts.hashes_unmeasured)
+
+
+# ------------------------------------------------------------------ E931: the pass's bounds, continued
+
+
+class _Session:
+    """One session over a shared FakePg world: the pass's connection and the fresh one both
+    see one lease row and one settings table, as two sessions of one database do. `dead`
+    makes every later statement fail the way a backend the server terminated does; `cost` is
+    the clock one statement spends, on the `clock` the engine's deadline check reads."""
+
+    def __init__(self, world: FakePg, clock: SimpleNamespace | None = None,
+                 cost: float = 0.0) -> None:
+        self.world = world
+        self.clock = clock
+        self.cost = cost
+        self.dead = False
+        self.issued: list[str] = []
+        self.closed = 0
+
+    def cursor(self) -> "_SessionCursor":
+        if self.dead:
+            raise ConnectionError("server closed the connection unexpectedly")
+        return _SessionCursor(self)
+
+    def transaction(self):
+        return self.world.transaction()
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _SessionCursor(_Cursor):
+    def __init__(self, session: _Session) -> None:
+        super().__init__(session.world)
+        self.session = session
+
+    def execute(self, sql: str, params=None) -> None:
+        if self.session.dead:
+            raise ConnectionError("server closed the connection unexpectedly")
+        self.session.issued.append(sql)
+        super().execute(sql, params)
+        if self.session.clock is not None:
+            self.session.clock.now += self.session.cost
+
+
+def test_the_fact_reads_check_the_deadline_between_slices(monkeypatch) -> None:
+    """The step before the neighbourhood read checks the clock and the step after does, and
+    between them the chunked read is 49 statements of up to 120 s each on a dense scope — on
+    a slow disk, far past the 1,050 s deadline with nothing to stop it. The deadline is read
+    before every slice: a read crossing it stops at a slice boundary and raises PassDeadline
+    (the pass rolls back and halves, E913); a read inside it is the whole read; a fact source
+    given no deadline reads as before."""
+    from autodedup import incremental, incremental_lane
+    from autodedup.incremental import PassDeadline
+    from autodedup.incremental_lane import SqlFacts
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    ids = sorted(int(listing_id) for listing_id in world.listings)
+    whole = SqlFacts(world).facts(ids)
+    monkeypatch.setattr(incremental_lane, "FACT_CHUNK", 2)
+    clock = SimpleNamespace(now=1_000.0)
+    monkeypatch.setattr(incremental, "time", SimpleNamespace(perf_counter=lambda: clock.now))
+    slow = _Session(world, clock=clock, cost=30.0)
+
+    inside = SqlFacts(slow, deadline=clock.now + 10_000.0)
+    assert inside.facts(ids) == whole
+    assert clock.now > 1_000.0, "the slow disk spent clock on every statement"
+
+    clock.now = 1_000.0
+    crossing = SqlFacts(slow, deadline=clock.now + 100.0)
+    with pytest.raises(PassDeadline):
+        crossing.facts(ids)
+    assert 0 < crossing.statements < inside.statements, "stopped at a slice boundary"
+
+    clock.now = 1_000.0
+    assert SqlFacts(slow).facts(ids) == whole, "no deadline: the read is the whole read"
+
+
+def test_a_dead_connections_release_falls_back_to_the_live_one_for_its_own_holder_only() -> None:
+    """E931 at the lease: with a `fallback`, the release a terminated backend cannot run is
+    retried on the live connection; the statement is keyed by holder, so another writer's
+    lease — a seed that took the row after ours expired — is never ended by it; and when
+    both fail the release is noted on the original, as before, or raised when there is none."""
+    from autodedup import rt_lease
+
+    class _Dead:
+        def cursor(self):
+            raise ConnectionError("server closed the connection")
+
+    world = FakePg()
+    assert rt_lease.take(world, "worker:1:1", 2_400)
+    original = RuntimeError("the pass raised")
+    assert rt_lease.release_after(_Dead(), "worker:1:1", original, fallback=world) is True
+    assert rt_lease.current(world)["live"] is False
+    assert any("released on the fresh one" in note for note in original.__notes__)
+
+    assert rt_lease.take(world, "rt_seed:other", 2_400)
+    assert rt_lease.release_after(_Dead(), "worker:1:1", RuntimeError("x"), fallback=world)
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("rt_seed:other", True), "not that holder's row"
+
+    both_dead = RuntimeError("the pass raised")
+    assert rt_lease.release_after(_Dead(), "worker:1:1", both_dead, fallback=_Dead()) is False
+    assert any("expires by itself" in note for note in both_dead.__notes__)
+    with pytest.raises(ConnectionError):
+        rt_lease.release_after(_Dead(), "worker:1:1", None, fallback=_Dead())
+
+
+def _pass_that_kills_its_connection(monkeypatch, session: _Session, exc: BaseException) -> None:
+    from autodedup import incremental_lane
+
+    def terminated_inside_the_transaction(*_args, **_kwargs):
+        session.dead = True
+        raise exc
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", terminated_inside_the_transaction)
+
+
+def test_a_raise_on_a_dead_connection_releases_the_lease_through_the_fresh_one(
+        tmp_path, monkeypatch) -> None:
+    """An idle-timeout kill ends the pass's backend; the `finally` could not release the lease
+    over it, so the row sat until its 2,400 s TTL and the next passes were skipped "leased"
+    for up to ~35 min. The release now rides the SAME fresh connection the halving write uses,
+    under the holder the pass took the lease with."""
+    from autodedup import rt_lease
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    conn = _Session(world)
+    fresh = _Session(world)
+    opened: list[_Session] = []
+    _pass_that_kills_its_connection(
+        monkeypatch, conn, RuntimeError("terminating connection due to idle-in-transaction "
+                                        "timeout"))
+
+    with pytest.raises(RuntimeError, match="idle-in-transaction") as raised:
+        run_incremental(lambda: conn, fresh_conn=lambda: opened.append(fresh) or fresh)
+
+    assert opened == [fresh], "one fresh connect carries the halving AND the release"
+    assert fresh.closed == 1
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert rt_lease.current(world)["live"] is False, "released, not left to its TTL"
+    assert fresh.issued.count(RT_LEASE_RELEASE_SQL) == 1
+    assert RT_LEASE_RELEASE_SQL not in conn.issued
+    assert any("released on the fresh one" in note for note in raised.value.__notes__)
+
+
+def test_a_raise_on_a_live_connection_releases_the_lease_the_existing_way(
+        tmp_path, monkeypatch) -> None:
+    """A Python error inside a healthy transaction: the halving still goes through the fresh
+    connection (E930) and the lease is released over the pass's own connection, once — never
+    also over the fresh one, and never a second time by the `finally`."""
+    from autodedup import rt_lease
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    releases_before = world.statements.count(RT_LEASE_RELEASE_SQL)
+    conn = _Session(world)
+    fresh = _Session(world)
+    _pass_that_raises(monkeypatch, RuntimeError("a Python error inside the pass"))
+
+    with pytest.raises(RuntimeError, match="Python error") as raised:
+        run_incremental(lambda: conn, fresh_conn=lambda: fresh)
+
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert rt_lease.current(world)["live"] is False
+    assert conn.issued.count(RT_LEASE_RELEASE_SQL) == 1
+    assert RT_LEASE_RELEASE_SQL not in fresh.issued
+    assert world.statements.count(RT_LEASE_RELEASE_SQL) == releases_before + 1, "once"
+    assert not any("rt_lease" in note for note in getattr(raised.value, "__notes__", []))

@@ -28,6 +28,8 @@
  * 409 — is identical, and lives here once.
  */
 
+import type { ReactNode } from 'react';
+
 import type {
   AutodedupCandidateSplitInput,
   AutodedupSplitInput,
@@ -282,7 +284,8 @@ export function UnitSelect({
   onChange,
   /* What the control is ABOUT, when it is not one advert: the candidate card
    * gives one select to a whole locked group, and "Jednotka #11" over four
-   * adverts would name the wrong thing. */
+   * adverts would name the wrong thing. A node, so a caption shared by every
+   * row can carry an sr-only suffix that tells the selects apart. */
   label,
   disabled = false,
 }: {
@@ -290,7 +293,7 @@ export function UnitSelect({
   units: UnitMap;
   count: number;
   onChange: (unit: string) => void;
-  label?: string;
+  label?: ReactNode;
   disabled?: boolean;
 }) {
   const letters = UNIT_LETTERS.slice(0, Math.min(Math.max(count, 2), UNIT_LETTERS.length));
