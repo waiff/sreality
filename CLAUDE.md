@@ -288,7 +288,6 @@ notifications, scraper orchestration, frontend build-time): the `toolkit-api` sk
 ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`);
 nor are the email/Telegram channels (rule #16). Don't start out-of-scope work without explicit direction.
 ## Where the detail lives
-
 | Need | Load |
 | --- | --- |
 | SQL, migrations, connection modes, Supabase MCP, schema conventions | `.claude/skills/database` |
