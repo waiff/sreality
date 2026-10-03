@@ -1,13 +1,14 @@
 """Orchestrator for the nemovitosti.maxima.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.maxima_main`. Maxima is a `Portal` (MaximaPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that pages the
-catalogue HTML and enqueues new/price-changed ids into the shared
-`listing_detail_queue` (source='maxima', migration 108), then a detail-drain that
-fetches each listing page, parses it to a `ScrapedListing`, and ingests via
-`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
-pipeline — only the per-portal fetcher (MaximaClient) + parser (maxima_parser) +
-config differ from sreality/idnes (the modularity rule in CLAUDE.md).
+driven by the generic `scraper.portal_runner`. Its own `walk_category` pages the
+catalogue HTML and hands its sightings to `portal_runner.reconcile_sightings`,
+which touches and enqueues into the shared `listing_detail_queue`
+(source='maxima', migration 108); the shared detail-drain
+fetches each listing page (MaximaClient), parses it to a `ScrapedListing`
+(maxima_parser), and writes via `listing_write.write_listings` (the one listing
+write; a first-seen row lands `property_id` NULL and the straggler-attach births
+its singleton, rule #15).
 
 Maxima is a small agency catalogue served as TWO mixed indexes — sale (the default
 view, `af=1`) and rent (the buy/rent toggle, `af=2`) — each spanning every property
@@ -47,10 +48,7 @@ from scraper.portal import (
     PortalConfig,
     StopReason,
     WalkVerdict,
-    default_config,
     deadline_reached,
-    load_portal_config,
-    classify_index_sighting,
     stop_is_portal_end,
     walk_coverage,
     walk_reached_end,
@@ -87,7 +85,7 @@ class _AgendaWalk:
         self.coverage = coverage    # the numeric verdict: an alarm, never a gate
 
 
-class MaximaPortal:
+class MaximaPortal(portal_runner.PortalDefaults):
     """nemovitosti.maxima.cz as a Portal: the seams the generic runner needs,
     wrapping the maxima client + parser.
 
@@ -104,12 +102,11 @@ class MaximaPortal:
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
@@ -129,15 +126,6 @@ class MaximaPortal:
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
         return (category.get("category_main"), category.get("category_type"))
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
-        # so the transaction pooler is fine — no session pooler needed.
-        conn = db.connect()
-        return conn
 
     @staticmethod
     def _confirm_empty_page(
@@ -341,40 +329,10 @@ class MaximaPortal:
 
         native_ids = [n for n in walk.native_ids if self._belongs(walk.cat_map.get(n), cm)]
         seen = set(native_ids)
-
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, walk.price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=maxima cm=%s ct=%s new=%d changed=%d unchanged=%d enqueued=%d",
-            cm, category.get("category_type"), len(new_ids), len(changed),
-            len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (walk.ref_map[n], walk.price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
+            label=f" cm={cm} ct={category.get('category_type')}",
         )
         # maxima reports a per-AGENDA total (220/34), not per-category, so the
         # per-category "portal expected" is what this category collected — index%
@@ -382,10 +340,7 @@ class MaximaPortal:
         # verdict (not the slice's): nomination is agenda-grain, so the slice never
         # needs a proof of its own. The runner nominates only when the agenda walk
         # reached maxima's end.
-        return (
-            seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages,
-            walk.reached_end,
-        )
+        return seen, counts, len(seen), pages, walk.reached_end
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
@@ -428,16 +383,7 @@ class MaximaPortal:
         )
         return candidates, active_rows, {"category_main": None}
 
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
-
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> MaximaClient:
-        return MaximaClient(limiter=limiter)
-
     def fetch_detail(
         self, client: MaximaClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -457,66 +403,12 @@ class MaximaPortal:
             payload={"listing": listing, "html": html, "status": status, "url": url},
         )
 
-    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
-        for it in items:
-            p = it.payload
-            page_id = db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=it.native_id,
-                source_url=p["url"], page_kind="detail",
-                html=p["html"], http_status=p["status"],
-                # W2a-0 churn instrument: this whole write_details is replayed on
-                # a transient pooler drop, so the counter bump inside needs the
-                # item's per-fetch token to make the replay a no-op.
-            )
-            pk, result = db.ingest_scraped_listing(
-                conn, p["listing"], discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = p["listing"].raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
-            db.mark_portal_page_parsed(conn, page_id)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # A gone detail flips that one listing inactive immediately (a definitive
-        # per-listing signal, independent of the agenda-grain index-absence sweep).
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'maxima' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = MaximaPortal(config, max_pages=args.max_pages)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -528,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
-    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    # page(s) only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
@@ -598,13 +490,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

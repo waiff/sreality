@@ -26,7 +26,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": null,
           "value_norm": null,
           "value_num": null,
@@ -42,10 +41,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "mm.det.accurate",
@@ -53,7 +50,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_declared_quality",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "accurate",
           "value_norm": "accurate",
           "value_num": 1.0,
@@ -69,10 +65,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "mm.det.country",
@@ -80,7 +74,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Česká republika",
           "value_norm": "ceska republika",
           "value_num": null,
@@ -96,10 +89,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "mm.det.district",
@@ -107,7 +98,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Bruntál",
           "value_norm": "bruntal",
           "value_num": null,
@@ -123,10 +113,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "mm.det.municipality",
@@ -134,7 +122,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Andělská Hora",
           "value_norm": "andelska hora",
           "value_num": null,
@@ -150,10 +137,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         },
         {
           "extractor_id": "mm.det.municipality_part",
@@ -161,7 +146,6 @@
           "surface": "embedded_json",
           "page_kind": "detail",
           "extraction_method": "portal_structured_field",
-          "snapshot_anchor": "unanchored_latest_fetch",
           "value_text": "Andělská Hora",
           "value_norm": "andelska hora",
           "value_num": null,
@@ -177,10 +161,8 @@
           "claim_confidence": null,
           "blur_evidence": "none",
           "licence_class": "portal",
-          "history_completeness": "payload_only",
           "subject_scoped": true,
-          "legacy_source_column": null,
-          "legacy_write_path_unknown": false
+          "legacy_source_column": null
         }
       ],
       "refusals": {}

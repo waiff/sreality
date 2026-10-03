@@ -10,21 +10,16 @@ migrations job (`TEST_DATABASE_URL`); every test rolls back.
 from __future__ import annotations
 
 import itertools
-import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from toolkit.property_identity import detach_listing, listing_origins, merge_property_set
+from tests._live_property import REQUIRED_DB, db_url
+from toolkit.property_identity import detach_listings, listing_origins, merge_property_set
 
-_DB_URL = os.environ.get("TEST_DATABASE_URL")
-
-pytestmark = pytest.mark.skipif(
-    not _DB_URL,
-    reason="TEST_DATABASE_URL not set — schema-replay test runs only in the CI DB job",
-)
+pytestmark = REQUIRED_DB
 
 OP = "ci-operator@replay.local"
 _SREALITY_IDS = itertools.count(9_200_000_001)
@@ -35,7 +30,7 @@ def cur():
     import psycopg
 
     conn = psycopg.connect(
-        _DB_URL,
+        db_url(),
         options="-c statement_timeout=20000 -c lock_timeout=5000"
         " -c idle_in_transaction_session_timeout=30000",
     )
@@ -138,7 +133,8 @@ def _merge(cur: Any, ids: list[int], *, source: str = "operator") -> dict[str, A
 
 
 def _detach(cur: Any, listing_id: int, **kw: Any) -> dict[str, Any]:
-    return detach_listing(cur.connection, listing_id, decided_by=OP, **kw)["data"]
+    data = detach_listings(cur.connection, [listing_id], decided_by=OP, **kw)["data"]
+    return {**data["adverts"][0], "rulings_written": data["rulings_written"]}
 
 
 def _placed(cur: Any, ids: list[int]) -> dict[int, int]:
@@ -222,7 +218,7 @@ def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_t
 
     out = _detach(cur, leave, reason="jiné patro")
     born = out["restored_property_id"]
-    assert (out["outcome"], out["survivor_property_id"]) == ("split_native", pid)
+    assert (out["outcome"], out["left_property_id"]) == ("split_native", pid)
     assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
     cur.execute("SELECT repr_listing_ref_id, status, is_active FROM properties WHERE id = %s",
                 (born,))
@@ -343,7 +339,7 @@ def test_the_copy_rules_the_operators_live_merge_same_and_nothing_it_did_not_jud
     _merge(cur, [survivor, brought], source="autodedup")
     old = _merge(cur, [survivor, absorbed], source="autodedup")["merge_group_id"]
     gone = _merge(cur, [survivor, undone], source="autodedup")["merge_group_id"]
-    detach_listing(cur.connection, u1, decided_by=OP, source="autodedup")
+    detach_listings(cur.connection, [u1], decided_by=OP, source="autodedup")
     cur.execute("UPDATE property_merge_events SET source = 'operator' "
                 "WHERE merge_group_id = ANY(%s::uuid[])", ([old, gone],))
 

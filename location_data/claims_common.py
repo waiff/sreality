@@ -1,10 +1,10 @@
 """The vocabulary every location claim producer shares — value objects, the licence
 ladder, the transform/guard registries, and the pure helpers the readers are built from.
 
-It exists so the ONE claim lane (`location_data.claims_intake`) can read both of its
-substrates without a cycle: the page readers (`location_data.page_readers`) need `Claim`,
-`Entry`, `ListingRow` and the coordinate ladder, and the lane that calls them needs the
-page readers. Nothing here touches a database, a clock or the network.
+It exists so the ONE claim lane (`location_data.claims_intake`) can read its three
+substrates without a cycle: the page readers (`location_data.page_readers`) and the reading
+reader (`location_data.text_reading`) need `Claim`, `Entry`, `ListingRow` and `_base`, and
+the lane that calls them needs both. Nothing here touches a database, a clock or the network.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from datetime import datetime
 from typing import Any
 
 from location_data import loader_db
-from location_data.resolver.normalize import STREET_LINE_SEPARATOR, strip_street_generic
 from scraper import street
 
 
@@ -65,23 +64,6 @@ DEFAULT_MAX_CLAIM_VALUE_BYTES = 2 * 1024 * 1024
 # 02 §2.1.9 + 06 §6.6 rule 6: a signal we may not store produces NO claim row. This lane
 # has exactly one storable lineage, and the guard is asserted at write time.
 EMITTABLE_LICENCE_CLASSES = frozenset({"portal"})
-
-# 06 §6.2.2, applied by the loader as a per-source constant: sreality is the only portal
-# whose location changes ever appended a snapshot; mmreality/bezrealitky have a payload
-# per snapshot but hash-excluded coordinates; the six slim-dict portals have locality-text
-# history only. Without the marker "a chart of locality-string changes reads as a chart of
-# coordinate changes".
-HISTORY_COMPLETENESS: dict[str, str] = {
-    "sreality": "full",
-    "mmreality": "payload_only",
-    "bezrealitky": "payload_only",
-    "bazos": "locality_text_only",
-    "idnes": "locality_text_only",
-    "ceskereality": "locality_text_only",
-    "realitymix": "locality_text_only",
-    "remax": "locality_text_only",
-    "maxima": "locality_text_only",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +117,9 @@ COORDINATE_RULES: dict[str, CoordinateRule] = {
 # into the existing rows.
 SUBSTRATE_PAYLOAD = "raw_json"
 SUBSTRATE_ARCHIVED_HTML = "archived_html"
+# The third substrate carries no coordinate, so the ladder is never asked about it: the text
+# lane's stored reading of the advert (location reader W3, `location_data.text_reading`).
+SUBSTRATE_READING = "reading"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,11 +251,9 @@ class Claim:
     extractor_id: str
     extractor_version: str
     contract_entry_id: int
-    snapshot_anchor: str
     first_observed_at: datetime
     blur_evidence: str
     licence_class: str
-    history_completeness: str
     value_text: str | None = None
     value_num: float | None = None
     value_geom_wkt: str | None = None
@@ -284,44 +267,15 @@ class Claim:
     declared_radius_m: float | None = None
     subject_scoped: bool | None = None
     legacy_source_column: str | None = None
-    legacy_write_path_unknown: bool = False
-    # The EXTRACTOR's confidence in this claim (`match_confidence`), not the portal's
-    # declaration — that is `declared_confidence`. NULL on every payload-derived claim;
-    # 06 §6.1.1 caps a class-B legacy column at 'medium' and the contract entry says so.
+    # NULL on every claim this lane writes since W3 deleted the headline's `low` (only the
+    # operator writes one, 'exact'); the column goes with a later, destructive migration.
     claim_confidence: str | None = None
-    # D7 evidence (01 §4.2's `loc_claim_text_evidence` + `loc_claim_evidence_payload`).
-    # NULL on every claim mined from `listings.raw_json`: that substrate is latest-wins
-    # JSON, and a span into a document nobody archived is a one-shot check. The PAGE
-    # readers fill them — the stored body is content-addressed and immutable — and for a
-    # `regex_text` claim the DB REQUIRES the whole set: quote, both offsets,
-    # `payload_scope_version`, `subject_scoped`, plus `payload_sha256` whenever there is a
-    # quote at all. `payload_sha256` is hex TEXT here, not `bytes`: the write path carries
-    # rows through `jsonb_to_recordset`, which has no bytea literal, so the SQL decodes it.
-    payload_id: int | None = None
-    payload_sha256: str | None = None
-    evidence_quote: str | None = None
-    span_start: int | None = None
-    span_end: int | None = None
-    payload_scope_version: str | None = None
-    # `loc_claim_llm_model` forces both non-null on an `llm_text` claim. No lane emits
-    # one (rule 25: no model in the claim lane) and the columns stay, because the CHECK
-    # does: a `Claim` that can be spelled but not written is a trap that takes a whole
-    # batch down at the constraint, once, in production.
-    model: str | None = None
-    prompt_version: str | None = None
-    # NULL on every claim the one lane writes: both its substrates are latest-wins (the
-    # listing's `raw_json`, the listing's newest stored body), so there is no snapshot to
-    # anchor to. The column stays because `loc_claim_anchor` (01 §4.2) pairs it with
-    # `snapshot_anchor` and rows written by the deleted snapshot re-mine still carry it.
-    snapshot_id: int | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
             "listing_id": self.listing_id,
             "source": self.source,
             "source_id_native": self.source_id_native,
-            "snapshot_id": self.snapshot_id,
-            "snapshot_anchor": self.snapshot_anchor,
             "first_observed_at": self.first_observed_at.isoformat(),
             "claim_type": self.claim_type,
             "surface": self.surface,
@@ -345,17 +299,7 @@ class Claim:
             "blur_evidence": self.blur_evidence,
             "licence_class": self.licence_class,
             "legacy_source_column": self.legacy_source_column,
-            "legacy_write_path_unknown": self.legacy_write_path_unknown,
-            "history_completeness": self.history_completeness,
             "subject_scoped": self.subject_scoped,
-            "payload_id": self.payload_id,
-            "payload_sha256": self.payload_sha256,
-            "evidence_quote": self.evidence_quote,
-            "span_start": self.span_start,
-            "span_end": self.span_end,
-            "payload_scope_version": self.payload_scope_version,
-            "model": self.model,
-            "prompt_version": self.prompt_version,
         }
         return row
 
@@ -615,71 +559,6 @@ def _address_part_street(value: str, arg: str) -> str | None:
     if arg != "loose" and not street.looks_like_czech_street(cleaned):
         return None
     return cleaned
-
-
-# W18: the street a portal states as TEXT. bazos is the first carrier (`/coords/street`,
-# then the capped headline), and this is the only normalisation that text gets — it is
-# deliberately the THINNEST of the street transforms.
-#
-# What it does NOT do is the point.
-#
-#  * It strips the GENERIC wrapper and nothing else: `ul. Jiráskova` -> `Jiráskova`,
-#    `Livornské ulici` -> `Livornské`, `v ulici Nádražní` -> `Nádražní`. `náměstí`, `třída`,
-#    `nábřeží` and `sídliště` STAY, because RÚIAN spells them into the official name and 215
-#    bazos titles bind only because the word survived. The fold is
-#    `resolver.normalize.strip_street_generic`, shared with the binder so the claim layer and
-#    the register layer cannot disagree about what the same street is called.
-#  * It does not strip a trailing house number. S1's `split_street_and_number` turns
-#    `28. října 12` into a name plus a čp, and R1 uses that čp to reach an address point —
-#    dropping it here would cost the finest rung the claim can reach.
-#  * It applies NO morphology gate. `looks_like_czech_street` refuses the real street
-#    `28. října`, and what a Czech street looks like is not a question a regex gets to answer
-#    when a closed 83,451-row register is standing right there. THE REGISTER IS THE GATE — an
-#    unbound street text is not published at all (resolver v5.2), so `Nový` costs nothing
-#    (no street of that name in the anchoring obec) while `28. října` binds.
-#  * It does not cut a street out of a longer line either. A whole title is claimed whole and
-#    SPLIT BY THE BINDER, inside the anchoring obec, fail-closed.
-#
-# What it does do is refuse what a register lookup cannot undo on its own: a value in a script
-# this corpus does not write streets in, a digits-only token, an `okres …` qualifier and a
-# `Town - Quarter` form (`reject_as_town`, called with NO `geo_names` — so it does NOT refuse
-# "Praha" or "Brno", and is not meant to: whether a segment names the listing's own town is a
-# question only the anchoring obec can answer, and `composite._names_a_place` is where it is
-# asked). A value carrying a line separator skips even that: on "Kladno - Dubí, Ke Křížku" the
-# dash is a separator and `Ke Křížku` is the street, so the line is gated per SEGMENT instead.
-_STREET_TOKEN_TRIM_RE = re.compile(r"^[\s\-–—,;:/|]+|[\s\-–—,;:/|]+$")
-_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
-
-
-@transform("street_token")
-def _street_token(value: str, arg: str) -> str | None:
-    """A street as the portal wrote it, unwrapped and sanity-checked — never re-spelled."""
-    # LEADING wrapper only. `Nová ulice`, `Husova ulice`, `V Ulici` and `I. ulice`…`IX. ulice`
-    # are register rows, and the matcher's exact key is taken from the STORED value — so
-    # stripping the trailing generic word here would destroy the only key those can bind by.
-    # Both ends are folded where that is safe to do: in the matcher, which keeps the unfolded
-    # form beside the stripped one.
-    token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value, trailing=False))
-    if not token:
-        # The leading wrapper WAS the whole value ("ulice", "na ulici"). Keep what the portal
-        # wrote rather than claiming nothing; the register decides whether it means anything.
-        token = _STREET_TOKEN_TRIM_RE.sub("", (value or "").strip())
-    if not token or token.isdigit():
-        return None
-    if not _is_latin_script(token):
-        return None
-    if not STREET_LINE_SEPARATOR.search(token) and street.reject_as_town(token):
-        return None
-    return token
-
-
-def _is_latin_script(value: str) -> bool:
-    """Every LETTER folds to ASCII a-z. Czech diacritics do; Cyrillic and Greek do not, and
-    a street spelled in one of those is a foreign listing's, never a Czech register row's."""
-    letters = _LETTER_RE.findall(value)
-    if not letters:
-        return False
-    return all(_fold(ch).isascii() and _fold(ch).isalpha() for ch in letters)
 
 
 @transform("address_part_house_number")
@@ -960,7 +839,7 @@ def value_norm_mirror(value: str | None) -> str | None:
 # ------------------------------------------------------------------ claim stamping
 
 def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
-    """Every claim is stamped identically: contract identity, anchor, blur, licence.
+    """Every claim is stamped identically: contract identity, blur, licence.
 
     `blur_evidence` and `licence_class` are always passed explicitly — 06 §6.6 rule 7:
     letting the column default fire stamps "no blur observed" onto the rows that carry a
@@ -977,18 +856,14 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
         "extractor_id": entry.entry_id,
         "extractor_version": entry.extractor_version,
         "contract_entry_id": entry.id,
-        # Both substrates are latest-wins, so there is one anchor. `unanchored_legacy` went
-        # with the `listings`-column readers (W1-c).
-        "snapshot_anchor": "unanchored_latest_fetch",
         "first_observed_at": row.observed_at,
         "blur_evidence": entry.default_blur_evidence,
         "licence_class": entry.default_licence_class,
-        "history_completeness": HISTORY_COMPLETENESS[row.source],
         "subject_scoped": entry.subject_scope.get("subject_scoped", True),
     }
     fields.update(overrides)
     if entry.claim_type == "precision_declaration":
-        # W1-c R5, once for every reader on both substrates, because this is the only place
+        # W1-c R5, once for every reader on every substrate, because this is the only place
         # every claim passes through. Two halves, and they are owned by different parties:
         #
         #  * the LABEL is the reader's. A reader that already decided it keeps it

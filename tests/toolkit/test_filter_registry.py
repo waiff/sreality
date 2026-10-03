@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from toolkit import filter_compiler
 from toolkit import filter_registry as fr
 
 
@@ -26,9 +27,7 @@ from toolkit import filter_registry as fr
 # A retired filter must not be offerable to any agenda; the code paths raise on a
 # non-null value rather than silently ignoring it (silently ignoring a retired filter
 # WIDENS the cohort). W7 removes the fields themselves.
-_RETIRED_BUT_DESERIALISABLE = {
-    "near_city_proximity",   # W5 / migration 436: 0 UI widgets, 0 presets, 0 subscriptions
-}
+_RETIRED_BUT_DESERIALISABLE = set(filter_compiler.RETIRED_FILTERS)
 
 
 def test_registry_is_nonempty() -> None:
@@ -158,47 +157,43 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
 # --- parity with hand-written classes (today's source of truth) -----------
 
 
-def test_comparable_filters_fields_covered_by_registry() -> None:
-    """Every ComparableFilters field exists in the registry under the
-    same id."""
+def _agenda_ids(*agendas: fr.Agenda) -> set[str]:
+    return {f.id for a in agendas for f in fr.filters_for_agenda(a)}
+
+
+def test_comparable_filters_fields_equal_the_cohort_agendas() -> None:
+    """ComparableFilters carries exactly the filters the cohort agendas declare, both
+    ways: a field no agenda declares would raise at compile, and a declared filter
+    without a field can never reach a cohort."""
     from toolkit.comparables import ComparableFilters
 
-    registry_ids = set(fr.REGISTRY.keys())
-    for f in dc_fields(ComparableFilters):
-        if f.name in _RETIRED_BUT_DESERIALISABLE:
-            continue
-        assert f.name in registry_ids, (
-            f"ComparableFilters.{f.name} has no entry in REGISTRY — "
-            f"add it to toolkit/filter_registry.py"
-        )
+    fields = {f.name for f in dc_fields(ComparableFilters)}
+    declared = _agenda_ids(fr.Agenda.COMPARABLES, fr.Agenda.ESTIMATION, fr.Agenda.VELOCITY)
+    assert fields == declared, (
+        f"declared but not on ComparableFilters: {sorted(declared - fields)}; "
+        f"on ComparableFilters but not declared: {sorted(fields - declared)}"
+    )
 
 
-def test_watchdog_filter_spec_fields_covered_by_registry() -> None:
-    """Every WatchdogFilterSpec field exists in the registry.
+def test_watchdog_filter_spec_fields_equal_the_watchdog_agenda() -> None:
+    """WatchdogFilterSpec carries exactly the WATCHDOG agenda, both ways.
 
-    Pydantic field names match the registry ids 1:1 (Watchdog uses
-    `min_price_czk`, `min_area_m2`, etc., same as the canonical
-    naming).
+    A declared filter missing from the spec is not an error anywhere else: pydantic's
+    extra='ignore' drops the key on save, and the watchdog silently matches wider than
+    the Browse view it was made from (merge f2d7b359 lost three filters that way).
+    lat/lng/radius_m are the sub-fields of the composite `location` filter.
     """
     from api.notifications import WatchdogFilterSpec
 
-    registry_ids = set(fr.REGISTRY.keys())
-    for name in WatchdogFilterSpec.model_fields:
-        # `dispositions`, `districts`, lat/lng/radius_m are watchdog
-        # specifics; lat/lng/radius_m are sub-fields of the composite
-        # `location` filter, so allow them.
-        if name in _RETIRED_BUT_DESERIALISABLE:
-            continue
-        if name in {"lat", "lng", "radius_m"}:
-            assert "location" in registry_ids, (
-                "WatchdogFilterSpec uses a center+radius spatial "
-                "filter but the registry has no 'location' entry"
-            )
-            continue
-        assert name in registry_ids, (
-            f"WatchdogFilterSpec.{name} has no entry in REGISTRY — "
-            f"add it to toolkit/filter_registry.py"
-        )
+    declared = _agenda_ids(fr.Agenda.WATCHDOG)
+    assert "location" in declared
+    spec = (set(WatchdogFilterSpec.model_fields) - {"lat", "lng", "radius_m"}
+            - _RETIRED_BUT_DESERIALISABLE)
+    declared -= {"location"}
+    assert spec == declared, (
+        f"declared WATCHDOG but not on WatchdogFilterSpec: {sorted(declared - spec)}; "
+        f"on WatchdogFilterSpec but not declared: {sorted(spec - declared)}"
+    )
 
 
 def test_browse_agenda_includes_location() -> None:
@@ -464,20 +459,39 @@ def test_sold_agenda_membership_is_opt_in() -> None:
 
 def test_every_sold_filter_is_column_backed_and_prefix_routable() -> None:
     """The sold surface has no `HAND_CODED_*` escape set: `applyRegistryFilters`
-    dispatches by type + id prefix, so a filter that fits no path is not hand-coded
-    somewhere else — it is simply never applied. Each sold filter must therefore be a
-    string_list (`.in`/`.eq`) or a `min_`/`max_`-prefixed number (`.gte`/`.lte`)."""
+    dispatches by kind, so a filter that fits no path is not hand-coded somewhere
+    else — it is simply never applied. Each sold filter must therefore be a list
+    (`.in`/`.eq`) or a bound (`.gte`/`.lte`); an `eq` number would be equality, which
+    is never what a bound means."""
     for f in fr.filters_for_agenda(fr.Agenda.SOLD):
-        assert f.pg_column, f"{f.id}: a sold filter with no column is a no-op"
-        if f.type == fr.FilterType.STRING_LIST:
-            continue
-        assert f.type in (fr.FilterType.INT, fr.FilterType.FLOAT), (
-            f"{f.id}: type {f.type} has no auto-dispatch path"
+        assert fr.sql_kind(f) in {"any", "gte", "lte"}, (
+            f"{f.id}: sql_kind {fr.sql_kind(f)!r} has no sold dispatch path"
         )
-        assert f.id.startswith(("min_", "max_")) or f.id.endswith(("_min", "_max")), (
-            f"{f.id}: a numeric sold filter without a min/max affix dispatches as "
-            f"equality, which is never what a bound means"
-        )
+
+
+def test_sql_kind_snapshot() -> None:
+    """The derived kind, counted. A move here is a filter changing how it compiles on
+    every surface at once (Python compiler and Browse's TS dispatch)."""
+    from collections import Counter
+
+    counts = Counter(fr.sql_kind(f) for f in fr.all_filters())
+    assert counts == {"gte": 18, "lte": 10, "eq": 9, "any": 7, "enum_or_unknown": 2, None: 31}
+    numeric_eq = {
+        f.id for f in fr.all_filters()
+        if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT) and fr.sql_kind(f) == "eq"
+    }
+    assert numeric_eq == {"category_sub_cb"}
+    column_backed = {f.id for f in fr.all_filters() if f.pg_column is not None}
+    assert fr.COMPILED_BY_HOOK <= column_backed
+
+
+def test_filter_to_json_carries_sql_kind() -> None:
+    """Codegen hands the SAME derived kind to Browse's TS dispatch."""
+    by_id = {f["id"]: f for f in fr.registry_to_json()["filters"]}
+    for f in fr.all_filters():
+        assert by_id[f.id]["sql_kind"] == fr.sql_kind(f), f.id
+    assert by_id["min_price_per_m2"]["sql_kind"] == "gte"
+    assert by_id["building_material"]["sql_kind"] is None
 
 
 def test_the_sold_date_filter_reaches_no_other_agenda() -> None:

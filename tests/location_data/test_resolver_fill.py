@@ -17,6 +17,7 @@ from dataclasses import replace
 from location_data.resolver import bind as step_bind
 from location_data.resolver import core
 from location_data.resolver import grade as step_grade
+from location_data.resolver.types import AddressPoint, Street
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
@@ -212,22 +213,156 @@ def test_the_registry_wins_the_house_number_and_the_psc_where_it_has_them():
     assert resolution.psc == "16000"
 
 
-def test_a_claimed_house_number_survives_when_the_registry_has_none():
+def test_a_claimed_house_number_the_registry_cannot_place_is_not_published():
+    """v5.5 (D7): a number is the REGISTER's or nothing. The claimed PSČ still falls back —
+    it is the one field that may."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_cp", value_text="487/40"),
+        mm.claim(2, "house_number_cp", value_text="487/40a"),
         mm.claim(3, "psc", value_text="160 00"),
     ])
-    assert resolution.house_number_cp == "487"
+    assert (resolution.house_number_cp, resolution.house_number_co) == (None, None)
     assert resolution.psc == "16000"
 
 
-def test_the_orientation_number_keeps_its_letter():
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_co", value_text="487/40a"),
-    ])
-    assert resolution.house_number_co == "40a"
+# ------------------------------------------ v5.5 (D7): typed numbers, never published unbound
+
+
+def _lesni(street: str, number: str | None = None, *, cp: bool = True):
+    """Bílovec's `Lesní` holds a cottage's č.ev. 13 and (`cp`) a č.p. 13: the same digits, two
+    buildings, which only `typ_so` tells apart."""
+    mirror = mm.default_mirror()
+    mirror.streets.append(Street(code=116, name="Lesní", name_norm="lesni", obec_kod=599212))
+    doors = [(33000113, "č.ev.")] + ([(33000013, "č.p.")] if cp else [])
+    mirror.points += [AddressPoint(kod_adm=kod, obec_unit_id=10, obec_kod=599212, psc="74301",
+                                   lat=49.758, lon=18.017, ulice_kod=116, street_name="Lesní",
+                                   street_name_norm="lesni", cislo_domovni=13, typ_so=typ)
+                      for kod, typ in doors]
+    claims = [mm.claim(1, "obec_name", value_text="Bílovec"),
+              mm.claim(2, "street_name", value_text=street)]
+    if number:
+        claims.append(mm.claim(3, "house_number_cp", value_text=number))
+    return _resolve(claims, mirror=mirror)
+
+
+def test_an_evidence_number_binds_only_the_evidence_point_and_publishes_no_number():
+    """A marked č.ev. (bezrealitky writes `ev.13`) never joins the č.p. of the same digits; an
+    unmarked number is the č.p. where the street has one, else the č.ev. (ceskereality)."""
+    for resolution in (_lesni("Lesní č.ev. 13"), _lesni("Lesní ev.13"),
+                       _lesni("Lesní", "č.ev. 13"), _lesni("Lesní 13", cp=False)):
+        assert (resolution.ruian_adm_kod, resolution.house_number_cp) == (33000113, None)
+        assert resolution.granularity == "address_point"
+    plain = _lesni("Lesní 13")
+    assert (plain.ruian_adm_kod, plain.house_number_cp) == (33000013, "13")
+
+
+def _vokovice_487(*extra, part: bool = True):
+    """No street claim: Praha, its část Vokovice and č.p. 487 — unique inside the část by law,
+    though Praha holds another č.p. 487 in another část."""
+    mirror = mm.default_mirror()
+    mirror.points.append(replace(mirror.points[0], kod_adm=21699999, cast_obce_unit_id=99,
+                                 ulice_kod=None, street_name_norm=None, street_name=None))
+    claims = [mm.claim(1, "obec_name", value_text="Praha"),
+              mm.claim(3, "house_number_cp", value_text="487")]
+    if part:
+        claims.append(mm.claim(2, "cast_obce_name", value_text="Vokovice"))
+    return _resolve(claims + list(extra), mirror=mirror)
+
+
+def _pin(lat: float, lon: float, label: str):
+    return mm.claim(4, "coordinate", lat=lat, lon=lon, declared_precision_label=label)
+
+
+def test_a_streetless_number_binds_inside_the_one_bound_part_when_the_pin_agrees():
+    for extra in ((), (_pin(50.1020, 14.3490, "gps"),), (_pin(50.13, 14.39, "municipality"),)):
+        resolution = _vokovice_487(*extra)
+        assert (resolution.ruian_adm_kod, resolution.house_number_cp) == (21690278, "487")
+        assert resolution.street_name == "Nad Bořislavkou"   # the register's
+
+
+def test_a_streetless_number_is_refused_without_a_part_a_quiet_pin_or_a_streetless_listing():
+    """An exact pin 3.5 km away would be moved unflagged; with no bound část the number is
+    ambiguous town-wide; after a street the register could not bind it is that street's."""
+    for resolution in (_vokovice_487(_pin(50.13, 14.39, "gps")), _vokovice_487(part=False),
+                       _vokovice_487(mm.claim(5, "street_name", value_text="Neexistující"))):
+        assert (resolution.ruian_adm_kod, resolution.house_number_cp) == (None, None)
+
+
+# ------------------------------------------ Q3 (v5.5): the register's part on a street row
+
+
+def _stefanikova(*parts: tuple[int, int], town: bool = True, street: str = "Štefánikova"):
+    """18909736 (§7): Hradec Králové and Štefánikova (127329), whose real doors all lie in
+    Moravské Předměstí while the advert says Třebeš, with its declared-approximate pin 720 m
+    off. `town=False`: the advert names no town, only the PSČ and the part supply one."""
+    claims = [mm.claim(2, "cast_obce_name", value_text="Třebeš", source="bazos"),
+              mm.claim(3, "street_name", value_text=street, source="bazos")]
+    if town:
+        claims.append(mm.claim(1, "obec_name", value_text="Hradec Králové", source="bazos"))
+    return _resolve(claims + _stefanikova_page(), mirror=_stefanikova_mirror(*parts))
+
+
+def _stefanikova_page():
+    return [mm.claim(4, "psc", value_text="50011", source="bazos"),
+            mm.claim(5, "coordinate", lat=50.1933, lon=15.8371, source="bazos",
+                     declared_precision_label="approximate_location")]
+
+
+def _stefanikova_mirror(*parts: tuple[int, int]):
+    mirror = mm.default_mirror()
+    mirror.units += [mm._unit(70, "obec", 569810, "Hradec Králové", "hradec kralove",
+                              "b569810", lat=50.2092, lon=15.8328, psc_set=("50011",)),
+                     mm._unit(71, "cast_obce", 409871, "Moravské Předměstí",
+                              "moravske predmesti", "b569810.c409871", parent=70),
+                     mm._unit(72, "cast_obce", 409847, "Třebeš", "trebes", "b569810.c409847",
+                              parent=70)]
+    mirror.obec_polygons[569810] = (50.2092, 15.8328, 5000.0)
+    mirror.streets.append(Street(code=127329, name="Štefánikova", name_norm="stefanikova",
+                                 obec_kod=569810))
+    mirror.points += [AddressPoint(kod_adm=77000000 + i, obec_unit_id=70, obec_kod=569810,
+                                   psc="50011", lat=50.1868, lon=15.837 + i / 1e4,
+                                   ulice_kod=127329, street_name="Štefánikova",
+                                   street_name_norm="stefanikova", cislo_domovni=800 + i,
+                                   cast_obce_unit_id=unit, cast_obce_kod=kod)
+                      for i, (unit, kod) in enumerate(parts)]
+    return mirror
+
+
+def test_18909736_from_its_stored_reading_publishes_stefanikova_in_moravske_predmesti():
+    """W3's acceptance: the reading the pilot took off the advert, through bazos@8's reading
+    entries (V1–V4), then the resolver — Štefánikova / Hradec Králové / Moravské Předměstí,
+    the register's part and not the advert's Třebeš (Q3), no number (none is stated)."""
+    from tests.location_data.test_text_reading import TRIGGER, _claims, _payload
+
+    text = _claims(_payload("offer", street=("Štefánikova", "v ulici Štefánikova"),
+                            town=("Hradec Králové", "v Hradci Králové"),
+                            part_of_town=("Třebeš", "části Třebše")), TRIGGER)
+    claims = [mm.claim(i, t, value_text=v, source="bazos", surface="description",
+                       extraction_method="llm_text")
+              for i, (t, v) in enumerate(sorted(text.items()), start=10)]
+    resolution = _resolve(claims + _stefanikova_page(),
+                          mirror=_stefanikova_mirror(*[(71, 409871)] * 3))
+    assert (resolution.street_name, resolution.obec_name, resolution.cast_obce_name) == (
+        "Štefánikova", "Hradec Králové", "Moravské Předměstí")
+    assert (resolution.granularity, resolution.house_number_cp) == ("street", None)
+
+
+def test_a_street_in_the_named_town_carries_the_registers_part_not_the_adverts():
+    resolution = _stefanikova((71, 409871), (71, 409871), (71, 409871))
+    assert (resolution.street_name, resolution.granularity) == ("Štefánikova", "street")
+    assert (resolution.cast_obce_name, resolution.cast_obce_kod) == (
+        "Moravské Předměstí", 409871)
+    assert (resolution.match_confidence, resolution.disputed) == ("medium", None)
+    assert resolution.house_number_cp is None
+
+
+def test_a_street_across_parts_or_in_a_town_the_advert_does_not_name_carries_no_part():
+    """Fail closed: RÚIAN draws no část polygon, so a street across two parts gets none; a
+    town only the PSČ and a part-of-town claim supplied, or a typo'd street (R3), lends none."""
+    for resolution in (_stefanikova((71, 409871), (72, 409847)),
+                       _stefanikova((71, 409871), town=False),
+                       _stefanikova((71, 409871), street="Štefánikovva")):
+        assert (resolution.street_name, resolution.cast_obce_kod) == ("Štefánikova", None)
 
 
 # ------------------------------------------- the position: a towned row always has one

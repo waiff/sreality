@@ -45,11 +45,6 @@ _STREET_TYPE = re.compile(
 # so "náměstí Míru" is the register's own string and 215 bazos titles bind only because the
 # word survived. `split_street_type` below still parses them off for the OTHER match key;
 # the binder tries both forms and that is what makes the pair symmetric with the register.
-# What makes a street value a LINE rather than a name: the separators the portals write a
-# composite address with. ONE constant — the claim layer asks it to decide which gate applies
-# (`reject_as_town` judges a name, never a line), BIND asks it to route the claim away from
-# R2/R3, and the binder splits on it. Three copies of it were three answers waiting to drift.
-STREET_LINE_SEPARATOR = re.compile(r"[,;]|\s[-‐-―−]\s")
 
 _STREET_GENERIC_LEAD = re.compile(
     r"^\s*(?:(?:v|ve|na)\s+)?(?:ulice|ulici|ul\.|ul\b)\s*", re.IGNORECASE)
@@ -61,9 +56,18 @@ _SENTENCE_TAIL = re.compile(r"(?<=[a-záčďéěíňóřšťúůýž])\.\s*$")
 # '28. října', '17. listopadu', '1. máje' — a LEADING ordinal is part of the street name,
 # never a house number (03 §3.3.1, named regression test).
 _NUMERIC_LEADING = re.compile(r"^\s*\d{1,3}\.\s*\S")
-# čp / čo forms: '128', '128/40', '128/40a', 'ev. č. 12', 'č.ev. 12'
-_EVIDENCNI = re.compile(r"(?:ev\.?\s*č\.?|č\.?\s*ev\.?|evidenční\s*číslo)\s*(\d{1,6})", re.IGNORECASE)
+# čp / čo forms: '128', '128/40', '128/40a', 'ev. č. 12', 'č.ev. 12', bezrealitky's 'ev.32'
+_EVIDENCNI = re.compile(r"(?:\bev\.?\s*(?:č\.?)?|č\.?\s*ev\.?|evidenční\s*číslo)\s*(\d{1,6})", re.IGNORECASE)
 _HN = re.compile(r"(\d{1,6})(?:\s*/\s*(\d{1,5})\s*([a-zA-Z])?)?")
+# The number that ENDS a street claim, WITH the marker that types it: "Chata Moravské Prusy
+# č.ev. 13" is evidence number 13, and splitting the bare digits off read it as č.p. 13 (D7).
+_TRAILING_NUMBER = re.compile(
+    r"\s+((?:č\.?\s*p\.?|č\.?\s*ev\.?|ev\.?\s*(?:č\.?)?)?\s*\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$",
+    re.IGNORECASE)
+# `ruian_address_points.typ_so`, the register's own two labels (measured 2026-09-30: 2,614,947
+# current `č.p.` points and 406,256 `č.ev.`, nothing else). The domovní číslo means nothing
+# without one of them.
+TYP_CP, TYP_EV = "č.p.", "č.ev."
 
 # bazos ships two PORTAL BUCKETS in the PSČ field; they are country signals, not postcodes
 # (03 §3.3.2, mining-bazos).
@@ -90,23 +94,13 @@ def split_glue(value: str) -> str:
     return _GLUE.sub(" ", value)
 
 
-def strip_street_generic(value: str, *, trailing: bool = True) -> str:
-    """Drop the generic `ulice`/`ul.` wrapper, and nothing else.
+def strip_street_generic(value: str) -> str:
+    """Drop the generic `ulice`/`ul.` wrapper at both ends, and nothing else. The matcher keeps
+    the unfolded form beside the stripped one — which is how `Livornské ulici` and `Nová
+    ulice` are both answered from one stored string.
 
-    `trailing=False` drops only the LEADING one, and that is what the claim layer uses. A
-    claim is what the portal WROTE, and the register holds `Nová ulice` ×8, `Husova ulice`,
-    `V Ulici`, `Na Ulici` and `I. ulice`…`IX. ulice`: stripping the trailing word at the claim
-    layer destroys the only key those can ever bind by, because the matcher's unfolded key is
-    taken from the stored value. The matcher strips BOTH ends, and it keeps the unfolded form
-    beside the stripped one — which is how `Livornské ulici` and `Nová ulice` are both
-    answered from one stored string.
-
-    THE one fold shared by the claim layer (`claims_common.street_token`, which is all a
-    portal's street text is normalised by) and by the binder — two copies of it would be two
-    answers to "is this the same street", which is the question the whole wave turns on.
-
-    It returns "" when the wrapper IS the whole value ("Na Ulici", "ulice"), and both callers
-    treat that as "the fold found nothing to do" rather than as an empty name: the register
+    It returns "" when the wrapper IS the whole value ("Na Ulici", "ulice"), and the matcher
+    treats that as "the fold found nothing to do" rather than as an empty name: the register
     holds `Nová ulice` ×8, `V Ulici`, `Na Ulici`, `Horní Ulice`, `Husova ulice` and
     `I. ulice`…`IX. ulice`, so the generic word is sometimes the street. The UNFOLDED form is
     always a match key too (`composite.street_match_keys`), which is how those rows bind.
@@ -115,9 +109,7 @@ def strip_street_generic(value: str, *, trailing: bool = True) -> str:
     generic word, because the trailing pattern needs the word to end the string.
     """
     trimmed = _SENTENCE_TAIL.sub("", value or "").strip()
-    stripped = _STREET_GENERIC_LEAD.sub("", trimmed)
-    if trailing:
-        stripped = _STREET_GENERIC_TRAIL.sub("", stripped)
+    stripped = _STREET_GENERIC_TRAIL.sub("", _STREET_GENERIC_LEAD.sub("", trimmed))
     return _WS.sub(" ", stripped).strip()
 
 
@@ -162,6 +154,16 @@ def normalize_house_number(raw: str) -> dict[str, object]:
     return slots
 
 
+def house_number(slots: dict[str, object]) -> tuple[int | None, str | None]:
+    """-> (the domovní číslo, its `typ_so`). Only a MARKED č.ev. is typed: an unmarked number
+    is None, which BIND reads as a č.p. where the scope has one, else a č.ev. (ceskereality
+    writes a cottage's "Dlouhá 6" with no marker at all)."""
+    for slot, typ in (("cislo_domovni", None), ("evidencni", TYP_EV)):
+        if str(slots.get(slot) or "").isdigit():
+            return int(str(slots[slot])), typ
+    return None, None
+
+
 def split_street_and_number(raw: str) -> tuple[str, dict[str, object]]:
     """Split a street claim that carries its own number. A LEADING ordinal stays with the
     name — bazos's regex loses '28. října' exactly here."""
@@ -173,7 +175,7 @@ def split_street_and_number(raw: str) -> tuple[str, dict[str, object]]:
         prefix = head + sep
     else:
         prefix, rest = "", text
-    match = re.search(r"\s+(\d{1,6}(?:\s*/\s*\d{1,5}[a-zA-Z]?)?)\s*$", rest)
+    match = _TRAILING_NUMBER.search(rest)
     if not match:
         return (prefix + rest).strip(), {}
     return (prefix + rest[: match.start()]).strip(), normalize_house_number(match.group(1))
@@ -225,25 +227,11 @@ def normalize_claim(
         if rejection:
             rejections.append(rejection)
         ascii_key = psc or ""
-    elif claim.claim_type in ("house_number_cp", "house_number_co", "evidencni", "house_unit"):
+    elif claim.claim_type in ("house_number_cp", "house_number_co"):
         slots.update(normalize_house_number(verbatim))
         if not slots:
             rejections.append("house_number_unparsed")
-    elif claim.claim_type in (
-        "obec_name",
-        "cast_obce_name",
-        "quarter_name",
-        "mestsky_obvod_name",
-        "okres_name",
-        "orp_name",
-        "kraj_name",
-        "cadastral_territory_name",
-        "postal_town",
-        "homonym_qualifier",
-        "landmark",
-        "development_name",
-        "country",
-    ):
+    elif claim.claim_type in ("obec_name", "cast_obce_name", "okres_name", "kraj_name", "country"):
         cleaned = split_glue(verbatim.strip())
         ascii_key = normalize_match_key(cleaned)
         cf = case_fold(cleaned)

@@ -14,6 +14,8 @@ const h = vi.hoisted(() => ({
   listeners: [] as Array<(event: string, session: unknown) => void>,
   initialSession: null as unknown,
   reads: [] as string[],
+  /* Per relation, envelopes served (in order) before the real rows. */
+  failNext: {} as Record<string, unknown[]>,
 }));
 
 vi.mock('./supabase', () => {
@@ -23,11 +25,19 @@ vi.mock('./supabase', () => {
       relation === 'plans'
         ? [{ key: 'free', agendas: { browse: true }, is_default: true }]
         : [];
+    let single = false;
     const b: Record<string, unknown> = {
       select: () => b,
-      maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      retry: () => b,
+      abortSignal: () => b,
+      maybeSingle: () => {
+        single = true;
+        return b;
+      },
       then: (resolve: (r: unknown) => unknown) =>
-        resolve({ data: rows, error: null }),
+        resolve(
+          h.failNext[relation]?.shift() ?? { data: single ? null : rows, error: null, status: 200 },
+        ),
     };
     return b;
   };
@@ -46,6 +56,7 @@ vi.mock('./supabase', () => {
   };
 });
 
+import { isTransientApiError } from './api';
 import { AuthProvider, useAuth } from './auth';
 
 /* A fresh object each call — exactly what Supabase hands out per auth event,
@@ -71,7 +82,23 @@ beforeEach(() => {
   h.listeners = [];
   h.reads = [];
   h.initialSession = null;
+  h.failNext = {};
 });
+
+/* postgrest-js's resolved envelopes for a dropped connection and a refused grant. */
+const NETWORK_DOWN = { data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 };
+const REFUSED = {
+  data: null,
+  error: { code: '42501', message: 'permission denied for table plans' },
+  status: 403,
+};
+/* main.tsx's rule, without its 1 s delay. */
+const productionClient = () =>
+  new QueryClient({
+    defaultOptions: {
+      queries: { retry: (n, e) => n < 1 && isTransientApiError(e), retryDelay: 0 },
+    },
+  });
 
 describe('AuthProvider session bootstrap', () => {
   it('reads entitlements + plans ONCE across repeated auth events for one user', async () => {
@@ -109,6 +136,45 @@ describe('AuthProvider session bootstrap', () => {
     for (const cb of h.listeners) cb('SIGNED_IN', sessionFor('user-2'));
 
     await waitFor(() => expect(qc.getQueryData(['collections'])).toBeUndefined());
+  });
+
+  /* The read is cached for the whole session, so a blip must never resolve to
+   * the "no constraint" fallback: it rejects, gets the one retry, and lands. */
+  it('retries a transient agenda read instead of caching the fallback', async () => {
+    h.initialSession = sessionFor('user-1');
+    h.failNext = { plans: [NETWORK_DOWN] };
+    const qc = productionClient();
+    const { getByTestId } = renderAuth(qc);
+
+    await waitFor(() => expect(getByTestId('agendas').textContent).toBe('browse'));
+    expect(h.reads.filter((r) => r === 'plans')).toHaveLength(2);
+  });
+
+  it('caches nothing when the transient failure outlasts the retry', async () => {
+    h.initialSession = sessionFor('user-1');
+    h.failNext = { entitlements: [NETWORK_DOWN, NETWORK_DOWN] };
+    const qc = productionClient();
+    const { getByTestId } = renderAuth(qc);
+
+    await waitFor(() =>
+      expect(qc.getQueryState(['session', 'agendas', 'user-1'])?.status).toBe('error'),
+    );
+    expect(qc.getQueryData(['session', 'agendas', 'user-1'])).toBeUndefined();
+    expect(getByTestId('agendas').textContent).toBe('null');
+  });
+
+  it('keeps the no-constraint fallback for a refused read, without retrying it', async () => {
+    h.initialSession = sessionFor('user-1');
+    h.failNext = { plans: [REFUSED] };
+    const qc = productionClient();
+    const { getByTestId } = renderAuth(qc);
+
+    await waitFor(() =>
+      expect(qc.getQueryState(['session', 'agendas', 'user-1'])?.status).toBe('success'),
+    );
+    expect(qc.getQueryData(['session', 'agendas', 'user-1'])).toBeNull();
+    expect(getByTestId('agendas').textContent).toBe('null');
+    expect(h.reads.filter((r) => r === 'plans')).toHaveLength(1);
   });
 
   it('does not clear the cache on the first sign-in of a session', async () => {

@@ -1009,3 +1009,137 @@ def test_a_seed_resets_the_rate_and_a_pass_times_its_reconcile(tmp_path, monkeyp
     ran = run_incremental(lambda: conn)
     assert seen and ran["reconcile"]["counts"]["groups"] == 7
     assert ran["reconcile"]["seconds"] >= 0
+
+
+# ------------------------------------------------------------------ a RAISED pass (E930)
+
+
+def test_the_idle_guard_outlives_the_deadline_and_not_the_lease() -> None:
+    """The scoring loop runs no statement while it decides every wanted pair, so an idle guard
+    tighter than the pass's own deadline terminates a HEALTHY pass (2026-10-02: 300 s killed
+    every bootstrap pass past the seventh on the worker). It must sit above the deadline plus
+    one statement and under the lease E913 sized for that deadline."""
+    from autodedup.incremental_lane import (IDLE_TIMEOUT_MS, LEASE_TTL_S, PASS_DEADLINE_S,
+                                            STATEMENT_TIMEOUT_MS)
+
+    assert IDLE_TIMEOUT_MS > PASS_DEADLINE_S * 1000 + STATEMENT_TIMEOUT_MS
+    assert IDLE_TIMEOUT_MS < LEASE_TTL_S * 1000
+
+
+def _pass_that_raises(monkeypatch, exc: BaseException) -> None:
+    from autodedup import incremental_lane
+
+    def raise_inside_the_transaction(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", raise_inside_the_transaction)
+
+
+def test_a_raised_pass_halves_its_rate_on_a_fresh_connection(tmp_path, monkeypatch) -> None:
+    """A raise rolls the pass back and moves no cursor, so the next pass claims the IDENTICAL
+    batch; without the halving it fails the same way for ever (six passes on 2026-10-02). The
+    write goes through a connection of its own: the pass's may be the one the server
+    terminated."""
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+    _pass_that_raises(monkeypatch, RuntimeError("server closed the connection unexpectedly"))
+    fresh = FakePg()
+    opened: list[FakePg] = []
+
+    def open_fresh() -> FakePg:
+        opened.append(fresh)
+        return fresh
+
+    with pytest.raises(RuntimeError, match="server closed"):
+        run_incremental(lambda: conn, fresh_conn=open_fresh)
+
+    assert opened == [fresh]
+    assert fresh.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S, "nothing on the pass's own"
+    assert conn.rolled_back >= 1
+
+
+def test_without_a_fresh_connection_the_halving_uses_the_pass_s_own(tmp_path,
+                                                                     monkeypatch) -> None:
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    _pass_that_raises(monkeypatch, RuntimeError("canceling statement due to statement timeout"))
+
+    with pytest.raises(RuntimeError, match="statement timeout"):
+        run_incremental(lambda: conn)
+
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+
+
+def test_a_failed_halving_write_keeps_the_original_raise(tmp_path, monkeypatch) -> None:
+    """The halving is best effort: a pooler that refuses the fresh connect is noted on the
+    raise, never raised in its place."""
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    _pass_that_raises(monkeypatch, RuntimeError("terminating connection due to idle-in-"
+                                                "transaction timeout"))
+
+    def pooler_down() -> FakePg:
+        raise ConnectionError("pooler down")
+
+    with pytest.raises(RuntimeError, match="idle-in-transaction") as raised:
+        run_incremental(lambda: conn, fresh_conn=pooler_down)
+
+    notes = getattr(raised.value, "__notes__", [])
+    assert any("halving" in note and "pooler down" in note for note in notes)
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+
+
+def test_a_refusal_never_halves_the_rate(tmp_path, monkeypatch) -> None:
+    """A refusal (a storage budget, a scope, the retirement rail) is repeated by design until
+    the operator acts; halving it every tick would wedge the claim at one advert."""
+    from autodedup.incremental_lane import (PASS_RATE_PER_S, RetireRefusal, pass_rate_key,
+                                            run_incremental)
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    _pass_that_raises(monkeypatch, RetireRefusal("the sweep wants to retire too much"))
+    opened: list[FakePg] = []
+
+    with pytest.raises(SystemExit, match="retire too much"):
+        run_incremental(lambda: conn, fresh_conn=lambda: opened.append(FakePg()) or opened[-1])
+
+    assert not opened
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+
+
+def test_the_fact_reads_are_sliced_by_whole_listings(tmp_path, monkeypatch) -> None:
+    """Every cohort statement is a plain any(ids) filter ordered within a listing and every
+    consumer keys by listing or image, so slices of whole listings read exactly what the whole
+    array did — the facts of nine listings read in slices of two are the facts read in one."""
+    from autodedup import incremental_lane
+    from autodedup.incremental_lane import SqlFacts
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    ids = sorted(int(listing_id) for listing_id in conn.listings)
+    assert len(ids) >= 5, "the world must span several slices"
+    whole_facts = SqlFacts(conn)
+    whole = whole_facts.facts(ids)
+    monkeypatch.setattr(incremental_lane, "FACT_CHUNK", 2)
+    sliced_facts = SqlFacts(conn)
+    sliced = sliced_facts.facts(ids)
+
+    assert sliced == whole
+    assert sliced_facts.reads == whole_facts.reads == len(whole)
+    assert sliced_facts.statements > whole_facts.statements, "more, smaller statements"
+    assert (sliced_facts.images_with_phash, sliced_facts.images_unmeasured,
+            sliced_facts.hashes_unmeasured) == (
+        whole_facts.images_with_phash, whole_facts.images_unmeasured,
+        whole_facts.hashes_unmeasured)

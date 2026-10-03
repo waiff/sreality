@@ -41,7 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from location_data.resolver.normalize import (
-    STREET_LINE_SEPARATOR,
+    house_number,
     normalize_match_key,
     split_street_and_number,
     split_street_type,
@@ -97,7 +97,7 @@ def resolve_locality(value: str, registry: RegistryView) -> CompositeBind:
 
     town_only: AdminUnit | None = None
     for index, unit in _anchor_candidates(tokens, registry):
-        obec = _obec_of(unit, registry)
+        obec = obec_of(unit, registry)
         if obec is None:
             continue
         part = _part_inside(tokens, index, obec, registry)
@@ -113,7 +113,7 @@ def resolve_locality(value: str, registry: RegistryView) -> CompositeBind:
 
 
 def _resolve_up(unit: AdminUnit, registry: RegistryView, reason: str) -> CompositeBind:
-    obec = _obec_of(unit, registry)
+    obec = obec_of(unit, registry)
     if obec is None:
         return CompositeBind(reason="no_obec_ancestor")
     return CompositeBind(obec=obec, part=None if unit.level == "obec" else unit, reason=reason)
@@ -167,7 +167,7 @@ def _part_inside(
             inside = [
                 unit
                 for unit in _lookup(registry, key, (level,))
-                if (parent := _obec_of(unit, registry)) is not None and parent.code == obec.code
+                if (parent := obec_of(unit, registry)) is not None and parent.code == obec.code
             ]
             if len(inside) == 1:
                 return inside[0]
@@ -176,7 +176,7 @@ def _part_inside(
     return None
 
 
-def _obec_of(unit: AdminUnit, registry: RegistryView) -> AdminUnit | None:
+def obec_of(unit: AdminUnit, registry: RegistryView) -> AdminUnit | None:
     if unit.level == "obec":
         return unit
     for ancestor in registry.admin_chain(unit.unit_id):
@@ -212,39 +212,30 @@ def _tokens(value: str) -> list[str]:
 
 # --------------------------------------------------------------------------- streets (W18)
 #
-# The SAME doctrine, one level down. A portal states a street inside a line as readily as it
-# states a quarter inside one — bazos' headline is "Prodej bytu 3+1, ul. Jiráskova, Mladá
-# Boleslav" and its parser's own reading is "Kladno - Dubí, Ke Křížku" — so the answer is the
-# one W9 already gave for localities: split on the separators the portals write, match each
-# segment against the REGISTER inside the anchoring town, and fail closed when more than one
-# thing matches.
+# The SAME doctrine, one level down: a street claim is matched against the REGISTER inside the
+# anchoring town, and fails closed when more than one row matches. (v5.6 deleted the split on
+# separators — its one user was bazos' whole headline, which the text reading replaced.)
 #
-# Three rules the locality binder does not need, and each is a measured one:
+# Two rules the locality binder does not need, and each is a measured one:
 #
 #  1. BOTH KEYS. `ruian_streets.name_norm` comes from `name_index.normalize_street_name`,
 #     which drops a leading `ulice`/`ul.` and nothing else — so the register says
 #     `namesti miru` while S1's `split_street_type` hands the resolver `miru`. Matching both
 #     forms is what makes the two sides symmetric without touching the loader, and it is
 #     worth 215 titles that bind only with the generic word kept.
-#  2. NO TRIGRAM. `bind`'s R3 exists for a single claimed name with a typo in it. Run over the
-#     segments of a whole title it would fuzzy-match "Prodej bytu" against a street, so a line
-#     binds EXACTLY or not at all. A title cut at bazos' 60-character cap ("ul. Vršo") is the
-#     same rule seen from the other side: a truncated stem is ambiguous by nature and there is
-#     no prefix matching here.
-#  3. NOT A PLACE. A segment naming the anchoring obec, or a část obce / MOMC inside it, is
+#  2. NOT A PLACE. A claim naming the anchoring obec, or a část obce / MOMC inside it, is
 #     never a street candidate — 76 register streets across 20 obce are spelled exactly like a
-#     část obce of their own town, and on a line there is nothing to tell them apart.
-_STREET_SEPARATORS = STREET_LINE_SEPARATOR
+#     část obce of their own town.
 
 
 @dataclass(frozen=True, slots=True)
 class StreetBind:
-    """What a street LINE names inside the anchoring obec. `reason` is the diagnostic."""
+    """What the street claims name inside the anchoring obec. `reason` is the diagnostic."""
 
     street: Street | None = None
     cislo_domovni: int | None = None
+    typ_so: str | None = None
     cislo_orientacni: int | None = None
-    znak_orientacniho: str | None = None
     reason: str = "no_match"
 
     @property
@@ -279,11 +270,6 @@ def street_match_keys(value: str) -> tuple[frozenset[str], frozenset[str]]:
     return (frozenset(k for k in exact if k), frozenset(k for k in every if k))
 
 
-def street_keys(value: str) -> frozenset[str]:
-    """Every key one name may match by — `street_match_keys` without the tier."""
-    return street_match_keys(value)[1]
-
-
 def register_street_keys(street: Street) -> frozenset[str]:
     """The same pair, taken off the REGISTER row. `ruian_streets.name_norm` is built by
     `name_index.normalize_street_name`, which drops a leading `ulice`/`ul.` and keeps
@@ -295,7 +281,7 @@ def register_street_keys(street: Street) -> frozenset[str]:
 
 def build_street_index(streets: Sequence[Street]) -> dict[str, list[Street]]:
     """`key -> the streets it reaches`, folded ONCE per obec instead of once per street per
-    segment. `register_street_keys` is two regex passes and Praha holds ~10,000 streets, so a
+    claim. `register_street_keys` is two regex passes and Praha holds ~10,000 streets, so a
     four-segment title paid for 40,000 of them before this existed."""
     index: dict[str, list[Street]] = {}
     for street in streets:
@@ -349,65 +335,53 @@ def match_streets(
 def resolve_street(
     lines: Sequence[str], obec_kods: Sequence[int], registry: RegistryView
 ) -> StreetBind:
-    """-> the ONE street the lines name inside the constraining obec, or nothing.
+    """-> the ONE street the claims name inside the constraining obec, or nothing.
 
-    Distinct across every line and every segment, because a line that names two streets is a
-    line nobody can resolve: "Sokolovská, roh Křižíkovy" is two answers and neither is the
+    Distinct across every claim, because two streets are two answers and neither is the
     listing's. Two SPELLINGS of one register row are one answer, which is why the set is keyed
     on the street's code.
     """
     tiers: dict[str, dict[int, tuple[Street, dict[str, object]]]] = {"exact": {}, "stripped": {}}
     for line in lines:
-        for segment in _street_segments(line):
-            _, keys = street_match_keys(segment)
-            if not keys:
-                continue
-            streets, tier = match_streets(segment, obec_kods, registry)
-            # The place test is asked AFTER the match and only about a segment that matched.
-            # Asked first it ran `admin_units_by_name` on every word of every title — prose
-            # keys, unique per listing, straight into a `RunCache` that CLEARS ITSELF at
-            # 250,000 entries and would have evicted the streets and chains the run lives on.
-            if not streets or _names_a_place(keys, {s.obec_kod for s in streets}, registry):
-                continue
-            _, numbers = split_street_and_number(strip_street_generic(segment))
-            for street in streets:
-                tiers[tier].setdefault(street.code, (street, numbers))
-    # The EXACT tier is consulted alone when it has anything at all, across every segment of
-    # every line: a title that names one street exactly and grazes another through the
-    # tolerant fold has named one street.
+        _, keys = street_match_keys(line)
+        if not keys:
+            continue
+        streets, tier = match_streets(line, obec_kods, registry)
+        # The place test is asked AFTER the match and only about a claim that matched: asked
+        # first, prose keys would fill a `RunCache` that CLEARS ITSELF at 250,000 entries.
+        if not streets or _names_a_place(keys, {s.obec_kod for s in streets}, registry):
+            continue
+        _, numbers = split_street_and_number(strip_street_generic(line))
+        for street in streets:
+            tiers[tier].setdefault(street.code, (street, numbers))
+    # The EXACT tier is consulted alone when it has anything at all: a claim that names one
+    # street exactly and grazes another through the tolerant fold has named one street.
     found = tiers["exact"] or tiers["stripped"]
     if not found:
         return StreetBind(reason="no_match")
     if len(found) > 1:
         return StreetBind(reason="ambiguous_streets")
     street, numbers = found[next(iter(sorted(found)))]
+    cislo_domovni, typ_so = house_number(numbers)
     return StreetBind(
-        street=street,
-        cislo_domovni=_as_int(numbers.get("cislo_domovni")),
-        cislo_orientacni=_as_int(numbers.get("cislo_orientacni")),
-        znak_orientacniho=(str(numbers["znak_orientacniho"])
-                           if numbers.get("znak_orientacniho") else None),
-        reason="segment_match",
+        street=street, cislo_domovni=cislo_domovni, typ_so=typ_so,
+        cislo_orientacni=_as_int(numbers.get("cislo_orientacni")), reason="street_match",
     )
-
-
-def _street_segments(line: str) -> list[str]:
-    return [seg for seg in (part.strip() for part in _STREET_SEPARATORS.split(line or "")) if seg]
 
 
 def _names_a_place(
     keys: frozenset[str], obec_kods: set[int], registry: RegistryView
 ) -> bool:
     """The town itself, or a part of it. `normalize.normalize_claim`'s `town_as_street` rule
-    covers a claim that IS one name; a segment of a line never reaches it, and the collision
-    is real at part level too (76 register streets across 20 obce are spelled exactly like a
-    část obce of their own town)."""
+    covers the town, when S1 is handed the place lookup; the collision is real at part level
+    too (76 register streets across 20 obce are spelled exactly like a část obce of their own
+    town)."""
     for key in keys:
         for unit in registry.admin_units_by_name(key, levels=("obec", *PART_LEVELS)):
             # Through the CHAIN, not through `AdminUnit.obec_kod`: that column is filled off
             # the ltree path by the SQL view and is empty on any other `RegistryView`, so
             # reading it here would make the rail fire in production and nowhere else.
-            town = _obec_of(unit, registry)
+            town = obec_of(unit, registry)
             if town is not None and town.code in obec_kods:
                 return True
     return False

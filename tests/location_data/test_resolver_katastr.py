@@ -237,8 +237,8 @@ def test_the_part_question_is_asked_only_for_a_part_bind_in_a_multi_ku_town():
 
 def test_the_katastr_rule_carries_its_own_resolver_version():
     """A rule that changes an output moves `RESOLVER_VERSION`, or the sweep never re-queues
-    the corpus and no existing row ever gets its KÚ."""
-    assert RESOLVER_VERSION == "resolver:v5.4"
+    the corpus and no existing row ever gets its KÚ (v5.4) — nor the W2 town rule (v5.5)."""
+    assert RESOLVER_VERSION == "resolver:v5.6"
 
 
 # ------------------------------------------------------------------ the SQL side
@@ -255,7 +255,7 @@ def test_every_ku_answer_rides_a_read_fill_already_makes():
 
     for sql, placeholders in (
         (resolve_db._ADDRESS_POINT_SQL, 2),             # version, kod_adm
-        (resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL, 8),  # version + the seven it had
+        (resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL, 11),  # version + ten (v5.5: typ_so, part)
         (resolve_db._STREET_POINT_SQL, 3),              # street id, version x2
         (resolve_db._PART_KATASTR_SQL, 3),              # unit id, version x2
         (resolve_db._ADMIN_CHAIN_SQL, 2),               # unchanged: the sole KÚ binds none

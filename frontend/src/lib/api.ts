@@ -3,17 +3,18 @@
  * Two auth shapes, matching the backend gate each route actually uses:
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
- *    Collections list, Pipeline, Watchdog subscriptions, /estimations,
+ *    Collections list, Pipeline, Watchdog subscriptions, /estimations (incl.
+ *    trace payload + feedback since 2026-10-02),
  *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared
  *    secret.
- *  - default (require_token routes) sends VITE_API_TOKEN, a static secret
- *    inlined into the JS bundle at build time and therefore extractable by
- *    anyone with browser devtools. That's fine for this gate: it only proves
- *    "loaded the SPA past its password gate", never an identity or admin
- *    claim. Server-side enforcement is api/dependencies.py:require_token.
+ *  - default (require_token routes) sends VITE_API_TOKEN, a static bearer
+ *    inlined into the JS bundle at build time; Caddy serves the bundle before
+ *    any sign-in, so anyone can read it. It proves only "loaded the SPA": a
+ *    require_token route must never return identity, admin or per-account
+ *    data. Server-side enforcement is api/dependencies.py:require_token.
  *    See frontend/README.md.
  */
 
@@ -110,16 +111,44 @@ if (!BASE_URL) {
   );
 }
 
+/* One transport deadline for every API call. Sized just above the server's own
+ * 120 s statement budget (a lock-blocked read is cancelled server-side at 120 s,
+ * so the deadline fires only when the server itself went silent) and well under
+ * Railway's ~300 s no-data edge close. A stuck request fails HERE, once, with an
+ * honest error — never an eternal spinner (the 2026-09-30 Brokers outage showed
+ * ~4 minutes of "Načítám…" because nothing in this file had a deadline). */
+export const REQUEST_DEADLINE_MS = 130_000;
+
+export type ApiErrorKind = 'http' | 'network' | 'timeout';
+
 export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
     public readonly body: unknown,
+    /* 'http' = the server answered with an error status; 'network' = fetch
+     * itself failed (DNS, refused, dropped mid-flight); 'timeout' = OUR
+     * deadline fired. A caller abort is not an ApiError at all — the
+     * DOMException propagates so react-query treats it as a cancel. */
+    public readonly kind: ApiErrorKind = 'http',
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
+
+/* The ONE retry policy question: is this worth one more attempt? Network blips
+ * and gateway/busy answers (502/503/504 — the API classifies a lock-blocked or
+ * cancelled DB read as 503 db_busy — and 520, Cloudflare's "unknown origin
+ * error" in front of Supabase's REST endpoint, which postgrest-js itself
+ * retried before pgRead switched its retry off) are; a deadline timeout is not
+ * (the caller already waited the full budget once), and neither is any 4xx or
+ * 500 (they are deterministic — retrying re-runs the same failure and doubles
+ * the wait). */
+const TRANSIENT_STATUSES = new Set([502, 503, 504, 520]);
+export const isTransientApiError = (err: unknown): boolean =>
+  err instanceof ApiError &&
+  (err.kind === 'network' || (err.kind === 'http' && TRANSIENT_STATUSES.has(err.status)));
 
 export type QueryScalar = string | number | boolean;
 /* An array value is serialized as REPEATED params (ids=1&ids=2) — the shape a
@@ -130,6 +159,9 @@ export type QueryValue = QueryScalar | readonly QueryScalar[] | undefined | null
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   query?: Record<string, QueryValue>;
   json?: unknown;
+  /* Multipart body (file uploads). Mutually exclusive with `json`; no
+   * Content-Type is set so the browser writes the multipart boundary. */
+  form?: FormData;
   /* True for require_admin / verify_jwt-gated routes — see the file-header
    * comment. Sends the caller's real Supabase JWT instead of VITE_API_TOKEN. */
   jwt?: boolean;
@@ -174,7 +206,39 @@ function detailText(detail: unknown): string {
   return String(detail);
 }
 
-async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+/* Maps a fetch/body-read rejection to the honest error class. A caller abort
+ * (react-query cancelling an unmounted query) is rethrown untouched so it stays
+ * a cancellation, not an error banner. */
+function mapTransportError(
+  err: unknown,
+  deadline: AbortSignal,
+  callerSignal: AbortSignal | null | undefined,
+): never {
+  if (callerSignal?.aborted) throw err;
+  if (deadline.aborted) {
+    throw new ApiError(
+      `Server neodpověděl do ${Math.round(REQUEST_DEADLINE_MS / 1000)} s`,
+      0,
+      null,
+      'timeout',
+    );
+  }
+  throw new ApiError(
+    err instanceof Error ? err.message : 'Network error',
+    0,
+    null,
+    'network',
+  );
+}
+
+/* The ONE transport: every API byte in or out of the SPA passes through here —
+ * URL/query building, auth, the deadline, and error classification. The former
+ * hand-rolled fetch() copies (attachment upload/download, rent-map upload)
+ * drifted on all four of those, so they were folded in. */
+async function send(
+  path: string,
+  opts: RequestOptions,
+): Promise<{ res: Response; deadline: AbortSignal }> {
   if (!BASE_URL) {
     throw new ApiError(
       'API base URL is not configured',
@@ -183,7 +247,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     );
   }
 
-  const { query, json, headers, jwt, ...rest } = opts;
+  const { query, json, form, headers, jwt, signal, ...rest } = opts;
   const url = new URL(BASE_URL + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
@@ -208,28 +272,35 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     ...((headers as Record<string, string> | undefined) ?? {}),
   };
 
+  const deadline = AbortSignal.timeout(REQUEST_DEADLINE_MS);
+  const finalSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+
   let res: Response;
   try {
     res = await fetch(url.toString(), {
       ...rest,
+      signal: finalSignal,
       headers: finalHeaders,
-      body: json !== undefined ? JSON.stringify(json) : undefined,
+      body:
+        json !== undefined ? JSON.stringify(json) : form !== undefined ? form : undefined,
     });
   } catch (err) {
-    throw new ApiError(
-      err instanceof Error ? err.message : 'Network error',
-      0,
-      null,
-    );
-  }
-
-  const text = await res.text();
-  let body: unknown = null;
-  if (text) {
-    try { body = JSON.parse(text); } catch { body = text; }
+    mapTransportError(err, deadline, signal);
   }
 
   if (!res.ok) {
+    /* The error body read shares the deadline: a server that answered the
+     * status line and then stalled must not hang the page either. */
+    let text = '';
+    try {
+      text = await res.text();
+    } catch (err) {
+      mapTransportError(err, deadline, signal);
+    }
+    let body: unknown = null;
+    if (text) {
+      try { body = JSON.parse(text); } catch { body = text; }
+    }
     const raw =
       body && typeof body === 'object' && body !== null && 'detail' in body
         ? (body as { detail: unknown }).detail
@@ -239,7 +310,34 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     throw new ApiError(detail, res.status, body);
   }
 
+  return { res, deadline };
+}
+
+async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const { res, deadline } = await send(path, opts);
+  let text = '';
+  try {
+    text = await res.text();
+  } catch (err) {
+    mapTransportError(err, deadline, opts.signal);
+  }
+  let body: unknown = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch { body = text; }
+  }
   return body as T;
+}
+
+/* The transport for binary responses (attachment bytes). Same URL building,
+ * auth, deadline and error classification as request() — only the body reader
+ * differs. */
+async function requestBlob(path: string, opts: RequestOptions = {}): Promise<Blob> {
+  const { res, deadline } = await send(path, opts);
+  try {
+    return await res.blob();
+  } catch (err) {
+    mapTransportError(err, deadline, opts.signal);
+  }
 }
 
 /* Generic verbs used by lib/maps.ts (and any other future module that
@@ -315,13 +413,13 @@ export const getTracePayload = (
   runId: number,
   stepN: number,
 ): Promise<TracePayload> =>
-  request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`);
+  request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`, { jwt: true });
 
 /* Phase AI slice B — feedback capture. POST inserts a new
  * `estimation_feedback` row and (default) fires the slice C
- * refiner inline; the response carries the (feedback, refinement)
- * pair so the UI can show the proposed prompt without a second
- * round-trip. */
+ * refiner inline — for an admin caller only; anyone else's note is
+ * stored as `submitted` with `refinement: null`. The response
+ * carries the (feedback, refinement) pair. */
 export interface CreateFeedbackIn {
   feedback_text: string;
   kick_off_refinement?: boolean;
@@ -337,6 +435,7 @@ export const listEstimationFeedback = (
 ): Promise<{ data: EstimationFeedback[] }> =>
   request<{ data: EstimationFeedback[] }>(
     `/estimations/${runId}/feedback`,
+    { jwt: true },
   );
 
 export const submitEstimationFeedback = (
@@ -346,6 +445,7 @@ export const submitEstimationFeedback = (
   request<FeedbackResponse>(`/estimations/${runId}/feedback`, {
     method: 'POST',
     json: input,
+    jwt: true,
   });
 
 export const decideRefinement = (
@@ -539,50 +639,17 @@ export const updateBuildingInputs = (
 /* Multipart upload — bypasses the JSON helper. Each call uploads ONE
  * file; the caller fans out for multi-file pickers. The server replies
  * with the inserted BuildingAttachment row. */
-export const uploadBuildingAttachment = async (
+export const uploadBuildingAttachment = (
   buildingId: number,
   file: File,
 ): Promise<BuildingAttachment> => {
-  if (!BASE_URL) {
-    throw new ApiError(
-      'API base URL is not configured', 0,
-      { detail: 'VITE_API_BASE_URL is empty' },
-    );
-  }
-  const url = new URL(`${BASE_URL}/buildings/${buildingId}/attachments`);
-  url.searchParams.set('source', 'ui');
   const form = new FormData();
   form.append('file', file, file.name);
-  let res: Response;
-  try {
-    res = await fetch(url.toString(), {
-      method: 'POST',
-      body: form,
-      headers: {
-        Accept: 'application/json',
-        ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-      },
-    });
-  } catch (err) {
-    throw new ApiError(
-      err instanceof Error ? err.message : 'Network error', 0, null,
-    );
-  }
-  const text = await res.text();
-  let body: unknown = null;
-  if (text) {
-    try { body = JSON.parse(text); } catch { body = text; }
-  }
-  if (!res.ok) {
-    const raw =
-      body && typeof body === 'object' && body !== null && 'detail' in body
-        ? (body as { detail: unknown }).detail
-        : null;
-    const detail =
-      raw == null ? res.statusText || `HTTP ${res.status}` : detailText(raw);
-    throw new ApiError(detail, res.status, body);
-  }
-  return body as BuildingAttachment;
+  return request<BuildingAttachment>(`/buildings/${buildingId}/attachments`, {
+    method: 'POST',
+    query: { source: 'ui' },
+    form,
+  });
 };
 
 export const listBuildingAttachments = (
@@ -614,28 +681,11 @@ export const buildingAttachmentRawUrl = (
   return `${BASE_URL}/buildings/${buildingId}/attachments/${attachmentId}/raw`;
 };
 
-export const fetchBuildingAttachmentBlob = async (
+export const fetchBuildingAttachmentBlob = (
   buildingId: number,
   attachmentId: number,
-): Promise<Blob> => {
-  if (!BASE_URL) {
-    throw new ApiError('API base URL is not configured', 0, null);
-  }
-  const url = buildingAttachmentRawUrl(buildingId, attachmentId);
-  const res = await fetch(url, {
-    headers: {
-      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-    },
-  });
-  if (!res.ok) {
-    throw new ApiError(
-      `HTTP ${res.status} fetching attachment`,
-      res.status,
-      null,
-    );
-  }
-  return res.blob();
-};
+): Promise<Blob> =>
+  requestBlob(`/buildings/${buildingId}/attachments/${attachmentId}/raw`);
 
 /* ----- admin / Settings page --------------------------------------------
  *
@@ -2376,29 +2426,14 @@ export const listRentMapRevisions = (): Promise<{ data: RentMapRevision[] }> =>
 export const triggerRentMapFetch = (): Promise<RentMapIngestResult> =>
   request<RentMapIngestResult>('/admin/rent-map/fetch', { method: 'POST', jwt: true });
 
-export async function uploadRentMapFile(
-  file: File,
-): Promise<RentMapIngestResult> {
+export function uploadRentMapFile(file: File): Promise<RentMapIngestResult> {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch(`${BASE_URL}/admin/rent-map/revisions`, {
+  return request<RentMapIngestResult>('/admin/rent-map/revisions', {
     method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      ...(await authHeader(true)),
-    },
-    body: form,
+    jwt: true,
+    form,
   });
-  const text = await res.text();
-  const body: unknown = text ? JSON.parse(text) : null;
-  if (!res.ok) {
-    const detail =
-      typeof body === 'object' && body && 'detail' in body
-        ? String((body as { detail: unknown }).detail)
-        : `upload failed (${res.status})`;
-    throw new ApiError(detail, res.status, body);
-  }
-  return body as RentMapIngestResult;
 }
 
 /* ----- condition scoring: per-kraj enablement ------------------------------

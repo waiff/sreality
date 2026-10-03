@@ -63,14 +63,16 @@ class ReasClient(BasePortalClient):
         return response.text
 
 
-def build_client() -> ReasClient:
+def build_client(max_wait_s: float | None = None) -> ReasClient:
     """A client on the SHARED politeness ledger, so every runtime spends one budget.
 
     `portal_rate_state` self-seeds on first use; with no database reachable the
-    ledger falls back to per-process pacing at the same rate.
+    ledger falls back to per-process pacing at the same rate. `max_wait_s` bounds each
+    ledger wait (the realtime worker's lane); the CLI passes none and waits as told.
     """
     return ReasClient(
-        limiter=build_rate_limiter(SOURCE, RATE_PER_S, shared=True, lease_n=_LEASE_N),
+        limiter=build_rate_limiter(
+            SOURCE, RATE_PER_S, shared=True, lease_n=_LEASE_N, max_wait_s=max_wait_s),
         # ONE retry, not the base class's three. 403 and 429 are RETRYABLE_STATUS, so
         # a page the site is actively refusing would otherwise be asked four times
         # (and `penalize()` four times) — while a sold cell is a 35-day-TTL fact feed

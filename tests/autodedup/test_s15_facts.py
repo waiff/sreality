@@ -506,11 +506,12 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
 
 @pytest.mark.skipif(not (S14_TRIAL_RUN / "clusters.json").is_file() or not TRIAL.is_file(),
                     reason="the W14 offline data pack is not on this machine")
-def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
-    """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). Every
-    stored row decides identically and the groups are the same member sets under the same keys
-    — except E927's: a share-sale advert (`podil`) now meets the sale at its price, so the rows
-    and groups that name one are the one change since S14 (4 adverts, 7 rows, 4 groups)."""
+def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
+    """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
+    took the room tag out of every refusal, so a stored row whose tag sat at or above the
+    0.90 floor (or was unknown) decides identically, and every row that moved had it below.
+    E927: a share-sale advert (`podil`) now meets the sale at its price,
+    so the rows that name one are set aside (4 adverts on this cohort)."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -523,8 +524,9 @@ def test_w29_replays_identically_on_the_trial_cohort(tmp_path: Path) -> None:
                                                  r["veto"], round(r["score"], 9)) for r in rows}
     share = {i for i, row in ds.listings.items() if row.category_type == "podil"}
     rest = lambda rows: {k: v for k, v in decided(rows).items() if not share & set(k)}  # noqa: E731
-    assert rest(read_pairs(tmp_path)) == rest(read_pairs(S14_TRIAL_RUN))
-    groups = lambda d: {  # noqa: E731
-        key: kept for key, members in json.loads((d / "clusters.json").read_text())[
-            "clusters"].items() if len(kept := [m for m in members if m not in share]) > 1}
-    assert groups(tmp_path) == groups(S14_TRIAL_RUN)
+    stored = read_pairs(S14_TRIAL_RUN)
+    now, then = rest(read_pairs(tmp_path)), rest(stored)
+    assert now.keys() == then.keys()
+    tag = {(r["lo"], r["hi"]): r["feats"].get("tag_room_clip_min2") for r in stored}
+    below = {key for key, slot in tag.items() if slot and slot[1] and slot[0] < 0.90}
+    assert {key for key in now if now[key] != then[key]} <= below

@@ -138,7 +138,7 @@ _CLAIM_COLUMNS = """id, listing_id, source, claim_type::text, surface::text,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_Y(value_geom) END,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_X(value_geom) END,
        value_jsonb, declared_precision_label, declared_radius_m,
-       blur_evidence::text, claim_confidence::text, subject_scoped"""
+       blur_evidence::text, subject_scoped"""
 
 
 def _claims_sql(listing_filter: str, order_by: str) -> str:
@@ -226,7 +226,7 @@ _ADDRESS_POINT_COLUMNS = """
        ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
        ST_Y(ap.geom), ST_X(ap.geom), ap.ulice_kod, s.name_norm, s.name,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
-       ap.cast_obce_unit_id, ap.cast_obce_kod, ku.code"""
+       ap.cast_obce_unit_id, ap.cast_obce_kod, ku.code, ap.typ_so"""
 
 # Every address-point read answers its KÚ in the SAME round trip — the drain's cost is round
 # trips, and FILL reads the bound point anyway. Binds the registry version FIRST.
@@ -261,8 +261,9 @@ SELECT {_ADDRESS_POINT_COLUMNS}{_ADDRESS_POINT_FROM}
  WHERE ap.obec_unit_id IN {_OBEC_UNIT_ID_SUBQUERY.strip()}
    AND ap.valid_to IS NULL
    AND (%s::text IS NULL OR s.name_norm = %s::text)
-   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer)
+   AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer AND ap.typ_so = coalesce(%s::text, ap.typ_so))
    AND (%s::integer IS NULL OR ap.cislo_orientacni = %s::integer)
+   AND (%s::bigint IS NULL OR ap.cast_obce_unit_id = %s::bigint)
  ORDER BY ap.kod_adm
  LIMIT 50
 """
@@ -294,10 +295,11 @@ SELECT s.code, s.name, s.name_norm, u.code, s.id
 # listing that binds a street. `::geography` on the distance because the answer is METRES;
 # the centroid stays geometry (4326 degrees), which is what `ST_Y`/`ST_X` want.
 #
-# The same door set answers the street's KÚ (PR-B, the door rule) in the same round trip.
+# The same door set answers the street's KÚ (PR-B, the door rule) and its část obce units
+# (Q3, v5.5) in the same round trip.
 _STREET_POINT_SQL = f"""
 WITH p AS (
-    SELECT ap.kod_adm, ap.geom
+    SELECT ap.kod_adm, ap.geom, ap.cast_obce_unit_id
       FROM ruian_address_points ap
      WHERE ap.street_id = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 ), c AS (
@@ -306,7 +308,8 @@ WITH p AS (
 SELECT ST_Y(c.g), ST_X(c.g),
        MAX(ST_Distance(c.g::geography, p.geom::geography)),
        count(*),
-       ({_doors_katastr("p")})
+       ({_doors_katastr("p")}),
+       array_agg(DISTINCT p.cast_obce_unit_id)
   FROM p, c
  GROUP BY 1, 2
 """
@@ -349,7 +352,7 @@ _ADMIN_COLUMNS = _admin_columns("u.definition_point")
 _ADMIN_CHAIN_COLUMNS = _admin_columns("coalesce(u.definition_point, gp.pt)")
 
 _ADMIN_BY_NAME_SQL = f"""
-SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
+SELECT {_ADMIN_COLUMNS}, n.psc_set
   FROM ruian_name_index n
   JOIN ruian_admin_units u ON u.id = n.entity_id AND u.level = n.entity_kind
  WHERE n.registry_version_id = %s
@@ -379,7 +382,7 @@ SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
 # that KÚ by the hierarchy alone, so FILL needs no geometry for 3,942 of the 6,258 obce. An
 # index read on `ruian_admin_units_parent`, in the round trip FILL already makes.
 _ADMIN_CHAIN_TAIL = f"""
-SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[], ks.code
+SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::char(5)[], ks.code
   FROM chain c
   JOIN ruian_admin_units u ON u.id = c.id
   LEFT JOIN LATERAL (
@@ -453,7 +456,7 @@ CONTAINING_OBEC_SQL = f"""
 SELECT p.idx, c.*
   FROM {_POINTS}
   CROSS JOIN LATERAL (
-    SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
+    SELECT {_ADMIN_COLUMNS}, NULL::char(5)[]
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %s
@@ -485,7 +488,7 @@ _NEAREST_OBEC_SQL = f"""
 SELECT p.idx, c.*
   FROM {_POINTS}
   CROSS JOIN LATERAL (
-    SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[],
+    SELECT {_ADMIN_COLUMNS}, NULL::char(5)[],
            ST_Distance(g.geom::geography, {_PT}::geography) AS d
       FROM ruian_admin_unit_geometries g
       JOIN ruian_admin_units u ON u.id = g.unit_id
@@ -494,7 +497,7 @@ SELECT p.idx, c.*
        AND u.level = 'obec'
        AND g.geom && ST_Expand({_PT}, %s / 60000.0)
        AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
-     ORDER BY 13
+     ORDER BY 11
      LIMIT 1
   ) c
 """
@@ -571,7 +574,7 @@ def _claim(row: Sequence[Any]) -> Claim:
         lon=None if row[11] is None else float(row[11]),
         value_jsonb=row[12] or {}, declared_precision_label=row[13],
         declared_radius_m=None if row[14] is None else float(row[14]),
-        blur_evidence=row[15], claim_confidence=row[16], subject_scoped=row[17],
+        blur_evidence=row[15], subject_scoped=row[16],
     )
 
 
@@ -613,8 +616,7 @@ def _admin_unit(row: Sequence[Any], *, sole_katastr_kod: int | None = None) -> A
         name_norm=str(row[4]), path=path, parent_id=row[6],
         lat=None if row[7] is None else float(row[7]),
         lon=None if row[8] is None else float(row[8]),
-        qualifier=row[9], homonym_count=int(row[10] or 1),
-        psc_set=tuple(str(p).strip() for p in (row[11] or ())),
+        psc_set=tuple(str(p).strip() for p in (row[9] or ())),
         obec_kod=_path_code(path, "b"), okres_kod=_path_code(path, "o"),
         kraj_kod=_path_code(path, "k"), sole_katastr_kod=sole_katastr_kod,
     )
@@ -622,7 +624,7 @@ def _admin_unit(row: Sequence[Any], *, sole_katastr_kod: int | None = None) -> A
 
 def _chain_unit(row: Sequence[Any]) -> AdminUnit:
     """A chain row: the unit columns, then the obec's one KÚ child (NULL off an obec row)."""
-    return _admin_unit(row[:12], sole_katastr_kod=row[12])
+    return _admin_unit(row[:10], sole_katastr_kod=row[10])
 
 
 def _path_code(path: str, prefix: str) -> int | None:
@@ -642,6 +644,7 @@ def _address_point(row: Sequence[Any]) -> AddressPoint:
         ulice_kod=row[6], street_name_norm=row[7], street_name=row[8],
         cislo_domovni=row[9], cislo_orientacni=row[10], znak_orientacniho=row[11],
         cast_obce_unit_id=row[12], cast_obce_kod=row[13], katastr_kod=row[14],
+        typ_so=str(row[15]),
     )
 
 
@@ -701,12 +704,14 @@ class SqlRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
+        typ_so: str | None = None, cast_obce_unit_id: int | None = None,
     ) -> list[AddressPoint]:
         rows = self._rows(
             "address_points_by_number",
             _ADDRESS_POINTS_BY_NUMBER_SQL,
             (self._version, obec_kod, street_name_norm, street_name_norm, cislo_domovni,
-             cislo_domovni, cislo_orientacni, cislo_orientacni),
+             cislo_domovni, typ_so, cislo_orientacni, cislo_orientacni,
+             cast_obce_unit_id, cast_obce_unit_id),
         )
         return [_address_point(r) for r in rows]
 
@@ -732,7 +737,7 @@ class SqlRegistryView:
         return StreetPoint(
             lat=float(rows[0][0]), lon=float(rows[0][1]),
             extent_m=float(rows[0][2] or 0.0), point_count=int(rows[0][3] or 0),
-            katastr_kod=rows[0][4],
+            katastr_kod=rows[0][4], part_unit_ids=tuple(rows[0][5] or ()),
         )
 
     def part_katastr_kod(self, unit_id: int) -> int | None:
@@ -797,7 +802,7 @@ class SqlRegistryView:
         )
         if not rows:
             return None
-        return _admin_unit(rows[0][1:]), float(rows[0][13])
+        return _admin_unit(rows[0][1:]), float(rows[0][11])
 
     def in_czechia_polygon_bulk(self, points: Sequence[tuple[float, float]]) -> dict[int, bool]:
         if not points:
@@ -928,15 +933,17 @@ class CachedRegistryView:
     def address_points_by_number(
         self, *, obec_kod: int, street_name_norm: str | None,
         cislo_domovni: int | None, cislo_orientacni: int | None,
+        typ_so: str | None = None, cast_obce_unit_id: int | None = None,
     ) -> Sequence[AddressPoint]:
         key = ("address_points_by_number", obec_kod, street_name_norm, cislo_domovni,
-               cislo_orientacni)
+               cislo_orientacni, typ_so, cast_obce_unit_id)
         return self._cache.get(
             key,
             lambda: tuple(
                 self._inner.address_points_by_number(
                     obec_kod=obec_kod, street_name_norm=street_name_norm,
                     cislo_domovni=cislo_domovni, cislo_orientacni=cislo_orientacni,
+                    typ_so=typ_so, cast_obce_unit_id=cast_obce_unit_id,
                 )
             ),
         )

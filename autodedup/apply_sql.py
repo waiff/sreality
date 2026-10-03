@@ -196,7 +196,7 @@ insert into autodedup.applied_merges (
 # Newest-first, so groups are undone in the reverse of the order they were applied, picked by
 # generation (and cluster_key), apply run and time window: every selector given must hold. Every
 # row of a group carries the same generation, run, survivor, member set and plan (with the
-# property each moved listing sat on when it merged: the adverts the undo's detach loop moves
+# property each moved listing sat on when it merged: the adverts the undo's detach moves
 # back) and the same `applied_at`: now() of the group's transaction, the
 # chokepoint's `merged_at`.
 UNAPPLY_TARGETS_SQL = """
@@ -216,7 +216,7 @@ select a.merge_group_id::text, max(a.generation), a.cluster_key, max(a.survivor_
  order by max(a.id) desc
 """
 
-# Where a group's survivor stands now. Only the chokepoint and `detach_listing` write
+# Where a group's survivor stands now. Only the chokepoint and `detach_listings` write
 # `merged_into` and `merged_at`, and the chokepoint stamps `merged_at` with now() of the
 # transaction that also wrote the group's ledger rows (`applied_at`). So a survivor merged into
 # a later merge's survivor at that merge's `applied_at` is still retired by it (E905).
@@ -226,7 +226,7 @@ select p.id, p.status, p.merged_into, p.merged_at
  where p.id = any(%(property_ids)s::bigint[])
 """
 
-# Where a group's listings sit now, read before the detach loop and again in the undo's own
+# Where a group's listings sit now, read before the detach and again in the undo's own
 # transaction: a member off the survivor means someone else took the merge apart first (E905).
 MEMBER_PROPERTIES_SQL = """
 select l.id, l.property_id

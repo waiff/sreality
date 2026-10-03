@@ -79,7 +79,7 @@ def test_a_pin_that_disagrees_with_the_registry_point_by_more_than_300_m_caps_at
 def test_a_tie_break_qualifier_caps_at_low_however_many_fields_agreed():
     """Six obce share PSČ 674 01. An honest low-confidence answer beats an arbitrary one —
     but it may never read as a corroborated one."""
-    for qualifier in ("coordinate_tiebreak_imprecise", "postal_town"):
+    for qualifier in ("coordinate_tiebreak_imprecise", "pip_nearest_within_n_m"):
         binding = _binding(agreed=("obec", "psc"), relaxations=(qualifier,))
         assert _graded(binding).match_confidence == "low", qualifier
 

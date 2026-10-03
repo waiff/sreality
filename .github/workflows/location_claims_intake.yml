@@ -16,7 +16,7 @@ name: "Jobs: Location claim intake"
 #     stall the whole backlog behind them, and the cursor is the WINDOW's max id (W1-a4).
 #   * THEN THE CHANGED LISTINGS — a keyset walk of `listing_snapshots.id`, the
 #     append-on-content-change log, standing 15 MINUTES BEHIND THE CLOCK: a bigserial id is
-#     allocated at INSERT and visible at COMMIT, so a concurrent `write_detail_batch`
+#     allocated at INSERT and visible at COMMIT, so a concurrent `listing_write.write_listings`
 #     transaction can land a row below a cursor that has already moved, and a keyset never
 #     looks back. A run opens an hour's CHANGE, not every listing the index walks happened
 #     to re-sight: the `last_seen_at` watermark it replaces opened ~180 000 listings an

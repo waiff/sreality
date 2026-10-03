@@ -21,8 +21,11 @@ from scraper import portal_runner
 from scraper.rate_ledger import (
     DEFAULT_LEASE_N,
     LedgerRateLimiter,
+    RateBudgetUnavailable,
     build_rate_limiter,
 )
+
+BOUND_S = 120.0  # the realtime worker's bound (realtime_worker.LEDGER_MAX_WAIT_SECONDS)
 from scraper.rate_limit import RateLimiter
 
 
@@ -97,11 +100,14 @@ class _Cur:
             row = led.rows[params["source"]]
             start = max(row["next_slot_at"], now)
             slot = params["interval_ms"] * row["penalty_factor"] / 1000.0
-            row["next_slot_at"] = start + params["n"] * slot
-            row["interval_ms"] = params["interval_ms"]
-            row["penalty_factor"] = max(
-                1.0, row["penalty_factor"] * params["decay"])
-            self._result = (max(start - now, 0.0), slot)
+            bound = params["max_wait_s"]
+            granted = bound is None or start <= now + bound
+            if granted:  # a refused lease leaves the row exactly as it was
+                row["next_slot_at"] = start + params["n"] * slot
+                row["interval_ms"] = params["interval_ms"]
+                row["penalty_factor"] = max(
+                    1.0, row["penalty_factor"] * params["decay"])
+            self._result = (max(start - now, 0.0), slot, granted)
         else:
             row = led.rows[params["source"]]
             pf = min(params["cap"], row["penalty_factor"] * params["mult"])
@@ -149,6 +155,7 @@ def test_first_acquire_lazily_creates_row_and_leases(monkeypatch):
     assert "make_interval" in lease_sql
     assert lease_params == {
         "source": "srealitka", "interval_ms": 500, "n": 4, "decay": 0.9,
+        "max_wait_s": None,
     }
 
 
@@ -245,6 +252,174 @@ def test_penalty_reaches_the_other_runtime_on_its_next_lease(monkeypatch):
     assert b.interval == pytest.approx(2.0)  # B leased at the shared 2x width
 
 
+# --- bounded waits (the 2026-09-29 freeze) ---
+
+def test_a_window_beyond_the_bound_raises_instead_of_sleeping(monkeypatch, caplog):
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect, max_wait_s=BOUND_S)
+    lim.acquire()
+    frontier = clock.now + 3600.0  # an hour out, as ceskereality's was
+    ledger.rows["x"]["next_slot_at"] = frontier
+    lim._slots_left = 0
+
+    with caplog.at_level(logging.WARNING, logger="scraper.rate_ledger"):
+        with pytest.raises(RateBudgetUnavailable):
+            lim.acquire()
+    assert sleeps == []                               # never parked the thread
+    assert ledger.rows["x"]["next_slot_at"] == frontier  # refusal leased nothing
+    assert (lim.refused, lim.refused_reason) == (True, "cap")  # a blocked portal
+    assert ledger.executed[-1][2]["max_wait_s"] == BOUND_S
+    assert any("RATE budget refused" in r.getMessage() for r in caplog.records)
+
+    statements = len(ledger.executed)
+    with pytest.raises(RateBudgetUnavailable):       # sticky for the run: no DB trip
+        lim.acquire()
+    assert len(ledger.executed) == statements
+
+
+def test_a_window_inside_the_bound_is_still_waited_for(monkeypatch):
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect, max_wait_s=BOUND_S)
+    lim.acquire()
+    ledger.rows["x"]["next_slot_at"] = clock.now + BOUND_S - 1.0
+    lim._slots_left = 0
+    lim.acquire()
+    assert sleeps[-1] == pytest.approx(BOUND_S - 1.0)
+    assert lim.refused is False
+
+
+def test_an_unbounded_caller_waits_however_far_out_the_window_is(monkeypatch):
+    # The Actions walks and drains pass no bound: they are built to wait, and a refusal
+    # would abandon the rest of a three-hour walk.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect)
+    lim.acquire()
+    ledger.rows["x"]["next_slot_at"] = clock.now + 3600.0
+    lim._slots_left = 0
+    lim.acquire()
+    assert sleeps[-1] == pytest.approx(3600.0)
+    assert lim.refused is False
+
+
+def test_the_retry_after_a_penalize_leases_one_slot_not_a_batch(monkeypatch):
+    clock = _Clock()
+    _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=20, connect=ledger.connect)
+    lim.acquire()
+    lim.penalize()                      # the 403
+    before = ledger.rows["x"]["next_slot_at"]
+    lim.acquire()                       # the retry
+    kind, _, params = ledger.executed[-1]
+    assert (kind, params["n"]) == ("lease", 1)
+    assert ledger.rows["x"]["next_slot_at"] == pytest.approx(before + 2.0)  # 1 slot at 2x
+    lim.acquire()                       # the request after a healthy retry
+    assert ledger.executed[-1][2]["n"] == 20
+
+
+def test_a_portal_answering_403_to_everything_ends_in_a_refusal_not_an_hour(monkeypatch):
+    # The incident, replayed for a bounded caller: every request is penalized and
+    # retried (portal_base's four attempts). Before, each retry leased a fresh batch and
+    # the frontier ran an hour ahead while callers slept there; now the frontier stops
+    # within one bound of now and the limiter refuses.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter(
+        "x", 0.7, lease_n=20, connect=ledger.connect, max_wait_s=BOUND_S)
+    with pytest.raises(RateBudgetUnavailable):
+        for _ in range(1000):
+            lim.acquire()
+            lim.penalize()
+    assert lim.refused is True
+    assert max(sleeps) <= BOUND_S
+    assert ledger.rows["x"]["next_slot_at"] - clock.now < BOUND_S + 20 * 1 / 0.7 * 8
+
+
+def test_an_acquire_after_the_deadline_is_refused_without_a_trip(monkeypatch, caplog):
+    # The worker's drain checks its budget only between chunks; the deadline is what ends
+    # a chunk that a 403 storm on a one-worker portal would otherwise stretch for an hour.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect,
+                            max_wait_s=BOUND_S, deadline=clock.now + BOUND_S)
+    lim.acquire()
+    clock.now += BOUND_S
+    statements, slept = len(ledger.executed), len(sleeps)
+    with caplog.at_level(logging.INFO, logger="scraper.rate_ledger"):
+        with pytest.raises(RateBudgetUnavailable):
+            lim.acquire()                             # slots were left: still refused
+    assert (lim.refused, lim.refused_reason) == (True, "deadline")
+    assert (len(ledger.executed), len(sleeps)) == (statements, slept)
+    # A time budget that ran out is not a blocked portal, and does not log like one.
+    assert any("RATE deadline reached" in r.getMessage() for r in caplog.records)
+    assert not any("RATE budget refused" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("frontier_s,reason,slept", [
+    (20.0, None, 20.0),            # inside the time left: waited for
+    (60.0, "deadline", None),      # inside the bound, past the deadline: time is up
+    (BOUND_S + 60.0, "cap", None),  # past the bound: a blocked portal, whatever time is left
+])
+def test_the_lease_bound_shrinks_to_the_time_left_before_the_deadline(
+    monkeypatch, frontier_s, reason, slept,
+):
+    # An acquire 30 s before the deadline must not sleep up to 120 s past it.
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect,
+                            max_wait_s=BOUND_S, deadline=clock.now + BOUND_S)
+    lim.acquire()
+    clock.now += BOUND_S - 30.0
+    ledger.rows["x"]["next_slot_at"] = frontier = clock.now + frontier_s
+    lim._slots_left = 0
+    if reason is None:
+        lim.acquire()
+        assert sleeps[-1] == pytest.approx(slept)
+    else:
+        with pytest.raises(RateBudgetUnavailable):
+            lim.acquire()
+        assert ledger.rows["x"]["next_slot_at"] == frontier  # refusal leased nothing
+    assert ledger.executed[-1][2]["max_wait_s"] == pytest.approx(30.0)
+    assert (lim.refused, lim.refused_reason) == (reason is not None, reason)
+
+
+def test_single_leases_owed_never_outgrow_one_batch(monkeypatch):
+    # portal_base clients acquire before every retry, so each penalize is paid back by
+    # the retry's one-slot lease. sreality's client acquires once and retries inside
+    # _request: four penalizes to one lease. Uncapped, the debt outlived the storm and
+    # every later request leased a single slot, one round trip each.
+    clock = _Clock()
+    _patch_time(monkeypatch, clock)
+    ledger = _Ledger(clock)
+    lim = LedgerRateLimiter("x", 1.0, lease_n=5, connect=ledger.connect)
+    for _ in range(50):                               # the storm, sreality-style
+        lim.acquire()
+        for _ in range(4):
+            lim.penalize()
+    assert lim._single_leases_owed == 5
+    storm = len(ledger.executed)
+    for _ in range(12):                               # the storm is over
+        lim.acquire()
+    assert [p["n"] for kind, _, p in ledger.executed[storm:] if kind == "lease"] == [
+        1, 1, 1, 1, 1, 5, 5]
+
+
+def test_factory_hands_the_bounds_to_the_ledger():
+    lim = build_rate_limiter("x", 2.0, True, max_wait_s=BOUND_S, deadline=5.0)
+    assert isinstance(lim, LedgerRateLimiter)
+    assert (lim._max_wait_s, lim._deadline) == (BOUND_S, 5.0)
+    assert build_rate_limiter("x", 2.0, False, max_wait_s=BOUND_S).refused is False
+
+
 # --- DB-failure posture ---
 
 def test_db_failure_falls_back_to_local_for_the_rest_of_the_run(
@@ -318,7 +493,6 @@ def test_factory_validates_lease_n():
 class _WiringPortal:
     source = "fake"
     index_rate = 1.5
-    supports_complete_walk = False
 
     def categories(self) -> list[Any]:
         return []
@@ -336,9 +510,6 @@ class _WiringPortal:
 
         return _C()
 
-    def claimable_count(self, conn: Any) -> int:
-        return 0
-
 
 def test_runner_builds_limiter_through_the_factory(monkeypatch):
     calls: list[tuple[str, float, bool]] = []
@@ -348,6 +519,7 @@ def test_runner_builds_limiter_through_the_factory(monkeypatch):
         return RateLimiter(rate)
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", _recorder)
+    monkeypatch.setattr(portal_runner.db, "claimable_counts", lambda _c, _s=None: {})
     portal = _WiringPortal()
     portal_runner.run_index_walk(portal, dry_run=True)
     portal_runner.run_detail_drain(portal, 0, True, 1, 2.5)

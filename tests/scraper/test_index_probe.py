@@ -13,6 +13,7 @@ import pytest
 
 from scraper import db, portal_runner
 from scraper.maxima_main import MaximaPortal
+from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.portal import default_config
 from scraper.remax_main import RemaxPortal
 
@@ -37,7 +38,6 @@ class _ProbePortal:
 
     source = "fake"
     index_rate = 100.0
-    supports_complete_walk = True
 
     def __init__(self, *, categories=None, walk_results=None, walk_fails=None) -> None:
         self._categories = categories if categories is not None else ["A"]
@@ -188,6 +188,43 @@ def test_probe_all_categories_failed_returns_nonzero_rc():
     assert agg["errors"] == 2
 
 
+def test_probe_gives_up_on_a_refused_source_without_counting_an_error():
+    # ceskereality's bespoke prober lets the shared ledger's refusal propagate; the
+    # probe stops asking that portal for this pass (the caller moves on to the next
+    # one) and counts it apart from errors.
+    p = _ProbePortal(categories=["A", "B", "C"])
+    asked: list[str] = []
+
+    def probe_category(category, conn, dry_run, limiter, probe_pages):
+        asked.append(category)
+        if category == "B":
+            limiter.refused = True
+            raise RateBudgetUnavailable("fake: next shared slot 3600s away")
+        return ({"x"}, {"found_new": 1, "enqueued": 1}, 99, 1, False)
+
+    p.probe_category = probe_category
+    rc, agg = portal_runner.run_index_probe(p, dry_run=False)
+    assert asked == ["A", "B"]
+    assert (rc, agg["errors"], agg["budget_refused"]) == (0, 0, 1)
+    assert agg["listings_enqueued"] == 1
+
+
+def test_probe_reads_a_refusal_the_walk_swallowed():
+    # The generic walk swallows a fetch error per page, the refusal included, so the
+    # probe reads it off the limiter rather than waiting for an exception.
+    p = _ProbePortal(categories=["A", "B"])
+
+    def walk_category(c, conn, dry_run, limiter):
+        p.calls["walk"].append(c)
+        limiter.refused = True
+        return (set(), {"found_new": 0, "enqueued": 0}, None, 0, False)
+
+    p.walk_category = walk_category
+    rc, agg = portal_runner.run_index_probe(p, dry_run=False)
+    assert p.calls["walk"] == ["A"]
+    assert (rc, agg["errors"], agg["budget_refused"]) == (0, 0, 1)
+
+
 def test_probe_requires_a_probe_seam():
     # sreality's portal implements neither seam (its count-probe lane is a
     # separate design) -> a loud error, not a silent full walk.
@@ -209,17 +246,18 @@ def test_probe_builds_limiter_through_factory(monkeypatch):
     # shared_rate_limiter engages the DB politeness ledger for probes too.
     seen: dict[str, Any] = {}
 
-    def fake_build(source, rate, shared, *, lease_n=0):
-        seen.update(source=source, rate=rate, shared=shared, lease_n=lease_n)
+    def fake_build(source, rate, shared, *, lease_n=0, max_wait_s=None):
+        seen.update(
+            source=source, rate=rate, shared=shared, lease_n=lease_n, max_wait_s=max_wait_s)
         return portal_runner.RateLimiter(rate)
 
     monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
     p = _ProbePortal()
     p.shared_rate_limiter = True
-    portal_runner.run_index_probe(p, dry_run=True)
+    portal_runner.run_index_probe(p, dry_run=True, max_wait_s=120.0)
     assert seen == {
         "source": "fake", "rate": 100.0, "shared": True,
-        "lease_n": portal_runner.PROBE_LEASE_N,
+        "lease_n": portal_runner.PROBE_LEASE_N, "max_wait_s": 120.0,
     }
 
 

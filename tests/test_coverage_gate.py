@@ -87,7 +87,7 @@ def test_a_full_sweep_three_times_running_opens_the_gate() -> None:
 
 def test_one_unfinished_slice_keeps_the_flag_down() -> None:
     """Fourteen of fifteen is not 93% coverage for delisting purposes — the hole
-    is exactly what mark_inactive reads as 'these listings are gone'."""
+    is exactly what an absence sweep would read as 'these listings are gone'."""
     conn = _Conn([("byt", "prodej", 15, 14), ("dum", "prodej", 15, 15)],
                  history=_covered_history(2))
     row = cg.evaluate(conn, "idnes", 2, dry_run=False)

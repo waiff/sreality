@@ -99,7 +99,7 @@ export default function MergedAdvertsSection({
    * listings_public. One request for the set. */
   const detailsQ = useQuery<Map<number, ListingPublic>, Error>({
     queryKey: mergedAdvertsKeys.listings(ids),
-    queryFn: () => fetchListingsForListingIds(ids),
+    queryFn: ({ signal }) => fetchListingsForListingIds(ids, { signal }),
     staleTime: 60_000,
   });
   /* Every advert's album in one read (the shared card-photo hydration), so the

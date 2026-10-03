@@ -18,7 +18,6 @@
  */
 
 import { useCallback, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import {
   ApiError,
@@ -31,7 +30,9 @@ import {
   type AutodedupVerdictInput,
   type AutodedupVerdictRow,
 } from '@/lib/api';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 import { pushToast } from '@/lib/toast';
+import { useOptimisticWrite, type Rollback } from '@/lib/useOptimisticWrite';
 import { clusterVerdictOf, type SplitError, type SplitReceipt } from './UnitSplit';
 
 /* One provisional row so the badge flips on click; the server's own row
@@ -59,6 +60,12 @@ export interface SplitLike {
   units: AutodedupSplitUnit[];
 }
 
+/* The session counter is a SERVER count, and a verdict is what changes it — so
+ * every write re-reads it and the strip moves. Without this "37 / 100" would
+ * stand still through a whole session and the operator would have no way to
+ * tell the sample was progressing. */
+const COUNT_AGAIN = [autodedupKeys.validationProgress];
+
 export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
   postSplit: (body: S) => Promise<AutodedupEnvelope<AutodedupSplitResult>> =
     postAutodedupSplitVerdict as unknown as (
@@ -66,29 +73,32 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
     ) => Promise<AutodedupEnvelope<AutodedupSplitResult>>,
 ) {
   const [overlay, setOverlay] = useState<Record<string, AutodedupVerdictRow>>({});
-  /* The session counter is a SERVER count, and a verdict is what changes it —
-   * so every successful write invalidates it and the strip re-reads. Without
-   * this "37 / 100" would stand still through a whole session and the operator
-   * would have no way to tell the sample was progressing. */
-  const queryClient = useQueryClient();
-  const countAgain = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['autodedup', 'validation-progress'] });
-  }, [queryClient]);
-  /* The IN-FLIGHT KEY, not a global boolean. One shared `isPending` would mark
+  /* Paint a provisional row under `key`; the returned rollback puts back what
+   * the key held before (or removes it). The overlay is React state the query
+   * cache cannot see, so this is the hook's function-form patch. */
+  const paint = (key: string, row: AutodedupVerdictRow): Rollback => {
+    const previous = overlay[key];
+    setOverlay((o) => ({ ...o, [key]: row }));
+    return () =>
+      setOverlay((o) => {
+        const next = { ...o };
+        if (previous) next[key] = previous;
+        else delete next[key];
+        return next;
+      });
+  };
+  /* PENDING PER KEY, not a global boolean. One shared `isPending` would mark
    * every row in the queue busy while a single write lands, and disabling the
    * button that was just clicked blurs it — a keyboard operator loses their
    * place after every verdict. Nothing is disabled here: the optimistic overlay
-   * already shows the press and onError already rolls it back. */
-  const [inFlight, setInFlight] = useState<string | null>(null);
-  const mutation = useMutation({
+   * already shows the press and a failure already rolls it back. */
+  const verdict = useOptimisticWrite({
+    mutationKey: ['write', 'autodedup', 'verdict'],
     mutationFn: (vars: { key: string; input: AutodedupVerdictInput }) =>
       postAutodedupVerdict(vars.input),
-    onMutate: (vars) => {
-      const previous = overlay[vars.key];
-      setInFlight(vars.key);
-      setOverlay((o) => ({ ...o, [vars.key]: optimisticVerdict(vars.input, 'ukládám…') }));
-      return { previous };
-    },
+    patch: (vars) => paint(vars.key, optimisticVerdict(vars.input, 'ukládám…')),
+    revalidate: COUNT_AGAIN,
+    pendingKey: (vars) => vars.key,
     onSuccess: (res, vars) => {
       if (res.data) setOverlay((o) => ({ ...o, [vars.key]: res.data as AutodedupVerdictRow }));
       const retracted = res.must_not_link_retracted ?? 0;
@@ -103,23 +113,12 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
             : 'Uloženo.',
       );
     },
-    onError: (err: Error, vars, ctx) => {
-      setOverlay((o) => {
-        const next = { ...o };
-        if (ctx?.previous) next[vars.key] = ctx.previous;
-        else delete next[vars.key];
-        return next;
-      });
-      pushToast('err', `Uložení se nepovedlo: ${err.message}`);
-    },
-    onSettled: () => {
-      setInFlight(null);
-      countAgain();
-    },
+    onError: (err) => pushToast('err', `Uložení se nepovedlo: ${err.message}`),
   });
+  const submitVerdict = verdict.mutate;
   const submit = useCallback(
-    (key: string, input: AutodedupVerdictInput) => mutation.mutate({ key, input }),
-    [mutation],
+    (key: string, input: AutodedupVerdictInput) => submitVerdict({ key, input }),
+    [submitVerdict],
   );
 
   const [splitErrors, setSplitErrors] = useState<Record<string, SplitError>>({});
@@ -127,19 +126,13 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
    * off live state is not a receipt: change a select after saving and the line
    * would confirm, in the server's own numbers, a ruling that was never sent. */
   const [splitResults, setSplitResults] = useState<Record<string, SplitReceipt>>({});
-  const splitMutation = useMutation({
+  const split = useOptimisticWrite({
+    mutationKey: ['write', 'autodedup', 'split'],
     mutationFn: (vars: { key: string; input: S }) => postSplit(vars.input),
-    onMutate: (vars) => {
-      const previous = overlay[vars.key];
-      setInFlight(vars.key);
-      setSplitErrors((e) => {
-        const next = { ...e };
-        delete next[vars.key];
-        return next;
-      });
-      setOverlay((o) => ({
-        ...o,
-        [vars.key]: optimisticVerdict(
+    patch: (vars) =>
+      paint(
+        vars.key,
+        optimisticVerdict(
           {
             kind: 'cluster',
             cluster_key: (vars.input as unknown as { cluster_key?: number }).cluster_key ?? null,
@@ -147,9 +140,9 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
           },
           'ukládám…',
         ),
-      }));
-      return { previous };
-    },
+      ),
+    revalidate: COUNT_AGAIN,
+    pendingKey: (vars) => vars.key,
     onSuccess: (res, vars) => {
       const stored = res.data?.cluster_verdict ?? null;
       if (stored) setOverlay((o) => ({ ...o, [vars.key]: stored }));
@@ -166,35 +159,40 @@ export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(
           + (reversed > 0 ? `, ${reversed} dřívějších rozhodnutí vzato zpět.` : '.'),
       );
     },
-    onError: (err: Error, vars, ctx) => {
-      setOverlay((o) => {
-        const next = { ...o };
-        if (ctx?.previous) next[vars.key] = ctx.previous;
-        else delete next[vars.key];
-        return next;
-      });
-      /* 409 is not a failure: the server is asking whether the operator really
-       * means to take back a veto they wrote earlier. The letters stay, the
-       * reason is shown in place, and the Save button arms rather than retries. */
+    /* 409 is not a failure: the server is asking whether the operator really
+     * means to take back a veto they wrote earlier. The letters stay, the
+     * reason is shown in place, and the Save button arms rather than retries. */
+    onError: (err, vars) =>
       setSplitErrors((e) => ({
         ...e,
         [vars.key]: {
           message: err.message,
           needsConfirm: err instanceof ApiError && err.status === 409,
         },
-      }));
-    },
-    onSettled: () => {
-      setInFlight(null);
-      countAgain();
-    },
+      })),
   });
+  const postSplitVerdict = split.mutate;
   const submitSplit = useCallback(
-    (key: string, input: S) => splitMutation.mutate({ key, input }),
-    [splitMutation],
+    (key: string, input: S) => {
+      setSplitErrors((e) => {
+        if (!(key in e)) return e;
+        const next = { ...e };
+        delete next[key];
+        return next;
+      });
+      postSplitVerdict({ key, input });
+    },
+    [postSplitVerdict],
   );
 
-  return { overlay, submit, submitSplit, pendingKey: inFlight, splitErrors, splitResults };
+  const verdictPending = verdict.pendingFor;
+  const splitPending = split.pendingFor;
+  const isPending = useCallback(
+    (key: string) => verdictPending(key) || splitPending(key),
+    [verdictPending, splitPending],
+  );
+
+  return { overlay, submit, submitSplit, isPending, splitErrors, splitResults };
 }
 
 export default useVerdictOverlay;

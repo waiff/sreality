@@ -69,8 +69,8 @@ def deal_class_sql(expr: str) -> str:
     return f"CASE {expr} {whens} ELSE {expr} END"
 
 
-# Cross-category merge compatibility. A flat ≠ a house (by default), so the merge_properties
-# chokepoint hard-rejects a category_main mismatch. The ONE
+# Cross-category merge compatibility. A flat ≠ a house (by default), so the merge's
+# `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
 # sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and
 # commercial on another is the same real-world property) — irrespective of sub-type. Lives
 # here (pure, no heavy imports) so property_identity can share it without an import cycle.

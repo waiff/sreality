@@ -17,7 +17,6 @@ import asyncio
 import inspect
 import logging
 import re
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +46,7 @@ MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / (
 @pytest.fixture(autouse=True)
 def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Per-process guards reset per test."""
-    monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", threading.Lock())
-    monkeypatch.setattr(rw, "_AUTODEDUP_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", rw._PassLock("autodedup"))
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
 
@@ -224,16 +222,22 @@ def test_the_engines_deadline_sits_inside_every_bound_around_it() -> None:
 
 def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """No argument, no wrapper: the pass runs under the scope and scorer its generation was
-    seeded with, and under the engine's own deadline (E913, E914)."""
+    """No switch, no wrapper: the pass runs under the scope and scorer its generation was
+    seeded with, and under the engine's own deadline (E913, E914). The one thing handed in
+    beside the connection is a factory for a FRESH, bounded connect (E930): the halving a
+    RAISED pass writes may not have a live connection of its own."""
     conn = _Conn()
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    connects: list[dict[str, Any]] = []
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
     _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _summary())
 
     last = rw._autodedup_sync()
 
-    assert seen["kwargs"] == {} and seen["conn"] is conn
+    assert set(seen["kwargs"]) == {"fresh_conn"} and seen["conn"] is conn
+    seen["kwargs"]["fresh_conn"]()
+    assert connects == [{}, {"attempts": 1,
+                             "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
     assert conn.executed == [RT_STORE_PRESENT_SQL]
     assert conn.closed
     assert last == {
@@ -350,14 +354,14 @@ def test_any_other_failure_is_the_lanes_failed_pass_and_closes_the_connection(
     with pytest.raises(RuntimeError):
         rw._autodedup_sync()
     assert conn.closed
-    assert rw._AUTODEDUP_PASS_LOCK.acquire(blocking=False), "the lock was not released"
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter(), "the lock was not released"
     rw._AUTODEDUP_PASS_LOCK.release()
 
 
 def test_an_abandoned_pass_is_never_overlapped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail(
         "a second pass must not open a connection while the first still holds the lock"))
-    assert rw._AUTODEDUP_PASS_LOCK.acquire(blocking=False)
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter()
     try:
         last = rw._autodedup_sync()
     finally:
@@ -379,7 +383,7 @@ def test_the_worker_merges_only_through_the_engine() -> None:
     the worker itself never names it."""
     src = "".join(inspect.getsource(fn) for fn in (
         rw._autodedup_sync, rw._autodedup_pass, rw._autodedup_outcome))
-    for forbidden in ("property_identity", "merge_properties", "operator_state"):
+    for forbidden in ("property_identity", "property_carriers", "_merge_pair"):
         assert forbidden not in src
 
 

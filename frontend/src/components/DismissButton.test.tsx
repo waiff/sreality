@@ -9,10 +9,16 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider, type InfiniteData } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  useInfiniteQuery,
+  type InfiniteData,
+} from '@tanstack/react-query';
 
 import DismissButton from './DismissButton';
 import { DEFAULT_FILTERS } from '@/lib/filters';
+import { createMutationCache } from '@/lib/mutationCache';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
 import * as toast from '@/lib/toast';
@@ -42,10 +48,15 @@ const HIDING = ['cards', DEFAULT_FILTERS, SORT];
 const REVEALED = ['cards', { ...DEFAULT_FILTERS, showDismissed: true }, SORT];
 const TABLE = ['table', DEFAULT_FILTERS, SORT];
 
-function setup(variant?: 'overlay' | 'inline' | 'header') {
-  const qc = new QueryClient({
+/* The app's own MutationCache, so a failed write's one global toast is real. */
+const newClient = () =>
+  new QueryClient({
+    mutationCache: createMutationCache(),
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+
+function setup(variant?: 'overlay' | 'inline' | 'header') {
+  const qc = newClient();
   qc.setQueryData(HIDING, page(42, 43));
   qc.setQueryData(REVEALED, page(42, 43));
   qc.setQueryData(TABLE, page(42, 43));
@@ -90,7 +101,59 @@ describe('<DismissButton>', () => {
     fireEvent.click(await live('Skrýt nemovitost'));
     await waitFor(() => expect(api.dismissProperty).toHaveBeenCalledWith(42));
     await waitFor(() => expect(ids(HIDING)).toEqual([42, 43]));
-    expect(toast.pushToast).not.toHaveBeenCalled();
+    // Snapped back AND said why — once, through the global toast.
+    expect(toast.pushToast).toHaveBeenCalledTimes(1);
+    expect(toast.pushToast).toHaveBeenCalledWith('err', 'boom');
+  });
+
+  /* The rollback restores the lists as they were when 42 was clicked — which
+   * still held 43, dismissed successfully in between. The failure therefore
+   * re-reads the lists, and the server's answer hides 43 again. */
+  it('does not resurrect a neighbour dismissed while a failed dismissal was in flight', async () => {
+    let fail42!: (e: Error) => void;
+    vi.mocked(api.dismissProperty).mockImplementation((id: number) =>
+      id === 42
+        ? new Promise((_res, rej) => {
+            fail42 = rej;
+          })
+        : Promise.resolve({ property_id: id, added: true }),
+    );
+    // What the server says once 43 is dismissed and 42 is not.
+    const serverList = vi.fn(async () => page(42).pages[0]);
+    function List() {
+      useInfiniteQuery({
+        queryKey: HIDING,
+        queryFn: serverList,
+        initialPageParam: null,
+        getNextPageParam: () => null,
+        staleTime: Infinity,
+      });
+      return null;
+    }
+    const qc = newClient();
+    qc.setQueryData(HIDING, page(42, 43));
+    render(
+      <QueryClientProvider client={qc}>
+        <List />
+        <DismissButton property_id={42} />
+        <DismissButton property_id={43} />
+      </QueryClientProvider>,
+    );
+    const ids = () =>
+      qc.getQueryData<InfiniteData<Page>>(HIDING)!.pages.flatMap((p) => p.rows.map((r) => r.property_id));
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Skrýt nemovitost' }).every((b) => !(b as HTMLButtonElement).disabled)).toBe(true),
+    );
+    const [b42, b43] = screen.getAllByRole('button', { name: 'Skrýt nemovitost' });
+    fireEvent.click(b42);
+    await waitFor(() => expect(api.dismissProperty).toHaveBeenCalledWith(42));
+    fireEvent.click(b43);
+    await waitFor(() => expect(api.dismissProperty).toHaveBeenCalledWith(43));
+    await waitFor(() => expect(ids()).toEqual([]));
+
+    await act(async () => fail42(new Error('boom')));
+    await waitFor(() => expect(serverList).toHaveBeenCalled());
+    await waitFor(() => expect(ids()).toEqual([42]));
   });
 
   it('offers an undo that still works after the dismissed card has gone', async () => {

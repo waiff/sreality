@@ -17,6 +17,7 @@ import {
 } from '../lib/brokers';
 import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
+import ErrorBanner from '../components/ErrorBanner';
 import { Field, PickButton, Segmented, Switch } from '../components/controls';
 import { BufferedNumberInput } from '../components/FilterForm';
 import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
@@ -122,18 +123,24 @@ export default function Brokers() {
   const reviewCount = Object.values(reviewQ.data?.reason_counts ?? {})
     .reduce((a, b) => a + b, 0);
 
-  const boardQ = useQuery({
+  const boardQ = useQuery<{ rows: BrokerLeaderRow[]; placeLabel: string }>({
     queryKey: [
       'broker-leaderboard',
       geo.regionIds, geo.okresIds, geo.obecIds,
       categoryMain, categoryType, metric, limit, firmIds, minPriceCzk, includeUnpriced,
       subtypes, includeUnknownSubtype,
     ],
-    queryFn: () =>
-      fetchBrokerLeaderboard({
-        ...geo, categoryMain, categoryType, metric, limit, firmIds,
-        minPriceCzk, includeUnpriced, subtypes, includeUnknownSubtype,
-      }),
+    // The result carries the placeLabel it was fetched under, so during
+    // keepPreviousData the previous filter's rows are never captioned with the
+    // NEW filter's place — the label always matches the rows on screen.
+    queryFn: ({ signal }) =>
+      fetchBrokerLeaderboard(
+        {
+          ...geo, categoryMain, categoryType, metric, limit, firmIds,
+          minPriceCzk, includeUnpriced, subtypes, includeUnknownSubtype,
+        },
+        signal,
+      ).then((data) => ({ rows: data, placeLabel })),
     staleTime: 60_000,
     // Every filter control (region, type, metric, firm) changes this query's
     // key. Without this, each click blanked the whole ledger back to
@@ -142,10 +149,13 @@ export default function Brokers() {
     placeholderData: keepPreviousData,
   });
 
-  const rows = boardQ.data ?? [];
+  const rows = boardQ.data?.rows ?? [];
   const resolved = districts.filter((d) => d.id != null && !d.excluded);
   const placeLabel =
     resolved.length === 0 ? 'Celá ČR' : resolved.map((d) => d.name).join(' + ');
+  // What the rows on screen were fetched under; falls back to the live label
+  // only when there is nothing on screen yet (first load, error, empty).
+  const shownPlaceLabel = boardQ.data?.placeLabel ?? placeLabel;
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto text-[var(--color-ink)]">
@@ -276,11 +286,17 @@ export default function Brokers() {
           once there's something on screen to update. */}
       <div className="mt-5">
         {boardQ.isLoading ? (
-          <p className="mt-10 text-sm text-[var(--color-ink-3)]">Načítám žebříček…</p>
-        ) : boardQ.isError ? (
-          <p className="mt-4 text-sm text-[var(--color-brick)]">
-            {(boardQ.error as Error).message}
+          <p className="mt-10 text-sm text-[var(--color-ink-3)]">
+            {boardQ.failureCount > 0
+              ? 'Server je vytížený, zkouším znovu…'
+              : 'Načítám žebříček…'}
           </p>
+        ) : boardQ.isError ? (
+          <ErrorBanner
+            title="Žebříček se nepodařilo načíst:"
+            message={boardQ.error.message}
+            onRetry={() => boardQ.refetch()}
+          />
         ) : rows.length === 0 ? (
           <Empty
             placeLabel={placeLabel}
@@ -293,12 +309,17 @@ export default function Brokers() {
             {boardQ.isFetching && (
               <p className="mb-2 text-xs text-[var(--color-ink-3)]">Aktualizuji…</p>
             )}
-            <Ledger
-              rows={rows}
-              metric={metric}
-              placeLabel={placeLabel}
-              capped={rows.length >= limit}
-            />
+            {/* Placeholder rows are the PREVIOUS filter's ranking (captioned by
+                their own shownPlaceLabel) — dimmed so a slow update reads as
+                "old data on its way out", never as the new filter's answer. */}
+            <div className={boardQ.isPlaceholderData ? 'opacity-60' : undefined}>
+              <Ledger
+                rows={rows}
+                metric={metric}
+                placeLabel={shownPlaceLabel}
+                capped={rows.length >= limit}
+              />
+            </div>
           </>
         )}
       </div>

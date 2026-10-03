@@ -1,22 +1,21 @@
 """Orchestrator for the bezrealitky.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.bezrealitky_main`. Bezrealitky is a `Portal`
-(BezrealitkyPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages bezrealitky's GraphQL `listAdverts` and enqueues
-new/price-changed ids into the shared `listing_detail_queue` (source='bezrealitky',
-migration 108), then a detail-drain that fetches `advert(id)`, parses it to a
-ScrapedListing, and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency +
-Tier-1 matching). No bespoke pipeline — only the per-portal fetcher
-(BezrealitkyClient) + parser (bezrealitky_parser) + config differ from sreality.
+(BezrealitkyPortal) driven by the generic `scraper.portal_runner`. Its own
+`walk_category` pages bezrealitky's GraphQL `listAdverts` and hands its sightings
+to `portal_runner.reconcile_sightings`, which touches and enqueues into the shared
+`listing_detail_queue` (source='bezrealitky', migration 108); the detail-drain fetches `advert(id)`,
+parses it to a ScrapedListing, and writes via `listing_write.write_listings`
+(the one listing write; a first-seen row lands `property_id` NULL and the
+straggler-attach births its singleton, rule #15).
 
-Unlike bazos (a partial-walk HTML crawler), bezrealitky's GraphQL has no
-deep-pagination cap, so a per-category walk can reach the portal's own end of
-list: `supports_complete_walk` (config-driven) lets the runner nominate the rows
-such a walk did not see for a page check, and the fetch decides (architectural
-rule #3), source-scoped so it only ever touches bezrealitky rows (rule #15). Because
-the detail JSON carries offerType/estateType, the drain derives each listing's
-category from the response — so bezrealitky walks MANY categories from one config
-without the queue-encodes-category limitation that constrains bazos.
+bezrealitky's GraphQL has no deep-pagination cap, so a per-category walk can
+reach the portal's own end of list. A walk that did (`walk_reached_end`, rule #3)
+nominates the rows it did not see for a page check and the fetch decides,
+source-scoped so it only ever touches bezrealitky rows (rule #15);
+`supports_complete_walk` is posture only and gates nothing. Because the detail
+JSON carries offerType/estateType, the drain derives each listing's category
+from the response — so bezrealitky walks MANY categories from one config.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from collections.abc import Callable
 from math import ceil
 from typing import Any
 
-from scraper import db, portal_runner
+from scraper import db, listing_write, portal_runner
 from scraper.bezrealitky_client import BezrealitkyClient, detail_payload_body
 from scraper.bezrealitky_parser import (
     ESTATE_TYPE,
@@ -39,10 +38,7 @@ from scraper.bezrealitky_parser import (
 from scraper.portal import (
     PortalConfig,
     StopReason,
-    default_config,
     deadline_reached,
-    load_portal_config,
-    classify_index_sighting,
     stop_is_portal_end,
     walk_reached_end,
 )
@@ -109,21 +105,20 @@ def _end_of_list_confirmed(
     )
 
 
-class BezrealitkyPortal:
+class BezrealitkyPortal(portal_runner.PortalDefaults):
     """Bezrealitky as a Portal: the seams the generic runner needs, wrapping the
-    bezrealitky GraphQL client + parser. Operational scope (categories,
-    complete-walk capability) comes from the `portals` registry config."""
+    bezrealitky GraphQL client + parser. Operational scope (categories, rates)
+    comes from the `portals` registry config."""
 
     source = SOURCE
     index_rate = 1.0  # baked floor; the instance reads it from config.limits
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
-        self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
-        self._price_change_min_pct = config.limits.price_change_min_pct
+        self.price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -144,14 +139,6 @@ class BezrealitkyPortal:
             et = category.get("estate_type")
             cm = ESTATE_TYPE.get(et) if isinstance(et, str) else None
         return (cm, OFFER_TYPE.get(category.get("offer_type")))
-
-    def connect_index(self) -> Any:
-        return db.connect()
-
-    def connect_drain(self) -> Any:
-        # Single-row ingest (ingest_scraped_listing), not batched prepared
-        # writes, so the transaction pooler is fine — no session pooler needed.
-        return db.connect()
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -265,38 +252,9 @@ class BezrealitkyPortal:
         )
 
         seen = set(native_ids)
-        existing = (
-            db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
-        )
-        new_ids = [n for n in native_ids if n not in existing]
-        changed: list[str] = []
-        unchanged_pks: list[int] = []
-        for nid in native_ids:
-            prev = existing.get(nid)
-            if prev is None:
-                continue
-            if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
-            ) == "unchanged":
-                unchanged_pks.append(prev["id"])
-            else:
-                changed.append(nid)
-
-        if conn is not None and unchanged_pks:
-            db.touch_listings_by_id(conn, unchanged_pks)
-
-        entries = (
-            [(n, None, price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, None, price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
-        )
-        enqueued = (
-            db.enqueue_detail(conn, SOURCE, entries)
-            if conn is not None and entries else 0
-        )
-        LOG.info(
-            "ENQUEUE source=bezrealitky new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+        counts = portal_runner.reconcile_sightings(
+            conn, SOURCE, {n: (None, price_map.get(n)) for n in native_ids},
+            min_change_pct=self.price_change_min_pct,
         )
         # STRUCTURAL, not numeric (rule #3, 2026-09-08): the walk may nominate
         # its unseen rows only if the PORTAL ended it. One flat offset walk per
@@ -309,21 +267,9 @@ class BezrealitkyPortal:
         reached_end = walk_reached_end(
             portal_end=portal_end, our_stop=bool(self._max_pages) or not portal_end,
         )
-        return (
-            seen, {"found_new": len(new_ids), "enqueued": enqueued},
-            declared_total, pages, reached_end,
-        )
-
-    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
+        return seen, counts, declared_total, pages, reached_end
 
     # --- detail-drain seams ---
-    def make_client(self, limiter: RateLimiter) -> BezrealitkyClient:
-        return BezrealitkyClient(limiter=limiter)
-
     def fetch_detail(
         self, client: BezrealitkyClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
@@ -346,7 +292,6 @@ class BezrealitkyPortal:
         )
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
-        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
         for it in items:
             listing = it.payload["listing"]
             # W2a-0 churn instrument: bezrealitky stages no body in
@@ -374,55 +319,19 @@ class BezrealitkyPortal:
                     ).encode("utf-8"),
                     content_type="application/json",
                 )
-            pk, result = db.ingest_scraped_listing(
-                conn, listing, discovery_seq=it.discovery_seq,
-                discovered_at=it.discovered_at)
-            image_urls = listing.raw.get("image_urls") or []
-            inserted = db.record_media(conn, pk, image_urls)
-            if result in counts:
-                counts[result] += 1
-            counts["images_discovered"] += inserted
-        return counts
-
-    def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Complete-walk portal: a gone detail flips that one listing inactive
-        # immediately (mirrors sreality), then the runner dequeues it. Keyed on the
-        # native id directly (not a sreality_id round-trip): post-Gate-2 the row's
-        # sreality_id is NULL, so the legacy mark_listing_inactive would no-op.
-        db.mark_listing_inactive_native(conn, SOURCE, native_id)
-
-    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
-        # have no sreality_id-keyed listing_fetch_failures row.
-        pass
-
-    def claimable_count(self, conn: Any) -> int:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE source = 'bezrealitky' AND claimed_at IS NULL AND given_up = false"
-            )
-            return int(cur.fetchone()[0])
-
-
-def _load_config(dry_run: bool) -> PortalConfig:
-    if dry_run:
-        return default_config(SOURCE)
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, SOURCE)
-    except Exception as exc:
-        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE)
-
-
+        return listing_write.tally(listing_write.write_listings(conn, [
+            listing_write.from_scraped(it.payload["listing"],
+                                       discovery_seq=it.discovery_seq,
+                                       discovered_at=it.discovered_at)
+            for it in items
+        ]))
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging(args.verbose)
+    portal_runner.configure_logging(args.verbose)
 
-    config = _load_config(args.dry_run)
+    config = portal_runner.load_config(SOURCE, args.dry_run)
     portal = BezrealitkyPortal(config, max_pages=args.max_pages)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
@@ -434,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
-    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    # page(s) only. No nomination, no drain, no scrape_runs row.
     if args.probe:
         rc, _ = portal_runner.run_index_probe(
             portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
@@ -501,13 +410,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
-
-
-def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 
 if __name__ == "__main__":

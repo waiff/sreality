@@ -44,6 +44,7 @@ import Spinner from '@/components/Spinner';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 import { fmtAbsolute, fmtCount, fmtUsd } from '@/lib/format';
+import { autodedupKeys } from '@/lib/autodedupKeys';
 
 /* The one phrase for "not measured yet" — never a zero, never a dash that
  * could be read as "none". Same word the NEW DEDUP dashboard uses. */
@@ -318,12 +319,12 @@ interface IterationsPage extends InfiniteListPage<AutodedupIteration> {
 
 export default function AutodedupProgress() {
   const stats = useQuery({
-    queryKey: ['autodedup', 'stats'],
+    queryKey: autodedupKeys.stats,
     queryFn: getAutodedupStats,
   });
 
   const list = useInfiniteList<AutodedupIteration, IterationsPage>({
-    queryKey: ['autodedup', 'iterations'],
+    queryKey: autodedupKeys.iterations,
     queryFn: async (cursor) => {
       const page = await getAutodedupIterations({
         limit: PAGE_SIZE,

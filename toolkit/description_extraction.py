@@ -16,10 +16,6 @@ What the deleted lane got wrong, and what this one does instead:
   * Its cache was keyed `(sreality_id, snapshot_id, model)`, so a price-only snapshot
     re-billed the same text (~$65 of ~$207) and a missed extraction was permanent. The key
     is now `(listing_id, text_hash, extractor_version)` — the text, not the snapshot (R6).
-    `extractor_version` carries the MODEL and the OPEN-GATE SET, because those are what a
-    cached answer is an answer from: migration 249 learned the model half, and the gate
-    half is what stops a cached answer for a narrower field set retiring a listing that a
-    newly-opened gate now has a column for.
   * A failed call left no trace, so the same listing was re-selected and re-billed on the
     next pass and every pass after it. A failure now writes the cache row too, with an
     attempt counter, and is given up on after GIVE_UP_AFTER — rule #5's shape, in the table
@@ -34,23 +30,17 @@ What the deleted lane got wrong, and what this one does instead:
     `building_type`. They are real JSON `enum` arrays generated from `scraper.vocabulary`.
   * It wrote `false` from silence — 92.9 % precision on `has_lift`, against a filter
     predicate that needs better. A `false` needs an explicit negation inside the evidence
-    quote, and every value needs a quote that is verbatim in the description (R7).
+    quote, and every value needs a quote that is verbatim in the advert text (R7).
   * It converted floors itself, at ~73 % and across two conventions. The model returns the
     advert's OWN words ('3. patro', '1. NP', 'přízemí') and `scraper.floor` converts them.
 
-Nothing is EXTRACTED until R7's gate passes. `attribute_contract.Cell.gate` carries the
-per-field verdict with the precision that granted it, and an open gate is the whole of this
-lane's scope — today that set is EMPTY, so the lane costs one dict comprehension per
-interval and does not even open a cursor. The earlier draft of this wave extracted every
-gated cell and wrote only the passed ones, on the theory that the cache would be scored
-later; it would not have been (the bake-off builds its own panel and makes its own calls,
-and bazos — the only portal in scope — has no structured sibling to grade it against), and
-worse, a cached row retires its listing from the selector, so the ~$113 it would have spent
-on day one could never have become a column value. Extract what may be written, and the
-first money the lane spends is money that lands somewhere.
-
-Opening a gate therefore re-opens the corpus (the gate set is inside `extractor_version`):
-open every field the bake-off cleared in ONE edit, or pay for the same descriptions twice.
+What it reads (location reader W1, 2026-09-30): the ADVERT TEXT — headline, newline,
+description, composed and hashed once in SQL — of every portal with an open R7 gate or an
+active contract entry declaring `llm_text`, asking for its open attribute fields plus the
+`location_data.text_reading` block, which is stored raw. `extractor_version` hashes the prompt
+and the schema, so changing either re-opens the corpus: open every field the bake-off cleared
+in ONE edit. A delisted advert is read once per SCHEMA_VERSION and never has an attribute
+written; only active adverts are re-read after a prompt or model change.
 
 The lane has no flag, no `app_settings` key of its own and no env var; the one switch is
 `app_settings.enrichment_model`, which names the model the bake-off chose.
@@ -67,6 +57,7 @@ from collections import Counter
 from threading import Lock
 from typing import Any, Iterable, Mapping, Sequence
 
+from location_data import text_reading
 from scraper import attribute_contract as contract
 from scraper import floor as floor_grammar
 from scraper import vocabulary
@@ -81,7 +72,7 @@ MODEL_SETTING = "enrichment_model"
 
 # Bumped when the tool schema or the merge rules change in a way that makes a cached answer
 # no longer the answer this code would accept.
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # The lane's service level, and the one number two readers share: `verify_pipeline` reports
 # p99 first_seen_at -> extraction against it, and `api/notifications`'s `:new:` re-scan
@@ -90,21 +81,13 @@ SCHEMA_VERSION = "1"
 # once-ever per property), never a duplicate.
 SLO_MINUTES = 20
 
-# Pass sizing, not a knob: 250 rows at the measured p50 of 11.7 s over 8 workers is ~6 min,
-# under LANE_PASS_TIMEOUT_SECONDS (1800) and the 1200 s stall warn. A pass abandoned at the
+# Pass sizing, not a knob: gpt-5.6-luna measures p50 1.3 s a call (llm_calls, n=6,786), so
+# 500 rows over 8 workers is ~80 s against LANE_PASS_TIMEOUT_SECONDS (1800), and 500 rather
+# than 250 halves a corpus re-read (~154k adverts, ~31 h). A pass abandoned at the
 # timeout keeps its threads — and their billing — alive, so the slice is what bounds the
 # lane, and the in-process pass lock in the worker is what stops an abandoned pass being
 # overlapped by the next one.
-#
-# ONE arm, newest-first. An earlier draft added an oldest-first backlog arm on an hourly
-# sub-cadence, on the theory that the deleted lane's 50k backlog was unreachable because it
-# ordered DESC. It was not: the anti-join means a row the lane has read is no longer
-# eligible, so DESC walks BACKWARDS through the backlog at 250 rows per pass — ~57k a day
-# against a measured bazos inflow of 1,940 a day, i.e. the 50,208-row backlog clears in
-# about a day. The deleted lane's backlog was unreachable because it keyed on `sreality_id`
-# and selected 223 rows, which no ORDER BY could have fixed. The ASC arm was a measured
-# 9.4-10.0 s bitmap heap scan buying nothing, so it is gone.
-PASS_SLICE = 250
+PASS_SLICE = 500
 WORKERS = 8
 MAX_TOKENS = 4096
 PASS_MAX_SECONDS = 900
@@ -122,25 +105,17 @@ _MAX_QUOTE_CHARS = 300
 
 
 def extractor_version(model: str) -> str:
-    """The cache's third key column: schema, OPEN-GATE SET, model.
+    """The cache's third key column: schema, what the model was ASKED, model.
 
     All three are things a cached answer is an answer FROM, and all three must invalidate
-    it. The model half is migration 249's lesson. The gate half is this wave's: the lane
-    asks only for the fields whose gate is open, so a row cached while three gates were
-    open is not an answer for the fourth — and without the fingerprint the selector's
-    anti-join would retire that listing for ever and the newly-opened column would stay
-    NULL on the entire existing corpus."""
-    scope = contract.extracted_cells()
-    blob = ";".join(f"{p}:{','.join(f)}" for p, f in sorted(scope.items()))
-    gates = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8] if blob else "none"
-    return f"{SCHEMA_VERSION}:{gates}:{model}"
-
-
-def text_hash(description: str | None) -> str:
-    """The cache's second key column, and what the selector compares against. Hashed here
-    and in SQL (`encode(sha256(convert_to(l.description,'UTF8')),'hex')`) — the same bytes
-    either side, so a row extracted by the lane is a row the selector stops returning."""
-    return hashlib.sha256((description or "").encode("utf-8")).hexdigest()
+    it (the model half is migration 249's lesson). What was asked is the prompt plus every
+    in-scope schema — each open-gate portal's, and the location-only one a portal in scope
+    through `llm_text` alone gets — so an edit to either re-reads the corpus, while which
+    portals declare `llm_text` (a DB fact) never moves the key of the ones already read."""
+    schemas = {p: extraction_tool(f) for p, f in contract.extracted_cells().items()}
+    schemas["*"] = extraction_tool(())
+    asked = _SYSTEM_PROMPT + json.dumps(schemas, sort_keys=True, ensure_ascii=False)
+    return f"{SCHEMA_VERSION}:{hashlib.sha256(asked.encode('utf-8')).hexdigest()[:8]}:{model}"
 
 
 # --- the extraction contract ------------------------------------------------
@@ -179,33 +154,39 @@ _SYSTEM_PROMPT = (
     "Every field takes {value, evidence_quote}. `evidence_quote` must be a VERBATIM span "
     "copied out of the advert text — if you cannot copy one, the value is null.\n"
     "Return false ONLY when the text explicitly denies the fact ('bez výtahu', 'není "
-    "balkon', 'bez parkování'). Silence is null, never false."
+    "balkon', 'bez parkování'). Silence is null, never false.\n"
+    + text_reading.LOCATION_PROMPT
 )
 
 
+def _cell(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "value": value,
+            "evidence_quote": {
+                "type": ["string", "null"],
+                "description": (
+                    "The verbatim span of the advert text that states this, at most "
+                    f"{_MAX_QUOTE_CHARS} characters. Null when value is null."
+                ),
+            },
+        },
+        "required": ["value", "evidence_quote"],
+    }
+
+
 def extraction_tool(fields: Sequence[str]) -> dict[str, Any]:
-    """The one tool schema, built from the contract's field list and the vocabulary."""
+    """The one tool schema: the portal's open attribute fields, then the location block."""
     properties: dict[str, Any] = {}
     for field in fields:
         value_type, description, enum_field = _FIELD_SPEC[field]
         value: dict[str, Any] = {"type": value_type, "description": description}
         if enum_field:
             value["enum"] = [*sorted(vocabulary.CANON[enum_field]), None]
-        properties[field] = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "value": value,
-                "evidence_quote": {
-                    "type": ["string", "null"],
-                    "description": (
-                        "The verbatim span of the advert text that states this, at most "
-                        f"{_MAX_QUOTE_CHARS} characters. Null when value is null."
-                    ),
-                },
-            },
-            "required": ["value", "evidence_quote"],
-        }
+        properties[field] = _cell(value)
+    properties["location"] = text_reading.location_block(_cell)
     return {
         "name": "record_description_facts",
         "description": (
@@ -216,7 +197,7 @@ def extraction_tool(fields: Sequence[str]) -> dict[str, Any]:
             "type": "object",
             "additionalProperties": False,
             "properties": properties,
-            "required": list(fields),
+            "required": list(properties),
         },
     }
 
@@ -237,7 +218,7 @@ def _flat(text: str | None) -> str:
     Not `vocabulary.fold`: that one exists to turn a portal LABEL into a registry key and
     rewrites separators to `_`, which would both destroy word boundaries for the negation
     test and make every quote check a comparison between two strings of underscores.
-    A quote is tested against THIS form of the description, so a model that reflowed a line
+    A quote is tested against THIS form of the advert text, so a model that reflowed a line
     break has still copied the span and a model that invented one still fails.
     """
     stripped = "".join(
@@ -246,17 +227,17 @@ def _flat(text: str | None) -> str:
     return _WS_RE.sub(" ", stripped.lower()).strip()
 
 
-def quote_supports(description: str, quote: str | None) -> bool:
+def quote_supports(text: str, quote: str | None) -> bool:
     if not quote:
         return False
     if len(quote) > _MAX_QUOTE_CHARS:
         return False
     flat = _flat(quote)
-    return bool(flat) and flat in _flat(description)
+    return bool(flat) and flat in _flat(text)
 
 
 def merge_extraction(
-    payload: Mapping[str, Any], *, description: str, fields: Iterable[str],
+    payload: Mapping[str, Any], *, text: str, fields: Iterable[str],
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """The model's tool arguments -> the values this lane is willing to store.
 
@@ -274,7 +255,7 @@ def merge_extraction(
         if raw is None:
             continue
         quote = cell.get("evidence_quote")
-        if not isinstance(quote, str) or not quote_supports(description, quote):
+        if not isinstance(quote, str) or not quote_supports(text, quote):
             dropped[field] = "quote_not_in_text"
             continue
         value, reason = _coerce(field, raw, quote)
@@ -323,31 +304,53 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
 
 # --- the one eligibility predicate (R8) -------------------------------------
 
-_HASH_EXPR = "encode(sha256(convert_to(l.description, 'UTF8')), 'hex')"
+# The advert text, spelled ONCE: headline, newline, description — the composition of
+# `scraper.bazos_parser.ad_haystack`. It is hashed here and nowhere else, so the string the
+# model reads and the key its answer is cached under cannot drift apart.
+_TEXT_EXPR = "coalesce(l.raw_json ->> 'title', '') || E'\\n' || coalesce(l.description, '')"
+_HASH_EXPR = f"encode(sha256(convert_to({_TEXT_EXPR}, 'UTF8')), 'hex')"
+# The location half of the scope: portals whose ACTIVE contract declares an `llm_text`
+# entry, read from the contract so that no portal is named here (rule 21).
+_LLM_TEXT_SOURCES = (
+    "SELECT pc.source FROM portal_contracts pc"
+    " JOIN portal_contract_entries pe ON pe.contract_id = pc.id"
+    " WHERE pc.is_active AND pe.extraction_method = 'llm_text'")
+LLM_TEXT_SOURCES_SQL = f"SELECT DISTINCT source FROM ({_LLM_TEXT_SOURCES}) s ORDER BY 1"
 
 
-def _eligible_where(cells: Mapping[str, Sequence[str]]) -> str:
+def _scope(open_sources: Iterable[str]) -> str:
+    listed = "".join(f" UNION ALL SELECT '{p}'" for p in sorted(open_sources))
+    return f"ARRAY({_LLM_TEXT_SOURCES}{listed})"
+
+
+def _eligible_where(open_sources: Iterable[str]) -> str:
     """The predicate BOTH the lane's selector and the health check's count are built from.
 
     `IS NOT DISTINCT FROM` on the hash is deliberate and load-bearing: it keeps `text_hash`
     out of the index condition on the unique key, so the anti-join probes
-    `(listing_id, extractor_version)` and the description is only hashed for a listing that
+    `(listing_id, extractor_version)` and the text is only hashed for a listing that
     ALREADY has an extraction at this version. Written as a plain `=` the planner turns the
-    hash into an index condition and detoasts + hashes all ~50k descriptions every pass,
+    hash into an index condition and detoasts + hashes every advert every pass,
     forever, including the steady state where nothing is eligible.
+
+    The CASE is a fence twice over: it keeps the anti-join a per-row probe (pulled up into a
+    join, a version ANALYZE has not seen is estimated at one row and planned as a nested loop
+    that grows with every row read at it: 7-23 s on prod's first pass, heading for the 120 s
+    statement_timeout), and it runs the delisted arm FIRST, so a delisted advert already read
+    is never detoasted. That arm (Q1: read ONCE per SCHEMA_VERSION) is hash-free, as a delisted
+    row is not re-fetched. Accepted edges: a text edited while active and delisted before its
+    re-read keeps the older reading; a given-up delisted row is retried after a version change;
+    a row read while delisted and relisted unchanged fills after the next one.
     """
-    if not cells:
-        return "false"
-    arms = [
-        "(l.source = '{p}' AND ({nulls}))".format(
-            p=portal, nulls=" OR ".join(f"l.{f} IS NULL" for f in fields))
-        for portal, fields in sorted(cells.items())
-    ]
     return (
-        "l.is_active\n"
+        f"l.source = ANY ({_scope(open_sources)})\n"
         "   AND l.description IS NOT NULL AND l.description <> ''\n"
-        "   AND (" + "\n        OR ".join(arms) + ")\n"
-        "   AND NOT EXISTS (\n"
+        "   AND CASE WHEN l.is_active OR NOT EXISTS (\n"
+        "         SELECT 1 FROM listing_description_enrichments d\n"
+        "          WHERE d.listing_id = l.id\n"
+        f"            AND d.extractor_version LIKE '{SCHEMA_VERSION}:%%'\n"
+        "            AND d.extracted -> 'error' IS NULL)\n"
+        "   THEN NOT EXISTS (\n"
         "         SELECT 1 FROM listing_description_enrichments e\n"
         "          WHERE e.listing_id = l.id\n"
         "            AND e.extractor_version = %(version)s\n"
@@ -357,21 +360,27 @@ def _eligible_where(cells: Mapping[str, Sequence[str]]) -> str:
         # re-billed for ever. The count lives in the cache row it already writes.
         "            AND (e.extracted -> 'error' IS NULL\n"
         "                 OR coalesce((e.extracted ->> 'attempts')::int, 1)\n"
-        f"                    >= {GIVE_UP_AFTER}))"
+        f"                    >= {GIVE_UP_AFTER})) END"
     )
 
 
-# ONE arm: newest-first, every pass. The eligible rows ARE the newest, so the query stops
-# at its LIMIT in ~0.4 s whether or not a backlog exists, and because an extracted row
-# leaves the predicate the same arm walks backwards through the backlog at PASS_SLICE a
-# pass. An oldest-first companion was measured and removed: once nothing is eligible it
-# cannot stop early and becomes a 9.4-10.0 s bitmap heap scan over 55,252 blocks, run to
-# find nothing.
-_SELECT_SQL_TEMPLATE = """
-SELECT l.id, l.source, l.first_seen_at, l.description
-  FROM listings l
- WHERE {where}
- ORDER BY l.first_seen_at {direction}
+# ONE arm, newest-first, walking each portal in scope on its own `(source, first_seen_at)`
+# index (LATERAL: over an ARRAY of sources the index cannot give the order). An extracted
+# row leaves the predicate, so the walk stops at LIMIT while a backlog exists (prod
+# 2026-09-30, a new version: 0.19 s) and reaches back through it at PASS_SLICE a pass; with
+# nothing eligible it reads the whole portal, delisted rows too (pre-W1, active only: 21.7 s cold).
+# The text and its hash are composed OUTSIDE the ordered pick: in its target list they were
+# computed for every candidate before the sort (prod EXPLAIN, 2026-09-30: > 50 s).
+_SELECT_SQL_TEMPLATE = f"""
+SELECT l.id, l.source, l.first_seen_at, l.is_active,
+       {_TEXT_EXPR} AS advert_text, {_HASH_EXPR} AS text_hash
+  FROM unnest({{scope}}) s(src)
+ CROSS JOIN LATERAL (SELECT l.id FROM listings l
+         WHERE l.source = s.src AND {{where}}
+         ORDER BY l.first_seen_at DESC
+         LIMIT %(limit)s) pick
+  JOIN listings l ON l.id = pick.id
+ ORDER BY l.first_seen_at DESC
  LIMIT %(limit)s
 """
 
@@ -404,15 +413,8 @@ SELECT count(*) AS n,
 """
 
 _OPEN = contract.extracted_cells()
-SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(
-    where=_eligible_where(_OPEN), direction="DESC")
+SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(scope=_scope(_OPEN), where=_eligible_where(_OPEN))
 ELIGIBLE_LAG_SQL = _LAG_SQL_TEMPLATE.format(where=_eligible_where(_OPEN))
-# The same predicate over every gate the contract DECLARES, open or not. With all gates
-# closed the two live constants above collapse to `WHERE false`, which PREPAREs and proves
-# nothing; this one keeps `tests/sql_corpus` type-checking the column arms a gate flip
-# switches on. One function, three spellings of its output — never a second predicate.
-_DECLARED_SELECT_SQL = _SELECT_SQL_TEMPLATE.format(
-    where=_eligible_where(contract.gated_cells()), direction="DESC")
 
 # The conflict target is the key migration 552 adds. DO UPDATE, not DO NOTHING, and only
 # over a row that is itself a recorded FAILURE: a retry either replaces the error with the
@@ -443,11 +445,13 @@ ON CONFLICT (listing_id, extractor_version, text_hash) DO UPDATE
 # value another writer put there while this call was in flight wins, with no compare-and-set
 # needed — and the WHERE keeps the statement off rows it would not change, so a pass that
 # fills nothing marks nothing. `listing_snapshots` and `last_seen_at` appear nowhere in it.
+# Active rows only: a delisted advert is read, never filled (PROGRAM.md §5, step iii).
 _WRITE_SQL_TEMPLATE = """
 WITH updated AS (
     UPDATE listings AS l
        SET {sets}
      WHERE l.id = %(id)s
+       AND l.is_active
        AND ({changed})
     RETURNING l.property_id
 )
@@ -482,16 +486,24 @@ def resolve_model(conn: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def lane_scope(conn: Any) -> dict[str, tuple[str, ...]]:
+    """`portal -> its open attribute fields` for every portal in scope; `()` for a portal in
+    scope only because its active contract declares `llm_text` (location block alone)."""
+    with conn.cursor() as cur:
+        cur.execute(LLM_TEXT_SOURCES_SQL)
+        located = {str(r[0]) for r in cur.fetchall()}
+    cells = contract.extracted_cells()
+    return {p: cells.get(p, ()) for p in sorted(located | set(cells))}
+
+
 def select_eligible(conn: Any, *, version: str,
                     slice_size: int = PASS_SLICE) -> list[dict[str, Any]]:
-    """The newest eligible listings. An extracted row leaves the predicate, so this walks
-    backwards through a backlog at `slice_size` a pass without a second arm."""
+    """The newest eligible listings, `slice_size` a pass (the walk: `_SELECT_SQL_TEMPLATE`)."""
     with conn.cursor() as cur:
         cur.execute(SELECT_INFLOW_SQL, {"version": version, "limit": max(0, slice_size)})
         rows = cur.fetchall()
-    return [{"id": listing_id, "source": source,
-             "first_seen_at": first_seen_at, "description": description}
-            for listing_id, source, first_seen_at, description in rows]
+    keys = ("id", "source", "first_seen_at", "is_active", "advert_text", "text_hash")
+    return [dict(zip(keys, row)) for row in rows]
 
 
 def _tool_arguments(response: Any) -> Mapping[str, Any] | None:
@@ -513,7 +525,7 @@ def record_extraction(
     holding a value it never wrote, which is the deleted lane's permanence bug in a new
     key."""
     writable = [c for c in contract.extracted_cells().get(str(row["source"]), ())
-                if c in values]
+                if c in values and row.get("is_active", True)]
     filled = {c: values[c] for c in writable}
     with conn.transaction():
         if writable:
@@ -545,7 +557,7 @@ def _cache_row(conn: Any, row: Mapping[str, Any], *, extracted: Mapping[str, Any
     with conn.cursor() as cur:
         cur.execute(_CACHE_INSERT_SQL, {
             "listing_id": row["id"],
-            "text_hash": text_hash(row["description"]),
+            "text_hash": row["text_hash"],
             "extractor_version": version,
             "extracted": json.dumps(extracted, ensure_ascii=False),
             "filled": json.dumps(filled, ensure_ascii=False),
@@ -571,11 +583,10 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
     """One bounded pass. Returns the dict the worker publishes in its heartbeat."""
     from toolkit import vision_batch
 
-    scope = contract.extracted_cells()
+    scope = lane_scope(conn)
     if not scope:
-        # No gate is open, so there is nothing this lane is allowed to write and therefore
-        # nothing it is allowed to pay for. Not even a query.
-        return {"claimed": 0, "reason": "no_open_gate"}
+        # No open gate and no `llm_text` entry: nothing this lane may read or pay for.
+        return {"claimed": 0, "reason": "empty_scope"}
     model = resolve_model(conn)
     if model is None:
         LOG.warning("text-extract lane idle: app_settings.%s is not set", MODEL_SETTING)
@@ -593,8 +604,7 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
     tally = Lock()
 
     def _call(llm: Any, row: Mapping[str, Any]) -> tuple[float, Any]:
-        fields = scope[str(row["source"])]
-        tool = extraction_tool(fields)
+        tool = extraction_tool(scope.get(str(row["source"]), ()))
         res = llm.call(
             called_for=CALLED_FOR, model=model, max_tokens=MAX_TOKENS,
             system=_SYSTEM_PROMPT, tools=[tool],
@@ -602,7 +612,7 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
             # cost comes back either way: the completion is already billed, and raising
             # here would hide that spend from the pre-call guard as well.
             tool_choice=tool["name"],
-            messages=[{"role": "user", "content": str(row["description"])}],
+            messages=[{"role": "user", "content": str(row["advert_text"])}],
         )
         return (float(getattr(res, "cost_usd", 0.0) or 0.0),
                 (res, _tool_arguments(res)))
@@ -631,9 +641,8 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
             with tally:
                 failures[error.split(":")[0][:60]] += 1
             return
-        fields = scope[str(row["source"])]
-        values, why = merge_extraction(
-            payload, description=str(row["description"]), fields=fields)
+        values, why = merge_extraction(payload, text=str(row["advert_text"]),
+                                       fields=scope.get(str(row["source"]), ()))
         try:
             columns = record_extraction(
                 wconn, row, values=values, extracted=dict(payload), model=model,

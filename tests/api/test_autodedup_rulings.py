@@ -604,17 +604,18 @@ def test_a_correction_to_same_between_two_properties_is_refused_too(client, conn
 
 
 def test_the_route_and_the_merge_chokepoint_read_one_gate():
-    """No second definition: the route refuses exactly what `merge_properties` refuses."""
+    """No second definition: the route refuses exactly what `merge_property_set` refuses."""
     from api.routes import autodedup as routes
     from toolkit import property_identity
+    from toolkit.property_identity import CategoryClash, category_clash
 
     assert routes.category_clash is property_identity.category_clash
-    assert property_identity._category_refusal(("pronajem", "byt"), ("prodej", "byt")) == (
+    assert str(CategoryClash(*category_clash(("pronajem", "byt"), ("prodej", "byt")))) == (
         "category_type mismatch (pronajem vs prodej); refusing to merge")
-    assert property_identity._category_refusal(("prodej", "byt"), ("prodej", "komercni")) == (
+    assert str(CategoryClash(*category_clash(("prodej", "byt"), ("prodej", "komercni")))) == (
         "category_main mismatch (byt vs komercni); refusing to merge")
-    assert property_identity._category_refusal(("prodej", "dum"), ("prodej", "komercni")) is None
-    assert property_identity._category_refusal(("podil", "byt"), ("prodej", "byt")) is None
+    assert category_clash(("prodej", "dum"), ("prodej", "komercni")) is None
+    assert category_clash(("podil", "byt"), ("prodej", "byt")) is None
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)

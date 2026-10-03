@@ -13,6 +13,7 @@ import type { MapySuggestion } from '@/lib/maps';
 import { CollapsibleGroup, ControlGroup, PickButton, Section } from '@/components/controls';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { pgRead } from '@/lib/pgRead';
 import {
   curationKeys,
   dismissalKeys,
@@ -21,6 +22,7 @@ import {
   fetchNoPriceCount,
 } from '@/lib/queries';
 import { listCollections } from '@/lib/api';
+import { browseKeys } from '@/lib/browseKeys';
 import { FilterForm } from '@/components/FilterForm';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
@@ -140,15 +142,16 @@ function IncludeNoPriceToggle({
    * rest of the cohort"), so key on the cohort MINUS price — dragging the
    * price range never refetches it. Only fetched once a bound is set. */
   const countQuery = useQuery({
-    queryKey: [
-      'no-price-count',
-      { ...filters, priceMin: null, priceMax: null, includeNoPrice: false },
-    ],
-    queryFn: () => fetchNoPriceCount(filters),
+    queryKey: browseKeys.noPriceCount({
+      ...filters,
+      priceMin: null,
+      priceMax: null,
+      includeNoPrice: false,
+    }),
+    queryFn: ({ signal }) => fetchNoPriceCount(filters, { signal }),
     enabled: hasBound,
     placeholderData: (prev) => prev,
     staleTime: 60_000,
-    retry: false,
   });
   const count = hasBound ? countQuery.data ?? null : null;
   const fmt = (n: number) => n.toLocaleString('cs-CZ');
@@ -238,14 +241,13 @@ function ShowDismissedToggle({
     queryKey: dismissalKeys.count,
     queryFn: fetchDismissedCount,
     staleTime: 60_000,
-    retry: false,
   });
   const hasAny = (anyQ.data ?? 0) > 0;
   const totalWith = (showDismissed: boolean) => {
     const f = { ...filters, showDismissed };
     return {
-      queryKey: ['browse-count', f],
-      queryFn: () => fetchBrowseCount(f),
+      queryKey: browseKeys.count(f),
+      queryFn: ({ signal }: { signal: AbortSignal }) => fetchBrowseCount(f, { signal }),
       enabled: hasAny,
       placeholderData: <T,>(prev: T) => prev,
       staleTime: 60_000,
@@ -766,14 +768,15 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
 function CityPopulationHint() {
   const { data } = useQuery<{ withPop: number; total: number }, Error>({
     queryKey: ['curated_cities_population_status'],
-    queryFn: async () => {
-      const total = await supabase
-        .from('curated_cities_public')
-        .select('*', { count: 'exact', head: true });
-      const withPop = await supabase
-        .from('curated_cities_public')
-        .select('*', { count: 'exact', head: true })
-        .not('population', 'is', null);
+    /* A hint, never an error: a failed read leaves `data` empty and the
+     * banner unrendered (`if (!data)` below). */
+    queryFn: async ({ signal }) => {
+      const head = () =>
+        supabase.from('curated_cities_public').select('*', { count: 'exact', head: true });
+      const [total, withPop] = await Promise.all([
+        pgRead(head(), { signal }),
+        pgRead(head().not('population', 'is', null), { signal }),
+      ]);
       return {
         withPop: withPop.count ?? 0,
         total:   total.count   ?? 0,

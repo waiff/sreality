@@ -6,6 +6,7 @@ detail <dl> spec table, the fancybox gallery, and the embedded map config
 
 from __future__ import annotations
 
+from scraper.hashing import digest
 from scraper.idnes_parser import (
     category_from_url,
     index_price,
@@ -228,11 +229,11 @@ def test_parse_detail_full():
 def test_parse_detail_content_hash_stable_and_bridges_to_ingest():
     a = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej")
     b = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej")
-    assert a.content_hash() == b.content_hash()
-    assert len(a.content_hash()) == 64
+    assert digest(a.hash_doc()) == digest(b.hash_doc())
+    assert len(digest(a.hash_doc())) == 64
 
-    row = a.to_row(-7)
-    assert row["sreality_id"] == -7
+    row = a.listing_columns()
+    assert "sreality_id" not in row
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 9_790_000
     assert row["area_m2"] == 69.0
@@ -248,7 +249,7 @@ def test_category_from_detail_url():
     ) == ("dum", "pronajem")
     # The new categories use multi-word singular slugs (komercni-nemovitost,
     # maly-objekt-nebo-garaz) — those must canonicalise too, else the drain
-    # records the wrong category_main and breaks source-scoped mark_inactive.
+    # records the wrong category_main and breaks source-scoped nomination.
     assert category_from_url(
         "https://reality.idnes.cz/detail/prodej/pozemek/x/6a18deadbeefdeadbeef0003/"
     ) == ("pozemek", "prodej")

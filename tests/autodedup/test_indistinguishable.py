@@ -259,14 +259,10 @@ def test_a_floorplan_conflict_with_a_weak_room_match_counts() -> None:
     assert "floorplan" in names(listing(1), listing(2), feats)
 
 
-def test_a_weak_room_match_is_an_interior_difference() -> None:
+def test_a_weak_room_match_alone_is_no_difference() -> None:
+    """E929: a room tag is never a fact."""
     feats = _feats(tag_room_clip_min2=0.80)
-    assert "interior" in names(listing(1), listing(2), feats)
-
-
-def test_a_strong_room_match_is_not() -> None:
-    feats = _feats(tag_room_clip_min2=0.99)
-    assert "interior" not in names(listing(1), listing(2), feats)
+    assert names(listing(1), listing(2), feats) == []
 
 
 def test_an_absent_feature_slot_is_not_a_difference() -> None:

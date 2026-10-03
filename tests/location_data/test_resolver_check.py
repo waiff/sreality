@@ -166,7 +166,8 @@ def test_a_pin_outside_the_resolved_obec_keeps_the_pin_and_drops_to_the_admin_le
     NO street here, deliberately. W18 gave a bound street a point of its own, and a row that
     has one no longer has "the pin because it is the only position there is" — it takes the
     register's point and disputes `pin_off_street` instead (the test below). This rail is
-    about the rows that still have nothing else."""
+    about the rows that still have nothing else. No PSČ and an undeclared pin (v5.5): the town
+    rule keeps the name — 56 realitymix pins sit on the centre of Czechia — and this flags it."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "coordinate", lat=49.7573, lon=18.0158),
@@ -232,6 +233,7 @@ def test_an_exact_pin_outside_the_town_outranks_the_off_street_reason():
         mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
         mm.claim(3, "coordinate", lat=49.7573, lon=18.0158,
                  declared_precision_label="gps"),
+        mm.claim(4, "psc", value_text="160 00"),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.granularity == "street"

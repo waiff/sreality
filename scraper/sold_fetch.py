@@ -36,6 +36,7 @@ from typing import Any
 import psycopg
 
 from scraper import sold_db
+from scraper.rate_ledger import RateBudgetUnavailable
 # `build_client` and `SOURCE` are re-exported: the worker lane opens its client and
 # names its ledger through this module, so shared code never imports a source's own.
 from scraper.reas_client import ReasClient, build_client  # noqa: F401
@@ -120,7 +121,9 @@ def fetch_cell(
     *,
     max_pages: int = MAX_PAGES,
 ) -> dict[str, Any]:
-    """Fetch, store and record one obec cell. Never raises."""
+    """Fetch, store and record one obec cell. Raises only RateBudgetUnavailable: the
+    shared ledger refused the run, which is not this cell's failure, so it records
+    nothing and the caller stops."""
     started = time.monotonic()
     box: sold_db.CellBox | None = None
     try:
@@ -143,6 +146,8 @@ def fetch_cell(
             record_count=stored, source_total=walk.source_total, pages=walk.pages,
             error=truncated,
         )
+    except RateBudgetUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 - a cell failure is a ledger row
         error = f"{type(exc).__name__}: {exc}"[:_ERROR_MAX]
         LOG.warning("SOLD cell obec=%s failed: %s", obec_kod, error)

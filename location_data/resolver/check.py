@@ -121,7 +121,7 @@ _FOREIGN_BUCKET_TOKENS = frozenset({"zahranici", "zahranicni"})
 # as a code — it is `status='foreign'` with a NULL `country_code`.
 UNKNOWN_FOREIGN = "XX"
 
-_TEXT_COUNTRY_TYPES = ("address_line_verbatim", "postal_town", "obec_name", "landmark")
+_TEXT_COUNTRY_TYPES = ("address_line_verbatim", "obec_name")
 
 
 def in_cz_bbox(lat: float, lon: float) -> bool:
@@ -190,7 +190,7 @@ def country_codes(
         hint = norm.typed_slots.get("country_hint") if norm else None
         if isinstance(hint, str):
             codes.add(hint)
-        elif claim.claim_type in ("obec_name", "postal_town") and normalize_match_key(
+        elif claim.claim_type == "obec_name" and normalize_match_key(
             claim.value_text or ""
         ) in _FOREIGN_BUCKET_TOKENS:
             codes.add(UNKNOWN_FOREIGN)

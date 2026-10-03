@@ -690,9 +690,7 @@ def test_an_evicted_key_still_held_by_a_live_row_is_not_reclaimable(
 def test_the_body_is_anchored_to_the_snapshot_it_was_fetched_for(
     conn: psycopg.Connection,
 ) -> None:
-    """location_claims.snapshot_anchor='snapshot' is the DEFAULT anchor, so a body
-    the writer cannot snapshot-anchor is a body no anchored claim can join to. And
-    fetched_at must be the payload's own time, not migration day."""
+    """fetched_at must be the payload's own time, not migration day."""
     native = _key()
     fetched_at = datetime(2026, 6, 1, 7, 30, tzinfo=timezone.utc)
 
@@ -869,8 +867,8 @@ def test_the_profile_and_the_cohort_follow_the_surface_not_the_portal(
     """`volatile=None` resolves by (source, page_kind). Every shipped profile was
     measured by diffing DETAIL pages, so an index body must NOT be addressed through
     one: `payload_sha256` is this store's identity, and a hash taken over the wrong
-    projection is permanent — every evidence span into that body inherits it.
-    Same bytes, two surfaces, two rows, and the row says which instrument made it."""
+    projection is permanent. Same bytes, two surfaces, two rows, and the row says which
+    instrument made it."""
     native = _key()
     body = (b'<html><body><h1>Byt 3+1</h1>'
             b'<div class="grid-similar-offers">other listings</div></body></html>')

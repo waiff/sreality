@@ -21,10 +21,10 @@ from tests.location_data.claim_intake_fixtures import (
 )
 
 
-def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
+def test_every_claim_writes_blur_evidence_explicitly():
     """The fleet mechanic, and the one thing this file still asserts for all nine: whatever
-    a portal's contract reads, every claim it produces writes the two axes 06 §6.6 rules 6
-    and 7 forbid this lane to default, and stamps the contract version that produced it.
+    a portal's contract reads, every claim it produces writes the blur axis 06 §6.6 rule 7
+    forbids this lane to default, and stamps the contract version that produced it.
 
     NO pinned version table any more. A version is the record of one portal's extraction
     changes, and pinning nine of them here made every contract bump a diff in a file about
@@ -42,9 +42,6 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
         ("realitymix", REALITYMIX_PAGE, 50.3, 13.6),
         ("maxima", MAXIMA_PAGE, 50.7, 15.0),
     )
-    expected_history = {
-        "sreality": "full", "bezrealitky": "payload_only", "mmreality": "payload_only",
-    }
     seen = 0
     for source, payload, lat, lon in cases:
         entries = entries_for(source)
@@ -53,8 +50,6 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
         for claim in result.claims:
             seen += 1
             assert claim.blur_evidence in ("none", "declared"), (source, claim.extractor_id)
-            assert claim.history_completeness == expected_history.get(
-                source, "locality_text_only")
             assert claim.extractor_version == f"contract:{source}@{expected_version}"
             assert claim.first_observed_at == result.claims[0].first_observed_at
     assert seen, "no portal yielded a payload claim — the loop proves nothing"

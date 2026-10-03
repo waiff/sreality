@@ -3,6 +3,7 @@
  * (src/lib/api.ts). Mirrors the fetch* conventions in src/lib/queries.ts. */
 import { supabase } from './supabase';
 import { fetchAllRows } from './fetchAllRows';
+import { pgRead, type PgReadOptions } from './pgRead';
 
 export interface PriceStatDataset {
   id: number;
@@ -80,14 +81,19 @@ export interface PriceStatRun {
   finished_at: string | null;
 }
 
-export const fetchLatestRun = async (datasetId: number): Promise<PriceStatRun | null> => {
-  const { data, error } = await supabase
-    .from('price_stat_runs_public')
-    .select('*')
-    .eq('dataset_id', datasetId)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as PriceStatRun | null) ?? null;
+export const fetchLatestRun = async (
+  datasetId: number,
+  { signal }: PgReadOptions = {},
+): Promise<PriceStatRun | null> => {
+  const { data } = await pgRead<PriceStatRun | null>(
+    supabase
+      .from('price_stat_runs_public')
+      .select('*')
+      .eq('dataset_id', datasetId)
+      .maybeSingle(),
+    { signal },
+  );
+  return data ?? null;
 };
 
 export const priceStatsKeys = {
@@ -107,17 +113,19 @@ export const priceStatsKeys = {
     ['price_stat_obec_series', id, from, to] as const,
 };
 
-export const fetchDatasets = async (): Promise<PriceStatDataset[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_datasets_public')
-    .select('*')
-    .order('name');
-  if (error) throw error;
-  return (data ?? []) as unknown as PriceStatDataset[];
+export const fetchDatasets = async (
+  { signal }: PgReadOptions = {},
+): Promise<PriceStatDataset[]> => {
+  const { data } = await pgRead<PriceStatDataset[] | null>(
+    supabase.from('price_stat_datasets_public').select('*').order('name'),
+    { signal },
+  );
+  return data ?? [];
 };
 
 export const fetchCityMetrics = async (
   datasetId: number,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatCityMetric[]> => {
   /* 4,044 rows on the obec-grain datasets — exhaustive by contract (a missing
    * obec is a wrong table/choropleth, not a shorter one). locality_name leads
@@ -137,11 +145,13 @@ export const fetchCityMetrics = async (
     ],
     key: ['entity_type', 'entity_id'],
     expectMax: 100_000,
+    signal,
   });
 };
 
 export const fetchChoropleth = async (
   datasetId: number,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatPolygon[]> => {
   return await fetchAllRows<PriceStatPolygon>({
     relation: 'price_stat_choropleth_public',
@@ -153,6 +163,7 @@ export const fetchChoropleth = async (
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
     expectMax: 100_000,
+    signal,
   });
 };
 
@@ -182,14 +193,13 @@ export const fetchGrowth = async (
   datasetId: number,
   from: string | null,
   to: string | null,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatGrowthRow[]> => {
-  const { data, error } = await supabase.rpc('price_stat_growth', {
-    p_dataset_id: datasetId,
-    p_from: from,
-    p_to: to,
-  });
-  if (error) throw error;
-  return (data ?? []) as PriceStatGrowthRow[];
+  const { data } = await pgRead<PriceStatGrowthRow[] | null>(
+    supabase.rpc('price_stat_growth', { p_dataset_id: datasetId, p_from: from, p_to: to }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* The window-invariant half of the growth choropleth: one polygon per obec
@@ -204,6 +214,7 @@ export interface PriceStatGrowthShape {
 
 export const fetchGrowthShapes = async (
   datasetId: number,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatGrowthShape[]> => {
   /* Prefer the already-materialized polygons. `price_stat_choropleth` is
    * written by the dataset run and holds the identical obec set — verified
@@ -232,6 +243,7 @@ export const fetchGrowthShapes = async (
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
     expectMax: 100_000,
+    signal,
   });
   if (materialized.length > 0) return materialized;
 
@@ -242,6 +254,7 @@ export const fetchGrowthShapes = async (
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
     expectMax: 100_000,
+    signal,
   });
 };
 
@@ -259,14 +272,13 @@ export const fetchSeries = async (
   datasetId: number,
   from: string | null,
   to: string | null,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatSeriesRow[]> => {
-  const { data, error } = await supabase.rpc('price_stat_series', {
-    p_dataset_id: datasetId,
-    p_from: from,
-    p_to: to,
-  });
-  if (error) throw error;
-  return (data ?? []) as PriceStatSeriesRow[];
+  const { data } = await pgRead<PriceStatSeriesRow[] | null>(
+    supabase.rpc('price_stat_series', { p_dataset_id: datasetId, p_from: from, p_to: to }),
+    { signal },
+  );
+  return data ?? [];
 };
 
 /* The kraj→okres→obec tree for the city picker (no geometry). */
@@ -279,7 +291,9 @@ export interface ObecNode {
   sreality_id: number | null;
 }
 
-export const fetchObecTree = async (): Promise<ObecNode[]> => {
+export const fetchObecTree = async (
+  { signal }: PgReadOptions = {},
+): Promise<ObecNode[]> => {
   /* 6,349 rows (every kraj/okres/obec) — an incomplete tree silently hides
    * municipalities from the picker. Names collide (same-name obce), hence the
    * id tiebreak. */
@@ -292,6 +306,7 @@ export const fetchObecTree = async (): Promise<ObecNode[]> => {
     orderBy: [{ column: 'name' }, { column: 'id' }],
     key: ['id'],
     expectMax: 100_000,
+    signal,
   });
 };
 
@@ -303,7 +318,10 @@ export interface NoDataObec {
   locality_name: string;
 }
 
-export const fetchNoData = async (datasetId: number): Promise<NoDataObec[]> => {
+export const fetchNoData = async (
+  datasetId: number,
+  { signal }: PgReadOptions = {},
+): Promise<NoDataObec[]> => {
   return await fetchAllRows<NoDataObec>({
     relation: 'price_stat_no_data_public',
     build: () =>
@@ -314,16 +332,22 @@ export const fetchNoData = async (datasetId: number): Promise<NoDataObec[]> => {
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
     expectMax: 100_000,
+    signal,
   });
 };
 
 /* Just the count (head request, no rows) — for the Browse market-growth note. */
-export const fetchNoDataCount = async (datasetId: number): Promise<number> => {
-  const { count, error } = await supabase
-    .from('price_stat_no_data_public')
-    .select('*', { count: 'exact', head: true })
-    .eq('dataset_id', datasetId);
-  if (error) throw error;
+export const fetchNoDataCount = async (
+  datasetId: number,
+  { signal }: PgReadOptions = {},
+): Promise<number> => {
+  const { count } = await pgRead(
+    supabase
+      .from('price_stat_no_data_public')
+      .select('*', { count: 'exact', head: true })
+      .eq('dataset_id', datasetId),
+    { signal },
+  );
   return count ?? 0;
 };
 
@@ -331,6 +355,7 @@ export const fetchCitySeries = async (
   datasetId: number,
   entityType: string,
   entityId: number,
+  { signal }: PgReadOptions = {},
 ): Promise<PriceStatObservation[]> => {
   /* Consumers rely on year,month ascending; category_type_cb only tiebreaks
    * within a month, completing the total order paging needs. */
@@ -349,5 +374,6 @@ export const fetchCitySeries = async (
     orderBy: [{ column: 'year' }, { column: 'month' }, { column: 'category_type_cb' }],
     key: ['year', 'month', 'category_type_cb'],
     expectMax: 100_000,
+    signal,
   });
 };

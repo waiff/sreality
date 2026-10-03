@@ -6,9 +6,10 @@ deep-pagination 422 is offset-triggered, not size-triggered, so a shallow probe
 never needs it) and early-stopping the moment a page yields zero new ids.
 
 Hermetic: a fake SrealityClient (per fetch_index_page(offset) -> list[dict])
-stands in for the network, and db.index_summary / db.touch_listings /
-db.enqueue_detail are monkeypatched so no DB is touched — the same style
-test_main.py's patched_db fixture uses for _walk_category.
+stands in for the network, and db.index_summary_native / db.touch_listings_by_id /
+db.enqueue_detail (what the shared portal_runner.reconcile_sightings calls) are
+monkeypatched so no DB is touched — the same style test_main.py's patched_db
+fixture uses for _walk_category.
 """
 
 from __future__ import annotations
@@ -47,14 +48,14 @@ def _patch_probe(monkeypatch, client: _FakeProbeClient, *, existing: dict[int, d
     }
     monkeypatch.setattr(scraper_main, "_build_client", lambda cm, ct, limiter=None: client)
 
-    def _fake_index_summary(_conn, ids):
-        ids = set(ids)
+    def _fake_index_summary(_conn, _source, ids):
+        ids = {int(i) for i in ids}
         calls["index_summary_ids"].append(ids)
-        return {sid: row for sid, row in (existing or {}).items() if sid in ids}
+        return {str(sid): {"id": sid, **row} for sid, row in (existing or {}).items() if sid in ids}
 
-    monkeypatch.setattr(scraper_main.db, "index_summary", _fake_index_summary)
+    monkeypatch.setattr(scraper_main.db, "index_summary_native", _fake_index_summary)
     monkeypatch.setattr(
-        scraper_main.db, "touch_listings",
+        scraper_main.db, "touch_listings_by_id",
         lambda _conn, ids: calls["touch"].append(sorted(ids)) or len(ids),
     )
 
@@ -145,6 +146,7 @@ def test_probe_category_price_change_uses_changed_priority(monkeypatch):
     portal.probe_category(
         (1, 2), conn=object(), dry_run=False, limiter=None, probe_pages=1,
     )
+    assert calls["touch"] == [[1]]  # the repriced row is touched too (touch-all, as the walk)
     assert len(calls["enqueue"]) == 1
     (native_id, ref, price, priority), = calls["enqueue"][0]
     assert native_id == "1"
@@ -158,7 +160,7 @@ def test_probe_category_dry_run_conn_none_skips_db_writes(monkeypatch):
     called = {"index_summary": False}
     monkeypatch.setattr(scraper_main, "_build_client", lambda cm, ct, limiter=None: client)
     monkeypatch.setattr(
-        scraper_main.db, "index_summary",
+        scraper_main.db, "index_summary_native",
         lambda *a, **k: called.__setitem__("index_summary", True) or {},
     )
     portal = scraper_main.SrealityPortal()

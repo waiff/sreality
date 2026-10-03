@@ -107,13 +107,13 @@ class _ClaimCursor:
 
     It refuses a statement that does not carry them and then applies them to its own rows, so
     the tests below go red BOTH when a rail is dropped from the SQL and when the loader stops
-    using that SQL. `sreality` is at version 4 and `bazos` at 7 (W18's head).
+    using that SQL. `sreality` is at version 4 and `bazos` at 7 (W18's head, which the rows
+    below were written against; bazos@8 declares the same five types plus three).
     """
 
     ACTIVE = {"sreality": 4, "bazos": 7}
 
-    # What the ACTIVE contract DECLARES an entry for. bazos@7 is the real shape: the four
-    # page entries plus the `street_name` payload entry W18 added.
+    # What the ACTIVE contract DECLARES an entry for: bazos@7's shape.
     DECLARED = {
         "sreality": ("obec_name", "coordinate"),
         "bazos": ("obec_name", "psc", "precision_declaration", "coordinate", "street_name"),
@@ -281,28 +281,6 @@ def test_a_carousel_coordinate_never_becomes_the_pin():
     assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)
 
 
-# --------------------------------------------------------- typed slots, not verbatim
-
-
-def test_a_combined_house_number_claim_is_unwrapped_into_its_own_slot():
-    """Three typed slots, never collapsed. Keying the unwrap on which slot happens to be
-    PRESENT wrote "487/40" into house_number_cp verbatim, because a house-number claim
-    carries no `street`/`psc` slot to trip the old branch."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_cp", value_text="487/40"),
-    ])
-    assert resolution.house_number_cp == "487"
-
-
-def test_the_orientation_number_keeps_its_letter():
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "house_number_co", value_text="487/40a"),
-    ])
-    assert resolution.house_number_co == "40a"
-
-
 # ------------------------------------------------------------ purity: no local timezone
 
 
@@ -316,8 +294,8 @@ def test_a_naive_and_an_aware_claim_set_resolve_identically():
             Claim(
                 id=i, listing_id=900001, source="sreality", claim_type=claim_type,
                 surface="api_json", extraction_method="portal_structured_field",
-                extractor_id="fx", licence_class="portal", observed_at=moment,
-                value_text=value, claim_confidence="high", subject_scoped=True,
+                licence_class="portal", observed_at=moment,
+                value_text=value, subject_scoped=True,
             )
             for i, (claim_type, value) in enumerate(
                 (("obec_name", "Praha"), ("street_name", STREET)), start=1

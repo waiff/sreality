@@ -94,7 +94,6 @@ class _Index:
         monkeypatch.setattr(remax_main, "parse_index", self._parse)
         monkeypatch.setattr(remax_main.db, "index_summary_native", lambda *a, **k: {})
         monkeypatch.setattr(remax_main.db, "enqueue_detail", lambda *a, **k: 0)
-        monkeypatch.setattr(remax_main.db, "touch_listings", lambda *a, **k: None)
 
     def _parse(self, html: str) -> Any:
         sale, page = (int(x) for x in html.split("/"))
@@ -124,8 +123,11 @@ def _nominations(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return captured
 
 
-def test_portal_reads_complete_walk_from_config() -> None:
-    assert _portal().supports_complete_walk is True
+def test_the_drain_owns_the_gone_flip() -> None:
+    """The runner flips a gone listing through db.mark_listing_inactive; no
+    portal carries a flip seam of its own."""
+    assert not hasattr(RemaxPortal, "mark_inactive")
+    assert not hasattr(RemaxPortal, "mark_gone")
 
 
 def test_nomination_is_agenda_grain(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,7 +189,7 @@ def test_walk_priceless_card_is_unchanged_not_changed(monkeypatch: pytest.Monkey
         lambda _c, _s, entries: enqueued.extend((n, prio) for n, _r, _p, prio in entries) or len(entries),
     )
     _seen, counts, *_ = portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())
-    assert touched == [[61, 62]]   # unchanged rows touched by surrogate id
+    assert touched == [[61, 62, 63]]   # every sighted known row, by surrogate id
     assert enqueued == [
         ("r3", remax_main.db.QUEUE_PRIORITY_CHANGED),
         ("r4", remax_main.db.QUEUE_PRIORITY_NEW),

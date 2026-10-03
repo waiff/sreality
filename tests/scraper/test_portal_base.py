@@ -6,12 +6,16 @@ backoff / penalize / gone machinery every portal client inherits.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import time
+from pathlib import Path
 
 import pytest
 import requests
 
-from scraper.portal_base import BasePortalClient, ListingGoneError
+from scraper.portal_base import BasePortalClient, ListingGoneError, client_hints
+from scraper.rate_ledger import RateBudgetUnavailable
 from scraper.rate_limit import RateLimiter
 
 
@@ -121,6 +125,26 @@ def test_pace_uses_limiter():
     assert lim.acquired == 1
 
 
+def test_a_refused_ledger_slot_ends_the_request_at_once(monkeypatch):
+    # Not a RequestException: retrying cannot bring a slot that is minutes away any
+    # nearer, and each retry would only lease again. The 403 is penalized; the
+    # retry's refused acquire ends the request.
+    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+
+    class _RefusingLimiter(_FakeLimiter):
+        def acquire(self) -> None:
+            super().acquire()
+            if self.penalized:
+                raise RateBudgetUnavailable("x: next shared slot 3600s away")
+
+    lim = _RefusingLimiter()
+    c = _client([_Resp(403), _Resp(200)], limiter=lim, max_retries=3)
+    with pytest.raises(RateBudgetUnavailable):
+        c._request("http://x/")
+    assert len(c._session.calls) == 1
+    assert (lim.acquired, lim.penalized) == (2, 1)
+
+
 def test_no_limiter_falls_back_to_sleep(monkeypatch):
     slept: list[float] = []
     monkeypatch.setattr(time, "monotonic", lambda: 100.0)
@@ -153,3 +177,95 @@ def test_accept_header_per_subclass():
     assert JsonClient()._session.headers["Accept"] == "application/json"
     assert BasePortalClient()._session.headers["Accept"] == "*/*"
     assert "Mozilla" in BasePortalClient()._session.headers["User-Agent"]
+
+
+_WIN_CHROME = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+)
+
+
+def test_client_hints_derive_from_a_windows_chrome_ua():
+    assert client_hints(_WIN_CHROME) == {
+        "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+
+@pytest.mark.parametrize("major,expected", [
+    (120, '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'),
+    (124, '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'),
+    (131, '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"'),
+    (148, '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"'),
+    (149, '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'),
+])
+def test_client_hints_grease_brand_matches_real_chrome(major, expected):
+    """GREASE brand, version and order are seeded by the major, as real Chrome does."""
+    ua = _WIN_CHROME.replace("Chrome/148", f"Chrome/{major}")
+    assert client_hints(ua)["sec-ch-ua"] == expected
+
+
+def test_client_hints_empty_for_a_non_chrome_ua():
+    assert client_hints("sreality-bot/1.0 (+https://example.org)") == {}
+
+
+def test_client_hints_platform_follows_the_ua():
+    mac = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    hints = client_hints(mac)
+    assert hints["sec-ch-ua-platform"] == '"macOS"'
+    assert 'v="131"' in hints["sec-ch-ua"]
+    linux = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+    assert client_hints(linux)["sec-ch-ua-platform"] == '"Linux"'
+    assert client_hints("Chrome/120.0.0.0")["sec-ch-ua-platform"] == '"Windows"'
+
+
+@pytest.mark.parametrize("ua", [
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/148.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/148.0.0.0 Safari/537.36",
+    _WIN_CHROME + " Edg/148.0.0.0",
+    _WIN_CHROME.replace("Chrome/148", "HeadlessChrome/148"),
+])
+def test_client_hints_empty_for_a_non_desktop_chrome_ua(ua):
+    """Desktop-Chrome hints would contradict a mobile, ChromeOS, Edge or headless UA."""
+    assert client_hints(ua) == {}
+
+
+def test_default_client_sends_no_client_hints():
+    """Guards the other portals: hints are opt-in, so their profile is unchanged."""
+    headers = BasePortalClient()._session.headers
+    assert not [k for k in headers if k.lower().startswith("sec-ch-ua")]
+
+
+def _portal_clients() -> list[type]:
+    """Every BasePortalClient subclass defined in a scraper/*_client.py module."""
+    found: list[type] = []
+    for path in sorted((Path(__file__).resolve().parents[2] / "scraper").glob("*_client.py")):
+        mod = importlib.import_module(f"scraper.{path.stem}")
+        found += [
+            obj for obj in vars(mod).values()
+            if inspect.isclass(obj) and obj.__module__ == mod.__name__
+            and issubclass(obj, BasePortalClient)
+        ]
+    return found
+
+
+def test_only_ceskereality_opts_into_client_hints():
+    """A new opt-in is deliberate: it changes that portal's request profile."""
+    clients = _portal_clients()
+    assert len(clients) > 5, "census found too few clients — has discovery broken?"
+    assert {c.__name__ for c in clients if c.CLIENT_HINTS} == {"CeskerealityClient"}
+
+
+def test_client_hints_never_contradict_a_non_chrome_ua_override():
+    class HonestBot(BasePortalClient):
+        USER_AGENT = "sreality-bot/1.0"
+        CLIENT_HINTS = True
+
+    headers = HonestBot()._session.headers
+    assert headers["User-Agent"] == "sreality-bot/1.0"
+    assert not [k for k in headers if k.lower().startswith("sec-ch-ua")]

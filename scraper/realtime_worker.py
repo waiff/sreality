@@ -8,7 +8,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
              newest-first delta probe (portal_runner.run_index_probe, Wave C-2)
              sequentially over the probe-capable portals — diff + enqueue only,
-             never mark_inactive.
+             never nominates.
 - drain:     every `realtime_drain_interval_seconds` (default 30), claim a
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub
@@ -46,6 +46,18 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              lease row (migration 279 — pooler-proof CAS; a session advisory
              lock strands over the transaction pooler) — a concurrent caller
              skips.
+- broker_maintenance: every `realtime_maintenance_interval_seconds` (shared
+             with the maintenance lane — same cadence class, no new setting),
+             one drain-until-empty broker pass via scripts.resolve_brokers.
+             run_incremental_pass (THE same implementation broker_resolution.yml
+             runs; never forked). Attributes dirty listings to brokers,
+             recomputes only the affected brokers' rollups, and republishes the
+             leaderboard matview when its derived_artifacts stamp is older than
+             ~an hour — so broker numbers stop being a once-daily artifact of
+             the GH-throttled full sweep (Broker Unify W3). Safe beside the GH
+             cron + daily sweep: all callers serialize on broker_resolution_lock;
+             a concurrent caller skips. Its own pass lock keeps an abandoned pass,
+             whose lease row goes stale, from running beside the next one.
 - location_resolve: every `realtime_location_resolve_interval_seconds`
              (default 15), one bounded pass of THE location resolver drain
              (location_data.resolver.drain.run — the same code
@@ -81,9 +93,10 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              towns where the deal pipeline holds a live card, stalest first, minus
              the cells whose newest `sold_transaction_fetches` row is younger than
              35 days (ok) or 6 hours (failed). One integer is cadence AND kill
-             switch; no boolean flag, no env var, no queue. A cell attempt always
-             ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
-             an unmigrated database skips with one warning.
+             switch; no boolean flag, no env var, no queue. A cell attempt ends in
+             the ledger unless the shared rate ledger refuses the tick (then the
+             tick stops, `budget_refused`), and an unmigrated database skips with
+             one warning.
 - autodedup: every `realtime_autodedup_interval_seconds` (DARK: the seeded row is
              0), ONE bounded pass of THE autodedup lane
              (autodedup.incremental_lane.run_incremental, its only caller): the pass
@@ -97,7 +110,11 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              there is one writer at a time. An absent autodedup store skips with one
              warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
-             worker_heartbeats (migration 269) — the Health-page liveness hook.
+             worker_heartbeats (migration 269) — the Health-page liveness hook. It
+             runs on the executor every lane shares, so it is that executor's
+             canary: a watchdog thread exits the process (Railway restarts it)
+             once no beat has finished for LIVENESS_BOUND_SECONDS, or once a lane's
+             pass lock has been held for PASS_LOCK_BOUND_SECONDS.
 
 SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
@@ -118,13 +135,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import faulthandler
 import importlib
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -133,7 +153,8 @@ from psycopg.types.json import Jsonb
 from scraper import (
     db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import PortalConfig
+from scraper.rate_ledger import RateBudgetUnavailable
 
 LOG = logging.getLogger("scraper.realtime_worker")
 
@@ -145,18 +166,85 @@ PROBE_INTERVAL_DEFAULT = 180
 DRAIN_INTERVAL_DEFAULT = 30
 DRAIN_SLICE_DEFAULT = 200
 DRAIN_MAX_SECONDS = 120.0
+# The longest a probe, drain or sold_comps pass waits for one slot of a source's shared
+# rate ledger (scraper/rate_ledger.py) before giving that source up for the pass: the
+# drain's whole per-portal budget, so a longer wait is never useful to it. On 2026-09-29
+# the wait was unbounded, an hour per thread, and the threads filled the executor. A
+# penalized portal's frontier can sit past it, and then the worker skips that portal for a
+# pass instead of parking a thread; the Actions walks and drains take no bound and wait as
+# long as the ledger says.
+LEDGER_MAX_WAIT_SECONDS = DRAIN_MAX_SECONDS
 IMAGES_INTERVAL_DEFAULT = 60
 IMAGES_SLICE_DEFAULT = 500
 # Modest beside the Actions lanes' 32: the worker slice is small and the lane
 # shares the CDNs with images_fresh.yml.
 IMAGES_WORKERS = 8
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+# Ten missed beats. When no heartbeat pass has FINISHED for this long the watchdog exits
+# the process and Railway's restartPolicy ALWAYS starts a fresh one; a freeze then costs
+# minutes instead of the 7 h 40 min of 2026-09-29, when the loop stayed alive and nothing
+# restarted it. Finished, not written: a database that refuses the write is not something
+# a restart fixes, and a heartbeat-only fault (a grant, a value Jsonb rejects) must not
+# restart every lane every five minutes. A frozen loop, a full executor or a hung beat
+# never finish one.
+LIVENESS_BOUND_SECONDS = 10 * HEARTBEAT_INTERVAL_SECONDS
+WATCHDOG_LAST_WORDS_SECONDS = 10.0
+# One connect attempt per beat, bounded per address: the next beat is 30 s away, and a
+# beat must finish well inside LIVENESS_BOUND_SECONDS even when the pooler black-holes
+# connects (db.connect's default is three attempts at psycopg's 130 s each).
+HEARTBEAT_CONNECT_TIMEOUT_SECONDS = 10
+# Every lane's blocking work, the heartbeat's included, runs on asyncio's default
+# executor, which makes the heartbeat its canary: if leaked threads fill it, beats stop
+# and the watchdog restarts the worker. Pinned rather than min(32, cpu+4), so the
+# headroom does not depend on what the container reports: fourteen lanes hold at most
+# one thread each in normal running.
+LANE_EXECUTOR_THREADS = 32
 IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
 # Ceiling on ONE lane pass. The drain lane legitimately loops eight portals at
 # up to DRAIN_MAX_SECONDS each (~16 min worst case), so this sits well above any
 # healthy pass and far below the nine-hour wedge it exists to bound.
 LANE_PASS_TIMEOUT_SECONDS = 1800
+# A pass lock held this long is a wedged lane (a probe or drain thread stuck in an HTTP
+# read or a lock wait). One stuck thread never fills the executor, so the heartbeat
+# beats on while the lane is dead for every portal; the watchdog exits on it too.
+PASS_LOCK_BOUND_SECONDS = 2 * LANE_PASS_TIMEOUT_SECONDS
+
+# lane -> time.monotonic() when the thread holding that lane's pass lock took it. A pass
+# abandoned at LANE_PASS_TIMEOUT_SECONDS is no longer stamped in the lane's state, yet its
+# thread still holds the lock and every later pass is skipped in ~0 s, which reads like a
+# quick pass. _lane_snapshot counts the lock's age into in_flight_s, where
+# worker_lane_stall sees the wedge, and _watchdog exits past PASS_LOCK_BOUND_SECONDS.
+_PASS_LOCKS_HELD: dict[str, float] = {}
+
+
+class _PassLock:
+    """One pass of a lane at a time INSIDE this process. A pass abandoned at
+    LANE_PASS_TIMEOUT_SECONDS keeps its thread (Python cannot kill one); without this
+    every later pass would start another thread beside it, with it the lane leaks at
+    most one and a pass that cannot enter is skipped (logged once per wedge)."""
+
+    def __init__(self, lane: str) -> None:
+        self._lane = lane
+        self._lock = threading.Lock()
+        self._skip_logged = False
+
+    def try_enter(self) -> bool:
+        if not self._lock.acquire(blocking=False):
+            if not self._skip_logged:
+                self._skip_logged = True
+                LOG.warning(
+                    "%s lane skipped: the previous pass was abandoned and its thread is "
+                    "still running", self._lane.upper())
+            return False
+        self._skip_logged = False
+        _PASS_LOCKS_HELD[self._lane] = time.monotonic()
+        return True
+
+    def release(self) -> None:
+        _PASS_LOCKS_HELD.pop(self._lane, None)
+        self._lock.release()
+
 
 # maintenance lane: the incremental property-maintenance pass (straggler attach
 # + dirty-set recompute — scripts.recompute_property_stats.
@@ -313,8 +401,7 @@ _INTAKE_FAST_R2_WARNED = False
 # The lane's own mutual exclusion INSIDE this process, for the same reason the resolve lane
 # has one: a pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill
 # the thread), and two scans sharing one cursor would each re-read the other's window.
-_INTAKE_FAST_PASS_LOCK = threading.Lock()
-_INTAKE_FAST_WEDGE_LOGGED = False
+_INTAKE_FAST_PASS_LOCK = _PassLock("location_intake_fast")
 # Whether the last pass opened no listing — drives the intake's log level (see
 # _tune_intake_log_level). Starts True so a quiet lane is quiet from the first pass.
 _INTAKE_FAST_LAST_IDLE = True
@@ -381,25 +468,23 @@ _SOLD_COMPS_STORE_WARNED = False
 # tick handing the SAME cells to a second walk. Under the rate limiter's 8x penalty
 # factor a five-cell pass can exceed the timeout, which is exactly when a second
 # walk is least welcome. Held for the whole pass.
-_SOLD_COMPS_PASS_LOCK = threading.Lock()
-_SOLD_COMPS_WEDGE_LOGGED = False
+_SOLD_COMPS_PASS_LOCK = _PassLock("sold_comps")
 
 # text_extract lane (field-capture W7): the post-publication extraction of the facts a
 # prose-only advert states in its text and nowhere else. A CONSTANT interval, no
 # app_settings row, no env var and no flag — the estimation lane is the cautionary case
 # (its flag was never set, so it has been dark since it shipped and is absent from
 # worker_heartbeats entirely, which makes it invisible to every monitor). This lane's whole
-# scope is `attribute_contract.extracted_cells()` — the cells whose R7 gate the bake-off
-# has OPENED. None open (the shipping state) and the pass returns before it opens a cursor,
-# so the lane is live, visible and free. Five minutes puts a new listing well inside the
-# lane's 20-minute SLO even after a missed pass.
+# scope is `description_extraction.lane_scope` — the portals with an R7 gate the bake-off
+# has OPENED or an active contract entry declaring `llm_text`. With none the pass returns
+# after one small query, so the lane is live, visible and free. Five minutes puts a new
+# listing well inside the lane's 20-minute SLO even after a missed pass.
 TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
 # The sold_comps lane's reason, with money on it: a pass abandoned at
 # LANE_PASS_TIMEOUT_SECONDS keeps its eight threads — and their billing — running, and the
 # cache rows they have not written yet cannot stop the next tick handing the same listings
 # to a second set of paid calls.
-_TEXT_EXTRACT_PASS_LOCK = threading.Lock()
-_TEXT_EXTRACT_WEDGE_LOGGED = False
+_TEXT_EXTRACT_PASS_LOCK = _PassLock("text_extract")
 
 # autodedup lane (E914): THE one production path of the dedup engine
 # (autodedup.incremental_lane.run_incremental, imported and never copied). One pass decides,
@@ -415,8 +500,11 @@ _TEXT_EXTRACT_WEDGE_LOGGED = False
 AUTODEDUP_INTERVAL_SETTING = "realtime_autodedup_interval_seconds"
 # Longest refusal/abort text carried into the heartbeat row.
 AUTODEDUP_REASON_CHARS = 300
-_AUTODEDUP_PASS_LOCK = threading.Lock()
-_AUTODEDUP_WEDGE_LOGGED = False
+# One connect attempt for the one write a RAISED pass makes after its own connection may have
+# died (its halved rate, E930): bounded, so a pooler that black-holes connects cannot hold the
+# lane's thread for db.connect's default three attempts at 130 s each.
+AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS = 10
+_AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # log-once-per-process guard: the autodedup store is absent.
 _AUTODEDUP_STORE_WARNED = False
 # Logged on the TRANSITION, never per pass: at a 60 s interval a lease held by a seed or a
@@ -464,6 +552,17 @@ _PROXY_WARNED: set[str] = set()
 # log-once-per-process guard when R2 env vars are absent on the worker.
 _R2_WARNED: set[str] = set()
 
+# The probe and drain lanes' own mutual exclusion. On 2026-09-29 they had none: one
+# probe thread per abandoned pass (eighteen by 23:15) plus drain threads, all asleep in
+# ceskereality's shared rate ledger, filled the executor. Each pass runs in ONE thread
+# holding its lock.
+_PROBE_PASS_LOCK = _PassLock("probe")
+_DRAIN_PASS_LOCK = _PassLock("drain")
+# The broker lane's: an abandoned drain-until-empty pass keeps its thread, and its
+# broker_resolution_lock row goes stale after _LOCK_STALE_MIN, so without this the next
+# tick would take the lease and run a second pass beside it, a thread per abandoned pass.
+_BROKER_MAINTENANCE_PASS_LOCK = _PassLock("broker_maintenance")
+
 # Count-probe walk DISPATCH is double-gated — a token env var AND the
 # realtime_sreality_count_dispatch_enabled setting (default off) — so the lane
 # ships dark for triggering (it still RECORDS per-pair totals for observability).
@@ -480,13 +579,12 @@ _RESOLVE_SESSION_WARNED = False
 # Logged on the TRANSITION into a skipped pass, not per pass: at a 15 s interval
 # a 30-minute GH run would otherwise emit 120 identical lines.
 _RESOLVE_LEASE_BUSY_LOGGED = False
-_RESOLVE_WEDGE_LOGGED = False
 # The lane's own mutual exclusion, INSIDE this process. A pass abandoned at
 # LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill the thread) while
 # its lease expires strictly earlier, so the lease alone cannot stop the next
 # pass from draining beside the still-live one. Held for the whole pass; a pass
 # that cannot take it does not touch the lease at all.
-_RESOLVE_PASS_LOCK = threading.Lock()
+_RESOLVE_PASS_LOCK = _PassLock("location_resolve")
 # Whether the last pass came back with an empty queue — drives the drain's log
 # level (see _tune_resolver_log_level).
 _RESOLVE_LAST_IDLE = False
@@ -737,15 +835,7 @@ def _read_count_dispatch_enabled() -> bool:
 
 
 def _load_config(source: str) -> PortalConfig:
-    try:
-        with db.connect() as conn:
-            return load_portal_config(conn, source)
-    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a pass
-        LOG.warning(
-            "load_portal_config failed source=%s: %s; using baked-in default",
-            source, exc,
-        )
-        return default_config(source)
+    return portal_runner.load_config(source)
 
 
 def _build_portal(source: str, config: PortalConfig) -> Any:
@@ -786,6 +876,7 @@ def _run_probe_sync(source: str) -> dict[str, Any]:
     portal = _build_portal(source, config)
     rc, agg = portal_runner.run_index_probe(
         portal, dry_run=False, probe_pages=PROBE_PAGES,
+        max_wait_s=LEDGER_MAX_WAIT_SECONDS,
     )
     agg["rc"] = rc
     return agg
@@ -805,6 +896,7 @@ def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
         detail_workers=config.limits.detail_workers,
         detail_rate=config.limits.detail_rate,
         max_seconds=DRAIN_MAX_SECONDS,
+        max_wait_s=LEDGER_MAX_WAIT_SECONDS,
     )
     agg["rc"] = rc
     return agg
@@ -813,13 +905,7 @@ def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
 def _claimable_by_source() -> dict[str, int]:
     conn = db.connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT source, count(*) FROM listing_detail_queue "
-                "WHERE claimed_at IS NULL AND given_up = false "
-                "GROUP BY source"
-            )
-            return {source: int(n) for source, n in cur.fetchall()}
+        return db.claimable_counts(conn)
     finally:
         with contextlib.suppress(Exception):
             conn.close()
@@ -886,18 +972,60 @@ def _record_lane_failure(source: str, lane: str, exc: BaseException) -> None:
     CheckViolation on the latency-critical drain used to produce a log line and
     nothing else, forever. One shared function, not a second producer.
 
-    BLOCKING — callers must `await asyncio.to_thread(...)` it, like every other DB touch
-    in this file. `db.connect()` is `_connect_with_retry` (3 attempts, `time.sleep(10.0)`
-    between), and `is_transient_db_error` is true for every `OperationalError`, so on a
-    pooler outage a bare call sleeps ~20s per source ON THE EVENT LOOP. A drain pass
-    iterates all nine sources, and the 30s heartbeat lane is a sibling coroutine on the
-    same loop — i.e. the recorder would blind `worker_liveness` and `worker_lane_stall`
-    during exactly the DB incident it exists to record."""
+    BLOCKING — call it from the pass's own thread, never on the event loop, like every
+    other DB touch in this file. `db.connect()` is `_connect_with_retry` (3 attempts,
+    `time.sleep(10.0)` between), and `is_transient_db_error` is true for every
+    `OperationalError`, so on a pooler outage a bare call sleeps ~20s per source ON THE
+    EVENT LOOP. A drain pass iterates all nine sources, and the 30s heartbeat lane is a
+    sibling coroutine on the same loop — i.e. the recorder would blind `worker_liveness`
+    and `worker_lane_stall` during exactly the DB incident it exists to record."""
     try:
         with db.connect() as conn:
             portal_runner.record_failure_signature(conn, exc, source=source, lane=lane)
     except Exception as rec_exc:  # noqa: BLE001 - observability must never end a pass
         LOG.warning("could not record %s lane failure for %s: %r", lane, source, rec_exc)
+
+
+def _probe_sync(disabled: set[str], stop_event: asyncio.Event) -> dict[str, Any]:
+    """One probe pass over REALTIME_SOURCES, in ONE thread holding the lane's pass lock.
+    A portal whose shared rate budget refuses the probe is given up for this pass and
+    counted under `budget_refused`; the next portal still runs."""
+    if not _PROBE_PASS_LOCK.try_enter():
+        return {"previous_pass_running": True}
+    try:
+        totals = {
+            "portals": 0, "new": 0, "enqueued": 0, "errors": 0, "skipped": 0,
+            "budget_refused": 0,
+        }
+        for source in REALTIME_SOURCES:
+            # is_set() is a plain attribute read, safe off the loop's thread.
+            if stop_event.is_set():
+                break
+            if source in disabled or _skip_for_proxy(source):
+                totals["skipped"] += 1
+                continue
+            try:
+                agg = _run_probe_sync(source)
+            except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
+                LOG.exception("PROBE lane source=%s failed", source)
+                _record_lane_failure(source, "probe", exc)
+                totals["errors"] += 1
+                continue
+            totals["portals"] += 1
+            totals["new"] += agg.get("listings_found_new", 0)
+            totals["enqueued"] += agg.get("listings_enqueued", 0)
+            totals["errors"] += agg.get("errors", 0)
+            totals["budget_refused"] += agg.get("budget_refused", 0)
+            LOG.info(
+                "PROBE lane source=%s pages=%d new=%d enqueued=%d "
+                "early_stopped=%d errors=%d budget_refused=%d",
+                source, agg.get("index_pages", 0), agg.get("listings_found_new", 0),
+                agg.get("listings_enqueued", 0), agg.get("early_stopped", 0),
+                agg.get("errors", 0), agg.get("budget_refused", 0),
+            )
+        return totals
+    finally:
+        _PROBE_PASS_LOCK.release()
 
 
 async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
@@ -906,32 +1034,57 @@ async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
         disabled = await asyncio.to_thread(_read_disabled_sources)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("probe lane: failed to read disabled sources: %s", exc)
-    totals = {"portals": 0, "new": 0, "enqueued": 0, "errors": 0, "skipped": 0}
-    for source in REALTIME_SOURCES:
-        if stop_event.is_set():
-            break
-        if source in disabled or _skip_for_proxy(source):
-            totals["skipped"] += 1
-            continue
-        try:
-            agg = await asyncio.to_thread(_run_probe_sync, source)
-        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
-            LOG.exception("PROBE lane source=%s failed", source)
-            await asyncio.to_thread(_record_lane_failure, source, "probe", exc)
-            totals["errors"] += 1
-            continue
-        totals["portals"] += 1
-        totals["new"] += agg.get("listings_found_new", 0)
-        totals["enqueued"] += agg.get("listings_enqueued", 0)
-        totals["errors"] += agg.get("errors", 0)
-        LOG.info(
-            "PROBE lane source=%s pages=%d new=%d enqueued=%d "
-            "early_stopped=%d errors=%d",
-            source, agg.get("index_pages", 0), agg.get("listings_found_new", 0),
-            agg.get("listings_enqueued", 0), agg.get("early_stopped", 0),
-            agg.get("errors", 0),
-        )
-    _record_pass(state, "probe", totals)
+    last = await asyncio.to_thread(_probe_sync, disabled, stop_event)
+    _record_pass(state, "probe", last)
+
+
+def _drain_sync(
+    slice_: int, disabled: set[str], stop_event: asyncio.Event,
+) -> dict[str, Any]:
+    """One drain pass, in ONE thread holding the lane's pass lock (see _probe_sync)."""
+    if not _DRAIN_PASS_LOCK.try_enter():
+        return {"previous_pass_running": True}
+    try:
+        counts = _claimable_by_source()
+        totals = {
+            "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
+            "budget_refused": 0, "deadline_stopped": 0,
+        }
+        for source in REALTIME_SOURCES:
+            if stop_event.is_set():
+                break
+            claimable = counts.get(source, 0)
+            if claimable <= 0:
+                continue
+            if source in disabled or _skip_for_proxy(source):
+                totals["skipped"] += 1
+                continue
+            try:
+                # Capped at what is waiting, so the ledger lease is sized to it.
+                agg = _run_drain_sync(source, min(slice_, claimable))
+            except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
+                LOG.exception("DRAIN lane source=%s failed", source)
+                _record_lane_failure(source, "drain", exc)
+                totals["errors"] += 1
+                continue
+            totals["sources"] += 1
+            totals["new"] += agg.get("listings_scraped_new", 0)
+            totals["updated"] += agg.get("listings_updated", 0)
+            totals["gone"] += agg.get("listings_inactive", 0)
+            totals["errors"] += agg.get("errors", 0)
+            totals["budget_refused"] += agg.get("budget_refused", 0)
+            totals["deadline_stopped"] += agg.get("deadline_stopped", 0)
+            LOG.info(
+                "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d "
+                "budget_refused=%d deadline_stopped=%d",
+                source, claimable, agg.get("listings_scraped_new", 0),
+                agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
+                agg.get("errors", 0), agg.get("budget_refused", 0),
+                agg.get("deadline_stopped", 0),
+            )
+        return totals
+    finally:
+        _DRAIN_PASS_LOCK.release()
 
 
 async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
@@ -948,38 +1101,8 @@ async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
         disabled = await asyncio.to_thread(_read_drain_disabled_sources)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("drain lane: failed to read disabled sources: %s", exc)
-    counts = await asyncio.to_thread(_claimable_by_source)
-    totals = {
-        "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
-    }
-    for source in REALTIME_SOURCES:
-        if stop_event.is_set():
-            break
-        claimable = counts.get(source, 0)
-        if claimable <= 0:
-            continue
-        if source in disabled or _skip_for_proxy(source):
-            totals["skipped"] += 1
-            continue
-        try:
-            agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
-        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
-            LOG.exception("DRAIN lane source=%s failed", source)
-            await asyncio.to_thread(_record_lane_failure, source, "drain", exc)
-            totals["errors"] += 1
-            continue
-        totals["sources"] += 1
-        totals["new"] += agg.get("listings_scraped_new", 0)
-        totals["updated"] += agg.get("listings_updated", 0)
-        totals["gone"] += agg.get("listings_inactive", 0)
-        totals["errors"] += agg.get("errors", 0)
-        LOG.info(
-            "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d",
-            source, claimable, agg.get("listings_scraped_new", 0),
-            agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
-            agg.get("errors", 0),
-        )
-    _record_pass(state, "drain", totals)
+    last = await asyncio.to_thread(_drain_sync, slice_, disabled, stop_event)
+    _record_pass(state, "drain", last)
 
 
 def _run_images_sync(max_downloads: int) -> dict[str, Any]:
@@ -1245,6 +1368,53 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
     _record_pass(state, "maintenance", last)
 
 
+def _broker_maintenance_sync() -> dict[str, Any]:
+    """One drain-until-empty broker pass on the worker's own connection. Reuses
+    THE script implementation (never forks it); broker_resolution_lock inside
+    run_incremental_pass makes this safe beside the GH cron and the daily full
+    sweep — a concurrent caller returns skipped. In ONE thread holding the lane's pass
+    lock (see _probe_sync). Lazy import keeps scripts.resolve_brokers off the worker's
+    startup path."""
+    if not _BROKER_MAINTENANCE_PASS_LOCK.try_enter():
+        return {"skipped": True, "previous_pass_running": True,
+                "attributed": 0, "brokers": 0, "refreshed": False}
+    try:
+        from scripts.resolve_brokers import run_incremental_pass
+
+        batch_size = _read_maintenance_batch_size()
+        conn = db.connect()
+        try:
+            return run_incremental_pass(conn, batch_size)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _BROKER_MAINTENANCE_PASS_LOCK.release()
+
+
+async def _broker_maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    stats = await asyncio.to_thread(_broker_maintenance_sync)
+    last = {
+        "skipped": bool(stats.get("skipped")),
+        "attributed": stats.get("attributed", 0),
+        "brokers": stats.get("brokers", 0),
+        "refreshed": bool(stats.get("refreshed")),
+    }
+    if stats.get("previous_pass_running"):
+        # _PassLock has already logged the wedge once.
+        last["previous_pass_running"] = True
+    elif last["skipped"]:
+        LOG.info("BROKER lane skipped (resolution lock held by cron or daily sweep)")
+    else:
+        LOG.info(
+            "BROKER lane attributed=%d brokers=%d refreshed=%s",
+            last["attributed"], last["brokers"], last["refreshed"],
+        )
+    _record_pass(state, "broker_maintenance", last)
+
+
 # estimation lane: claim ONE pending run atomically over the transaction pooler.
 # FOR UPDATE SKIP LOCKED (not a session advisory lock — unsound over the pooler,
 # the mig-279 lesson) flips pending->running + stamps claimed_at/worker in one
@@ -1366,28 +1536,20 @@ def _location_resolve_sync() -> dict[str, Any]:
     pass."""
     from location_data.resolver import drain, lease
 
-    global _RESOLVE_SESSION_WARNED, _RESOLVE_LEASE_BUSY_LOGGED
-    global _RESOLVE_WEDGE_LOGGED, _RESOLVE_LAST_IDLE
+    global _RESOLVE_SESSION_WARNED, _RESOLVE_LEASE_BUSY_LOGGED, _RESOLVE_LAST_IDLE
 
     session_pooler = bool(os.environ.get("SUPABASE_DB_SESSION_URL"))
-    if not _RESOLVE_PASS_LOCK.acquire(blocking=False):
+    if not _RESOLVE_PASS_LOCK.try_enter():
         # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its
         # thread is still inside drain.run. Its lease has already expired (the
         # TTL is deliberately shorter, so a DEAD worker frees the lane), so the
         # lease cannot stop us here — this lock is what does. Never touch the
         # lease on this path: acquiring it would hand a second drain the row.
-        if not _RESOLVE_WEDGE_LOGGED:
-            _RESOLVE_WEDGE_LOGGED = True
-            LOG.warning(
-                "LOCATION_RESOLVE lane skipped: the previous pass was abandoned "
-                "and its thread is still draining"
-            )
         return {
             "acquired": False,
             "session_pooler": session_pooler,
             "previous_pass_running": True,
         }
-    _RESOLVE_WEDGE_LOGGED = False
     try:
         max_seconds = _read_location_resolve_max_seconds()
         batch_size = _read_location_resolve_batch_size()
@@ -1578,16 +1740,10 @@ def _location_intake_fast_sync() -> dict[str, Any]:
     run(): a raise is the signal, and _lane_loop records the failed pass."""
     from location_data import claims_intake
 
-    global _INTAKE_FAST_WEDGE_LOGGED, _INTAKE_FAST_LAST_IDLE
+    global _INTAKE_FAST_LAST_IDLE
 
-    if not _INTAKE_FAST_PASS_LOCK.acquire(blocking=False):
-        if not _INTAKE_FAST_WEDGE_LOGGED:
-            _INTAKE_FAST_WEDGE_LOGGED = True
-            LOG.warning(
-                "LOCATION_INTAKE_FAST lane skipped: the previous pass was abandoned and "
-                "its thread is still scanning")
+    if not _INTAKE_FAST_PASS_LOCK.try_enter():
         return {"ran": False, "previous_pass_running": True}
-    _INTAKE_FAST_WEDGE_LOGGED = False
     try:
         conn = db.connect_session()
         try:
@@ -1641,6 +1797,7 @@ def _intake_fast_pass(conn: Any) -> dict[str, Any]:
         # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
         # it would cost more than the drain it measures.
         backlog_readout=False,
+        readings=False,  # the readings half is the hourly run's (its selector's 5 s gate)
         pool=_intake_fast_pool(),
     )
     stats = claims_intake.run(
@@ -1766,17 +1923,13 @@ def _sold_comps_sync() -> dict[str, Any]:
     No lease (the location_refetch lane's reason: one SELECT and a handful of
     idempotent cell writes), but one in-process lock — an abandoned pass has written
     no ledger row, so nothing else can stop the next tick re-walking its cells beside
-    it. `fetch_cell` never raises, so one bad cell costs its own ledger row.
+    it. `fetch_cell` raises only the shared ledger's refusal, which ends the tick; any
+    other bad cell costs its own ledger row.
     """
-    global _SOLD_COMPS_STORE_WARNED, _SOLD_COMPS_WEDGE_LOGGED
+    global _SOLD_COMPS_STORE_WARNED
 
     started = time.monotonic()
-    if not _SOLD_COMPS_PASS_LOCK.acquire(blocking=False):
-        if not _SOLD_COMPS_WEDGE_LOGGED:
-            _SOLD_COMPS_WEDGE_LOGGED = True
-            LOG.warning(
-                "SOLD_COMPS lane skipped: the previous pass was abandoned and its "
-                "thread is still walking cells")
+    if not _SOLD_COMPS_PASS_LOCK.try_enter():
         return {"ran": False, "reason": "previous_pass_running",
                 "seconds": round(time.monotonic() - started, 1)}
     try:
@@ -1793,9 +1946,16 @@ def _sold_comps_sync() -> dict[str, Any]:
                 return {"ran": False, "reason": "store_missing",
                         "seconds": round(time.monotonic() - started, 1)}
             results: list[dict[str, Any]] = []
+            refused = False
             if cells:
-                client = sold_fetch.build_client()
-                results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
+                client = sold_fetch.build_client(max_wait_s=LEDGER_MAX_WAIT_SECONDS)
+                for kod in cells:
+                    try:
+                        results.append(sold_fetch.fetch_cell(conn, client, kod))
+                    except RateBudgetUnavailable:
+                        # Sticky for the client: every later cell would be refused too.
+                        refused = True
+                        break
             return {
                 "ran": True,
                 "cells": len(results),
@@ -1806,6 +1966,7 @@ def _sold_comps_sync() -> dict[str, Any]:
                 # reaches the lane again the heartbeat — not the ledger — is the only
                 # place it can show. Counted so it can never read as a quiet pass.
                 "skipped": sum(1 for r in results if r["status"] == "skipped"),
+                "budget_refused": int(refused),
                 "seconds": round(time.monotonic() - started, 1),
             }
         finally:
@@ -1837,21 +1998,13 @@ def _text_extract_sync() -> dict[str, Any]:
     other lane on this worker needs on the startup path. No try/except around run_pass —
     a raise is the signal, and _lane_loop records the failed pass.
 
-    While every gate in `attribute_contract` is closed the pass returns before it opens a
-    cursor, so this lane is live, visible in the heartbeat and free from the day it ships.
+    With an empty scope the pass returns before it selects anything, so this lane is live,
+    visible in the heartbeat and free from the day it ships.
     """
-    global _TEXT_EXTRACT_WEDGE_LOGGED
-
     from toolkit import description_extraction
 
-    if not _TEXT_EXTRACT_PASS_LOCK.acquire(blocking=False):
-        if not _TEXT_EXTRACT_WEDGE_LOGGED:
-            _TEXT_EXTRACT_WEDGE_LOGGED = True
-            LOG.warning(
-                "TEXT_EXTRACT lane skipped: the previous pass was abandoned and its "
-                "threads are still calling")
+    if not _TEXT_EXTRACT_PASS_LOCK.try_enter():
         return {"claimed": 0, "previous_pass_running": True}
-    _TEXT_EXTRACT_WEDGE_LOGGED = False
     try:
         conn = db.connect()
         try:
@@ -1970,19 +2123,13 @@ def _autodedup_sync() -> dict[str, Any]:
     refusal is caught HERE and recorded as an error, never re-raised. Any other exception is
     the signal, and _lane_loop records the failed pass.
     """
-    global _AUTODEDUP_WEDGE_LOGGED, _AUTODEDUP_STORE_WARNED
+    global _AUTODEDUP_STORE_WARNED
 
     started = time.monotonic()
-    if not _AUTODEDUP_PASS_LOCK.acquire(blocking=False):
+    if not _AUTODEDUP_PASS_LOCK.try_enter():
         # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its thread still
         # holds its connection. The engine's own deadline makes that a short window.
-        if not _AUTODEDUP_WEDGE_LOGGED:
-            _AUTODEDUP_WEDGE_LOGGED = True
-            LOG.warning(
-                "AUTODEDUP lane skipped: the previous pass was abandoned and its thread is "
-                "still running")
         return _autodedup_outcome(started, skipped="previous_pass_running")
-    _AUTODEDUP_WEDGE_LOGGED = False
     try:
         from autodedup import incremental_lane
 
@@ -1997,7 +2144,11 @@ def _autodedup_sync() -> dict[str, Any]:
                 return _autodedup_outcome(started, skipped="store_absent")
             _AUTODEDUP_STORE_WARNED = False
             try:
-                summary = incremental_lane.run_incremental(lambda: conn)
+                summary = incremental_lane.run_incremental(
+                    lambda: conn,
+                    fresh_conn=lambda: db.connect(
+                        attempts=1,
+                        connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS))
             except SystemExit as exc:
                 return _autodedup_outcome(started, refused=str(exc))
             return _autodedup_outcome(started, summary=summary)
@@ -2064,38 +2215,108 @@ def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     `in_flight_s` is computed HERE rather than left to the reader: it is the one
     number that separates "this lane is working" from "this lane is wedged", and
     a value only derivable by arithmetic over an ISO string is a value nothing
-    will alarm on.
+    will alarm on. A lane whose pass lock is still held by an abandoned pass is in
+    flight since that pass began (see _PASS_LOCKS_HELD).
     """
-    now = datetime.now(timezone.utc)
+    now, mono = datetime.now(timezone.utc), time.monotonic()
+    held = dict(_PASS_LOCKS_HELD)
     out: dict[str, Any] = {}
     for lane, info in lanes.items():
         entry = dict(info)
-        started = entry.get("started_at")
-        elapsed: float | None = None
-        if started:
-            with contextlib.suppress(ValueError):
-                elapsed = round((now - datetime.fromisoformat(started)).total_seconds(), 1)
-        entry["in_flight_s"] = elapsed
+        ages = [mono - held[lane]] if lane in held else []
+        with contextlib.suppress(TypeError, ValueError):
+            ages.append((now - datetime.fromisoformat(entry.get("started_at"))).total_seconds())
+        entry["in_flight_s"] = round(max(ages), 1) if ages else None
         out[lane] = entry
     return out
 
 
 def _beat_sync(state: dict[str, Any]) -> None:
-    conn = db.connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(_HEARTBEAT_SQL, {
-                "worker": WORKER_NAME,
-                "started_at": state["started_at"],
-                "details": Jsonb(_lane_snapshot(state["lanes"])),
-            })
+        conn = db.connect(attempts=1, connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_SECONDS)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_HEARTBEAT_SQL, {
+                    "worker": WORKER_NAME,
+                    "started_at": state["started_at"],
+                    "details": Jsonb(_lane_snapshot(state["lanes"])),
+                })
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
     finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+        state["beat_done_at"] = time.monotonic()
 
 
 async def _heartbeat_pass(state: dict[str, Any]) -> None:
     await asyncio.to_thread(_beat_sync, state)
+
+
+def _arm_exit_backstop(seconds: float) -> None:
+    # faulthandler's timer thread takes no GIL and calls _exit(1) itself: it ends a
+    # process whose Python threads are all stopped, and as PID 1, where the kernel drops
+    # a default-action signal. It dumps to /dev/null: it fires only when the dump to
+    # stderr is stuck, and a second write into that pipe would block the timer too.
+    faulthandler.dump_traceback_later(
+        seconds, exit=True, file=os.open(os.devnull, os.O_WRONLY))
+
+
+def _watchdog(
+    state: dict[str, Any],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    exit_: Callable[[int], None] = os._exit,
+    arm_backstop: Callable[[float], Any] = _arm_exit_backstop,
+) -> None:
+    """Exit the process once no heartbeat pass has FINISHED for LIVENESS_BOUND_SECONDS,
+    or once a pass lock has been held for PASS_LOCK_BOUND_SECONDS.
+
+    Runs on its own daemon thread, so it needs neither the event loop nor an executor,
+    the two things a freeze takes down. os._exit, never sys.exit: a normal exit joins
+    every executor thread, and a thread asleep inside a portal call never returns. A
+    faulthandler timer armed before the dump exits even if the dump holds the GIL."""
+    while True:
+        sleep(HEARTBEAT_INTERVAL_SECONDS)
+        now = clock()
+        silent = now - state["beat_done_at"]
+        wedged = sorted(
+            lane for lane, at in dict(_PASS_LOCKS_HELD).items()
+            if now - at >= PASS_LOCK_BOUND_SECONDS)
+        if silent < LIVENESS_BOUND_SECONDS and not wedged:
+            continue
+        why = (
+            f"pass lock of {','.join(wedged)} held over {PASS_LOCK_BOUND_SECONDS}s" if wedged
+            else f"no heartbeat pass finished for {silent:.0f}s "
+                 f"(bound {LIVENESS_BOUND_SECONDS:.0f}s)")
+
+        def last_words() -> None:
+            # faulthandler writes holding the GIL: on a full stderr pipe a blocking write
+            # would stop every thread, this watchdog's join and exit included. EAGAIN
+            # instead; the dump may then be cut short, the exit is not.
+            with contextlib.suppress(Exception):
+                os.set_blocking(sys.stderr.fileno(), False)
+            LOG.critical(
+                "WATCHDOG %s; dumping every thread's stack to stderr and exiting so "
+                "Railway restarts the worker", why,
+            )
+            faulthandler.dump_traceback(all_threads=True)
+
+        # The backstop if the dump still holds the GIL (the join below and exit_ both
+        # need it): the timer _exits and Railway's restartPolicy ALWAYS starts a new one.
+        # Nothing before the exit may keep it from running: arming the timer or starting
+        # the speaker can itself fail (an exhausted fd table or thread limit at the
+        # moment of the wedge), and a watchdog that raised instead of exiting would leave
+        # the very freeze it exists to end.
+        try:
+            with contextlib.suppress(Exception):
+                arm_backstop(WATCHDOG_LAST_WORDS_SECONDS + 5)
+            speaker = threading.Thread(target=last_words, name="rt-watchdog-dump", daemon=True)
+            speaker.start()
+            speaker.join(WATCHDOG_LAST_WORDS_SECONDS)
+        finally:
+            exit_(1)
+        return
 
 
 # --- the supervisor -----------------------------------------------------------
@@ -2154,8 +2375,10 @@ async def _lane_loop(
             #
             # Honest limit: a pass that is blocked inside asyncio.to_thread keeps
             # running after the cancellation -- Python cannot kill a thread. This
-            # frees the LANE, and a leak shows up as repeated timeouts on the same
-            # lane, which is itself the diagnosis we currently lack.
+            # frees the LANE, not the thread: the eight lanes with a _PassLock leak at
+            # most one each and stay in flight in the heartbeat while it lives; a lane
+            # without one leaks a thread per abandoned pass, and if those fill the
+            # executor the heartbeat stops and the watchdog restarts the process.
             await asyncio.wait_for(run_pass(), timeout=LANE_PASS_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             LOG.error(
@@ -2202,7 +2425,11 @@ async def _supervised(
 
 
 def _new_state() -> dict[str, Any]:
-    return {"started_at": datetime.now(timezone.utc), "lanes": {}}
+    # beat_done_at starts at boot, so a worker that never finishes a first beat exits too.
+    return {
+        "started_at": datetime.now(timezone.utc), "lanes": {},
+        "beat_done_at": time.monotonic(),
+    }
 
 
 async def _amain() -> int:
@@ -2212,8 +2439,11 @@ async def _amain() -> int:
         # Railway sends SIGTERM on redeploy; finish the current pass, then exit.
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_event.set)
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=LANE_EXECUTOR_THREADS))
 
     state = _new_state()
+    threading.Thread(
+        target=_watchdog, args=(state,), name="rt-watchdog", daemon=True).start()
     LOG.info(
         "realtime worker starting sources=%s probe_pages=%d",
         ",".join(REALTIME_SOURCES), PROBE_PAGES,
@@ -2242,6 +2472,11 @@ async def _amain() -> int:
         ("maintenance", lambda: _lane_loop(
             "maintenance", stop_event, _read_maintenance_interval,
             lambda: _maintenance_pass(stop_event, state),
+            state,
+            default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
+        ("broker_maintenance", lambda: _lane_loop(
+            "broker_maintenance", stop_event, _read_maintenance_interval,
+            lambda: _broker_maintenance_pass(stop_event, state),
             state,
             default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
         ("estimation", lambda: _lane_loop(

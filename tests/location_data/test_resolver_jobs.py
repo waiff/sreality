@@ -416,7 +416,7 @@ def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
     the 10,679 active orphans the 2026-09-11 audit measured. The row states "nothing to go
     on" so coverage can count it (rule 25)."""
     slice_ = drain._Slice(claims={}, sources={4242: "remax"})
-    item = drain._compute_one(4242, mm.context(), REGISTRY, slice_, dry_run=False)
+    item = drain._compute_one(4242, mm.context(), REGISTRY, slice_)
     assert item is not None
     assert item.listing_id == 4242 and item.source == "remax"
     assert item.country_status == "undetermined"
@@ -425,6 +425,20 @@ def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
     # ...and it is a WRITEABLE row, not a sentinel the upsert would reject.
     row = projection.build_listing_row(item)
     assert set(row) == set(projection.ROW_PARAMS)
+
+
+def test_the_dry_run_counts_what_a_rule_change_does_to_the_stored_row():
+    """`--dry-run` (v5.5) compares a re-resolution with the row it would replace, per portal:
+    town, part, numbers gained/lost, a move beyond 300 m, and the granularity by direction."""
+    from collections import Counter
+
+    new = core.resolve([mm.claim(1, "obec_name", value_text="Praha")], mm.context(),
+                       resolver_version="v", registry_version=REGISTRY)
+    counts: Counter[str] = Counter()
+    drain._tally(counts, (1, 599212, 490067, "8", "street", 50.3, 14.4), new)
+    drain._tally(counts, (2, 554782, None, None, "obec", new.lat, new.lon), new)
+    assert counts == Counter({"n": 2, "town": 1, "part": 1, "number_lost": 1,
+                              "moved_300m": 1, "granularity": 1, "street>obec": 1})
 
 
 # --------------------------------------------------- the claim projection, positionally
@@ -455,12 +469,12 @@ def test_the_claims_select_maps_onto_claim_positionally():
         "id", "listing_id", "source", "claim_type", "surface", "extraction_method",
         "licence_class", "first_observed_at", "value_text", "value_num", "st_y", "st_x",
         "value_jsonb", "declared_precision_label", "declared_radius_m", "blur_evidence",
-        "claim_confidence", "subject_scoped",
+        "subject_scoped",
     ], labels
 
     row = (11, 22, "sreality", "street_name", "api_json", "portal_structured_field",
            "portal", mm._T0, "Dlouhá", 3.5, 50.1, 14.4, {"k": "v"}, "exact_address",
-           25.0, "declared", "high", True)
+           25.0, "declared", True)
     assert len(row) == len(labels)
     claim = resolve_db._claim(row)
 
@@ -474,11 +488,8 @@ def test_the_claims_select_maps_onto_claim_positionally():
     assert claim.value_jsonb == {"k": "v"}
     assert claim.declared_precision_label == "exact_address"
     assert claim.declared_radius_m == 25.0
-    assert (claim.blur_evidence, claim.claim_confidence) == ("declared", "high")
+    assert claim.blur_evidence == "declared"
     assert claim.subject_scoped is True
-    # The six the pure core never read keep their names and their defaults (W1-b).
-    assert (claim.extractor_id, claim.declared_confidence, claim.page_kind) == ("", None, "none")
-    assert (claim.snapshot_id, claim.distance_m, claim.target_text) == (None, None, None)
 
     # A NULL geometry must not become 0.0 — the resolver's `has_position` reads both.
     assert resolve_db._claim(row[:10] + (None, None) + row[12:]).has_position is False

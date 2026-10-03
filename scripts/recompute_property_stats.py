@@ -55,7 +55,8 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from scraper import db
@@ -69,7 +70,12 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
     raise SystemExit(143)
 
 
-_STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL"
+# One attach handles at most this many births (a pass, or one turn of the full sweep's loop):
+# all nine portals land new rows NULL, so a backlog after a worker freeze must not birth,
+# recompute and browse-sync everything in one transaction. No ORDER BY, so the planner keeps
+# listings_property_id_idx; NEW_SINGLETONS_SQL sorts the ids anyway.
+STRAGGLER_BATCH = 2000
+_STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL LIMIT %(limit)s"
 
 _RECOMPUTE_BATCH_SQL = f"""
     WITH batch AS (
@@ -214,15 +220,16 @@ _RECOMPUTE_BATCH_SQL = f"""
 
 # Single-property recompute, derived from the batch SQL by narrowing the `batch`
 # CTE to one id. Deriving it (rather than re-writing the body) guarantees the
-# inline merge recompute and the hourly batch can never drift apart.
+# ingest birth's recompute and the batch can never drift apart.
 _RECOMPUTE_ONE_SQL = _RECOMPUTE_BATCH_SQL.replace(
     "SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s",
     "SELECT id FROM properties WHERE id = %(pid)s",
 )
 
 # Dirty-set recompute (Phase 3), derived the same way: the batch CTE is scoped to
-# an explicit id array instead of an id range, so the incremental job recomputes
-# exactly the queued properties with the identical body (never drifts from full).
+# an explicit id array instead of an id range, so `properties_changed` (the drain,
+# the identity writers) and straggler-attach recompute exactly their properties
+# with the identical body (never drifts from full).
 _RECOMPUTE_SCOPED_SQL = _RECOMPUTE_BATCH_SQL.replace(
     "SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s",
     "SELECT id FROM properties WHERE id = ANY(%(ids)s)",
@@ -263,8 +270,8 @@ _CLEAR_DIRTY_SWEPT_SQL = (
 
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
-# property drops out of the UPDATE and keeps stale columns -- merge_properties
-# sets the loser is_active=false explicitly, but this guards the general case
+# property drops out of the UPDATE and keeps stale columns -- the merge's retire
+# (`toolkit.property_identity._RETIRE_SQL`) sets the loser is_active=false, but this guards the general case
 # (a partially-failed merge, or any childless active property) so Browse never
 # shows a ghost active dot.
 _RECONCILE_CHILDLESS_SQL = """
@@ -298,23 +305,74 @@ _STAMP_SWEEP_COMPLETE_SQL = """
 def recompute_one(conn: Any, property_id: int) -> None:
     """Recompute one property's rollup + stats using the batch job's exact SQL.
 
-    No transaction wrapper, so it nests inside a caller's open transaction
-    (e.g. the inline survivor recompute in toolkit.property_identity.merge_properties).
+    No transaction wrapper, so it nests inside a caller's open transaction. Its one caller is
+    the ingest birth (`scraper.db._ensure_property`); the identity writers and the dirty drain
+    use `properties_changed`.
     """
     with conn.cursor() as cur:
         cur.execute(_RECOMPUTE_ONE_SQL, {"pid": property_id})
 
 
-def _run_recompute_statement(conn: Any, sql: str, params: dict[str, Any]) -> None:
-    """One recompute statement under the raised per-statement ceiling.
+# Every advert of these properties that a broker is attributed to, queued for the broker drain
+# (Broker Unify W3): `brokers.property_count` / `active_property_count` key on the advert's
+# property, so a recompute, a merge or a detach changes them. Stamped clock_timestamp(), not
+# now(): this runs inside the writer's (or the slice's) transaction, whose now() is its START.
+# A broker pass whose cutoff falls inside that transaction would otherwise read the pre-move
+# listings.property_id and then, once we commit, its `marked_at <= cutoff` dequeue would still
+# match our re-stamp and drop it — that broker's counts stale until the daily sweep. Statement
+# time narrows the window to the gap between this statement and the commit.
+_MIRROR_BROKER_DIRTY_SQL = (
+    "INSERT INTO dirty_broker_listings (listing_id, marked_at) "
+    "SELECT l.id, clock_timestamp() FROM listings l "
+    "WHERE l.property_id = ANY(%(ids)s) AND l.broker_identity_id IS NOT NULL "
+    "ON CONFLICT (listing_id) DO UPDATE SET marked_at = clock_timestamp()"
+)
 
-    Explicit transaction so SET LOCAL takes effect (it silently no-ops in
-    autocommit); the transaction spans exactly this one statement, so the
-    batch-commits-independently crash-safety property is unchanged."""
+
+def properties_changed(conn: Any, property_ids: Iterable[int]) -> None:
+    """Make what is derived from these properties true now, inside the caller's transaction: the
+    rollup (the sweep's own body, scoped), their Browse rows, and their attributed adverts queued
+    for the broker drain. THE after-step of the dirty drain and of both identity writers
+    (`toolkit.property_identity`); it opens no transaction, sets no ceiling and never enqueues
+    `dirty_properties` (the drain calls it on ids it is about to dequeue).
+
+    The order is load-bearing: `browse_projection` reads the recomputed `properties` row, and the
+    broker mirror selects adverts by their property AFTER the writer moved them. The Browse patch
+    is best-effort (`sync_browse_list` unwinds only itself) and a fast path, not a guarantee:
+    without it a recompute waited a measured mean 11.7 min (worst 36.6) for the */15 wholesale
+    rebuild, and a patch committed while a rebuild is in flight (~26% of wall-clock) lands on the
+    doomed table and is superseded silently. A full drain slice (2000 ids, only after a backlog;
+    the live depth is a couple of dozen) costs ~100-270 ms of ROW EXCLUSIVE on `browse_list`, the
+    lock the rebuild's drop waits behind. That is the uncontended cost. The rebuild's drop runs
+    with lock_timeout 0, so it queues behind any in-flight `browse_list` reader (up to 120 s on
+    the API role), and the patch queues behind it while the caller still holds these
+    properties' row locks; a merge or split of one of them waits too. The drain bounds that wait
+    (`_DRAIN_LOCK_TIMEOUT`); the identity writers inherit their caller's lock_timeout.
+    """
+    ids = sorted({int(p) for p in property_ids if p is not None})
+    if not ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(_RECOMPUTE_SCOPED_SQL, {"ids": ids})
+    sync_browse_list(conn, ids)
+    with conn.cursor() as cur:
+        cur.execute(_MIRROR_BROKER_DIRTY_SQL, {"ids": ids})
+
+
+@contextmanager
+def _bounded(conn: Any) -> Iterator[None]:
+    """A transaction under the batch ceiling (SET LOCAL no-ops in autocommit)."""
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL statement_timeout = '{_BATCH_STATEMENT_TIMEOUT}'")
-            cur.execute(sql, params)
+        yield
+
+
+def _run_recompute_statement(conn: Any, sql: str, params: dict[str, Any]) -> None:
+    """One recompute statement in its own `_bounded` transaction, so each batch still commits
+    independently (a killed sweep keeps every finished batch)."""
+    with _bounded(conn), conn.cursor() as cur:
+        cur.execute(sql, params)
 
 
 def _reconcile_childless(conn: Any) -> int:
@@ -331,19 +389,21 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
         yield lo, lo + batch_size
 
 
-def _attach_stragglers(conn: Any) -> int:
-    """Give every property_id-NULL listing its own singleton property, recomputed at birth.
+def _attach_stragglers(conn: Any, limit: int = STRAGGLER_BATCH) -> int:
+    """Give up to `limit` property_id-NULL listings their own singleton, recomputed and browse-synced at birth.
     No cross-listing matching happens here, ever (CLAUDE.md rule 15)."""
     # Birth, link and first recompute in ONE transaction: a replay after a failure (db.
     # run_resilient replays this op) finds the stragglers still unlinked, never a linked bare
-    # row that Browse could show before its recompute.
+    # row that Browse could show before its recompute. The browse patch is best-effort in its
+    # own savepoint (sync_browse_list), so it can never abort the birth.
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute(_STRAGGLERS_SQL)
+            cur.execute(_STRAGGLERS_SQL, {"limit": limit})
             stragglers = [int(r[0]) for r in cur.fetchall()]
         born = db.create_singleton_properties(conn, stragglers) if stragglers else []
         if born:
             _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": born})
+            sync_browse_list(conn, born)
     return len(born)
 
 
@@ -396,16 +456,27 @@ def _bind_pending_estimation_listing_ids(conn: Any, *, limit: int = 5000) -> int
         return cur.rowcount or 0
 
 
+# The drain slice's ceiling on any one lock wait. Its Browse patch can queue behind a */15
+# rebuild's swap, holding the slice's `properties` row locks (properties_changed's docstring),
+# and the slice is mostly recently-dirtied properties — the ones the autodedup lane (5 s
+# lock_timeout) and a split (5 s, busy 409) are likeliest to touch. A patch that times out
+# unwinds only its savepoint and the next rebuild carries the row; a recompute that times out
+# rolls the slice back and the next pass replays it. Drain only: the full sweep and the
+# straggler attach share `_bounded` and keep the session default.
+_DRAIN_LOCK_TIMEOUT = "5s"
+
+
 def _drain_dirty(
     conn: Any, batch_size: int, cutoff: Any,
     renew: Any = None,
 ) -> int:
-    """Recompute every property queued at/before `cutoff`, scoped + batched.
+    """Bring every property queued at/before `cutoff` current, one claimed slice at a time.
 
-    Crash-safe under autocommit: recompute then delete per batch, so an
-    interrupted run simply re-recomputes (idempotent) on the next pass. Always
-    terminates -- only rows with marked_at <= cutoff are claimable, the delete
-    removes the claimed ones, and a row re-dirtied mid-run moves past the cutoff.
+    Each slice runs `properties_changed` (recompute, Browse patch, broker queue) in ONE
+    `_bounded` transaction under `_DRAIN_LOCK_TIMEOUT`, then dequeues: a crash between the two
+    replays the slice, and every statement is idempotent. Always terminates -- only rows with
+    marked_at <= cutoff are claimable, the delete removes the claimed ones, and a row re-dirtied
+    mid-run moves past the cutoff.
 
     `renew` (a zero-arg callable) is invoked once per claimed slice so a long
     drain — e.g. the backlog after a maintenance freeze, or the nine-portal
@@ -422,25 +493,10 @@ def _drain_dirty(
         if not claimed:
             break
         ids = [int(r[0]) for r in claimed]
-        _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": ids})
-        # Browse reads `browse_list`, not `properties`, and pg_cron rebuilds it
-        # wholesale only every 15 min — so without this a recompute reached Browse
-        # a measured 11.7 min later on average (94 rebuilds / 24 h: best 2.3,
-        # worst 36.6). Patching here, the one place that knows which properties
-        # just changed, puts it on this lane's own cadence instead. Ordered BEFORE
-        # the dirty delete so a crash between the two replays both.
-        # A FAST PATH, not a guarantee, and two costs worth knowing. (i) The rebuild
-        # snapshots `browse_projection` into `browse_list_next` at its START and
-        # renames at its END, so a patch committed inside that window lands on the
-        # doomed table and is superseded WITHOUT erroring (nothing logs): 283
-        # succeeded rebuilds / 72 h, mean 237 s against a 900 s cadence = in flight
-        # ~26% of wall-clock, so the seen-to-Browse gain is bimodal, not a flat
-        # ~2 min. (ii) A full slice is not free: `batch_size` defaults to 2000 (the
-        # GH cron passes exactly that) and the SELECT half alone is ~100 ms warm /
-        # ~270 ms cold over ~23k buffers, holding ROW EXCLUSIVE on `browse_list` —
-        # the one lock the rebuild's `drop table` waits behind. The live dirty depth
-        # is a couple of dozen; only a post-freeze backlog claims a full slice.
-        sync_browse_list(conn, ids)
+        with _bounded(conn):
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL lock_timeout = '{_DRAIN_LOCK_TIMEOUT}'")
+            properties_changed(conn, ids)
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
@@ -639,9 +695,9 @@ def _release_lease(conn: Any, holder: str,
 def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
-    maintenance lane: attach new stragglers + recompute the dirty set + patch `browse_list` for exactly the
-    properties it recomputed, so a change reaches Browse on this lane's cadence
-    rather than at the next */15 wholesale rebuild.
+    maintenance lane: attach new stragglers, then bring the dirty set current through
+    `properties_changed` (recompute, `browse_list` patch, broker queue), so a change reaches
+    Browse on this lane's cadence rather than at the next */15 wholesale rebuild.
     Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally
@@ -802,7 +858,13 @@ def main() -> int:
             # own, and nothing has been done yet when it fails.
             _wait_lease(conn, holder, _LEASE_TTL)
             # attempts=2, like sweep.batch: a doomed attach reds in ~4 min instead of ~8.
-            attached = step(_attach_stragglers, "sweep.attach", attempts=2)
+            # Bounded batches until one comes back short: each is its own transaction.
+            attached = 0
+            while True:
+                batch = step(_attach_stragglers, "sweep.attach", attempts=2)
+                attached += batch
+                if batch < STRAGGLER_BATCH:
+                    break
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
             budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)

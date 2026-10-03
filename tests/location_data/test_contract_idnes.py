@@ -9,8 +9,8 @@ contract actually makes.
 
 It absorbs `test_contract_idnes_activation.py` (deleted with idnes@2's entry set, W1-c R14):
 the junk-pin and CZ-envelope rails, the id-matched subject selection, the licence ladder and
-the Mapy veto, the anonymiser regression on the repo's real capture, and the evidence-span
-promise all live on here against the entries that replaced it.
+the Mapy veto and the anonymiser regression on the repo's real capture all live on here
+against the entries that replaced it.
 
 Five committed bodies, and the differences between them are the point:
   * `location_w2/idnes_detail.html` — the pinned page the golden scores; modelled on this
@@ -122,17 +122,15 @@ def resolver_claim(claim: Any) -> ResolverClaim:
         id=1, listing_id=1, source="idnes", claim_type=claim.claim_type,
         surface="archived_html", extraction_method=claim.extraction_method,
         licence_class=claim.licence_class, observed_at=CLOCK, value_text=claim.value_text,
-        subject_scoped=claim.subject_scoped, extractor_id=claim.extractor_id)
+        subject_scoped=claim.subject_scoped)
 
 
 def row(native: str = NATIVE) -> ListingRow:
     return fx.listing("idnes", {}, native=native)
 
 
-def payload(body: bytes, native: str = NATIVE) -> ArchivedPayload:
-    return ArchivedPayload(
-        id=9001, source="idnes", source_id_native=native, page_kind="detail",
-        payload_sha256="ab" * 32, first_observed_at=CLOCK, body=body)
+def payload(body: bytes) -> ArchivedPayload:
+    return ArchivedPayload(id=9001, page_kind="detail", first_observed_at=CLOCK, body=body)
 
 
 def register() -> ScopeRegister:
@@ -149,7 +147,7 @@ def scoped(body: bytes | str) -> ScopedDocument:
 
 def read(entry_id: str, document: ScopedDocument, *, native: str = NATIVE) -> list[Any]:
     item = entry(entry_id)
-    return PAGE_READERS[str(item.reader)](item, row(native), payload(b"", native), document)
+    return PAGE_READERS[str(item.reader)](item, row(native), payload(b""), document)
 
 
 def one_claim(entry_id: str, document: ScopedDocument, *, native: str = NATIVE) -> Any:
@@ -278,43 +276,21 @@ def test_the_three_conditional_entries_claim_nothing_on_a_czech_line_without_a_n
     assert read(entry_id, scoped(_PINNED.read_bytes())) == []
 
 
-@pytest.mark.parametrize("entry_id", [
-    "id.det.subject_feature", "id.det.no_exact_disclaimer", "id.det.kraj", "id.det.okres",
-    "id.det.obec", "id.det.cast_obce", "id.det.street",
-])
-def test_every_evidence_quote_resolves_to_a_real_span(entry_id: str) -> None:
-    """An `evidence_quote` is a promise the payload contains that text (01 §4.2 pairs it with
-    `payload_sha256`). Migration 382's CHECK only tests that the quote is a substring, so a
-    span pointing at the WRONG occurrence still passes — slicing it back is what makes the
-    promise real."""
-    document = scoped(_PINNED.read_bytes())
-    claim = one_claim(entry_id, document)
-    assert claim.span_start is not None and claim.span_end is not None, entry_id
-    assert document.html[claim.span_start:claim.span_end] == claim.evidence_quote
-
-
-def test_the_coordinate_quotes_the_array_and_not_the_thirteen_kilobyte_config() -> None:
-    """"lat,lon" is assembled by the reader and appears nowhere in the body, and the node it
-    came from is a whole map config. An evidence quote rides in the same jsonb array as the
-    claim and is counted by `archived_claim_value_bytes`, so quoting the blob would put tens
-    of KB on every idnes coordinate claim."""
+def test_the_coordinate_is_the_subject_features_geojson_point() -> None:
     claim = one_claim("id.det.subject_feature", scoped(_PINNED.read_bytes()))
-    assert claim.evidence_quote == "[15.31331632, 50.74437214]"
     assert claim.value_geom_wkt == "POINT(15.31331632 50.74437214)"
 
 
 def test_the_disclaimer_claims_the_contracts_label_and_declares_blur() -> None:
-    """The claim's VALUE is this contract's canonical label and its EVIDENCE is the portal's
-    verbatim sentence — two different fields for exactly this case, so a reworded sentence
-    stops matching instead of silently restating a different fact under the same label. W1-c
-    R5: on a `precision_declaration` the stamped label IS the value, whatever the reader."""
+    """The claim's VALUE is this contract's canonical label, never the portal's sentence, so a
+    reworded sentence stops matching instead of silently restating a different fact under the
+    same label. W1-c R5: on a `precision_declaration` the stamped label IS the value, whatever
+    the reader."""
     document = scoped(_PINNED.read_bytes())
     claim = one_claim("id.det.no_exact_disclaimer", document)
     assert claim.value_text == "no_exact_address"
     assert claim.blur_evidence == "declared"
-    assert claim.evidence_quote == DISCLAIMER
-    stamped = stamp_page_claim(claim, payload(_PINNED.read_bytes()),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(claim, payload(_PINNED.read_bytes()))
     assert stamped.declared_precision_label == "no_exact_address"
 
 
@@ -337,7 +313,7 @@ def test_the_town_extracts_from_every_committed_idnes_body(
     """Rule 25's invariant, measured rather than asserted: every committed body of this
     portal — modelled, real, blurred, Prague — yields its town through the lane's own entry
     point, with the scoper, the page-kind filter and both evidence validators applied."""
-    result = extract_page(payload(path.read_bytes(), native), row(native),
+    result = extract_page(payload(path.read_bytes()), row(native),
                           fx.entries_for("idnes"), register=register())
     towns = [c.value_text for c in result.claims if c.claim_type == "obec_name"]
     assert towns == [town]
@@ -558,7 +534,7 @@ def test_a_subject_miss_costs_only_the_id_matched_entries() -> None:
     whatever body the archive handed them — which is sound because a payload row is keyed
     (source, source_id_native) and the line is the subject's own header block, and is why
     they declare `subject_scoped: true` explicitly."""
-    result = extract_page(payload(_PINNED.read_bytes(), native="999999"), row("999999"),
+    result = extract_page(payload(_PINNED.read_bytes()), row("999999"),
                           fx.entries_for("idnes"), register=register())
     assert sorted(c.extractor_id for c in result.claims) == [
         "id.det.no_exact_disclaimer", "id.det.okres", "id.det.street"]
@@ -645,8 +621,7 @@ def test_the_pin_branch_is_licensed_portal_by_the_ladder_not_by_the_reader() -> 
     document = scoped(_PINNED.read_bytes())
     reads = read("id.det.subject_feature", document)
     assert reads[0].position_branch == "portal_pin"
-    stamped = stamp_page_claim(reads[0].claim, payload(_PINNED.read_bytes()),
-                               scope_version=document.scope_version)
+    stamped = stamp_page_claim(reads[0].claim, payload(_PINNED.read_bytes()))
     licensed, reason = _licensed_coordinate(
         stamped, row(), entry("id.det.subject_feature"), reads[0].position_branch)
     assert licensed is not None

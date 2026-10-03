@@ -589,6 +589,24 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       token IS the auth, renders for logged-out recipients) inserts a `source='unsubscribe'`
       suppression on the one-click POST. Both env vars optional → the header is omitted and no
       token verifies when unconfigured (dark-safe). Tests `test_unsubscribe`.
+    - **Owed (found 2026-10-01) — the Watchdog "Run estimation" kickoff forks the estimation
+      ledger (rule #12).** `POST /notifications/dispatches/{id}/estimate`
+      (`api/routes/notifications.py` `post_kickoff_estimate`) never calls `create_estimation_run`: it
+      hand-INSERTs the row (`api/notifications.py` `_insert_pending_run`, `_insert_failed_run`) and
+      runs its own executor (`run_pending_estimation`). Compared with the shared path, it skips the
+      `TraceRecorder` (its `estimate_yield` call passes none, so the trace stays the hand-copied
+      `version: 2` "queued from watchdog notification" stub — no steps, no
+      `estimation_trace_payloads`), the `reference_rent` column (`api/estimation_runs.py:1116`),
+      the `estimation_job_lane_enabled` worker lane (always an in-process BackgroundTask,
+      `api/routes/notifications.py:231`) and any account resolution (rows take the column
+      DEFAULT, SYSTEM — `migrations/291_estimation_building_runs_account_id.sql:13-15`). Fix:
+      route the kickoff through `create_estimation_run` — which first needs a `listing_id`
+      input (`CreateEstimationIn` takes only `url`/`spec`/`sreality_id`, the same gap that keeps
+      Browse estimates sreality-only, `docs/architecture.md` § rule 12) — then delete
+      `_insert_pending_run` / `_insert_failed_run` / `run_pending_estimation`. Deterministic runs
+      are unmetered, so the fold changes no quota. The second fork, `scripts/smoke_agent.py`'s
+      hand INSERT (`source='api'`, `mode='agent'`, one production row per manual
+      `smoke_agent.yml` run), is owed the same fold or an explicit manual-smoke sanction.
     - **Remaining Wave 3 — operator / product / legal-gated (NOT started, surfaced as decisions):**
       (a) **Resend go-live** — operator provisions a Resend account + verified sending domain +
       DNS (SPF/DKIM/DMARC) + `RESEND_WEBHOOK_SECRET`/`NOTIFICATION_UNSUB_SECRET`/`API_PUBLIC_URL`,
@@ -602,6 +620,30 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       multi-dispatch claim) — depends on (b). (e) **Launch gate:** cross-tenant audit of the three
       tables + webhook + unsubscribe, GDPR sign-off, a deliverability check, and a matcher-pass load
       check at target sub count.
+11. **OWED (security, found 2026-10-01): `require_token` routes that are account-blind — an
+    open list.** **DONE 2026-10-02 — the three estimation routes:** `GET
+    /estimations/{run_id}/trace/{step_n}/payload` and `GET` + `POST /estimations/{run_id}/feedback`
+    ran service-role behind the SPA-bundle `VITE_API_TOKEN` alone, so any holder could read any
+    account's trace payloads and post feedback on any run (by default spending refiner LLM credit).
+    The two reads now take `tenant_pool.tenant_conn` (no `require_token`): RLS-only (migration 292
+    on `estimation_trace_payloads` / `estimation_feedback`), a foreign run 404s and the static token
+    401s. `POST` takes `verify_jwt` and opens a SHORT `tenant_pool.tenant_transaction`: a strict
+    probe of the run (404 before any write; a non-admin must OWN the run, since a note on a SYSTEM
+    run would be stamped SYSTEM and readable by every account) plus the note's `INSERT`, committed.
+    The refiner is admin-only (unmetered LLM spend, and its row carries the platform skill prompt;
+    a non-admin's `kick_off_refinement` stores the note as `submitted`) and runs afterwards on a
+    service-role connection, so no tenant transaction sits open across the LLM call. Doctrine:
+    the `database` skill's `references/tenancy.md`, named exception. SPA `getTracePayload` /
+    `listEstimationFeedback` / `submitEstimationFeedback` send `jwt: true`. Census:
+    `tests/api/test_admin_route_coverage.py`;
+    behaviour: `tests/api/test_estimation_child_routes_tenancy.py`. **Still owed, same shape:**
+    `/filter-presets*` (`api/routes/filter_presets.py` → `api/filter_presets.py` `list_presets`
+    selects every row; `filter_presets` is account-scoped with RLS since migration 290),
+    `/buildings*` (`api/main.py` `get_buildings` → `list_building_runs`, no account filter;
+    `building_runs` tenant RLS since migration 291) and `POST /notifications/dispatches/{id}/estimate`
+    (`api/routes/notifications.py` `post_kickoff_estimate` returns any account's dispatch row and
+    starts a run for it). Then sweep the remaining `require_token` routes the SPA calls for the
+    same shape (CLAUDE.md § Territories: the static bearer may gate only "loaded the SPA").
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

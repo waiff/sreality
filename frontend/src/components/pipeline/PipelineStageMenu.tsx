@@ -53,7 +53,8 @@ export default function PipelineStageMenu({
     staleTime: 60_000,
   });
   const stages = useMemo(() => stagesQ.data ?? [], [stagesQ.data]);
-  const { move, remove, pending } = usePipelineCard(property_id, { cohortScoped });
+  const { move, remove, pending: pendingFor } = usePipelineCard({ cohortScoped });
+  const pending = pendingFor(property_id);
   const [confirming, setConfirming] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -91,7 +92,7 @@ export default function PipelineStageMenu({
 
   const moveTo = (stage: PipelineStage) => {
     if (stage.id === stageId || pending) return;
-    move.mutate(stage.id);
+    move.mutate({ propertyId: property_id, stageId: stage.id });
     onClose();
   };
 
@@ -190,7 +191,7 @@ export default function PipelineStageMenu({
                   autoFocus
                   disabled={pending}
                   onClick={() => {
-                    remove.mutate();
+                    remove.mutate(property_id);
                     onClose();
                   }}
                   className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[0.72rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 disabled:opacity-50"

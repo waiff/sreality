@@ -1135,6 +1135,34 @@ def get_estimation_run(
     return _fetch_run(conn, run_id)
 
 
+def estimation_run_visible(conn: "psycopg.Connection", run_id: int) -> bool:
+    """Can `conn` see the run? On a tenant conn this IS the RLS ownership gate.
+
+    Strict where `_fetch_run` is lenient: that one degrades a failed SELECT to a
+    stub row so the detail page still renders, which would read as "visible" here —
+    and this gate sits in front of service-role writes and LLM spend. Errors raise.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM estimation_runs WHERE id = %s", (run_id,))
+        return cur.fetchone() is not None
+
+
+def estimation_run_owned(conn: "psycopg.Connection", run_id: int) -> bool:
+    """Is the run one of the caller's OWN accounts' — not merely visible?
+
+    `estimation_run_visible` also passes migration 291's shared SYSTEM arm, where
+    every pre-tenancy run sits: a child row a non-admin writes there is stamped
+    SYSTEM (migration 292) and so readable by every account. Errors raise.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM estimation_runs "
+            "WHERE id = %s AND account_id IN (SELECT current_account_ids())",
+            (run_id,),
+        )
+        return cur.fetchone() is not None
+
+
 def update_scenario(
     conn: "psycopg.Connection",
     run_id: int,

@@ -1,13 +1,19 @@
 name: Broker resolution (full sweep + backfill)
 
-# Broker intelligence: the daily full-sweep reconcile + the one-shot backfill.
-# Re-attributes EVERY sreality listing from raw_json (keyset-batched so the
-# raw_json scan never times out over the pooler), recomputes all rollups, rebuilds
-# firm memberships + firm counts, runs the cross-source merge step, REFRESHes the
-# leaderboard matview, and clears the dirty queue — the self-healing backstop for
-# anything the */10 incremental pass missed. Runs after the property recompute
-# (04:15) so property_id is fresh for property_count. mode=backfill is the same
-# code path (the first population); dispatch it once after this lands on main.
+# Broker intelligence: the daily full-sweep RECONCILE + the one-shot backfill.
+# Re-attributes a rotating lap of broker-bearing listings from raw_json
+# (keyset-batched so the raw_json scan never times out over the pooler),
+# recomputes ALL broker rollups + memberships in ONE merged statement
+# (recompute_brokers(None), Broker Unify W3 — the old 9-window loop paid ~27
+# full index walks and 100+ min), rebuilds firm rollups, runs the cross-source
+# merge step, generates candidates, and clears the dirty queue — the
+# self-healing backstop for anything the incremental drain missed. It no longer
+# publishes the leaderboard matview: that is the drain path's job
+# (hourly-if-stale, worker lane + broker_resolution.yml), so serving freshness
+# stopped depending on this job's length or its GH-cron-drifted start time.
+# Nominally runs after the property recompute (04:15); in practice GH throttling
+# drifts both into the same mid-morning window. mode=backfill is the same code
+# path (the first population); dispatch it once after this lands on main.
 # Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency
 # group with the incremental job.
 #
@@ -50,8 +56,11 @@ jobs:
     #                     plus the firm-link loop's own _FIRM_LINK_MIN_SECONDS (5 min)
     #                     floor, which it needs because attribution routinely spends
     #                     the whole budget before that loop starts.
-    #   tail    ~50 min — merge + rollups + matview + candidates measured 17-25 min,
-    #                     each phase capped at attempts=2 by resolve_brokers.py.
+    #   tail    ~50 min — merge + rollups + candidates, each phase capped at
+    #                     attempts=2 by resolve_brokers.py. W3 replaced the
+    #                     unbounded 9-window rollup loop (measured 19–143 min)
+    #                     with ONE recompute_brokers(None) statement and moved
+    #                     the matview publish out of this job entirely.
     #   ------------------
     #   ~108 min, inside 110. The two halves stack only in theory: the tail's 2x is
     #   every phase failing once, which has never co-occurred with a budget-exhausted

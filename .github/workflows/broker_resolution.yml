@@ -1,14 +1,18 @@
 name: Broker resolution (incremental)
 
-# Broker intelligence: the incremental identity resolver. Drains the
-# dirty_broker_listings queue — new + content-changed listings enqueued at write
-# time by the detail writers (rule #20), so there is no full-table straggler
-# scan — attributes them to their per-source broker_identities, ensures their
-# firms, attaches singleton canonical brokers, and recomputes ONLY the affected
-# brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard
-# matview (that is the daily full sweep's job). Source-agnostic maintenance job, so
-# it carries NO `# portal:` tag. Shares the broker-resolution concurrency group
-# with the full sweep so the two never mutate the broker tables at once.
+# Broker intelligence: the THROTTLED BACKSTOP of the incremental identity
+# resolver (Broker Unify W3). The primary host is the realtime worker's
+# broker_maintenance lane; both call THE same driver,
+# scripts.resolve_brokers.run_incremental_pass — drain the dirty_broker_listings
+# queue until empty (new + content-changed listings enqueued at write time by
+# the detail writers, plus delist/revive flips mirrored in by the property
+# drain), attribute to per-source broker_identities, ensure firms, attach
+# singleton canonical brokers, recompute ONLY the affected brokers' rollups +
+# memberships (one merged statement), and republish the leaderboard matview
+# CONCURRENTLY when its derived_artifacts stamp is older than ~an hour. So this
+# cron matters exactly when the worker is down. O(changes); source-agnostic
+# maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution
+# concurrency group with the full sweep so the two never mutate at once.
 #
 # Required secret: SUPABASE_DB_URL.
 

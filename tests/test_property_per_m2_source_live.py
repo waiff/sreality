@@ -244,34 +244,37 @@ def test_property_with_no_area_at_all_is_still_recomputed(cur):
     assert active is False, "the row must still have been updated"
 
 
-def test_singleton_insert_path_stamps_the_basis(cur):
-    """A brand-new listing gets its property from scraper.db (born bare, then the rollup's
-    own recompute), not the sweep; a NULL basis on every new listing is a hole in the measure."""
-    from scraper import db
+def test_a_changed_rewrite_dirty_marks_and_the_drain_restamps(cur):
+    """A brand-new listing lands bare and the straggler attach births its singleton; after that
+    a content change reaches the property through dirty_properties (rule 20) and the drain's
+    recompute — not an inline rollup at the write — keeps the basis true."""
+    from scraper import listing_write
+    from scraper.scraped_listing import ScrapedListing
+    from scripts.recompute_property_stats import _attach_stragglers, _drain_dirty
 
-    lid = _add_child(cur, None, source="bezrealitky", price=3_000_000, area=55.0)
+    def _write(price: int) -> int:
+        listing = ScrapedListing(
+            source="bazos", source_id_native=native,
+            source_url=f"https://reality.bazos.cz/inzerat/{native}/x.php",
+            category_main="byt", category_type="prodej", price_czk=price, area_m2=48.0)
+        [o] = listing_write.write_listings(cur.connection, [listing_write.from_scraped(listing)])
+        return o.listing_id
+
+    native = f"w3-{uuid.uuid4()}"
+    cur.execute("SELECT now()")      # opens the rolled-back transaction the writer nests in
+    cutoff = cur.fetchone()[0]
+    lid = _write(2_500_000)
     _skew_property_ids_past(cur, lid)
-    db._ensure_property(cur.connection, lid)
-
-    pid, stamp = _stamp_of_child(cur, lid)
-    assert stamp == lid != pid, "the stamp is a listings.id, not the property's own id"
-
-
-def test_a_rescrape_restamps_an_already_linked_singleton(cur):
-    """db._ensure_property recomputes the property on EVERY re-scrape of an already-linked
-    listing, so it — not the sweep — keeps a singleton's basis true as its price moves."""
-    from scraper import db
-
-    lid = _add_child(cur, None, source="bazos", price=2_500_000, area=48.0)
-    _skew_property_ids_past(cur, lid)
-    db._ensure_property(cur.connection, lid)
+    _attach_stragglers(cur.connection)
     pid, _first = _stamp_of_child(cur, lid)
-
     cur.execute(
-        "UPDATE properties SET price_per_m2_source_listing_id = NULL WHERE id = %s",
-        (pid,),
-    )
-    db._ensure_property(cur.connection, lid)  # already linked -> the recompute
+        "UPDATE properties SET price_per_m2_source_listing_id = NULL WHERE id = %s", (pid,))
+    cur.execute("DELETE FROM dirty_properties")
+
+    assert _write(2_400_000) == lid
+    cur.execute("SELECT count(*) FROM dirty_properties WHERE property_id = %s", (pid,))
+    assert cur.fetchone()[0] == 1
+    _drain_dirty(cur.connection, 2000, cutoff)
 
     assert _stamp_of_child(cur, lid) == (pid, lid), (
         "the rollup must stamp the CHILD's listings.id; stamping l.property_id "

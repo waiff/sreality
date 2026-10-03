@@ -27,7 +27,6 @@ import { splitTagLabel } from '@/lib/tagLabel';
 import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
 import DefinitionCard from '@/components/tag-definitions/DefinitionCard';
-import { pushToast } from '@/lib/toast';
 
 /* NEW DEDUP · Exam — the sealed holdout, answered one image at a time.
  *
@@ -147,7 +146,6 @@ export default function NewDedupExam() {
       setVerdicts(new Map());
       qc.invalidateQueries({ queryKey: EXAM_KEY(cohort) });
     },
-    onError: (e: Error) => pushToast('err', e.message),
   });
 
   /* `toSend` is EXPLICIT, never read from state: "None of these" means none even

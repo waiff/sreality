@@ -378,8 +378,9 @@ def test_writing_a_hashed_column_refuses_without_the_deferral_acknowledgement(
 def test_the_gate_states_srealitys_opposite_consequence_not_the_fleet_default(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """sreality's drain hashes the RAW payload (`scraper/main.py`), not the parsed fields
-    (`scraper.db.write_details`), so a column heal changes no hash and its next detail fetch
+    """sreality's drain hashes the RAW payload (`listing_write.from_sreality`:
+    `hashing.sreality_hash_doc`), not the parsed fields (`listing_write.from_scraped`:
+    `ScrapedListing.hash_doc`), so a column heal changes no hash and its next detail fetch
     appends NOTHING — ever. Acknowledging "the snapshot is deferred" there would be
     acknowledging a consequence that never arrives; the architecture doc records the same
     asymmetry for the W17 land heal's 44,237 sreality rows."""

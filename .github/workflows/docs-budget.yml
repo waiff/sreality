@@ -10,16 +10,6 @@ name: Docs budget
 
 on:
   pull_request:
-    paths:
-      - 'CLAUDE.md'
-      - 'ROADMAP.md'
-      - '.claude/**'
-      - 'roadmap/**'
-      - 'migrations/**'
-      - 'toolkit/**'
-      - 'api/**'
-      - 'scraper/**'
-      - 'frontend/**'
 
 jobs:
   docs-budget:

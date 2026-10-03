@@ -1,12 +1,13 @@
 """Location W1v: the OPERATOR claim producer (03 S7 rank 1, 05 5.5.5).
 
-One of the four claim producers in the design (portal contracts, the LLM lane,
-operator input, the migration loader). A correction is an appended
+One of the two claim producers (the contract-driven claim lane, over its three
+substrates, and operator input). A correction is an appended
 `location_claims` row - `surface='operator_input'`,
 `extraction_method='operator_manual'`, `licence_class='operator'`,
 `claim_confidence='exact'` - never an UPDATE of anything: a wrong correction
 is superseded by a newer one (S7 breaks operator-vs-operator ties by recency),
-and the claim spine stays append-only.
+and no DELETE reaches it: supersession, `--retract` and the retire script
+delete only claims that carry a `contract_entry_id`, which an operator claim never does.
 
 Two deliberate choices, both learned from the intake lane:
 
@@ -22,13 +23,8 @@ Two deliberate choices, both learned from the intake lane:
   functions (`location_value_norm`, `location_claim_fingerprint`), exactly as
   the intake does - a Python mirror drifts on the foreign-address cohort and a
   drifted fingerprint does not conflict, it inserts. Both still take the FULL
-  01 4.2.1 tuple; migration 498 stopped STORING nine of its inputs, which is
-  what keeps every fingerprint already on disk valid.
-
-snapshot_anchor is 'unanchored_latest_fetch': an operator correction is a
-statement about the listing as currently served, not about a stored payload
-(and not registry-derived even when it asserts a registry key - the OPERATOR
-chose the key; the registry only validated it).
+  01 4.2.1 tuple; migration 498 stopped STORING eleven of its inputs, and
+  still hashing them is what keeps every fingerprint already on disk valid.
 
 The synchronous projection refresh (05 5.5.5: operator-initiated changes are
 visible on the next read) is `resolve_now()` = `drain.run(only_listing_id=)`;
@@ -91,7 +87,6 @@ _OPERATOR_CLAIM_SQL = """
     WITH input AS (
         SELECT %(listing_id)s::bigint AS listing_id, %(source)s::text AS source,
                %(source_id_native)s::text AS source_id_native,
-               'unanchored_latest_fetch'::text AS snapshot_anchor,
                now() AS first_observed_at,
                %(claim_type)s::text AS claim_type,
                'operator_input'::text AS surface, 'none'::text AS page_kind,
@@ -108,8 +103,7 @@ _OPERATOR_CLAIM_SQL = """
                NULL::text AS declared_confidence, NULL::numeric AS declared_radius_m,
                'exact'::text AS claim_confidence,
                'none'::text AS blur_evidence, 'operator'::text AS licence_class,
-               NULL::text AS legacy_source_column, false AS legacy_write_path_unknown,
-               NULL::text AS history_completeness, true AS subject_scoped
+               NULL::text AS legacy_source_column, true AS subject_scoped
     ), typed AS (
         SELECT i.*,
                location_value_norm(i.value_text) AS value_norm,

@@ -33,6 +33,7 @@ import {
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
 import { pushToast } from '@/lib/toast';
+import { useOptimisticWrite } from '@/lib/useOptimisticWrite';
 import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
@@ -236,7 +237,6 @@ export default function NewDedupLabeling() {
   const usingOriginalTagFilter = mode === 'proposals' && showOriginal;
   const imageLarge = usePersistedFlag(IMAGE_LARGE_KEY, false);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
-  const [pendingRowKeys, setPendingRowKeys] = useState<ReadonlySet<string>>(new Set());
   const [drafts, setDrafts] = useState<ReadonlyMap<string, string>>(new Map());
   const [detailImageId, setDetailImageId] = useState<number | null>(null);
 
@@ -560,7 +560,6 @@ export default function NewDedupLabeling() {
       pushToast('ok', 'Tag added.');
       invalidateOverview();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const renameLabelMut = useMutation({
@@ -573,7 +572,6 @@ export default function NewDedupLabeling() {
       invalidateProposals();
       invalidateTagImages();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const removeLabelMut = useMutation({
@@ -585,14 +583,12 @@ export default function NewDedupLabeling() {
       invalidateProposals();
       invalidateTagImages();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const setFlagsMut = useMutation({
     mutationFn: ({ id, flags }: { id: number; flags: { priority?: boolean; ready_for_training?: boolean } }) =>
       setNewDedupTagFlags(id, flags),
     onSuccess: () => invalidateOverview(),
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   // --- candidate retrieval --------------------------------------------------
@@ -627,7 +623,6 @@ export default function NewDedupLabeling() {
       invalidateCandidates();
       invalidateTagImages();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
   // A new tag is a different queue: the previous tag's draw report would read
   // as this one's.
@@ -647,21 +642,10 @@ export default function NewDedupLabeling() {
       setLastGrow({ requested: Number(growCount), added: res.data.added });
       invalidateOverview();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   // --- proposal review ------------------------------------------------------
 
-  const beginAction = (imageId: number, model: string) =>
-    setPendingRowKeys((prev) => new Set(prev).add(rowKey(imageId, model)));
-  const endAction = (imageId: number, model: string) =>
-    setPendingRowKeys((prev) => {
-      const key = rowKey(imageId, model);
-      if (!prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
   const clearDraft = (imageId: number, model: string) =>
     setDrafts((prev) => {
       const key = rowKey(imageId, model);
@@ -671,7 +655,11 @@ export default function NewDedupLabeling() {
       return next;
     });
 
-  const setStateMut = useMutation({
+  /* Not optimistic — the grid repaints from the server's row — but per-row
+   * pending: a tile is busy while ITS write is in flight, never the whole grid
+   * (useOptimisticWrite's pendingFor). */
+  const setStateMut = useOptimisticWrite({
+    mutationKey: ['write', 'labeling', 'proposal-state'],
     mutationFn: ({
       imageId,
       model,
@@ -698,8 +686,7 @@ export default function NewDedupLabeling() {
       }));
       patchPositiveTags(vars.imageId, res.data.label, res.data.state);
     },
-    onError: (err: Error) => pushToast('err', err.message),
-    onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
+    pendingKey: (vars) => rowKey(vars.imageId, vars.model),
   });
   const bulkStateMut = useMutation({
     mutationFn: ({
@@ -728,10 +715,10 @@ export default function NewDedupLabeling() {
         if (p) patchPositiveTags(imageId, p.label, res.data.state);
       }
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
-  const setTagAnnotationMut = useMutation({
+  const setTagAnnotationMut = useOptimisticWrite({
+    mutationKey: ['write', 'labeling', 'tag-annotation'],
     mutationFn: ({
       imageId,
       state,
@@ -749,8 +736,7 @@ export default function NewDedupLabeling() {
       // patched in place, never invalidated.
       invalidateCandidates();
     },
-    onError: (err: Error) => pushToast('err', err.message),
-    onSettled: (_d, _e, vars) => endAction(vars.imageId, 'sample'),
+    pendingKey: (vars) => rowKey(vars.imageId, 'sample'),
   });
   const bulkTagAnnotationMut = useMutation({
     mutationFn: ({
@@ -770,7 +756,6 @@ export default function NewDedupLabeling() {
       invalidateOverview();
       invalidateCandidates();
     },
-    onError: (err: Error) => pushToast('err', err.message),
   });
 
   const toggle = (id: number) =>
@@ -823,7 +808,6 @@ export default function NewDedupLabeling() {
   const proposalKeyboard = useGridKeyboardReview(proposals.length, (i, state, excludedReason) => {
     const p = proposals[i];
     if (!p || p.status !== 'pending') return;
-    beginAction(p.image_id, p.model);
     setStateMut.mutate({
       imageId: p.image_id,
       model: p.model,
@@ -835,7 +819,6 @@ export default function NewDedupLabeling() {
   const candidateKeyboard = useGridKeyboardReview(tagImages.length, (i, state, excludedReason) => {
     const r = tagImages[i];
     if (!r || activeTagId == null) return;
-    beginAction(r.image_id, 'sample');
     setTagAnnotationMut.mutate({ imageId: r.image_id, state, excludedReason });
   });
   const keyboard = mode === 'proposals' ? proposalKeyboard : candidateKeyboard;
@@ -1185,7 +1168,6 @@ export default function NewDedupLabeling() {
                   }}
                   onOpenDetail={() => setDetailImageId(p.image_id)}
                   onSetState={(state, excludedReason) => {
-                    beginAction(p.image_id, p.model);
                     setStateMut.mutate({
                       imageId: p.image_id,
                       model: p.model,
@@ -1194,7 +1176,7 @@ export default function NewDedupLabeling() {
                       excludedReason: excludedReason ?? null,
                     });
                   }}
-                  actionPending={pendingRowKeys.has(rowKey(p.image_id, p.model))}
+                  actionPending={setStateMut.pendingFor(rowKey(p.image_id, p.model))}
                 />
               ))}
             </div>
@@ -1245,14 +1227,13 @@ export default function NewDedupLabeling() {
                     }}
                     onOpenDetail={() => setDetailImageId(r.image_id)}
                     onSetState={(state, excludedReason) => {
-                      beginAction(r.image_id, 'sample');
                       setTagAnnotationMut.mutate({
                         imageId: r.image_id,
                         state,
                         excludedReason: excludedReason ?? null,
                       });
                     }}
-                    actionPending={pendingRowKeys.has(rowKey(r.image_id, 'sample'))}
+                    actionPending={setTagAnnotationMut.pendingFor(rowKey(r.image_id, 'sample'))}
                   />
                 ))}
               </div>

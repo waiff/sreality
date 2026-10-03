@@ -106,7 +106,7 @@ def test_neither_site_reads_the_bare_plot_column():
     back to `estate_area` silently re-drops a third of the land inventory, and nothing
     else in the system would say so."""
     bare = re.compile(r"\bl\.estate_area\s*[<>]=?", re.I)
-    for rel in ("api/notifications.py", "toolkit/comparables.py"):
+    for rel in ("api/notifications.py", "toolkit/comparables.py", "toolkit/filter_compiler.py"):
         code = "\n".join(
             line for line in (_ROOT / rel).read_text(encoding="utf-8").splitlines()
             if not line.lstrip().startswith("#")
@@ -160,7 +160,7 @@ def test_neither_site_derives_the_formula_itself():
 
 def test_no_hand_typed_per_m2_division_survives_in_either_module():
     """The source-text guard: a fifth copy cannot be reintroduced quietly."""
-    for rel in ("api/notifications.py", "toolkit/comparables.py",
+    for rel in ("api/notifications.py", "toolkit/comparables.py", "toolkit/filter_compiler.py",
                 "toolkit/transit_axis.py", "toolkit/neighborhoods.py"):
         text = (_ROOT / rel).read_text(encoding="utf-8")
         # Strip comment lines: the WHY of the collapse names the old spelling.

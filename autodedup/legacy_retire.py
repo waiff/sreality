@@ -1,7 +1,7 @@
 """A2: undo the old engine's merges in the apply scope's area before this engine merges there.
 
-TEMPORARY SCAFFOLDING, deleted in W5 (PLAN.md ledger A2) once the worker lane owns every grouping
-that is not an operator ruling. Lane mode `apply` with `retire_legacy=1` runs it BEFORE the plan
+TEMPORARY SCAFFOLDING, kept until W8 by the ordering rule of the W5 ONE LANE row in
+docs/design/autodedup/PROGRAM.md. Lane mode `apply` with `retire_legacy=1` runs it BEFORE the plan
 it applies, in the same dispatch and under the same `dry_run`, so no duplicate reappears in
 Browse between the undo and the engine's merges (decision 3). The mode refuses it with
 `listing_ids` (the step reads blocks only) and, before anything is undone, for a generation with
@@ -38,7 +38,7 @@ alone. The dry run reads the same
 classification, so it predicts every skip.
 
 Groups go newest first, each in its own transaction over its locked properties and a fresh read,
-as a loop of `detach_listing` over the adverts it moved (ledger order, each back to where THAT
+as ONE `detach_listings` call over the adverts it moved (ledger order, each back to where THAT
 merge took it from) with `source='auto'`, so NO ruling is written: an old-engine merge is not the
 operator's word in either direction; the in-transaction re-read refuses a group that no longer
 qualifies (`refused:<reason>`). Its ledger rows are stamped
@@ -73,7 +73,7 @@ from typing import Any, Callable, Iterable, Mapping
 from autodedup import apply_sql as S
 from autodedup.census import write_json
 from autodedup.ui_sql import NEGATIVE_VERDICTS
-from toolkit.property_identity import MergeError, detach_listing
+from toolkit.property_identity import MergeError, detach_listings
 
 RETIRE_BY: str = "autodedup-legacy-retire"
 LEGACY_SOURCE: str = "auto"
@@ -457,13 +457,13 @@ def _retire_one(
                 raise _Refused("no_longer_live")
             if not fresh[0].selected:
                 raise _Refused(fresh[0].outcome.removeprefix("skipped:"))
-            for lid in group.moved:
-                data = detach(conn, lid, decided_by=undone_by, source=LEGACY_SOURCE,
-                              merge_group_id=group.merge_group_id)["data"]
-                if not data["detached"]:
-                    raise _Refused(str(data["outcome"]))
+            out = detach(conn, list(group.moved), decided_by=undone_by, source=LEGACY_SOURCE,
+                         merge_group_id=group.merge_group_id)["data"]["adverts"]
+            for a in out:
+                if not a["detached"]:
+                    raise _Refused(str(a["outcome"]))
                 back += 1
-                reactivated += int(bool(data.get("reactivated")))
+                reactivated += int(bool(a["reactivated"]))
     except (_Refused, MergeError) as exc:
         group.outcome = f"refused:{exc}"
         return
@@ -533,7 +533,7 @@ def retire_legacy(
     _CLOCK.clear()
     area = read_area(conn, blocks)
     categories = frozenset(category_types) if category_types is not None else None
-    detach = detach or detach_listing
+    detach = detach or detach_listings
     undone_by = f"{RETIRE_BY}:{run_id}"
     engine = engine or EngineMaps()
     first = read_groups(conn, area, categories, engine=engine)

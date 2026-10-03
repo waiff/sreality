@@ -44,7 +44,8 @@ export default function PipelineToggle({ property_id }: { property_id: number })
   // Writes — and the cache policy every other surface depends on — live in the
   // shared hook. A listing page is never itself a pipeline-scoped cohort, so it
   // has no reason to invalidate the Browse read surfaces.
-  const { add, pending } = usePipelineCard(property_id);
+  const { add, pending: pendingFor } = usePipelineCard();
+  const pending = pendingFor(property_id);
   const pillRef = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
@@ -62,7 +63,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
     return (
       <button
         type="button"
-        onClick={() => add.mutate()}
+        onClick={() => add.mutate(property_id)}
         disabled={pending}
         title="Přidat do pipeline"
         className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-paper-2)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] transition-colors hover:bg-[var(--color-copper-soft)] disabled:opacity-60"
@@ -84,13 +85,18 @@ export default function PipelineToggle({ property_id }: { property_id: number })
       <button
         ref={pillRef}
         type="button"
-        onClick={() => setMenuOpen((v) => !v)}
-        disabled={pending}
+        onClick={() => {
+          if (pending) return;
+          setMenuOpen((v) => !v);
+        }}
+        /* aria-disabled, not `disabled`: the menu's write marks this pill busy as
+         * the menu unmounts, and focus must still be able to return here. */
+        aria-disabled={pending || undefined}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-label={`V pipeline (${card.stage_label}) — změnit fázi`}
         title="Změnit fázi nebo odebrat z pipeline"
-        className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border py-1.5 pl-2.5 pr-2 text-[0.8rem] transition-opacity disabled:opacity-60"
+        className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border py-1.5 pl-2.5 pr-2 text-[0.8rem] transition-opacity aria-disabled:opacity-60"
         style={{ background: bg, color: fg, borderColor: fg }}
       >
         <PipelineMark filled badge={badge} iconClassName="h-4 w-4" badgeClassName="text-[0.7rem]" />

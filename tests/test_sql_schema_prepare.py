@@ -203,3 +203,22 @@ def test_every_sql_statement_prepares_against_the_schema(_conn):
         + "\n".join(failures)
         + f"\n\n{summary}"
     )
+
+
+def _portals() -> list[str]:
+    from scraper.portal import _DEFAULTS
+
+    return sorted(_DEFAULTS)
+
+
+# The one listing write's upsert is an lru_cache'd builder (one text per source: the
+# contract picks the preserve set, the broker registry the pre-read), so no `*_SQL`
+# constant exists for the corpus scan to find. PREPARE each source's rendering.
+@pytest.mark.parametrize("source", _portals())
+def test_every_per_source_upsert_prepares(_conn, source):
+    from scraper import listing_write
+
+    stmt = to_prepare_form(listing_write._upsert_sql(source))
+    with _conn.cursor() as cur:
+        cur.execute(f"PREPARE _lw_{source} AS {stmt}")
+        cur.execute(f"DEALLOCATE _lw_{source}")
