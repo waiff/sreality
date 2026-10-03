@@ -553,7 +553,11 @@ class Store(Protocol):
 class FactSource(Protocol):
     """The read-only half: listing facts and galleries out of `public` (D4 — never written)."""
 
-    def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]: ...
+    # E933: `clip=False` hands every gallery over without its CLIP vectors, and `vectors`
+    # reads them for a set of images afterwards.
+    def facts(self, ids: Iterable[int], *, clip: bool = True
+              ) -> dict[int, tuple[Listing, list[Image]]]: ...
+    def vectors(self, image_ids: Iterable[int]) -> dict[int, str]: ...
 
 
 @dataclass(slots=True, frozen=True)
@@ -825,15 +829,37 @@ class _Working:
         self.listings: dict[int, Listing] = {}
         self.images: dict[int, list[Image]] = {}
         self.fps: dict[int, Fingerprint] = {}
+        # E933: who carries CLIP vectors. A gallery is fetched without them unless asked: the
+        # probe-key neighbourhood is O(store) a pass and no fingerprint, key, guard, digest or
+        # census reads one. The claim (its refresh records their PRESENCE, E92) and the scored
+        # endpoints ask.
+        self.vectored: set[int] = set()
 
-    def ensure(self, ids: Iterable[int]) -> None:
+    def ensure(self, ids: Iterable[int], *, clip: bool = False) -> None:
+        ids = list(ids)
         missing = [i for i in ids if i not in self.fps]
-        if not missing:
+        if missing:
+            for listing_id, (listing, images) in self.facts.facts(missing, clip=clip).items():
+                self.listings[listing_id] = listing
+                self.images[listing_id] = list(images)
+                self.fps[listing_id] = build_fingerprint(listing, images, self.settings)
+                if clip:
+                    self.vectored.add(listing_id)
+        if not clip:
             return
-        for listing_id, (listing, images) in self.facts.facts(missing).items():
-            self.listings[listing_id] = listing
-            self.images[listing_id] = list(images)
-            self.fps[listing_id] = build_fingerprint(listing, images, self.settings)
+        # The top-up reads the vectors and nothing else: a second gallery read would count the
+        # population readout twice, and the fingerprint already built reads no vector.
+        bare = [i for i in ids if i in self.fps and i not in self.vectored]
+        if not bare:
+            return
+        vectors = self.facts.vectors(
+            [image.image_id for i in bare for image in self.images.get(i, ())])
+        for listing_id in bare:
+            self.images[listing_id] = [
+                replace(image, clip=vectors[image.image_id])
+                if image.image_id in vectors else image
+                for image in self.images.get(listing_id, ())]
+            self.vectored.add(listing_id)
 
 
 class _Overlay:
@@ -1066,7 +1092,7 @@ def run_pass(
 
     keyer = Keyer(settings, calibration)
     working = _Working(facts, settings)
-    working.ensure(claimed)
+    working.ensure(claimed, clip=True)
     # Everything this pass writes before the budget check goes through the overlay, so a
     # refusal leaves the store exactly as it found it (E75).
     view = _Overlay(store)
@@ -1221,10 +1247,22 @@ def run_pass(
         result.pairs_deleted = len(dropped)
 
     # --- 5. score what is new or stale -----------------------------------------------------
-    working.ensure({i for pair in wanted for i in pair})
     endpoints = {i for pair in wanted for i in pair}
+    working.ensure(endpoints)
     digests = {i: fp_digest(working.fps[i], working.images.get(i, ()))
                for i in endpoints if i in working.fps}
+    # A stored decision stands while neither side's digest moved and neither side was refreshed.
+    # Only the pairs it does not cover are decided, and only their two sides read photographs —
+    # the features the CLIP vectors, E93's hold their presence — so only they carry them (E933).
+    decide: set[tuple[int, int]] = set()
+    for lo, hi in wanted:
+        if lo not in working.fps or hi not in working.fps:
+            continue
+        previous = stored.get((lo, hi))
+        if (previous is None or previous.fp_lo != digests.get(lo, "")
+                or previous.fp_hi != digests.get(hi, "") or lo in changed or hi in changed):
+            decide.add((lo, hi))
+    working.ensure({i for pair in decide for i in pair}, clip=True)
     ctx = context_for(calibration, settings, working.fps, working.listings)
     census = _census(store, working.listings, working.images)
     # E93's two inputs, batched for the whole pass: what each endpoint's photographs ARE right
@@ -1242,8 +1280,7 @@ def run_pass(
         previous = stored.get((lo, hi))
         dlo = digests.get(lo, "")
         dhi = digests.get(hi, "")
-        if (previous is not None and previous.fp_lo == dlo and previous.fp_hi == dhi
-                and lo not in changed and hi not in changed):
+        if previous is not None and (lo, hi) not in decide:
             if (set(previous.probes) != entry["probes"] or previous.from_lo != entry["from_lo"]
                     or previous.from_hi != entry["from_hi"]):
                 previous.probes = sorted(entry["probes"])

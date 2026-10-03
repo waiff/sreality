@@ -926,7 +926,7 @@ class SqlFacts:
     it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
-                 population: Mapping[int, int] | None = None, clip: bool = True,
+                 population: Mapping[int, int] | None = None,
                  deadline: float | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
@@ -941,9 +941,6 @@ class SqlFacts:
         # passes this — its population is the table's or unknown (E91).
         self.population = None if population is None else {
             int(key): int(value) for key, value in population.items()}
-        # The cut builds fingerprints, which read no CLIP vector: it skips the one read that
-        # would move ~2 kB per photograph for nothing.
-        self.clip = clip
         self.reads = 0
         self.statements = 0
         # The population readout, for the pass summary: how many phash-bearing images this pass
@@ -977,7 +974,8 @@ class SqlFacts:
             rows.extend(self._dicts(sql, {"ids": ids_slice, **params}))
         return rows
 
-    def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
+    def facts(self, ids: Iterable[int], *, clip: bool = True
+              ) -> dict[int, tuple[Listing, list[Image]]]:
         wanted = sorted({int(i) for i in ids})
         if not wanted:
             return {}
@@ -1000,11 +998,18 @@ class SqlFacts:
         # adds up are per frame, so the slices read what the whole array would.
         galleries: dict[int, list[Image]] = {}
         for ids_slice in self._slices(wanted):
-            galleries.update(self._galleries(ids_slice))
+            galleries.update(self._galleries(ids_slice, clip))
         self.reads += len(listings)
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
-    def _galleries(self, ids: Sequence[int]) -> dict[int, list[Image]]:
+    def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
+        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else."""
+        wanted = sorted({int(i) for i in image_ids})
+        encoded = {int(row["image_id"]): encode_clip(row["embedding"])
+                   for row in self._dicts_over(COHORT_CLIP_SQL, wanted, model=self.clip_model)}
+        return {image_id: clip for image_id, clip in encoded.items() if clip is not None}
+
+    def _galleries(self, ids: Sequence[int], clip: bool) -> dict[int, list[Image]]:
         rows = self._dicts(COHORT_IMAGES_SQL, {"ids": list(ids)})
         if not rows:
             return {}
@@ -1013,7 +1018,7 @@ class SqlFacts:
         clips = {int(row["image_id"]): encode_clip(row["embedding"])
                  for row in self._dicts(COHORT_CLIP_SQL,
                                         {"ids": image_ids, "model": self.clip_model})
-                 } if self.clip else {}
+                 } if clip else {}
         tags: dict[int, list[dict[str, Any]]] = {}
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
@@ -1947,13 +1952,16 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     _cut_bound(conn, deadline)
     population = ({int(row[0]): int(row[1]) for row in _rows(
         conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
-    facts = SqlFacts(conn, population=population, clip=False)
+    facts = SqlFacts(conn, population=population)
     listings: dict[int, Listing] = {}
     fps: dict[int, Any] = {}
     for start in range(0, len(ids), chunk):
         if deadline is not None:
             _cut_bound(conn, deadline)
-        for listing_id, (listing, images) in facts.facts(ids[start:start + chunk]).items():
+        # Fingerprints read no CLIP vector, so the cut skips the read that would move ~2 kB per
+        # photograph for nothing.
+        for listing_id, (listing, images) in facts.facts(ids[start:start + chunk],
+                                                         clip=False).items():
             listings[listing_id] = listing
             fps[listing_id] = build_fingerprint(listing, images, settings)
     calibration = Calibration.build(fps, listings, settings, generation)
