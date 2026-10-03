@@ -279,7 +279,6 @@ secret (the frontend build must not see it). **Full env-var / secrets reference:
 ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`);
 nor are the email/Telegram channels (rule #16). Don't start out-of-scope work without explicit direction.
 ## Where the detail lives
-
 | Need | Load |
 | --- | --- |
 | SQL, migrations, connection modes, Supabase MCP, schema conventions | `.claude/skills/database` |
@@ -289,3 +288,4 @@ nor are the email/Telegram channels (rule #16). Don't start out-of-scope work wi
 | Dashboards, admin panels, apps, tools — interface/UI design craft | `.claude/skills/interface-design` |
 | Full rule rationale, per-portal data sources, territory deep-dives | `docs/architecture.md` |
 | Sequencing / what's next | `ROADMAP.md` → `roadmap/<track>.md` |
+| Vocabulary: property, ad, canonical ad, merge, split, survivor, curation | `GLOSSARY.md` |
