@@ -368,7 +368,7 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
       target: { value: 'jiné patro' },
     });
     fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
-    // the property page's row split: every advert shown, the one leaving, the rest not ruled
+    // one advert leaving: every advert shown, the one leaving, the rest not ruled
     await waitFor(() =>
       expect(api.splitProperty).toHaveBeenCalledWith(100, {
         adverts: [11, 12, 13],

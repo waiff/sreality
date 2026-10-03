@@ -244,7 +244,10 @@ export default function PropertyDetail() {
       {sources.length > 0 && (
         <>
           <Hairline />
+          {/* Keyed on the property: the split letters, reason and refusal are
+              mount-time state, and property → property reuses this instance. */}
           <MergedAdvertsSection
+            key={propertyId}
             propertyId={propertyId}
             canonicalListingId={property.id}
             sources={sources}

@@ -1469,12 +1469,12 @@ renumber.** Navigate by area:
     portal link collapsed, description / full gallery / broker expanded). For an admin
     session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
     a split returns it to, and the source and date of the merge that took it from there), and
-    every row that would move carries a two-step **Rozdělit** that posts
-    `POST /properties/{id}/split` with `separate: [[that advert]], keep_together: false` over
-    every advert the page shows — any property size, a merge of any origin (operator, legacy
-    `auto`, `autodedup`), the optional free-text `reason` kept on the "different" rulings —
-    toasts a link to the property it landed on, then re-reads the property page (keyed on the
-    property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
+    every row carries a unit letter (the Groups page's `UnitSelect`, all A); two letters open one
+    **Rozdělit nemovitost** panel that posts ONE `POST /properties/{id}/split` over every advert
+    the page shows — each letter group but the one keeping the record (most own adverts, else
+    the header's; `lib/mergedAdverts.splitPlan`) a `separate` unit, `keep_together: false`, the
+    optional `reason` on the rulings — toasts a link per unit that left, then re-reads the
+    property page (keyed on the property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP one lane (W5; live — interval 60 since migration 572, scope = the three trial blocks since migration 570).** The engine's ONE production path is the
@@ -2869,7 +2869,7 @@ renumber.** Navigate by area:
     determination — a country field, a foreign section, a pin outside the country — never the
     default for "no town found". **Speed**: Browse and the map read `browse_list`, which copies the
     fields at rebuild, so no consumer query joins the store; a field is added only by operator
-    ruling (katastr_kod, 2026-09) or after a measured slowdown, and only there. Full as-built
+    ruling (katastr_kod 2026-09, ulice_id 2026-10) or after a measured slowdown, and only there. Full as-built
     detail — the store's 27 columns by role, the lane's two halves and their cursors, the contract
     rails, the resolver's four stages, the served-listing predicate, what deliberately stays
     outside the store, and the incident lessons — is `docs/architecture.md` § Location data.
@@ -3530,14 +3530,17 @@ identical; clicking a pin draws its true-metre circle of `uncertainty_radius_m` 
 popup is open, and the popup names the rung and the radius. (W3-3 first drew that circle under every
 such pin at once — with ~87 % of active pins below building level it buried the map, 2026-09-22.)
 Clusters and server-side grid cells carry no per-pin radius, so all of this exists only in point mode.
+Migration 584 (operator ruling 2026-10-02) appends `ulice_id` (= `ll.ulice_kod`) last to
+`browse_projection`, `properties_public`, `pipeline_board_public` and `listing_feed_public`, and so to
+both read models — served for the street chip level, read by no filter until its RPC arm lands.
 **Appending is the only legal edit here** — `browse_list` and `properties_map_mv` materialize
 `select * from browse_projection` and `toolkit/browse_read_model.sync_browse_list` re-inserts
 POSITIONALLY, so anything computed outside the view, or any reordering, writes NULLs into the wrong
 columns silently. An unresolved row's re-sourced codes and pin are NULL, and a NULL `lat` drops the
 row out of `properties_map_mv` — the intended posture (no pin the resolver would not stand behind),
 and the reason the red line gates everything downstream. Browse and the map read `browse_list`, which
-COPIES those fields at rebuild, so no consumer query joins the store; a field is added only after a
-measured slowdown, and only there.
+COPIES those fields at rebuild, so no consumer query joins the store; a field is added only by operator
+ruling or after a measured slowdown, and only there.
 
 **THE CONSUMER RULE** (operator ruling 2026-09-13, W5). A listing is SERVED to consumers only when
 `listing_location` has an ANSWER for it — a point, or the determination `country_status = 'foreign'`;
