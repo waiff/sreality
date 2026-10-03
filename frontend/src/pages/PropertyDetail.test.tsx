@@ -271,7 +271,7 @@ describe('<PropertyDetail> one property, one voice', () => {
     renderAt('/property/774');
 
     expect(await screen.findByText('Sloučené inzeráty')).toBeInTheDocument();
-    expect(within(screen.getByText('Sreality').closest('li') as HTMLElement).getByText('v záhlaví'))
+    expect(within(screen.getByText('Sreality').closest('li') as HTMLElement).getByText('hlavní inzerát'))
       .toBeInTheDocument();
     // The chips row, the "current active listing" jump, the history block's URL
     // list and the price-mismatch note are gone: one list, one price.
