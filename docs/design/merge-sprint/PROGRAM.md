@@ -2,7 +2,7 @@
 
 **Program document. This file is the program's source of truth.**
 Status: decisions taken by the operator in a design interview on 2026-10-02/03 (four rounds; 47 of 48
-questions answered, Q48 open, one new question Q49: §8). **Plan awaiting approval; only W0 is approved
+questions answered, Q48 open, two new questions Q49 and Q51: §8). **Plan awaiting approval; only W0 is approved
 to build.** Rules MS1–MS23 are binding once approved and supersede any design text, code comment or
 docstring that differs. Design detail per wave (inputs, not rules) is kept outside the repo in
 `~/merge-sprint-artifacts/`: `wf2/` designs and their skeptics, `wf3/` the non-interference check,
@@ -34,11 +34,11 @@ resolutions in `wf2/critic.md` §2 apply; where they differ, the rule wins.
 Every wave is tested against this sentence. Work that does not serve it is cut (§9).
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path beside
-an old one. Estimate for code, tests and workflows: about **+2,700 / −12,500 lines**, plus −21,000
+an old one. Estimate for code, tests and workflows: about **+3,200 / −12,600 lines**, plus −21,000
 lines of data files; **−7 tables, +1**; about **1.5 GB** freed in the database, 1.15 GB of it two
 indexes nothing has ever used. Not counted: about 730 lines of migration text that restate views.
 About 7,700 of the removed lines depend on the open question Q48. Every wave removes more than it adds
-except W0 (a hotfix, about +120 / −40) and W2a (about even).
+except W0 (a hotfix: +600 / −140 with its tests and docs) and W2a (about even).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -210,7 +210,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 
 | Wave | Content | Engine path | Needs | Lines (≈) |
 |---|---|---|---|---|
-| **W0** | Daily recompute resumes where the last run stopped | no, but a shared file | dedup session's OK to merge before its PR #1655 | +120 / −40 |
+| **W0** | Daily recompute resumes where the last run stopped (draft PR #1695) | no, but a shared file | dedup session's OK to merge before its PR #1655; Q51 | +600 / −140 |
 | **W1a** | Condition grades out: code, workflows, data files, filters, screens; the data-quality view restated; estimator instructions changed first, by a guarded data update that also dismisses two stale suggestions | two recompute lines; AI-provider classes the engine's judge imports | **Q48**; #1655 | +40 / −7,700 |
 | **W1b** | Asset links and the pipeline note field out (code) | yes | #1655 | 0 / −840 |
 | **W2a** | Recompute: speaking-ad order, amenity union, the two portal lists, price lineage; stops writing two write-only columns; keeps #1655's share-sale rule | yes | #1655; W1a if Q48 = drop | +180 / −185 |
@@ -305,7 +305,7 @@ that session; the two never-used indexes come from migrations 198 and 275.
    on the two grades and it can filter comparables by grade; 4 of 104 estimates ever did, and grades
    exist for 7 % of ads. (a) Drop them: W1a runs, the estimator's instructions lose that section and
    use the portal's condition text and the AI summaries instead. (b) Keep them for now: W1a and the
-   first row of §6 fall away and the program shrinks to about +2,660 / −4,800 lines. W1a does not
+   first row of §6 fall away and the program shrinks to about +3,160 / −4,900 lines. W1a does not
    start until this is answered.
 2. **Q49, new: may the "newest on this portal" order go?** Under a portal filter, "Newest first" will
    sort by when the property was first seen on any portal, so a known property newly advertised on
@@ -313,14 +313,19 @@ that session; the two never-used indexes come from migrations 198 and 275.
    This retires the August "one portal's own page". (a) Accept. (b) Keep a per-portal "first seen
    here" sort, which costs a stored date per property and portal. W5's deletion of the per-ad lane
    does not start until this is answered.
-3. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
+3. **Q51, new, belongs to W0: the health check's two limits.** The check on the daily recompute warns
+   at 26 hours and fails at 30 hours since the last complete cycle. While the database is slow a cycle
+   takes two runs, so the check would fail for about 18 of every 48 hours although both runs succeed.
+   (a) Re-size the two limits for a two-run cycle, about 52 and 56 hours. (b) Leave them and accept the
+   red hours. W0's PR changes neither.
+4. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
    each ad's row keeping its broker; the Rulings page keeping its confirm; several portals meaning
    any of them; alert events outside the carry record; the price-move list showing every ad.
-4. **The repair merge of properties 310481 and 876074 is still not done.** The operator chose "your
+5. **The repair merge of properties 310481 and 876074 is still not done.** The operator chose "your
    request" (Q26); the permission layer blocked it. Either click it in Browse or allow the request in
    an interactive session. Until then the extension shows no note on the re-listed ads.
-5. **Glossary PR #1688** merges before W1a; until then MS1 points at a file not yet on main.
-6. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). They are
+6. **Glossary PR #1688** merges before W1a; until then MS1 points at a file not yet on main.
+7. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). They are
    W4's first real cases; until W4 ships the existing split is used.
 
 ## 9. Cut from scope (reported, not built)

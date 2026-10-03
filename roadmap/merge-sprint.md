@@ -10,9 +10,10 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
 
 ## State (2026-10-03)
 - **Plan awaiting the operator's approval.** Decisions come from a four-round design interview; two
-  questions are open (Q48 condition grades and the estimator, Q49 the per-portal sort order).
-- **W0 approved:** the daily property recompute resumes where the last run stopped (it had not
-  completed since 2026-09-29). Built in its own worktree; merges with the AUTODEDUP session's OK.
+  questions are open (Q48 condition grades and the estimator, Q49 the per-portal sort order), plus
+  Q51 on the recompute health check's limits.
+- **W0 approved and built:** the daily property recompute resumes where the last run stopped (it had
+  not completed since 2026-09-29). Draft PR #1695; merges with the AUTODEDUP session's OK.
 - **Hand-over with the AUTODEDUP session agreed in writing** (memory note
   `merge-sprint-handover-to-autodedup`): it keeps `properties.all_sources` / `active_sources`;
   engine-path changes merge after its "C2 CLOSED" line (2026-10-06) and after its PR #1655.
