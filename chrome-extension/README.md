@@ -57,12 +57,44 @@ maxima, remax, mmreality, ceskereality).
     Absent while the property is a LIVE deal (a card at a non-terminal stage); a
     deal closed into "Passed"/"Lost" keeps it. Adding a card, or moving one back
     into a live stage, lifts the dismissal.
-- **Index / search pages** get a small per-card badge: `Výnos MF X.X %` (or the
+- **Index / search pages — every category, not just flats** — get the Browse
+  card's own controls on each listing card we have a property for, in the same
+  order and with the same meaning as in the app (`src/index_cards.ts`):
+  - **Funnel** (pipeline, rule #22): out of the pipeline, one click adds the
+    property at the entry stage; in it, the funnel carries the stage badge and
+    colour and a click opens the stage menu — move to another stage, or
+    **Odebrat z pipeline** behind a two-step confirm. Never a remove toggle.
+  - **Bookmark** (collections, rule #18): opens the checklist of every
+    collection, monitored ones first and bell-marked; a click on a row adds or
+    removes the property. The list is re-read each time the checklist opens.
+  - **Eye** (hide, migration 536): one click hides the property, one click
+    restores it. Absent while the property is a LIVE deal, like everywhere else.
+  - All three write through the same routes as the panel and the app, are
+    optimistic (a failure puts the state back and says why in the corner), and
+    are property-grain: a write repaints every card of that property on the
+    page, and the panel when it shows the same property (and the other way
+    round).
+  - A card is the outermost list item / article that still holds ONE listing,
+    so a photo carousel that repeats the link on every slide gets one set of
+    controls, not one per slide. The controls live in a closed shadow root per
+    card; the two menus float in one page-level shadow host.
+- **The corner dock** (`src/index_dock.ts`) sits **bottom-left** on every index
+  page with listing cards (the panel owns the bottom-right): a **Skrýt skryté**
+  switch plus how many hidden properties this page holds. On (the default), a
+  hidden property's card stays where it is but is drawn barely visible (10 %,
+  greyscale; hovering lifts it enough to see what it is); off, it is drawn like
+  any other card and told apart only by its filled eye. The card is never
+  removed — that would break the portal's own grid and paging, and a card that
+  is gone can't be un-hidden from where it stood. The preference is per
+  browser (`chrome.storage.local`) and follows the operator across portals and
+  open tabs.
+- **Sale apartments** additionally get the per-card yield badge, after the
+  three controls: `Výnos MF X.X %` (or the
   town's `X.X–Y.Y %` range, its note in the tooltip) when the property's MF
   result has a yield, otherwise a clickable **Odhadnout výnos** badge that runs one
-  on-demand estimation by that card's own URL. Badges come only from a
+  on-demand estimation by that card's own URL. Controls and badges come only from a
   successful lookup; when it fails the page is not left silent — one small
-  notice in the **bottom-left** corner (the panel owns the bottom-right) says
+  notice in the dock, above the switch, says
   why: **Přihlásit se přes Google** when signed out (a click first checks for
   a session made elsewhere — the panel, another tab — and skips the Google
   round trip if there is one), **Obnovit stránku** when the extension was
@@ -71,10 +103,9 @@ maxima, remax, mmreality, ceskereality).
   build without an API URL, which only a rebuild fixes). Automatic re-lookups
   back off 60 s; the tab becoming visible again asks at once; a lookup
   unanswered for 20 s shows as failed, though a late answer still badges. The
-  notice appears only while listing cards the URL doesn't rule out as sale
-  apartments are waiting on the failed lookup — never on a page without cards,
-  and on sreality / idnes / ceskereality not on a rental or house search. ×
-  hides it until the next page load.
+  notice appears while any listing card is waiting on the failed lookup — every
+  card gets controls from it, so a rental or house search is as stuck as a flat
+  one — and never on a page without cards. × hides it until the next page load.
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the
@@ -389,17 +420,26 @@ Odhlásit" line then appears at the top of the panel on every listing; click
    Edits to the three fields debounce 500 ms and PATCH the scenario back —
    the SPA's `/estimation/:id` page picks up the same state on next load.
 
-**On a search / index page** (any supported portal):
+**On a search / index page** (any supported portal, any category):
 
-1. Each sale-apartment card we recognise gets a small badge.
-2. `Výnos MF X.X %` (or a range) when we have the yield (rent or note in the
+1. Each card we have in our database gets three small icons in its top-left
+   corner — the same three as a Browse card in the app: the **funnel** (add to
+   the pipeline; once added, click again to change the stage), the **bookmark**
+   (tick the collections the property belongs in) and the **eye** (hide the
+   property / show it again).
+2. Sale-apartment cards also get a badge right after the icons:
+   `Výnos MF X.X %` (or a range) when we have the yield (rent or note in the
    tooltip); otherwise a
    clickable **Odhadnout výnos** badge that runs one estimation for that card
    and swaps in the result.
-3. Cards aren't matched by portal-specific markup — the overlay scans each
+3. In the bottom-left corner, the **Skrýt skryté** switch: on, the properties
+   you have hidden stay on the page as barely visible cards (hover one to peek
+   at it, click its eye to bring it back); off, they look like every other
+   card. The number beside it says how many hidden ones the page holds.
+4. Cards aren't matched by portal-specific markup — the overlay scans each
    card's detail link and resolves it through `/listings/lookup`, so it
-   survives the portals reshuffling their card HTML. Cards not in our DB (or
-   not sale apartments) get no badge.
+   survives the portals reshuffling their card HTML. Cards not in our DB get no
+   icons (a sale apartment the URL identifies still gets the estimate badge).
 
 ### Supported portals
 
@@ -408,8 +448,9 @@ ceskereality (URL→id extractors there are best-effort until those portals
 have data; a miss just shows no badge, never a wrong one).
 
 > **Note:** index pages on the React/Next.js portals (sreality, bezrealitky)
-> render cards client-side, so badges appear a moment after the results do and
-> re-attach as you scroll/paginate (a `MutationObserver` watches for new cards).
+> render cards client-side, so the icons and badges appear a moment after the
+> results do and re-attach as you scroll/paginate (a `MutationObserver` watches
+> for new cards).
 
 ## Chrome Web Store submission — what's left
 

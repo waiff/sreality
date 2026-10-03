@@ -984,8 +984,9 @@ def run_pass(
     """One bounded, idempotent incremental pass. Re-running it on an unchanged corpus is a no-op.
 
     `deadline` (a `time.perf_counter()` instant) bounds the pass's own time (E913): it is read
-    between steps and every few hundred pair decisions, and past it the pass raises
-    `PassDeadline` for its caller's transaction to roll back.
+    between steps, every few hundred pair decisions and — in the lane, whose `SqlFacts` holds
+    the same instant — between the slices of every fact read (E931), and past it the pass
+    raises `PassDeadline` for its caller's transaction to roll back.
 
     The order is the cohort pass's order, restricted: refresh the fingerprints that moved,
     widen to the probe-key neighbourhood (E71), retrieve, score what is new or stale, write the
