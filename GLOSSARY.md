@@ -66,7 +66,7 @@ _Avoid_: unmerge, detach, undo, separate
 
 **Survivor**:
 The property that keeps its identity: after a merge, the one that remains; after a split, the one
-that keeps the record.
+that keeps its number and its page.
 _Avoid_: keeper, winner, target
 
 **Ruling**:
