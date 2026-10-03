@@ -1715,9 +1715,9 @@ def test_the_same_pair_merges_again_once_its_old_ledger_row_is_closed() -> None:
     assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
 
 
-def test_a_split_off_property_takes_a_re_listing_of_its_flat() -> None:
+def test_a_split_off_property_takes_a_re_list_of_its_flat() -> None:
     # g12 merged 200 (11) into 100 (10); the operator split 11 off — back on 200, ruled
-    # different from 10. A re-listing of 11's flat, 30 on 3000, is grouped with 11 in g13: the
+    # different from 10. A re-list of 11's flat, 30 on 3000, is grouped with 11 in g13: the
     # restored 200 receives it, since no ruling stands between 11 and 30 (E934).
     db = FakeDb()
     scope, calls = _applied_two(db)
@@ -1732,13 +1732,14 @@ def test_a_split_off_property_takes_a_re_listing_of_its_flat() -> None:
     assert db.listings[30]["property_id"] == db.listings[11]["property_id"] == 200
 
 
-def test_two_ads_of_one_flat_split_apart_and_ruled_same_merge_but_never_rejoin_the_other() -> None:
-    # Production, 2026-10-03 (E934): the engine had merged two flats into one property; the
-    # operator split it — every ad back on the property it came from, each pair across the
-    # units ruled different — and then ruled the two ads of one flat (11, 12) "same". The lane
-    # grouped them and refused the merge (`restored_outside_engine`): both properties were
-    # engine-retired and active again. Now they merge, and the split's rulings refuse a group
-    # that would re-join them with the other flat (10).
+def test_two_ads_of_one_flat_split_apart_and_ruled_same_merge_but_not_with_the_other_flat(
+) -> None:
+    # The production case of 2026-10-03 (E934), modelled: the engine merged two flats into one
+    # property; the operator split it — each ad back on the property it came from, every pair
+    # across the units ruled different — and ruled the two ads of one flat (11, 12) "same".
+    # The lane grouped them and refused the merge (`restored_outside_engine`): both properties
+    # were engine-retired and active again. Now they merge, and the split's rulings refuse a
+    # group that would merge them back with the other flat (10).
     db = FakeDb()
     db.live_scope()
     scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
