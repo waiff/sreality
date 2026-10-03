@@ -10,7 +10,10 @@ dependencies = [
   # Deterministic HTML parsing for the bazos crawler (scraper/bazos_parser.py).
   # Single lexbor wheel, CSS selectors; stdlib html.parser is too low-level for
   # bazos's class-based markup. Not needed by the sreality JSON path.
-  "selectolax>=0.3",
+  # <1.0: selectolax 1.0.0 (2026-10-03) raises ImportError on `selectolax.parser`
+  # (the Modest backend), which eight scraper modules and location_data import.
+  # Lift the bound only together with a move to `selectolax.lexbor`.
+  "selectolax>=0.3,<1.0",
   # Perceptual image hashing (dHash) for the Tier-2 dedup sweep's image
   # corroborator (scraper/image_phash.py). Pillow-only — no numpy/scipy.
   # Pre-approved in docs/design/multi-portal-dedup.md.
