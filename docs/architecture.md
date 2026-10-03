@@ -1257,8 +1257,9 @@ renumber.** Navigate by area:
     in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
     linked in the same statement) then that recompute, in the straggler-attach. A linked
     advert's change reaches its property through `dirty_properties` (rule #20).
-    `all_sources` / `active_sources` (never written) left the read model; the physical columns
-    are W8's destructive drop (the SPA never read them).
+    `all_sources` / `active_sources` (never written) left the read model in 561; the PHYSICAL
+    columns STAY and are no longer on W8's drop list (operator ruling 2026-10-03: the merge
+    sprint's property-grain portal filter will write and read them).
     **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
     (`frontend/src/pages/PropertyDetail.tsx`). Its header is the `properties_public` row
     (`PROPERTY_COLS`, pinned to the view by `tests/test_property_page_read_contract.py`) -- the
