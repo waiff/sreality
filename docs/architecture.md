@@ -1538,7 +1538,9 @@ renumber.** Navigate by area:
     split statement rules `different` + a must-not-link across its units, and an engine merge
     taken apart outside the engine bans nothing by itself, so a split-off property may receive
     engine merges again; an `unapply` that finds the merge already partly taken apart records
-    its undo as theirs (`undone_by = 'external'`). `unapply` skips a
+    its undo as theirs (`undone_by = 'external'`), and a merge that records a (survivor,
+    retired) pair again closes that pair's stale live row the same way, in its own transaction,
+    so the ledger's live-pair index holds. `unapply` skips a
     group a later engine merge still builds on (more listings merged onto its survivor by a
     merge whose own undo is not refused for moving nothing back, or a retirement of its
     survivor that still stands) and names the merge to undo first — and only then: a group

@@ -19,8 +19,8 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
 - **Operator split (2026-10-03):** the property page states a whole partition by letters, in one
   `POST /properties/{id}/split` (frontend only; the route is E919's). Decided 2026-10-03 and done
   (E934): `restored_outside_engine` is deleted, so a split-off property receives engine merges
-  again and only the operator's rulings are bans; owed: the same-pair ledger edge and migration
-  558's `undone_by` comment (E934).
+  again and only the operator's rulings are bans; owed: migration 558's `undone_by` column
+  comment (E934).
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
