@@ -92,6 +92,22 @@ def test_a_set_whose_members_clash_is_refused_though_the_survivor_is_unknown(cat
     assert _merge(sanctioned, [3, 7, 9])["retired_ids"] == [7, 9]
 
 
+@pytest.mark.parametrize("other", ["pronajem", "drazba"])
+def test_a_share_sale_is_refused_with_a_rental_or_an_auction(other):
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("podil", "pozemek"), 7: (other, "pozemek")})
+    with pytest.raises(CategoryClash, match="category_type"):
+        _merge(db, [3, 7])
+    assert db.events == [] and db.listings == {1: 3, 2: 7}
+
+
+def test_a_share_sale_merges_with_a_sale():
+    """E932 (operator 2026-09-30): sreality alone files a share sale as `podil`; every other
+    portal lists it as `prodej`. The gate reads the deal class; price is the engine's."""
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("podil", "pozemek"), 7: ("prodej", "pozemek")})
+    assert _merge(db, [3, 7])["retired_ids"] == [7]
+    assert set(db.listings.values()) == {3}
+
+
 def test_two_different_asset_links_refuse_the_set_before_anything_merges():
     db = _Ledger({1: 3, 2: 7, 3: 9}, assets={3: 41, 9: 42})
     with pytest.raises(AssetLinkConflict):

@@ -26,7 +26,7 @@ from scraper.db import create_singleton_properties
 from scripts.recompute_property_stats import properties_changed
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import MergeSource  # re-exported: callers read it from here
-from toolkit.room_taxonomy import category_main_compatible
+from toolkit.room_taxonomy import category_main_compatible, category_type_compatible
 
 # The `detach_listings` outcomes that move the advert: back to its origin, or to a new record.
 MOVED = frozenset({"detached", "split_native"})
@@ -299,10 +299,10 @@ def category_clash(
     a: tuple[str | None, str | None], b: tuple[str | None, str | None],
 ) -> tuple[str, str | None, str | None] | None:
     """Rule 15's gate on two (category_type, category_main): the field that makes them two
-    properties and its two values — sale != rent, flat != house, except the one sanctioned
-    dum <-> komercni — or None. NULL = unknown, not a conflict. The chokepoint and the verdict
-    route (E925) read this one definition."""
-    if a[0] is not None and b[0] is not None and a[0] != b[0]:
+    properties and its two values — sale != rent != auction (a share sale IS a sale, E932),
+    flat != house, except the one sanctioned dum <-> komercni — or None. NULL = unknown, not a
+    conflict. The chokepoint and the verdict route (E925) read this one definition."""
+    if not category_type_compatible(a[0], b[0]):
         return ("category_type", a[0], b[0])
     if not category_main_compatible(a[1], b[1]):
         return ("category_main", a[1], b[1])

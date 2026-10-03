@@ -923,9 +923,30 @@ def test_every_advert_field_comes_from_the_canonical_advert():
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
     for column in ADVERT_FIELDS:
+        if column == "category_type":
+            continue  # the one class fold, pinned by the next test
         assert _rhs(setc, column).startswith("c."), f"{column} must be the canonical advert's"
     assert _rhs(setc, "price_per_m2_source_listing_id") == (
         "price_per_m2_source_id(c.price_czk, c.area_m2, c.id)")
+
+
+def test_the_deal_type_is_the_class_representative_when_the_adverts_disagree():
+    """E932 N8 (operator ruling 2026-10-01): a share (`podil`) + sale (`prodej`) property reads
+    Prodej, not Podíl, whichever advert is canonical -- so it stays in Browse's Prodej cohort and
+    every `prodej` watchdog. Rule 15 admits no other deal-type mix, so the fold only ever moves
+    `podil` -> `prodej`; a property of share adverts alone still reads `podil`. ONE definition:
+    `room_taxonomy.deal_class_sql` spells the class table, nothing here copies it."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+    from toolkit.room_taxonomy import deal_class_sql
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "category_type") == (
+        f"CASE WHEN r.deal_type_count > 1 THEN {deal_class_sql('c.category_type')} "
+        "ELSE c.category_type END")
+    rollup = _RECOMPUTE_BATCH_SQL.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0]
+    assert "count(distinct k.category_type) AS deal_type_count" in rollup
+    assert "podil" not in _RECOMPUTE_BATCH_SQL.replace(deal_class_sql("c.category_type"), ""), (
+        "the class table is spelled in room_taxonomy only")
 
 
 def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():

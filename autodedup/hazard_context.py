@@ -33,6 +33,7 @@ from typing import Iterable, Mapping, Sequence
 
 from autodedup.dataset import Image, Listing, live_end_stamp
 from autodedup.text_facts import address_block_key, states_from_price
+from toolkit.room_taxonomy import category_type_compatible, deal_class_of
 
 _FAR_FUTURE = datetime(2999, 1, 1, tzinfo=timezone.utc)
 
@@ -79,7 +80,7 @@ def disjoint_windows(a: Listing, b: Listing) -> bool:
 
 
 def category_group(listing: Listing) -> str:
-    return f"{listing.category_main or '?'}|{listing.category_type or '?'}"
+    return f"{listing.category_main or '?'}|{deal_class_of(listing.category_type) or '?'}"
 
 
 def _close(x: float | None, y: float | None, tol: float) -> bool:
@@ -161,8 +162,7 @@ def confusable_twins(listing: Listing, block_members: Sequence[Listing]) -> list
     for other in block_members:
         if other.id == listing.id:
             continue
-        if (listing.category_type and other.category_type
-                and listing.category_type != other.category_type):
+        if not category_type_compatible(listing.category_type, other.category_type):
             continue
         if listing.disposition and other.disposition and listing.disposition != other.disposition:
             continue

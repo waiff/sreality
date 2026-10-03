@@ -40,8 +40,37 @@ ROOM_TYPES: tuple[str, ...] = tuple(ROOM_FAMILIES)
 SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
 
-# Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
-# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
+# Deal-type classes (operator ruling 2026-09-30). sreality alone files a share sale in its own
+# "Podíly" section (category_type_cb 4 -> 'podil'); the other eight portals list the same advert
+# as a plain sale, so a share sale is in the SALE class. An auction and a rental are each a class
+# of their own. The engine merges a share sale with a sale only at one stated price
+# (`autodedup.guards.share_price_conflict`); an operator ruling needs no price.
+_DEAL_CLASS: dict[str, str] = {"podil": "prodej"}
+
+
+def deal_class_of(category_type: str | None) -> str | None:
+    return None if category_type is None else _DEAL_CLASS.get(category_type, category_type)
+
+
+def category_type_compatible(a: str | None, b: str | None) -> bool:
+    """Same deal class, or either side NULL (unknown is never a conflict)."""
+    return a is None or b is None or deal_class_of(a) == deal_class_of(b)
+
+
+def crosses_deal_type(a: str | None, b: str | None) -> bool:
+    """Both stated, different, one class: a share sale against a sale."""
+    return a is not None and b is not None and a != b and deal_class_of(a) == deal_class_of(b)
+
+
+def deal_class_sql(expr: str) -> str:
+    """`deal_class_of` spelled in SQL over a column expression, for the one rollup
+    (`scripts.recompute_property_stats`): the class table is never copied into SQL by hand."""
+    whens = " ".join(f"WHEN '{raw}' THEN '{cls}'" for raw, cls in _DEAL_CLASS.items())
+    return f"CASE {expr} {whens} ELSE {expr} END"
+
+
+# Cross-category merge compatibility. A flat ≠ a house (by default), so the merge's
+# `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
 # sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and
 # commercial on another is the same real-world property) — irrespective of sub-type. Lives
 # here (pure, no heavy imports) so property_identity can share it without an import cycle.

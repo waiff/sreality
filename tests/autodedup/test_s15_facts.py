@@ -509,7 +509,9 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
 def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
     """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
     took the room tag out of every refusal, so a stored row whose tag sat at or above the
-    0.90 floor (or was unknown) decides identically, and every row that moved had it below."""
+    0.90 floor (or was unknown) decides identically, and every row that moved had it below.
+    E932: a share-sale advert (`podil`) now meets the sale at its price,
+    so the rows that name one are set aside (4 adverts on this cohort)."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -520,8 +522,10 @@ def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
         mnl if S14.operator_must_not_link else frozenset())
     decided = lambda rows: {(r["lo"], r["hi"]): (r["zone"], r["reason"], r["certificate"],  # noqa: E731
                                                  r["veto"], round(r["score"], 9)) for r in rows}
+    share = {i for i, row in ds.listings.items() if row.category_type == "podil"}
+    rest = lambda rows: {k: v for k, v in decided(rows).items() if not share & set(k)}  # noqa: E731
     stored = read_pairs(S14_TRIAL_RUN)
-    now, then = decided(read_pairs(tmp_path)), decided(stored)
+    now, then = rest(read_pairs(tmp_path)), rest(stored)
     assert now.keys() == then.keys()
     tag = {(r["lo"], r["hi"]): r["feats"].get("tag_room_clip_min2") for r in stored}
     below = {key for key, slot in tag.items() if slot and slot[1] and slot[0] < 0.90}
