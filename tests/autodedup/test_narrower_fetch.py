@@ -2,10 +2,10 @@
 endpoints carry them.
 
 The world is `lane_world`'s nine listings with a CLIP vector on every photograph, plus two
-listings that share every probe key but sit four and eight floors away — the rule floor vetoes
-every pair they could form, so once stored they are in every later pass's neighbourhood and
-never an endpoint. That is the read E932 removes, and the parity below is that removing it
-moves no decision.
+listings that share every probe key but sit seven and eight floors up: the rule floor vetoes
+every pair they could form with the nine, so once both are stored they are in every later
+pass's neighbourhood and the sides of one wanted pair — their own, whose decision stands. That
+is the read E932 removes, and the parity below is that removing it moves no decision.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from autodedup.incremental import (
     run_pass_bounded,
 )
 from autodedup.incremental_lane import SqlFacts, SqlStore
+from autodedup.incremental_sql import RT_PAIR_UPSERT_SQL
 from autodedup.incremental_store import CohortFacts, MemoryStore, Schedule
 from autodedup.model import hand_initialised
 from autodedup.score_lane import families_of_bitmask
@@ -43,7 +44,7 @@ from tests.autodedup.fake_pg import FakePg, _Cursor
 from tests.autodedup.test_one_lane import _Session
 
 GEN = "rt"
-OUTLIERS = {4_100: 10, 4_101: 14}
+OUTLIERS = {4_100: 10, 4_101: 11}
 ORDER = [4_000, 4_001, 4_100, 4_002, 4_003, 4_101, 4_004, 4_005, 4_006, 4_007, 4_008]
 
 
@@ -230,30 +231,35 @@ def test_the_narrower_fetch_decides_exactly_what_the_full_fetch_decides() -> Non
         "skipped vectors read as photographs the producers have not delivered")
 
 
-def test_the_vector_read_names_the_claim_and_the_endpoints_only() -> None:
+def test_the_vector_read_names_the_claim_and_the_scored_endpoints_only() -> None:
     """Per pass, `COHORT_CLIP_SQL` reads the photographs of the claimed listings (their refresh
-    records the vectors' presence) and of the scored endpoints — and never those of a
-    neighbourhood listing that is neither. The read before E932 carried them every pass."""
+    records the vectors' presence) and of the two sides of every pair the pass DECIDES — never
+    those of a neighbourhood listing, nor of the sides of a wanted pair whose stored decision
+    stands. The read before E932 carried all of them, every pass."""
     conn = _world()
     passes, statements = _drain(SqlStore(conn, GEN, store_floor=0.0), SqlFacts(conn), conn)
     full = _world()
     _, before = _drain(SqlStore(full, GEN, store_floor=0.0), _EveryVector(SqlFacts(full)),
                        full)
-    endpoints = {i for key in conn.pairs if key[0] == GEN for i in key[1:]}
-    assert not endpoints & set(OUTLIERS), "the outliers pair with nothing"
+    assert (GEN, *sorted(OUTLIERS)) in conn.pairs, "the outliers pair with each other"
+    assert all(set(key[1:]) <= set(OUTLIERS) or not set(key[1:]) & set(OUTLIERS)
+               for key in conn.pairs), "and with nothing else"
 
-    neighbourhood_reads = 0
+    skipped = 0
     for result, issued, issued_before in zip(passes, statements, before):
         claimed = set(result.claimed)
+        decided = {int(params[side]) for text, params in issued
+                   if text == RT_PAIR_UPSERT_SQL and params.get("features") is not None
+                   for side in ("listing_lo", "listing_hi")}
         vectored = _ids(issued, COHORT_CLIP_SQL)
         assert _images_of(conn, claimed) <= vectored, "the claim's presence is read"
-        assert vectored <= _images_of(conn, claimed | endpoints)
-        for outlier in set(OUTLIERS) - claimed:
+        assert _images_of(conn, claimed | decided) == vectored
+        for outlier in set(OUTLIERS) - claimed - decided:
             if outlier in _ids(issued, COHORT_IMAGES_SQL):
-                neighbourhood_reads += 1
+                skipped += 1
                 assert not _images_of(conn, {outlier}) & vectored
                 assert _images_of(conn, {outlier}) <= _ids(issued_before, COHORT_CLIP_SQL)
-    assert neighbourhood_reads > 0, "the outliers were read as neighbourhood, without vectors"
+    assert skipped > 0, "the outliers were read as neighbourhood, without vectors"
 
 
 # ------------------------------------------------------------------ what a bare gallery is

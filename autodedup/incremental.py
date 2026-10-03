@@ -1248,9 +1248,21 @@ def run_pass(
 
     # --- 5. score what is new or stale -----------------------------------------------------
     endpoints = {i for pair in wanted for i in pair}
-    working.ensure(endpoints, clip=True)
+    working.ensure(endpoints)
     digests = {i: fp_digest(working.fps[i], working.images.get(i, ()))
                for i in endpoints if i in working.fps}
+    # A stored decision stands while neither side's digest moved and neither side was refreshed.
+    # Only the pairs it does not cover are decided, and only their two sides read photographs —
+    # the features the CLIP vectors, E93's hold their presence — so only they carry them (E932).
+    decide: set[tuple[int, int]] = set()
+    for lo, hi in wanted:
+        if lo not in working.fps or hi not in working.fps:
+            continue
+        previous = stored.get((lo, hi))
+        if (previous is None or previous.fp_lo != digests.get(lo, "")
+                or previous.fp_hi != digests.get(hi, "") or lo in changed or hi in changed):
+            decide.add((lo, hi))
+    working.ensure({i for pair in decide for i in pair}, clip=True)
     ctx = context_for(calibration, settings, working.fps, working.listings)
     census = _census(store, working.listings, working.images)
     # E93's two inputs, batched for the whole pass: what each endpoint's photographs ARE right
@@ -1268,8 +1280,7 @@ def run_pass(
         previous = stored.get((lo, hi))
         dlo = digests.get(lo, "")
         dhi = digests.get(hi, "")
-        if (previous is not None and previous.fp_lo == dlo and previous.fp_hi == dhi
-                and lo not in changed and hi not in changed):
+        if previous is not None and (lo, hi) not in decide:
             if (set(previous.probes) != entry["probes"] or previous.from_lo != entry["from_lo"]
                     or previous.from_hi != entry["from_hi"]):
                 previous.probes = sorted(entry["probes"])
