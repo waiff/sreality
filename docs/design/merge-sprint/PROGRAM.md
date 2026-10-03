@@ -331,8 +331,8 @@ condition grades with their scores, jobs and settings (MS4); anything on the lea
 
 ## 7. Coordination with the parallel dedup session (MS22)
 
-The hand-over and that session's reply of 2026-10-03 14:34 UTC live in the memory note
-`merge-sprint-handover-to-autodedup`. Verified on 2026-10-03: nothing in §6 was built by or is used by
+The hand-over, that session's reply of 2026-10-03 14:34 UTC and its addendum of 21:20 UTC live in the
+memory note `merge-sprint-handover-to-autodedup`. Verified on 2026-10-03: nothing in §6 was built by or is used by
 that session; the two never-used indexes come from migrations 198 and 275.
 
 - **Left to that session** (its own deletion wave, after its own backup): its unused tables; the
@@ -383,9 +383,9 @@ that session; the two never-used indexes come from migrations 198 and 275.
    next ad that states them; the lowest-price line in the header's place when the header has none;
    the pipeline board's broker line; each ad's row keeping its broker; the toast naming no field
    changes; the Rulings page keeping its confirm; in a split, the rule and not the user choosing which
-   letter keeps the property, and which letter gets back a property two letters came from; an
-   operator merge ruling "same" every standing "different" across the merged properties; several
-   portals meaning any of them; with no active ad, the badge listing all portals; alert events
+   letter keeps the property, and which letter gets back a property two letters came from; a user's
+   merge taking back every "different" ruling between the ads it joins (MS12); several portals
+   meaning any of them; with no active ad, the badge listing all portals; alert events
    outside the carry record; the price-move list showing every ad; a property's condition grades
    following its canonical ad; under one portal, "Newest first" following that portal's newest ad,
    and the property's first seen with no portal or several; our own first sighting on every portal,
