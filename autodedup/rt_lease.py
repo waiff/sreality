@@ -78,13 +78,34 @@ def release_stale(conn: Any, holder: str) -> dict[str, Any]:
     return {"released": holder, "expires_at_was": str(row["expires_at"])}
 
 
-def release_after(conn: Any, holder: str, original: BaseException | None) -> None:
+def release_after(conn: Any, holder: str, original: BaseException | None, *,
+                  fallback: Any | None = None) -> bool:
     """Release at the end of a run. A release that fails while `original` is on its way out
-    is noted ON it instead of replacing it: the lease then expires by itself."""
+    is noted ON it instead of replacing it: the lease then expires by itself.
+
+    `fallback` is a second, live connection the caller already holds — the one a raised pass
+    halves its rate on (E930) — and a release that fails on `conn` (the backend the server
+    terminated) is retried there (E931): a lease left to its TTL skips every pass of the next
+    ~35 min as "leased". The statement is keyed by holder, so it ends this holder's row and
+    no other's. Returns whether a release ran."""
     try:
         release(conn, holder)
+        return True
     except Exception as exc:
+        failed: Exception = exc
+        if fallback is not None:
+            try:
+                release(fallback, holder)
+            except Exception as again:  # noqa: BLE001 — noted below, never raised instead
+                failed = again
+            else:
+                if original is not None:
+                    original.add_note(f"releasing autodedup.rt_lease for {holder!r} failed on "
+                                      f"the pass's connection ({type(exc).__name__}: {exc}); "
+                                      "released on the fresh one")
+                return True
         if original is None:
-            raise
+            raise failed
         original.add_note(f"releasing autodedup.rt_lease for {holder!r} also failed "
-                          f"({type(exc).__name__}: {exc}); it expires by itself")
+                          f"({type(failed).__name__}: {failed}); it expires by itself")
+        return False
