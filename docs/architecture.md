@@ -2106,10 +2106,10 @@ renumber.** Navigate by area:
     `property_sweep_last_complete` stamp (and deletes the cursor) — so chronic exhaustion surfaces
     as red runs plus the `property_maintenance` health check failing on stamp age, and the unswept
     id tail keeps its pre-sweep windowed stats until a cycle finishes (is_active flips still heal
-    incrementally — every delist path enqueues `dirty_properties`). That check's 26h/30h stamp-age
-    thresholds still assume a one-run cycle, so a two-run cycle, green in the sweep's own exit
-    code, also fails it for ~18h before its second run stamps; re-sizing them is an operator
-    decision. The maintenance lease is one 15-minute TTL
+    incrementally — every delist path enqueues `dirty_properties`). That check's stamp-age
+    thresholds (warn 52h, fail 56h) are sized for a two-run cycle (operator, 2026-10-03), so a
+    dead sweep is flagged after about two days, not 30h; a run that stops on budget twice or
+    sweeps nothing exits RED on its own. The maintenance lease is one 15-minute TTL
     heartbeat-renewed every batch/slice, so a killed job freezes maintenance for minutes, not
     hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both

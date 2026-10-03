@@ -41,8 +41,8 @@ pair already co-located — that would erase evidence of a bypass); `POST
 `broker_resolution_runs.suppressed_pairs` (pairs, not merges: the rail blocks before grading) and
 the `RESOLVE full merge done … suppressed=N` line. Kill switch: `broker_auto_merge_enabled`=false.
 The property sweep axis ages a CYCLE (one run, or two through `app_settings.property_sweep_cursor`
-since 2026-10-03), but its 26h/30h thresholds still assume one run: a two-run cycle, green in the
-sweep's own exit code, fails the check for ~18h of every 48h (re-sizing is the operator's call).
+since 2026-10-03); its thresholds (warn 52h, fail 56h) are sized for the two-run cycle, so a dead
+sweep is flagged after about two days and the sweep's own RED exit is the faster alarm.
 Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
 spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
 `app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps

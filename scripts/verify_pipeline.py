@@ -175,13 +175,13 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
     # sweeps + a stranded lease freezing every maintenance lane). The sweep
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
-    # cycle, possibly across two runs (its resume cursor); healthy age is ~24h
-    # (daily 04:15 cadence), so fail at 30h fires ~5-6h after a dead, killed or
-    # incomplete cycle — however the process died. These two still assume a
-    # one-run cycle: a two-run cycle (green in the sweep's own exit code) stamps
-    # every ~48h, so the check warns 4h then fails ~18h before its second run
-    # lands. Sizing them for two runs (as broker_sweep_* is for its two-run lap)
-    # loosens the bound on a dead sweep, so it is an operator decision.
+    # cycle, which is one run or two (its resume cursor), so a healthy stamp is
+    # ~24h or ~48h old. Sized for the two-run cycle (operator, 2026-10-03), as
+    # broker_sweep_* is for its two-run lap: warn above 48h plus the spread in
+    # when a run finishes (GH's scheduled-run delay, the lease wait, the run:
+    # ~2.5h), fail a few hours on — a cycle whose second run never stamped. The
+    # price is a dead sweep flagged after ~2 days instead of ~30h; a run that
+    # stops on budget twice, or sweeps nothing, exits RED on its own.
     # Dirty rows drain within ~2 min of the worker lane's tick — EXCEPT while the
     # daily full sweep holds the maintenance lease, which blocks every incremental
     # pass and only clears dirty_properties at the very end, so oldest-dirt ages
@@ -190,8 +190,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # #1026) plus lease wait + finalize, so warn must sit ABOVE it or a perfectly
     # healthy long sweep turns this axis amber and trains the operator to ignore
     # it. 1.5h -> 2.5h; fail stays 3h. Raise this together with the sweep budget.
-    "property_sweep_warn_hours": 26,
-    "property_sweep_fail_hours": 30,
+    "property_sweep_warn_hours": 52,
+    "property_sweep_fail_hours": 56,
     "property_dirty_warn_hours": 2.5,
     "property_dirty_fail_hours": 3,
     # Broker resolution. Same two axes as property maintenance, but the sweep axis
