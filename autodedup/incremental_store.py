@@ -253,7 +253,8 @@ class CohortFacts:
         self.ds = ds
         self.withheld = frozenset(withheld)
 
-    def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
+    def facts(self, ids: Iterable[int], *, clip: bool = True
+              ) -> dict[int, tuple[Listing, list[Image]]]:
         out: dict[int, tuple[Listing, list[Image]]] = {}
         for listing_id in ids:
             listing = self.ds.listings.get(listing_id)
@@ -263,8 +264,19 @@ class CohortFacts:
             if listing_id in self.withheld:
                 images = [replace(image, phash=None, pop=None, clip=None, tags=[])
                           for image in images]
+            elif not clip:
+                images = [replace(image, clip=None) for image in images]
             out[listing_id] = (listing, images)
         return out
+
+    def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
+        """The CLIP vectors `facts` would have carried for these images (E932)."""
+        wanted = set(image_ids)
+        return {image.image_id: image.clip
+                for listing_id, bucket in self.ds.images_by_listing.items()
+                if listing_id not in self.withheld
+                for image in bucket
+                if image.image_id in wanted and image.clip is not None}
 
 
 class Schedule:
