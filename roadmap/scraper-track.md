@@ -484,10 +484,10 @@ scale to 5–10 portals.
   Known follow-ups: (1) the batch UPDATE rewrites all ~515k live rows daily
   with no changed-only guard — the suspected driver of the runtime growth
   (bloat feedback); measure and add an `IS DISTINCT FROM` guard as its own
-  change; (2) repeated budget exhaustion restarts from id 1 each day (no
-  resume cursor), so a chronically over-budget sweep starves the high-id
-  tail — loud (daily RED + stamp-age fail) but not self-healing; add a
-  cursor only if (1) doesn't restore headroom.
+  change; (2) DONE 2026-10-03 after four days of stops near id 540k of 927k:
+  a budget stop saves `app_settings.property_sweep_cursor` and the next run
+  resumes the cycle there instead of at id 1 (cycles over 36h old restart);
+  the first stop of a cycle exits 0, a resumed run that stops again exits RED.
 
 ### Phase 4.0: Portal framework — one pipeline for every portal (done)
 The fourth scaling-roadmap unlock: collapse sreality + bazos onto ONE shared

@@ -3405,7 +3405,7 @@
         },
         {
           "name": "dry_run",
-          "description": "Report straggler + dirty + property counts and exit without writing",
+          "description": "Report straggler + dirty + property counts and the resume cursor, then exit without writing",
           "required": false,
           "type": "choice",
           "default": "false",
@@ -3416,7 +3416,7 @@
         },
         {
           "name": "max_seconds",
-          "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 6000 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
+          "description": "Wall-clock sweep budget in seconds (clean-stop past it, saving where the next run resumes; a resumed run that stops again is RED; clamped to 6000 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
           "required": false,
           "type": "string",
           "default": "6000",

@@ -68,6 +68,11 @@ def test_every_id_lands_in_exactly_one_range():
     assert seen == max_id
 
 
+def test_a_resumed_walk_starts_its_ranges_at_the_cursor():
+    assert list(_batch_ranges(6000, 2000, 2001)) == [(2001, 4001), (4001, 6001)]
+    assert list(_batch_ranges(6000, 2000, 6001)) == []
+
+
 class _Cur:
     def __init__(self, conn: "_FakeConn") -> None:
         self._conn = conn
@@ -530,13 +535,16 @@ def test_lease_ttl_is_short_everywhere():
 
 class _SweepConn(_FakeConn):
     """Context-manager conn driving main()'s full sweep without stubbing the
-    batch loop: serves now(), the lease CAS (always granted), and max(id)."""
+    batch loop: serves now(), the lease CAS (always granted), max(id), and the
+    saved resume cursor (next_lo, runs, cycle_started_at, young) when given one."""
 
-    def __init__(self, max_id: int) -> None:
+    def __init__(self, max_id: int, cursor: tuple[Any, ...] | None = None) -> None:
         super().__init__([
             (lambda s: s == "SELECT now()", [("CUTOFF",)]),
             (lambda s: "property_maintenance_lease" in s and "RETURNING" in s, [(1,)]),
             (lambda s: "coalesce(max(id), 0) FROM properties" in s, [(max_id,)]),
+            (lambda s: s.startswith("SELECT") and "property_sweep_cursor" in s,
+             [cursor] if cursor else []),
         ])
 
     def __enter__(self) -> "_SweepConn":
@@ -576,9 +584,9 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
               if "property_maintenance_lease" in s and "RETURNING" in s]
     # initial acquisition + one renewal per batch
     assert len(grants) == 1 + 2
-    # complete walk → global dirty clear, no swept-range scope
+    # complete walk → the swept-range clear over its whole range
     cleared = _find(conn, "DELETE FROM dirty_properties")
-    assert cleared and "property_id <" not in cleared[0]
+    assert cleared and cleared[1] == {"cutoff": "CUTOFF", "lo": 1, "hi": 4001}
     # ...and the completion stamp the health check reads (O(1) liveness signal)
     stamp = _find(conn, "property_sweep_last_complete")
     assert stamp and stamp[1]["max_id"] == 4000 and stamp[1]["batches"] == 2
@@ -599,32 +607,148 @@ def test_the_full_sweep_patches_no_browse_row(monkeypatch: Any) -> None:
     assert not any("browse_list" in s for s in _sqls(conn))
 
 
-def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
-    monkeypatch: Any,
+# monotonic: started_at, _wait_lease entry anchor, batch-1 deadline check, batch-1 per-batch
+# timing, batch-2 deadline check (over a 60s budget), then the elapsed stamps in logging.
+_BUDGET_STOP_CLOCK = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
+_CURSOR_SAVE = "VALUES ('property_sweep_cursor'"
+_CURSOR_DROP = "DELETE FROM app_settings WHERE key = 'property_sweep_cursor'"
+
+
+def _swept(conn: _FakeConn) -> list[tuple[int, int]]:
+    return [(p["lo"], p["hi"]) for s, p in conn.executed if "WITH batch AS" in s]
+
+
+def _dirty_clears(conn: _FakeConn) -> list[Any]:
+    return [p for s, p in conn.executed if s.startswith("DELETE FROM dirty_properties")]
+
+
+def test_a_fresh_cycle_stopped_by_the_budget_saves_its_cursor_and_exits_green(
+    monkeypatch: Any, caplog: Any,
 ) -> None:
-    """Stopping early must (a) exit RED — GH reports a timeout kill as
-    `cancelled` which alerts nobody, an explicit failure emails — and (b) clear
-    dirty rows ONLY below the high-water mark: the global clear would erase the
-    recompute signal for unswept ids, leaving them stale until the next full
-    sweep instead of healed by the next incremental pass."""
+    """The first budget stop of a cycle is tolerated: exit 0 with a warning naming where the
+    next run resumes, and save that cursor. It still clears dirty rows ONLY in the range it
+    swept (a wider clear would erase the recompute signal for unswept ids, leaving them stale
+    until the next cycle instead of healed by the next incremental pass), and stamps nothing:
+    a stale stamp IS the health check's alarm condition."""
     conn = _SweepConn(max_id=6000)  # 3 batches at the default size
-    # monotonic: started_at, _wait_lease entry anchor, batch-1 deadline check,
-    # batch-1 per-batch timing, batch-2 deadline check (over budget), then the
-    # elapsed stamps in logging.
-    clock = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
-    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=clock)
-    assert rc == 1
-    recomputes = [p for s, p in conn.executed if "WITH batch AS" in s]
-    assert [(p["lo"], p["hi"]) for p in recomputes] == [(1, 2001)]
-    cleared = _find(conn, "DELETE FROM dirty_properties")
-    assert cleared and "property_id < %(hi)s" in cleared[0]
-    assert cleared[1] == {"cutoff": "CUTOFF", "hi": 2001}
-    # incomplete walk must NOT reconcile childless, claim a full clear, or
-    # stamp completion — a stale stamp IS the health check's alarm condition
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 0
+    assert "the next run resumes this cycle at id 2001" in caplog.text
+    assert _swept(conn) == [(1, 2001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 2001}]
+    saved = _find(conn, _CURSOR_SAVE)
+    assert saved and saved[1] == {"next_lo": 2001, "cycle_started_at": "CUTOFF", "runs": 1}
     assert not _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
     assert not _find(conn, "property_sweep_last_complete")
-    # the lease is still released
     assert _find(conn, "SET holder = NULL")
+
+
+class _TxnSweepConn(_SweepConn):
+    transaction = _TxnMarkingConn.transaction
+
+
+def test_a_resumed_run_finishes_the_cycle_from_its_cursor(monkeypatch: Any) -> None:
+    """Run 2 walks [next_lo, max_id] only and clears only that range's dirt (ids below it were
+    recomputed by run 1 and may be dirty again), reconciles, stamps the cycle (runs=2, run 1's
+    start) and deletes the cursor in the stamp's own transaction."""
+    conn = _TxnSweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(2001, 4001), (4001, 6001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": 6001}]
+    assert _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 2 and stamp[1]["cycle_started_at"] == "CYCLE"
+    assert stamp[1]["max_id"] == 6000 and stamp[1]["batches"] == 2
+    assert not _find(conn, _CURSOR_SAVE)
+    order = _sqls(conn)
+    clear = next(i for i, s in enumerate(order) if s.startswith("DELETE FROM dirty_properties"))
+    stamped = next(i for i, s in enumerate(order) if "property_sweep_last_complete" in s)
+    dropped = order.index(_CURSOR_DROP)
+    begin = max(i for i in range(clear) if order[i] == "BEGIN")
+    assert begin < clear < stamped < dropped < order.index("COMMIT", begin)
+    assert _find(conn, "SET holder = NULL")
+
+
+def test_a_resumed_run_stopped_by_the_budget_again_is_red_and_advances_the_cursor(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """A cycle that needs three or more runs is genuinely too slow: RED, with the cycle facts
+    in the message, and the cursor still advanced so a run within the age limit continues."""
+    conn = _SweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 1
+    assert "three or more runs" in caplog.text and "investigate per-batch cost" in caplog.text
+    assert _swept(conn) == [(2001, 4001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": 4001}]
+    saved = _find(conn, _CURSOR_SAVE)
+    assert saved and saved[1] == {"next_lo": 4001, "cycle_started_at": "CYCLE", "runs": 2}
+    assert not _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    assert not _find(conn, "property_sweep_last_complete")
+    assert _find(conn, "SET holder = NULL")
+
+
+@pytest.mark.parametrize("cursor", [
+    (2001, 1, "OLD", False),     # the cycle began more than _CURSOR_MAX_AGE ago
+    (8001, 1, "CYCLE", True),    # past max_id
+    (1, 1, "CYCLE", True),       # nothing to skip
+], ids=["stale", "past-max-id", "at-id-1"])
+def test_a_cursor_that_cannot_continue_its_cycle_is_ignored(
+    monkeypatch: Any, caplog: Any, cursor: tuple[Any, ...],
+) -> None:
+    """A stale cursor would let the stamp vouch for a reconcile whose lower half is days old:
+    walk from id 1 as a fresh cycle instead. The age is judged by the database's clock."""
+    import scripts.recompute_property_stats as rps
+
+    conn = _SweepConn(max_id=6000, cursor=cursor)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    read = _find(conn, "SELECT (value->>'next_lo')")
+    assert read and read[1] == {"max_age": rps._CURSOR_MAX_AGE}
+    assert "ignoring the saved cursor" in caplog.text
+    assert _swept(conn) == [(1, 2001), (2001, 4001), (4001, 6001)]
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 1 and stamp[1]["cycle_started_at"] == "CUTOFF"
+    assert _find(conn, _CURSOR_DROP)
+
+
+def test_a_fresh_complete_walk_clears_its_whole_range_and_leaves_no_cursor(
+    monkeypatch: Any,
+) -> None:
+    """No cursor: walk from id 1 as before. The one dirty clear covers [1, max_id + 1), which
+    stands in for the deleted global `_CLEAR_DIRTY_SQL` (why that is the same clear: the comment
+    on `_CLEAR_DIRTY_SWEPT_SQL`)."""
+    import scripts.recompute_property_stats as rps
+
+    conn = _SweepConn(max_id=4000)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(1, 2001), (2001, 4001)]
+    assert not hasattr(rps, "_CLEAR_DIRTY_SQL")
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 4001}]
+    assert _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 1 and stamp[1]["cycle_started_at"] == "CUTOFF"
+    assert _find(conn, _CURSOR_DROP) and not _find(conn, _CURSOR_SAVE)
+
+
+def test_the_cursor_survives_one_daily_gap_but_not_two() -> None:
+    """The daily cron starts hours late and unevenly, so the next day's run must still find the
+    cycle young enough to resume; the day after must start over at id 1."""
+    import scripts.recompute_property_stats as rps
+
+    assert 24 * 3600 < _interval_seconds(rps._CURSOR_MAX_AGE) < 48 * 3600
+
+
+def test_the_dry_run_reports_the_cursor_and_writes_nothing(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO)
+    conn = _SweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    conn.script.append((lambda s: s.startswith("SELECT count(*)"), [(7,)]))
+    assert _run_sweep(monkeypatch, conn, ["--dry-run"]) == 0
+    assert "(2001, 1, 'CYCLE', True)" in caplog.text
+    assert not any(s.startswith(("INSERT", "UPDATE", "DELETE")) for s in _sqls(conn))
+    assert not _find(conn, "property_maintenance_lease")
 
 
 class _FlakyCur(_Cur):

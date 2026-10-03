@@ -21,18 +21,23 @@ Liveness (2026-08-06 incident): the maintenance lease is a SHORT (15 min) TTL
 heartbeat-renewed every batch/slice — never a runtime-sized grant — so a
 SIGKILL at any point freezes maintenance for minutes, not hours. The full
 sweep also takes a --max-seconds wall-clock budget and CLEAN-STOPS at a batch
-boundary when it runs out: finalize what was covered, release the lease, exit
+boundary when it runs out: finalize what was covered, save a resume cursor,
+release the lease. The next run continues that CYCLE from the cursor instead
+of id 1 (2026-10-03: four daily runs in a row stopped near id 540k of 927k,
+each restarting at 1, so the tail went days without a reconcile). The first
+stop of a cycle exits 0 with a warning; a resumed run that stops again exits
 RED (GH reports a timeout kill as `cancelled`, which alerts nobody). The
 `property_maintenance` check in scripts/verify_pipeline.py watches the
-resulting staleness independently.
+completion stamp independently.
 
 Two run modes (Phase 3 -- real-time properties):
 
   * --incremental (cron */5, property_maintenance.yml): attach new stragglers + recompute
     ONLY the properties queued in `dirty_properties` by the writers. O(changes).
   * full (default, daily reconcile, recompute_property_stats.yml): attach +
-    recompute EVERY property + reconcile childless + clear the queue. The
-    self-healing backstop for anything the incremental pass missed.
+    recompute EVERY property (one cycle, resumed across runs when the budget
+    cuts it) + reconcile childless + clear the queue. The self-healing backstop
+    for anything the incremental pass missed.
 
 Usage (typically via the workflows above):
 
@@ -246,19 +251,19 @@ _DELETE_DIRTY_SQL = """
     WHERE property_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s
 """
 
-# Enqueue the spatially-linked stragglers so the recompute below picks them up.
-# Full sweep clears the queue (it recomputed everything), but only rows that
-# existed at its start -- anything dirtied mid-sweep is left for the next pass.
-_CLEAR_DIRTY_SQL = "DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s"
-
-# The budget-exhausted variant: a sweep that stops early has only recomputed
-# ids below its high-water mark, so clearing the GLOBAL pre-cutoff queue would
-# erase the recompute signal for unswept ids — those rows would stay stale
-# until the next FULL sweep instead of being healed by the next incremental
-# pass minutes later. Scope the delete to the swept range.
+# The full sweep's one dirty clear: rows queued at or before the run's start (anything dirtied
+# mid-run survives for the next pass) in the id range THIS run recomputed. Never wider: ids
+# above a budget stop were not recomputed, and ids below a resumed run's start were recomputed
+# by an earlier run and may be dirty again -- clearing either would erase their recompute
+# signal until the next cycle instead of the next incremental pass minutes later. A complete
+# walk from id 1 passes [1, max_id + 1), which is the old global pre-cutoff delete for every
+# property it walked: the FK makes each queued row name a property, ids are bigserial from 1
+# and never deleted, and max_id is read after the cutoff. The one row the global delete also
+# dropped was dirt stamped before the cutoff on a property born after max_id was read -- one
+# the walk never recomputed, so keeping it is the fix, not a loss.
 _CLEAR_DIRTY_SWEPT_SQL = (
     "DELETE FROM dirty_properties "
-    "WHERE marked_at <= %(cutoff)s AND property_id < %(hi)s"
+    "WHERE marked_at <= %(cutoff)s AND property_id >= %(lo)s AND property_id < %(hi)s"
 )
 
 # A merge re-points a retired property's children onto the survivor, leaving the
@@ -273,13 +278,15 @@ _RECONCILE_CHILDLESS_SQL = """
       AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
 """
 
-# Written ONLY when a walk covered every id — the O(1) liveness signal the
+# Written ONLY when a cycle covered every id (in one run, or across runs through the cursor
+# below) — the O(1) liveness signal the
 # `property_maintenance` health check reads. Per-row stats_computed_at cannot
 # serve that role: min() over 620k properties with a listings semi-join
 # measured ~3.5 min live, and a check that heavy would blow the hourly acute
 # lane's own 5-min job timeout — recreating the silent-`cancelled` failure
 # mode it exists to catch. A dead, killed, or chronically-incomplete sweep
 # shows up here as a stale stamp within hours, however the process died.
+# `batches` and `elapsed_s` are the finishing run's; `runs` and `cycle_started_at` the cycle's.
 _STAMP_SWEEP_COMPLETE_SQL = """
     INSERT INTO app_settings (key, value, updated_by)
     VALUES ('property_sweep_last_complete',
@@ -287,12 +294,42 @@ _STAMP_SWEEP_COMPLETE_SQL = """
                 'completed_at', now(),
                 'max_property_id', %(max_id)s::bigint,
                 'batches', %(batches)s::int,
-                'elapsed_s', %(elapsed_s)s::numeric),
+                'elapsed_s', %(elapsed_s)s::numeric,
+                'runs', %(runs)s::int,
+                'cycle_started_at', %(cycle_started_at)s::timestamptz),
             'recompute_property_stats')
     ON CONFLICT (key) DO UPDATE
       SET value = excluded.value, updated_at = now(),
           updated_by = excluded.updated_by
 """
+
+# The resume cursor (2026-10-03: four daily runs in a row stopped on budget near id 540k of
+# 927k and each restarted at id 1, so the id tail went days without a reconcile). A budget stop
+# saves where the next run continues the cycle; the run that completes it deletes the row in
+# the stamp's transaction. A cycle that began more than _CURSOR_MAX_AGE ago starts over at id 1
+# instead, or the stamp would vouch for a reconcile whose lower half is days old.
+_CURSOR_MAX_AGE = "36 hours"
+
+_READ_SWEEP_CURSOR_SQL = """
+    SELECT (value->>'next_lo')::bigint, (value->>'runs')::int, value->>'cycle_started_at',
+           (value->>'cycle_started_at')::timestamptz > now() - %(max_age)s::interval
+      FROM app_settings WHERE key = 'property_sweep_cursor'
+"""
+
+_SAVE_SWEEP_CURSOR_SQL = """
+    INSERT INTO app_settings (key, value, updated_by)
+    VALUES ('property_sweep_cursor',
+            jsonb_build_object(
+                'next_lo', %(next_lo)s::bigint,
+                'cycle_started_at', %(cycle_started_at)s::timestamptz,
+                'runs', %(runs)s::int),
+            'recompute_property_stats')
+    ON CONFLICT (key) DO UPDATE
+      SET value = excluded.value, updated_at = now(),
+          updated_by = excluded.updated_by
+"""
+
+_DELETE_SWEEP_CURSOR_SQL = "DELETE FROM app_settings WHERE key = 'property_sweep_cursor'"
 
 
 def recompute_one(conn: Any, property_id: int) -> None:
@@ -374,11 +411,11 @@ def _reconcile_childless(conn: Any) -> int:
         return cur.rowcount or 0
 
 
-def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
-    """Yield half-open [lo, hi) id ranges covering 1..max_id inclusive."""
-    if max_id < 1 or batch_size < 1:
+def _batch_ranges(max_id: int, batch_size: int, start: int = 1) -> Iterator[tuple[int, int]]:
+    """Yield half-open [lo, hi) id ranges covering start..max_id inclusive."""
+    if max_id < start or batch_size < 1:
         return
-    for lo in range(1, max_id + 1, batch_size):
+    for lo in range(start, max_id + 1, batch_size):
         yield lo, lo + batch_size
 
 
@@ -500,6 +537,23 @@ def _max_property_id(conn: Any) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT coalesce(max(id), 0) FROM properties")
         return int(cur.fetchone()[0])
+
+
+def _read_sweep_cursor(conn: Any) -> tuple[Any, ...] | None:
+    """The saved cursor as (next_lo, runs, cycle_started_at, younger than _CURSOR_MAX_AGE)."""
+    with conn.cursor() as cur:
+        cur.execute(_READ_SWEEP_CURSOR_SQL, {"max_age": _CURSOR_MAX_AGE})
+        return cur.fetchone()
+
+
+def _resume_point(saved: tuple[Any, ...] | None, max_id: int) -> tuple[int, int, Any] | None:
+    """(next_lo, runs, cycle_started_at) if the saved cursor can continue its cycle, else None."""
+    if saved is None:
+        return None
+    next_lo, runs, cycle_started_at, young = saved
+    if not young or next_lo is None or not (1 < next_lo <= max_id):
+        return None
+    return int(next_lo), int(runs or 0), cycle_started_at
 
 
 # A single-row LEASE serializes EVERY property-maintenance writer: the GH
@@ -735,14 +789,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Report straggler + dirty + property counts and exit without writing.",
+        help="Report straggler + dirty + property counts and the resume cursor, "
+             "then exit without writing.",
     )
     parser.add_argument(
         "--max-seconds", type=float, default=6000.0,
         help="Full-sweep wall-clock budget (default 6000). On exhaustion the "
              "sweep clean-stops at a batch boundary, finalizes only what it "
-             "covered, releases the lease, and exits RED (1) — a visible "
-             "failure instead of a silent timeout-minutes `cancelled` kill. "
+             "covered, saves where the next run resumes the cycle, and releases "
+             "the lease; a resumed run that runs out again exits RED (1) — a "
+             "visible failure instead of a silent timeout-minutes `cancelled` kill. "
              f"Clamped to {int(_MAX_BUDGET_SECONDS)}s: the workflow's "
              "timeout-minutes backstop is sized for that ceiling, and a "
              "larger budget would let the runner SIGKILL the job before the "
@@ -793,6 +849,19 @@ def main() -> int:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
 
+        def step(op: Callable[[Any], Any], label: str,
+                 attempts: int | None = None) -> Any:
+            """db.run_resilient with the conn rebinding its docstring demands (it may
+            hand back a FRESH connection after a pooler drop). Every op below is
+            idempotent — recompute statements are pure latest-wins recomputes and the
+            dirty-clear, cursor and stamp are keyed writes, so a replay re-commits
+            identically."""
+            nonlocal conn
+            budget = {} if attempts is None else {"attempts": attempts}
+            result, conn = db.run_resilient(
+                conn, op, reconnect=reconnect, label=label, **budget)
+            return result
+
         if args.dry_run:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM listings WHERE property_id IS NULL")
@@ -801,9 +870,11 @@ def main() -> int:
                 dirty = int(cur.fetchone()[0])
                 cur.execute("SELECT count(*) FROM properties")
                 properties = int(cur.fetchone()[0])
+            saved = step(_read_sweep_cursor, "sweep.cursor")
             LOG.info(
-                "RECOMPUTE dry-run mode=%s stragglers=%d dirty=%d properties=%d; exit",
-                mode, stragglers, dirty, properties,
+                "RECOMPUTE dry-run mode=%s stragglers=%d dirty=%d properties=%d "
+                "cursor(next_lo, runs, cycle_started_at, younger than %s)=%s; exit",
+                mode, stragglers, dirty, properties, _CURSOR_MAX_AGE, saved,
             )
             return 0
 
@@ -834,18 +905,6 @@ def main() -> int:
         holder = _new_holder("full")
         incomplete_at: int | None = None
 
-        def step(op: Callable[[Any], Any], label: str,
-                 attempts: int | None = None) -> Any:
-            """db.run_resilient with the conn rebinding its docstring demands (it may
-            hand back a FRESH connection after a pooler drop). Every op below is
-            idempotent — recompute statements are pure latest-wins recomputes and the
-            dirty-clear / stamp are keyed writes, so a replay re-commits identically."""
-            nonlocal conn
-            budget = {} if attempts is None else {"attempts": attempts}
-            result, conn = db.run_resilient(
-                conn, op, reconnect=reconnect, label=label, **budget)
-            return result
-
         try:
             # Lease ACQUISITION stays unwrapped: its CAS/backoff semantics are its
             # own, and nothing has been done yet when it fails.
@@ -870,9 +929,27 @@ def main() -> int:
                 )
             deadline = started_at + budget
             max_id = step(_max_property_id, "sweep.max_id")
-            total_batches = -(-max_id // args.batch_size) if max_id else 0
+            saved = step(_read_sweep_cursor, "sweep.cursor")
+            resume = _resume_point(saved, max_id)
+            if resume is not None:
+                start_lo, runs, cycle_started_at = resume
+                LOG.info(
+                    "RECOMPUTE resuming the cycle started %s at id %d (run %d of it)",
+                    cycle_started_at, start_lo, runs + 1,
+                )
+            else:
+                if saved is not None:
+                    LOG.warning(
+                        "RECOMPUTE ignoring the saved cursor %s (cycle older than %s, "
+                        "or next_lo outside 2-%d); a fresh cycle starts at id 1",
+                        saved, _CURSOR_MAX_AGE, max_id,
+                    )
+                # A fresh cycle starts when this run did: its cutoff, by the database clock.
+                start_lo, runs, cycle_started_at = 1, 0, cutoff
+            ranges = list(_batch_ranges(max_id, args.batch_size, start_lo))
+            total_batches = len(ranges)
             batches = 0
-            for lo, hi in _batch_ranges(max_id, args.batch_size):
+            for lo, hi in ranges:
                 # Budget clean-stop (the detail drains' --max-seconds pattern):
                 # stop batching with enough headroom left to finalize + release,
                 # instead of being SIGKILLed mid-statement by timeout-minutes.
@@ -929,33 +1006,34 @@ def main() -> int:
                     )
 
                 def _finalize(c: Any) -> None:
-                    # The full sweep recomputed every property, so clear the dirt
-                    # that existed at its start; anything dirtied mid-sweep survives
-                    # for the next incremental pass.
-                    with c.cursor() as cur:
-                        cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
-                    # Completion stamp — the health check's O(1) liveness signal.
-                    # Complete walks only: an incomplete sweep leaving the stamp
-                    # stale IS the alarm condition.
-                    with c.cursor() as cur:
+                    # This run recomputed [start_lo, max_id]: clear that range's dirt,
+                    # stamp the completed cycle (complete cycles only — an incomplete one
+                    # leaving the stamp stale IS the alarm condition), and delete the
+                    # cursor in the same transaction, so a stamp never coexists with it.
+                    with c.transaction(), c.cursor() as cur:
+                        cur.execute(_CLEAR_DIRTY_SWEPT_SQL, {
+                            "cutoff": cutoff, "lo": start_lo, "hi": max_id + 1})
                         cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
                             "max_id": max_id, "batches": batches,
                             "elapsed_s": round(time.monotonic() - started_at, 1),
+                            "runs": runs + 1, "cycle_started_at": cycle_started_at,
                         })
+                        cur.execute(_DELETE_SWEEP_CURSOR_SQL)
 
                 step(_finalize, "sweep.finalize")
             else:
-                # Only ids < incomplete_at were recomputed — clear their dirt
-                # only, and skip _reconcile_childless (next complete sweep runs
-                # it; its targets are near-zero in practice).
-                def _clear_swept(c: Any) -> None:
-                    with c.cursor() as cur:
-                        cur.execute(
-                            _CLEAR_DIRTY_SWEPT_SQL,
-                            {"cutoff": cutoff, "hi": incomplete_at},
-                        )
+                # Only [start_lo, incomplete_at) was recomputed: clear its dirt only, save
+                # where the next run resumes, and leave _reconcile_childless to the run
+                # that completes the cycle (its targets are near-zero in practice).
+                def _stop(c: Any) -> None:
+                    with c.transaction(), c.cursor() as cur:
+                        cur.execute(_CLEAR_DIRTY_SWEPT_SQL, {
+                            "cutoff": cutoff, "lo": start_lo, "hi": incomplete_at})
+                        cur.execute(_SAVE_SWEEP_CURSOR_SQL, {
+                            "next_lo": incomplete_at,
+                            "cycle_started_at": cycle_started_at, "runs": runs + 1})
 
-                step(_clear_swept, "sweep.clear_swept")
+                step(_stop, "sweep.stop")
         finally:
             # `nonlocal conn` keeps this pointing at the last SUCCESSFULLY returned
             # connection, but run_resilient closes both the original and its
@@ -964,25 +1042,39 @@ def main() -> int:
             _release_lease(conn, holder, reconnect)
 
     elapsed = time.monotonic() - started_at
+    if incomplete_at is not None and resume is None:
+        # One continuation is tolerated: the cursor is saved and the next run finishes the
+        # cycle from it, stamping it complete like any other.
+        LOG.warning(
+            "RECOMPUTE budget exhausted after %.0fs: swept ids %d to %d of %d (%d/%d batches); "
+            "the next run resumes this cycle at id %d",
+            elapsed, start_lo, incomplete_at - 1, max_id, batches, total_batches, incomplete_at,
+        )
+        return 0
     if incomplete_at is not None:
-        # RED on purpose: an incomplete reconcile is a broken contract, not a
-        # partial success — GH only emails on scheduled-run FAILURES (a
-        # timeout kill lands as `cancelled` and alerts nobody, which is how
-        # 5 dead sweeps went unnoticed for 4 days). The id tail above
-        # `incomplete_at` keeps its pre-sweep stats until a sweep finishes;
-        # the `property_maintenance` health check tracks that staleness.
+        # RED on purpose: a resumed run that runs out again means the cycle needs three or
+        # more runs — genuinely too slow, not a partial success. GH only emails on
+        # scheduled-run FAILURES (a timeout kill lands as `cancelled` and alerts nobody,
+        # which is how 5 dead sweeps went unnoticed for 4 days). The id tail above
+        # `incomplete_at` keeps its pre-sweep stats until a cycle completes; the
+        # `property_maintenance` health check tracks that staleness.
         LOG.error(
-            "RECOMPUTE budget exhausted after %.0fs: swept ids<%d of %d "
-            "(%d/%d batches); exiting RED — investigate per-batch cost first "
-            "(see the progress logs); raising the budget past %.0fs requires "
-            "editing BOTH --max-seconds and the workflow's timeout-minutes",
-            elapsed, incomplete_at, max_id, batches, total_batches,
+            "RECOMPUTE budget exhausted after %.0fs: swept ids %d to %d of %d (%d/%d batches) "
+            "in run %d of the cycle started %s, so the cycle needs three or more runs; "
+            "cursor saved at id %d (resumed by a run within %s of the cycle's start, else "
+            "the next run starts over at id 1); exiting RED — investigate per-batch cost "
+            "first (see the progress logs); raising the budget past %.0fs requires editing "
+            "BOTH --max-seconds and the workflow's timeout-minutes",
+            elapsed, start_lo, incomplete_at - 1, max_id, batches, total_batches,
+            runs + 1, cycle_started_at, incomplete_at, _CURSOR_MAX_AGE,
             _MAX_BUDGET_SECONDS,
         )
         return 1
     LOG.info(
-        "RECOMPUTE done max_property_id=%d batches=%d avg_batch_s=%.1f elapsed=%.1fs",
-        max_id, batches, elapsed / batches if batches else 0.0, elapsed,
+        "RECOMPUTE done max_property_id=%d from_id=%d cycle_runs=%d batches=%d "
+        "avg_batch_s=%.1f elapsed=%.1fs",
+        max_id, start_lo, runs + 1, batches, elapsed / batches if batches else 0.0,
+        elapsed,
     )
     return 0
 

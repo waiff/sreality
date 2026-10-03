@@ -175,8 +175,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
     # sweeps + a stranded lease freezing every maintenance lane). The sweep
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
-    # walk; healthy age is ~24h (daily 04:15 cadence), so fail at 30h fires
-    # ~5-6h after a dead/killed/incomplete sweep — however the process died.
+    # cycle, possibly across two runs (its resume cursor); healthy age is ~24h
+    # (daily 04:15 cadence), so fail at 30h fires ~5-6h after a dead, killed or
+    # incomplete cycle — however the process died. A cycle that needs its
+    # second run ages the stamp past both thresholds before that run lands.
     # Dirty rows drain within ~2 min of the worker lane's tick — EXCEPT while the
     # daily full sweep holds the maintenance lease, which blocks every incremental
     # pass and only clears dirty_properties at the very end, so oldest-dirt ages
