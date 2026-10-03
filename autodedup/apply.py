@@ -116,7 +116,6 @@ SKIP_ASSET_LINKED = "asset_linked_units"
 SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
 SKIP_REFUSED_BEFORE = "refused_at_chokepoint_before"
-SKIP_RESTORED_ELSEWHERE = "restored_outside_engine"
 # Re-checked inside the group's own transaction, just before the merge (E903).
 SKIP_CHANGED_SINCE_PLAN = "changed_since_plan"
 # Not a merge at all: a group ALREADY on one property that an operator negative now covers.
@@ -507,25 +506,18 @@ def _unapply_args(generation: str, cluster_key: int) -> str:
 
 @dataclass(frozen=True)
 class EngineMerge:
-    """A merge this engine made (its own ledger, never property_merge_events — D7)."""
+    """A live merge this engine made (its own ledger, never property_merge_events — D7)."""
 
     generation: str
     cluster_key: int
     merge_group_id: str
     survivor_id: int | None
     member_ids: frozenset[int]
-    live: bool = True
-    # Undone by `unapply` itself — the one undo that states nothing about the listings.
-    undone_by_engine: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {"generation": self.generation, "cluster_key": self.cluster_key,
                 "merge_group_id": self.merge_group_id,
                 "unapply": _unapply_args(self.generation, self.cluster_key)}
-
-
-def _undone_by_engine(undone: Any, undone_by: Any) -> bool:
-    return bool(undone) and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX)
 
 
 def _engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
@@ -534,29 +526,10 @@ def _engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
         return []
     return [
         EngineMerge(str(gen), int(key), str(group), int(surv) if surv is not None else None,
-                    frozenset(int(x) for x in (members or ())), live=not undone,
-                    undone_by_engine=_undone_by_engine(undone, undone_by))
-        for gen, key, group, surv, members, undone, undone_by in _rows(
+                    frozenset(int(x) for x in (members or ())))
+        for gen, key, group, surv, members in _rows(
             conn, S.ENGINE_MERGES_SQL, {"listing_ids": ids})
     ]
-
-
-def _separated_merges(
-    listings: set[int], prop_of: Mapping[int, int], merges: Iterable[EngineMerge],
-) -> list[dict[str, Any]]:
-    """Engine merges someone other than `unapply` took apart, whose listings this set holds on
-    two or more properties: a merge of the set would re-unite what was separated (E905). Keyed
-    on listings, so it survives the restored property being merged on into another one."""
-    out: list[dict[str, Any]] = []
-    for merge in merges:
-        if merge.undone_by_engine:
-            continue
-        inside = merge.member_ids & listings
-        if len({prop_of.get(lid) for lid in inside} - {None}) > 1:
-            out.append({"generation": merge.generation, "cluster_key": merge.cluster_key,
-                        "merge_group_id": merge.merge_group_id,
-                        "listings": sorted(inside)[:20]})
-    return sorted(out, key=lambda m: (m["generation"], m["cluster_key"]))
 
 
 def _set_reasons(
@@ -704,32 +677,18 @@ def plan_groups(
         listing_group = {**dict(group_of(every_listing)), **listing_group}
     negatives = Negatives.read(conn, every_listing,
                                [int(c["cluster_key"]) for c, _m in everyone])
-    all_merges = _engine_merges(conn, every_listing)
     merges_by_listing: dict[int, list[EngineMerge]] = {}
-    standing_by_listing: dict[int, list[EngineMerge]] = {}
-    for merge in all_merges:
+    for merge in _engine_merges(conn, every_listing):
         for lid in merge.member_ids:
-            if merge.live:
-                merges_by_listing.setdefault(lid, []).append(merge)
-            if not merge.undone_by_engine:
-                standing_by_listing.setdefault(lid, []).append(merge)
+            merges_by_listing.setdefault(lid, []).append(merge)
     # A chokepoint refusal is remembered by the MEMBER SET it refused, not by the key it was
     # filed under: a real-time generation's keys move as its groups do (A9), and a batch
     # generation's key names exactly one member set, so the two readings agree there.
     refused_sets: set[frozenset[int]] = set()
-    # Properties this engine retired whose merge `unapply` did not undo: active again, someone
-    # else restored them.
-    restored: set[int] = set()
     if candidates:
-        for gen, _key, retired, outcome, undone, undone_by, members in _rows(
-                conn, S.LEDGER_HISTORY_SQL, {
-                    "generation": generation, "property_ids": sorted(all_props),
-                    "listing_ids": sorted(every_listing)}):
-            if outcome == "refused" and gen == generation:
-                refused_sets.add(frozenset(int(x) for x in (members or ())))
-            elif (outcome == "applied" and retired is not None
-                  and not _undone_by_engine(undone, undone_by)):
-                restored.add(int(retired))
+        refused_sets = {frozenset(int(x) for x in (members or ())) for (members,) in _rows(
+            conn, S.LEDGER_HISTORY_SQL, {"generation": generation,
+                                         "listing_ids": sorted(every_listing)})}
 
     groups: list[GroupPlan] = []
     for cluster, members in settled:
@@ -798,24 +757,11 @@ def plan_groups(
             reasons.append(SKIP_CARRIES_UNGROUPED)
             detail["ungrouped_listings"] = ungrouped[:20]
 
-        # The engine's own ledger (never property_merge_events, D7). An engine merge someone
-        # else took apart is the operator's word on its LISTINGS: a merge that would re-unite
-        # them is refused whatever property they sit on now. A property this engine retired
-        # that is active again was restored by someone: never re-merged on the engine's own
-        # authority. Only the engine's own undo releases a property, to any later apply; a
-        # merge the operator undid first stays restored-elsewhere even once `unapply` has
-        # noted it (E905).
+        # The engine's own ledger (never property_merge_events, D7) refuses only a member set
+        # the chokepoint refused before (E41). An undo of an engine merge, by anyone, bans
+        # nothing: the operator's rulings, read above, are the bans (E934).
         if frozenset(member_set) in refused_sets:
             reasons.append(SKIP_REFUSED_BEFORE)
-        separated = _separated_merges(
-            extended, prop_of,
-            {mg for lid in extended for mg in standing_by_listing.get(lid, ())})
-        if separated:
-            reasons.append(SKIP_RESTORED_ELSEWHERE)
-            detail["separated_engine_merges"] = separated[:20]
-        if any(pid in restored for pid in property_ids if pid not in inactive):
-            reasons.append(SKIP_RESTORED_ELSEWHERE)
-        reasons = list(dict.fromkeys(reasons))
 
         survivor: int | None = None
         retired: list[int] = []
@@ -979,10 +925,8 @@ def recheck_group(
             "arrived_since_plan": sorted(now - planned)[:20],
             "left_since_plan": sorted(planned - now)[:20]}
     placed: dict[int, list[int]] = {pid: [] for pid in group.property_ids}
-    prop_of: dict[int, int] = {}
     for m in rows:
         placed.setdefault(int(m.property_id), []).append(m.listing_id)
-        prop_of[m.listing_id] = int(m.property_id)
     group.listings_by_property = {pid: sorted(lids) for pid, lids in placed.items()}
     reasons: list[str] = []
     detail: dict[str, Any] = {}
@@ -999,11 +943,7 @@ def recheck_group(
         now, {m.listing_id: m for m in rows}, list(locked.values()), scope)
     reasons += set_reasons
     detail.update(set_detail)
-    separated = _separated_merges(now, prop_of, _engine_merges(conn, now))
-    if separated:
-        reasons.append(SKIP_RESTORED_ELSEWHERE)
-        detail["separated_engine_merges"] = separated[:20]
-    return list(dict.fromkeys(reasons)), detail
+    return reasons, detail
 
 
 def apply_plan(
@@ -1349,8 +1289,8 @@ def unapply(
     still stands retired, is skipped with the reason and the merge to undo first; one taken
     apart outside the engine, or with nothing left to move back, is skipped naming nothing —
     and the dry run says so from the same reads. A merge someone else had already partly taken
-    apart is undone but recorded as THEIR undo (`undone_by='external'`), so the listings they
-    separated stay apart in every later generation (E905)."""
+    apart is undone but recorded as THEIR undo (`undone_by='external'`), a record that bans
+    nothing: only the operator's rulings keep ads apart (E934)."""
     if generation is None and cluster_key is not None:
         raise ValueError("cluster_key selects a group of one generation: name the generation")
     if generation is None and run is None and since is None and until is None:
@@ -1452,8 +1392,8 @@ def _unapply_live(
             taken = _taken_apart(conn, target)
             data = _detach_group(conn, target, detach, undone_by)
             # Someone else had already taken the merge apart (an operator split), or wholly
-            # undone it: the separation is THEIR word on those listings, recorded as theirs so a
-            # later generation never re-unites them (E905).
+            # undone it: recorded as their undo, not the engine's (E905). It bans nothing; a
+            # split's own rulings keep its units apart (E934).
             external = bool(taken or data["conflicts"]) or not data["listings_moved_back"]
             record = {**data, "noted_by": undone_by, "taken_apart": taken} if external \
                 else data
