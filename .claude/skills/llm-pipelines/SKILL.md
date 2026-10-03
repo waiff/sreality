@@ -146,11 +146,11 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
   test). It reads ONLY the matview `rent_map_cells` (latest revision as `ku`/`obec`/`town` cells
   with the adjustments as columns), never geometry. Nothing WRITES MF any more (the hourly job
   and the merge/detach recompute are gone); estimations and `/estimate_yield` call the measure.
-- **Serving, after 567 applies:** `browse_projection` / `properties_public` call the measure in
-  their property lateral with the representative's `ll.obec_kod` + `ll.katastr_kod` (566, FILL
-  v5.4: the single KÚ of the bound entity, never a pin); `listing_feed_public` takes the
-  PROPERTY's yield from `browse_list` via `browse_list_mf(property_id)` (Q8 b). Until 567 applies
-  they read the stored, writer-less `properties.mf_*` / `listings.mf_*`; PR-F drops those.
+- **Serving (567):** `browse_projection` / `properties_public` call the measure in their
+  property lateral with the representative's `ll.obec_kod` + `ll.katastr_kod` (566, FILL v5.4:
+  the single KÚ of the bound entity, never a pin); `listing_feed_public` takes the PROPERTY's
+  yield from `browse_list` via `browse_list_mf(property_id)` (Q8 b). No table stores MF: 575
+  dropped `listings.mf_*` / `properties.mf_*` and `listings_public`'s copies.
 - **Rules:** flats only (else no row). VK = leading integer of the disposition clamped 1..4;
   novostavba = `condition = 'novostavba'` (NULL → older column, adjustments kept); rent =
   round((base + adjustments) × area); yield only for `prodej` with price ≥ 100 000, else the

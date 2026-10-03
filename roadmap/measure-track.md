@@ -561,7 +561,7 @@ dum/prodej no longer reads ~5 701 Kč/m² on a ~905 m² median area.
 - Renaming the anon-exposed `price_stat_*` rate columns that are named like absolute
   prices (breaks the SPA's direct read — commented in W4, renamed never or much later).
 
-## MF reference rent — one read-time measure (2026-09, in progress)
+## MF reference rent — one read-time measure (2026-09, delivered)
 
 Order C → D → B → A → F (approved 2026-09-25; B before A, 2026-09-26). North star: MF is one
 read-time SQL measure returning a value, the town's published range, or a reason; readers
@@ -579,12 +579,28 @@ render its SHAPE.
   2 call sites (`merge_property_set`, `detach_listing`), the Python PIP implementation
   (`_REFERENCE_RENT_SQL`, `disposition_to_vk`, the amenity derivations in estimations +
   `/estimate_yield`), the dead comparables MF bounds. Matrix + inlining plan test + notes rail:
-  `tests/test_mf_reference.py`. The serving views call it after PR-B's 567 applies.
-- **Done — PR-B (#1624, rollout pending):** `listing_location.katastr_kod` (566; FILL v5.4: the
-  single KÚ of the bound entity, never a pin; the nightly sweep re-resolves the corpus) plus the
-  ONE view swap (567, applied once the re-resolve drained). After 567 applies, `browse_projection`
-  and `properties_public` call the measure with `ll.katastr_kod` and `listing_feed_public` reads
-  the property's yield from `browse_list` (`browse_list_mf`, Q8 b); estimations pass the KÚ too.
-  PR-A (registry publish-complete) is merged.
-- **Next — PR-F:** drops the stored `mf_*`, the 507 functions and `rent_map_*_public` right
-  after the program is verified in production (operator 2026-09-25; explicit OK + `pg_dump` first).
+  `tests/test_mf_reference.py`. The serving views call it since PR-B's 567.
+- **Done — PR-B (#1624):** `listing_location.katastr_kod` (566; FILL v5.4: the single KÚ of the
+  bound entity, never a pin) plus the ONE view swap (567, applied after the re-resolve drained):
+  `browse_projection` and `properties_public` call the measure with `ll.katastr_kod` and
+  `listing_feed_public` reads the property's yield from `browse_list` (`browse_list_mf`, Q8 b);
+  estimations pass the KÚ too. PR-A (#1621, registry publish-complete) is merged.
+- **Done — PR-F (#1634, destructive):** migration 575 drops `listings.mf_*` / `properties.mf_*`
+  (+ their 3 indexes), `listings_public`'s three MF columns (517's blue-green, 44 → 41), the 507
+  functions, `rent_map_values_public` / `rent_map_adjustments_public` and
+  `ruian_admin_units.has_polygon` — applied from its branch after `backup_before_drop.yml` (#1635,
+  the new-dedup one-off generalized) dumped every dropped value to R2, on the operator's OK.
+
+**Final ledger** (`main @ 99f23ae9` → after PR-F; the PRs' own diffs, LOC ±5 %):
+
+| Kind | Change |
+|---|---|
+| Table columns | **−6** (+`listing_location.katastr_kod`; −`listings.mf_*` ×3, −`properties.mf_*` ×3, −`has_polygon`) |
+| Views / matviews / view columns | **−2** (`rent_map_*_public`) / **+1** (`rent_map_cells`) / **−3** (`listings_public`) |
+| SQL functions / indexes | **−1** (+`mf_reference`, +`browse_list_mf`; −3 of 507) / **−2** (+`rent_map_cells_key`; −3) |
+| Workflows / crons | **−1** (`recompute_mf_yields.yml`) / **4 → 2** (MF hourly, registry boundaries) |
+| Registry modes / inputs / bypass flags | **4 → 1** / **6 → 2** / **−2** (plus the `vfr_delta` module) |
+| MF write paths / implementations / stored grains | **3 → 0** / **3 → 1** / **2 → 0** |
+| Reason-text sources | **1** (six codes, notes only in 565; −2 client literals) |
+| LOC outside migrations: prod / tests / docs | **+1470 −1533** / **+2292 −575** / **+237 −164** |
+| Migration SQL (append-only) | **+1364** (565, 566, 567, 575) |

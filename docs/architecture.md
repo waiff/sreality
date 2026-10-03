@@ -2487,9 +2487,9 @@ renumber.** Navigate by area:
     **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
     `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
     published range or a reason (six codes, notes only in that migration), rendered by its shape.
-    Estimations call it; after 567 applies the serving views call it too, with the stored
-    `katastr_kod` (the feed reads the property's yield from `browse_list`); until then they read
-    the stored, writer-less `mf_*` columns. Rules: the `llm-pipelines` skill.
+    Estimations and the serving views call it (567, with the stored `katastr_kod`; the feed
+    reads the property's yield from `browse_list`). No table stores MF: 575 dropped the `mf_*`
+    columns of `listings` and `properties`. Rules: the `llm-pipelines` skill.
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
@@ -3593,7 +3593,7 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   source; not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,
   so the legacy place keys live there as history forever.
-* `listings_public` is **44 columns — exactly its readers** (W6-c, migration 517): the SPA's
+* `listings_public` is **41 columns — exactly its readers** (W6-c 517, then 575 −3 MF): the SPA's
   `DETAIL_COLS` listing-detail select, of which `api/notifications.py` reads 15, `api/curation.py` 2
   and the five dependent matviews 8. W4-c had left it 61 wide because a matview's dependency is on
   the VIEW, not on its columns, so `create or replace` (append-only) was the only shape available;
