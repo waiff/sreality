@@ -11,15 +11,16 @@ resolutions in `wf2/critic.md` §2 apply; where they differ, the rule wins.
 
 **Words used here.**
 - *Property*: the group of ads for one real-world unit. *Ad*: one portal advertisement (`GLOSSARY.md`).
-- *Speaking ad*: the one ad whose price, photos and text the property shows (in code: canonical ad).
+- *Canonical ad*: the one ad whose price, photos and text the property shows, chosen by a fixed order
+  (MS5).
 - *Curation*: what a user puts on a property: notes, a pipeline card (the entry on the deal board),
-  collections, tags, hides.
+  collections, tags, a dismissal (the account hides the property from its own Browse).
 - *Fold*: two items of one kind, such as one user's two pipeline cards, become one.
 - *Carry record*: what a merge writes down about every user item it moved or folded, so a split can
   send it back.
 - *Ruling*: a recorded "same unit" or "different units" verdict on two ads.
 - *Engine*: the parallel session's automatic duplicate finder. Its *brake* undoes one engine run; the
-  *clean-up* undoes merges made by the old, removed engine.
+  *clean-up* undoes merges made by the removed engine.
 - *Recompute*: the job that rebuilds a property from its ads. *Read model*: the pre-built tables that
   Browse, the map and Stats read.
 
@@ -44,7 +45,7 @@ tests and docs) and W2a (+220 / −185).
 ## 1. Why this program exists (verified 2026-10-02/03)
 
 The trigger was a note that "disappeared": the operator merged two properties in Browse and the
-extension then showed no note on the ad. The note sat on a third property, the delisted predecessor
+extension then showed no note on the ad. The note sat on a third property, the inactive predecessor
 of a re-list, 257 rows down the sort, and merge mode hides the marks that would have identified it.
 The investigation (four workflows of agents, each finding checked by a skeptic) found real surface
 defects and an unwritten model underneath:
@@ -53,11 +54,11 @@ defects and an unwritten model underneath:
    from a different ad was built in June and taken apart in three steps by September; nothing recorded
    which rule each field follows on a merge and on a split.
 2. **A split gave back almost nothing.** Only the pipeline card (partly) and the asset link returned;
-   notes, collections, tags and hides stayed. The "lossless restore" the docs promise has never
+   notes, collections, tags and dismissals stayed. The "lossless restore" the docs promise has never
    restored a card in production.
 3. **A merge said nothing and hid what mattered.** The toast counts properties and calls them
    listings; marks are hidden while ticking; notes have no mark; a failed read looks like "none".
-4. **Two filters meant four things.** The portal filter matches the speaking ad's portal on most
+4. **Two filters meant four things.** The portal filter matches the canonical ad's portal on most
    surfaces, hiding 12 % of properties with an active idnes ad, and the ad's own portal on one.
 5. **Dead lanes ride on every merge.** Asset links (0 rows ever), the status log (1.6 M rows, one
    chart reader) and a pipeline note nobody can write are read or written inside the merge path.
@@ -71,7 +72,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 - **MS1 — Vocabulary.** Property and ad are the two primary terms; `GLOSSARY.md` lists words to avoid.
 - **MS2 — A property is a recomputed view.** Every ad gets its own property when the maintenance job
   first sees it, within about two minutes, never while the ad is being saved. A later merge, by the
-  engine inside its area or by a user anywhere, folds properties into the oldest one. Nothing is
+  engine inside its area or by a user anywhere, merges properties into the oldest one. Nothing is
   remembered from merge time except which ad moved where and the carry record (MS14). *(Q1 was left
   blank; taken as yes because every later answer relies on it.)*
 - **MS3 — Ads are untouched.** A merge or split changes only which property an ad belongs to, plus the
@@ -86,19 +87,19 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
   condition grading: the two 1–5 grades on ads and properties, the stored scores and extracted clues,
   the paused jobs that made them, the two grade filters, the bulk-AI interface and the estimator's
   instructions. With no prompt rewrite, the two stale prompt suggestions stay as they are (Q43). A
-  property's grades keep following its speaking ad, as today, so MS5 moves them (§10) *(default)*. The
-  portal's condition text stays an ad field, the speaking ad's (MS11). The AI ad summaries and the
+  property's grades keep following its canonical ad, as today, so MS5 moves them (§10) *(default)*. The
+  portal's condition text stays an ad field, the canonical ad's (MS11). The AI ad summaries and the
   photo-comparison tool are untouched too (Q41, Q42). The grade removal in the design inputs
   (`wf2/design_condition.md`; the grade parts of the critic's C4 and D) is void.
-- **MS5 — One ad speaks.** Order: active ads first; then ads with a map point
+- **MS5 — One canonical ad.** Order: active ads first; then ads with a map point
   (`listing_location.geom` present); then, among active ads, the earliest `first_seen_at`; among
   inactive ads, the latest `last_seen_at`; then portal trust; then id. One function, spelled once.
-  With no active ad, an ad with a map point outranks a later-ended ad without one.
+  With no active ad, an ad with a map point outranks one without, even if that one was seen later.
 - **MS6 — Amenities are a union.** Balcony, lift, parking, terrace, garage, cellar: yes if any of the
   property's ads says yes, active or not. Accepted cost: an unreliable "yes" beats a stated "no"; MF
   rent and yield rise on about 2,300 sale flats.
-- **MS7 — Brokers are a list.** The brokers of the active ads, one entry per person, the speaking ad's
-  broker first. When no ad is active: the brokers of all its ads, marked as from ended ads. The
+- **MS7 — Brokers are a list.** The brokers of the active ads, one entry per person, the canonical ad's
+  broker first. When no ad is active: the brokers of all its ads, marked as from inactive ads. The
   property header shows the list; the pipeline board shows its first entry plus "+N"; each ad's own row
   keeps showing its own broker *(the last two: default)*. Nothing is stored.
 - **MS8 — Lowest active price.** On the property page, a labelled display-only line whenever the
@@ -118,39 +119,39 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 
 | Field | Rule |
 |---|---|
-| Price, price per m², area, layout, floor, category, description, photos, link, furnished, condition text, our two condition grades (MS4), map point, address | the speaking ad (MS5) |
-| Building type, ownership, energy rating, usable / plot / garden area, parking spaces | the first ad in the speaking order that states it (today's rule, kept) |
+| Price, price per m², area, layout, floor, category, description, photos, link, furnished, condition text, our two condition grades (MS4), map point, address | the canonical ad (MS5) |
+| Building type, ownership, energy rating, usable / plot / garden area, parking spaces | the first ad in the canonical order that states it (today's rule, kept) |
 | Balcony, lift, parking, terrace, garage, cellar | yes if any ad says yes (MS6) |
 | Brokers | MS7 |
 | Portals | every portal with an ad; portals with an active ad kept separately (MS19) |
 | Active | any ad active |
 | First seen / last seen / days on market | earliest ad / latest ad / the span between |
 | Newest ad on each portal | when the property's newest ad on that portal was first seen, active or not; empty when it has no ad there (MS19) |
-| Price changes, price drops, total change | the speaking ad and its same-portal predecessors (MS10) |
+| Price changes, price drops, total change | the canonical ad and its same-portal predecessors (MS10) |
 | Lowest active price | MS8 |
 | MF rent and yield | computed from the fields above |
-| Notes, pipeline card, collections, tags, hides | stay on the property; MS14 on a merge, MS18 on a split |
+| Notes, pipeline card, collections, tags, dismissal | stay on the property; MS14 on a merge, MS18 on a split |
 
 ### Merge
 - **MS12 — The oldest property survives a merge**, for users and the engine alike.
 - **MS13 — Collisions.** A live pipeline stage beats a closed one; otherwise the stage further along
-  the board wins (rule 22, unchanged). No new rule lifts a hide. The toast says "hidden for you"
-  whenever the acting account has an active hide on the surviving property.
+  the board wins (rule 22, unchanged). No new rule lifts a dismissal. The toast says "hidden for
+  you" whenever the acting account has an active dismissal on the surviving property.
 - **MS14 — Carry record; nothing a user made is ever lost.** A merge writes one row per curation row
   it moved or folded (`property_merge_carries`): table, key, the row's own timestamp, account,
   from-property, to-property, merge group, whether it was moved or folded, a snapshot of folded rows,
   and when a split undid it. A merge of three or more properties is one step per retired property
-  under one merge group; a card overwritten by a later step is recorded as folded from the property it
+  under one merge group; a pipeline card overwritten by a later step is recorded as folded from the property it
   came from. Alert events are not curation and get no rows *(default)*. **Invariant, tested on every
-  merge and split:** each account's count of notes, pipeline cards, collection entries, tags and hides
-  is the same before and after, except that a fold removes one, its split brings it back, and each
+  merge and split:** each account's count of notes, pipeline cards, collection entries, tags and
+  dismissals is the same before and after, except that a fold removes one, its split brings it back, and each
   "both" copy adds one.
 - **MS15 — One click, one toast.** A Browse merge has no confirm step. The toast names the surviving
   property, lists only the acting account's moved items (notes as a count, the rest by name) and
   offers "Otevřít #S". The engine's Rulings page keeps its own two-step confirm and shows the same
   toast *(default)*.
 - **MS16 — A merge hides nothing it will touch.** In merge mode every Browse row keeps its pipeline,
-  collection and hide marks, shown read-only, and the merge bar lists what is ticked. Every row gets a
+  collection and dismissal marks, shown read-only, and the merge bar lists what is ticked. Every row gets a
   note mark with the count of the acting account's notes. When notes, the pipeline card, collections
   or tags fail to load, the app and the extension say so and offer a retry; they never show an empty
   list. Reading notes with an id that was merged away follows it to the survivor, as writes already do.
@@ -191,8 +192,8 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
   active ad on P; *inactive* = ads on P and none of them active; *any* = any ad on P. Several portals =
   any of them *(default, as today)*. A broker filter works the same over that broker's ads; portal and
   broker together mean one ad satisfies both. One rule on Browse list, count, map, Stats and Watchdog.
-  A row shows the speaking ad's facts; its portal badge lists the portals where the property has an
-  active ad, or, when none is active, all its portals marked ended. **Newest first (Q49 b):** with
+  A row shows the canonical ad's facts; its portal badge lists the portals where the property has an
+  active ad, or, when none is active, all its portals marked inactive. **Newest first (Q49 b):** with
   exactly one portal P selected, "Newest first" and "Oldest first" order properties by when their
   newest ad on P was first seen, active or not, so a property advertised on P again rises to the top
   *(its newest ad on P, not its first: default)*. With no portal or several portals they order by when
@@ -218,7 +219,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 - Writes an ad's facts or history on a merge or split.
 - Changes our condition-grading code, its tables or its filters (MS4).
 - Remembers property facts from merge time.
-- Deletes a note, pipeline card, collection entry, tag or hide of any account.
+- Deletes a note, pipeline card, collection entry, tag or dismissal of any account.
 - Adds a flag, a setting or a second path beside an old one.
 - Touches the dedup session's leave list (§7) or allocates its rule numbers.
 
@@ -230,7 +231,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 |---|---|---|---|---|
 | **W0** | Daily recompute resumes where the last run stopped (draft PR #1695) | no, but a shared file | dedup session's OK to merge before its PR #1655 | +630 / −150 |
 | **W1b** | Asset links and the pipeline note field out (code) | yes | #1655 | 0 / −840 |
-| **W2a** | Recompute: speaking-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage; stops writing two write-only columns; keeps #1655's share-sale rule; realitymix joins the portal list | yes | #1655; its additive migration (nine `properties` date columns) applied before merge | +220 / −185 |
+| **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage; stops writing two write-only columns; keeps #1655's share-sale rule; realitymix joins the portal list | yes | #1655; its additive migration (nine `properties` date columns) applied before merge | +220 / −185 |
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 | no | — | +360 / −480 |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | #1655 | +330 / −655 |
 | **W4** | One split dialog (stays / goes / both), curation routing; three dialogs and the split undo deleted | yes | W3 | +1,400 / −1,740 |
@@ -247,7 +248,7 @@ failing test, a merge conflict or a red gate stops the wave and is reported.
 
 **Rule edits.** CLAUDE.md has 291 of its 300 lines on main (PR #1697, 2026-10-03; CI's docs budget
 fails above 300). Each wave's edit is net zero except W5 (+1); rule 14 and the "Derived — condition
-scores" line stay (MS4). W1b drops the asset link from rule 18. W2a puts the speaking ad and the
+scores" line stay (MS4). W1b drops the asset link from rule 18. W2a puts the canonical-ad order and the
 amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. W3 replaces rule 22's
 "lossless restore" clause and rule 18's detach sentence with the carry record. W4 rewrites rule 15's
 "or a refusal" and rule 18's split sentence. W5 adds the portal rule to rule 16; the one-portal
@@ -263,7 +264,7 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
 - **W2a:** its nine date columns exist in production before the code merges (an additive migration,
   confirmed by a catalog read). The fill is a one-off script, not a migration: it queues the roughly
   64,000 properties with two or more ads, at most 2,000 per maintenance tick, off-peak, pausing while
-  the engine is bootstrapping. After it, a 1 % sample shows 0 properties whose stored speaking ad,
+  the engine is bootstrapping. After it, a 1 % sample shows 0 properties whose stored canonical ad,
   portal lists or per-portal dates differ from the rule, and reports how many changed their condition
   grades (expected: about 1.7 % of properties with two or more ads). Single-ad properties get their
   portal lists and dates from the next full recompute cycle.
@@ -281,7 +282,7 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
   portal's index with no sort step; every read-model object changes in one transaction, off-peak,
   never while a recompute runs, both read models are rebuilt once before the code merges, and the two
   Stats/map functions are restated from their live bodies; order agreed with the street-filter session
-  (its 585 restates both functions) and with the dedup session's legacy-deletion wave.
+  (its 585 restates both functions) and with the dedup session's wave that deletes the removed engine's tables.
 - **W6:** each object re-checked on the day: no view or function depends on it, and no cascade is
   used; backup to R2 read back; engine paused; 05:20–05:30 UTC; a 5-second lock limit with retries;
   indexes dropped outside the transaction, after a query plan shows the Watchdog does not use them and
@@ -314,7 +315,7 @@ that session; the two never-used indexes come from migrations 198 and 275.
   removed engine's 11 caches, one of which holds 16 rows the operator wrote; the merge ledger's
   `generation` column; `properties.published_at` and `publish_reason`.
 - **This sprint changes the engine's path in four ways**, all accepted by that session in writing:
-  asset links go; a new speaking-ad order; a carry record inside every merge; one split dialog, which
+  asset links go; a new canonical-ad order; a carry record inside every merge; one split dialog, which
   removes its Proposed-splits page's batch run, "keep together" and "Vrátit". These replace three of
   that session's recorded decisions.
 - **Its conditions, adopted:** its PR #1655 (share sales) merges before any sprint PR that touches
@@ -334,7 +335,7 @@ that session; the two never-used indexes come from migrations 198 and 275.
 
 1. **Q48, answered 2026-10-03: (b), keep our condition grades for now.** W1a and the condition row
    of §6 are cut; nothing in condition grading changes (MS4). A property's grades keep following its
-   speaking ad: on a 2 % sample the new order (MS5) changes them on about 1,200 properties (about 850
+   canonical ad: on a 2 % sample the new order (MS5) changes them on about 1,200 properties (about 850
    lose them although another of their ads is graded, 250 take another ad's, 100 gain), almost all
    with no active ad. Taking the grades from the first graded ad instead would differ on about 1,600
    properties and separate a property's grades from its condition text; it is not done *(default)*.
@@ -355,7 +356,7 @@ that session; the two never-used indexes come from migrations 198 and 275.
 4. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
    each ad's row keeping its broker; the Rulings page keeping its confirm; several portals meaning
    any of them; alert events outside the carry record; the price-move list showing every ad; a
-   property's condition grades following its speaking ad; under one portal, "Newest first" following
+   property's condition grades following its canonical ad; under one portal, "Newest first" following
    that portal's newest ad, and the property's first seen with no portal or several; our own first
    sighting on every portal, bazos and ceskereality included; a card showing its date on the selected
    portal when that differs from its first seen.
@@ -386,10 +387,10 @@ that session; the two never-used indexes come from migrations 198 and 275.
   timed out this week. Every rollout uses a queue, never a full-table pass, and heavy steps run
   off-peak.
 - **More work inside every merge** (the carry record) against the engine's 25-second limit per merge.
-- **Speaking-ad changes** restart price-alert clocks on about 3,600 properties with an active ad. No
+- **Canonical-ad changes** restart price-alert clocks on about 3,600 properties with an active ad. No
   alert is replayed. Properties with no active ad are re-measured in W2a's sample.
-- **Our condition grades move with the speaking ad** on about 1,200 properties (about 850 lose them),
-  nearly all with no active ad. Every surface reads the speaking ad's grades, so Browse, Stats, the
+- **Our condition grades move with the canonical ad** on about 1,200 properties (about 850 lose them),
+  nearly all with no active ad. Every surface reads the canonical ad's grades, so Browse, Stats, the
   map, the Watchdog and the estimator's comparables still agree.
 - **Browse counts move.** One portal now counts properties, not ads; several portals gain the
   properties the old rule hid.
