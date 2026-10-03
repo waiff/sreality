@@ -18,21 +18,23 @@
  * out is the row's stored `source_url`, never rebuilt.
  *
  * Admin sessions also see where each advert came from (the merge ledger's origin,
- * on expand) and a per-row two-step 'Rozdělit' on every advert that would move:
- * exactly that advert goes back to its origin — or, if no merge brought it, to a
- * new record of its own — any property size, any merge origin, with an optional
- * free-text reason kept on the "different" ruling. It is the split route's
- * statement "this one advert is not this property" (`separate: [[id]],
- * keep_together: false`, E919), naming every advert the page shows so a newcomer
- * the lane merged in meanwhile refuses it (`stale`) instead of being ruled. */
+ * on expand) and, on a property of two or more adverts, a LETTER per advert (the
+ * Groups page's unit select, every advert A): one letter is one property, two
+ * letters are two. Two letters in use open ONE panel that states the whole
+ * partition as one split statement (`splitPlan`, E919): every letter group but
+ * the one keeping the record leaves as one property, so the two adverts of one
+ * flat leave together instead of being ruled "different" from each other. It
+ * names every advert the page shows, so a newcomer the lane merged in meanwhile
+ * refuses it (`stale`) instead of being ruled. */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ImageCarousel from '@/components/ImageCarousel';
 import MemberText from '@/components/autodedup/MemberText';
 import { MissingPhotoTile } from '@/components/autodedup/ListingMini';
+import { UnitSelect, type UnitMap } from '@/components/autodedup/UnitSplit';
 import { SectionLabel } from '@/components/section';
 import {
   DETACH_REASON_MAX,
@@ -40,6 +42,8 @@ import {
   splitProperty,
   splitRefusal,
   type AdvertOrigin,
+  type SplitRefusal,
+  type SplitStatement,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { fetchListingBroker } from '@/lib/brokers';
@@ -49,12 +53,15 @@ import { imageSrc } from '@/lib/imageUrl';
 import { propertyPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
 import {
-  STATE_STAYS,
   inzeratu,
   mergeOriginLabel,
   mergedAdvertsKeys,
   refreshAfterSplit,
+  splitPlan,
+  stateStays,
+  unitLanding,
   unmovedReason,
+  type SplitPlan,
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 import { fetchListingsForListingIds } from '@/lib/queries';
@@ -70,6 +77,25 @@ const PHOTOS_PER_ADVERT = 200;
 
 /* An admin session's read of one advert's origin; null for any other session. */
 type OriginRead = { status: 'pending' | 'error' | 'success'; origin: AdvertOrigin | undefined };
+
+const NO_LETTERS: UnitMap = {};
+
+/* The row's half of the split: its letter, and whether it is the property's own advert. */
+type RowSplit = {
+  units: UnitMap;
+  count: number;
+  disabled: boolean;
+  onLetter: (listingId: number, letter: string) => void;
+  ownTitle: string | null;
+};
+
+type SplitCall = { propertyId: number; statement: SplitStatement };
+/* A refusal, with the statement it refused: "Přesto rozdělit" is offered only
+ * while the letters still make that statement. */
+type SplitFailure = { statement: SplitStatement; refusal: SplitRefusal | null; message: string };
+
+const STALE_TEXT =
+  'Nemovitost se mezitím změnila — načteno znovu, nic se nezapsalo. Zkontrolujte písmena a rozdělte znovu.';
 
 interface SectionProps {
   propertyId: number;
@@ -87,6 +113,8 @@ export default function MergedAdvertsSection({
   openAdvertId,
 }: SectionProps) {
   const { isAdmin } = useAuth();
+  const qc = useQueryClient();
+  const navigate = useNavigate();
   const ids = useMemo(() => sources.map((s) => s.id), [sources]);
   const originsQ = useQuery({
     queryKey: mergedAdvertsKeys.origins(propertyId),
@@ -107,6 +135,94 @@ export default function MergedAdvertsSection({
   const { photos, isPending: photosPending } = useListingPhotos(ids, PHOTOS_PER_ADVERT);
 
   const portals = new Set(sources.map((s) => s.source)).size;
+  const portalOf = (listingId: number): string => {
+    const s = sources.find((x) => x.id === listingId);
+    return s ? (portalLabel(s.source) ?? s.source) : '';
+  };
+
+  /* Who stays is decided by which adverts are the property's own, so no letter
+   * is offered before the origins are read. */
+  const canSplit = isAdmin && originsQ.isSuccess && sources.length >= 2;
+  const own = useMemo(
+    () =>
+      new Set(
+        (originsQ.data?.adverts ?? [])
+          .filter((a) => a.origin_property_id == null)
+          .map((a) => a.listing_id),
+      ),
+    [originsQ.data],
+  );
+  const ownShown = ids.filter((id) => own.has(id)).length;
+  /* The letters hold for the advert list they were set over: a list that changed
+   * (a split landed, a newcomer arrived) starts again at A. */
+  const listKey = [...ids].sort((a, b) => a - b).join(',');
+  const [letters, setLetters] = useState({ list: listKey, units: NO_LETTERS });
+  const units = letters.list === listKey ? letters.units : NO_LETTERS;
+  const [reason, setReason] = useState('');
+  const [failure, setFailure] = useState<SplitFailure | null>(null);
+  const plan = splitPlan(ids, units, own, canonicalListingId);
+
+  const split = useMutation({
+    mutationFn: (call: SplitCall) => splitProperty(call.propertyId, call.statement),
+    onSuccess: (res, call) => {
+      setLetters((prev) => ({ list: prev.list, units: NO_LETTERS }));
+      setReason('');
+      setFailure(null);
+      const left = res.units.filter((u) => u.role === 'separated' && u.moved.length > 0);
+      for (const u of left) {
+        pushToast(
+          'ok',
+          `Odděleno — ${fmtCount(u.moved.length)} ${inzeratu(u.moved.length)}: ${unitLanding(u, call.propertyId)}.`,
+          0,
+          { label: `Otevřít #${u.property_id}`, onClick: () => navigate(propertyPath(u.property_id)) },
+        );
+      }
+      if (left.length === 0) pushToast('info', 'Nic se nepřesunulo — inzeráty už jsou odděleny.');
+      refreshAfterSplit(qc);
+    },
+    /* The panel stays open so nothing looks done. A property that changed since
+     * the page read it (`stale`) is re-read; an advert that cannot leave re-reads
+     * the origins, so its row says why. */
+    onError: (e, call) => {
+      const refusal = splitRefusal(e);
+      setFailure({ statement: call.statement, refusal, message: e.message });
+      if (refusal?.code === 'stale') refreshAfterSplit(qc);
+      if (refusal?.code === 'cannot_move') {
+        qc.invalidateQueries({ queryKey: mergedAdvertsKeys.origins(call.propertyId) });
+      }
+    },
+  });
+
+  const setLetter = (listingId: number, letter: string) => {
+    setLetters({ list: listKey, units: { ...units, [listingId]: letter } });
+    setFailure(null);
+  };
+  const cancel = () => {
+    setLetters({ list: listKey, units: NO_LETTERS });
+    setReason('');
+    setFailure(null);
+  };
+  /* Only over the partition it refused: a letter moved since clears the refusal. */
+  const confirming =
+    failure?.refusal?.code === 'reverses_rulings' && samePartition(failure.statement, plan.statement);
+  const send = () => {
+    if (split.isPending) return;
+    setFailure(null);
+    const why = reason.trim();
+    split.mutate({
+      propertyId,
+      statement: {
+        ...plan.statement,
+        ...(why ? { reason: why } : {}),
+        ...(confirming ? { confirm_retract: true } : {}),
+      },
+    });
+  };
+  const panel = canSplit && plan.leaving.length > 0;
+  const ownTitle =
+    ownShown > 1
+      ? 'Nepřišel sloučením — při rozdělení zůstanou v této nemovitosti inzeráty písmena, které má nejvíc vlastních inzerátů.'
+      : 'Nepřišel sloučením — inzeráty s jeho písmenem při rozdělení zůstanou v této nemovitosti.';
 
   return (
     <section aria-label="Sloučené inzeráty">
@@ -120,6 +236,8 @@ export default function MergedAdvertsSection({
       <p className="mt-1 text-[0.75rem] text-[var(--color-ink-3)]">
         Inzeráty, které tvoří tuto nemovitost. Rozbalte řádek pro popis, všechny
         fotky a makléře.
+        {canSplit &&
+          ' Nemovitost rozdělíte písmeny u inzerátů: stejné písmeno = jedna nemovitost, různá písmena = různé nemovitosti.'}
         {isAdmin && (
           <>
             {' '}
@@ -137,6 +255,22 @@ export default function MergedAdvertsSection({
           Údaje inzerátů se nepodařilo načíst: {detailsQ.error.message}
         </p>
       )}
+      {panel && (
+        <SplitPanel
+          propertyId={propertyId}
+          plan={plan}
+          portalOf={portalOf}
+          reason={reason}
+          onReason={setReason}
+          pending={split.isPending}
+          confirming={confirming}
+          failure={failure}
+          onSend={send}
+          onCancel={cancel}
+        />
+      )}
+      {/* A refusal outlives the letters: a re-read that changed the list resets them. */}
+      {!panel && failure && <SplitFailureNote failure={failure} portalOf={portalOf} className="mt-3" />}
       <ul className="mt-4 space-y-2">
         {sources.map((s) => (
           <MergedAdvertRow
@@ -148,13 +282,22 @@ export default function MergedAdvertsSection({
             imagesLoading={photosPending}
             isCanonical={s.id === canonicalListingId}
             opened={s.id === openAdvertId}
-            propertyId={propertyId}
-            adverts={ids}
             originRead={
               isAdmin
                 ? {
                     status: originsQ.status,
                     origin: originsQ.data?.adverts.find((a) => a.listing_id === s.id),
+                  }
+                : null
+            }
+            split={
+              canSplit
+                ? {
+                    units,
+                    count: sources.length,
+                    disabled: split.isPending,
+                    onLetter: setLetter,
+                    ownTitle: own.has(s.id) ? ownTitle : null,
                   }
                 : null
             }
@@ -178,9 +321,8 @@ function MergedAdvertRow({
   imagesLoading,
   isCanonical,
   opened,
-  propertyId,
-  adverts,
   originRead,
+  split,
 }: {
   source: PropertySource;
   detail: ListingPublic | null;
@@ -189,20 +331,20 @@ function MergedAdvertRow({
   imagesLoading: boolean;
   isCanonical: boolean;
   opened: boolean;
-  propertyId: number;
-  adverts: number[];
   originRead: OriginRead | null;
+  split: RowSplit | null;
 }) {
   const [expanded, setExpanded] = useState(opened);
   const rowRef = useRef<HTMLLIElement | null>(null);
   useEffect(() => {
     if (opened) rowRef.current?.scrollIntoView?.({ block: 'start' });
   }, [opened]);
-  const [detachArmed, setDetachArmed] = useState(false);
-  const origin = originRead?.origin?.splittable ? originRead.origin : null;
-  /* Why a row of a bigger property offers no split (an advert alone has nothing to leave). */
+  /* Why an advert cannot leave. Said of neither a lone advert (nothing to leave)
+   * nor the last own one: the letters keep its group on the property. */
   const unmoved =
-    originRead?.origin && !originRead.origin.splittable && originRead.origin.detach_outcome !== 'not_merged'
+    originRead?.origin &&
+    !originRead.origin.splittable &&
+    !SAYS_NOTHING.has(originRead.origin.detach_outcome ?? '')
       ? originRead.origin
       : null;
   const panelId = `merged-advert-${source.id}`;
@@ -251,6 +393,14 @@ function MergedAdvertRow({
                   v záhlaví
                 </span>
               )}
+              {split?.ownTitle && (
+                <span
+                  title={split.ownTitle}
+                  className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
+                >
+                  vlastní inzerát
+                </span>
+              )}
               <span className="font-mono text-[0.85rem] tabular-nums text-[var(--color-ink)]">
                 {priceLabel(source.price_czk, detail?.category_type)}
               </span>
@@ -277,15 +427,21 @@ function MergedAdvertRow({
               Na portálu ↗
             </a>
           )}
-          {origin && !detachArmed && (
-            <button
-              type="button"
-              onClick={() => setDetachArmed(true)}
-              className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[0.72rem] text-[var(--color-ink-3)] transition-colors hover:border-[var(--color-brick)] hover:bg-[var(--color-brick-soft)] hover:text-[var(--color-brick)]"
-            >
-              Rozdělit
-              <span className="sr-only"> ({portal})</span>
-            </button>
+          {split && (
+            <div className="shrink-0">
+              <UnitSelect
+                listingId={source.id}
+                units={split.units}
+                count={split.count}
+                disabled={split.disabled}
+                onChange={(letter) => split.onLetter(source.id, letter)}
+                label={
+                  <>
+                    Nemovitost<span className="sr-only"> inzerátu {portal} #{source.id}</span>
+                  </>
+                }
+              />
+            </div>
           )}
         </div>
         {unmoved && <UnmovedLine origin={unmoved} />}
@@ -298,16 +454,6 @@ function MergedAdvertRow({
           onOpen={() => setExpanded(true)}
         />
       </div>
-
-      {origin && detachArmed && (
-        <DetachConfirm
-          propertyId={propertyId}
-          adverts={adverts}
-          origin={origin}
-          isCanonical={isCanonical}
-          onCancel={() => setDetachArmed(false)}
-        />
-      )}
 
       {expanded && (
         <div
@@ -484,7 +630,7 @@ function OriginLine({ read }: { read: OriginRead }) {
   );
 }
 
-/* A row a detach would not move, and why; where its origin went, when a later
+/* A row a split would not move, and why; where its origin went, when a later
    merge took it (the property page follows the merge to its survivor). */
 function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
   return (
@@ -506,79 +652,69 @@ function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
   );
 }
 
-/* Step two of the split: say where the advert goes, then offer the write. */
-function DetachConfirm({
+const SAYS_NOTHING = new Set(['not_merged', 'last_native']);
+
+const samePartition = (a: SplitStatement, b: SplitStatement): boolean =>
+  JSON.stringify([a.adverts, a.separate]) === JSON.stringify([b.adverts, b.separate]);
+
+/* The letters as the statement they make, before anything is written: which
+ * group stays on this property and which leave, what gets recorded, what stays. */
+function SplitPanel({
   propertyId,
-  adverts,
-  origin,
-  isCanonical,
+  plan,
+  portalOf,
+  reason,
+  onReason,
+  pending,
+  confirming,
+  failure,
+  onSend,
   onCancel,
 }: {
   propertyId: number;
-  adverts: number[];
-  origin: AdvertOrigin;
-  isCanonical: boolean;
+  plan: SplitPlan;
+  portalOf: (listingId: number) => string;
+  reason: string;
+  onReason: (reason: string) => void;
+  pending: boolean;
+  confirming: boolean;
+  failure: SplitFailure | null;
+  onSend: () => void;
   onCancel: () => void;
 }) {
-  const qc = useQueryClient();
-  const navigate = useNavigate();
-  /* The header's own advert leaving for a new record: the property's state stays here. */
-  const stateStays = isCanonical && origin.origin_property_id == null;
-  const [reason, setReason] = useState('');
-  const detach = useMutation({
-    mutationFn: () =>
-      splitProperty(propertyId, {
-        adverts,
-        separate: [[origin.listing_id]],
-        keep_together: false,
-        ...(reason.trim() ? { reason: reason.trim() } : {}),
-      }),
-    onSuccess: (res) => {
-      const left = res.units.find((u) => u.role === 'separated');
-      const move = left?.moved[0];
-      if (left && move) {
-        pushToast(
-          'ok',
-          move.outcome === 'split_native'
-            ? `Odděleno — inzerát má novou vlastní nemovitost #${left.property_id}.` +
-                (stateStays ? ` ${STATE_STAYS}` : '')
-            : `Odděleno — inzerát je zpět v nemovitosti #${left.property_id}.`,
-          0,
-          { label: `Otevřít #${left.property_id}`, onClick: () => navigate(propertyPath(left.property_id)) },
-        );
-      } else {
-        pushToast('info', 'Nic se nepřesunulo — inzerát už je oddělen.');
-      }
-      onCancel();
-      refreshAfterSplit(qc);
-    },
-    /* The panel stays open so nothing looks done; a property that changed since the
-     * page read it (`stale`) is re-read. */
-    onError: (e) => {
-      pushToast('err', (e as Error).message);
-      if (splitRefusal(e)?.code === 'stale') refreshAfterSplit(qc);
-    },
-  });
-
+  const groups = [plan.kept, ...plan.leaving].sort((a, b) => a.letter.localeCompare(b.letter));
   return (
     <div
       role="group"
-      aria-label="Oddělit inzerát"
-      className="mx-3 mb-2 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2"
+      aria-label="Rozdělení nemovitosti"
+      className="mt-3 space-y-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2"
     >
-      <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
-        <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
-        {origin.origin_property_id == null ? (
-          <>Nepřivedlo ho sloučení: dostane novou vlastní nemovitost</>
-        ) : (
-          <>
-            Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
-            {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
-            {fmtDateSlash(origin.merged_at)}
-          </>
-        )}
-        , a zapíše se, že se zbylými inzeráty nejde o stejnou nemovitost.
-        {stateStays && ` ${STATE_STAYS}`}
+      <ul className="space-y-0.5 text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
+        {groups.map((g) => (
+          <li key={g.letter}>
+            <span className="font-mono font-medium text-[var(--color-ink)]">{g.letter}</span> —{' '}
+            {g === plan.kept ? (
+              <>
+                zůstává v nemovitosti <span className="font-mono tabular-nums">#{propertyId}</span>
+              </>
+            ) : (
+              'odejde jako jedna nemovitost'
+            )}
+            :{' '}
+            {g.listingIds.map((id, i) => (
+              <Fragment key={id}>
+                {i > 0 && ', '}
+                <span className="text-[0.68rem] tracking-[0.06em] uppercase">{portalOf(id)}</span>{' '}
+                <span className="font-mono tabular-nums">#{id}</span>
+              </Fragment>
+            ))}
+          </li>
+        ))}
+      </ul>
+      <p className="text-[0.72rem] leading-snug text-[var(--color-ink-2)]">
+        Různá písmena = různé nemovitosti: každá dvojice inzerátů napříč písmeny se uloží jako
+        „různé“ a dostane trvalý zákaz spojení; inzeráty se stejným písmenem zůstanou spolu jako
+        jedna nemovitost. {stateStays(propertyId)}
       </p>
       <textarea
         aria-label="Důvod rozdělení (nepovinné)"
@@ -586,23 +722,27 @@ function DetachConfirm({
         maxLength={DETACH_REASON_MAX}
         rows={2}
         value={reason}
-        disabled={detach.isPending}
-        onChange={(e) => setReason(e.target.value)}
-        className="mt-2 block w-full max-w-[32rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]"
+        disabled={pending}
+        onChange={(e) => onReason(e.target.value)}
+        className="block w-full max-w-[32rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]"
       />
-      <div className="mt-2 flex items-center gap-1.5">
+      {failure && <SplitFailureNote failure={failure} portalOf={portalOf} />}
+      <div className="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
-          autoFocus
-          disabled={detach.isPending}
-          onClick={() => detach.mutate()}
-          className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[0.72rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 disabled:opacity-50"
+          /* Not disabled while in flight (SplitRow's rule): disabling the button
+           * just clicked drops focus onto <body>. */
+          aria-busy={pending}
+          onClick={onSend}
+          className={`rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[0.72rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 ${
+            pending ? 'opacity-60' : ''
+          }`}
         >
-          {detach.isPending ? 'Odděluji…' : 'Ano, oddělit'}
+          {pending ? 'Probíhá…' : confirming ? 'Přesto rozdělit' : 'Rozdělit nemovitost'}
         </button>
         <button
           type="button"
-          disabled={detach.isPending}
+          disabled={pending}
           onClick={onCancel}
           className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[0.72rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-rule-soft)] disabled:opacity-50"
         >
@@ -610,6 +750,65 @@ function DetachConfirm({
         </button>
       </div>
     </div>
+  );
+}
+
+type Stuck = { listing_id: number; outcome?: unknown };
+const isStuck = (x: unknown): x is Stuck =>
+  typeof x === 'object' && x !== null && typeof (x as Stuck).listing_id === 'number';
+const isPair = (x: unknown): x is [number, number] =>
+  Array.isArray(x) && x.length === 2 && x.every((n) => typeof n === 'number');
+
+/* Why the statement wrote nothing, in the page's words; anything unforeseen raw. */
+function SplitFailureNote({
+  failure,
+  portalOf,
+  className = '',
+}: {
+  failure: SplitFailure;
+  portalOf: (listingId: number) => string;
+  className?: string;
+}) {
+  const r = failure.refusal;
+  const tone = `text-[0.72rem] leading-snug text-[var(--color-brick)] ${className}`;
+  const pairs = r?.code === 'reverses_rulings' ? r.ids.filter(isPair) : [];
+  if (pairs.length > 0) {
+    return (
+      <p role="alert" className={tone}>
+        Nic se nezapsalo: tím byste vzali zpět své dřívější rozhodnutí „různé“ u{' '}
+        {pairs.map(([lo, hi]) => `#${lo} × #${hi}`).join(', ')} a zrušili jejich trvalý zákaz
+        spojení.
+      </p>
+    );
+  }
+  if (r?.code === 'stale') {
+    return (
+      <p role="alert" className={tone}>
+        {STALE_TEXT}
+      </p>
+    );
+  }
+  const stuck = r?.code === 'cannot_move' ? r.ids.filter(isStuck) : [];
+  if (stuck.length > 0) {
+    return (
+      <div role="alert" className={tone}>
+        <p>Nic se nezapsalo — tyto inzeráty nemohou odejít:</p>
+        <ul className="mt-0.5 space-y-0.5">
+          {stuck.map((a) => (
+            <li key={a.listing_id}>
+              {portalOf(a.listing_id) && `${portalOf(a.listing_id)} `}
+              <span className="font-mono tabular-nums">#{a.listing_id}</span>:{' '}
+              {typeof a.outcome === 'string' && a.outcome ? unmovedReason(a.outcome) : failure.message}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return (
+    <p role="alert" className={tone}>
+      Chyba: {failure.message}
+    </p>
   );
 }
 
