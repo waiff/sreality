@@ -177,8 +177,11 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
     # cycle, possibly across two runs (its resume cursor); healthy age is ~24h
     # (daily 04:15 cadence), so fail at 30h fires ~5-6h after a dead, killed or
-    # incomplete cycle — however the process died. A cycle that needs its
-    # second run ages the stamp past both thresholds before that run lands.
+    # incomplete cycle — however the process died. These two still assume a
+    # one-run cycle: a two-run cycle (green in the sweep's own exit code) stamps
+    # every ~48h, so the check warns 4h then fails ~18h before its second run
+    # lands. Sizing them for two runs (as broker_sweep_* is for its two-run lap)
+    # loosens the bound on a dead sweep, so it is an operator decision.
     # Dirty rows drain within ~2 min of the worker lane's tick — EXCEPT while the
     # daily full sweep holds the maintenance lease, which blocks every incremental
     # pass and only clears dirty_properties at the very end, so oldest-dirt ages
@@ -636,8 +639,9 @@ def _status_for_property_maintenance(
 ) -> tuple[str, list[str]]:
     """Worst-of over the two maintenance liveness axes.
 
-    `sweep_age_hours` is the age of the last COMPLETE full sweep's stamp
-    (app_settings.property_sweep_last_complete, written by the sweep itself) —
+    `sweep_age_hours` is the age of the stamp the last COMPLETE sweep cycle wrote
+    (app_settings.property_sweep_last_complete: one run, or two through the
+    sweep's resume cursor) —
     None means no stamp on record, which is a warn, not a fail: it is the
     expected state between deploying this check and the first complete sweep,
     and permanently red would train the operator to ignore the check. A dirty
@@ -1353,7 +1357,8 @@ def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[st
     2026-08-06 incident — the sweep outgrew its job timeout and died `cancelled`
     (not `failed`) for 4 days straight while each kill's stranded lease froze every
     maintenance lane; no check watched any of it. The sweep axis reads the
-    completion stamp the (fixed) sweep writes on complete walks only, so ANY way
+    completion stamp the (fixed) sweep writes on complete cycles only (one run,
+    or two through its resume cursor), so ANY way
     the sweep dies — SIGKILL, runner death, chronic budget exhaustion — surfaces
     as a stale stamp within hours."""
     row = _fetchone(conn, _PROPERTY_MAINTENANCE_SQL)

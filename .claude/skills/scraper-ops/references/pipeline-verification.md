@@ -20,7 +20,7 @@ migration 437: warns when the oldest `pg_stat_activity.xact_start` passes an hou
 `refresh_llm_cost_rollups`' 3-hour trailing re-scan only absorbs a late arrival whose
 transaction was shorter than that — `called_at` defaults to now() = transaction START; the
 repair is `select refresh_llm_cost_rollups('-infinity');`), `db_saturation`, `worker_liveness`,
-`dual_write_parity`, `property_maintenance` (last-complete-sweep stamp age + oldest
+`dual_write_parity`, `property_maintenance` (last-complete-cycle stamp age + oldest
 dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
 never a properties scan) and `broker_resolution_freshness` (**three** axes over
 `app_settings.broker_resolution_last_complete`, `broker_resolution_runs.ended_at` and
@@ -40,6 +40,9 @@ pair already co-located — that would erase evidence of a bypass); `POST
 /broker-review/suppressions` the ledger. Per-sweep counts land in
 `broker_resolution_runs.suppressed_pairs` (pairs, not merges: the rail blocks before grading) and
 the `RESOLVE full merge done … suppressed=N` line. Kill switch: `broker_auto_merge_enabled`=false.
+The property sweep axis ages a CYCLE (one run, or two through `app_settings.property_sweep_cursor`
+since 2026-10-03), but its 26h/30h thresholds still assume one run: a two-run cycle, green in the
+sweep's own exit code, fails the check for ~18h of every 48h (re-sizing is the operator's call).
 Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
 spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
 `app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps

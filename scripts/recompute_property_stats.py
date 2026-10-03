@@ -25,8 +25,9 @@ boundary when it runs out: finalize what was covered, save a resume cursor,
 release the lease. The next run continues that CYCLE from the cursor instead
 of id 1 (2026-10-03: four daily runs in a row stopped near id 540k of 927k,
 each restarting at 1, so the tail went days without a reconcile). The first
-stop of a cycle exits 0 with a warning; a resumed run that stops again exits
-RED (GH reports a timeout kill as `cancelled`, which alerts nobody). The
+stop of a cycle exits 0 with a warning; a resumed run that stops again, or a
+run that stops before its first batch (nothing to resume), exits RED (GH
+reports a timeout kill as `cancelled`, which alerts nobody). The
 `property_maintenance` check in scripts/verify_pipeline.py watches the
 completion stamp independently.
 
@@ -307,7 +308,10 @@ _STAMP_SWEEP_COMPLETE_SQL = """
 # 927k and each restarted at id 1, so the id tail went days without a reconcile). A budget stop
 # saves where the next run continues the cycle; the run that completes it deletes the row in
 # the stamp's transaction. A cycle that began more than _CURSOR_MAX_AGE ago starts over at id 1
-# instead, or the stamp would vouch for a reconcile whose lower half is days old.
+# instead, or the stamp would vouch for a reconcile whose lower half is days old. The age is
+# judged when a run resumes, not when it stamps, so a stamp's oldest recompute can be
+# _CURSOR_MAX_AGE plus that run's own length (~2h: budget + one in-flight batch) old; the
+# stamp's `cycle_started_at` records it.
 _CURSOR_MAX_AGE = "36 hours"
 
 _READ_SWEEP_CURSOR_SQL = """
@@ -541,9 +545,19 @@ def _max_property_id(conn: Any) -> int:
 
 def _read_sweep_cursor(conn: Any) -> tuple[Any, ...] | None:
     """The saved cursor as (next_lo, runs, cycle_started_at, younger than _CURSOR_MAX_AGE)."""
-    with conn.cursor() as cur:
-        cur.execute(_READ_SWEEP_CURSOR_SQL, {"max_age": _CURSOR_MAX_AGE})
-        return cur.fetchone()
+    import psycopg
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_READ_SWEEP_CURSOR_SQL, {"max_age": _CURSOR_MAX_AGE})
+            return cur.fetchone()
+    except psycopg.DataError as exc:
+        # The Settings page edits any app_settings row as raw JSON, and a value the casts reject
+        # is a DataError run_resilient never retries: it would red every run until someone fixed
+        # the row by hand. Like resolve_brokers._sweep_state, treat it as no cursor instead.
+        LOG.warning("RECOMPUTE property_sweep_cursor is unreadable (%s): treated as absent, so "
+                    "a fresh cycle starts at id 1 and its first save replaces the row", exc)
+        return None
 
 
 def _resume_point(saved: tuple[Any, ...] | None, max_id: int) -> tuple[int, int, Any] | None:
@@ -797,7 +811,8 @@ def main() -> int:
         help="Full-sweep wall-clock budget (default 6000). On exhaustion the "
              "sweep clean-stops at a batch boundary, finalizes only what it "
              "covered, saves where the next run resumes the cycle, and releases "
-             "the lease; a resumed run that runs out again exits RED (1) — a "
+             "the lease; a resumed run that runs out again, or a run that runs out "
+             "before its first batch, exits RED (1) — a "
              "visible failure instead of a silent timeout-minutes `cancelled` kill. "
              f"Clamped to {int(_MAX_BUDGET_SECONDS)}s: the workflow's "
              "timeout-minutes backstop is sized for that ceiling, and a "
@@ -1033,7 +1048,10 @@ def main() -> int:
                             "next_lo": incomplete_at,
                             "cycle_started_at": cycle_started_at, "runs": runs + 1})
 
-                step(_stop, "sweep.stop")
+                # A fresh run stopped before batch 1 swept nothing to clear, and a cursor at
+                # id 1 is never resumed (_resume_point needs 1 < next_lo): save nothing.
+                if incomplete_at > 1:
+                    step(_stop, "sweep.stop")
         finally:
             # `nonlocal conn` keeps this pointing at the last SUCCESSFULLY returned
             # connection, but run_resilient closes both the original and its
@@ -1042,6 +1060,18 @@ def main() -> int:
             _release_lease(conn, holder, reconnect)
 
     elapsed = time.monotonic() - started_at
+    if incomplete_at == 1:
+        # The budget clock starts before the lease wait and the straggler attach, so a backlog
+        # can spend it all before batch 1. Nothing was recomputed and no cursor saved, so there
+        # is no cycle for the next run to continue: RED, or every such day would exit green
+        # having reconciled nothing.
+        LOG.error(
+            "RECOMPUTE budget exhausted after %.0fs before the first batch (the lease wait and "
+            "the straggler attach above ran first): nothing recomputed and no cursor saved, so "
+            "the next run starts a fresh cycle at id 1; exiting RED",
+            elapsed,
+        )
+        return 1
     if incomplete_at is not None and resume is None:
         # One continuation is tolerated: the cursor is saved and the next run finishes the
         # cycle from it, stamping it complete like any other.

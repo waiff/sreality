@@ -2099,13 +2099,17 @@ renumber.** Navigate by area:
     clean-stops at a batch boundary, clears only the id range that run swept, and saves a resume
     cursor (`app_settings.property_sweep_cursor`); the next run continues the cycle there instead
     of at id 1 (2026-10-03: four daily runs in a row stopped near id 540k of 927k, each from id 1)
-    unless the cycle began over 36h ago. The first stop of a cycle exits 0 with a warning; a
-    resumed run that stops again exits RED. Only a completed cycle writes the
+    unless the cycle began over 36h ago — judged when that run resumes, so a stamped cycle's
+    oldest recompute can be ~38h old (the stamp records `cycle_started_at`). The first stop of a
+    cycle exits 0 with a warning; a resumed run that stops again, or a run that stops before its
+    first batch (nothing to resume), exits RED. Only a completed cycle writes the
     `property_sweep_last_complete` stamp (and deletes the cursor) — so chronic exhaustion surfaces
     as red runs plus the `property_maintenance` health check failing on stamp age, and the unswept
     id tail keeps its pre-sweep windowed stats until a cycle finishes (is_active flips still heal
-    incrementally — every delist path enqueues `dirty_properties`). The maintenance lease is one
-    15-minute TTL
+    incrementally — every delist path enqueues `dirty_properties`). That check's 26h/30h stamp-age
+    thresholds still assume a one-run cycle, so a two-run cycle, green in the sweep's own exit
+    code, also fails it for ~18h before its second run stamps; re-sizing them is an operator
+    decision. The maintenance lease is one 15-minute TTL
     heartbeat-renewed every batch/slice, so a killed job freezes maintenance for minutes, not
     hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both

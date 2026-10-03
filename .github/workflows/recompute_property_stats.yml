@@ -5,14 +5,16 @@ name: "Jobs: recompute property stats (daily full reconcile)"
 # EVERY property's is_active rollup, source / site counts, first/last-seen span,
 # representative child, current price, and the price-history aggregates (drop /
 # rise counts, max drop %) from the union of its children's snapshots. Finally it
-# clears the dirty_properties queue (everything was just recomputed).
+# clears the dirty_properties rows queued before it started, for the id range it
+# recomputed.
 #
 # As of Phase 3 this is the RECONCILE BACKSTOP, not the live path: the fast,
 # frequent dirty-set incremental pass (property_maintenance.yml, cron */5) keeps
 # `properties` near-real-time by recomputing only the properties the writers
 # queued. This full sweep runs once a day to recompute everything from scratch,
-# so any enqueue the writers missed self-heals within 24h. O(all properties), so
-# it must NOT run frequently at scale.
+# so any enqueue the writers missed self-heals within one cycle (a day, or two
+# when the budget splits it across runs). O(all properties), so it must NOT run
+# frequently at scale.
 #
 # Decision #3: the property is_active rollup lives here / in the incremental
 # pass, NOT in the scraper's mid-walk mark_inactive, so a cross-source rollup
@@ -30,9 +32,10 @@ name: "Jobs: recompute property stats (daily full reconcile)"
 # worker lane + both crons, and reported as `cancelled`, which alerts nobody):
 #   * the script CLEAN-STOPS at --max-seconds (default 6000, the clamp). The
 #     first stop of a cycle exits 0 with a warning (the next run finishes the
-#     cycle); a resumed run that stops again exits RED, so a cycle needing
-#     three or more runs is a visible scheduled-run failure, not a silent
-#     kill. Raised from 4200 in 2026-08: the six sweeps to 08-10 ran
+#     cycle); a resumed run that stops again, or a stop before the first
+#     batch (nothing to resume), exits RED, so a cycle needing three or more
+#     runs is a visible scheduled-run failure, not a silent kill. Raised from
+#     4200 in 2026-08: the six sweeps to 08-10 ran
 #     3502-4044s, i.e. 83-96% of that ceiling with the corpus growing ~2k
 #     properties/day — one slow day from a false RED. 6000s puts the observed
 #     worst case at ~67%;

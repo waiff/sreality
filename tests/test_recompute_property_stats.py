@@ -585,8 +585,7 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
     # initial acquisition + one renewal per batch
     assert len(grants) == 1 + 2
     # complete walk → the swept-range clear over its whole range
-    cleared = _find(conn, "DELETE FROM dirty_properties")
-    assert cleared and cleared[1] == {"cutoff": "CUTOFF", "lo": 1, "hi": 4001}
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 4001}]
     # ...and the completion stamp the health check reads (O(1) liveness signal)
     stamp = _find(conn, "property_sweep_last_complete")
     assert stamp and stamp[1]["max_id"] == 4000 and stamp[1]["batches"] == 2
@@ -612,14 +611,23 @@ def test_the_full_sweep_patches_no_browse_row(monkeypatch: Any) -> None:
 _BUDGET_STOP_CLOCK = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
 _CURSOR_SAVE = "VALUES ('property_sweep_cursor'"
 _CURSOR_DROP = "DELETE FROM app_settings WHERE key = 'property_sweep_cursor'"
+_CURSOR_READ = "SELECT (value->>'next_lo')"
 
 
 def _swept(conn: _FakeConn) -> list[tuple[int, int]]:
     return [(p["lo"], p["hi"]) for s, p in conn.executed if "WITH batch AS" in s]
 
 
+# Pinned as text, not read from the module: psycopg ignores unused mapping keys, so a dropped
+# bound would still be handed its parameter and pass every params-only assertion.
+_SCOPED_CLEAR = ("DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s "
+                 "AND property_id >= %(lo)s AND property_id < %(hi)s")
+
+
 def _dirty_clears(conn: _FakeConn) -> list[Any]:
-    return [p for s, p in conn.executed if s.startswith("DELETE FROM dirty_properties")]
+    clears = [(s, p) for s, p in conn.executed if s.startswith("DELETE FROM dirty_properties")]
+    assert all(s == _SCOPED_CLEAR for s, _ in clears), "every sweep clear is bounded both ways"
+    return [p for _, p in clears]
 
 
 def test_a_fresh_cycle_stopped_by_the_budget_saves_its_cursor_and_exits_green(
@@ -701,7 +709,7 @@ def test_a_cursor_that_cannot_continue_its_cycle_is_ignored(
 
     conn = _SweepConn(max_id=6000, cursor=cursor)
     assert _run_sweep(monkeypatch, conn, []) == 0
-    read = _find(conn, "SELECT (value->>'next_lo')")
+    read = _find(conn, _CURSOR_READ)
     assert read and read[1] == {"max_age": rps._CURSOR_MAX_AGE}
     assert "ignoring the saved cursor" in caplog.text
     assert _swept(conn) == [(1, 2001), (2001, 4001), (4001, 6001)]
@@ -749,6 +757,188 @@ def test_the_dry_run_reports_the_cursor_and_writes_nothing(
     assert "(2001, 1, 'CYCLE', True)" in caplog.text
     assert not any(s.startswith(("INSERT", "UPDATE", "DELETE")) for s in _sqls(conn))
     assert not _find(conn, "property_maintenance_lease")
+
+
+def test_a_fresh_run_stopped_before_its_first_batch_is_red_and_saves_nothing(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """The budget clock starts before the lease wait and the straggler attach, so a backlog can
+    spend it before batch 1. A cursor at id 1 is never resumed, so there is no cycle to continue:
+    RED and nothing saved, or every such day would exit green."""
+    conn = _SweepConn(max_id=6000)
+    # monotonic: started_at, _wait_lease anchor, batch-1 deadline check (past 60s), elapsed
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=[0.0, 1.0, 100.0, 101.0])
+    assert rc == 1
+    assert "before the first batch" in caplog.text and "resumes" not in caplog.text
+    assert _swept(conn) == [] and _dirty_clears(conn) == []
+    assert not _find(conn, _CURSOR_SAVE) and not _find(conn, "property_sweep_last_complete")
+    assert _find(conn, "SET holder = NULL")
+
+
+def test_a_cursor_at_the_last_id_still_resumes(monkeypatch: Any) -> None:
+    """`next_lo <= max_id`: a stop on the batch holding only the last id continues the cycle."""
+    conn = _SweepConn(max_id=6001, cursor=(6001, 1, "CYCLE", True))
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(6001, 8001)]
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 2
+
+
+def test_an_unreadable_cursor_costs_one_fresh_cycle_not_every_run(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """The Settings page edits any app_settings row as raw JSON, and the read casts in SQL. A
+    value the casts reject is a DataError, which run_resilient never retries: it must start a
+    fresh cycle (whose completion deletes the row), not red every run until fixed by hand."""
+    import psycopg
+
+    class _HandEditedCur(_Cur):
+        def execute(self, sql: str, params: Any = None) -> None:
+            if "value->>'next_lo'" in sql:
+                raise psycopg.errors.InvalidTextRepresentation(
+                    'invalid input syntax for type bigint: "540k"')
+            super().execute(sql, params)
+
+    class _HandEditedConn(_SweepConn):
+        def cursor(self) -> Any:
+            return _HandEditedCur(self)
+
+    conn = _HandEditedConn(max_id=4000)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert "unreadable" in caplog.text and "540k" in caplog.text
+    assert _swept(conn) == [(1, 2001), (2001, 4001)]
+    assert _find(conn, _CURSOR_DROP)
+
+
+def test_the_cursor_sql_reads_back_what_it_saves() -> None:
+    """The fakes serve canned rows, not SQL, so pin the SQL's own half of the contract: the read
+    names the keys the save writes, in `_resume_point`'s order; a cursor is young while its
+    cycle began after now() - max_age; both rows are upserts (a resumed run that stops again
+    saves over the cursor); and the stamp carries the cycle's facts."""
+    import re
+
+    import scripts.recompute_property_stats as rps
+
+    def built(sql: str) -> dict[str, str]:
+        return dict(re.findall(r"'(\w+)', %\((\w+)\)s", sql))
+
+    read = " ".join(rps._READ_SWEEP_CURSOR_SQL.split())
+    assert re.findall(r"value->>'(\w+)'", read) == [
+        "next_lo", "runs", "cycle_started_at", "cycle_started_at"]
+    assert "(value->>'cycle_started_at')::timestamptz > now() - %(max_age)s::interval" in read
+    assert built(rps._SAVE_SWEEP_CURSOR_SQL) == {
+        "next_lo": "next_lo", "cycle_started_at": "cycle_started_at", "runs": "runs"}
+    stamp = built(rps._STAMP_SWEEP_COMPLETE_SQL)
+    assert stamp["runs"] == "runs" and stamp["cycle_started_at"] == "cycle_started_at"
+    for sql in (rps._SAVE_SWEEP_CURSOR_SQL, rps._STAMP_SWEEP_COMPLETE_SQL):
+        assert "ON CONFLICT (key) DO UPDATE" in sql
+
+
+class _SettingsCur(_Cur):
+    """app_settings as a dict: an upsert stores the jsonb object its SQL builds from its
+    ('key', %(param)s) pairs, a DELETE pops the row, and the cursor read serves back the keys
+    it names, young by the fake database's clock."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import re
+
+        super().execute(sql, params)
+        s, rows = self._conn.executed[-1][0], self._conn.settings
+        key = re.search(r"'(property_sweep_\w+)'", s)
+        if key is None:
+            return
+        if s.startswith("INSERT INTO app_settings"):
+            rows[key[1]] = {k: params[p] for k, p in re.findall(r"'(\w+)', %\((\w+)\)s", s)}
+        elif s.startswith("DELETE FROM app_settings"):
+            rows.pop(key[1], None)
+        elif s.startswith("SELECT") and key[1] in rows:
+            *values, began = (rows[key[1]].get(k) for k in re.findall(r"value->>'(\w+)'", s))
+            age = (self._conn.now - began).total_seconds()
+            self._rows = [(*values, age < _interval_seconds(params["max_age"]))]
+
+
+class _SettingsSweepConn(_SweepConn):
+    def __init__(self, max_id: int, settings: dict[str, Any], now: Any) -> None:
+        super().__init__(max_id)
+        self.settings, self.now = settings, now
+        self.script.insert(0, (lambda s: s == "SELECT now()", [(now,)]))  # first match wins
+
+    def cursor(self) -> Any:
+        return _SettingsCur(self)
+
+
+@pytest.mark.parametrize("gap_hours, resumed", [(25, True), (37, False)])
+def test_the_next_run_continues_from_exactly_what_the_last_one_saved(
+    monkeypatch: Any, gap_hours: int, resumed: bool,
+) -> None:
+    """Run 1 stops on budget; run 2 reads back the row run 1 wrote and finishes the cycle, or
+    starts over at id 1 once the cycle is past _CURSOR_MAX_AGE. Either way the stamp carries
+    the cycle it completed and the cursor is gone."""
+    from datetime import UTC, datetime, timedelta
+
+    settings: dict[str, Any] = {}
+    start = datetime(2026, 10, 3, 10, tzinfo=UTC)
+    first = _SettingsSweepConn(6000, settings, now=start)
+    rc = _run_sweep(monkeypatch, first, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 0
+    assert settings == {
+        "property_sweep_cursor": {"next_lo": 2001, "cycle_started_at": start, "runs": 1}}
+
+    later = start + timedelta(hours=gap_hours)
+    second = _SettingsSweepConn(6000, settings, now=later)
+    assert _run_sweep(monkeypatch, second, [], clock=[0.0] * 32) == 0
+    stamp = settings.pop("property_sweep_last_complete")
+    assert settings == {}
+    assert _swept(second)[0] == ((2001, 4001) if resumed else (1, 2001))
+    assert (stamp["runs"], stamp["cycle_started_at"]) == ((2, start) if resumed else (1, later))
+
+
+class _DropAfterCur(_Cur):
+    """Runs the statement, then loses the reply ONCE for the first one matching
+    `conn.drop_after`: a drop that may follow the server's COMMIT."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import psycopg
+
+        super().execute(sql, params)
+        if self._conn.drop_after and self._conn.drop_after in self._conn.executed[-1][0]:
+            self._conn.drop_after = None
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+
+class _DropAfterSweepConn(_SweepConn):
+    def __init__(self, max_id: int, cursor: tuple[Any, ...], drop_after: str) -> None:
+        super().__init__(max_id, cursor)
+        self.drop_after: str | None = drop_after
+
+    def cursor(self) -> Any:
+        return _DropAfterCur(self)
+
+
+@pytest.mark.parametrize("drop_after, budget_stop", [
+    (_CURSOR_READ, False), (_CURSOR_SAVE, True), (_CURSOR_DROP, False),
+], ids=["read", "stop", "finalize"])
+def test_a_dropped_cursor_statement_replays_with_identical_values(
+    monkeypatch: Any, drop_after: str, budget_stop: bool,
+) -> None:
+    """Every cursor read and write runs through step(), so a drop replays the whole op. Its
+    values (next_lo, runs + 1, the cycle's start) are fixed before the op, so a replay after a
+    COMMIT the client never saw writes the same row again: never runs + 2."""
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setattr(rps.db.time, "sleep", lambda s: None)
+    conn = _DropAfterSweepConn(6000, cursor=(2001, 1, "CYCLE", True), drop_after=drop_after)
+    argv, clock = (["--max-seconds", "60"], list(_BUDGET_STOP_CLOCK)) if budget_stop else ([], None)
+    assert _run_sweep(monkeypatch, conn, argv, clock=clock) == (1 if budget_stop else 0)
+    replays = 1 if drop_after == _CURSOR_READ else 2
+    hi = 4001 if budget_stop else 6001
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": hi}] * replays
+    if budget_stop:
+        assert [p for s, p in conn.executed if _CURSOR_SAVE in s] == [
+            {"next_lo": 4001, "cycle_started_at": "CYCLE", "runs": 2}] * replays
+    else:
+        assert [(p["runs"], p["cycle_started_at"]) for s, p in conn.executed
+                if "property_sweep_last_complete" in s] == [(2, "CYCLE")] * replays
 
 
 class _FlakyCur(_Cur):
