@@ -16,6 +16,10 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   Nisou, Turnov, Praha-Vysočany) since migration 570. Merges go only through the rule-15 chokepoint
   (`merge_property_set`, `source='autodedup'`) and only inside `app_settings.autodedup_apply_scope`.
 - **Brake:** `realtime_autodedup_interval_seconds` = 0, then `mode=unapply`.
+- **Operator split (2026-10-03):** the property page states a whole partition by letters, in one
+  `POST /properties/{id}/split` (frontend only; the route is E919's). Open with the operator: lift
+  E905's property-grain freeze (`restored_outside_engine`) so a split-off property can receive
+  engine merges again; only his pair rulings would stay as bans.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.

@@ -1469,12 +1469,12 @@ renumber.** Navigate by area:
     portal link collapsed, description / full gallery / broker expanded). For an admin
     session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
     a split returns it to, and the source and date of the merge that took it from there), and
-    every row that would move carries a two-step **Rozdělit** that posts
-    `POST /properties/{id}/split` with `separate: [[that advert]], keep_together: false` over
-    every advert the page shows — any property size, a merge of any origin (operator, legacy
-    `auto`, `autodedup`), the optional free-text `reason` kept on the "different" rulings —
-    toasts a link to the property it landed on, then re-reads the property page (keyed on the
-    property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
+    every row carries a unit letter (the Groups page's `UnitSelect`, all A); two letters open one
+    **Rozdělit nemovitost** panel that posts ONE `POST /properties/{id}/split` over every advert
+    the page shows — each letter group but the one keeping the record (most own adverts, else
+    the header's; `lib/mergedAdverts.splitPlan`) a `separate` unit, `keep_together: false`, the
+    optional `reason` on the rulings — toasts a link per unit that left, then re-reads the
+    property page (keyed on the property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP one lane (W5; live — interval 60 since migration 572, scope = the three trial blocks since migration 570).** The engine's ONE production path is the

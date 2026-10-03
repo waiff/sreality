@@ -3095,8 +3095,9 @@ export const listMergedProperties = (
  * separate (`separate`: each leaves as ONE record — back where it came from, or
  * new), and `keep_together` (the rest ruled one property). Across units the
  * adverts are ruled "different" with a permanent must-not-link. One transaction:
- * all of it or nothing. The property page's row split is `separate: [[id]],
- * keep_together: false`; the proposals page always keeps the rest together. */
+ * all of it or nothing. The property page sends its letters as one statement
+ * (`keep_together: false`, every letter group but the kept one a unit); the
+ * proposals page always keeps the rest together. */
 export const DETACH_REASON_MAX = 500;
 
 export interface SplitStatement {
