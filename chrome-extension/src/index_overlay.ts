@@ -1,27 +1,41 @@
 /* Index / search-page overlay. We don't depend on any portal's card markup:
  * we scan every <a href>, keep the ones whose href yields a listing id via the
- * portal registry, and badge the nearest card-ish ancestor. One batched lookup
+ * portal registry, and draw on the nearest card-ish ancestor. One batched lookup
  * per pass; a result cache makes it cheap + resilient to SPA re-renders.
  *
- * Per sale-apartment card a single badge, ALWAYS clickable → opens the full
- * yield panel (MF rent/yield + the editable comparables calculator + run/view
- * estimation). Badge label: "Výnos MF X %" (or the town's "X–Y %" range) when
- * the property's MF result has a yield, else "Odhad X %" when an estimation
- * already exists, else "Odhadnout výnos".
+ * It runs on EVERY index page of a portal, whatever the category. Per card
+ * (index_cards.ts): the pipeline / collection / hide controls for any listing
+ * we have a property for, and — on sale apartments only — the yield badge,
+ * ALWAYS clickable → opens the full yield panel (MF rent/yield + the editable
+ * comparables calculator + run/view estimation). Badge label: "Výnos MF X %"
+ * (or the town's "X–Y %" range) when the property's MF result has a yield, else
+ * "Odhad X %" when an estimation already exists, else "Odhadnout výnos".
  *
- * Sale-apartment gating: by our row's category when found; for listings not yet
- * in our DB, by the portal's URL category hint (sreality/idnes encode it in the
- * path) so freshly-listed cards still get the estimate affordance.
+ * Per page (index_dock.ts): the bottom-left dock with the "Skrýt skryté"
+ * switch — whether a dismissed property's card is drawn barely visible.
  *
- * Badges only ever come from a SUCCESSFUL lookup. When it fails (signed out,
- * network / API error) the page gets one corner notice instead — see
- * "the failure notice" below. */
+ * Sale-apartment gating of the badge: by our row's category when found; for
+ * listings not yet in our DB, by the portal's URL category hint (sreality/idnes
+ * encode it in the path) so freshly-listed cards still get the estimate
+ * affordance.
+ *
+ * Controls and badges only ever come from a SUCCESSFUL lookup. When it fails
+ * (signed out, network / API error) the page gets one notice in the dock
+ * instead — see "the failure notice" below. */
 
 // The shared product brand (frontend/src/lib/brand.ts) — the notice's wordmark
 // is the same string as the panel header's.
 import { APP_NAME } from '../../frontend/src/lib/brand';
 // The MF result's ONE shape rule, shared with the SPA (a zero-dependency module).
 import { mfShape } from '../../frontend/src/lib/mfReference';
+import {
+  PROCESSED_ATTR,
+  VEIL_ROOT_ATTR,
+  createCardLayer,
+  holdsOneListing,
+  type BadgeView,
+} from './index_cards';
+import { mountDock, onVeilChange, readVeil, writeVeil, type DockHandle } from './index_dock';
 import { detailRef, portalForHost, type Portal, type PortalRef } from './portals';
 import type { ApiMessage, ApiResult, AuthState, PortalListing } from './types';
 
@@ -30,35 +44,26 @@ type OpenPanel = (
   ref: PortalRef, url: string, prefetched?: PortalListing | null,
 ) => Promise<void>;
 
-/* Holds the listing id the card was badged FOR, not a boolean: SPA routers
- * recycle card DOM nodes between result sets, so a node can still carry the
- * badge of the listing it previously held. Storing the id lets a recycled node
- * be detected and re-badged (or, while its lookup is failing, unbadged) instead
- * of silently showing another listing's yield. */
-const PROCESSED_ATTR = 'data-mf-processed';
-const BADGE_CLASS = '__mf_badge';
-const STYLE_ID = '__mf_badge_style__';
 const SCAN_DEBOUNCE_MS = 400;
 const MAX_LOOKUP_PER_PASS = 50;
 
 /* ---- the failure notice --------------------------------------------------
  *
- * A failed lookup leaves nothing to badge, and the page used to stay silent: a
+ * A failed lookup leaves nothing to draw, and the page used to stay silent: a
  * signed-out operator got no badge, no CTA and no sign-in prompt — while a
  * detail page in the same state shows the panel's prompt — and read it as a
  * broken extension (2026-09-24). A failure now raises ONE page-level notice
  * offering what can fix it: sign-in when signed out, a page reload when an
  * extension update orphaned this script, a retry for other errors, nothing for
- * a build without an API URL. Page-level, not per-card: for listings we have
- * no row for, the sale-apartment gate is a URL hint only sreality / idnes /
- * ceskereality provide, so a per-card prompt would be invisible on the other
- * portals. It shows only while cards the URL doesn't rule out as sale
- * apartments wait on the failed lookup — never on a page without listing
- * cards, and on those three portals not on a rental or house search. It sits
- * bottom-LEFT: the panel owns the bottom-right corner and a badge click can
- * open it while the notice is up (a new card's lookup failing under an open
- * panel), so the two never share a corner. × hides it until the next page
- * load (a soft-nav round trip through a listing keeps it hidden).
+ * a build without an API URL. Page-level, not per-card: without a lookup there
+ * is no row to say what a card is, so nothing per card can carry the prompt.
+ * It shows while ANY listing card waits on the failed lookup — every card gets
+ * controls from it now, so a rental or house search is as stuck as a flat one —
+ * and never on a page without listing cards. It sits in the dock, bottom-LEFT,
+ * above the "Skrýt skryté" bar: the panel owns the bottom-right corner and a
+ * badge click can open it while the notice is up (a new card's lookup failing
+ * under an open panel), so the two never share a corner. × hides it until the
+ * next page load (a soft-nav round trip through a listing keeps it hidden).
  *
  * Backoff: after a failure, observer-driven passes don't ask again for
  * LOOKUP_RETRY_AFTER_MS — a 401 costs no network, but in a real outage every
@@ -83,7 +88,6 @@ const MAX_LOOKUP_PER_PASS = 50;
  * Teardown: stop() removes the notice, and everything that awaits re-checks
  * `stopped` — a sign-in or lookup resolving after a route change must not
  * re-mount the notice or re-scan a page this overlay no longer owns. */
-const NOTICE_HOST_ID = '__mf_notice_host__';
 const LOOKUP_RETRY_AFTER_MS = 60_000;
 /* Prod answers in well under a second; past this a lookup reads as failed. */
 const LOOKUP_TIMEOUT_MS = 20_000;
@@ -98,6 +102,11 @@ const LIVE_REGION_SETTLE_MS = 100;
  * content.ts does: api.ts runs only in the background service worker, and the
  * content bundle never fetches directly. */
 const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
+
+/* A failed card write's reason, in the panel's words (content.ts's friendlyDetail). */
+function describeDetail(detail: string): string {
+  return detail === NOT_SIGNED_IN_DETAIL ? 'nejste přihlášeni' : detail;
+}
 /* api.ts's API_NOT_CONFIGURED_DETAIL, by value for the same reason: a build
  * without VITE_API_BASE_URL, which neither a retry nor a reload can fix. */
 const API_NOT_CONFIGURED_DETAIL = 'API base URL not configured';
@@ -148,6 +157,28 @@ interface NoticeHandle {
   destroy: () => void;
 }
 
+export interface IndexOverlayOptions {
+  /* The app's collections page, for the card checklist's "Spravovat kolekce"
+   * link; null hides the link. */
+  collectionsUrl: string | null;
+  /* A write made on a card settled: this is the property's operator state now
+   * (the panel mirrors it when it shows the same property). */
+  onCardWrite: (listing: PortalListing) => void;
+}
+
+export interface IndexOverlayHandle {
+  /* Disconnect the observer, cancel any pending scan, remove everything drawn —
+   * called when a route change (SPA soft-nav) moves the tab off an index page,
+   * so repeated navigations don't stack duplicate observers scanning the DOM. */
+  stop: () => void;
+  /* The panel changed this property's pipeline / collections / dismissal:
+   * repaint its cards. */
+  sync: (listing: PortalListing) => void;
+  /* Signed in or out from the panel: everything held was read as the session
+   * that just ended. */
+  sessionChanged: () => void;
+}
+
 function fmtPct(n: number | null): string {
   return n == null
     ? '—'
@@ -184,21 +215,20 @@ function failureKind(detail: string): FailureKind {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/* Returns a stop() to disconnect the observer + cancel any pending scan + remove
- * the failure notice — called when a route change (SPA soft-nav) moves the tab
- * off an index page, so repeated navigations don't stack duplicate observers
- * scanning the DOM. */
 export async function runIndexOverlay(
-  call: Caller, openPanel: OpenPanel,
-): Promise<() => void> {
+  call: Caller, openPanel: OpenPanel, opts: IndexOverlayOptions,
+): Promise<IndexOverlayHandle> {
   const noop = (): void => {};
   const portal = portalForHost(location.hostname);
-  if (portal == null) return noop;
-  injectStyle();
+  if (portal == null) return { stop: noop, sync: noop, sessionChanged: noop };
 
   const cache = new Map<string, PortalListing>();
 
   let stopped = false;
+  /* Whether dismissed properties are drawn barely visible (index_dock.ts). */
+  let veil = await readVeil();
+  let dock: DockHandle | null = null;
+  let sawCards = false;  // the dock mounts with the first listing card, then stays
   let failure: LookupFailure | null = null;
   let failedAt: number | null = null;  // backoff anchor (monotonic); null = free to ask
   let cardsWaiting = false;  // the last pass saw possible sale cards with no row yet
@@ -247,8 +277,8 @@ export async function runIndexOverlay(
     }
     const looking = inFlightGen === gen;
     if (notice == null) {
-      if (looking) return;
-      notice = mountNotice(handlers);
+      if (looking || dock == null) return;
+      notice = mountNotice(handlers, dock.slot);
     }
     notice.render({
       failure: current,
@@ -259,6 +289,43 @@ export async function runIndexOverlay(
 
   function keep(rows: PortalListing[]): void {
     for (const l of rows) cache.set(l.source_id, l);
+  }
+
+  const layer = createCardLayer({
+    call,
+    cache,
+    badgeFor: (listing, href) => badgeFor(portal, listing, href),
+    openPanel: (ref, href, listing) => { void openPanel(ref, href, listing); },
+    collectionsUrl: opts.collectionsUrl,
+    veilOn: () => veil,
+    describe: describeDetail,
+    flash: (message) => { dock?.flash(message); },
+    onWrite: opts.onCardWrite,
+    onRefresh: () => { dock?.setCount(layer.dismissedCount()); },
+  });
+
+  function applyVeil(on: boolean): void {
+    veil = on;
+    document.documentElement.setAttribute(VEIL_ROOT_ATTR, on ? '1' : '0');
+    dock?.setVeil(on);
+    layer.refresh();
+  }
+
+  /* The dock lives for as long as the page shows listing cards; a portal that
+   * re-renders <body>'s children takes the host with it, so it is re-made. */
+  function ensureDock(): void {
+    if (dock != null && !dock.connected()) {
+      notice?.destroy();
+      notice = null;
+      dock.destroy();
+      dock = null;
+    }
+    if (dock != null) return;
+    dock = mountDock(NOTICE_CSS, () => {
+      applyVeil(!veil);
+      writeVeil(veil);
+    });
+    dock.setVeil(veil);
   }
 
   /* The extension is gone from this tab (update, disable, removal): stop
@@ -340,24 +407,26 @@ export async function runIndexOverlay(
     if (stopped) return;
     let hits = collectHits(portal!.source);
     if (hits.length > 0) {
+      sawCards = true;
+      ensureDock();
       await lookup(hits);
       if (stopped) return;
       /* The page can change while the lookup is out (a soft-nav to a page
-       * without cards, a filter swapping sale cards for rentals): the notice
-       * and the badges act on the page as it is now. */
+       * without cards, a filter swapping one result set for another): the
+       * notice and the cards act on the page as it is now. */
       hits = collectHits(portal!.source);
     }
+    if (sawCards) ensureDock();
 
-    cardsWaiting = hits.some(
-      (h) => !cache.has(h.ref.sourceId) && urlSaleHint(portal!, h.href) !== false,
-    );
+    cardsWaiting = hits.some((h) => !cache.has(h.ref.sourceId));
     syncNotice();
 
     for (const hit of hits) {
-      const listing = cache.get(hit.ref.sourceId);
-      if (listing != null) process(hit, listing, portal!, openPanel);
-      else unbadgeRecycled(hit);
+      const card = cardFor(hit.anchor, hit.ref.sourceId);
+      if (cache.has(hit.ref.sourceId)) layer.mount(card, hit.ref, hit.href);
+      else unbadgeRecycled(hit, card, layer.clear);
     }
+    layer.refresh();  // drops cards the portal removed; recounts the dismissed
   }
 
   /* The same background-owned PKCE sign-in the panel's prompt runs (a content
@@ -423,17 +492,65 @@ export async function runIndexOverlay(
     schedule();
   };
 
+  /* What makes a property's operator state on a card: the three things the
+   * card controls and the panel both write. */
+  const curation = (l: PortalListing): string =>
+    JSON.stringify([l.pipeline, l.collection_ids, l.dismissed]);
+
+  function sync(listing: PortalListing): void {
+    if (stopped || !listing.found || listing.property_id == null) return;
+    let changed = false;
+    for (const [id, l] of cache) {
+      if (l.property_id !== listing.property_id || curation(l) === curation(listing)) continue;
+      cache.set(id, {
+        ...l,
+        pipeline: listing.pipeline,
+        collection_ids: listing.collection_ids,
+        dismissed: listing.dismissed,
+      });
+      changed = true;
+    }
+    if (changed) layer.refresh();
+  }
+
+  /* Every row, list and control here was read as the session that just ended:
+   * drop them and ask again (a signed-out answer raises the notice). */
+  function sessionChanged(): void {
+    if (stopped) return;
+    gen++;
+    cache.clear();
+    layer.reset();
+    failure = null;
+    failedAt = null;
+    signInError = null;
+    void pass();
+  }
+
+  document.documentElement.setAttribute(VEIL_ROOT_ATTR, veil ? '1' : '0');
+  // Flipped in another tab, or on another portal: this page follows.
+  const unsubscribeVeil = onVeilChange((on) => { if (!stopped) applyVeil(on); });
+
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
   document.addEventListener('visibilitychange', onVisibility);
   void pass();
 
-  return () => {
-    stopped = true;
-    obs.disconnect();
-    document.removeEventListener('visibilitychange', onVisibility);
-    if (timer != null) clearTimeout(timer);
-    syncNotice();
+  return {
+    stop(): void {
+      stopped = true;
+      obs.disconnect();
+      document.removeEventListener('visibilitychange', onVisibility);
+      unsubscribeVeil();
+      if (timer != null) clearTimeout(timer);
+      /* The controls go with the overlay: a later run starts from an empty
+       * cache, and a card still marked as mounted would be skipped by it. */
+      layer.reset();
+      syncNotice();
+      dock?.destroy();
+      dock = null;
+    },
+    sync,
+    sessionChanged,
   };
 }
 
@@ -443,7 +560,7 @@ function collectHits(source: string): Hit[] {
   for (const anchor of Array.from(anchors)) {
     const ref = detailRef(anchor.href, location.hostname);
     if (ref == null || ref.source !== source) continue;
-    // Skip only if this card is already badged for THIS listing (see PROCESSED_ATTR).
+    // Skip only if this card is already mounted for THIS listing (see PROCESSED_ATTR).
     if (anchor.closest(`[${PROCESSED_ATTR}]`)?.getAttribute(PROCESSED_ATTR) === ref.sourceId) {
       continue;
     }
@@ -452,11 +569,27 @@ function collectHits(source: string): Hit[] {
   return hits;
 }
 
-function cardFor(anchor: HTMLAnchorElement): HTMLElement {
-  const card = anchor.closest(
+/* The card a listing link belongs to: the nearest card-ish ancestor — then
+ * outward through the list items / articles around it for as long as they
+ * still hold this ONE listing. A photo carousel renders the listing's link once
+ * per slide, each inside its own card-ish node (bezrealitky): without the climb
+ * every slide got its own controls, riding away with its photo, and the title
+ * link a further set on the article around them. Only `li` / `article` are
+ * climbed to — a class-name match that far out is a results wrapper as often
+ * as a card. */
+function cardFor(anchor: HTMLAnchorElement, sourceId: string): HTMLElement {
+  const near = anchor.closest<HTMLElement>(
     'li, article, [class*="item"], [class*="card"], [class*="result"], [class*="estate"]',
-  );
-  return (card as HTMLElement | null) ?? anchor.parentElement ?? anchor;
+  ) ?? anchor.parentElement ?? anchor;
+  let card = near;
+  for (
+    let outer = near.parentElement?.closest<HTMLElement>('li, article');
+    outer != null && holdsOneListing(outer, sourceId);
+    outer = outer.parentElement?.closest<HTMLElement>('li, article')
+  ) {
+    card = outer;
+  }
+  return card;
 }
 
 /* sreality/idnes encode prodej/byt in the detail path; other portals return null. */
@@ -469,110 +602,55 @@ function urlSaleHint(portal: Portal, href: string): boolean | null {
   }
 }
 
-function clearBadge(card: HTMLElement): void {
-  card.querySelector(`:scope > .${BADGE_CLASS}`)?.remove();
-  card.removeAttribute(PROCESSED_ATTR);
-}
-
 /* A card still waiting on its lookup whose node was recycled from another
- * listing (see PROCESSED_ATTR) drops that listing's badge and click target now,
- * not on the next successful lookup — a failing or backed-off lookup would
- * leave it up for a whole backoff window. A card that still links the badged
- * listing wasn't recycled, just holds two links; it is left alone. */
-function unbadgeRecycled(hit: Hit): void {
-  const card = cardFor(hit.anchor);
+ * listing (see PROCESSED_ATTR) drops that listing's controls and click targets
+ * now, not on the next successful lookup — a failing or backed-off lookup would
+ * leave them up, writing to the wrong property, for a whole backoff window. A
+ * card that still links the mounted listing wasn't recycled, just holds two
+ * links; it is left alone. */
+function unbadgeRecycled(hit: Hit, card: HTMLElement, clear: (card: HTMLElement) => void): void {
   const prevId = card.getAttribute(PROCESSED_ATTR);
   if (prevId == null || prevId === hit.ref.sourceId) return;
   const stillLinked = Array.from(card.querySelectorAll<HTMLAnchorElement>('a[href]'))
     .some((a) => detailRef(a.href, location.hostname)?.sourceId === prevId);
-  if (!stillLinked) clearBadge(card);
+  if (!stillLinked) clear(card);
 }
 
-function process(hit: Hit, listing: PortalListing, portal: Portal, openPanel: OpenPanel): void {
-  const card = cardFor(hit.anchor);
-  const prevId = card.getAttribute(PROCESSED_ATTR);
-  if (prevId === hit.ref.sourceId) return;
-  // Recycled node — drop the previous listing's badge before re-badging.
-  if (prevId != null) clearBadge(card);
-  card.setAttribute(PROCESSED_ATTR, hit.ref.sourceId);
-
+/* The yield badge — sale apartments only: by our row's category when we have
+ * one, else by the portal's URL hint. A value's or a range's yield on the
+ * badge; the result's note (the range's (i), or a reason) rides in its title —
+ * the badge falls through to the estimate or the CTA when there is no MF yield
+ * to show. */
+function badgeFor(portal: Portal, listing: PortalListing, href: string): BadgeView | null {
   const saleApt = listing.found
     ? listing.category_main === 'byt' && listing.category_type === 'prodej'
-    : urlSaleHint(portal, hit.href) === true;
-  if (!saleApt) return;
+    : urlSaleHint(portal, href) === true;
+  if (!saleApt) return null;
 
-  if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
-
-  const badge = document.createElement('div');
-  badge.className = BADGE_CLASS;
-  badge.setAttribute('role', 'button');
-  badge.title = 'Klikni pro odhad výnosu';
-
-  /* A value's or a range's yield on the badge; the result's note (the range's
-   * (i), or a reason) rides in its title — the badge falls through to the
-   * estimate or the CTA when there is no MF yield to show. */
+  let title = 'Klikni pro odhad výnosu';
   const shape = mfShape(listing.found ? listing.mf_reference_rent : null);
   if (shape.kind === 'value') {
-    badge.title = `MF nájem ${fmtCzk(shape.ref.monthly_rent_czk)}/měs · klikni pro odhad`;
+    title = `MF nájem ${fmtCzk(shape.ref.monthly_rent_czk)}/měs · klikni pro odhad`;
   } else if (shape.kind !== 'none' && shape.note != null) {
-    badge.title = shape.note;
+    title = shape.note;
   }
   const mfYield = mfYieldText(listing);
-  if (mfYield != null) {
-    badge.classList.add('__mf_badge--yield');
-    badge.textContent = `Výnos MF ${mfYield}`;
-  } else if (listing.latest_estimation?.gross_yield_pct != null) {
-    badge.classList.add('__mf_badge--est');
-    badge.textContent = `Odhad ${fmtPct(listing.latest_estimation.gross_yield_pct)}`;
-  } else {
-    badge.classList.add('__mf_badge--cta');
-    badge.textContent = 'Odhadnout výnos';
+  if (mfYield != null) return { kind: 'yield', text: `Výnos MF ${mfYield}`, title };
+  if (listing.latest_estimation?.gross_yield_pct != null) {
+    return { kind: 'est', text: `Odhad ${fmtPct(listing.latest_estimation.gross_yield_pct)}`, title };
   }
-
-  badge.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    void openPanel(hit.ref, hit.href, listing);
-  });
-  card.appendChild(badge);
+  return { kind: 'cta', text: 'Odhadnout výnos', title };
 }
 
-function injectStyle(): void {
-  if (document.getElementById(STYLE_ID) != null) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  /* Scoped class + explicit properties — index badges live in the portal's
-   * DOM (not a shadow root), so we spell out everything to resist CSS bleed. */
-  style.textContent = `
-    .__mf_badge {
-      position: absolute; top: 6px; left: 6px; z-index: 2147483646;
-      font-family: system-ui, -apple-system, sans-serif; font-size: 11px;
-      font-weight: 600; line-height: 1; letter-spacing: 0.02em;
-      padding: 4px 7px; border: 1px solid #1c1c1c; border-radius: 0;
-      font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.12); pointer-events: auto;
-    }
-    .__mf_badge--yield { background: #b3592d; color: #fff; }
-    .__mf_badge--est { background: #555; color: #fff; }
-    .__mf_badge--cta { background: #f7f3ec; color: #b3592d; }
-    .__mf_badge--cta:hover { background: #f3eadf; }
-    .__mf_badge--yield:hover, .__mf_badge--est:hover { filter: brightness(1.08); }
-  `;
-  (document.head ?? document.documentElement).appendChild(style);
-}
-
-/* The notice's own stylesheet — a closed shadow root like the panel's, so the
- * portal's CSS can't reach in. The panel's civic-archive palette by value:
- * paper surface, ink edge, the 2px copper "filed" top edge, a copper button. */
+/* The notice's stylesheet, handed to the dock: it mounts in the dock's closed
+ * shadow root (which positions it and keeps the portal's CSS out). The panel's
+ * civic-archive palette by value: paper surface, ink edge, the 2px copper
+ * "filed" top edge, a copper button. */
 const NOTICE_CSS = `
-  :host { all: initial; }
-  [hidden] { display: none !important; }
   .__mf_notice {
-    position: fixed; left: 1.25rem; bottom: 1.25rem; z-index: 2147483646;
     box-sizing: border-box; width: max-content;
     max-width: min(21rem, calc(100vw - 2.5rem));
     padding: 0.6rem 0.85rem 0.8rem;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     font-size: 0.82rem; line-height: 1.45; text-align: left; color: #1c1c1c;
     background: #f7f3ec; border: 1px solid #1c1c1c;
     box-shadow: inset 0 2px 0 #b3592d, 0 10px 34px -10px rgba(28, 20, 10, 0.30);
@@ -622,15 +700,7 @@ const NOTICE_CSS = `
  * busy is aria-disabled, because `disabled` would drop focus to <body>, behind
  * every focusable element of the portal page. The first text waits
  * LIVE_REGION_SETTLE_MS after mount (see there). */
-function mountNotice(on: NoticeHandlers): NoticeHandle {
-  document.getElementById(NOTICE_HOST_ID)?.remove();
-  const host = document.createElement('div');
-  host.id = NOTICE_HOST_ID;
-  const shadow = host.attachShadow({ mode: 'closed' });
-  const style = document.createElement('style');
-  style.textContent = NOTICE_CSS;
-  shadow.appendChild(style);
-
+function mountNotice(on: NoticeHandlers, slot: HTMLElement): NoticeHandle {
   const box = el('div', '__mf_notice is-pending');
   const head = el('div', 'n-head');
   const mark = el('span', 'n-mark');
@@ -662,8 +732,7 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
   };
 
   box.append(head, body, action);
-  shadow.appendChild(box);
-  document.body.appendChild(host);
+  slot.replaceChildren(box);
 
   let latest: NoticeView | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -680,8 +749,8 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
     busy = view.busy;
     const signedOut = kind === 'signed_out';
     setText(text, signedOut
-      ? 'Pro výnosy na kartách se prosím přihlaste.'
-      : 'Výnosy se nepodařilo načíst.');
+      ? 'Pro výnosy a ukládání na kartách se prosím přihlaste.'
+      : 'Data ke kartám se nepodařilo načíst.');
     /* The detail line sits in the live region: "Načítám…" and then the error
      * again is what tells a screen reader (and the eye) a retry ran and failed. */
     const detailLine = signedOut ? '' : busy ? 'Načítám…' : view.failure.detail;
@@ -706,11 +775,11 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
       latest = view;
       if (live) paint(view);
     },
-    connected: () => host.isConnected,
+    connected: () => box.isConnected,
     destroy(): void {
       cancelAnimationFrame(frame);
       if (settleTimer != null) clearTimeout(settleTimer);
-      host.remove();
+      box.remove();
     },
   };
 }

@@ -52,7 +52,8 @@ per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
   `stageColor` (grey fallback) instead of `stageAccent` (copper) — converge, or record the
   grey fallback as deliberate. The extension hand-copies the funnel SVG (forced: no React)
   plus `stageBadge` and `stageAccent` (not forced: pure TS it could import from
-  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`) — import it. Then
+  `frontend/src/lib/pipelineStage.ts`, as it already imports `lib/brand`) — import it; since
+  Phase U-EXT-INDEX the copies live in ONE file, `chrome-extension/src/glyphs.ts`. Then
   rule #22 (CLAUDE.md + architecture) drops the remaining exceptions (origin: Phase U-PIPE
   3i below).
 
@@ -523,6 +524,32 @@ deal closed into a terminal stage can be dismissed.
   label set a future ranking/scoring model would learn from; `property_notes`
   covers free text today), and an "only dismissed" review lens if the reveal
   proves too coarse for reviewing the pile.
+
+### Phase U-EXT-INDEX: Triage from the portals' search pages (done, 2026-10-03)
+Operator ask: file and hide listings straight from a portal's result list, the
+way Browse cards allow — and be able to dim what is already hidden on any index
+page, not only on flat searches (the overlay drew nothing but the sale-flat
+yield badge).
+- Every card we have a property for gets the Browse card's cluster — funnel,
+  bookmark, eye — with the app's semantics (rule #22: add in one click, then a
+  stage menu with removal behind a two-step confirm; rule #18 checklist;
+  one-click hide/restore, absent on a live deal). Same routes as the panel; no
+  API change, no migration — `POST /listings/lookup` already served all three
+  states for every category.
+- A bottom-left dock on every index page carries the **Skrýt skryté** switch
+  (per browser, synced across tabs): hidden properties stay in the portal's
+  grid as barely visible cards instead of being removed.
+- Card writes and panel writes repaint each other (property-grain), and a
+  sign-in/out in the panel resets the cards.
+- Found against live markup: a carousel portal (bezrealitky) links the listing
+  once per photo slide, so "nearest card-ish ancestor" drew one set of controls
+  per slide — a card is now the outermost `li`/`article` still holding one
+  listing; and the controls' stacking level dropped from the maximum to 900 so
+  they no longer show through cookie walls and filter drawers.
+- **Next (not built):** tags from the card (Browse cards have no tag control
+  either — tags are edited on the listing page); verifying the card placement
+  on sreality itself (its consent wall blocks an unattended check — idnes and
+  bezrealitky were checked against live pages).
 
 ### Phase U-EXT-COLL: Every collection from the extension panel (done, #1562, 2026-09-21)
 Operator ask: use any collection from the portal page the way the app's
