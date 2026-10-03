@@ -90,7 +90,7 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> s
 
 
 def share_price_conflict(a: "Fingerprint", b: "Fingerprint") -> bool:
-    """E927 (operator 2026-09-30): a share sale and a sale are one property only at ONE stated
+    """E932 (operator 2026-09-30): a share sale and a sale are one property only at ONE stated
     price — an amount on one advert's price path is E160's round-equal of one on the other's.
     A missing price is not the same price. Only a pair that crosses deal types is read."""
     if not crosses_deal_type(a.category_type, b.category_type):
@@ -216,7 +216,7 @@ def cluster_invariants_ok(
     E910: `closure_of` maps a member to its must-link closure (the operator's `same` rulings,
     Decision 8), and an advert it does not name is a closure of its own. The hard limbs (size,
     deal class, category) and the operator's must-not-links read the whole set; the share-sale
-    price (E927) and the spreads (area, disposition, floor) are read across closures only,
+    price (E932) and the spreads (area, disposition, floor) are read across closures only,
     because the operator has ruled two adverts of one closure one property — with no ruling
     that is every pair, today's rule exactly. The relation must be bound to the same closures
     by the caller.

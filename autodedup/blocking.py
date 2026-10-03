@@ -129,7 +129,7 @@ class BlockIndex:
 
     def index_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
         """The keys this listing is POSTED under — exact band, exact decile. The attribute keys
-        carry the deal CLASS (E927), so a share sale meets the sale of the same property."""
+        carry the deal CLASS (E932), so a share sale meets the sale of the same property."""
         if not self._keys_ready:
             raise RuntimeError("BlockIndex.index_keys before finalize")
         out: list[tuple[str, Any]] = []

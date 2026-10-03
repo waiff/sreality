@@ -568,7 +568,7 @@ def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
     ("prodej", "dum", "prodej", "komercni"),  # the one sanctioned cross-type
     ("prodej", "byt", "prodej", "byt"),
     (None, "byt", "prodej", None),  # unknown is never a conflict
-    ("podil", "pozemek", "prodej", "pozemek"),  # E927: a share sale IS a sale
+    ("podil", "pozemek", "prodej", "pozemek"),  # E932: a share sale IS a sale
 ], ids=["house vs commercial", "flat vs flat", "unknown", "share vs sale"])
 def test_a_same_rule_15_allows_is_written(client, conn, sides):
     conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]

@@ -1,4 +1,4 @@
-"""Shape gate for migration 582: the live apply scope admits share sales (E927, N9 2026-10-01).
+"""Shape gate for migration 582: the live apply scope admits share sales (E932, N9 2026-10-01).
 
 Offline, no DB. The value is migration 570's row with `podil` added to `category_types` and
 nothing else moved (the three trial blocks, the 600 cap), parses as a LIVE scope, is written
@@ -46,7 +46,7 @@ def test_the_value_is_570s_row_plus_podil_and_parses_as_a_live_scope() -> None:
 
 
 def test_a_share_advert_is_inside_the_scope_an_auction_still_outside() -> None:
-    """The regression E927 names: a sale group that absorbs its `podil` twin is refused WHOLE
+    """The regression E932 names: a sale group that absorbs its `podil` twin is refused WHOLE
     under 570 (`group_outside`); under 582 it is inside. An auction stays outside."""
     before = A.effective_scope(_value(_PRIOR), {}, live=True)
     after = A.effective_scope(_value(_MIGRATION), {}, live=True)

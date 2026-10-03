@@ -101,7 +101,7 @@ def test_a_share_sale_is_refused_with_a_rental_or_an_auction(other):
 
 
 def test_a_share_sale_merges_with_a_sale():
-    """E927 (operator 2026-09-30): sreality alone files a share sale as `podil`; every other
+    """E932 (operator 2026-09-30): sreality alone files a share sale as `podil`; every other
     portal lists it as `prodej`. The gate reads the deal class; price is the engine's."""
     db = _Ledger({1: 3, 2: 7}, cats={3: ("podil", "pozemek"), 7: ("prodej", "pozemek")})
     assert _merge(db, [3, 7])["retired_ids"] == [7]

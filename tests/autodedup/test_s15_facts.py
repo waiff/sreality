@@ -510,7 +510,7 @@ def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
     """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
     took the room tag out of every refusal, so a stored row whose tag sat at or above the
     0.90 floor (or was unknown) decides identically, and every row that moved had it below.
-    E927: a share-sale advert (`podil`) now meets the sale at its price,
+    E932: a share-sale advert (`podil`) now meets the sale at its price,
     so the rows that name one are set aside (4 adverts on this cohort)."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run

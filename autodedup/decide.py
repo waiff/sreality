@@ -723,7 +723,7 @@ def _decide_layers(
             f"guard:{UNIT_DESIGNATOR_VETO}",
             {"unit_lo": designators[0], "unit_hi": designators[1]},
         )
-    # E927 stands here for E61's reason: it reads the price paths, which the stored five-column
+    # E932 stands here for E61's reason: it reads the price paths, which the stored five-column
     # retrieval side (`incremental.GuardRow`) does not carry.
     if share_price_conflict(fa, fb):
         return Decision(lo, hi, "veto", 0.0, set(), None, SHARE_PRICE_VETO,

@@ -931,7 +931,7 @@ def test_every_advert_field_comes_from_the_canonical_advert():
 
 
 def test_the_deal_type_is_the_class_representative_when_the_adverts_disagree():
-    """E927 N8 (operator ruling 2026-10-01): a share (`podil`) + sale (`prodej`) property reads
+    """E932 N8 (operator ruling 2026-10-01): a share (`podil`) + sale (`prodej`) property reads
     Prodej, not Podíl, whichever advert is canonical -- so it stays in Browse's Prodej cohort and
     every `prodej` watchdog. Rule 15 admits no other deal-type mix, so the fold only ever moves
     `podil` -> `prodej`; a property of share adverts alone still reads `podil`. ONE definition:

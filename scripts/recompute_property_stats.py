@@ -11,7 +11,7 @@
    models take place, floor, description, photos, broker and link. The one fold is the deal
    type: when the adverts state more than one, the property reads the deal CLASS representative
    (`room_taxonomy.deal_class_sql`, the one class table) -- a share sale (`podil`) with a sale
-   (`prodej`) reads Prodej, not Podíl (operator ruling 2026-10-01, autodedup E927 N8); rule 15
+   (`prodej`) reads Prodej, not Podíl (operator ruling 2026-10-01, autodedup E932 N8); rule 15
    admits no other mix, and a property of share adverts alone still reads `podil`. Every
    physical fact (building type, ownership, energy rating, amenities, estate/usable/garden
    area, parking) is the first non-empty value in the same order. Lifecycle: any advert active,

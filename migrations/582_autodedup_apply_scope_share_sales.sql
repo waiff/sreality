@@ -1,6 +1,6 @@
 -- 582_autodedup_apply_scope_share_sales.sql
 --
--- AUTODEDUP E927 (PR #1655): a share-sale advert (`podil`, sreality's "Podíly" section) merges
+-- AUTODEDUP E932 (PR #1655): a share-sale advert (`podil`, sreality's "Podíly" section) merges
 -- with the sale advert (`prodej`) of the same property at one stated price (operator ruling
 -- 2026-09-30). On 2026-10-01 the operator answered N9: admit `podil` into the live apply scope
 -- in the same release. The scope row (558 -> 562 -> 563 -> 570) names `prodej, pronajem`, and
@@ -9,9 +9,9 @@
 -- trial groups today, about 1,400 nationally as the scope widens. `category_types` gains
 -- `podil`; the blocks and the 600 cap are migration 570's, unchanged.
 --
--- Applied TOGETHER with the release that carries E927 (apply_migration.yml), never before: the
+-- Applied TOGETHER with the release that carries E932 (apply_migration.yml), never before: the
 -- scope admits whatever the running engine groups, and the engine measured with `podil` in
--- scope is E927's (under the base engine every deal-type gate keeps a share apart from a sale,
+-- scope is E932's (under the base engine every deal-type gate keeps a share apart from a sale,
 -- and a `podil`-only group would merge unmeasured). The release's `rt_seed fresh=true` re-seed
 -- is what reaches the stored `podil` listings.
 -- Data, not schema: one row updated (idempotent); migration 020's trigger archives the previous

@@ -299,7 +299,7 @@ def category_clash(
     a: tuple[str | None, str | None], b: tuple[str | None, str | None],
 ) -> tuple[str, str | None, str | None] | None:
     """Rule 15's gate on two (category_type, category_main): the field that makes them two
-    properties and its two values — sale != rent != auction (a share sale IS a sale, E927),
+    properties and its two values — sale != rent != auction (a share sale IS a sale, E932),
     flat != house, except the one sanctioned dum <-> komercni — or None. NULL = unknown, not a
     conflict. The chokepoint and the verdict route (E925) read this one definition."""
     if not category_type_compatible(a[0], b[0]):

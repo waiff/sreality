@@ -1254,7 +1254,7 @@ renumber.** Navigate by area:
     furnished) is the canonical advert's -- with one fold: when the adverts state more than one
     deal type (only a share sale `podil` with a sale `prodej` can, rule #15) the property reads
     the class representative, `prodej`, through `room_taxonomy.deal_class_sql` (operator ruling
-    2026-10-01, autodedup E927 N8), so it stays in Browse's Prodej cohort and every `prodej`
+    2026-10-01, autodedup E932 N8), so it stays in Browse's Prodej cohort and every `prodej`
     watchdog -- and `repr_listing_ref_id` names it for every read model
     (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
     energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
@@ -1402,7 +1402,7 @@ renumber.** Navigate by area:
     (`property_identity.category_clash`, also the E925 verdict guard). `category_type_compatible`
     reads the deal CLASS: a sale ≠ a rental ≠ an auction, but a share sale (`podil` — sreality
     alone has a "Podíly" section; every other portal lists the same advert as `prodej`) IS a
-    sale (operator ruling 2026-09-30, autodedup PROGRAM.md E927; the AUTODEDUP engine merges a
+    sale (operator ruling 2026-09-30, autodedup PROGRAM.md E932; the AUTODEDUP engine merges a
     share with a sale only at one stated price, `autodedup.guards.share_price_conflict`, while
     the operator's own merge needs none). `category_main_compatible`: a
     flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔ komercni** (the same

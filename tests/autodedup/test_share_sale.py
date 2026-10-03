@@ -1,4 +1,4 @@
-"""E927 (operator ruling 2026-09-30): a share-sale advert merges with the sale of the same
+"""E932 (operator ruling 2026-09-30): a share-sale advert merges with the sale of the same
 property, and the engine does it only at one stated price.
 
 sreality alone files a share sale under its own deal type (`podil`); every other portal lists
@@ -122,7 +122,7 @@ def test_the_d43_deal_type_fact_reads_the_deal_class() -> None:
     assert "category_type" in names
 
 
-# ------------------------------------------------------- the price limb (E927)
+# ------------------------------------------------------- the price limb (E932)
 
 
 @pytest.mark.parametrize(("share", "sale", "conflict"), [
@@ -202,7 +202,7 @@ def test_a_group_may_not_carry_a_share_sale_to_a_sale_at_another_price() -> None
 
 def test_a_sale_that_prints_no_price_stays_in_its_group_when_a_share_joins() -> None:
     # c17, Znojmo: three sales at the share's price and a fourth that prints none. Reading the
-    # fourth evicted it from the sale group BASE had built, a sale merge lost to E927.
+    # fourth evicted it from the sale group BASE had built, a sale merge lost to E932.
     members = [_fp(1, category_type="podil"), _fp(2, category_type="prodej", source="idnes"),
                _fp(3, category_type="prodej", source="realitymix", price=None)]
     assert share_price_conflict(members[0], members[2]) is True
