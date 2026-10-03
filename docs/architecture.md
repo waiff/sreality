@@ -2095,14 +2095,23 @@ renumber.** Navigate by area:
     (bounded at 2000 per pass; it patches `browse_list` for the births). The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
-    self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs
-    under a `--max-seconds` budget (default 6000s, clamped to the same ceiling the workflow's
-    `timeout-minutes: 130` is sized for) and on exhaustion clean-stops at a batch
-    boundary, clears only the swept id range, exits RED, and does NOT write the
-    `property_sweep_last_complete` stamp — so chronic exhaustion surfaces as a red run daily plus
-    the `property_maintenance` health check failing on stamp age, and the unswept id tail keeps
-    its pre-sweep windowed stats until a sweep finishes (is_active flips still heal incrementally
-    — every delist path enqueues `dirty_properties`). The maintenance lease is one 15-minute TTL
+    self-heals within one cycle (24h when one run covers it) *provided the cycle completes*:
+    since the 2026-08-06 incident it runs under a `--max-seconds` budget (default 6000s, clamped
+    to the same ceiling the workflow's `timeout-minutes: 130` is sized for) and on exhaustion
+    clean-stops at a batch boundary, clears only the id range that run swept, and saves a resume
+    cursor (`app_settings.property_sweep_cursor`); the next run continues the cycle there instead
+    of at id 1 (2026-10-03: four daily runs in a row stopped near id 540k of 927k, each from id 1)
+    unless the cycle began over 36h ago — judged when that run resumes, so a stamped cycle's
+    oldest recompute can be ~38h old (the stamp records `cycle_started_at`). The first stop of a
+    cycle exits 0 with a warning; a resumed run that stops again, or a run that stops before its
+    first batch (nothing to resume), exits RED. Only a completed cycle writes the
+    `property_sweep_last_complete` stamp (and deletes the cursor) — so chronic exhaustion surfaces
+    as red runs plus the `property_maintenance` health check failing on stamp age, and the unswept
+    id tail keeps its pre-sweep windowed stats until a cycle finishes (is_active flips still heal
+    incrementally — every delist path enqueues `dirty_properties`). That check's stamp-age
+    thresholds (warn 52h, fail 56h) are sized for a two-run cycle (operator, 2026-10-03), so a
+    dead sweep is flagged after about two days, not 30h; a run that stops on budget twice or
+    sweeps nothing exits RED on its own. The maintenance lease is one 15-minute TTL
     heartbeat-renewed every batch/slice, so a killed job freezes maintenance for minutes, not
     hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both

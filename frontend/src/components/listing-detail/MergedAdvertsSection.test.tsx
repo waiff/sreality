@@ -177,7 +177,8 @@ function Where() {
 function setup({
   sources = SOURCES,
   openAdvertId = null,
-}: { sources?: PropertySource[]; openAdvertId?: number | null } = {}) {
+  canonicalListingId = 101,
+}: { sources?: PropertySource[]; openAdvertId?: number | null; canonicalListingId?: number } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -186,7 +187,7 @@ function setup({
       <MemoryRouter>
         <MergedAdvertsSection
           propertyId={42}
-          canonicalListingId={101}
+          canonicalListingId={canonicalListingId}
           sources={list}
           openAdvertId={openAdvertId}
         />
@@ -249,7 +250,12 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(screen.getByText('Sloučené inzeráty')).toBeInTheDocument();
 
     const sreality = rowOf('Sreality');
-    expect(within(sreality).getByText('v záhlaví')).toBeInTheDocument();
+    /* The primary advert (the header's) is named on its row, and only there. */
+    expect(within(sreality).getByText('hlavní inzerát')).toHaveAttribute(
+      'title',
+      'Záhlaví nemovitosti ukazuje fotky a údaje tohoto inzerátu.',
+    );
+    expect(screen.getAllByText('hlavní inzerát')).toHaveLength(1);
     expect(within(sreality).getByText('5 000 000 Kč')).toBeInTheDocument();
     expect(await within(sreality).findByText('54 m² · 2+kk')).toBeInTheDocument();
     expect(within(sreality).getByText(/05\/01\/2026 –\s*dosud/)).toBeInTheDocument();
@@ -491,6 +497,27 @@ describe('<MergedAdvertsSection> the split letters', () => {
         keep_together: false,
       }),
     );
+  });
+
+  it('says so when the primary advert’s group leaves: the record stays with the own advert', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(FOUR_ORIGINS);
+    setup({ sources: FOUR, canonicalListingId: 303 });
+    await assign({ 303: 'B', 404: 'B' });
+    expect(within(rowOf('Bazoš')).getByText('hlavní inzerát')).toBeInTheDocument();
+    expect(planLines()).toEqual([
+      `A — zůstává v nemovitosti #42: ${AD[101]}, ${AD[202]}`,
+      `B — odejde jako jedna nemovitost: ${AD[303]}, ${AD[404]}`,
+    ]);
+    expect(panel()).toHaveTextContent(
+      'Hlavní inzerát odejde se skupinou B: záhlaví nemovitosti #42 pak převezme inzerát skupiny A.',
+    );
+  });
+
+  it('says nothing about the primary advert while its group stays', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(FOUR_ORIGINS);
+    setup({ sources: FOUR });
+    await assign({ 303: 'B', 404: 'B' });
+    expect(panel()).not.toHaveTextContent('Hlavní inzerát odejde');
   });
 
   it('no own advert at all: the header advert’s group keeps the property', async () => {

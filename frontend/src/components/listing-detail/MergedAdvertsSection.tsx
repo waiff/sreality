@@ -80,6 +80,9 @@ type OriginRead = { status: 'pending' | 'error' | 'success'; origin: AdvertOrigi
 
 const NO_LETTERS: UnitMap = {};
 
+/* The primary advert is the canonical one: the header's photos and facts are its. */
+const PRIMARY_TITLE = 'Záhlaví nemovitosti ukazuje fotky a údaje tohoto inzerátu.';
+
 /* The row's half of the split: its letter, and whether it is the property's own advert. */
 type RowSplit = {
   units: UnitMap;
@@ -267,6 +270,7 @@ export default function MergedAdvertsSection({
           plan={plan}
           portalOf={portalOf}
           priceOf={priceOf}
+          canonicalListingId={canonicalListingId}
           reason={reason}
           onReason={setReason}
           pending={split.isPending}
@@ -383,6 +387,14 @@ function MergedAdvertRow({
               <span className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-1.5 py-0.5 text-[0.62rem] tracking-[0.08em] uppercase text-[var(--color-ink-2)]">
                 {portal}
               </span>
+              {isCanonical && (
+                <span
+                  title={PRIMARY_TITLE}
+                  className="rounded-[var(--radius-xs)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-1.5 py-0.5 text-[0.62rem] tracking-[0.08em] uppercase text-[var(--color-copper-2)]"
+                >
+                  hlavní inzerát
+                </span>
+              )}
               <span className="inline-flex items-center gap-1 text-[0.7rem] text-[var(--color-ink-3)]">
                 <span
                   aria-hidden
@@ -392,14 +404,6 @@ function MergedAdvertRow({
                 />
                 {source.is_active ? 'aktivní' : 'staženo'}
               </span>
-              {isCanonical && (
-                <span
-                  title="Záhlaví stránky ukazuje údaje tohoto inzerátu"
-                  className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
-                >
-                  v záhlaví
-                </span>
-              )}
               {split?.ownTitle && (
                 <span
                   title={split.ownTitle}
@@ -671,6 +675,7 @@ function SplitPanel({
   plan,
   portalOf,
   priceOf,
+  canonicalListingId,
   reason,
   onReason,
   pending,
@@ -683,6 +688,7 @@ function SplitPanel({
   plan: SplitPlan;
   portalOf: (listingId: number) => string;
   priceOf: (listingId: number) => string;
+  canonicalListingId: number;
   reason: string;
   onReason: (reason: string) => void;
   pending: boolean;
@@ -692,6 +698,8 @@ function SplitPanel({
   onCancel: () => void;
 }) {
   const groups = [plan.kept, ...plan.leaving].sort((a, b) => a.letter.localeCompare(b.letter));
+  /* The record stays with the own adverts, which need not be the primary one's group. */
+  const primaryLeaves = plan.leaving.find((g) => g.listingIds.includes(canonicalListingId));
   return (
     <div
       role="group"
@@ -727,6 +735,14 @@ function SplitPanel({
         „různé“ a dostane trvalý zákaz spojení; inzeráty se stejným písmenem zůstanou spolu jako
         jedna nemovitost. {stateStays(propertyId)}
       </p>
+      {primaryLeaves && (
+        <p className="text-[0.72rem] leading-snug text-[var(--color-ink)]">
+          Hlavní inzerát odejde se skupinou{' '}
+          <span className="font-mono font-medium">{primaryLeaves.letter}</span>: záhlaví nemovitosti{' '}
+          <span className="font-mono tabular-nums">#{propertyId}</span> pak převezme inzerát skupiny{' '}
+          <span className="font-mono font-medium">{plan.kept.letter}</span>.
+        </p>
+      )}
       <textarea
         aria-label="Důvod rozdělení (nepovinné)"
         placeholder="Důvod (nepovinné)"
