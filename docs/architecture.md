@@ -3521,6 +3521,9 @@ identical; clicking a pin draws its true-metre circle of `uncertainty_radius_m` 
 popup is open, and the popup names the rung and the radius. (W3-3 first drew that circle under every
 such pin at once — with ~87 % of active pins below building level it buried the map, 2026-09-22.)
 Clusters and server-side grid cells carry no per-pin radius, so all of this exists only in point mode.
+Migration 584 (operator ruling 2026-10-02) appends `ulice_id` (= `ll.ulice_kod`) last to
+`browse_projection`, `properties_public`, `pipeline_board_public` and `listing_feed_public`, and so to
+both read models — served for the street chip level, read by no filter until its RPC arm lands.
 **Appending is the only legal edit here** — `browse_list` and `properties_map_mv` materialize
 `select * from browse_projection` and `toolkit/browse_read_model.sync_browse_list` re-inserts
 POSITIONALLY, so anything computed outside the view, or any reordering, writes NULLs into the wrong

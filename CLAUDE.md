@@ -255,8 +255,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     (browse/map/feed/watchdog/dedup) serve a listing only when its location is resolved or determined foreign — ONE
     predicate (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id surfaces stay reachable. Invariant:
     **every served listing has a row, every active Czech listing has a town** (`location_town_coverage` red until
-    zero; foreign is a determination, never a default); a field is added only by operator ruling (katastr_kod,
-    2026-09) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
+    zero; foreign is a determination, never a default); a field is added only by operator ruling (katastr_kod
+    2026-09, ulice_id 2026-10) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 ## Coding conventions
 
 - Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.
