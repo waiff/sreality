@@ -2,7 +2,7 @@
 
 **Program document. This file is the program's source of truth.**
 Status: decisions taken by the operator in a design interview on 2026-10-02/03 (four rounds; 47 of 48
-questions answered, Q48 open, two new questions Q49 and Q51: §8). **Plan awaiting approval; only W0 is approved
+questions answered, Q48 open, one new question Q49 open, Q51 answered: §8). **Plan awaiting approval; only W0 is approved
 to build.** Rules MS1–MS23 are binding once approved and supersede any design text, code comment or
 docstring that differs. Design detail per wave (inputs, not rules) is kept outside the repo in
 `~/merge-sprint-artifacts/`: `wf2/` designs and their skeptics, `wf3/` the non-interference check,
@@ -210,7 +210,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 
 | Wave | Content | Engine path | Needs | Lines (≈) |
 |---|---|---|---|---|
-| **W0** | Daily recompute resumes where the last run stopped (draft PR #1695) | no, but a shared file | dedup session's OK to merge before its PR #1655; Q51 | +600 / −140 |
+| **W0** | Daily recompute resumes where the last run stopped (draft PR #1695) | no, but a shared file | dedup session's OK to merge before its PR #1655 | +630 / −150 |
 | **W1a** | Condition grades out: code, workflows, data files, filters, screens; the data-quality view restated; estimator instructions changed first, by a guarded data update that also dismisses two stale suggestions | two recompute lines; AI-provider classes the engine's judge imports | **Q48**; #1655 | +40 / −7,700 |
 | **W1b** | Asset links and the pipeline note field out (code) | yes | #1655 | 0 / −840 |
 | **W2a** | Recompute: speaking-ad order, amenity union, the two portal lists, price lineage; stops writing two write-only columns; keeps #1655's share-sale rule | yes | #1655; W1a if Q48 = drop | +180 / −185 |
@@ -313,11 +313,9 @@ that session; the two never-used indexes come from migrations 198 and 275.
    This retires the August "one portal's own page". (a) Accept. (b) Keep a per-portal "first seen
    here" sort, which costs a stored date per property and portal. W5's deletion of the per-ad lane
    does not start until this is answered.
-3. **Q51, new, belongs to W0: the health check's two limits.** The check on the daily recompute warns
-   at 26 hours and fails at 30 hours since the last complete cycle. While the database is slow a cycle
-   takes two runs, so the check would fail for about 18 of every 48 hours although both runs succeed.
-   (a) Re-size the two limits for a two-run cycle, about 52 and 56 hours. (b) Leave them and accept the
-   red hours. W0's PR changes neither.
+3. **Q51, answered 2026-10-03: (a).** The health check on the daily recompute now warns at 52 hours
+   and fails at 56 hours since the last complete cycle (was 26 and 30), sized for a two-run cycle. It is
+   part of W0's PR. Known price: a recompute that dies silently is flagged after about two days.
 4. **Defaults taken without asking** are marked *(default)* in §2: the pipeline board's broker line;
    each ad's row keeping its broker; the Rulings page keeping its confirm; several portals meaning
    any of them; alert events outside the carry record; the price-move list showing every ad.
