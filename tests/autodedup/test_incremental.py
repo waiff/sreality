@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import pytest
 
 from autodedup import harness
-from autodedup.blocking import BlockIndex
+from autodedup.blocking import QUARTER_PROBE, BlockIndex
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
 from autodedup.incremental import (
     Calibration,
@@ -66,6 +66,33 @@ def _dataset(n: int = 24) -> Dataset:
 
 def _settings() -> Settings:
     return Settings()
+
+
+# E936: w31 at a key limit of four, so the cohort below explodes both home keys of every flat.
+QUARTER_GRAIN = Settings.from_dict({**harness.named_settings("w31").to_dict(), "max_block_size": 4})
+
+
+def quarter_grain_dataset() -> Dataset:
+    """Twelve Praha-Vysočany flats (two dispositions, two adjacent area bands, three to a cell)
+    whose two home keys explode under `QUARTER_GRAIN` while each quarter key holds three, and one
+    flat of another quarter: short bodies, no address, no broker, no shared frame, so the quarter
+    key is their one path to one another."""
+    cells = [(disposition, area) for disposition in ("3+kk", "2+kk")
+             for area in (80.0, 82.0, 84.0, 88.0, 90.0, 92.0)]
+    places = [(490245, *cell) for cell in cells] + [(490059, "3+kk", 84.0)]
+    listings: dict[int, Listing] = {}
+    images: dict[int, list[Image]] = {}
+    for index, (quarter, disposition, area) in enumerate(places):
+        listing_id = 5000 + index * 13
+        listings[listing_id] = _listing(
+            listing_id, disposition=disposition, area_m2=area, broker_key=None,
+            description="Byt k prodeji.",
+            location=Location(obec_kod=554782, cast_obce_kod=quarter))
+        images[listing_id] = [Image(listing_id=listing_id, image_id=listing_id * 10 + seq, seq=seq,
+                                    phash=(listing_id * 10 + seq) * 0x9E3779B97F4A7C15 % 2 ** 64,
+                                    pop=1)
+                              for seq in range(2)]
+    return Dataset(meta=Meta(), listings=listings, images_by_listing=images)
 
 
 def _calibration(ds: Dataset, settings: Settings) -> Calibration:
@@ -121,10 +148,12 @@ def invariant_state(ds: Dataset, settings: Settings, calibration: Calibration,
 # --------------------------------------------------------------------------- E71 retrieval
 
 
-def test_retrieval_matches_the_cohort_pass_exactly() -> None:
-    """The one rail that stops the SQL restatement of `BlockIndex.candidates` from drifting."""
-    ds = _dataset()
-    settings = _settings()
+@pytest.mark.parametrize("grain", ["home", "quarter"])
+def test_retrieval_matches_the_cohort_pass_exactly(grain: str) -> None:
+    """The one rail that stops the SQL restatement of `BlockIndex.candidates` from drifting —
+    also where the quarter key is the only attribute path left (E936)."""
+    ds, settings = ((_dataset(), _settings()) if grain == "home"
+                    else (quarter_grain_dataset(), QUARTER_GRAIN))
     fps, calibration = harness.calibrated(ds, settings)
     store, _passes = _drain(ds, settings, calibration, arrival_order(ds))
 
@@ -135,10 +164,13 @@ def test_retrieval_matches_the_cohort_pass_exactly() -> None:
 
     keyer = Keyer(settings, calibration)
     guards = {i: guard_row(fp) for i, fp in fps.items()}
+    quarter_only = 0
     for listing_id in sorted(fps):
         expected = index.candidates(fps[listing_id])
         got = retrieve(fps[listing_id], keyer, store, guards, settings, {})
         assert got == expected, listing_id
+        quarter_only += sum(1 for probes in got.values() if probes == {QUARTER_PROBE})
+    assert (quarter_only > 0) == (grain == "quarter")
 
 
 def test_index_keys_come_from_the_block_index_not_a_restatement() -> None:

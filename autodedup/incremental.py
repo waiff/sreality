@@ -608,7 +608,8 @@ def retrieve(
     listing id, exactly as the cohort pass fills it, so the cap can only ever discard the
     weakest evidence class (E17). `tests/autodedup/test_incremental.py` asserts this against
     `BlockIndex.candidates` over the whole cohort rather than trusting the restatement."""
-    # `index.probes` is `PROBE_PRIORITY`, plus E300's town probe last when the row asks for it.
+    # `index.probes` is `PROBE_PRIORITY`, plus E300's town and E936's quarter probes last when
+    # the row asks for them.
     probes = keyer.index.probes
     by_probe: dict[str, list[str]] = {probe: [] for probe in probes}
     wanted: list[tuple[str, str]] = []
