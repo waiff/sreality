@@ -299,9 +299,10 @@ def category_clash(
     a: tuple[str | None, str | None], b: tuple[str | None, str | None],
 ) -> tuple[str, str | None, str | None] | None:
     """Rule 15's gate on two (category_type, category_main): the field that makes them two
-    properties and its two values — sale != rent, flat != house, except the one sanctioned
-    dum <-> komercni — or None. NULL = unknown, not a conflict. The chokepoint and the verdict
-    route (E925) read this one definition."""
+    properties and its two values — sale != rent, flat != house, except the sanctioned
+    cross-types of `room_taxonomy.category_main_compatible` (dum, komercni, pozemek) — or None.
+    NULL = unknown, not a conflict. The chokepoint and the verdict route (E925) read this one
+    definition."""
     if a[0] is not None and b[0] is not None and a[0] != b[0]:
         return ("category_type", a[0], b[0])
     if not category_main_compatible(a[1], b[1]):

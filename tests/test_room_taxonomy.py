@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from toolkit import room_taxonomy as rt
 
 
@@ -25,15 +27,26 @@ def test_family_of() -> None:
     assert rt.family_of(None) is None
 
 
-def test_category_main_compatible() -> None:
-    # equal, or either side unknown, is compatible
-    assert rt.category_main_compatible("byt", "byt")
-    assert rt.category_main_compatible(None, "byt")
-    assert rt.category_main_compatible("byt", None)
-    # the ONE sanctioned cross-type, both directions
-    assert rt.category_main_compatible("dum", "komercni")
-    assert rt.category_main_compatible("komercni", "dum")
-    # everything else is a hard reject
+CATEGORIES = ("byt", "dum", "komercni", "pozemek", "ostatni", None)
+# Rule 15's sanctioned cross-types (E935, 2026-10-04): dům, komerční and pozemek merge with each
+# other; a flat and `ostatni` with no other category.
+CROSS_TYPES = {frozenset({"dum", "komercni"}), frozenset({"pozemek", "dum"}),
+               frozenset({"pozemek", "komercni"})}
+
+
+@pytest.mark.parametrize("a", CATEGORIES)
+@pytest.mark.parametrize("b", CATEGORIES)
+def test_category_main_compatible_matrix(a: str | None, b: str | None) -> None:
+    """Equal, or either side unknown, is compatible; of two different known categories only
+    the three cross-types are, in both directions."""
+    expected = a is None or b is None or a == b or frozenset({a, b}) in CROSS_TYPES
+    assert rt.category_main_compatible(a, b) is expected
+    assert rt.category_main_compatible(b, a) is expected
+
+
+def test_land_merges_with_a_house_or_commercial_but_never_with_a_flat_or_other() -> None:
+    assert rt.category_main_compatible("pozemek", "dum")
+    assert rt.category_main_compatible("komercni", "pozemek")
+    assert not rt.category_main_compatible("pozemek", "byt")
+    assert not rt.category_main_compatible("ostatni", "pozemek")
     assert not rt.category_main_compatible("byt", "dum")
-    assert not rt.category_main_compatible("byt", "pozemek")
-    assert not rt.category_main_compatible("pozemek", "dum")

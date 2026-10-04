@@ -41,16 +41,23 @@ SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
 
 # Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
-# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
-# sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and
-# commercial on another is the same real-world property) — irrespective of sub-type. Lives
-# here (pure, no heavy imports) so property_identity can share it without an import cycle.
-_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({frozenset({"dum", "komercni"})})
+# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The sanctioned
+# cross-types, irrespective of sub-type, are the three pairs of dum, komercni and pozemek: a
+# building listed as a house on one portal and commercial on another is one real-world
+# property, and so is a plot with a house on it listed as a house on one portal and as land
+# on another (operator, 2026-10-04: "Pozemky can merge with houses or komerční"). A byt and an
+# ostatni merge with no other category. Lives here (pure, no heavy imports) so
+# property_identity can share it without an import cycle.
+_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({
+    frozenset({"dum", "komercni"}),
+    frozenset({"pozemek", "dum"}),
+    frozenset({"pozemek", "komercni"}),
+})
 
 
 def category_main_compatible(a_cat: str | None, b_cat: str | None) -> bool:
-    """True if two category_main values may be the same property. Equal (or either NULL =
-    unknown) is compatible; the only allowed cross-type is dum <-> komercni."""
+    """True if two category_main values may be one property: equal, either NULL (unknown), or
+    any two of dum, komercni and pozemek."""
     if a_cat is None or b_cat is None or a_cat == b_cat:
         return True
     return frozenset({a_cat, b_cat}) in _CROSS_TYPE_OK

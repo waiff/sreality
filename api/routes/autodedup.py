@@ -2325,8 +2325,8 @@ _SAME_REFUSED: dict[str, str] = {
     "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
                      "nemovitosti, proto je nelze označit jako stejné.",
     "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
-                     "do jedné nemovitosti (jediná výjimka je dům a komerční objekt), proto je "
-                     "nelze označit jako stejné.",
+                     "do jedné nemovitosti (výjimkou jsou dům, komerční objekt a pozemek, které "
+                     "lze spojit navzájem), proto je nelze označit jako stejné.",
 }
 _CATEGORY_LABELS: dict[str, str] = {
     option.value: option.label_cs
