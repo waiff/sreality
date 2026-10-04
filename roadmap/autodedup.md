@@ -24,7 +24,8 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   attribute keys hold over 200 ads had no attribute path (1,670 Vysočany flats live, 268863 among them);
   it now keys disposition + area band at its quarter. Offline: live +13 merge-zone pairs (268863 joins
   its 44-ad iDNES property), none on trial / c18 / c17; M1–M3 and every ruling equal. Still dark:
-  1,212 ads in four Vysočany keys over 200. Release after C2 with E929's re-seed (required: keys move).
+  1,212 ads in four Vysočany keys over 200. Release after C2 with E929's re-seed (required: keys move; `SEED_VERSION` is bumped, so nothing
+  merges between the deploy and the re-seed).
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
