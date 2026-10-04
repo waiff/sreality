@@ -98,7 +98,10 @@ def block_key_of(obec_kod: int | None, cast_obce_kod: int | None) -> str:
 
 
 def cat_group_of(category_main: str | None) -> str | None:
-    """E3's sanctioned cross-type folded into one blocking token."""
+    """E3's dům <-> komerční cross-type folded into one blocking token. Land keeps its own
+    (E935): folding it would move every land advert's probe keys, price deciles and census
+    cells, a recalibration of its own; land meets a house only through the category-free
+    probes (addr, phash, text)."""
     if category_main is None:
         return None
     return CROSS_TYPE_GROUP if category_main in _CROSS_TYPE_MEMBERS else category_main
