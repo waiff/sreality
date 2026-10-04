@@ -288,7 +288,7 @@ def test_E286_one_category_keeps_its_subtype() -> None:
 
 def test_E935_land_across_a_house_or_commercial_drops_the_subtype_slots_too() -> None:
     """E935: the E286 skip reads rule #15's one definition, so a plot filed as `pozemek`
-    (`zahrada`, 23) against a `dum` or a `komercni` advert is no subtype contradiction; every
+    (`zahrada`, 23) against a `dum` or a `komercni` ad is no subtype contradiction; every
     other slot is still compared."""
     on = variant(attr_cross_type_subtype_skip=True)
     land = cammerswalde(1, "pozemek", "zahrada", 23, "novostavba")

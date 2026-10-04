@@ -663,7 +663,7 @@ CROSS_TYPE_SUBTYPE_KEYS: frozenset[str] = frozenset({"subtype", "category_sub_cb
 def cross_type_attr_keys(
     la: Listing, lb: Listing, settings: "Settings | None"
 ) -> frozenset[str]:
-    """E286: the subtype slots, where the two adverts sit in two categories rule #15 lets merge."""
+    """E286: the subtype slots, where the two ads sit in two categories rule #15 lets merge."""
     if settings is None or not getattr(settings, "attr_cross_type_subtype_skip", False):
         return frozenset()
     a, b = la.category_main, lb.category_main
