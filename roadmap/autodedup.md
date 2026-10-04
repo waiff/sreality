@@ -20,6 +20,11 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   `POST /properties/{id}/split` (frontend only; the route is E919's). Open with the operator: lift
   E905's property-grain freeze (`restored_outside_engine`) so a split-off property can receive
   engine merges again; only his pair rulings would stay as bans.
+- **Quarter probe (2026-10-04, E936):** an ad in a known quarter of Praha / Brno / Ostrava whose two
+  attribute keys hold over 200 ads had no attribute path (1,670 Vysočany flats live, 268863 among them);
+  it now keys disposition + area band at its quarter. Offline: live +13 merge-zone pairs (268863 joins
+  its 44-ad iDNES property), none on trial / c18 / c17; M1–M3 and every ruling equal. Still dark:
+  1,212 ads in four Vysočany keys over 200. Release after C2 with E929's re-seed (required: keys move).
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
