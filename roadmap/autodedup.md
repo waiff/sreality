@@ -20,6 +20,12 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   `POST /properties/{id}/split` (frontend only; the route is E919's). Open with the operator: lift
   E905's property-grain freeze (`restored_outside_engine`) so a split-off property can receive
   engine merges again; only his pair rulings would stay as bans.
+- **Land cross-types (2026-10-04, E935):** the operator's ruling on 38803: a `pozemek` merges with a
+  `dům` or a `komerční` property (Browse merge, a `same` ruling, the engine). Blocking groups, the area
+  guard and every feature are unchanged, so the engine joins such pairs only where both ads state one
+  size: offline +27 / +54 / +13 merge-zone pairs on trial / c18 / c17, M1–M3 and every ruling equal; the
+  fan-out cap drops 10 / 9 weak-probe rejects on c18 / c17. Release after C2 with E929's re-seed. Open:
+  a plot-aware area comparison for house × land, so the engine finds a 38803 by itself.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
