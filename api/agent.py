@@ -790,6 +790,9 @@ def run_agent_estimation(
         if stop_reason == "record_estimate":
             break
 
+        # Tools that make their own LLM calls bill them to this run; re-read
+        # so the cap check at the top of the next turn sees them.
+        state.total_cost_usd = _running_cost(state, llm_client, estimation_run_id)
         messages.append(Message(role="user", content=list(results)))
 
     result = _finalise(
@@ -1297,6 +1300,7 @@ def _handle_summarize_listing(
     return summarize_listing(
         state.conn, state.llm_client,
         **_listing_id_kwargs(args),
+        estimation_run_id=state.estimation_run_id,
     )
 
 
@@ -1366,10 +1370,12 @@ def _handle_compare_listing_images(
         return compare_listing_images(
             state.conn, state.llm_client,
             listing_id_a=a, listing_id_b=b, n_images=n_images,
+            estimation_run_id=state.estimation_run_id,
         )
     return compare_listing_images(
         state.conn, state.llm_client,
         sreality_id_a=a, sreality_id_b=b, n_images=n_images,
+        estimation_run_id=state.estimation_run_id,
     )
 
 
