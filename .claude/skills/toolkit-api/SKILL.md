@@ -185,10 +185,8 @@ it (`api/`). They do not apply to the scraper.
    pruner.
 10. **Agent skills live in the `skills` table; the on-disk `skills/<name>/SKILL.md` file is
     the canonical seed.** Each skill is a bundle of (system prompt + allowed tool whitelist +
-    per-provider preferred model + loop limits). `preferred_model` names any non-empty subset of
-    the registered providers (`api/skills.py` refuses an unknown name, not a missing one); an
-    agent run on a provider the skill does not name fails and persists `status='failed'`.
-    Migration 029's seed `INSERT` is the importer
+    per-provider preferred model + loop limits; `preferred_model` names any non-empty subset of the
+    registered providers, a run on an unnamed one fails). Migration 029's seed `INSERT` is the importer
     of the markdown file's content; at runtime the DB row is the source of truth. Operators
     edit via `/settings` (UI) or `PUT /admin/skills/{name}` (API). Every update writes a
     `skills_history` row via trigger — same pattern as `app_settings_history` (migration 020).
