@@ -1549,7 +1549,6 @@ export interface CreateManualEstimateIn {
   author: string;
   source_kind: ManualEstimateSourceKind;
   notes?: string | null;
-  updated_by?: string | null;
 }
 
 export interface UpdateManualEstimateIn {
@@ -1557,7 +1556,6 @@ export interface UpdateManualEstimateIn {
   author?: string;
   source_kind?: ManualEstimateSourceKind;
   notes?: string | null;
-  updated_by?: string | null;
 }
 
 // scraper_health_checks() RPC (migration 088)
