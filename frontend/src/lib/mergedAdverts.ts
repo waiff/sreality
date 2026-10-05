@@ -134,9 +134,10 @@ export function unitLanding(unit: SplitUnit, from: number): string {
 }
 
 /* Read-your-writes after a split (or its undo), for the property page, the
- * proposals page AND every Browse surface. The property page is keyed on the
- * property, so a plain invalidation re-reads the property (a separated canonical
- * advert hands the header to the next one) and its advert list. */
+ * proposals page, the category review AND every Browse surface. The property
+ * page is keyed on the property, so a plain invalidation re-reads the property
+ * (a separated canonical advert hands the header to the next one) and its
+ * advert list. */
 export function refreshAfterSplit(qc: QueryClient): void {
   for (const key of [
     ['property'],
@@ -145,6 +146,7 @@ export function refreshAfterSplit(qc: QueryClient): void {
     ['snapshots'],
     mergedAdvertsKeys.all,
     autodedupKeys.proposedSplits,
+    autodedupKeys.categorySplits,
   ]) {
     qc.invalidateQueries({ queryKey: key });
   }
