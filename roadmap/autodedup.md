@@ -20,6 +20,11 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   `POST /properties/{id}/split` (frontend only; the route is E919's). Open with the operator: lift
   E905's property-grain freeze (`restored_outside_engine`) so a split-off property can receive
   engine merges again; only his pair rulings would stay as bans.
+- **Category review (2026-10-05, E937):** `/autodedup/category-splits?properties=…` shows the
+  properties a link names whose ads carry categories rule 15 never joins, side by side with photos
+  and text, ten per page; per property the operator splits by category or keeps it as one (both
+  `POST /properties/{id}/split`). Open with the operator: "keep" writes `same` across categories,
+  the word E925 refuses on the verdict route.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.

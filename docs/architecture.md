@@ -1583,7 +1583,18 @@ renumber.** Navigate by area:
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings, pipeline cards and the carried
     asset link; collections, tags, notes, dispatches and dismissals stay on the property left
-    (rule #18).
+    (rule #18). **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
+    ?properties=…` (`autodedup/category_splits.py`, read-only, 1 to 100 ids) puts each named live
+    property's ads into SIDES, the ads `category_clash` (rule 15's one gate) passes together; an
+    ad of unknown category and a contentless record (no price, area, disposition or text) ride
+    with the kept side (most own ads) and never make a property mixed. Its page
+    `/autodedup/category-splits` opens from a link that names the properties (no menu entry, no
+    stored list), reads them ten per request and shows each side's ads with photos and their
+    scrubbed text; per card, behind a second click, **Rozdělit podle kategorií** (every side but
+    the kept one leaves as one property, its movable ads named, `keep_together: false`) or
+    **Ponechat jako jednu nemovitost** (`separate: []`, `keep_together: true`), both through
+    `POST /properties/{id}/split`; a property no longer mixed, or every pair across confirmed
+    `same`, is a done row.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
