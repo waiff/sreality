@@ -49,15 +49,16 @@ export interface CategoryPlan {
   statement: SplitStatement;
   /* Each side that leaves: the ads the split moves, and the ones it cannot. */
   leaving: { side: CategorySplitSide; movers: CategorySplitAdvert[]; stuck: CategorySplitAdvert[] }[];
-  /* Sides with no ad the split can move: the split is not offered. */
-  blocked: CategorySplitSide[];
+  /* The ads of leaving sides the split cannot move. One is enough to withhold the
+   * split: it would stay behind and be ruled "různé" from the ads of its own side. */
+  stuck: CategorySplitAdvert[];
 }
 
 const everyAd = (item: CategorySplit) => item.groups.flatMap((g) => g.adverts).map((a) => a.listing_id);
 
-/* "Rozdělit podle kategorií": every side but the kept one leaves as one unit.
- * Only the ads the split can move are named: `keep_together` is false, so the
- * server would refuse the whole statement over one it cannot move. */
+/* "Rozdělit podle kategorií": every side but the kept one leaves whole, as one
+ * unit. The split is offered only while every ad of every leaving side can move
+ * (`stuck` is empty): an ad left behind would be ruled "různé" from its own side. */
 export function categorySplitPlan(item: CategorySplit): CategoryPlan {
   const leaving = item.groups
     .filter((g) => !g.kept)
@@ -73,7 +74,7 @@ export function categorySplitPlan(item: CategorySplit): CategoryPlan {
       keep_together: false,
     },
     leaving,
-    blocked: leaving.filter((l) => l.movers.length === 0).map((l) => l.side),
+    stuck: leaving.flatMap((l) => l.stuck),
   };
 }
 
@@ -89,16 +90,6 @@ export function splitSentence(item: CategorySplit, plan: CategoryPlan): string {
   const parts = plan.leaving
     .filter((l) => l.movers.length > 0)
     .map((l) => `oddělit ${sideLabel(l.side)} jako jednu nemovitost: ${l.movers.map(tag).join(' + ')}`);
-  /* It stays in the kept unit, so the statement rules it "different" from the
-   * ads of its own side that leave: the operator reads that before confirming. */
-  for (const l of plan.leaving) {
-    for (const a of l.stuck) {
-      parts.push(
-        `${tag(a)} oddělit nejde (${unmovedReason(a.detach_outcome ?? '')}), zůstane — ` +
-          's oddělenými inzeráty se mu zapíše „různé“',
-      );
-    }
-  }
   if (kept) {
     parts.push(
       `na #${item.property_id} zůstane ${sideLabel(kept)} ` +
@@ -107,6 +98,21 @@ export function splitSentence(item: CategorySplit, plan: CategoryPlan): string {
     );
   }
   return `Plán: ${parts.join(' · ')}`;
+}
+
+/* Why the split is withheld: each ad of a leaving side that cannot move. */
+export function stuckSentence(plan: CategoryPlan): string {
+  const each = plan.stuck.map(
+    (a) => `#${a.listing_id} nejde oddělit (${unmovedReason(a.detach_outcome ?? '')})`,
+  );
+  return `Rozdělit nelze: ${each.join('; ')}.`;
+}
+
+/* The clash in the side headings' words, "Prodej · byt × Pronájem · byt". */
+export function clashLabel(item: CategorySplit, lo: number, hi: number): string | null {
+  const sideOf = (id: number) => item.groups.find((g) => g.adverts.some((a) => a.listing_id === id));
+  const [a, b] = [sideOf(lo), sideOf(hi)];
+  return a && b ? `${sideLabel(a)} × ${sideLabel(b)}` : null;
 }
 
 export function keepSentence(item: CategorySplit): string {

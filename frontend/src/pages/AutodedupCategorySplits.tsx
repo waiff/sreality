@@ -32,11 +32,13 @@ import {
   PROPERTIES_PER_PAGE,
   cardState,
   categorySplitPlan,
+  clashLabel,
   keepSentence,
   keepStatement,
   parsePropertyIds,
   sideLabel,
   splitSentence,
+  stuckSentence,
 } from '@/components/autodedup/categorySplit';
 import { followUpSplit, sendSplit, type SplitOutcome } from '@/components/autodedup/splitOutcome';
 import { useAdvertMembers } from '@/components/autodedup/useAdvertMembers';
@@ -318,7 +320,12 @@ function CategoryCard({
         ))}
       </div>
 
-      <SplitReasons splits={item.splits} />
+      <SplitReasons
+        splits={item.splits.map((s) => ({
+          ...s,
+          reason: clashLabel(item, s.listing_lo, s.listing_hi) ?? s.reason,
+        }))}
+      />
       {said && <div className="mt-2 text-[0.75rem]">{said}</div>}
 
       {armed ? (
@@ -349,7 +356,7 @@ function CategoryCard({
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             type="button"
-            disabled={busy || plan.blocked.length > 0}
+            disabled={busy || plan.stuck.length > 0}
             onClick={() => setArmed('split')}
             className={brick}
           >
@@ -358,10 +365,8 @@ function CategoryCard({
           <button type="button" disabled={busy} onClick={() => setArmed('keep')} className={plain}>
             Ponechat jako jednu nemovitost
           </button>
-          {plan.blocked.length > 0 && (
-            <span className="text-[0.75rem] text-[var(--color-brick)]">
-              Rozdělit nelze: {plan.blocked.map(sideLabel).join(', ')} — žádný inzerát nejde oddělit.
-            </span>
+          {plan.stuck.length > 0 && (
+            <span className="text-[0.75rem] text-[var(--color-brick)]">{stuckSentence(plan)}</span>
           )}
         </div>
       )}

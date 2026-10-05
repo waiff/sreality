@@ -281,7 +281,7 @@ describe('<AutodedupCategorySplits> the list', () => {
       within(sale).getByText('#1266410 · Bazoš · prázdný záznam, bez ceny, plochy a textu, zůstane'),
     ).toBeInTheDocument();
     expect(within(sale).queryByText('#1266410')).toBeNull();
-    expect(within(shot).getByText(/kategorie: category_type: prodej vs pronajem/)).toBeInTheDocument();
+    expect(within(shot).getByText(/kategorie: Prodej · byt × Pronájem · byt/)).toBeInTheDocument();
 
     // the open cards' ads are hydrated in one read, done rows and contentless records not
     expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith(
@@ -303,7 +303,9 @@ describe('<AutodedupCategorySplits> the list', () => {
     ).toBeInTheDocument();
     expect(within(blocked).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeDisabled();
     expect(
-      within(blocked).getByText('Rozdělit nelze: Prodej · byt — žádný inzerát nejde oddělit.'),
+      within(blocked).getByText(
+        'Rozdělit nelze: #534883 nejde oddělit (nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam).',
+      ),
     ).toBeInTheDocument();
     expect(within(blocked).getByRole('button', { name: 'Ponechat jako jednu nemovitost' })).toBeEnabled();
   });
@@ -413,27 +415,17 @@ describe('<AutodedupCategorySplits> the decisions', () => {
     expect(within(card(12664)).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeEnabled();
   });
 
-  it('a side that is partly stuck: only what moves is named, and the plan says what stays', async () => {
+  it('a side that is partly stuck is not split: the ad left behind would be ruled "různé" from its own side', async () => {
     setup();
-    vi.mocked(api.splitProperty).mockResolvedValue(result(197654, []));
     const share = await screen.findByTestId('category-197654');
-    fireEvent.click(within(share).getByRole('button', { name: 'Rozdělit podle kategorií' }));
+    expect(within(share).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeDisabled();
     expect(
       within(share).getByText(
-        'Plán: oddělit Podíl · dům jako jednu nemovitost: #1976543 (sreality) · #1976544 (idnes) ' +
-          'oddělit nejde (inzerát už je v nemovitosti, ze které přišel), zůstane — s oddělenými ' +
-          'inzeráty se mu zapíše „různé“ · na #197654 zůstane Prodej · dům (#1976541, #1976542) i se ' +
-          'záznamem nemovitosti (poznámky, štítky, karta v pipeline)',
+        'Rozdělit nelze: #1976544 nejde oddělit (inzerát už je v nemovitosti, ze které přišel).',
       ),
     ).toBeInTheDocument();
-    fireEvent.click(within(share).getByRole('button', { name: 'Potvrdit' }));
-    await waitFor(() =>
-      expect(api.splitProperty).toHaveBeenCalledWith(197654, {
-        adverts: [1976541, 1976542, 1976543, 1976544],
-        separate: [[1976543]],
-        keep_together: false,
-      }),
-    );
+    expect(within(share).getByRole('button', { name: 'Ponechat jako jednu nemovitost' })).toBeEnabled();
+    expect(api.splitProperty).not.toHaveBeenCalled();
   });
 
   it('Ponechat jako jednu nemovitost asks twice and keeps every ad as one property', async () => {
