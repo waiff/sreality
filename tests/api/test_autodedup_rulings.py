@@ -547,7 +547,10 @@ _NOTHING_WRITTEN = (usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQ
     (("pronajem", "byt", "prodej", "byt"), ("Inzerát typu Pronájem", "typu Prodej")),
     (("prodej", "byt", "prodej", "komercni"), ("v kategorii Byty", "v kategorii Komerční")),
     (("prodej", "komercni", "prodej", "byt"), ("v kategorii Komerční", "v kategorii Byty")),
-], ids=["rent vs sale", "flat vs commercial", "commercial vs flat"])
+    (("podil", "pozemek", "pronajem", "pozemek"), ("Inzerát typu Podíl", "typu Pronájem")),
+    (("podil", "byt", "drazba", "byt"), ("Inzerát typu Podíl", "typu Dražba")),
+], ids=["rent vs sale", "flat vs commercial", "commercial vs flat", "share vs rent",
+        "share vs auction"])
 def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
         client, conn, sides, named):
     """422, never 409: the rulings page reads every 409 as "ruled again since the page loaded"
@@ -565,7 +568,8 @@ def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
     ("prodej", "dum", "prodej", "komercni"),  # the one sanctioned cross-type
     ("prodej", "byt", "prodej", "byt"),
     (None, "byt", "prodej", None),  # unknown is never a conflict
-], ids=["house vs commercial", "flat vs flat", "unknown"])
+    ("podil", "pozemek", "prodej", "pozemek"),  # E932: a share sale IS a sale
+], ids=["house vs commercial", "flat vs flat", "unknown", "share vs sale"])
 def test_a_same_rule_15_allows_is_written(client, conn, sides):
     conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]
     conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict="same")]
@@ -611,6 +615,7 @@ def test_the_route_and_the_merge_chokepoint_read_one_gate():
     assert str(CategoryClash(*category_clash(("prodej", "byt"), ("prodej", "komercni")))) == (
         "category_main mismatch (byt vs komercni); refusing to merge")
     assert category_clash(("prodej", "dum"), ("prodej", "komercni")) is None
+    assert category_clash(("podil", "byt"), ("prodej", "byt")) is None
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)

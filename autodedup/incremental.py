@@ -128,8 +128,8 @@ def key_token(key: Sequence[Any]) -> str:
     return _SEP.join("" if part is None else str(part) for part in key)
 
 
-def _cut_key(cat_group: str | None, category_type: str | None) -> str:
-    return key_token((cat_group, category_type))
+def _cut_key(cat_group: str | None, deal_class: str | None) -> str:
+    return key_token((cat_group, deal_class))
 
 
 @dataclass(slots=True, frozen=True)

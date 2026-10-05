@@ -55,6 +55,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Listing
 from autodedup.decide import Decision
+from autodedup.hazard_context import category_group
 from autodedup.settings import Settings
 from autodedup.text_facts import address_block_key, fold
 
@@ -198,15 +199,11 @@ def _terms_in(listing: Listing, terms: Sequence[str]) -> tuple[str, ...]:
     return tuple(term for term in terms if term in text)
 
 
-def _category_group(listing: Listing) -> str:
-    return f"{listing.category_main or '?'}|{listing.category_type or '?'}"
-
-
 def block_population(listings: Mapping[int, Listing]) -> dict[tuple[str, str], int]:
     """How many cohort listings sit at each (address block, category group)."""
     out: dict[tuple[str, str], int] = {}
     for listing in listings.values():
-        key = (address_block_key(listing), _category_group(listing))
+        key = (address_block_key(listing), category_group(listing))
         out[key] = out.get(key, 0) + 1
     return out
 
@@ -256,7 +253,7 @@ def markers_of(
     vocabulary = project_vocab or coop_vocab
 
     blocks = {address_block_key(item) for item in rows}
-    groups = {_category_group(item) for item in rows}
+    groups = {category_group(item) for item in rows}
     block_key = sorted(blocks)[0] if len(blocks) == 1 else None
     group = sorted(groups)[0] if len(groups) == 1 else None
     density = 0
