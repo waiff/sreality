@@ -3250,8 +3250,9 @@ export interface ProposedSplit {
     listing_lo: number;
     listing_hi: number;
     /* `not_compared`: the live stream holds the two apart with no stored pair
-     * between them — nothing stated, so a split never takes an advert on it. */
-    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none' | 'not_compared';
+     * between them — nothing stated, so a split never takes an advert on it.
+     * `category`: two sides of the category review (E937), rule 15's clash. */
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none' | 'not_compared' | 'category';
     reason: string;
     ruling: {
       verdict: string;
@@ -3277,6 +3278,50 @@ export const getProposedSplits = (
   }>
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
+
+/* E937: the category review. The named live properties whose ads carry categories
+ * rule 15 never joins, as SIDES — the ads its gate passes together (one
+ * definition, `category_clash`), the canonical ad's side first and `kept` on the
+ * side that is the survivor of a split (most of its own ads). An ad of
+ * unknown deal type or category (`unknown`) and a contentless record (`empty`:
+ * no price, area, disposition or text) ride with the kept side and never make a
+ * property `mixed`. `confirmed`: every pair across sides is ruled "stejné".
+ * The decision is `splitProperty`. `missing`: ids that are not a live property
+ * of two or more ads. */
+export interface CategorySplitAdvert extends ProposedSplitAdvert {
+  empty: boolean;
+  unknown: boolean;
+  /* The ad's own words, PII-scrubbed by the server (E28). */
+  text: { title: string | null; description: string | null };
+}
+
+export interface CategorySplitSide {
+  cluster_key: null;
+  /* The stored values, `prodej · byt`; the page words them in Czech. */
+  label: string;
+  kept: boolean;
+  category_type: string | null;
+  category_main: string[];
+  adverts: CategorySplitAdvert[];
+}
+
+export interface CategorySplit {
+  property_id: number;
+  canonical_listing_id: number | null;
+  groups: CategorySplitSide[];
+  unseen: CategorySplitAdvert[];
+  splits: ProposedSplit['splits'];
+  ruled: boolean;
+  mixed: boolean;
+  confirmed: boolean;
+}
+
+/* The route reads ONE comma-separated value, the shape of the link the page
+ * opens from (`?properties=12664,9737`), not repeated params. */
+export const getCategorySplits = (
+  propertyIds: readonly number[],
+): Promise<AutodedupEnvelope<{ items: CategorySplit[]; missing: number[] }>> =>
+  request('/autodedup/category-splits', { query: { properties: propertyIds.join(',') }, jwt: true });
 
 /* ----- the rulings page (E920) ------------------------------------------------
  *
