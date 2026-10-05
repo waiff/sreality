@@ -1,10 +1,12 @@
 /* The category review (E937): the property ids come from the link and are read
  * ten per request; each mixed property is a card of its sides (photos, facts and
- * each ad's own words, a contentless record as one muted line) with two
- * decisions, each behind a second click, both `POST /properties/{id}/split`: split
- * by category (every side but the kept one leaves, only its movable ads named)
- * or keep as one property. The outcome stays in place with the server's undo
- * and the E52 re-send; a property no longer mixed, or confirmed, is a done row. */
+ * each ad's own words, a contentless record as one muted line) with a letter per
+ * ad, one per side until the operator moves one, and two decisions, each behind
+ * a second click, both `POST /properties/{id}/split`: split by the letters (the
+ * property page's `splitPlan`: every letter but the one that stays leaves as one
+ * property) or keep as one property. The outcome stays in place with the
+ * server's undo and the E52 re-send; a property no longer mixed, or confirmed,
+ * is a done row. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -13,7 +15,9 @@ import { MemoryRouter } from 'react-router-dom';
 
 import AutodedupCategorySplits from './AutodedupCategorySplits';
 import * as api from '@/lib/api';
+import { fmtCzk } from '@/lib/format';
 import * as queries from '@/lib/queries';
+import type { ListingPublic } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
@@ -249,9 +253,52 @@ function setup(url = LINK, items: api.CategorySplit[] = ITEMS) {
 const card = (pid: number) => screen.getByTestId(`category-${pid}`);
 const SALE_ADS = [1266401, 1266402, 1266403, 1266404, 1266405, 1266406, 1266410];
 const RENT_ADS = [1266407, 1266408, 1266409];
+/* An ad's letter, as the property page names it. */
+const LETTER = (id: number, portal: string) => `Nemovitost inzerátu ${portal} #${id}`;
+const planLines = (confirm: HTMLElement) =>
+  within(confirm).getAllByRole('listitem').map((li) => li.textContent);
+
+/* 12664's facts: one 30 m² flat for sale; two ads of one rental flat at 10 000 Kč
+ * a month and a third, another flat, at 9 500 (the operator's case of 2026-10-05). */
+const FACTS = new Map(
+  (
+    [
+      [1266401, 'sreality', 2_990_000, 'prodej'],
+      [1266402, 'idnes', 2_990_000, 'prodej'],
+      [1266403, 'idnes', 2_990_000, 'prodej'],
+      [1266404, 'idnes', 2_990_000, 'prodej'],
+      [1266405, 'idnes', 2_990_000, 'prodej'],
+      [1266406, 'idnes', 2_990_000, 'prodej'],
+      [1266407, 'sreality', 10_000, 'pronajem'],
+      [1266408, 'idnes', 10_000, 'pronajem'],
+      [1266409, 'bezrealitky', 9_500, 'pronajem'],
+    ] as const
+  ).map(([id, source, price_czk, category_type]) => [
+    id,
+    {
+      id,
+      source,
+      price_czk,
+      category_type,
+      category_main: 'byt',
+      is_active: true,
+    } as unknown as ListingPublic,
+  ]),
+);
+const SALE_LINE = [
+  `Sreality ${fmtCzk(2_990_000)}`,
+  ...Array.from({ length: 5 }, () => `iDNES Reality ${fmtCzk(2_990_000)}`),
+  'Bazoš cena neuvedena',
+].join(', ');
+const RENT_LINE = [
+  `Sreality ${fmtCzk(10_000)} / měs`,
+  `iDNES Reality ${fmtCzk(10_000)} / měs`,
+  `Bezrealitky ${fmtCzk(9_500)} / měs`,
+].join(', ');
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(new Map());
 });
 
 describe('<AutodedupCategorySplits> the list', () => {
@@ -268,8 +315,8 @@ describe('<AutodedupCategorySplits> the list', () => {
 
     const sale = within(shot).getByRole('region', { name: 'Prodej · byt' });
     const rent = within(shot).getByRole('region', { name: 'Pronájem · byt' });
-    expect(within(sale).getByText('Prodej · byt · 6 inzerátů · zůstává')).toBeInTheDocument();
-    expect(within(rent).getByText('Pronájem · byt · 3 inzeráty · při rozdělení odejde')).toBeInTheDocument();
+    expect(within(sale).getByText('Prodej · byt · 6 inzerátů')).toBeInTheDocument();
+    expect(within(rent).getByText('Pronájem · byt · 3 inzeráty')).toBeInTheDocument();
     // every ad a card with its number, and its own words under it
     for (const id of [1266401, 1266406]) expect(within(sale).getByText(`#${id}`)).toBeInTheDocument();
     for (const id of RENT_ADS) expect(within(rent).getByText(`#${id}`)).toBeInTheDocument();
@@ -295,13 +342,18 @@ describe('<AutodedupCategorySplits> the list', () => {
     setup();
     const blocked = await screen.findByTestId('category-53488');
     expect(within(blocked).getByRole('region', { name: 'Prodej · dům + komerční prostor' })).toBeInTheDocument();
-    expect(within(blocked).getByText('kategorie neuvedena — zůstane')).toBeInTheDocument();
+    expect(
+      within(blocked).getByText('kategorie neuvedena — bez písmena, zůstane se skupinou, která zůstává'),
+    ).toBeInTheDocument();
+    expect(within(blocked).queryByLabelText(LETTER(534885, 'Realitymix'))).toBeNull();
     expect(
       within(blocked).getByText(
-        'nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam — zůstane',
+        'Nelze oddělit: nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam.',
       ),
     ).toBeInTheDocument();
-    expect(within(blocked).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeDisabled();
+    // the ad of unknown category is counted with the group that stays
+    expect(within(blocked).getByText('A zůstává (4) · B odejde (1)')).toBeInTheDocument();
+    expect(within(blocked).getByRole('button', { name: 'Rozdělit podle písmen' })).toBeDisabled();
     expect(
       within(blocked).getByText(
         'Rozdělit nelze: #534883 nejde oddělit (nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam).',
@@ -362,26 +414,34 @@ describe('<AutodedupCategorySplits> the list', () => {
 });
 
 describe('<AutodedupCategorySplits> the decisions', () => {
-  it('Rozdělit podle kategorií asks twice, sends every ad and the other side, then offers the undo', async () => {
+  it('untouched letters split by category: asks twice, sends the other side, offers the undo', async () => {
     const { invalidate } = setup();
+    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(FACTS);
     vi.mocked(api.splitProperty).mockResolvedValue(SPLIT_DONE);
     const shot = await screen.findByTestId('category-12664');
+    // one letter per side; the contentless record takes none
+    expect(within(shot).getByLabelText(LETTER(1266401, 'Sreality'))).toHaveValue('A');
+    expect(within(shot).getByLabelText(LETTER(1266407, 'Sreality'))).toHaveValue('B');
+    expect(within(shot).queryByLabelText(LETTER(1266410, 'Bazoš'))).toBeNull();
+    expect(within(shot).getByText('A zůstává (7) · B odejde (3)')).toBeInTheDocument();
 
-    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle kategorií' }));
+    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle písmen' }));
     const confirm = within(shot).getByRole('group', { name: 'Potvrdit rozdělení' });
-    expect(
-      within(confirm).getByText(
-        'Plán: oddělit Pronájem · byt jako jednu nemovitost: #1266407 (sreality) + #1266408 (idnes) + ' +
-          '#1266409 (bezrealitky) · na #12664 zůstane Prodej · byt (#1266401, #1266402, #1266403, ' +
-          '#1266404, #1266405, #1266406, #1266410) i se záznamem nemovitosti (poznámky, štítky, karta v pipeline)',
-      ),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(planLines(confirm)).toEqual([
+        `A — zůstává v nemovitosti #12664: ${SALE_LINE}`,
+        `B — odejde jako jedna nemovitost: ${RENT_LINE}`,
+      ]),
+    );
+    expect(confirm.textContent).toContain('každá dvojice inzerátů napříč písmeny se uloží jako „různé“');
+    // what the confirm shows is what is sent: the letters wait
+    expect(within(shot).getByLabelText(LETTER(1266409, 'Bezrealitky'))).toBeDisabled();
     expect(api.splitProperty).not.toHaveBeenCalled();
     fireEvent.click(within(confirm).getByRole('button', { name: 'Zrušit' }));
     expect(within(shot).queryByRole('group', { name: 'Potvrdit rozdělení' })).toBeNull();
     expect(api.splitProperty).not.toHaveBeenCalled();
 
-    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle kategorií' }));
+    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle písmen' }));
     fireEvent.click(within(shot).getByRole('button', { name: 'Potvrdit' }));
     await waitFor(() =>
       expect(api.splitProperty).toHaveBeenCalledWith(12664, {
@@ -398,7 +458,7 @@ describe('<AutodedupCategorySplits> the decisions', () => {
     );
     expect(within(shot).getByRole('link', { name: 'zůstává #12664' })).toBeInTheDocument();
     expect(within(shot).getByText(/odděleno: #1266407 \(sreality\), #1266408 \(idnes\)/)).toBeInTheDocument();
-    expect(within(shot).queryByRole('button', { name: 'Rozdělit podle kategorií' })).toBeNull();
+    expect(within(shot).queryByRole('button', { name: 'Rozdělit podle písmen' })).toBeNull();
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['autodedup', 'category-splits'] });
 
     vi.mocked(api.undoSplit).mockResolvedValue({
@@ -412,13 +472,14 @@ describe('<AutodedupCategorySplits> the decisions', () => {
     await waitFor(() => expect(api.undoSplit).toHaveBeenCalledWith(12664, UNDO));
     expect(await within(card(12664)).findByText(/Vráceno — inzeráty jsou znovu jedna nemovitost/)).toBeInTheDocument();
     // back to a card the operator can decide again
-    expect(within(card(12664)).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeEnabled();
+    expect(within(card(12664)).getByRole('button', { name: 'Rozdělit podle písmen' })).toBeEnabled();
   });
 
-  it('a side that is partly stuck is not split: the ad left behind would be ruled "různé" from its own side', async () => {
+  it('a leaving group holding an ad that cannot move is not split; its letter can keep it', async () => {
     setup();
+    vi.mocked(api.splitProperty).mockResolvedValue(result(197654, []));
     const share = await screen.findByTestId('category-197654');
-    expect(within(share).getByRole('button', { name: 'Rozdělit podle kategorií' })).toBeDisabled();
+    expect(within(share).getByRole('button', { name: 'Rozdělit podle písmen' })).toBeDisabled();
     expect(
       within(share).getByText(
         'Rozdělit nelze: #1976544 nejde oddělit (inzerát už je v nemovitosti, ze které přišel).',
@@ -426,6 +487,94 @@ describe('<AutodedupCategorySplits> the decisions', () => {
     ).toBeInTheDocument();
     expect(within(share).getByRole('button', { name: 'Ponechat jako jednu nemovitost' })).toBeEnabled();
     expect(api.splitProperty).not.toHaveBeenCalled();
+
+    // the operator keeps the stuck ad with the group that stays: the rest of its side leaves
+    fireEvent.change(within(share).getByLabelText(LETTER(1976544, 'iDNES Reality')), {
+      target: { value: 'A' },
+    });
+    expect(within(share).getByText('A zůstává (3) · B odejde (1)')).toBeInTheDocument();
+    fireEvent.click(within(share).getByRole('button', { name: 'Rozdělit podle písmen' }));
+    fireEvent.click(within(share).getByRole('button', { name: 'Potvrdit' }));
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(197654, {
+        adverts: [1976541, 1976542, 1976543, 1976544],
+        separate: [[1976543]],
+        keep_together: false,
+      }),
+    );
+  });
+
+  it('a side that bundles two flats: one rental ad to C sends three units', async () => {
+    setup();
+    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(FACTS);
+    vi.mocked(api.splitProperty).mockResolvedValue(result(12664, []));
+    const shot = await screen.findByTestId('category-12664');
+    fireEvent.change(within(shot).getByLabelText(LETTER(1266409, 'Bezrealitky')), {
+      target: { value: 'C' },
+    });
+    expect(within(shot).getByText('A zůstává (7) · B odejde (2) · C odejde (1)')).toBeInTheDocument();
+
+    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle písmen' }));
+    const confirm = within(shot).getByRole('group', { name: 'Potvrdit rozdělení' });
+    await waitFor(() =>
+      expect(planLines(confirm)).toEqual([
+        `A — zůstává v nemovitosti #12664: ${SALE_LINE}`,
+        `B — odejde jako jedna nemovitost: Sreality ${fmtCzk(10_000)} / měs, iDNES Reality ${fmtCzk(10_000)} / měs`,
+        `C — odejde jako jedna nemovitost: Bezrealitky ${fmtCzk(9_500)} / měs`,
+      ]),
+    );
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Potvrdit' }));
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(12664, {
+        adverts: [...SALE_ADS, ...RENT_ADS],
+        separate: [[1266407, 1266408], [1266409]],
+        keep_together: false,
+      }),
+    );
+  });
+
+  it('one letter for every ad leaves nothing to split, and says so', async () => {
+    setup();
+    const shot = await screen.findByTestId('category-12664');
+    const rentals = [
+      [1266407, 'Sreality'],
+      [1266408, 'iDNES Reality'],
+      [1266409, 'Bezrealitky'],
+    ] as const;
+    for (const [id, portal] of rentals) {
+      fireEvent.change(within(shot).getByLabelText(LETTER(id, portal)), { target: { value: 'A' } });
+    }
+    expect(within(shot).getByText('A zůstává (10)')).toBeInTheDocument();
+    expect(within(shot).getByRole('button', { name: 'Rozdělit podle písmen' })).toBeDisabled();
+    expect(
+      within(shot).getByText('Všechny inzeráty mají stejné písmeno, není co rozdělit.'),
+    ).toBeInTheDocument();
+    expect(within(shot).getByRole('button', { name: 'Ponechat jako jednu nemovitost' })).toBeEnabled();
+  });
+
+  it('the riders go with the group that stays, also when the letters change which group that is', async () => {
+    setup();
+    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(FACTS);
+    vi.mocked(api.splitProperty).mockResolvedValue(result(12664, []));
+    const shot = await screen.findByTestId('category-12664');
+    // the sale side's own ad joins the rentals: B now holds two own ads and stays
+    fireEvent.change(within(shot).getByLabelText(LETTER(1266401, 'Sreality')), {
+      target: { value: 'B' },
+    });
+    expect(within(shot).getByText('A odejde (5) · B zůstává (5)')).toBeInTheDocument();
+    fireEvent.click(within(shot).getByRole('button', { name: 'Rozdělit podle písmen' }));
+    const confirm = within(shot).getByRole('group', { name: 'Potvrdit rozdělení' });
+    await waitFor(() =>
+      expect(planLines(confirm)[1]).toMatch(/^B — zůstává v nemovitosti #12664: .*Bazoš cena neuvedena$/),
+    );
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Potvrdit' }));
+    await waitFor(() =>
+      expect(api.splitProperty).toHaveBeenCalledWith(12664, {
+        adverts: [...SALE_ADS, ...RENT_ADS],
+        separate: [[1266402, 1266403, 1266404, 1266405, 1266406]],
+        keep_together: false,
+      }),
+    );
   });
 
   it('Ponechat jako jednu nemovitost asks twice and keeps every ad as one property', async () => {
