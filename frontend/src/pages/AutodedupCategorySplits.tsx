@@ -8,14 +8,17 @@
  * card shows the property's SIDES, the ads the server's one definition
  * (`category_clash`) lets be one property, with photos and facts (MemberGrid)
  * and each ad's text (MemberText); a contentless record and an ad of unknown
- * category ride with the kept side and never make a property mixed.
+ * category ride with the group that stays and never make a property mixed.
  *
+ * A side can bundle two flats, so every other ad carries a LETTER, as on the
+ * property page: one letter is one property. The letters start one per side.
  * Two decisions, each behind a second click, both the operator's split
- * statement (`POST /properties/{id}/split`, E919): split by category (every
- * side but the kept one leaves as one property, ruled "různé" from the rest)
- * or keep as one property (every pair ruled "stejné"). The outcome stays in
- * place with the server's undo. A property no longer mixed, or confirmed,
- * is a one-line done row: the list is also the progress view. */
+ * statement (`POST /properties/{id}/split`, E919): split by the letters (the
+ * property page's `splitPlan`: every letter but the one that stays leaves as
+ * one property, ruled "různé" from the rest) or keep as one property (every
+ * pair ruled "stejné"). The outcome stays in place with the server's undo. A
+ * property no longer mixed, or confirmed, is a one-line done row: the list is
+ * also the progress view. */
 
 import { useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -28,17 +31,21 @@ import MemberText from '@/components/autodedup/MemberText';
 import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 import { PropertyLinks, SplitReasons } from '@/components/autodedup/SplitCardParts';
 import SplitOutcomeBody from '@/components/autodedup/SplitOutcomeBody';
+import SplitPlanLines, { priceLabel } from '@/components/autodedup/SplitPlanLines';
+import { UnitSelect, type UnitMap } from '@/components/autodedup/UnitSplit';
 import {
   PROPERTIES_PER_PAGE,
   cardState,
-  categorySplitPlan,
   clashLabel,
+  defaultLetters,
   keepSentence,
   keepStatement,
+  letterPlan,
+  lettersLine,
   parsePropertyIds,
+  rides,
   sideLabel,
-  splitSentence,
-  stuckSentence,
+  splitWithheld,
 } from '@/components/autodedup/categorySplit';
 import { followUpSplit, sendSplit, type SplitOutcome } from '@/components/autodedup/splitOutcome';
 import { useAdvertMembers } from '@/components/autodedup/useAdvertMembers';
@@ -52,11 +59,18 @@ import {
 } from '@/lib/api';
 import { autodedupKeys } from '@/lib/autodedupKeys';
 import { fmtCount } from '@/lib/format';
-import { inzeratu, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
+import { inzeratu, refreshAfterSplit, saysUnmoved, unmovedReason } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 
 type Decision = 'split' | 'keep';
 type MemberOf = (a: CategorySplitAdvert) => AutodedupMember;
+/* The card's letters, as each ad's select needs them. */
+type Letters = {
+  units: UnitMap;
+  count: number;
+  disabled: boolean;
+  onLetter: (id: number, letter: string) => void;
+};
 
 const button =
   'rounded-[var(--radius-sm)] border px-3 py-1 text-[0.8rem] transition-colors disabled:opacity-40';
@@ -120,10 +134,11 @@ export default function AutodedupCategorySplits() {
           Nemovitosti, ve kterých jsou inzeráty různých kategorií — třeba prodej a pronájem, nebo
           byt a komerční prostor. Takové inzeráty systém do jedné nemovitosti sám nikdy nespojí.
           Prohlédněte si fotky a texty a u každé nemovitosti rozhodněte: <strong>rozdělit podle
-          kategorií</strong> (každá další kategorie odejde jako samostatná nemovitost, inzerát se
-          vrátí tam, odkud přišel, nebo dostane novou, a mezi kategoriemi se zapíše „různé“), nebo{' '}
-          <strong>ponechat jako jednu nemovitost</strong> (mezi inzeráty se zapíše „stejné“). Dokud
-          nepotvrdíte, nic se nezmění.
+          písmen</strong> (každé další písmeno odejde jako samostatná nemovitost, inzerát se vrátí
+          tam, odkud přišel, nebo dostane novou, a mezi písmeny se zapíše „různé“), nebo{' '}
+          <strong>ponechat jako jednu nemovitost</strong> (mezi inzeráty se zapíše „stejné“). Písmena
+          jsou předvyplněná podle kategorií a stejné písmeno znamená jednu nemovitost: inzerátu, který
+          patří jinam, třeba jinému bytu, dejte jiné písmeno. Dokud nepotvrdíte, nic se nezmění.
         </p>
         {ids.length > 0 && (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
@@ -226,6 +241,9 @@ function CategoryCard({
 }) {
   const qc = useQueryClient();
   const [armed, setArmed] = useState<Decision | null>(null);
+  /* The letters hold for the ads they were set over: a re-read that changed the
+   * ads starts again from the sides. */
+  const [letters, setLetters] = useState<{ list: string; units: UnitMap } | null>(null);
   const run = useMutation({
     mutationFn: (statement: SplitStatement) =>
       sendSplit({
@@ -295,8 +313,30 @@ function CategoryCard({
     );
   }
 
-  const plan = categorySplitPlan(item);
-  const adverts = item.groups.reduce((n, g) => n + g.adverts.length, 0);
+  const ads = item.groups.flatMap((g) => g.adverts);
+  const listKey = ads.map((a) => a.listing_id).sort((a, b) => a - b).join(',');
+  const units = letters?.list === listKey ? letters.units : defaultLetters(item);
+  const { plan, stuck } = letterPlan(item, units);
+  const withheld = splitWithheld({ plan, stuck });
+  const byId = new Map(ads.map((a) => [a.listing_id, a]));
+  const portalOf = (id: number) => {
+    const a = byId.get(id);
+    return a ? (portalLabel(a.source) ?? a.source) : '';
+  };
+  const priceOf = (id: number) => {
+    const a = byId.get(id);
+    if (!a) return '';
+    const m = member(a);
+    return priceLabel(m.price_czk, m.category_type);
+  };
+  const lettering: Letters = {
+    units,
+    count: ads.filter((a) => !rides(a)).length,
+    /* Set before the second click: what the confirm shows is what is sent. */
+    disabled: busy || armed !== null,
+    onLetter: (id, letter) => setLetters({ list: listKey, units: { ...units, [id]: letter } }),
+  };
+  const adverts = ads.length;
   const sides = item.groups.filter((g) => g.category_type).length;
   return (
     <li
@@ -316,7 +356,12 @@ function CategoryCard({
 
       <div className="mt-3 space-y-4">
         {item.groups.map((g) => (
-          <SideSection key={g.adverts[0]?.listing_id ?? g.label} side={g} member={member} />
+          <SideSection
+            key={g.adverts[0]?.listing_id ?? g.label}
+            side={g}
+            member={member}
+            letters={lettering}
+          />
         ))}
       </div>
 
@@ -334,9 +379,18 @@ function CategoryCard({
           aria-label={armed === 'split' ? 'Potvrdit rozdělení' : 'Potvrdit ponechání'}
           className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-4 py-3"
         >
-          <p className="text-[0.8rem] text-[var(--color-ink-2)]">
-            {armed === 'split' ? splitSentence(item, plan) : keepSentence(item)}
-          </p>
+          {armed === 'split' ? (
+            <div className="space-y-2">
+              <SplitPlanLines
+                plan={plan}
+                propertyId={propertyId}
+                portalOf={portalOf}
+                priceOf={priceOf}
+              />
+            </div>
+          ) : (
+            <p className="text-[0.8rem] text-[var(--color-ink-2)]">{keepSentence(item)}</p>
+          )}
           <div className="mt-2 flex items-center gap-2">
             <button
               type="button"
@@ -353,37 +407,55 @@ function CategoryCard({
           </div>
         </div>
       ) : (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            disabled={busy || plan.stuck.length > 0}
-            onClick={() => setArmed('split')}
-            className={brick}
-          >
-            Rozdělit podle kategorií
-          </button>
-          <button type="button" disabled={busy} onClick={() => setArmed('keep')} className={plain}>
-            Ponechat jako jednu nemovitost
-          </button>
-          {plan.stuck.length > 0 && (
-            <span className="text-[0.75rem] text-[var(--color-brick)]">{stuckSentence(plan)}</span>
-          )}
-        </div>
+        <>
+          <p className="mt-3 text-[0.75rem] text-[var(--color-ink-2)] tabular-nums">
+            {lettersLine(plan)}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy || withheld != null}
+              onClick={() => setArmed('split')}
+              className={brick}
+            >
+              Rozdělit podle písmen
+            </button>
+            <button type="button" disabled={busy} onClick={() => setArmed('keep')} className={plain}>
+              Ponechat jako jednu nemovitost
+            </button>
+            {withheld && (
+              <span
+                className={`text-[0.75rem] ${
+                  stuck.length > 0 ? 'text-[var(--color-brick)]' : 'text-[var(--color-ink-3)]'
+                }`}
+              >
+                {withheld}
+              </span>
+            )}
+          </div>
+        </>
       )}
     </li>
   );
 }
 
-/* One side: its ads as cards with their own words under each, its contentless
- * records as one muted line each. */
-function SideSection({ side, member }: { side: CategorySplitSide; member: MemberOf }) {
+/* One side: its ads as cards, each with its letter and its own words under it,
+ * its contentless records as one muted line each. */
+function SideSection({
+  side,
+  member,
+  letters,
+}: {
+  side: CategorySplitSide;
+  member: MemberOf;
+  letters: Letters;
+}) {
   const cards = side.adverts.filter((a) => !a.empty);
   const empties = side.adverts.filter((a) => a.empty);
   return (
     <section aria-label={sideLabel(side)}>
       <h3 className="mb-1.5 text-[0.7rem] uppercase tracking-[0.12em] text-[var(--color-ink-3)]">
-        {sideLabel(side)} · {fmtCount(cards.length)} {inzeratu(cards.length)} ·{' '}
-        {side.kept ? 'zůstává' : 'při rozdělení odejde'}
+        {sideLabel(side)} · {fmtCount(cards.length)} {inzeratu(cards.length)}
       </h3>
       {cards.length > 0 && (
         /* Unfolded: the decision covers every ad, so none hides behind a fold. */
@@ -392,7 +464,7 @@ function SideSection({ side, member }: { side: CategorySplitSide; member: Member
           members={cards.map(member)}
           renderUnder={(m) => {
             const a = cards.find((x) => x.listing_id === m.listing_id);
-            return a ? <AdUnder ad={a} leaving={!side.kept} /> : null;
+            return a ? <AdUnder ad={a} letters={letters} /> : null;
           }}
         />
       )}
@@ -406,12 +478,28 @@ function SideSection({ side, member }: { side: CategorySplitSide; member: Member
   );
 }
 
-function AdUnder({ ad, leaving }: { ad: CategorySplitAdvert; leaving: boolean }) {
+function AdUnder({ ad, letters }: { ad: CategorySplitAdvert; letters: Letters }) {
+  const portal = portalLabel(ad.source) ?? ad.source;
   return (
     <>
-      {ad.unknown && <p className={muted}>kategorie neuvedena — zůstane</p>}
-      {leaving && !ad.splittable && (
-        <p className={muted}>{unmovedReason(ad.detach_outcome ?? '')} — zůstane</p>
+      {rides(ad) ? (
+        <p className={muted}>kategorie neuvedena — bez písmena, zůstane se skupinou, která zůstává</p>
+      ) : (
+        <UnitSelect
+          listingId={ad.listing_id}
+          units={letters.units}
+          count={letters.count}
+          disabled={letters.disabled}
+          onChange={(letter) => letters.onLetter(ad.listing_id, letter)}
+          label={
+            <>
+              Nemovitost<span className="sr-only"> inzerátu {portal} #{ad.listing_id}</span>
+            </>
+          }
+        />
+      )}
+      {saysUnmoved(ad) && (
+        <p className={muted}>Nelze oddělit: {unmovedReason(ad.detach_outcome ?? '')}.</p>
       )}
       <MemberText title={ad.text.title} text={ad.text.description} label={`#${ad.listing_id}`} />
     </>

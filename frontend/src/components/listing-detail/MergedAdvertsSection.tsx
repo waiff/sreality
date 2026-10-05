@@ -27,13 +27,14 @@
  * names every advert the page shows, so a newcomer the lane merged in meanwhile
  * refuses it (`stale`) instead of being ruled. */
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ImageCarousel from '@/components/ImageCarousel';
 import MemberText from '@/components/autodedup/MemberText';
 import { MissingPhotoTile } from '@/components/autodedup/ListingMini';
+import SplitPlanLines, { priceLabel } from '@/components/autodedup/SplitPlanLines';
 import { UnitSelect, type UnitMap } from '@/components/autodedup/UnitSplit';
 import { SectionLabel } from '@/components/section';
 import {
@@ -47,7 +48,7 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { fetchListingBroker } from '@/lib/brokers';
-import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtFloor } from '@/lib/format';
+import { fmtArea, fmtCount, fmtDateSlash, fmtFloor } from '@/lib/format';
 import { taggedImageUrls, useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { imageSrc } from '@/lib/imageUrl';
 import { propertyPath } from '@/lib/listingUrl';
@@ -57,8 +58,8 @@ import {
   mergeOriginLabel,
   mergedAdvertsKeys,
   refreshAfterSplit,
+  saysUnmoved,
   splitPlan,
-  stateStays,
   unitLanding,
   unmovedReason,
   type SplitPlan,
@@ -319,11 +320,6 @@ export default function MergedAdvertsSection({
   );
 }
 
-function priceLabel(price: number | null, categoryType: string | null | undefined): string {
-  if (price == null) return 'cena neuvedena';
-  return categoryType === 'pronajem' ? `${fmtCzk(price)} / měs` : fmtCzk(price);
-}
-
 function MergedAdvertRow({
   source,
   detail,
@@ -350,14 +346,8 @@ function MergedAdvertRow({
   useEffect(() => {
     if (opened) rowRef.current?.scrollIntoView?.({ block: 'start' });
   }, [opened]);
-  /* Why an advert cannot leave. Said of neither a lone advert (nothing to leave)
-   * nor the last own one: the letters keep its group on the property. */
-  const unmoved =
-    originRead?.origin &&
-    !originRead.origin.splittable &&
-    !SAYS_NOTHING.has(originRead.origin.detach_outcome ?? '')
-      ? originRead.origin
-      : null;
+  /* Why an advert cannot leave. */
+  const unmoved = originRead?.origin && saysUnmoved(originRead.origin) ? originRead.origin : null;
   const panelId = `merged-advert-${source.id}`;
   const portal = portalLabel(source.source) ?? source.source;
   const facts = [
@@ -663,8 +653,6 @@ function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
   );
 }
 
-const SAYS_NOTHING = new Set(['not_merged', 'last_native']);
-
 const samePartition = (a: SplitStatement, b: SplitStatement): boolean =>
   JSON.stringify([a.adverts, a.separate]) === JSON.stringify([b.adverts, b.separate]);
 
@@ -697,7 +685,6 @@ function SplitPanel({
   onSend: () => void;
   onCancel: () => void;
 }) {
-  const groups = [plan.kept, ...plan.leaving].sort((a, b) => a.letter.localeCompare(b.letter));
   /* The record stays with the own adverts, which need not be the primary one's group. */
   const primaryLeaves = plan.leaving.find((g) => g.listingIds.includes(canonicalListingId));
   return (
@@ -706,35 +693,7 @@ function SplitPanel({
       aria-label="Rozdělení nemovitosti"
       className="mt-3 space-y-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2"
     >
-      <ul className="space-y-0.5 text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
-        {groups.map((g) => (
-          <li key={g.letter}>
-            <span className="font-mono font-medium text-[var(--color-ink)]">{g.letter}</span> —{' '}
-            {g === plan.kept ? (
-              <>
-                zůstává v nemovitosti <span className="font-mono tabular-nums">#{propertyId}</span>
-              </>
-            ) : (
-              'odejde jako jedna nemovitost'
-            )}
-            :{' '}
-            {g.listingIds.map((id, i) => (
-              <Fragment key={id}>
-                {i > 0 && ', '}
-                <span className="text-[0.68rem] tracking-[0.06em] uppercase">{portalOf(id)}</span>{' '}
-                <span className="font-mono tabular-nums" title={`inzerát #${id}`}>
-                  {priceOf(id)}
-                </span>
-              </Fragment>
-            ))}
-          </li>
-        ))}
-      </ul>
-      <p className="text-[0.72rem] leading-snug text-[var(--color-ink-2)]">
-        Různá písmena = různé nemovitosti: každá dvojice inzerátů napříč písmeny se uloží jako
-        „různé“ a dostane trvalý zákaz spojení; inzeráty se stejným písmenem zůstanou spolu jako
-        jedna nemovitost. {stateStays(propertyId)}
-      </p>
+      <SplitPlanLines plan={plan} propertyId={propertyId} portalOf={portalOf} priceOf={priceOf} />
       {primaryLeaves && (
         <p className="text-[0.72rem] leading-snug text-[var(--color-ink)]">
           Hlavní inzerát odejde se skupinou{' '}

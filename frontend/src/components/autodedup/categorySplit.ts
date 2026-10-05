@@ -1,15 +1,16 @@
-/* AUTODEDUP · the category review's statements and sentences (E937), pure.
+/* AUTODEDUP · the category review's letters, statements and sentences (E937), pure.
  *
  * The server says which ads can be one property (the SIDES, rule 15's one
- * definition) and which side is the survivor of a split (`kept`: most of the
- * property's own ads, the side `toolkit/property_split._keeper` leaves the
- * property's number and curation with).
- * This file turns one card into the two statements its buttons send
- * (`POST /properties/{id}/split`, E919) and the sentence each confirm shows. */
+ * definition). A side can still bundle two flats, so every ad carries a LETTER,
+ * as on the property page: one letter is one property. The letters start one
+ * per side, so an untouched card states exactly the split by category, and they
+ * become the split statement through the property page's own `splitPlan`
+ * (`POST /properties/{id}/split`, E919). */
 
 import type { CategorySplit, CategorySplitAdvert, CategorySplitSide, SplitStatement } from '@/lib/api';
+import { UNIT_LETTERS, type UnitMap } from '@/components/autodedup/UnitSplit';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
-import { unmovedReason } from '@/lib/mergedAdverts';
+import { splitPlan, unmovedReason, type SplitPlan } from '@/lib/mergedAdverts';
 
 /* A request per ten properties: one property can hold thirty ads, and each ad
  * brings its text and twelve photos. */
@@ -41,71 +42,62 @@ export function cardState(item: CategorySplit): CardState {
   return item.confirmed ? 'kept' : 'open';
 }
 
-export function keptSide(item: CategorySplit): CategorySplitSide | undefined {
-  return item.groups.find((g) => g.kept) ?? item.groups[0];
+const everyAd = (item: CategorySplit) => item.groups.flatMap((g) => g.adverts);
+
+/* Never a side of its own (a contentless record, or a category unknown): it
+ * takes no letter and goes with the group that stays. */
+export const rides = (a: CategorySplitAdvert): boolean => a.empty || a.unknown;
+
+/* The letters an untouched card starts from: one per side, in display order. */
+export function defaultLetters(item: CategorySplit): UnitMap {
+  const units: UnitMap = {};
+  item.groups.forEach((g, i) => {
+    for (const a of g.adverts) if (!rides(a)) units[a.listing_id] = UNIT_LETTERS[i] ?? 'A';
+  });
+  return units;
 }
 
-export interface CategoryPlan {
-  statement: SplitStatement;
-  /* Each side that leaves: the ads the split moves, and the ones it cannot. */
-  leaving: { side: CategorySplitSide; movers: CategorySplitAdvert[]; stuck: CategorySplitAdvert[] }[];
-  /* The ads of leaving sides the split cannot move. One is enough to withhold the
-   * split: it would stay behind and be ruled "různé" from the ads of its own side. */
+export interface LetterPlan {
+  plan: SplitPlan;
+  /* The ads of a leaving group the split cannot move. One is enough to withhold
+   * the split: it would stay behind, ruled "různé" from its own group. */
   stuck: CategorySplitAdvert[];
 }
 
-const everyAd = (item: CategorySplit) => item.groups.flatMap((g) => g.adverts).map((a) => a.listing_id);
+/* The letters as the split statement, through `splitPlan` (`own`: no merge brought
+ * the ad). The riders take the letter of the group that stays, read off the
+ * lettered ads first, so every ad is named in `adverts` and none rides out. */
+export function letterPlan(item: CategorySplit, units: UnitMap): LetterPlan {
+  const ads = everyAd(item);
+  const own = new Set(ads.filter((a) => a.origin_property_id == null).map((a) => a.listing_id));
+  const lettered = ads.filter((a) => !rides(a)).map((a) => a.listing_id);
+  const stays = splitPlan(lettered, units, own, item.canonical_listing_id).kept.letter;
+  const all: UnitMap = { ...units };
+  for (const a of ads) if (rides(a)) all[a.listing_id] = stays;
+  const plan = splitPlan(ads.map((a) => a.listing_id), all, own, item.canonical_listing_id);
+  const leaving = new Set(plan.leaving.flatMap((g) => g.listingIds));
+  return { plan, stuck: ads.filter((a) => leaving.has(a.listing_id) && !a.splittable) };
+}
 
-/* "Rozdělit podle kategorií": every side but the kept one leaves whole, as one
- * unit. The split is offered only while every ad of every leaving side can move
- * (`stuck` is empty): an ad left behind would be ruled "různé" from its own side. */
-export function categorySplitPlan(item: CategorySplit): CategoryPlan {
-  const leaving = item.groups
-    .filter((g) => !g.kept)
-    .map((side) => ({
-      side,
-      movers: side.adverts.filter((a) => a.splittable),
-      stuck: side.adverts.filter((a) => !a.splittable),
-    }));
-  return {
-    statement: {
-      adverts: everyAd(item),
-      separate: leaving.filter((l) => l.movers.length > 0).map((l) => l.movers.map((a) => a.listing_id)),
-      keep_together: false,
-    },
-    leaving,
-    stuck: leaving.flatMap((l) => l.stuck),
-  };
+/* Why "Rozdělit podle písmen" is not offered, or null when it is. */
+export function splitWithheld({ plan, stuck }: LetterPlan): string | null {
+  if (plan.leaving.length === 0) return 'Všechny inzeráty mají stejné písmeno, není co rozdělit.';
+  if (stuck.length === 0) return null;
+  const each = stuck.map((a) => `#${a.listing_id} nejde oddělit (${unmovedReason(a.detach_outcome ?? '')})`);
+  return `Rozdělit nelze: ${each.join('; ')}.`;
+}
+
+/* The letters as they stand, "A zůstává (6) · B odejde (2)". */
+export function lettersLine(plan: SplitPlan): string {
+  return [plan.kept, ...plan.leaving]
+    .sort((a, b) => a.letter.localeCompare(b.letter))
+    .map((g) => `${g.letter} ${g === plan.kept ? 'zůstává' : 'odejde'} (${g.listingIds.length})`)
+    .join(' · ');
 }
 
 /* "Ponechat jako jednu nemovitost": nothing leaves, every pair is ruled "stejné". */
 export function keepStatement(item: CategorySplit): SplitStatement {
-  return { adverts: everyAd(item), separate: [], keep_together: true };
-}
-
-const tag = (a: CategorySplitAdvert) => `#${a.listing_id} (${a.source})`;
-
-export function splitSentence(item: CategorySplit, plan: CategoryPlan): string {
-  const kept = keptSide(item);
-  const parts = plan.leaving
-    .filter((l) => l.movers.length > 0)
-    .map((l) => `oddělit ${sideLabel(l.side)} jako jednu nemovitost: ${l.movers.map(tag).join(' + ')}`);
-  if (kept) {
-    parts.push(
-      `na #${item.property_id} zůstane ${sideLabel(kept)} ` +
-        `(${kept.adverts.map((a) => `#${a.listing_id}`).join(', ')}) ` +
-        'i se záznamem nemovitosti (poznámky, štítky, karta v pipeline)',
-    );
-  }
-  return `Plán: ${parts.join(' · ')}`;
-}
-
-/* Why the split is withheld: each ad of a leaving side that cannot move. */
-export function stuckSentence(plan: CategoryPlan): string {
-  const each = plan.stuck.map(
-    (a) => `#${a.listing_id} nejde oddělit (${unmovedReason(a.detach_outcome ?? '')})`,
-  );
-  return `Rozdělit nelze: ${each.join('; ')}.`;
+  return { adverts: everyAd(item).map((a) => a.listing_id), separate: [], keep_together: true };
 }
 
 /* The clash in the side headings' words, "Prodej · byt × Pronájem · byt". */

@@ -1,10 +1,10 @@
-/* The merged-adverts section on the property page and the proposed-splits page:
- * their query keys, their words for a merge's origin, a split's outcome and where
- * a unit landed, and the refresh after a split. Both write through ONE route,
- * `POST /properties/{id}/split` (E919), and both state a whole partition in one
- * call: the property page as letters over its adverts (`splitPlan` — every letter
- * group but the one keeping the record leaves as one property), a proposal card
- * as ticks. */
+/* The merged-adverts section on the property page, the proposed-splits page and
+ * the category review: their query keys, their words for a merge's origin, a
+ * split's outcome and where a unit landed, and the refresh after a split. All
+ * write through ONE route, `POST /properties/{id}/split` (E919), and each states
+ * a whole partition in one call: the property page and the category review as
+ * letters over the adverts (`splitPlan` — every letter group but the one keeping
+ * the record leaves as one property), a proposal card as ticks. */
 
 import type { QueryClient } from '@tanstack/react-query';
 
@@ -65,6 +65,13 @@ export function unmovedReason(outcome: string): string {
   return UNMOVED[outcome] ?? outcome;
 }
 
+/* Whether an advert's row says why it cannot leave: never of a lone advert
+ * (nothing to leave) nor of the last own one (the letters keep its group on the
+ * property). */
+export function saysUnmoved(a: { splittable: boolean; detach_outcome: string | null }): boolean {
+  return !a.splittable && !['not_merged', 'last_native'].includes(a.detach_outcome ?? '');
+}
+
 /* What a split never moves: the operator's state is the property record's (rules 18, 22). */
 export function stateStays(propertyId: number): string {
   return `Poznámky, štítky, kolekce a zařazení v pipeline zůstanou u nemovitosti #${propertyId}.`;
@@ -84,7 +91,8 @@ export interface SplitPlan {
   leaving: PlanGroup[];
 }
 
-/* The property page's letters as the ONE split statement. The letters say which
+/* The letters as the ONE split statement: the property page's, and the category
+ * review's (E937), whose letters start one per category. The letters say which
  * adverts are one property; they do not say which one stays: the server keeps
  * the record with the unit not sent in `separate`, and refuses (`cannot_move`
  * `last_native`) when that unit holds none of the property's own adverts while
@@ -96,7 +104,7 @@ export function splitPlan(
   adverts: readonly number[],
   units: UnitMap,
   own: ReadonlySet<number>,
-  canonicalListingId: number,
+  canonicalListingId: number | null,
 ): SplitPlan {
   const groups: PlanGroup[] = distinctUnits(
     adverts.map((id) => ({ listing_id: id })),
@@ -109,7 +117,7 @@ export function splitPlan(
   let kept: PlanGroup | undefined;
   for (const g of groups) if (owned(g) > (kept ? owned(kept) : 0)) kept = g;
   kept ??=
-    groups.find((g) => g.listingIds.includes(canonicalListingId)) ??
+    groups.find((g) => canonicalListingId != null && g.listingIds.includes(canonicalListingId)) ??
     groups[0] ??
     { letter: 'A', listingIds: [] };
   const leaving = groups.filter((g) => g !== kept);
