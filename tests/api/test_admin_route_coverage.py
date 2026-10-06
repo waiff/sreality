@@ -48,7 +48,7 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
 # mechanics are listed by their own sub-paths — "/properties/merge" covers /merge,
 # /merges and /merged.
 _ADMIN_PREFIXES: tuple[str, ...] = (
-    "/admin", "/properties/merge", "/properties/assets", "/labeling",
+    "/admin", "/properties/merge", "/labeling",
     "/outreach", "/broker-review", "/skill-refinements", "/location",
     "/autodedup",
 )

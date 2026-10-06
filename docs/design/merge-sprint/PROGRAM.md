@@ -2,8 +2,8 @@
 
 **Program document. This file is the program's source of truth.**
 Status: decisions taken by the operator in a design interview on 2026-10-02/03 (four rounds, 48
-questions, Q1 left blank (MS2); the later Q49 and Q51: §8). **Plan awaiting approval; only W0 was
-approved to build, and it is live (PR #1695).** Rules MS1–MS23 are binding once approved and
+questions, Q1 left blank (MS2); the later Q49 and Q51: §8). **Approved by the operator on 2026-10-06 (PR
+#1693); the build is under way, wave by wave (roadmap/merge-sprint.md).** Rules MS1–MS23 are binding once approved and
 supersede any design text, code comment or docstring that differs. Design detail per wave (inputs,
 not rules) is kept outside the repo in `~/merge-sprint-artifacts/`: `wf2/` designs and their
 skeptics, `wf3/` the non-interference check, `wf5/` and `wf7/` this plan's two reviews, `wf6/` the

@@ -196,16 +196,13 @@ def test_a_detach_gives_a_property_ending_on_inactive_its_active_state_back(cur)
 def test_merging_then_detaching_every_advert_restores_every_original_property(cur):
     """W3's gate, executed: three set merges, one built on another, then a detach of every
     advert a merge moved; every original property_id is back, every property active, no ledger
-    row live, and the asset link the merges carried 4 -> 3 -> 0 is back on 4 alone."""
+    row live."""
     props = [_property(cur) for _ in range(6)]
     adverts = [_advert(cur, pid, source=src, price=5_000_000)
                for pid, src in zip(props, ("sreality", "idnes", "remax", "bazos", "maxima",
                                            "realitymix"))]
     for pid in props:
         _recompute(cur, pid)
-    cur.execute("INSERT INTO assets DEFAULT VALUES RETURNING id")
-    asset = int(cur.fetchone()[0])
-    cur.execute("UPDATE properties SET asset_id = %s WHERE id = %s", (asset, props[4]))
     original = _placed(cur, adverts)
     _merge(cur, props[:3])
     _merge(cur, props[3:5], source="autodedup")
@@ -221,9 +218,6 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     cur.execute("SELECT count(*) FROM property_merge_events "
                 "WHERE listing_ref_id = ANY(%s) AND undone_at IS NULL", (adverts,))
     assert cur.fetchone()[0] == 0
-    cur.execute("SELECT id, asset_id FROM properties WHERE id = ANY(%s) AND asset_id IS NOT NULL",
-                (props,))
-    assert cur.fetchall() == [(props[4], asset)]
 
 
 def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_to_it(cur):

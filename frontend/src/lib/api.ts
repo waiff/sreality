@@ -3042,36 +3042,6 @@ export const mergePropertySet = (
     jwt: true,
   });
 
-/* Asset links (migration 224): group properties that are the same physical
- * building across category cohorts WITHOUT collapsing them — the cross-category
- * sameness a merge correctly refuses. Both rows + both category facets survive. */
-export interface AssetLinkResult {
-  data: {
-    asset_id: number;
-    member_property_ids: number[];
-    newly_linked_property_ids: number[];
-    dissolved_asset_ids: number[];
-  };
-}
-
-export const linkAssetProperties = (
-  propertyIds: number[],
-  note?: string,
-): Promise<AssetLinkResult> =>
-  request<AssetLinkResult>('/properties/assets/link', {
-    method: 'POST',
-    json: { property_ids: propertyIds, note: note ?? null },
-    jwt: true,
-  });
-
-export const unlinkAssetProperty = (
-  propertyId: number,
-): Promise<{ data: { asset_id: number; asset_dissolved: boolean } }> =>
-  request<{ data: { asset_id: number; asset_dissolved: boolean } }>(
-    '/properties/assets/unlink',
-    { method: 'POST', json: { property_id: propertyId }, jwt: true },
-  );
-
 /* Browse the RESULTS of merging: already-merged properties whose child-listing
  * count (`source_count`) is in [min_listings, max_listings], biggest groups
  * first. `max_listings`/`category_main` omitted => no upper bound / any type

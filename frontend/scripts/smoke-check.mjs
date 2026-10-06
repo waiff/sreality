@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Production smoke-check: logs into the live SPA as the dedicated admin test
 // account, confirms Browse renders, and opens+closes Merge mode without ever
-// touching a card checkbox — the two mutating buttons (Merge, Link as same
-// building) stay `disabled` until >=2 cards are selected, so this script can
+// touching a card checkbox — the mutating button (Merge) stays `disabled`
+// until >=2 cards are selected, so this script can
 // never trigger a production write. See CLAUDE.md "Autonomy and the safety
 // net" and the `prod-smoke-check-accounts-and-recipe` memory.
 //
@@ -272,15 +272,13 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
     step('clicked "Merge mode" (local state only, no network call)', true);
 
     const mergeBtn = page.getByRole('button', { name: /^Merge($| \d)/ });
-    const linkBtn = page.getByRole('button', { name: 'Link as same building', exact: true });
     await mergeBtn.waitFor({ state: 'visible', timeout: 5000 });
 
     const mergeDisabled = await mergeBtn.isDisabled();
-    const linkDisabled = await linkBtn.isDisabled();
     step(
-      'mutating buttons disabled pre-selection (no cards clicked)',
-      mergeDisabled && linkDisabled,
-      `merge disabled=${mergeDisabled}, link disabled=${linkDisabled}`
+      'mutating button disabled pre-selection (no cards clicked)',
+      mergeDisabled,
+      `merge disabled=${mergeDisabled}`
     );
 
     await page.screenshot({ path: path.join(SHOT_DIR, '03-merge-mode-active.png') });

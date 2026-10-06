@@ -257,9 +257,8 @@ name: "AUTODEDUP: engine lane"
 #
 #   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges and
 #             writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json. Per
-#             group it names the survivor (the one asset-linked property if exactly one is
-#             linked; else the property with the most listings, a tie going to the oldest
-#             first_seen_at, then the lowest id) and the properties that would retire into it,
+#             group it names the survivor (the oldest first_seen_at, then the lowest id) and the
+#             properties that would retire into it,
 #             or records why the group is refused. Every check reads EVERY listing the merge
 #             would put on the survivor, not only the members: a member with no property yet,
 #             a property not active, an operator negative (a pair verdict or must-not-link
@@ -267,8 +266,8 @@ name: "AUTODEDUP: engine lane"
 #             types or incompatible categories (the chokepoint's own helper), a listing
 #             outside the scope (inside = LOCATED in a scope block by its live listing_location
 #             obec_kod / cast_obce_kod, never the engine's block key; out-of-scope groups are
-#             counted per reason in the summary), two properties the operator asset-linked
-#             (asset_linked_units), a property the engine split across two groups, a property
+#             counted per reason in the summary), a property the engine split across two groups,
+#             a property
 #             carrying a listing no group holds (unless this engine already merged it there
 #             with a member), or a chokepoint refusal on an earlier run. An undo of an engine
 #             merge, by anyone, refuses nothing: the operator's rulings are the bans (E934).

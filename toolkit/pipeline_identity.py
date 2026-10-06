@@ -41,8 +41,8 @@ if TYPE_CHECKING:  # property_carriers imports this module at runtime
 # (0) snapshot BOTH sides' pre-merge cards so a detach can restore losslessly.
 _SNAPSHOT_SQL = (
     "INSERT INTO property_pipeline_events "
-    "  (account_id, property_id, to_stage_id, reason, merge_group_id, note_snapshot) "
-    "SELECT account_id, property_id, stage_id, 'merge_absorb', %(g)s, note "
+    "  (account_id, property_id, to_stage_id, reason, merge_group_id) "
+    "SELECT account_id, property_id, stage_id, 'merge_absorb', %(g)s "
     "FROM property_pipeline WHERE property_id IN (%(r)s, %(s)s)"
 )
 
@@ -63,7 +63,7 @@ _MOVE_IF_EMPTY_SQL = (
 _KEEP_MOST_ADVANCED_SQL = (
     "UPDATE property_pipeline s "
     "SET stage_id = r.stage_id, board_position = r.board_position, "
-    "    note = COALESCE(s.note, r.note), entered_stage_at = r.entered_stage_at, "
+    "    entered_stage_at = r.entered_stage_at, "
     "    updated_at = now() "
     "FROM property_pipeline r, pipeline_stages ss, pipeline_stages rs "
     "WHERE s.property_id = %(s)s AND r.property_id = %(r)s "
@@ -82,8 +82,8 @@ _DROP_RETIRED_SQL = "DELETE FROM property_pipeline WHERE property_id = %(r)s"
 # Restore per (account_id, property_id). Bare ON CONFLICT: no inference target, so it is
 # valid against both the (property_id) PK and 295's (account_id, property_id) PK.
 _RESTORE_SQL = (
-    "INSERT INTO property_pipeline (account_id, property_id, stage_id, note) "
-    "SELECT e.account_id, e.property_id, e.to_stage_id, e.note_snapshot "
+    "INSERT INTO property_pipeline (account_id, property_id, stage_id) "
+    "SELECT e.account_id, e.property_id, e.to_stage_id "
     "FROM property_pipeline_events e "
     "WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
     "  AND e.property_id = %(r)s AND e.to_stage_id IS NOT NULL "
