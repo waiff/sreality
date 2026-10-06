@@ -13,7 +13,7 @@ Carrier invariants:
     3, `.claude/skills/database/references/tenancy.md`): the service role bypasses RLS. Pipeline
     and Dismissals name `account_id`; a `CurationTable` is partitioned through its keys, ids one
     account owns (collection_id, tag_id, subscription_id), so one whose keys are not
-    account-owned must add `account_id` to them. The asset link is shared data, no account.
+    account-owned must add `account_id` to them.
   - It never deletes history. The one sanctioned delete is a SET table's collision collapse.
   - `on_merge` runs once per retired property, after the merge ledger row and the advert
     re-point and before the retire; `on_detach` only when a detach reactivated `restored`,
@@ -76,94 +76,6 @@ class Carrier(Protocol):
     def on_merge(self, cur: psycopg.Cursor, step: MergeStep) -> None: ...
 
     def on_detach(self, cur: psycopg.Cursor, step: DetachStep) -> None: ...
-
-
-def _ledger_source(source: MergeSource) -> str:
-    # asset_membership_events.source's CHECK (migration 224) allows only these two.
-    return "operator" if source == "operator" else "auto"
-
-
-# Decision 17: the one asset link moves onto the survivor, never left on a merged_away row; each
-# membership change is logged as `toolkit.asset_identity` logs a link or an unlink, the reason
-# naming the merge group so a detach can give the link back (`_RESTORE_ASSET_LINK_SQL`).
-_CARRY_ASSET_LINK_SQL = """
-WITH moved AS (
-    UPDATE properties
-    SET asset_id = CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END
-    WHERE id IN (%(survivor)s::bigint, %(retired)s::bigint)
-      AND asset_id IS DISTINCT FROM
-          CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END
-    RETURNING id, asset_id
-)
-INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
-SELECT %(asset)s::bigint, m.id,
-       CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
-       %(reason)s::text, %(source)s::text
-FROM moved m
-"""
-
-# The carry's inverse, when a detach reactivates the property a merge unlinked: the link it lost
-# (unless its asset dissolved since) comes back while a survivor on the advert's path (`path`, the
-# merges it undoes: `merges`) still holds it, and leaves each such survivor one of those merges
-# linked it to — so detaches in any order give every link back to where it was.
-_RESTORE_ASSET_LINK_SQL = """
-WITH carried AS (
-    SELECT e.asset_id FROM asset_membership_events e
-    JOIN assets a ON a.id = e.asset_id AND a.status = 'active'
-    WHERE e.property_id = %(restored)s::bigint AND e.action = 'unlinked'
-      AND e.reason = %(merge)s::text
-    ORDER BY e.id DESC LIMIT 1
-), holders AS (
-    SELECT p.id, EXISTS (
-             SELECT 1 FROM asset_membership_events s
-             WHERE s.property_id = p.id AND s.asset_id = p.asset_id AND s.action = 'linked'
-               AND s.reason = ANY(%(merges)s::text[])) AS carried_here
-    FROM properties p JOIN carried c ON p.asset_id = c.asset_id
-    WHERE p.id = ANY(%(path)s::bigint[])
-), moved AS (
-    UPDATE properties p
-    SET asset_id = CASE WHEN p.id = %(restored)s::bigint THEN c.asset_id END
-    FROM carried c
-    WHERE EXISTS (SELECT 1 FROM holders)
-      AND ((p.id = %(restored)s::bigint AND p.asset_id IS NULL)
-           OR p.id IN (SELECT h.id FROM holders h WHERE h.carried_here))
-    RETURNING p.id, p.asset_id, c.asset_id AS carried
-)
-INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
-SELECT m.carried, m.id, CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
-       %(detach)s::text, %(source)s::text
-FROM moved m
-"""
-
-
-class AssetLink:
-    """Decision 17's one link per property: carried onto the survivor, given back (chain-aware)
-    when a detach reactivates the property the merge unlinked."""
-
-    name = "asset_link"
-    columns = (("properties", "asset_id"), ("asset_membership_events", "property_id"))
-    # The row is already locked by the merge's set lock.
-    RETIRED_ASSET_SQL = "SELECT asset_id FROM properties WHERE id = %(retired)s"
-    sql = (RETIRED_ASSET_SQL, _CARRY_ASSET_LINK_SQL, _RESTORE_ASSET_LINK_SQL)
-
-    def on_merge(self, cur: psycopg.Cursor, step: MergeStep) -> None:
-        cur.execute(self.RETIRED_ASSET_SQL, {"retired": step.retired})
-        row = cur.fetchone()
-        if row is None or row[0] is None:
-            return
-        cur.execute(_CARRY_ASSET_LINK_SQL, {
-            "survivor": step.survivor, "retired": step.retired, "asset": int(row[0]),
-            "reason": f"merge {step.group}", "source": _ledger_source(step.source),
-        })
-
-    def on_detach(self, cur: psycopg.Cursor, step: DetachStep) -> None:
-        first = step.undo[0]
-        cur.execute(_RESTORE_ASSET_LINK_SQL, {
-            "restored": step.restored, "merge": f"merge {first.group}",
-            "merges": [f"merge {h.group}" for h in step.undo],
-            "path": [h.survivor for h in step.undo], "detach": f"detach {first.group}",
-            "source": _ledger_source(step.source),
-        })
 
 
 class CurationTable:
@@ -296,7 +208,6 @@ class Dismissals:
 
 
 PROPERTY_CARRIERS: tuple[Carrier, ...] = (
-    AssetLink(),
     CurationTable("collection_properties", ("collection_id",)),
     CurationTable("property_tags", ("tag_id",)),
     CurationTable("property_notes"),
@@ -308,12 +219,15 @@ PROPERTY_CARRIERS: tuple[Carrier, ...] = (
 _ENGINE_HISTORY = "history of the removed decision engine, never consulted (rule 15)"
 _AUTODEDUP_HISTORY = "an engine or operator ledger: history (D7)"
 _MERGE_LEDGER = "the chokepoint's own ledger: history, replayed by a detach"
+_ASSET_LINKS_REMOVED = "dropped in W6; the asset-link feature was removed in W1b"
 
 NOT_CARRIED: dict[tuple[str, str], str] = {
     ("listings", "property_id"):
         "the identity link itself: the writers move it (merge re-point, detach move)",
     ("properties", "merged_into"):
         "the merge's own pointer: set by the retire, cleared by the reactivation",
+    ("properties", "asset_id"): _ASSET_LINKS_REMOVED,
+    ("asset_membership_events", "property_id"): _ASSET_LINKS_REMOVED,
     ("property_merge_events", "survivor_property_id"): _MERGE_LEDGER,
     ("property_merge_events", "retired_property_id"): _MERGE_LEDGER,
     ("property_merge_events", "prev_property_id"): _MERGE_LEDGER,

@@ -1340,15 +1340,14 @@ renumber.** Navigate by area:
     rules are not to be invented.
     **The link mechanics: one merge, one undo.** `toolkit/property_identity.py` is the single
     chokepoint. `merge_property_set` is the ONE merge (operator and engine alike): it refuses a
-    non-active property, a category clash between ANY two members, two DIFFERENT asset links,
-    or (the engine only) two linked units of one asset (`AssetLinkConflict`), keeps the OLDEST
+    non-active property or a category clash between ANY two members, keeps the OLDEST
     record (`first_seen_at`, then the lowest id — decision 17, `survivor_of`), and merges the
     rest under ONE `merge_group_id` in one transaction. One lock covers the whole set (id order)
     and one gate (`_gate_set`) refuses it, the category clash a typed `CategoryClash`; then each
     retired property goes through the private `_merge_pair`: one `property_merge_events` row per
     advert it holds, the `listings.property_id` re-point, every carrier in `PROPERTY_CARRIERS`
-    order (`toolkit/property_carriers.py`: the one asset link, collections, tags, notes,
-    dispatches, the pipeline, dismissals — rules 18, 22, decision 17), and the soft-retire
+    order (`toolkit/property_carriers.py`: collections, tags, notes,
+    dispatches, the pipeline, dismissals — rules 18, 22), and the soft-retire
     (`merged_away`). Then an operator merge rules the ticked cards "same", and
     `properties_changed` (`scripts/recompute_property_stats.py`, the dirty drain's own
     after-step: the scoped rollup, the Browse row, the broker queue) runs ONCE over the survivor
@@ -1359,7 +1358,7 @@ renumber.** Navigate by area:
     to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
     property if merged away INTO that merge's survivor (else the advert stays:
     `origin_moved_on`, read under the lock) and then running every carrier's inverse in REVERSE
-    list order (the pipeline card and the carried asset link come back), stamping its ledger
+    list order (the pipeline card comes back), stamping its ledger
     rows `undone_at`/`undone_by` (never deleted). Then, for the operator, the rulings ONCE
     (`_rule_detached`: each moved advert `different` from every advert still on the property it
     left after ALL moves, never from another that moved in the call), then `properties_changed`
@@ -1376,15 +1375,14 @@ renumber.** Navigate by area:
     (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
     property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
     detach, `unapply`'s included, can leave an active property with no advert. No carrier
-    runs on a native split: operator state, the pipeline card and the asset link stay on the
+    runs on a native split: operator state and the pipeline card stay on the
     property left (rules 18, 22).
     Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
     undo covers both kinds. A group comes apart as
     one `detach_listings` call scoped to it (`merge_group_id=`: only while that merge is the newest to
     move the advert, else a conflict left in place) — `unmerge_group`,
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
-    back every original property and asset link in any order (one asset held twice in a chained
-    operator merge excepted; tests/test_detach_listing.py, executed in
+    back every original property in any order (tests/test_detach_listing.py, executed in
     tests/test_merge_safety_live.py). Callers serialize per-property on the row locks.
     **A merge writes no status event (migration 559).** The status-history trigger
     (migration 392) skips the retirement (`is_active = false` set with `merged_away`), and
@@ -1411,9 +1409,7 @@ renumber.** Navigate by area:
     (E925), the engine's `pair_veto` its pair, its cluster invariant and `apply._set_reasons`
     every pair of the group's categories (the apply plan reads every ad the merge would move).
     This guard is deliberately *at the merge*, not in the caller, so no future decision layer
-    can route around it. It is distinct from the **asset-link** grain (migration 224), which
-    links genuinely *different* units in one building (a `byt` and its ground-floor `komercni`
-    shop, a `dum` and a separate parcel beside it) WITHOUT collapsing them into one property.
+    can route around it.
     **Who orders a merge today.** The operator — and, only inside the area its scope row
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`; **`POST /properties/{id}/split`**
@@ -1535,10 +1531,9 @@ renumber.** Navigate by area:
     just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
-    categories, a listing outside the scope — inside = LOCATED in a scope block by its live
+    categories, a listing outside the scope (inside = LOCATED in a scope block by its live
     `listing_location` obec_kod / cast_obce_kod, never the engine's blocking key; out-of-scope
-    groups are counted per reason — (and the merge's own refusal of two **asset-linked**
-    properties is recorded as `asset_linked_units`), a non-active property, a
+    groups are counted per reason), a non-active property, a
     property the engine split across two groups, or a listing no group holds (unless this
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
@@ -1594,8 +1589,8 @@ renumber.** Navigate by area:
     take back the operator's own "různé" (409 `reverses_rulings`), **Přesto uložit**
     (`confirm_retract`). Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
-    nothing from `property_merge_events`. Undo restores listings, pipeline cards and the carried
-    asset link; collections, tags, notes, dispatches and dismissals stay on the property left
+    nothing from `property_merge_events`. Undo restores listings and pipeline cards;
+    collections, tags, notes, dispatches and dismissals stay on the property left
     (rule #18). **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
     ?properties=…` (`autodedup/category_splits.py`, read-only, 1 to 100 ids) puts each named live
     property's ads into SIDES, every two ads of a side passed by `category_clash` (rule 15's one
@@ -1815,7 +1810,7 @@ renumber.** Navigate by area:
     about the real-world property, not one portal's advert, so it is keyed on `property_id`
     and **follows the property across a merge** (a detach leaves it where it is, best-effort).
     `toolkit/property_carriers.py` (`PROPERTY_CARRIERS`, the one ordered list; `NOT_CARRIED` +
-    the census) carries that state inside the merge transaction, in a fixed order: the asset link;
+    the census) carries that state inside the merge transaction, in a fixed order:
     collections, tags, notes AND `notification_dispatches` as `CurationTable`s (SET tables union
     with collision-collapse; APPEND tables move every row); the pipeline (rule #22); then
     dismissals, AFTER the pipeline so a live card lifts its account's dismissal. The private
@@ -1836,9 +1831,8 @@ renumber.** Navigate by area:
     one cached id could create a membership it could then never remove. The two halves of one
     affordance must resolve alike. A write that needs a real target 4xx's on an unresolvable id; a
     remove falls through to the raw id and stays idempotent, because no caller reads the boolean.
-    Resolution is wrong in exactly two places, both enumerated in the rail: the merge route itself
-    (it CREATES survivors) and `properties.asset_id` (a column on the property row: the merge carries it
-    onto the survivor, but a link or an unlink names one row). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
+    Resolution is wrong in exactly one place, enumerated in the rail: the merge route itself
+    (it CREATES survivors). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
     commit message is not one. Adding a
     new property-anchored operator-state table = one `CurationTable(...)` line, or one adapter when
     its collision must not DELETE (history, like dismissals) or it is single-valued (like the
@@ -2302,8 +2296,8 @@ renumber.** Navigate by area:
     a stray click in a 60-card grid, undone the obvious way, silently reset "in pipeline since" and
     every time-in-stage figure the board sorts on. (The transition trail survives in
     `property_pipeline_events`; nothing reads it back. Operator notes are property-grain — rule #18 —
-    and were never at risk: `property_pipeline.note` is a separate column with no writer in any
-    surface.) The confirm therefore names that consequence and points at the terminal stages, which
+    and were never at risk.)
+    The confirm therefore names that consequence and points at the terminal stages, which
     close a deal while KEEPING its record — the data-preserving alternative to deletion. The menu
     also replaced the listing header's own `<select>` + bare ✕, and the Chrome-extension panel gained
     the same confirm on its ✕ (`buildConfirmRow` — one destructive-confirm shape for the whole panel,

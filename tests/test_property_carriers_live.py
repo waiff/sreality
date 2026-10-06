@@ -31,9 +31,9 @@ from toolkit.property_identity import detach_listings, merge_property_set
 
 pytestmark = REQUIRED_DB
 
-# The current-state tables a merge re-points (rule 18, 22, migration 536). The two ledgers it
-# also writes, property_pipeline_events and asset_membership_events, name the retired property
-# by design: a detach replays them.
+# The current-state tables a merge re-points (rule 18, 22, migration 536). The ledger it
+# also writes, property_pipeline_events, names the retired property
+# by design: a detach replays it.
 _CARRIED = (
     "collection_properties",
     "property_tags",
@@ -70,14 +70,12 @@ def _left_on(cur: Any, pid: int) -> dict[str, int]:
     for table in _CARRIED:
         cur.execute(f"SELECT count(*) FROM {table} WHERE property_id = %s", (pid,))
         out[table] = int(cur.fetchone()[0])
-    cur.execute("SELECT count(*) FROM properties WHERE id = %s AND asset_id IS NOT NULL", (pid,))
-    out["properties.asset_id"] = int(cur.fetchone()[0])
     return out
 
 
-def _merged(cur: Any, survivor: int, retired: int, *, source: str = "operator") -> str:
+def _merged(cur: Any, survivor: int, retired: int) -> str:
     """Merge the pair through the public writer; the orphan probe runs on the retired side."""
-    out = merge_property_set(cur.connection, [survivor, retired], source=source,
+    out = merge_property_set(cur.connection, [survivor, retired], source="operator",
                              reason="manual_subset", decided_by=OP)["data"]
     _require((out["survivor_id"], out["retired_ids"]) == (survivor, [retired]),
              f"the seed order did not pick the survivor: {out}")
@@ -86,9 +84,8 @@ def _merged(cur: Any, survivor: int, retired: int, *, source: str = "operator") 
     return str(out["merge_group_id"])
 
 
-def _detached(cur: Any, listing_id: int, origin: int, *, source: str = "operator") -> None:
-    (out,) = detach_listings(cur.connection, [listing_id], decided_by=OP,
-                             source=source)["data"]["adverts"]
+def _detached(cur: Any, listing_id: int, origin: int) -> None:
+    (out,) = detach_listings(cur.connection, [listing_id], decided_by=OP)["data"]["adverts"]
     _require((out["outcome"], out["restored_property_id"], out["reactivated"])
              == ("detached", origin, True), f"the detach did not bring {origin} back: {out}")
 
@@ -322,39 +319,6 @@ def test_dismissals_lift_never_delete_and_follow_the_pipeline(cur, accounts):
 
     _detached(cur, advert, r)
     assert rows() == after, "a detach moved a dismissal back"
-
-
-# --- the asset link ---------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(("source", "ledger"), [("operator", "operator"), ("autodedup", "auto")])
-def test_the_asset_link_follows_and_comes_back(cur, source, ledger):
-    s, r, _s_advert, advert = _pair(cur)
-    # The asset row and its link as toolkit/asset_identity.py writes them.
-    cur.execute("INSERT INTO assets (note, created_by) VALUES (%s, %s) RETURNING id", ("lp", OP))
-    asset = int(cur.fetchone()[0])
-    cur.execute("UPDATE properties SET asset_id = %s WHERE id = %s", (asset, r))
-    cur.execute(
-        "INSERT INTO asset_membership_events "
-        "    (asset_id, property_id, action, reason, source, confidence, created_by) "
-        "VALUES (%s, %s, 'linked', 'lp seed', 'operator', NULL, %s)", (asset, r, OP))
-
-    def links() -> dict[int, int | None]:
-        cur.execute("SELECT id, asset_id FROM properties WHERE id = ANY(%s)", ([s, r],))
-        return {int(pid): aid for pid, aid in cur.fetchall()}
-
-    def logged(reason: str) -> list[tuple[int, str, str]]:
-        cur.execute("SELECT property_id, action, source FROM asset_membership_events "
-                    "WHERE asset_id = %s AND reason = %s ORDER BY property_id", (asset, reason))
-        return [(int(pid), action, src) for pid, action, src in cur.fetchall()]
-
-    group = _merged(cur, s, r, source=source)
-    assert links() == {s: asset, r: None}
-    assert logged(f"merge {group}") == [(s, "linked", ledger), (r, "unlinked", ledger)]
-
-    _detached(cur, advert, r, source=source)
-    assert links() == {s: None, r: asset}
-    assert logged(f"detach {group}") == [(s, "unlinked", ledger), (r, "linked", ledger)]
 
 
 # --- the census, over the replayed schema ---------------------------------------------------

@@ -1,5 +1,5 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
-record survives, one asset link rides onto it and two refuse, ONE group and ONE after-step
+record survives, ONE group and ONE after-step
 (`properties_changed`) per set, every carrier walked per retired property, the operator's cards
 ruled "same"; and migration 560's copy. Over tests/_property_ledger's stateful fake, each carrier
 recorded at the seam."""
@@ -24,7 +24,7 @@ from tests._property_ledger import (  # noqa: F401 — the fixture
 from tests.test_detach_listing import _appended
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import MergeStep
-from toolkit.property_identity import AssetLinkConflict, CategoryClash, MergeError
+from toolkit.property_identity import CategoryClash, MergeError
 
 pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
@@ -53,26 +53,6 @@ def test_the_set_needs_two_active_properties_and_an_operator_merge_an_identity()
         _merge(_Ledger({1: 3}, props={7: "merged_away"}), [3, 7])
     with pytest.raises(MergeError, match="decided_by"):
         _merge(_Ledger({1: 3, 2: 7}), [3, 7], source="operator")
-
-
-def test_the_one_asset_link_rides_onto_the_older_survivor():
-    db = _Ledger({1: 3, 2: 7}, first_seen={7: T0 + timedelta(days=1)}, assets={7: 42})
-    out = _merge(db, [3, 7])
-    assert out["survivor_id"] == 3 and db.assets == {3: 42, 7: None}
-    assert db.sql("INSERT INTO asset_membership_events") == [
-        {"survivor": 3, "retired": 7, "asset": 42,
-         "reason": f"merge {out['merge_group_id']}", "source": "auto"}]
-
-
-def test_two_units_linked_into_one_asset_are_the_operators_to_merge_never_the_engines():
-    """The link is the operator's "different units, do not collapse" (rule 15, E903): the
-    engine is refused; the operator's own merge keeps the one link on the survivor."""
-    held_twice = _Ledger({1: 3, 2: 7}, assets={3: 41, 7: 41})
-    with pytest.raises(AssetLinkConflict):
-        _merge(held_twice, [3, 7])
-    assert held_twice.events == []
-    assert _merge(held_twice, [3, 7], source="operator", decided_by=OP)["survivor_id"] == 3
-    assert held_twice.assets == {3: 41, 7: None}
 
 
 @pytest.mark.parametrize("cats, clash", [
@@ -155,13 +135,6 @@ def test_land_and_a_house_for_rent_and_for_sale_are_still_two_properties():
     assert db.events == []
 
 
-def test_two_different_asset_links_refuse_the_set_before_anything_merges():
-    db = _Ledger({1: 3, 2: 7, 3: 9}, assets={3: 41, 9: 42})
-    with pytest.raises(AssetLinkConflict):
-        _merge(db, [3, 7, 9])
-    assert db.events == [] and ("rollback", None) in db.log
-
-
 def test_the_whole_set_is_brought_current_once():
     """One `properties_changed` over the survivor and every retired id: the rollup (a retired id
     holds no advert, so the recompute skips it), the Browse patch (its row goes) and the broker
@@ -209,22 +182,19 @@ def test_each_retired_property_walks_every_carrier_then_retires():
     names = [c.name for c in carriers.PROPERTY_CARRIERS]
     seen = [(s, p) for s, p in db.log if s.startswith(("INSERT INTO property_merge_events",
                                                          "UPDATE listings SET property_id",
-                                                         "SELECT asset_id FROM properties",
                                                          "carrier:", "UPDATE properties SET"))]
     expected = []
     for rid in (7, 9):
         step = MergeStep(3, rid, group, "autodedup")
         expected += ["ledger", "repoint", *names, f"retire {rid}"]
         assert [e for e in db.carried if e[2].retired == rid] == [
-            ("merge", name, step) for name in names if name != "asset_link"]
+            ("merge", name, step) for name in names]
     labels = []
     for s, p in seen:
         if s.startswith("INSERT INTO property_merge_events"):
             labels.append("ledger")
         elif s.startswith("UPDATE listings SET property_id"):
             labels.append("repoint")
-        elif s.startswith("SELECT asset_id FROM properties"):
-            labels.append("asset_link")
         elif s.startswith("carrier:"):
             labels.append(s.removeprefix("carrier:"))
         else:

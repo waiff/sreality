@@ -199,10 +199,6 @@ def _names() -> list[str]:
     return [c.name for c in PROPERTY_CARRIERS]
 
 
-def test_the_asset_link_runs_first():
-    assert _names()[0] == "asset_link"
-
-
 def test_dismissals_run_after_the_pipeline():
     """The dismissal lift reads the live card the pipeline carry just put on the survivor."""
     assert _names().index("pipeline") < _names().index("dismissals")
@@ -227,7 +223,7 @@ def test_the_status_log_stays_with_its_own_property():
 def test_no_carrier_deletes_history():
     """The one sanctioned delete is a SET table's collision collapse (and the pipeline's
     current-state card, snapshotted to its ledger first); never a ledger or log row."""
-    history = ("property_dismissals", "property_pipeline_events", "asset_membership_events",
+    history = ("property_dismissals", "property_pipeline_events",
                "property_merge_events", "property_status_events", "properties")
     for statement in CARRIER_SQL:
         deleted = re.findall(r"\bDELETE\s+FROM\s+(\w+)", statement, re.I)
@@ -240,8 +236,8 @@ _NAMED = re.compile(r"%\((\w+)\)s")
 
 
 class _StrictCur:
-    def __init__(self, carrier: Carrier, fetch: tuple | None = None) -> None:
-        self.carrier, self.fetch = carrier, fetch
+    def __init__(self, carrier: Carrier) -> None:
+        self.carrier = carrier
         self.declared = {_n(s) for s in carrier.sql}
         self.ran: list[tuple[str, Any]] = []
 
@@ -256,15 +252,12 @@ class _StrictCur:
             assert s.count("%s") == len(params or ()), f"{self.carrier.name}: param count"
         self.ran.append((s, params))
 
-    def fetchone(self) -> tuple | None:
-        return self.fetch
 
-
-def _walk(carrier: Carrier, *, fetch: tuple | None = (41,), source: str = "operator",
-          undo: tuple[Hop, ...] = (Hop(1, G, 10, 20),), left: int = 10) -> _StrictCur:
-    cur = _StrictCur(carrier, fetch)
-    carrier.on_merge(cur, MergeStep(10, 20, G, source))  # type: ignore[arg-type]
-    carrier.on_detach(cur, DetachStep(20, left, undo, source))  # type: ignore[arg-type]
+def _walk(carrier: Carrier, *, undo: tuple[Hop, ...] = (Hop(1, G, 10, 20),),
+          left: int = 10) -> _StrictCur:
+    cur = _StrictCur(carrier)
+    carrier.on_merge(cur, MergeStep(10, 20, G, "operator"))
+    carrier.on_detach(cur, DetachStep(20, left, undo, "operator"))
     return cur
 
 
@@ -273,19 +266,6 @@ def test_every_carrier_runs_only_its_declared_sql_with_its_params_supplied(carri
     cur = _walk(carrier)
     assert {s for s, _p in cur.ran} == {_n(s) for s in carrier.sql}, (
         f"{carrier.name} declares SQL it never runs")
-
-
-def test_the_asset_link_reads_the_retired_link_and_logs_the_engine_as_auto():
-    linked = _walk(carriers.AssetLink(), source="autodedup")
-    carry, restore = linked.ran[1][1], linked.ran[2][1]
-    assert carry == {"survivor": 10, "retired": 20, "asset": 41, "reason": f"merge {G}",
-                     "source": "auto"}
-    assert restore == {"restored": 20, "merge": f"merge {G}", "merges": [f"merge {G}"],
-                       "path": [10], "detach": f"detach {G}", "source": "auto"}
-    unlinked = _walk(carriers.AssetLink(), fetch=(None,), source="autodedup")
-    assert [s for s, _p in unlinked.ran][:1] == [_n(carriers.AssetLink.RETIRED_ASSET_SQL)]
-    assert len(unlinked.ran) == 2, "no link on the retired property: nothing to carry"
-    assert _walk(carriers.AssetLink()).ran[1][1]["source"] == "operator"
 
 
 def test_the_dispatch_collapse_hands_its_sends_to_the_kept_twin_first():
@@ -319,7 +299,7 @@ def test_the_retired_dispatches_are_locked_in_their_own_statement_before_the_res
 def test_curation_dispatches_and_dismissals_give_nothing_back_on_a_detach():
     """Rule 18 best-effort: these rows stay on the property the advert left."""
     for carrier in PROPERTY_CARRIERS:
-        if carrier.name in ("asset_link", "pipeline"):
+        if carrier.name == "pipeline":
             continue
         cur = _StrictCur(carrier)
         carrier.on_detach(cur, DetachStep(20, 10, (Hop(1, G, 10, 20),), "operator"))

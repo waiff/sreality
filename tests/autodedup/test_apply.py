@@ -3,9 +3,8 @@
 The fake below STORES what the apply path writes and serves it back, dispatching on the SQL
 constant itself (the `fake_pg` idiom): a statement this file does not know raises. The set merge
 and the set detach it hands the apply path mimic the toolkit's contract — the oldest
-record survives, one asset link is carried and two refuse (two linked units, too, for the
-engine), re-point, soft-retire, refuse a category mismatch, move each advert back off the ledger
-in order (the toolkit's own `_detach_plan` and `_origin_gone`; a dry run reads the real
+record survives, re-point, soft-retire, refuse a category mismatch, move each advert back off
+the ledger in order (the toolkit's own `_detach_plan` and `_origin_gone`; a dry run reads the real
 `detach_outcomes` over the fake ledger) —
 inside nested transactions that roll back on an exception, so a group's atomicity is
 observable here.
@@ -30,7 +29,6 @@ from autodedup.incremental_sql import RT_LEASE_READ_SQL, RT_LEASE_RELEASE_SQL, R
 from toolkit import property_identity
 from tests._property_ledger import _Ledger
 from toolkit.property_identity import (
-    AssetLinkConflict,
     CategoryClash,
     MergeError,
     _detach_plan,
@@ -128,11 +126,10 @@ class FakeDb:
 
     # --- builders
     def prop(self, pid: int, *, ct: str | None = "prodej", cm: str | None = "byt",
-             first: datetime | None = T0, status: str = "active",
-             asset: int | None = None) -> None:
+             first: datetime | None = T0, status: str = "active") -> None:
         self.properties[pid] = {"status": status, "category_type": ct, "category_main": cm,
                                 "first_seen_at": first, "merged_into": None,
-                                "merged_at": None, "asset_id": asset}
+                                "merged_at": None}
 
     def listing(self, lid: int, pid: int | None, *, ct: str | None = "prodej",
                 cm: str | None = "byt",
@@ -343,8 +340,6 @@ class FakeDb:
             self.events.append({"id": len(self.events) + 1, "merge_group_id": group,
                                 "survivor": survivor_id, "retired": retired_id, "listing": lid,
                                 "generation": None, "undone": False, "source": source})
-        if r["asset_id"] is not None:
-            s["asset_id"], r["asset_id"] = r["asset_id"], None
         r.update(status="merged_away", merged_into=survivor_id, merged_at=self.now)
         return len(moved)
 
@@ -358,10 +353,6 @@ class FakeDb:
             with conn.transaction():
                 if any(conn.properties[pid]["status"] != "active" for pid in ids):
                     raise MergeError("not active")
-                carriers = [pid for pid in ids if conn.properties[pid]["asset_id"] is not None]
-                assets = {conn.properties[pid]["asset_id"] for pid in carriers}
-                if len(assets) > 1 or (len(carriers) > 1 and source != "operator"):
-                    raise AssetLinkConflict(f"asset links {sorted(assets)} on {carriers}")
                 survivor = survivor_of({pid: conn.properties[pid]["first_seen_at"]
                                         for pid in ids})
                 retired = [pid for pid in ids if pid != survivor]
@@ -733,37 +724,6 @@ def test_a_flat_merges_with_a_commercial_unit_but_a_set_with_a_house_is_refused(
     assert groups[20].detail["category_mains"] == ["byt", "dum", "komercni"]
     assert A.SKIP_CATEGORY_MAIN in groups[30].reasons
     assert groups[30].detail["category_mains"] == ["byt", "dum", "komercni"]
-
-
-def test_the_merges_own_asset_refusal_is_reported_as_asset_linked_units() -> None:
-    # The plan does not second-guess asset links: the merge carries one onto the survivor and
-    # refuses two different ones (decision 17) — and, the engine's, two units the operator
-    # linked into ONE asset, "different units, do not collapse" (rule 15, E903) — and that
-    # refusal is the group's reason.
-    db = FakeDb()
-    db.live_scope()
-    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
-    db.prop(100)
-    db.prop(200, asset=7)
-    _pair_group(db, 10, [10, 11], [100, 200])
-    db.prop(300, asset=8)
-    db.prop(400, asset=9)
-    _pair_group(db, 20, [20, 21], [300, 400])
-    db.prop(500, asset=5)
-    db.prop(600, asset=5)
-    _pair_group(db, 30, [30, 31], [500, 600])
-    plan = A.plan_apply(db, GEN, scope)
-    assert [g.reasons for g in plan.groups] == [[], [], []]
-    calls: list[dict[str, Any]] = []
-    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
-    assert [(c["survivor_id"], c["retired_id"]) for c in calls] == [(100, 200)]
-    assert db.properties[100]["asset_id"] == 7 and db.properties[200]["asset_id"] is None
-    assert [(g["cluster_key"], g["reasons"]) for g in result["skipped_at_apply"]] == [
-        (20, [A.SKIP_ASSET_LINKED]), (30, [A.SKIP_ASSET_LINKED])]
-    assert {db.listings[lid]["property_id"] for lid in (30, 31)} == {500, 600}
-    skipped = next(r for r in db.ledger if r["cluster_key"] == 20)
-    assert skipped["outcome"] == "skipped" and skipped["error"] == A.SKIP_ASSET_LINKED
-    assert {db.listings[lid]["property_id"] for lid in (20, 21)} == {300, 400}
 
 
 def test_merged_away_and_unattached_are_refused_and_size_is_the_engines_cap_alone() -> None:
@@ -1139,27 +1099,24 @@ def test_a_property_that_changed_since_the_plan_is_not_merged() -> None:
 def test_the_apply_time_recheck_locks_and_re_reads_categories_and_scope() -> None:
     # The listing ids are unchanged, but after the plan a re-parse flips 11 to a rental (200's
     # rollup not recomputed yet), both of group 20's listings and properties become rentals
-    # (no mix, but outside the prodej scope), and the operator links 500 and 600 to two
-    # different assets, which the merge itself then refuses.
+    # (no mix, but outside the prodej scope).
     db = FakeDb()
     db.live_scope()
     _pair_group(db, 10, [10, 11], [100, 200])
     _pair_group(db, 20, [20, 21], [300, 400])
-    _pair_group(db, 30, [30, 31], [500, 600])
     scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
     plan = A.plan_apply(db, GEN, scope)
-    assert [g.reasons for g in plan.groups] == [[], [], []]
+    assert [g.reasons for g in plan.groups] == [[], []]
     db.listings[11]["category_type"] = "pronajem"
     for lid, pid in ((20, 300), (21, 400)):
         db.listings[lid]["category_type"] = "pronajem"
         db.properties[pid]["category_type"] = "pronajem"
-    db.properties[500]["asset_id"], db.properties[600]["asset_id"] = 3, 4
     calls: list[dict[str, Any]] = []
     result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
-    assert calls == [] and result["counts"]["skipped_at_apply"] == 3
+    assert calls == [] and result["counts"]["skipped_at_apply"] == 2
     assert {row["cluster_key"]: row["reasons"] for row in result["skipped_at_apply"]} == {
         10: [A.SKIP_CATEGORY_TYPE, A.SKIP_CARRIES_OUT_OF_SCOPE],
-        20: [A.SKIP_CARRIES_OUT_OF_SCOPE], 30: [A.SKIP_ASSET_LINKED]}
+        20: [A.SKIP_CARRIES_OUT_OF_SCOPE]}
     # The properties are locked FOR UPDATE, then their listings FOR SHARE, before any check.
     assert "for update" in S.LOCK_PROPERTIES_SQL and "for share" in S.LOCK_PROPERTY_LISTINGS_SQL
     first_lock = db.statements.index(S.LOCK_PROPERTIES_SQL)

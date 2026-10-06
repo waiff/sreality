@@ -4,8 +4,8 @@ and the split statement run against end to end: tests/test_detach_listing.py,
 tests/test_property_merge_set.py and tests/test_property_split.py; executed:
 tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
 
-STRICT: it answers each statement by its exact text and raises on one it does not model. The
-carriers other than the asset link are swapped for `RecordingCarrier`s by the `ledger_carriers`
+STRICT: it answers each statement by its exact text and raises on one it does not model. Every
+carrier is swapped for a `RecordingCarrier` by the `ledger_carriers`
 fixture, which every suite over this fake opts into; `db.carried` then holds each
 (merge|detach, carrier name, step) the writers handed the seam. The fake also models the
 dispatch carrier with the `channel_sends` its collapse must not strand; a test runs it for real
@@ -39,7 +39,7 @@ class _Tx:
 
     def __enter__(self) -> "_Tx":
         self.saved = (dict(self.db.listings), dict(self.db.props), [dict(e) for e in self.db.events],
-                      dict(self.db.into), dict(self.db.assets),
+                      dict(self.db.into),
                       [dict(r) for r in self.db.verdicts], dict(self.db.mnl),
                       list(self.db.carried), list(self.db.changed), list(self.db.browse),
                       list(self.db.broker), {k: dict(v) for k, v in self.db.dispatches.items()},
@@ -49,7 +49,7 @@ class _Tx:
     def __exit__(self, exc_type: Any, *exc: Any) -> bool:
         if exc_type is not None:
             (self.db.listings, self.db.props, self.db.events, self.db.into,
-             self.db.assets, self.db.verdicts, self.db.mnl,
+             self.db.verdicts, self.db.mnl,
              self.db.carried, self.db.changed, self.db.browse, self.db.broker,
              self.db.dispatches, self.db.sends) = self.saved
             self.db.log.append(("rollback", None))
@@ -86,15 +86,15 @@ class _Cur:
 
 class _Ledger:
     """listings: id -> property_id; props: id -> status; into: id -> merged_into; first_seen /
-    assets / cats / canonical: per property; events: the merge ledger; asset_events: the asset
-    membership log; verdicts: the pair rulings LEDGER (migration 574), appended on change like
+    cats / canonical: per property; events: the merge ledger; verdicts: the pair rulings LEDGER
+    (migration 574), appended on change like
     `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; mnl: (lo, hi) -> (source,
     reason); dispatches: notification_dispatches id -> {property_id, *its collapse keys} (a key
     left out is NULL); sends: channel_sends id -> {consumer, notification_id}; claiming: the
     sends an outbox claim is inserting while the merge runs (not yet committed)."""
 
     def __init__(self, listings: dict[int, int], *, first_seen: dict[int, datetime] | None = None,
-                 assets: dict[int, int] | None = None, canonical: dict[int, int] | None = None,
+                 canonical: dict[int, int] | None = None,
                  props: dict[int, str] | None = None,
                  cats: dict[int, tuple[str | None, str | None]] | None = None,
                  dispatches: dict[str, dict[str, Any]] | None = None,
@@ -103,11 +103,10 @@ class _Ledger:
         self.listings = dict(listings)
         self.props = {pid: "active" for pid in set(listings.values())} | (props or {})
         self.into: dict[int, int] = {}
-        self.first_seen, self.assets = first_seen or {}, dict(assets or {})
+        self.first_seen = first_seen or {}
         self.cats = cats or {}
         self.canonical = canonical or {}
         self.events: list[dict[str, Any]] = []
-        self.asset_events: list[tuple[int, int, str, str]] = []
         self.log: list[tuple[str, Any]] = []
         self.count: int | None = None
         self.verdicts: list[dict[str, Any]] = []
@@ -232,15 +231,12 @@ class _Ledger:
 
     def _lock_set(self, p: Any) -> list[tuple]:
         cat = lambda pid: self.cats.get(pid, ("prodej", "byt"))  # noqa: E731
-        return [(pid, self.props[pid], self.first_seen.get(pid, T0), self.assets.get(pid),
+        return [(pid, self.props[pid], self.first_seen.get(pid, T0),
                  *cat(pid)) for pid in sorted(p["ids"]) if pid in self.props]
 
     def _status(self, p: Any) -> list[tuple]:
         return [(pid, self.props[pid], self.into.get(pid))
                 for pid in sorted(p["ids"]) if pid in self.props]
-
-    def _retired_asset(self, p: Any) -> list[tuple]:
-        return [(self.assets.get(p["retired"]),)]
 
     def _canonical_adverts(self, p: Any) -> list[tuple]:
         return [(self.canonical[pid],) for pid in p["ids"] if pid in self.canonical]
@@ -321,14 +317,6 @@ class _Ledger:
     def _nothing(self, p: Any) -> None:
         return None
 
-    def _carry(self, p: dict[str, Any]) -> None:
-        for pid, want in ((p["survivor"], p["asset"]), (p["retired"], None)):
-            if self.assets.get(pid) != want:
-                self.assets[pid] = want
-                self.asset_events.append((p["asset"], pid, "linked" if want else "unlinked",
-                                          p["reason"]))
-        return None
-
     def _twin(self, nid: str, survivor: int) -> str | None:
         """The survivor's row a retired dispatch collapses onto: every key equal, a NULL equal to
         a NULL (`IS NOT DISTINCT FROM`, which Python's `==` on None already is)."""
@@ -386,21 +374,6 @@ class _Ledger:
             row["property_id"] = p["survivor"]
         self.count = len(moved)
 
-    def _restore(self, p: dict[str, Any]) -> None:
-        carried = [a for a, pid, act, why in self.asset_events
-                   if pid == p["restored"] and act == "unlinked" and why == p["merge"]]
-        holders = [h for h in p["path"] if carried and self.assets.get(h) == carried[-1]]
-        if not holders:
-            return None
-        asset = carried[-1]
-        moved = [(p["restored"], asset)] if self.assets.get(p["restored"]) is None else []
-        moved += [(h, None) for h in holders
-                  if any((asset, h, "linked", m) in self.asset_events for m in p["merges"])]
-        for pid, want in moved:
-            self.assets[pid] = want
-            self.asset_events.append((asset, pid, "linked" if want else "unlinked", p["detach"]))
-        return None
-
 
 def _n(sql: str) -> str:
     return " ".join(sql.split())
@@ -429,9 +402,6 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (pi._LOCK_SET_SQL, _Ledger._lock_set),
         (pi._STATUS_SQL, _Ledger._status),
         (pi._STATUS_SQL + " FOR UPDATE", _Ledger._status),
-        (carriers.AssetLink.RETIRED_ASSET_SQL, _Ledger._retired_asset),
-        (carriers._CARRY_ASSET_LINK_SQL, _Ledger._carry),
-        (carriers._RESTORE_ASSET_LINK_SQL, _Ledger._restore),
         (pi._CANONICAL_ADVERTS_SQL, _Ledger._canonical_adverts),
         (pi._INGEST_GROUPING_SQL, _Ledger._ingest_grouping),
         (NEW_SINGLETONS_SQL, _Ledger._new_singletons),
@@ -478,11 +448,10 @@ class RecordingCarrier:
 
 @pytest.fixture()
 def ledger_carriers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every carrier but the asset link (which this fake models) recorded, not executed: a suite
-    that forgets it fails on the first carrier statement the strict fake does not model."""
+    """Every carrier recorded, not executed: a suite that forgets it fails on the first carrier
+    statement the strict fake does not model."""
     monkeypatch.setattr(carriers, "PROPERTY_CARRIERS", tuple(
-        c if c.name == "asset_link" else RecordingCarrier(c.name)
-        for c in carriers.PROPERTY_CARRIERS))
+        RecordingCarrier(c.name) for c in carriers.PROPERTY_CARRIERS))
 
 
 def keep_real(monkeypatch: pytest.MonkeyPatch, carrier: carriers.Carrier) -> None:

@@ -36,11 +36,6 @@ class MergeError(ValueError):
     """A merge/detach precondition failed (e.g. a property is already merged)."""
 
 
-class AssetLinkConflict(MergeError):
-    """Two different asset links in one merge (the survivor could keep only one, decision 17),
-    or two linked units in an engine merge (the operator's "different units", E903)."""
-
-
 class CategoryClash(MergeError):
     """Rule 15's refusal: two members differ on `field` (category_type or category_main)."""
 
@@ -72,7 +67,7 @@ SELECT root, id FROM chain WHERE status = 'active'
 """
 
 _LOCK_SET_SQL = """
-SELECT id, status, first_seen_at, asset_id, category_type, category_main
+SELECT id, status, first_seen_at, category_type, category_main
 FROM properties WHERE id = ANY(%(ids)s::bigint[])
 ORDER BY id
 FOR UPDATE
@@ -319,23 +314,18 @@ def _canonical_pairs(conn: psycopg.Connection, property_ids: list[int]) -> set[t
     return {(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]}
 
 
-def _gate_set(rows: Mapping[int, tuple], ids: list[int], source: MergeSource) -> None:
-    """The set's refusals, read under its lock: a member missing or not active, two different
-    asset links (the survivor keeps only one) or, not the operator's own merge, two linked units
-    (E903), and any rule-15 category clash between ANY two members — the survivor's stored
-    category is not recomputed until the whole set has merged, so a NULL there would otherwise
-    let a sale and a rent through."""
+def _gate_set(rows: Mapping[int, tuple], ids: list[int]) -> None:
+    """The set's refusals, read under its lock: a member missing or not active, and any rule-15
+    category clash between ANY two members — the survivor's stored category is not recomputed
+    until the whole set has merged, so a NULL there would otherwise let a sale and a rent
+    through."""
     missing = [pid for pid in ids if pid not in rows]
     inactive = [pid for pid in ids if pid in rows and rows[pid][1] != "active"]
     if missing or inactive:
         raise MergeError(f"properties not found {missing} or not active {inactive}")
-    linked = [pid for pid in ids if rows[pid][3] is not None]
-    assets = sorted({int(rows[pid][3]) for pid in linked})
-    if len(assets) > 1 or (len(linked) > 1 and source != "operator"):
-        raise AssetLinkConflict(f"asset links {assets} on {linked}; refusing to merge")
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
-            clash = category_clash(rows[a][4:6], rows[b][4:6])
+            clash = category_clash(rows[a][3:5], rows[b][3:5])
             if clash:
                 raise CategoryClash(*clash)
 
@@ -384,7 +374,7 @@ def merge_property_set(
         with conn.cursor() as cur:
             cur.execute(_LOCK_SET_SQL, {"ids": ids})
             rows = {int(r[0]): r for r in cur.fetchall()}
-        _gate_set(rows, ids, source)
+        _gate_set(rows, ids)
         survivor = survivor_of({pid: rows[pid][2] for pid in ids})
         retired = [pid for pid in ids if pid != survivor]
         pairs = _canonical_pairs(conn, ids) if source == "operator" else set()
@@ -644,8 +634,8 @@ def detach_listings(
     """Split a SET of adverts off their properties, in the caller's order, in ONE transaction: a
     merged one back to its ORIGIN (with `merge_group_id`, to where it sat before that merge, only
     while it is the newest to move it); if that merge retired the origin it is reactivated and
-    every carrier's inverse runs, in reverse `PROPERTY_CARRIERS` order (its pipeline card and
-    asset link come back; curation, dispatches and dismissals stay on the property left, rules
+    every carrier's inverse runs, in reverse `PROPERTY_CARRIERS` order (its pipeline card
+    comes back; curation, dispatches and dismissals stay on the property left, rules
     18, 22). A native one (no standing merge moved it), while another own advert stays, goes to
     a NEW record (`split_native`: the operator only, never group-scoped; any other source answers
     `propose_only`, decision 9); no carrier runs. Idempotent, each `outcome` saying why nothing
