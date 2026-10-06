@@ -1534,11 +1534,13 @@ renumber.** Navigate by area:
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
     rows before it merges; the live `rt` generation may be planned by a dry run but is never
     applied here (the lane reconciles it, above), and a live run holds the lane's lease
-    `autodedup.rt_lease` (one writer). An engine
-    merge the operator took
-    apart stays apart: its separated LISTINGS are never re-united by a later generation, even
-    once the restored property has been merged into another one, and an `unapply` that finds
-    the merge already partly taken apart records its undo as the operator's. `unapply` skips a
+    `autodedup.rt_lease` (one writer). Only the operator's rulings keep ads apart (E934): his
+    split statement rules `different` + a must-not-link across its units, and an engine merge
+    taken apart outside the engine bans nothing by itself, so a split-off property may receive
+    engine merges again; an `unapply` that finds the merge already partly taken apart records
+    its undo as theirs (`undone_by = 'external'`), and a merge that records a (survivor,
+    retired) pair again closes that pair's stale live row the same way, in its own transaction,
+    so the ledger's live-pair index holds. `unapply` skips a
     group a later engine merge still builds on (more listings merged onto its survivor by a
     merge whose own undo is not refused for moving nothing back, or a retirement of its
     survivor that still stands) and names the merge to undo first — and only then: a group
@@ -1583,7 +1585,20 @@ renumber.** Navigate by area:
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings, pipeline cards and the carried
     asset link; collections, tags, notes, dispatches and dismissals stay on the property left
-    (rule #18).
+    (rule #18). **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
+    ?properties=…` (`autodedup/category_splits.py`, read-only, 1 to 100 ids) puts each named live
+    property's ads into SIDES, the ads `category_clash` (rule 15's one gate) passes together; an
+    ad of unknown category and a contentless record (no price, area, disposition or text) ride
+    with the kept side (most own ads) and never make a property mixed. Its page
+    `/autodedup/category-splits` opens from a link that names the properties (no menu entry, no
+    stored list), reads them ten per request and shows each side's ads with photos and their
+    scrubbed text, each ad with a letter (the property page's select, one letter per side to
+    start, since a side can bundle two flats; riders take none); per card, behind a second click,
+    **Rozdělit podle písmen** (the property page's `splitPlan`: every letter but the one holding
+    most own ads leaves as one property, `keep_together: false`; offered only while every ad of
+    every leaving letter can move) or **Ponechat jako jednu nemovitost** (`separate: []`,
+    `keep_together: true`), both through `POST /properties/{id}/split`; a property no longer
+    mixed, or every pair across confirmed `same`, is a done row.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

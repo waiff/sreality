@@ -4,7 +4,7 @@ The worker's `autodedup` lane decides, groups AND merges in one pass under one l
 (`autodedup.rt_lease`): after the pass's transaction commits, `run` takes the groups it
 re-clustered plus a slice swept past the `rt_reconcile` cursor and hands them to THE apply
 path — `apply.plan_groups` (every refusal E903 names: operator negatives, categories, the scope,
-carry-along, spans-groups, refused-before, restored-elsewhere) and `apply.apply_group`
+carry-along, spans-groups, refused-before) and `apply.apply_group`
 (`recheck_group` over locked rows, `merge_property_set(source='autodedup')` and the ledger row
 in one transaction). Nothing here decides a refusal of its own; the reconcile is the batch
 apply's brain run by the lane.

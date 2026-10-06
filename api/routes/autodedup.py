@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from autodedup import candidates as candidate_groups
+from autodedup import category_splits as categories
 from autodedup import progress_sql as psql
 from autodedup import proposed_splits as splits
 from autodedup import ui_sql as usql
@@ -2877,6 +2878,43 @@ def proposed_split(
     if not found[1]:
         raise HTTPException(status_code=404, detail="no live property of two or more adverts")
     return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}
+
+
+# ------------------------------------------------------------------ the category review (E937)
+
+CATEGORY_SPLITS_MAX = 100
+_PROPERTY_IDS = re.compile(r"[0-9]{1,18}(?:,[0-9]{1,18})*")
+
+
+def _property_ids(raw: str) -> list[int]:
+    """`12664,9737` -> the distinct ids in the order named; 422 unless 1 to 100 of them."""
+    if not _PROPERTY_IDS.fullmatch(raw):
+        raise HTTPException(status_code=422, detail="properties: property ids separated by commas")
+    ids = list(dict.fromkeys(int(part) for part in raw.split(",")))
+    if len(ids) > CATEGORY_SPLITS_MAX:
+        raise HTTPException(status_code=422,
+                            detail=f"properties: at most {CATEGORY_SPLITS_MAX} property ids")
+    return ids
+
+
+@router.get("/category-splits")
+def category_splits(
+    request: Request, properties: str = Query(...), conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The named live properties as sides of ads rule 15 never joins, for the operator to split
+    or keep (E937); `missing` names the ids that are not a live property of two or more ads.
+    Read-only: the decision is `POST /properties/{id}/split`."""
+    _reject_unknown_filters(request, frozenset({"properties"}))
+    ids = _property_ids(properties)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        items = categories.category_splits(conn, ids)
+    except _STORE_BEHIND:
+        return _not_ready()
+    shown = {item["property_id"] for item in items}
+    return {"data": {"items": items, "missing": [pid for pid in ids if pid not in shown]},
+            "store_ready": True}
 
 
 # ------------------------------------------------------------------ the rulings page (E920)
