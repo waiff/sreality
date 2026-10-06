@@ -961,19 +961,25 @@ def test_a_cooling_host_is_skipped_by_the_next_run_without_an_attempt(monkeypatc
     assert out["throttled"] == 0 and out["stopped_suspicious"] is True
 
 
-def test_the_cooldown_doubles_per_trip_and_honours_a_longer_retry_after():
+def test_the_cooldown_doubles_per_window_not_per_image_and_honours_retry_after():
     now = 1000.0
     assert scraper_main.trip_host("h", _http_error(429), now=now) == 15 * 60
-    assert scraper_main.trip_host("h", _http_error(403), now=now) == 30 * 60
-    assert scraper_main.host_cooling("h", now=now + 29 * 60)
-    assert not scraper_main.host_cooling("h", now=now + 31 * 60)
+    # the rest of the batch lands on a cooling host: same window, no escalation
+    for _ in range(68):
+        assert scraper_main.trip_host("h", _http_error(403), now=now + 1) == 15 * 60 - 1
+    assert scraper_main.host_cooling("h", now=now + 14 * 60)
+    assert not scraper_main.host_cooling("h", now=now + 16 * 60)
+    # the next window's first throttle is the second trip
+    assert scraper_main.trip_host("h", _http_error(403), now=now + 16 * 60) == 30 * 60
+    t = now + 16 * 60
     for _ in range(6):
-        wait = scraper_main.trip_host("h", _http_error(429), now=now)
+        t += 3 * 60 * 60
+        wait = scraper_main.trip_host("h", _http_error(429), now=t)
     assert wait == 2 * 60 * 60
     scraper_main.host_recovered("h")
     err = _http_error(429)
     err.response.headers["Retry-After"] = "3600"
-    assert scraper_main.trip_host("h", err, now=now) == 3600
+    assert scraper_main.trip_host("h", err, now=t + 3 * 60 * 60) == 3600
     assert scraper_main._throttle_status(RuntimeError("read timed out")) is None
     assert scraper_main._throttle_status(_http_error(503)) is None
 
