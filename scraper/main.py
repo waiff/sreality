@@ -163,9 +163,16 @@ def host_cooling(host: str, now: float | None = None) -> bool:
 
 
 def trip_host(host: str, error: Exception, now: float | None = None) -> float:
-    """Open `host`'s cool-down after a throttle; returns its length in seconds."""
+    """Open `host`'s cool-down after a throttle; returns its length in seconds.
+
+    One window counts once: the throttles of the images already in flight when the
+    first one lands (a whole batch, 69 on 2026-10-06) must not each double the wait,
+    so a host that is already cooling keeps its window and its trip count."""
     now = time.monotonic() if now is None else now
     with _host_state_lock:
+        until = _host_cooldown_until.get(host)
+        if until is not None and until > now:
+            return until - now
         trips = _host_trips.get(host, 0) + 1
         _host_trips[host] = trips
         wait = min(THROTTLE_COOLDOWN_S * (2 ** (trips - 1)), THROTTLE_COOLDOWN_MAX_S)
