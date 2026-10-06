@@ -14,6 +14,8 @@ export const autodedupKeys = {
   rulings: (filterKey: string, after: string | null) => [R, 'rulings', filterKey, after] as const,
   proposedSplits: [R, 'proposed-splits'] as const,
   proposedSplitsPage: (after: number | null) => [R, 'proposed-splits', after] as const,
+  categorySplits: [R, 'category-splits'] as const,
+  categorySplitsPage: (propertyIds: readonly number[]) => [R, 'category-splits', propertyIds] as const,
   residual: (filters: unknown) => [R, 'residual', filters] as const,
   candidates: (filters: unknown) => [R, 'candidates', filters] as const,
   candidate: (candidateKey: string, generation: string) =>

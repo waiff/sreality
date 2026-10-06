@@ -26,6 +26,12 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   size: offline +27 / +54 / +13 merge-zone pairs on trial / c18 / c17, M1–M3 and every ruling equal; the
   fan-out cap drops 10 / 9 weak-probe rejects on c18 / c17. Release after C2 with E929's re-seed. Open:
   a plot-aware area comparison for house × land, so the engine finds a 38803 by itself.
+- **Category review (2026-10-05, E937):** `/autodedup/category-splits?properties=…` shows the
+  properties a link names whose ads carry categories rule 15 never joins, side by side with photos
+  and text, ten per page. Every ad has a letter, one per category to start, so a side that bundles
+  two flats splits into two properties; per property the operator splits by the letters (the
+  property page's `splitPlan`) or keeps it as one (both `POST /properties/{id}/split`). Open with
+  the operator: "keep" writes `same` across categories, the word E925 refuses on the verdict route.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
