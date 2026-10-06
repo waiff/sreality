@@ -137,6 +137,10 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    file, so it moves DOWN on a measurement, never up to make
  *                    room; the `baseline` above is left at its last live
  *                    measurement rather than guessing 19 from a local build.
+ *   2026-10-06 merge sprint W2b — /browse +1 (the note marks' one whole-set
+ *                    read of property_notes_public), /pipeline +1 (the broker
+ *                    line reads the cards' ads before their brokers, MS7).
+ *                    Both stay under their ceilings; neither moves.
  * Still ahead: W9b appends columns to listings_public for the listing-detail
  * chain; W7a moves Browse + comparables onto the shared hydration layer.
  *

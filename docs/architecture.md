@@ -1290,10 +1290,15 @@ renumber.** Navigate by area:
     **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
     (`frontend/src/pages/PropertyDetail.tsx`). Its header is the `properties_public` row
     (`PROPERTY_COLS`, pinned to the view by `tests/test_property_page_read_contract.py`) -- the
-    facts the Browse card shows -- with the canonical advert's photos, broker, own price series
-    and freshness checks; the price-change figures are the row's, as Browse filters on them. The
+    facts the Browse card shows -- with the canonical advert's photos and freshness checks; the
+    price-change figures are the row's, as Browse filters on them. Nothing else is stored (merge
+    sprint MS7-MS10): the brokers are `lib/brokers.propertyBrokers` over the adverts (one batched
+    `POST /brokers/by-listings` the advert rows share), a lowest active price that differs from
+    the canonical advert's live one (the header's, less the recompute's lag) is a labelled
+    display-only line (`priceHistory.lowestActivePrice`), and the chart (with a key) and its dated
+    moves draw every advert's own line, labelled by portal. The
     merged-adverts section is the ONLY list of adverts (a singleton's one advert included), each
-    advert's own facts and stored portal link in its row. Every property-grain surface links
+    advert's own facts, broker and stored portal link in its row. Every property-grain surface links
     `propertyPath(property_id)` (`lib/listingUrl`). Old advert addresses -- `/listing/{source}/
     {native}` (emails, the extension), `/listing/{sreality_id}`, `/listing?property=` -- are
     aliases (`AdvertRedirect`) that resolve the advert's property and open its row
@@ -1414,8 +1419,9 @@ renumber.** Navigate by area:
     tests/test_merge_safety_live.py). Callers serialize per-property on the row locks.
     **A merge writes no status event (migration 559).** The status-history trigger
     (migration 392) skips the retirement (`is_active = false` set with `merged_away`), and
-    `property_status_events` is NOT carried onto the survivor: each property keeps its own
-    activity log, so the survivor never charts two series as one. A detach restores
+    `property_status_events` is NOT carried onto the survivor. Nothing reads the log since merge
+    sprint W2b (the chart draws every advert's own line instead); the trigger, function, view and
+    table stay until W6 drops them. A detach restores
     `is_active` in the statement that clears `merged_away`, and the trigger logs that only
     where the property's own last row disagrees (a pre-559 absorbed property ends on the old
     merge's false 'inactive' and gets its 'active' back). **Apply 559 before its code merges**
@@ -1440,7 +1446,9 @@ renumber.** Navigate by area:
     can route around it.
     **Who orders a merge today.** The operator — and, only inside the area its scope row
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
-    multi-select → merge) posts to `POST /properties/merge`; **`POST /properties/{id}/split`**
+    multi-select → merge; every card keeps its pipeline, collection, dismissal and note marks,
+    read-only, and the bar lists each ticked property with its marks, MS16) posts to
+    `POST /properties/merge`; **`POST /properties/{id}/split`**
     (E919, `toolkit.property_split.split_property`) is the operator's ONE split statement:
     `{adverts, separate: [[...], ...], keep_together, reason?, confirm_retract?}` — `adverts` is
     every advert the operator was shown (a newcomer the lane merged in since is a 409 `stale`,
@@ -1861,8 +1869,10 @@ renumber.** Navigate by area:
     the survivor, the remove half kept the raw id, matched nothing, and answered a success-shaped
     `{"removed": false}` (or a 404 "note not found" for a note alive and well on the survivor) — so
     one cached id could create a membership it could then never remove. The two halves of one
-    affordance must resolve alike. A write that needs a real target 4xx's on an unresolvable id; a
-    remove falls through to the raw id and stays idempotent, because no caller reads the boolean.
+    affordance must resolve alike, and the note list resolves too (MS16): a tab opened before a
+    merge reads the survivor's notes, not an empty list. A write that needs a real target 4xx's on
+    an unresolvable id; a remove falls through to the raw id and stays idempotent, because no
+    caller reads the boolean.
     Resolution is wrong in exactly one place, enumerated in the rail: the merge route itself
     (it CREATES survivors). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
     commit message is not one. Adding a
@@ -2383,8 +2393,9 @@ renumber.** Navigate by area:
     rendered a bare "Načítání…" until all of it settled. It now reads ONE relation and returns —
     `pipeline_board_public` (migration 417, `security_invoker = true`) joins the account's
     pipeline rows to their properties server-side, so even the two structural reads W1 left
-    behind became one; the cover photo and the broker line are independent React Query reads
-    keyed on the surrogate `listing_id`, delivered to cards through `CardHydrationProvider`, and
+    behind became one; the cover photo (keyed on the surrogate `listing_id`) and the broker line
+    (keyed on each card's property and canonical ad, MS7) are independent React Query reads,
+    delivered to cards through `CardHydrationProvider`, and
     the cover comes from `listing_cover_public` (migration 416), which reduces to one row per
     listing BEFORE the CLIP-tag lateral instead of after. Three rules hold this
     in place. (1) **Decoration keys live in their own top-level `['hydration', …]` namespace** — never
@@ -2450,9 +2461,11 @@ renumber.** Navigate by area:
     server-side `DISTINCT ON`, deliberately a different QUERY from the multi-image
     `useListingPhotos` that Browse cards and the estimation comparables share (W7a): asking the
     multi-image read for one photo per card is the fetch-everything-then-discard W4 measured at
-    901 rows / 3,995 buffers for 44 cards; the **canonical broker** per card via
-    ONE batched read — `fetchListingBrokersByIds` (`POST /brokers/by-listings`), NOT the raw
-    drift-prone `properties_public.broker_*` — the name links to `/brokers/{id}`, contact in a
+    901 rows / 3,995 buffers for 44 cards; the **property's broker list** per card (MS7: the
+    property page's `propertyBrokers` rule, shown as its first entry plus "+N") via two batched
+    reads — the cards' adverts (`fetchPropertySourcesByPropertyIds`), then their brokers
+    (`fetchListingBrokersByIds`, `POST /brokers/by-listings`), NOT the raw drift-prone
+    `properties_public.broker_*` — the name links to `/brokers/{id}`, contact in a
     native-title hover. **Migration 419 (hydration sprint W6)** put `primary_email` /
     `primary_phone` on `listing_broker_public`, so the chained `fetchBrokersByIds`
     (`GET /brokers?ids=`) that used to follow it is deleted from the SPA — on the board and on
@@ -2502,7 +2515,8 @@ renumber.** Navigate by area:
     Clearing is ONE header **Reset** gated on a derived `filtersActive`, never a per-row
     clear. **Fail-open contract** (pinned by `Pipeline.test.tsx`): an unresolved member map
     (loading or errored) means no constraint, no Kolekce row and nothing counted — a `?collections=`
-    link must never empty a board that cannot see membership — while a RESOLVED selection matching
+    link must never empty a board that cannot see membership; an errored one says so with a retry
+    where the row sits (merge sprint MS16) — while a RESOLVED selection matching
     nothing is zero cards, never everything. Stav's default stays `any`, so a delisted member of a
     collection stays in the cohort. **On the kanban board** stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a

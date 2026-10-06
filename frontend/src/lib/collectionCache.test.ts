@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { revalidateCollections } from './collectionCache';
+import { revalidateAfterMerge, revalidateCollections } from './collectionCache';
 import { browseKeys } from './browseKeys';
+import { PIPELINE_REVALIDATE } from './pipelineCache';
 import { curationKeys } from './queries';
 
 describe('collection revalidation contract', () => {
@@ -39,6 +40,20 @@ describe('collection revalidation contract', () => {
       curationKeys.propertyCollectionMembers,
       curationKeys.collections,
       ...browseKeys.all,
+    ]);
+  });
+
+  /* MS16: a merge moves notes onto the survivor too, so the note marks re-read
+   * with everything else the merge carried. */
+  it('re-reads Browse and everything a merge carries, the note counts included', () => {
+    const invalidateQueries = vi.fn();
+    revalidateAfterMerge({ invalidateQueries } as never);
+    expect(invalidateQueries.mock.calls.map(([arg]) => arg.queryKey)).toEqual([
+      ...browseKeys.all,
+      curationKeys.propertyCollectionMembers,
+      curationKeys.collections,
+      ...PIPELINE_REVALIDATE,
+      curationKeys.noteCounts,
     ]);
   });
 });

@@ -22,6 +22,7 @@ import { listTags } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
 import type { Tag } from '@/lib/types';
 import TagEditPopover from '@/components/curation/TagEditPopover';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 
 export function TagPicker({
   value,
@@ -56,6 +57,11 @@ export function TagPicker({
     return (
       <p className="text-[0.75rem] text-[var(--color-ink-4)]">Loading…</p>
     );
+  }
+
+  /* A failed read is a retry, never "No tags yet" (MS16). */
+  if (readFailed(tagsQ)) {
+    return <ReadFailedMark what="Štítky" variant="header" onRetry={() => void tagsQ.refetch()} />;
   }
 
   if (tags.length === 0) {

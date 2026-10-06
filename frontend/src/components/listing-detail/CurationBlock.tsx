@@ -12,6 +12,8 @@
  *     FastAPI service so listing_count + ordering live in one place.
  *   - The "does THIS property belong to X" reverse-index reads pull from the
  *     *_public Supabase views via the anon key. Writes always go through the API.
+ * A failed read is said out loud with a retry and never drawn as an empty list
+ * or an unticked toggle (MS16).
  */
 
 import { useId, useMemo, useRef, useState, useEffect } from 'react';
@@ -44,6 +46,8 @@ import {
 } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
 import type { Collection, Note, Tag, TagColor } from '@/lib/types';
+import ErrorBanner from '@/components/ErrorBanner';
+import { readFailed } from '@/components/ReadFailedMark';
 import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 import { PencilIcon, TrashIcon } from '@/components/icons';
@@ -127,12 +131,17 @@ function CollectionsRow({ property_id }: { property_id: number }) {
         </Link>
       </div>
 
-      {allQ.isLoading ? (
+      {readFailed(allQ) || readFailed(membershipQ) ? (
+        <ErrorBanner
+          title="Kolekce"
+          message="se nepodařilo načíst."
+          onRetry={() => {
+            if (readFailed(allQ)) void allQ.refetch();
+            if (readFailed(membershipQ)) void membershipQ.refetch();
+          }}
+        />
+      ) : allQ.isLoading ? (
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">Loading…</p>
-      ) : allQ.error ? (
-        <p className="mt-3 text-sm text-[var(--color-brick)]">
-          Failed to load collections: {(allQ.error as Error).message}
-        </p>
       ) : collections.length === 0 ? (
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">
           No collections yet.{' '}
@@ -246,6 +255,22 @@ function TagsRow({ property_id }: { property_id: number }) {
 
   const memberTags = tags.filter((t) => memberIds.has(t.id));
   const otherTags = tags.filter((t) => !memberIds.has(t.id));
+
+  if (readFailed(allQ) || readFailed(membershipQ)) {
+    return (
+      <div>
+        <SectionLabel>Tags</SectionLabel>
+        <ErrorBanner
+          title="Štítky"
+          message="se nepodařilo načíst."
+          onRetry={() => {
+            if (readFailed(allQ)) void allQ.refetch();
+            if (readFailed(membershipQ)) void membershipQ.refetch();
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -524,21 +549,23 @@ function NotesRow({
       qc.invalidateQueries({
         queryKey: curationKeys.propertyNotes(property_id),
       });
+      qc.invalidateQueries({ queryKey: curationKeys.noteCounts });
     },
     onError: (err: ApiError | Error) =>
       setError(err.message || 'Failed to save note'),
   });
 
   const notes = notesQ.data?.data ?? [];
+  const failed = readFailed(notesQ);
   const trimmed = body.trim();
 
   return (
-    <details className="group" open={notes.length > 0}>
+    <details className="group" open={failed || notes.length > 0}>
       <summary className="cursor-pointer list-none flex items-baseline justify-between gap-4">
         <SectionLabel>
           <span id={notesLabelId}>Notes</span>
           <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
-            ({notes.length})
+            {failed ? '(—)' : `(${notes.length})`}
           </span>
         </SectionLabel>
         <span className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] group-open:hidden">
@@ -583,7 +610,13 @@ function NotesRow({
         )}
       </form>
 
-      {notesQ.isLoading ? (
+      {failed ? (
+        <ErrorBanner
+          title="Poznámky"
+          message="se nepodařilo načíst."
+          onRetry={() => void notesQ.refetch()}
+        />
+      ) : notesQ.isLoading ? (
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">Loading…</p>
       ) : notes.length === 0 ? null : (
         <ul className="mt-4 space-y-3">
@@ -603,6 +636,7 @@ function NotesRow({
                     qc.invalidateQueries({
                       queryKey: curationKeys.propertyNotes(property_id),
                     });
+                    qc.invalidateQueries({ queryKey: curationKeys.noteCounts });
                   })
                 }
               />

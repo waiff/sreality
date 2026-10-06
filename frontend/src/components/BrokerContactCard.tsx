@@ -7,7 +7,7 @@ import {
 } from '@/lib/brokers';
 
 /* The broker's two reachable channels — one card, shared by /brokers/:id and the
-   PropertyDetail vizitka so the same broker reads identically on both surfaces.
+   property page's broker list so the same broker reads identically on both surfaces.
    Typed on BrokerContactFields, not BrokerPublic: the masked pair is all the card
    consumes, and which half arrives (primary_* for an admin, has_* otherwise) is a
    property of the CALLER, not of the row. */

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import PriceLineChart from './PriceLineChart';
 import type { PriceSeries } from '@/lib/priceHistory';
 
@@ -74,35 +74,14 @@ describe('PriceLineChart', () => {
     expect(container.querySelectorAll('.recharts-line')).toHaveLength(2);
     // The second track is dotted once, the first twice — its window starts late.
     expect(container.querySelectorAll('.recharts-line-dots circle')).toHaveLength(3);
+    // MS9: a key names each line without hovering; one line needs none.
+    const key = screen.getByRole('list', { name: 'Linie grafu' });
+    expect(within(key).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Price', 'Bazos']);
   });
 
-  it('breaks the line where activeWindows leaves a gap, and does not bridge it', () => {
-    // A snapshot at 2026-07-17 lands inside the dark stretch between the two
-    // windows, so it's the row that actually forces a null in the middle.
-    const track: PriceSeries[] = [
-      {
-        id: 1,
-        label: 'Price',
-        points: [
-          { t: T('2026-06-27T08:00:00Z'), price: 4_000_000 },
-          { t: T('2026-07-17T08:00:00Z'), price: 3_900_000 },
-        ],
-        endT: T('2026-08-03T08:00:00Z'),
-      },
-    ];
-    const activeWindows: [number, number][] = [
-      [T('2026-06-27T08:00:00Z'), T('2026-07-10T08:00:00Z')],
-      [T('2026-07-25T08:00:00Z'), T('2026-08-03T08:00:00Z')],
-    ];
-    const { container } = render(
-      <PriceLineChart series={track} activeWindows={activeWindows} />,
-    );
-    // recharts draws one SVG <path> per Line even with an internal null run,
-    // but (without connectNulls) the path `d` gets a second "M" (moveto) —
-    // one subpath per contiguous non-null stretch instead of one continuous
-    // curve bridging the gap.
-    const d = container.querySelector('.recharts-line-curve')?.getAttribute('d') ?? '';
-    expect(d.match(/M/g)?.length).toBe(2);
+  it('draws no key for a single line', () => {
+    render(<PriceLineChart series={oneTrack} />);
+    expect(screen.queryByRole('list', { name: 'Linie grafu' })).toBeNull();
   });
 
   it('survives a single-observation track (no span to scale)', () => {

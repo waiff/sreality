@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   buildPriceSeries,
   buildChartRows,
-  buildActiveWindows,
+  lowestActivePrice,
   priceChangeEvents,
   seriesValueKey,
   seriesObservedKey,
   type PriceAdvert,
   type PriceSeries,
 } from './priceHistory';
-import type { ListingSnapshotPublic, PropertyStatusEventPublic } from './types';
+import type { ListingSnapshotPublic } from './types';
 
 const NOW = Date.parse('2026-03-01T00:00:00Z');
 
@@ -18,28 +18,32 @@ function snap(
   scraped_at: string,
   price_czk: number | null,
 ): ListingSnapshotPublic {
-  return {
-    id: Math.random(),
-    sreality_id: listing_id,
-    listing_id,
-    scraped_at,
-    price_czk,
-    description: null,
-  };
+  return { id: Math.random(), listing_id, scraped_at, price_czk };
 }
 
 const ADVERT: PriceAdvert = {
   id: 100,
+  source: 'sreality',
   is_active: true,
   price_czk: 2_400_000,
   first_seen_at: '2026-01-01T00:00:00Z',
   last_seen_at: '2026-03-01T00:00:00Z',
 };
 
+/* A second advert on another portal: seen later, delisted before now. */
+const IDNES: PriceAdvert = {
+  id: 200,
+  source: 'idnes',
+  is_active: false,
+  price_czk: 2_500_000,
+  first_seen_at: '2026-01-10T00:00:00Z',
+  last_seen_at: '2026-02-20T00:00:00Z',
+};
+
 describe('buildPriceSeries', () => {
   it('draws the advert’s own snapshots as one track, extended to now while live', () => {
     const series = buildPriceSeries(
-      ADVERT,
+      [ADVERT],
       [
         snap(100, '2026-02-01T00:00:00Z', 2_400_000),
         snap(100, '2026-01-01T00:00:00Z', 2_600_000),
@@ -47,23 +51,60 @@ describe('buildPriceSeries', () => {
       NOW,
     );
     expect(series).toHaveLength(1);
-    expect(series[0].label).toBe('Price');
+    expect(series[0].label).toBe('Sreality');
     expect(series[0].points.map((p) => p.price)).toEqual([2_600_000, 2_400_000]);
     expect(series[0].endT).toBe(NOW);
   });
 
+  /* MS9: every advert is its own line, so the lines together are the property's
+     time on the market — no stored on/off log needed. */
+  it('draws one track per advert, in the order given, labelled by portal', () => {
+    const series = buildPriceSeries(
+      [ADVERT, IDNES],
+      [snap(100, '2026-01-01T00:00:00Z', 2_600_000), snap(200, '2026-01-15T00:00:00Z', 2_500_000)],
+      NOW,
+    );
+    expect(series.map((s) => [s.id, s.label])).toEqual([
+      [100, 'Sreality'],
+      [200, 'iDNES Reality'],
+    ]);
+    // The delisted advert's line ends at its last sighting, not now.
+    expect(series[1].endT).toBe(Date.parse('2026-02-20T00:00:00Z'));
+  });
+
   it('never mixes in another advert’s snapshots — a step never spans two adverts', () => {
     const series = buildPriceSeries(
-      ADVERT,
+      [ADVERT, IDNES],
       [snap(100, '2026-01-01T00:00:00Z', 2_600_000), snap(200, '2026-01-15T00:00:00Z', 2_500_000)],
       NOW,
     );
     expect(series[0].points.map((p) => p.price)).toEqual([2_600_000]);
+    expect(series[1].points.map((p) => p.price)).toEqual([2_500_000]);
+  });
+
+  it('dates the label when two tracks share a portal, as the advert rows do', () => {
+    const first = { ...ADVERT, first_seen_at: '2026-01-01T12:00:00Z' };
+    const relist = { ...ADVERT, id: 300, first_seen_at: '2026-02-05T12:00:00Z' };
+    const series = buildPriceSeries(
+      [first, relist],
+      [snap(100, '2026-01-01T00:00:00Z', 2_600_000), snap(300, '2026-02-05T00:00:00Z', 2_300_000)],
+      NOW,
+    );
+    expect(series.map((s) => s.label)).toEqual([
+      'Sreality · 01/01/2026',
+      'Sreality · 05/02/2026',
+    ]);
+  });
+
+  it('counts only the drawn lines: an unpriced advert on the same portal dates nothing', () => {
+    const unpriced = { ...ADVERT, id: 300, price_czk: null, first_seen_at: '2026-02-05T12:00:00Z' };
+    const series = buildPriceSeries([ADVERT, unpriced], [snap(100, '2026-01-01T00:00:00Z', 2_600_000)], NOW);
+    expect(series.map((s) => s.label)).toEqual(['Sreality']);
   });
 
   it('synthesizes a single point when the advert has no snapshots but a price', () => {
     const series = buildPriceSeries(
-      { ...ADVERT, is_active: false, last_seen_at: '2026-02-15T00:00:00Z' },
+      [{ ...ADVERT, is_active: false, last_seen_at: '2026-02-15T00:00:00Z' }],
       [],
       NOW,
     );
@@ -75,14 +116,56 @@ describe('buildPriceSeries', () => {
   });
 
   it('draws nothing for an advert that never had a price', () => {
-    expect(buildPriceSeries({ ...ADVERT, price_czk: null }, [], NOW)).toEqual([]);
+    expect(buildPriceSeries([{ ...ADVERT, price_czk: null }], [], NOW)).toEqual([]);
+  });
+});
+
+describe('lowestActivePrice', () => {
+  const ad = (source: string, price_czk: number | null, is_active = true) => ({
+    source,
+    price_czk,
+    is_active,
+  });
+
+  it('is nothing when the lowest active price is the header’s', () => {
+    expect(lowestActivePrice([ad('sreality', 5_000_000), ad('idnes', 5_200_000)], 5_000_000))
+      .toBeNull();
+  });
+
+  it('names the cheaper active advert’s portal', () => {
+    expect(lowestActivePrice([ad('sreality', 5_000_000), ad('idnes', 4_900_000)], 5_000_000))
+      .toEqual({ price: 4_900_000, sources: ['idnes'] });
+  });
+
+  it('treats a header with no price as differing from any active price', () => {
+    expect(lowestActivePrice([ad('sreality', null), ad('idnes', 4_900_000)], null))
+      .toEqual({ price: 4_900_000, sources: ['idnes'] });
+  });
+
+  it('ignores a cheaper advert that is no longer active', () => {
+    expect(lowestActivePrice([ad('sreality', 5_000_000), ad('bazos', 3_000_000, false)], 5_000_000))
+      .toBeNull();
+  });
+
+  it('names every portal quoting the lowest price', () => {
+    expect(
+      lowestActivePrice(
+        [ad('sreality', 5_000_000), ad('idnes', 4_800_000), ad('bazos', 4_800_000)],
+        5_000_000,
+      ),
+    ).toEqual({ price: 4_800_000, sources: ['idnes', 'bazos'] });
+  });
+
+  it('is nothing when no active advert states a price', () => {
+    expect(lowestActivePrice([ad('sreality', null), ad('idnes', 4_000_000, false)], null))
+      .toBeNull();
   });
 });
 
 describe('buildChartRows', () => {
   const series = () =>
     buildPriceSeries(
-      ADVERT,
+      [ADVERT],
       [
         snap(100, '2026-01-01T00:00:00Z', 2_600_000),
         snap(100, '2026-02-01T00:00:00Z', 2_400_000),
@@ -119,24 +202,6 @@ describe('buildChartRows', () => {
     expect(buildChartRows([])).toEqual([]);
   });
 
-  it('gaps every track outside the given active windows, ignoring connectNulls-style bridging', () => {
-    // Property active 10-20 and 30-40, dark 20-30 — even though the track's
-    // OWN [start, endT] window (10-40) would otherwise cover the gap. The
-    // t=25 snapshot lands inside the dark stretch, so it's the row that
-    // actually exercises the gap (window boundaries themselves are inclusive).
-    const s: PriceSeries[] = [
-      {
-        id: 1,
-        label: 'Price',
-        points: [{ t: 10, price: 100 }, { t: 25, price: 150 }],
-        endT: 40,
-      },
-    ];
-    const rows = buildChartRows(s, [[10, 20], [30, 40]]);
-    expect(rows.map((r) => r.t)).toEqual([10, 20, 25, 30, 40]);
-    expect(rows.map((r) => r[seriesValueKey(1)])).toEqual([100, 100, null, 150, 150]);
-  });
-
   it('resamples the step so a hover reads the price at that instant, not the nearest change', () => {
     // The reported bug, to scale: first seen 9. 5. at 16M, one step to 21M on
     // 30. 7., still live on 11. 8. Recharts picks the tooltip row by nearest
@@ -153,7 +218,7 @@ describe('buildChartRows', () => {
         endT: now,
       },
     ];
-    const rows = buildChartRows(s, undefined, 400);
+    const rows = buildChartRows(s, 400);
 
     const nearestTo = (t: number) =>
       rows.reduce((best, r) =>
@@ -179,7 +244,7 @@ describe('buildChartRows', () => {
     const s: PriceSeries[] = [
       { id: 1, label: 'Price', points: [{ t: 0, price: 100 }, { t: 700, price: 90 }], endT: 1000 },
     ];
-    const rows = buildChartRows(s, undefined, 50);
+    const rows = buildChartRows(s, 50);
     // the resampled grid never displaces a real observation...
     for (const t of [0, 700]) {
       const row = rows.find((r) => r.t === t);
@@ -195,7 +260,7 @@ describe('buildChartRows', () => {
     const s: PriceSeries[] = [
       { id: 1, label: 'Price', points: [{ t: 10, price: 100 }, { t: 20, price: 200 }], endT: 30 },
     ];
-    const dense = buildChartRows(s, undefined, 100);
+    const dense = buildChartRows(s, 100);
     const times = dense.map((r) => r.t as number);
     expect(Math.min(...times)).toBe(10);
     expect(Math.max(...times)).toBe(30);
@@ -206,80 +271,6 @@ describe('buildChartRows', () => {
     }
   });
 
-  it('is unaffected by activeWindows when omitted (pre-existing behavior)', () => {
-    const s: PriceSeries[] = [
-      { id: 1, label: 'Price', points: [{ t: 10, price: 100 }], endT: 40 },
-    ];
-    expect(buildChartRows(s)).toEqual(buildChartRows(s, undefined));
-  });
-});
-
-describe('buildActiveWindows', () => {
-  const evt = (isActive: boolean, iso: string): PropertyStatusEventPublic => ({
-    property_id: 1,
-    is_active: isActive,
-    event_at: iso,
-  });
-
-  it('falls back to one window spanning the whole range when there are no events', () => {
-    const windows = buildActiveWindows([], { start: 10, end: 100 });
-    expect(windows).toEqual([[10, 100]]);
-  });
-
-  it('builds one window per active stretch, gapping the delisted middle', () => {
-    const windows = buildActiveWindows(
-      [
-        evt(true, '2026-01-01T00:00:00Z'),
-        evt(false, '2026-01-10T00:00:00Z'),
-        evt(true, '2026-01-20T00:00:00Z'),
-      ],
-      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
-    );
-    expect(windows).toEqual([
-      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-01-10T00:00:00Z')],
-      [Date.parse('2026-01-20T00:00:00Z'), Date.parse('2026-02-01T00:00:00Z')],
-    ]);
-  });
-
-  it('closes a still-open trailing window at the fallback end', () => {
-    const windows = buildActiveWindows(
-      [evt(true, '2026-01-01T00:00:00Z')],
-      { start: 0, end: Date.parse('2026-03-01T00:00:00Z') },
-    );
-    expect(windows).toEqual([
-      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-03-01T00:00:00Z')],
-    ]);
-  });
-
-  it('opens at the fallback start when the first event is a deactivation', () => {
-    const windows = buildActiveWindows(
-      [
-        evt(false, '2026-01-10T00:00:00Z'),
-        evt(true, '2026-01-20T00:00:00Z'),
-      ],
-      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
-    );
-    expect(windows).toEqual([
-      [0, Date.parse('2026-01-10T00:00:00Z')],
-      [Date.parse('2026-01-20T00:00:00Z'), Date.parse('2026-02-01T00:00:00Z')],
-    ]);
-    expect(
-      buildActiveWindows([evt(false, '2026-01-10T00:00:00Z')], { start: 0, end: 99 }),
-    ).toEqual([[0, Date.parse('2026-01-10T00:00:00Z')]]);
-  });
-
-  it('sorts out-of-order events before pairing them', () => {
-    const windows = buildActiveWindows(
-      [
-        evt(false, '2026-01-10T00:00:00Z'),
-        evt(true, '2026-01-01T00:00:00Z'),
-      ],
-      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
-    );
-    expect(windows).toEqual([
-      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-01-10T00:00:00Z')],
-    ]);
-  });
 });
 
 describe('priceChangeEvents', () => {

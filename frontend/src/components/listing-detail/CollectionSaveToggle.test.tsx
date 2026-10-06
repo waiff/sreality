@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -162,7 +162,7 @@ describe('<CollectionSaveToggle>', () => {
 
   /* The panel used to answer a failed list and an empty one with the same
      "Create a collection →" — which tells an operator whose collections exist
-     that they have none. Same distinction the broker vizitka draws. */
+     that they have none. Same distinction the property page's broker list draws. */
   it('says the list failed instead of offering to create a first collection', async () => {
     vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     vi.mocked(api.listCollections).mockRejectedValue(new Error('HTTP 500'));
@@ -172,6 +172,29 @@ describe('<CollectionSaveToggle>', () => {
 
     expect(await screen.findByText('Kolekce se nepodařilo načíst')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /Create a collection/ })).toBeNull();
+  });
+
+  /* MS16: a failed membership read is not "in no collection". */
+  it('offers a retry instead of the save verb when membership cannot be read', async () => {
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderToggle();
+
+    const retry = await screen.findByRole('button', { name: /Kolekce se nepodařilo načíst/ });
+    expect(screen.queryByRole('button', { name: 'Uložit do kolekce' })).toBeNull();
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[42, [7]]]));
+    fireEvent.click(retry);
+    expect(await screen.findByRole('button', { name: 'V kolekci' })).toBeInTheDocument();
+  });
+
+  it('retries a failed collection list from inside the panel', async () => {
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
+    vi.mocked(api.listCollections).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderToggle();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Uložit do kolekce' }));
+    const failed = await screen.findByText('Kolekce se nepodařilo načíst');
+    fireEvent.click(within(failed).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByRole('button', { name: /Sledované/ })).toBeInTheDocument();
   });
 
   it('Escape closes the panel and hands focus back to the trigger', async () => {

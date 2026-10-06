@@ -36,13 +36,16 @@ resolutions in `wf2/critic.md` §2 apply; where they differ, the rule wins.
 
 Every wave is tested against this sentence. Work that does not serve it is cut (§9).
 
-**Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path beside
-an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines**; **−3 tables, +1**;
-about **1.5 GB** dropped from the database, 1.15 GB of it two indexes nothing has ever used, while the
-Browse read models grow by roughly 0.2 GB (the two portal lists, the nine per-portal dates and their
-indexes). Not counted: about 750 lines of migration text that restate views. Our own condition grades
-stay for now (Q48, §9). Every wave removes more than it adds except W0 (a hotfix: +630 / −150 with its
-tests and docs) and W2a (+220 / −185).
+**Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path
+beside an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines** when
+approved; as built so far (W0–W2b, 2026-10-06) **+3,405 / −3,098**, with W3–W5 still estimated at
++2,500 / −3,700; **−3 tables, +1**; about **1.5 GB** dropped from the database, 1.15 GB of it two
+indexes nothing has ever used, while the Browse read models grow by roughly 0.2 GB (the two portal
+lists, the nine per-portal dates and their indexes). Not counted: about 750 lines of migration text
+that restate views. Our own condition grades stay for now (Q48, §9). Every wave removes more than it
+adds except W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the
+migration, live tests and the plan's gate text) and W2b (+1,866 / −990 as built: MS16's honesty on
+every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed").
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -250,9 +253,9 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | Wave | Content | Engine path | Needs | Lines (≈) |
 |---|---|---|---|---|
 | **W0** | Daily recompute resumes where the last run stopped (PR #1695, merged 2026-10-03; its gate is pending) | no, but a shared file | — | +630 / −150 |
-| **W1b** | Asset links and the pipeline note field out (code) | yes | "C2 CLOSED" | 0 / −840 |
-| **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage, city figures that follow the canonical ad; stops writing two write-only columns; realitymix joins the portal list; #1655's share-sale rule comes later, with that PR's rebase | yes | "C2 CLOSED"; its additive migration 588 (nine `properties` date columns, the canonical order) applied before merge | +220 / −185 |
-| **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +360 / −480 |
+| **W1b** | Asset links and the pipeline note field out (code) | yes | "C2 CLOSED" | +153 / −1,099 (built, #1717) |
+| **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage, city figures that follow the canonical ad; stops writing two write-only columns; realitymix joins the portal list; #1655's share-sale rule comes later, with that PR's rebase | yes | "C2 CLOSED"; its additive migration 588 (nine `properties` date columns, the canonical order) applied before merge | +756 / −332 (built, #1719) |
+| **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +1,866 / −990 (built, #1720) |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED" | +330 / −655 |
 | **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview, curation routing per letter with copies, a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties, the brake's dry run counting note moves; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together", "Přesto rozdělit", writing "same" inside a letter (recorded rulings stay) and the split undo | yes | W3 | +1,550 / −2,100 (after #1699) |
 | **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +290 / −870 |

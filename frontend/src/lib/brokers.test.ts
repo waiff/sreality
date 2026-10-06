@@ -4,8 +4,8 @@
  * 2026-08-12. Three things are worth pinning, because each has a silent-failure
  * mode: (1) EVERY call must carry the caller's real session JWT — the routes
  * reject the static bundle token, and a missed `jwt: true` reads as "no broker"
- * rather than as an error; (2) a 404 (unattributed listing / unknown broker) is
- * an ANSWER, everything else must propagate; (3) contact PII arrives as
+ * rather than as an error; (2) a 404 (unknown broker) is an ANSWER, everything
+ * else must propagate; (3) contact PII arrives as
  * has_email/has_phone flags for a non-admin, and `contactState` must not collapse
  * that into "no contact exists".
  *
@@ -92,7 +92,6 @@ describe('auth mode', () => {
   it('sends the session JWT on every repointed read, never the bundle token', async () => {
     const calls = stubFetch(() => ({ body: { data: [] } }));
     const b = await loadBrokers();
-    await b.fetchListingBroker(1);
     await b.fetchBrokerLeaderboard({
       regionIds: [],
       okresIds: [],
@@ -105,7 +104,7 @@ describe('auth mode', () => {
     await b.searchBrokerFirms('mmreality');
     await b.fetchListingBrokersByIds([1]);
     await b.fetchBrokerListings(7);
-    expect(calls).toHaveLength(6);
+    expect(calls).toHaveLength(5);
     for (const c of calls) expect(authHeader(c)).toBe('Bearer USER-JWT');
   });
 });
@@ -265,40 +264,34 @@ describe('searchBrokerFirms', () => {
   });
 });
 
-describe('fetchListingBroker', () => {
-  it('keys on the surrogate listing_id, not sreality_id', async () => {
-    const calls = stubFetch(() => ({
-      body: { data: { listing_id: 55, broker_id: 7 } },
-    }));
-    const { fetchListingBroker } = await loadBrokers();
-    const row = await fetchListingBroker(55);
-    const url = new URL(calls[0].url);
-    expect(url.pathname).toBe('/brokers/by-listing');
-    expect(url.searchParams.get('listing_id')).toBe('55');
-    expect(url.searchParams.has('sreality_id')).toBe(false);
-    expect(row?.broker_id).toBe(7);
+/* MS7: a property's brokers are a list over its ads, and nothing stores it. */
+describe('propertyBrokers', () => {
+  const broker = (listing_id: number, broker_id: number) => ({
+    sreality_id: null,
+    listing_id,
+    broker_id,
+    broker_display_name: `Makléř ${broker_id}`,
+    broker_firm_label: null,
+  });
+  const ad = (id: number, is_active = true) => ({ id, is_active });
+
+  const ids = (out: { brokers: { broker_id: number }[] }) => out.brokers.map((b) => b.broker_id);
+  const byListing = new Map([[1, broker(1, 10)], [2, broker(2, 10)], [3, broker(3, 30)]]);
+
+  it('lists the active ads’ brokers once each, the canonical ad’s first, skipping the unattributed', async () => {
+    const { propertyBrokers } = await loadBrokers();
+    const out = propertyBrokers([ad(1), ad(2), ad(3), ad(4)], byListing, 3);
+    expect(ids(out)).toEqual([30, 10]);
+    expect(out.fromInactive).toBe(false);
+    // An inactive ad's broker is hidden while another ad is active.
+    expect(ids(propertyBrokers([ad(1), ad(3, false)], byListing, 1))).toEqual([10]);
   });
 
-  it('treats 404 as "unattributed", not as a failure', async () => {
-    stubFetch(() => ({ status: 404, body: { detail: 'listing has no attributed broker' } }));
-    const { fetchListingBroker } = await loadBrokers();
-    await expect(fetchListingBroker(55)).resolves.toBeNull();
-  });
-
-  it('propagates a real fault instead of degrading to null', async () => {
-    stubFetch(() => ({ status: 500, body: { detail: 'boom' } }));
-    const { fetchListingBroker } = await loadBrokers();
-    await expect(fetchListingBroker(55)).rejects.toThrow('boom');
-  });
-
-  /* A 404 that did NOT come from the route saying "nothing attributed" —
-     Railway's edge on an unrouted host, a stale VITE_API_BASE_URL, a renamed
-     path — must not read as "this listing has no broker", or the whole corpus
-     goes silently dark again exactly as it did under PostgREST. */
-  it('propagates a routing 404 instead of swallowing it as "unattributed"', async () => {
-    stubFetch(() => ({ status: 404, body: { detail: 'Not Found' } }));
-    const { fetchListingBroker } = await loadBrokers();
-    await expect(fetchListingBroker(55)).rejects.toThrow('Not Found');
+  it('falls back to every ad’s broker, marked, when no ad is active', async () => {
+    const { propertyBrokers } = await loadBrokers();
+    const out = propertyBrokers([ad(1, false), ad(3, false)], byListing, 3);
+    expect(ids(out)).toEqual([30, 10]);
+    expect(out.fromInactive).toBe(true);
   });
 });
 

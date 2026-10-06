@@ -32,7 +32,7 @@ vi.mock('@/lib/auth', async (importOriginal) => ({
 }));
 vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
-  fetchListingBroker: vi.fn(),
+  fetchListingBrokersByIds: vi.fn(),
 }));
 vi.mock('@/lib/queries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/queries')>()),
@@ -224,13 +224,17 @@ beforeEach(() => {
       [202, images(202, 2)],
     ]),
   );
-  vi.mocked(brokers.fetchListingBroker).mockResolvedValue({
-    listing_id: 202,
-    sreality_id: null,
-    broker_id: 7,
-    broker_display_name: 'Jana Nováková',
-    broker_firm_label: 'RE/MAX Alfa',
-  } as unknown as Awaited<ReturnType<typeof brokers.fetchListingBroker>>);
+  vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(
+    new Map([
+      [202, {
+        listing_id: 202,
+        sreality_id: null,
+        broker_id: 7,
+        broker_display_name: 'Jana Nováková',
+        broker_firm_label: 'RE/MAX Alfa',
+      }],
+    ]),
+  );
   vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins());
   vi.mocked(api.splitProperty).mockResolvedValue(result(kept([101]), left('B', [202], 43, 'detached')));
 });
@@ -277,7 +281,9 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(within(strip).getByText('+2')).toBeInTheDocument();
 
     expect(screen.queryByText('Byt č. 14, orientace na jih.')).not.toBeInTheDocument();
-    expect(brokers.fetchListingBroker).not.toHaveBeenCalled();
+    // Every advert's broker in ONE batched read for the section, not one per row.
+    await waitFor(() => expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledTimes(1));
+    expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledWith([101, 202]);
   });
 
   it('expanded: the description, every photo and the broker — no link to another detail page', async () => {
@@ -293,13 +299,26 @@ describe('<MergedAdvertsSection> rows', () => {
     await waitFor(() => expect(idnes.textContent).toContain('Byt č. 14, orientace na jih.'));
     expect(within(idnes).queryByRole('link', { name: 'Otevřít detail' })).toBeNull();
     expect(await within(idnes).findByText('Jana Nováková')).toBeInTheDocument();
-    expect(brokers.fetchListingBroker).toHaveBeenCalledWith(202);
+    // An advert with no attributed broker says so on its own row.
+    const sreality = rowOf('Sreality');
+    fireEvent.click(within(sreality).getAllByRole('button')[0]);
+    expect(await within(sreality).findByText('Makléř: nepřiřazen')).toBeInTheDocument();
     // The carousel pages the whole album (2 photos → a counter).
     expect(within(idnes).getByText('1 / 2')).toBeInTheDocument();
     // Where it came from, as information.
     expect(
       await within(idnes).findByText('nemovitost #43 · ruční sloučení ze dne 21/09/2026'),
     ).toBeInTheDocument();
+  });
+
+  it('says a failed broker read failed, with a retry — never "nepřiřazen"', async () => {
+    vi.mocked(brokers.fetchListingBrokersByIds).mockRejectedValueOnce(new Error('HTTP 500'));
+    setup({ openAdvertId: 202 });
+    const idnes = rowOf('iDNES Reality');
+    expect(await within(idnes).findByText('Makléře se nepodařilo načíst')).toBeInTheDocument();
+    expect(within(idnes).queryByText('Makléř: nepřiřazen')).toBeNull();
+    fireEvent.click(within(idnes).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await within(idnes).findByText('Jana Nováková')).toBeInTheDocument();
   });
 
   it('opens the row an old advert address asked for, and only that one', async () => {

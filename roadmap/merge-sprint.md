@@ -26,8 +26,8 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
 - [x] W2a — recompute: canonical-ad order, amenity union, portal lists, per-portal newest-ad dates,
       price lineage, city figures follow the canonical ad; realitymix joins the portal filter
       (PR #1719, +755 / −331, migration 588 applied before merge; gate: the first full sweep after the merge)
-- [ ] W2b — property page, pipeline board, Browse rows: broker list, lowest price line, chart of
-      every ad, marks and note mark in merge mode, honest failed reads
+- [x] W2b — property page, pipeline board, Browse rows: broker list, lowest price line, chart of
+      every ad, marks and note mark in merge mode, honest failed reads (PR #1720, +1,866 / −990; above budget, awaiting the operator's ruling)
 - [ ] W3 — carry record, the count invariant, one merge toast
 - [ ] W4 — one split dialog by letters (grown from PR #1699), curation routing per letter with copies
 - [ ] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first"

@@ -13,7 +13,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
 import Pipeline, { planMove } from './Pipeline';
-import type { Collection, PipelineBoardCard, PipelineStage } from '@/lib/types';
+import type { Collection, PipelineBoardCard, PipelineStage, PropertySource } from '@/lib/types';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
 import * as brokersApi from '@/lib/brokers';
@@ -41,6 +41,7 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchPipelineBoard: vi.fn(),
     fetchListingCovers: vi.fn(),
     fetchPropertyCollectionMemberSet: vi.fn(),
+    fetchPropertySourcesByPropertyIds: vi.fn(),
   };
 });
 
@@ -50,11 +51,11 @@ vi.mock('@/lib/toast', async (importOriginal) => {
 });
 
 /* Decorations (cover photo, broker line) no longer come off the board query —
- * they load through lib/hydration keyed on listing_id. Mocking the two batch
- * readers rather than the hooks means these tests drive the REAL provider,
- * hooks, key namespace and projection, so what they pin is the path that
- * actually runs in the browser. `pipelineCardBroker` is deliberately left
- * unmocked: the masking projection is part of what the broker test asserts. */
+ * they load through lib/hydration. The broker line is the property's list
+ * (MS7): the cards' ads, then their brokers. Mocking those batch readers rather
+ * than the hooks means these tests drive the REAL provider, hooks, key
+ * namespace and `propertyBrokers` rule, so what they pin is the path that
+ * actually runs in the browser. */
 vi.mock('@/lib/brokers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/brokers')>();
   return {
@@ -117,6 +118,10 @@ const listingBroker = (masked: boolean) => ({
     ? { has_email: true, has_phone: true }
     : { primary_email: 'jan@remax.cz', primary_phone: '420777123456' }),
 });
+
+/* Each card's ads, for its broker line (MS7). */
+const ad = (id: number, property_id: number, is_active = true) =>
+  ({ id, property_id, is_active }) as PropertySource;
 
 // A second card of a different property type, for the type-filter test.
 const CARD_DUM: PipelineBoardCard = {
@@ -236,6 +241,9 @@ describe('<Pipeline> board', () => {
     });
     vi.mocked(api.removePipelineCard).mockResolvedValue({ removed: true });
     vi.mocked(queries.fetchListingCovers).mockResolvedValue(new Map());
+    vi.mocked(queries.fetchPropertySourcesByPropertyIds).mockResolvedValue(
+      new Map([[42, [ad(111, 42)]]]),
+    );
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
       new Map([[111, listingBroker(false)]]),
     );
@@ -417,6 +425,35 @@ describe('<Pipeline> board', () => {
     );
   });
 
+  /* MS7: the property's list, compact — the canonical ad's broker first, "+N"
+     for the rest (an inactive ad's hidden while one is active), from two batched
+     reads for the whole board. */
+  it('shows the first broker of the property and counts the others', async () => {
+    const other = (listing_id: number, broker_id: number, broker_display_name: string) =>
+      ({ ...listingBroker(false), listing_id, broker_id, broker_display_name });
+    vi.mocked(queries.fetchPropertySourcesByPropertyIds)
+      .mockClear()
+      .mockResolvedValue(new Map([[42, [ad(110, 42), ad(111, 42), ad(112, 42, false)]]]));
+    vi.mocked(brokersApi.fetchListingBrokersByIds).mockClear().mockResolvedValue(
+      new Map([[110, other(110, 8, 'Eva Malá')], [111, listingBroker(false)], [112, other(112, 9, 'Petr')]]),
+    );
+    renderBoard();
+    expect((await screen.findByText('Jan Novák')).closest('a')).toHaveAttribute('href', '/brokers/7');
+    expect(screen.getByText('+1')).toHaveAttribute('title', 'Eva Malá');
+    expect(queries.fetchPropertySourcesByPropertyIds).toHaveBeenCalledTimes(1);
+    expect(brokersApi.fetchListingBrokersByIds).toHaveBeenCalledWith([110, 111, 112]);
+  });
+
+  /* MS16: a failed board read says so and offers a retry that reads again. */
+  it('offers a retry when the board cannot be read', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderBoard();
+    const retry = await screen.findByRole('button', { name: 'Zkusit znovu' });
+    expect(screen.queryByText('Sadová')).not.toBeInTheDocument();
+    fireEvent.click(retry);
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+  });
+
   it('filters the board by property type', async () => {
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
     renderBoard();
@@ -493,15 +530,21 @@ describe('<Pipeline> board', () => {
     expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
   });
 
-  it('applies no collection constraint when the member map errors', async () => {
+  /* ...and says so (MS16): a retry where the row sits, after which the
+     constraint applies. */
+  it('applies no collection constraint when the member map errors, and offers a retry', async () => {
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
     vi.mocked(queries.fetchPropertyCollectionMemberSet).mockRejectedValue(new Error('403'));
     renderBoard('/pipeline?collections=7');
-    await waitFor(() =>
-      expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí'),
-    );
+    const retry = await screen.findByRole('button', { name: /Kolekce se nepodařilo načíst/ });
+    expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí');
     expect(screen.getByText('Sadová')).toBeInTheDocument();
     expect(screen.queryByText('Kolekce')).not.toBeInTheDocument();
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[42, [7]]]));
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(screen.getByText(/nemovitostí/).textContent).toBe('1 z 2 nemovitostí'),
+    );
   });
 
   /* The row reads the member map, NOT the collections list: a selection is a

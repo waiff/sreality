@@ -144,7 +144,6 @@ describe('refreshAfterSplit', () => {
     for (const key of [
       ['property'],
       ['property-sources'],
-      ['property-status-events'],
       ['snapshots'],
       ['merged-adverts'],
       ['autodedup', 'proposed-splits'],

@@ -26,12 +26,26 @@ export function idsKey(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',');
 }
 
+/* A board card's property and the canonical ad that heads its broker list. */
+export interface BrokerSubject {
+  property_id: number;
+  listing_id: number | null;
+}
+
 export const hydrationKeys = {
   all: [HYDRATION_NAMESPACE] as const,
   covers: (ids: readonly number[]) =>
     [HYDRATION_NAMESPACE, 'covers', idsKey(ids)] as const,
   brokers: (ids: readonly number[]) =>
     [HYDRATION_NAMESPACE, 'brokers', idsKey(ids)] as const,
+  /* PROPERTY-grain (MS7), never under `brokers`: the two id spaces overlap. The
+   * canonical ad heads the list, so it is in the key too. */
+  propertyBrokers: (subjects: readonly BrokerSubject[]) =>
+    [
+      HYDRATION_NAMESPACE,
+      'property-brokers',
+      subjects.map((s) => `${s.property_id}:${s.listing_id ?? ''}`).sort().join(','),
+    ] as const,
   /* Several photos per listing — the Browse card carousel and the comparables
    * modal, as distinct from `covers` (the board's ONE thumbnail, W4). `perId` is
    * part of the key on purpose: it is a client-side retention cap applied to the

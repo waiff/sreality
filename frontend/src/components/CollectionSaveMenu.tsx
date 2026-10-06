@@ -100,6 +100,13 @@ export default function CollectionSaveMenu({
          * exist that they have none. */
         <p className="px-1.5 py-1.5 text-[0.78rem] text-[var(--color-ink-3)]">
           Kolekce se nepodařilo načíst
+          <button
+            type="button"
+            onClick={() => void collectionsQ.refetch()}
+            className="ml-2 font-medium text-[var(--color-copper)] underline underline-offset-2 hover:no-underline"
+          >
+            Zkusit znovu
+          </button>
         </p>
       ) : sorted.length === 0 ? (
         <Link
