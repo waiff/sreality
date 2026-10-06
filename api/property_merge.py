@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
+from api.category_clash_text import LETTER_ENDING, clash_sentence
 from toolkit.asset_identity import (
     AssetError,
     get_asset,
@@ -30,6 +31,7 @@ from toolkit.asset_identity import (
 )
 from toolkit.property_identity import (
     MOVED,
+    CategoryClash,
     MergeError,
     detach_outcomes,
     listing_origins,
@@ -309,6 +311,12 @@ def post_split(
         )
     except SplitRefused as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    except CategoryClash as exc:
+        # a leaving letter that mixes categories rule 15 never joins (E925's sentence)
+        raise HTTPException(status_code=409, detail={
+            "code": "refused", "ids": [],
+            "message": clash_sentence(exc.field, exc.a, exc.b, ending=LETTER_ENDING),
+        }) from exc
     except MergeError as exc:
         raise HTTPException(status_code=409, detail={
             "code": "refused", "message": str(exc), "ids": []}) from exc
