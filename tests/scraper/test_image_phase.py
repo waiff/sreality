@@ -726,7 +726,7 @@ def _drive_image_loop(
         scraper_main.db, "mark_image_listing_taken_down", lambda conn, sid: 0
     )
 
-    def _fake_fetch(sid, seq, url, r2, semaphore=None):
+    def _fake_fetch(sid, seq, url, r2, semaphore=None, proxies=None):
         if fetch_delay:
             time.sleep(fetch_delay)
         err = fetch_result(url)
@@ -989,3 +989,15 @@ def test_a_classifier_never_sees_a_throttle(monkeypatch):
     the drain routes 429/403 to the host cool-down before it."""
     assert scraper_main._throttle_status(_http_error(403)) == 403
     assert scraper_main._throttle_status(_http_error(429)) == 429
+
+
+def test_image_proxies_come_from_the_clients_own_declaration(monkeypatch):
+    """No portal is named in the drain: every client class that declares USE_PROXY and
+    whose PROXY_ENV is set contributes its site's host; with the env unset, nothing."""
+    monkeypatch.delenv("SCRAPER_PROXY_URL", raising=False)
+    assert scraper_main.image_proxies() == {}
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:8080")
+    hosts = scraper_main.image_proxies()
+    assert "reality.idnes.cz" in hosts and "www.ceskereality.cz" in hosts
+    assert hosts["reality.idnes.cz"] == {"http": "http://proxy.example:8080", "https": "http://proxy.example:8080"}
+    assert "sta-reality2.1gr.cz" not in hosts and "www.sreality.cz" not in hosts

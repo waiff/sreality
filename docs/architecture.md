@@ -1060,7 +1060,11 @@ renumber.** Navigate by area:
    outlives the run (module state in `scraper/main.py`: 15 min doubling to 2 h, or the portal's
    `Retry-After`), so the worker's minute-by-minute lane cannot re-hammer it; fetches to one host are
    spaced ≥ 0.2 s apart and wear the crawlers' desktop-Chrome identity (`image_storage._session`),
-   because iDNES serves galleries through its own site's redirector, not a CDN. Incident: 2026-10-01 →
+   because iDNES serves galleries through its own site's redirector, not a CDN; **a photo link on a
+   portal's OWN site resolves through that portal's residential proxy** (`main.image_proxies`, derived
+   from each client's `USE_PROXY` / `BASE_URL`, no portal named; one redirect hop, the bytes come
+   straight from the CDN), since such a site punishes our datacenter address while its CDN does not.
+   Incident: 2026-10-01 →
    10-05 the bare python-requests identity was rate-limited then blocked there, five attempts in twenty
    minutes gave 28k photos on 2.1k ads up for good, and the engine's evidence rule held every merge
    touching them; migration 585 re-queued those rows. sreality photos are fetched through their `SQUARE_1800_JPG` template
