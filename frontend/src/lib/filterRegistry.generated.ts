@@ -1097,7 +1097,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "source",
       "default": null,
-      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax. A listing matches if its source is in the list. Empty list / null = all portals.",
+      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax, realitymix. A listing matches if its source is in the list. Empty list / null = all portals.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1152,6 +1152,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "remax",
           "label_cs": "RE/MAX",
           "label_en": "RE/MAX"
+        },
+        {
+          "value": "realitymix",
+          "label_cs": "RealityMix",
+          "label_en": "RealityMix"
         }
       ],
       "aliases": [],
@@ -2650,7 +2655,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "int",
       "pg_column": null,
       "default": null,
-      "description": "Minimum number of price changes (cuts AND raises) for the property, counted inside the `price_change_window_days` window (all time when the window is unset). One count per consecutive snapshot pair where the asking price moved WITHIN a single portal listing, summed over the property's listings — so two portals quoting different prices for the same property is not itself a change. Use 2+ for repeatedly repriced listings.",
+      "description": "Minimum number of price changes (cuts AND raises) for the property, counted inside the `price_change_window_days` window (all time when the window is unset). Counted along the shown price's lineage: one per consecutive snapshot pair where the asking price moved within the canonical listing or one of its same-portal predecessors (a re-list: a listing there that ended before the next one appeared), plus one at each re-list whose first price differs from the previous listing's last. Listings that ran at the same time never form a step, so two portals quoting different prices for the same property is not itself a change. Use 2+ for repeatedly repriced listings.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
@@ -2718,7 +2723,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": null,
       "default": null,
-      "description": "Signed total price change threshold, as a percent of the first observed price of the property's REPRESENTATIVE listing — the same listing whose price is displayed, so the shown price and this delta always describe one series. Negative = total drop of at least that much (`total_price_change_pct <= X`, e.g. -10 for 'down 10%+ overall'); positive = total rise of at least that much (`>= X`). Zero is treated as unset. Properties whose representative listing has fewer than two price points are excluded when set.",
+      "description": "Signed total price change threshold, as a percent: from the first observed price of the oldest priced listing in the shown price's lineage (the canonical listing and its same-portal predecessors, as in `price_change_count_min`) to the shown price. Negative = total drop of at least that much (`total_price_change_pct <= X`, e.g. -10 for 'down 10%+ overall'); positive = total rise of at least that much (`>= X`). Zero is treated as unset. Properties with fewer than two price points across that lineage, or an unpriced canonical listing, are excluded when set.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [

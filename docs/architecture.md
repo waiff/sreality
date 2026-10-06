@@ -1259,19 +1259,34 @@ renumber.** Navigate by area:
     maintenance job's straggler-attach does any spatial/geo probe. Frontend Browse reads
     `properties_public`; region stats read the property grain
     (migration 103).
-    **One property, one voice (W4, migration 561, decision 18).** A property speaks with its
-    CANONICAL advert, rank 1 of `property_canonical_listings(property_id)`: active first, then
-    `source_trust_rank`, then the most recently seen, then the lowest id. ONE RULE PER FIELD:
-    every advert field (price and ITS OWN `listing_price_steps` history, area with no fallback,
-    layout, category, subtype, source, condition with both derived levels -- rule #14 --,
-    furnished) is the canonical advert's, and `repr_listing_ref_id` names it for every read model
-    (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
-    energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
-    in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
-    linked in the same statement) then that recompute, in the straggler-attach. A linked
-    advert's change reaches its property through `dirty_properties` (rule #20).
-    `all_sources` / `active_sources` (never written) left the read model; the physical columns
-    are W8's destructive drop (the SPA never read them).
+    **One property, one voice (W4, migration 561, decision 18; MERGE SPRINT W2a, migration
+    588).** A property speaks with its CANONICAL advert, rank 1 of
+    `property_canonical_listings(property_id)`: active first; then a map point
+    (`listing_location.geom` present); then, among active adverts, the earliest first sighting,
+    among inactive ones the latest last sighting; then `source_trust_rank`; then the lowest id.
+    Both seen keys are fixed for the adverts they rank (561's "most recently seen" swapped two
+    live adverts on every index sighting and restamped `repr_since`). ONE RULE PER FIELD
+    (`docs/design/merge-sprint/PROGRAM.md` MS11): every advert field (price, area with no
+    fallback, layout, category, subtype, source, condition with both derived levels -- rule #14
+    --, furnished) is the canonical advert's, and `repr_listing_ref_id` names it for every read
+    model (`properties_public.listing_id` IS it). The six amenities (balcony, lift, parking,
+    terrace, garage, cellar) are a union over every advert, active or not (MS6); every other
+    physical fact (building type, ownership, energy rating, estate/usable/garden area, parking
+    spaces) is the first non-empty value in the canonical order. The price figures are the
+    canonical advert's LINEAGE (MS10): its own and its same-portal predecessors'
+    `listing_price_steps` (a predecessor is the advert on that portal last seen latest, strictly
+    before the later one was first seen, so concurrent adverts never form a step), plus one
+    handover step per link; the total compounds to the oldest priced link's first price against
+    the shown price. The rollup also writes `all_sources` / `active_sources` (sorted; the active
+    one empty when none is) and one `newest_ad_at_<portal>` per `PORTAL_OPTIONS` code (the first
+    sighting of the property's newest advert there, NULL with none; MS19), which W5 projects.
+    The city figures (`home_obec_pop`, `near_*`) follow the canonical advert's point: the rollup
+    clears `city_proximity_computed_at` when the canonical advert changes, or changed after they
+    were computed, and the hourly `recompute_city_proximity` refills them from that point. The
+    job reads only a point: a canonical advert without one keeps the figures of an earlier point
+    (or none) until it gains one. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL`
+    (a bare row linked in the same statement) then that recompute, in the straggler-attach. A
+    linked advert's change reaches its property through `dirty_properties` (rule #20).
     **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
     (`frontend/src/pages/PropertyDetail.tsx`). Its header is the `properties_public` row
     (`PROPERTY_COLS`, pinned to the view by `tests/test_property_page_read_contract.py`) -- the
@@ -1660,15 +1675,19 @@ renumber.** Navigate by area:
     two browse RPCs agree per shared predicate only (place plan, rule-23 measures,
     `curated_cities_matching()`, served predicate). Open divergences: center+radius is a circle
     in Python and a bounding square in Browse (M3); `tom_days` reaches Stats but not the Browse
-    list (M4). `WatchdogFilterSpec`'s fields EQUAL the WATCHDOG agenda (and `ComparableFilters`'
-    the cohort agendas) by an equality test in `tests/toolkit/test_filter_registry.py`, because
-    `extra='ignore'` drops a missing field on save without a word: merge f2d7b359 lost
-    `building_material` and `min/max_garden_area` that way until `fix/watchdog-dropped-filters`
-    (M1).
-    **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
-    and the collection monitor alert only on the canonical advert's own steps scraped after it
-    became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert
-    changes: a merge, detach or delisting that hands the slot over replays nothing), and
+    list (M4); the six amenities are the property's union (MS6) for the Watchdog, Browse and
+    Stats but the canonical advert's own flags in an estimation cohort, until MS20
+    (`docs/design/merge-sprint/PROGRAM.md` §9). `WatchdogFilterSpec`'s fields EQUAL the
+    WATCHDOG agenda (and `ComparableFilters`' the cohort agendas) by an equality test in
+    `tests/toolkit/test_filter_registry.py`, because `extra='ignore'` drops a missing field on
+    save without a word: merge f2d7b359 lost `building_material` and `min/max_garden_area` that
+    way until `fix/watchdog-dropped-filters` (M1).
+    **Every surface reads the same canonical advert (migrations 561, 588).** Both watchdog
+    producers and the collection monitor alert only on the canonical advert's own steps scraped
+    after it became canonical (`properties.repr_since`, stamped by the rollup when the canonical
+    advert changes: a merge, detach or delisting that hands the slot over replays nothing, and a
+    same-portal re-list's handover step, which the property's price figures count, is no
+    `listing_price_steps` row, so a cheaper re-list fires no price-drop alert), and
     `_shared_filter_where` admits an advert only as its property's canonical advert and drops
     every advert of the subject's property (`exclude_listing_ids`, the one exclusion; decision
     13), so comparables, velocity and the corridor count each property once.
@@ -2154,9 +2173,11 @@ renumber.** Navigate by area:
     `dirty_properties`.
     A residual of removing the
     inline singleton rollup: a crawler change confined to unhashed columns (`area_basis`,
-    `published_at`, `source_url`, which feed `price_per_m2_source_listing_id`) reaches its
-    property only at the daily sweep, and an unchanged, non-reactivating refetch no longer
-    refreshes `properties.last_seen_at`/`source_count` inline (sreality parity).
+    `published_at`, `source_url`) reaches its property only at the daily sweep, and an
+    unchanged, non-reactivating refetch no longer refreshes `properties.last_seen_at`/
+    `source_count` inline (sreality parity). A `listing_location` write does not dirty its
+    property either: an advert gaining or losing its map point re-ranks the canonical advert
+    (migration 588) at that property's next recompute, at worst the daily sweep.
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a client
     (fetch + pacing) + a parser + a `Portal` adapter + a config row — and shared code grows no new
     portal-name branch.** The parser's outputs
@@ -2196,7 +2217,12 @@ renumber.** Navigate by area:
     `reconcile_sightings` and never reads or writes `listings` itself) and the config row. Pacing is
     per-portal by design — each portal keeps its own politeness rules in its client + its
     `PortalLimits`. A genuine per-portal need is a seam on the `Portal` protocol, justified in
-    review, never an `if source == …` in shared code. **The seams.** Attributes: `source`,
+    review, never an `if source == …` in shared code. One per-portal SCHEMA seam:
+    `properties.newest_ad_at_<portal>` (migration 588), one column per
+    `toolkit.filter_registry.PORTAL_OPTIONS` code, from which the rollup's statement is generated;
+    a portal added there fails `tests/test_recompute_property_stats.py` until a migration gives it
+    its column, and `PORTAL_OPTIONS` must name every `scraper.portal_factory.PORTAL_CLASSES`
+    portal (`tests/toolkit/test_filter_registry.py`). **The seams.** Attributes: `source`,
     `index_rate`, `price_change_min_pct` (+ optional `shared_rate_limiter`). Required:
     `categories`, `category_labels`, `walk_category`, `fetch_detail`. Defaulted on
     `PortalDefaults`, overridden only where the portal differs: `connect_index` (idnes: staleness
