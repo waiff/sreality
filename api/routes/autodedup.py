@@ -2191,7 +2191,7 @@ def verdict(
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
 
     A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
-    rental, a flat and a commercial unit) is a 422 in the operator's words (E925), never a 409:
+    rental, a flat and a house) is a 422 in the operator's words (E925), never a 409:
     the rulings page reads every 409 as "ruled again since the page loaded".
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
@@ -2326,8 +2326,9 @@ _SAME_REFUSED: dict[str, str] = {
     "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
                      "nemovitosti, proto je nelze označit jako stejné.",
     "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
-                     "do jedné nemovitosti (výjimkou jsou dům, komerční objekt a pozemek, které "
-                     "lze spojit navzájem), proto je nelze označit jako stejné.",
+                     "do jedné nemovitosti (výjimkou jsou jen dvojice dům – komerční objekt, "
+                     "dům – pozemek, komerční objekt – pozemek a byt – komerční objekt), proto "
+                     "je nelze označit jako stejné.",
 }
 _CATEGORY_LABELS: dict[str, str] = {
     option.value: option.label_cs
@@ -3150,7 +3151,7 @@ def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
 _CLOSURE_REFUSED = {
     "size": "spojují skupinu o {n} inzerátech, větší, než pevné pravidlo dovolí",
     "category_type": "spojují prodej s pronájmem, což pevné pravidlo nedovolí",
-    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a dům), "
                      "což pevné pravidlo nedovolí"),
     "must_not_link": "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny",
 }

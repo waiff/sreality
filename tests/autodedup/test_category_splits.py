@@ -1,16 +1,21 @@
 """The category review's sides (E937): which ads of one property can be one property.
 
-Two ads are on one side when rule 15's gate passes them (`category_clash`, the one definition);
-an ad of unknown deal type or category, and a contentless record, ride with the kept side and
-never make a property mixed. Ad ids echo the production cases the page was built for.
+Every two ads of one side pass rule 15's gate (`category_clash`, the one definition); the rule is
+a set of pairs (E938), so the ads are walked in one order and each joins the first side it clashes
+with no member of. An ad of unknown deal type or category, and a contentless record, ride with
+the kept side and never make a property mixed. Ad ids echo the production cases the page was
+built for.
 """
 
 from __future__ import annotations
+
+from itertools import combinations, combinations_with_replacement
 
 import pytest
 
 from autodedup.category_splits import Ad, Side, contentless, rides, sides
 from toolkit import room_taxonomy
+from toolkit.property_identity import category_clash
 
 
 def ad(listing_id: int, deal: str | None, main: str | None, *, origin: int | None = 1,
@@ -29,24 +34,59 @@ def test_a_sale_and_a_rental_of_one_flat_are_two_sides() -> None:
     assert ids(found) == [(1, 2, 3, 4, 5, 6), (7, 8, 9)]
 
 
-def test_a_house_and_a_commercial_listing_are_one_side() -> None:
-    """53488: two house ads and a commercial ad are one side, the flat ad the other."""
+def test_a_commercial_ad_beside_a_flat_and_a_house_takes_the_flat_s_side() -> None:
+    """53488: two house ads, a flat ad and a commercial ad. The commercial ad may be one property
+    with either (E938), never both: the walk meets the flat first, so it starts on the flat's
+    side and the two sides hold no clash. The letters stay the operator's to change."""
     found = sides([ad(11, "prodej", "dum"), ad(12, "prodej", "dum"), ad(13, "prodej", "byt"),
                    ad(14, "prodej", "komercni")], canonical=11)
-    assert ids(found) == [(11, 12, 14), (13,)]
+    assert ids(found) == [(11, 12), (13, 14)]
 
 
-def test_a_flat_and_a_commercial_unit_are_two_sides() -> None:
-    """9737: two flat ads and two commercial ads."""
+def test_two_flats_a_commercial_unit_and_a_house_are_two_sides_without_a_clash() -> None:
+    adverts = [ad(1, "prodej", "byt"), ad(2, "prodej", "byt"), ad(3, "prodej", "komercni"),
+               ad(4, "prodej", "dum")]
+    found = sides(adverts, canonical=1)
+    assert ids(found) == [(1, 2, 3), (4,)]
+    by_id = {a.listing_id: a for a in adverts}
+    assert all(category_clash((by_id[x].category_type, by_id[x].category_main),
+                              (by_id[y].category_type, by_id[y].category_main)) is None
+               for side in found for x, y in combinations(side.ads, 2))
+
+
+def test_a_flat_and_a_commercial_unit_are_one_side() -> None:
+    """9737: two flat ads and two commercial ads, one studio filed both ways (E938)."""
     found = sides([ad(21, "prodej", "komercni"), ad(22, "prodej", "komercni"),
                    ad(23, "prodej", "byt"), ad(24, "prodej", "byt")], canonical=21)
-    assert ids(found) == [(21, 22), (23, 24)]
+    assert ids(found) == [(21, 22, 23, 24)]
+    assert ids(sides([ad(25, "prodej", "byt"), ad(26, "prodej", "komercni")], canonical=26)) == [
+        (25, 26)]
 
 
 def test_three_sides() -> None:
     found = sides([ad(31, "pronajem", "byt"), ad(32, "prodej", "byt"),
-                   ad(33, "prodej", "komercni"), ad(34, "prodej", "byt")], canonical=33)
+                   ad(33, "prodej", "dum"), ad(34, "prodej", "byt")], canonical=33)
     assert ids(found) == [(33,), (31,), (32, 34)]
+
+
+DEALS = ("prodej", "pronajem")
+MAINS = ("byt", "dum", "komercni", "pozemek", "ostatni")
+
+
+@pytest.mark.parametrize("size", [2, 3, 4])
+def test_no_side_holds_a_clash_and_every_two_sides_hold_one(size: int) -> None:
+    """Every set of up to four ads over every deal type and category: a side never holds two ads
+    rule 15 keeps apart, and two sides always hold two, so the card can name its clash."""
+    kinds = [(deal, main) for deal in DEALS for main in MAINS]
+    for chosen in combinations_with_replacement(kinds, size):
+        adverts = [ad(i, deal, main) for i, (deal, main) in enumerate(chosen, start=1)]
+        kind = {a.listing_id: (a.category_type, a.category_main) for a in adverts}
+        found = [s.ads for s in sides(adverts, canonical=1)]
+        assert sorted(i for side in found for i in side) == list(range(1, size + 1))
+        for side in found:
+            assert all(category_clash(kind[x], kind[y]) is None for x, y in combinations(side, 2))
+        for one, other in combinations(found, 2):
+            assert any(category_clash(kind[x], kind[y]) for x in one for y in other), chosen
 
 
 def test_a_contentless_record_never_makes_a_rental_property_mixed() -> None:
@@ -70,15 +110,17 @@ def test_a_share_sale_beside_a_sale_is_two_sides_today() -> None:
 
 
 @pytest.mark.parametrize(("pairs", "expected"), [
-    (frozenset(), [(61,), (62,)]),
-    (frozenset({frozenset({"dum", "komercni"}), frozenset({"byt", "komercni"})}), [(61, 62, 63)]),
+    (frozenset(), [(61,), (62,), (63,)]),
+    (frozenset({frozenset({"dum", "komercni"})}), [(61, 62), (63,)]),
+    (frozenset({frozenset({"dum", "komercni"}), frozenset({"byt", "komercni"})}), [(61,), (62, 63)]),
+    (frozenset({frozenset({"dum", "komercni"}), frozenset({"byt", "komercni"}),
+                frozenset({"byt", "dum"})}), [(61, 62, 63)]),
 ])
 def test_the_sides_follow_the_one_definition(monkeypatch: pytest.MonkeyPatch, pairs, expected):
-    """No category pair is spelled here: change the sanctioned cross-types and the sides move."""
+    """No category pair is spelled here: change the sanctioned cross-types and the sides move;
+    a chain of two pairs (byt–komerční, komerční–dům) is not a third (byt–dům)."""
     monkeypatch.setattr(room_taxonomy, "_CROSS_TYPE_OK", pairs)
-    adverts = [ad(61, "prodej", "dum"), ad(62, "prodej", "komercni")]
-    if len(expected) == 1:
-        adverts.append(ad(63, "prodej", "byt"))
+    adverts = [ad(61, "prodej", "dum"), ad(62, "prodej", "komercni"), ad(63, "prodej", "byt")]
     assert ids(sides(adverts, canonical=61)) == expected
 
 

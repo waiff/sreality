@@ -510,8 +510,10 @@ def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
     """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
     took the room tag out of every refusal, so a stored row whose tag sat at or above the
     0.90 floor (or was unknown) decides identically, and every row that moved had it below.
-    E935 lets land meet a house or a commercial ad, so the only rows S14 never stored are
-    such pairs, which its rule vetoed before scoring."""
+    E935 lets land meet a house or a commercial ad, and E938 a flat a commercial ad, so the
+    only rows S14 never stored are such pairs, which its rule vetoed before scoring; the
+    fan-out cap (E17) gives them slots, so a row S14 stored and this run did not is a reject
+    they displaced (four flat pairs on this pack), never a merge or a band."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -524,10 +526,10 @@ def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
                                                  r["veto"], round(r["score"], 9)) for r in rows}
     stored = read_pairs(S14_TRIAL_RUN)
     now, then = decided(read_pairs(tmp_path)), decided(stored)
-    land_cross = [{"pozemek", "dum"}, {"pozemek", "komercni"}]
-    assert then.keys() <= now.keys()
-    assert all({ds.listings[lo].category_main, ds.listings[hi].category_main} in land_cross
+    cross = [{"pozemek", "dum"}, {"pozemek", "komercni"}, {"byt", "komercni"}]
+    assert all(then[key][0] == "reject" for key in then.keys() - now.keys())
+    assert all({ds.listings[lo].category_main, ds.listings[hi].category_main} in cross
                for lo, hi in now.keys() - then.keys())
     tag = {(r["lo"], r["hi"]): r["feats"].get("tag_room_clip_min2") for r in stored}
     below = {key for key, slot in tag.items() if slot and slot[1] and slot[0] < 0.90}
-    assert {key for key in then if now[key] != then[key]} <= below
+    assert {key for key in then.keys() & now.keys() if now[key] != then[key]} <= below

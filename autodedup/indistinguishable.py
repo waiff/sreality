@@ -2626,9 +2626,9 @@ def distinguishing_facts(
     if (a.category_type is not None and b.category_type is not None
             and a.category_type != b.category_type):
         add("category_type", a.category_type, b.category_type)
-    # `category_main_compatible`, not raw inequality: rule #15 sanctions any two of dům,
-    # komerční and pozemek (dům <-> komerční: the operator confirmed 8 merges across it in this
-    # cohort; pozemek since E935).
+    # `category_main_compatible`, not raw inequality: rule #15 sanctions four pairs, dům–komerční
+    # (the operator confirmed 8 merges across it in this cohort), pozemek with dům or komerční
+    # (E935) and byt–komerční (E938). A pair, never a class: a byt and a dům still differ.
     if not category_main_compatible(a.category_main, b.category_main):
         add("category_main", a.category_main, b.category_main)
 

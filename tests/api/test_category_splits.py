@@ -3,10 +3,12 @@
 The connection is faked and dispatches on the statement (the module's own constants, reused).
 The properties echo the production cases the page was built for: 12664 (six sale ads and three
 rental ads of one flat), 9737 (two flat ads and two commercial ads, every pair across ruled
-`same`), 53488 (two house ads and a commercial ad are one side, the flat ad the other), 914
-(nineteen rentals and one contentless Bazoš record stored under `byt` / `prodej`), 197654 (two
-house sales and a share sale) and 31 (an ad of unknown deal type rides along). 5 holds one ad, 6
-was merged away, 999 does not exist.
+`same`: one side since E938), 53488 (two house ads, a flat ad and a commercial ad: the commercial
+ad starts on the flat's side, E938), 914 (nineteen rentals and one contentless Bazoš record
+stored under `byt` / `prodej`), 197654 (two house sales and a share sale) and 31 (an ad of
+unknown deal type rides along); 36 (a commercial canonical ad between a flat and a house) and 41
+(a flat and a house ruled `same`) are made up. 5 holds one ad, 6 was merged away, 999 does not
+exist.
 """
 
 from __future__ import annotations
@@ -55,10 +57,15 @@ ADS = [
     _ad(31, 3101, "sreality", "prodej", "byt"),
     _ad(31, 3102, "idnes", "pronajem", "byt", price=RENT),
     _ad(31, 3103, "realitymix", None, "byt"),
+    _ad(36, 3601, "sreality", "prodej", "komercni"),
+    _ad(36, 3602, "idnes", "prodej", "byt"),
+    _ad(36, 3603, "remax", "prodej", "dum"),
+    _ad(41, 4101, "sreality", "prodej", "byt"),
+    _ad(41, 4102, "idnes", "prodej", "dum"),
     _ad(5, 501, "sreality", "prodej", "byt"),
 ]
 CANONICAL = {12664: 1266401, 9737: 973701, 53488: 534881, 914: 91400, 197654: 1976541,
-             31: 3101, 5: 501}
+             31: 3101, 36: 3601, 41: 4101, 5: 501}
 ADS = [(*a[:1], CANONICAL[a[0]], *a[2:]) for a in ADS]
 LIVE = set(CANONICAL)  # 6 is merged away, 999 never existed
 
@@ -78,6 +85,7 @@ def _verdict(lo: int, hi: int, verdict: str, at: datetime = AT) -> tuple[Any, ..
 
 VERDICTS = [  # newest first
     *(_verdict(lo, hi, "same") for lo in (973701, 973702) for hi in (973703, 973704)),
+    _verdict(4101, 4102, "same"),
     _verdict(1266401, 1266407, "different"),
     _verdict(1976541, 1976543, "unsure"),
     _verdict(1976541, 1976543, "same", datetime(2026, 9, 1, tzinfo=timezone.utc)),
@@ -152,7 +160,7 @@ def client(conn: _Conn):
     api_main.app.dependency_overrides.clear()
 
 
-ASKED = "914,12664,5,9737,53488,197654,6,31,999"
+ASKED = "914,12664,5,9737,53488,197654,6,31,36,41,999"
 
 
 def _items(client) -> dict[int, dict[str, Any]]:
@@ -168,7 +176,7 @@ def test_the_items_come_in_the_order_asked_and_the_rest_is_missing(client, conn)
     body = client.get(f"/autodedup/category-splits?properties={ASKED}").json()
     assert body["store_ready"] is True
     assert [i["property_id"] for i in body["data"]["items"]] == [914, 12664, 9737, 53488,
-                                                                 197654, 31]
+                                                                 197654, 31, 36, 41]
     assert body["data"]["missing"] == [5, 6, 999]
     assert not any(s.lstrip().lower().startswith(("insert", "update", "delete"))
                    for s, _p in conn.calls), "the review is read-only"
@@ -206,19 +214,41 @@ def test_each_ad_carries_the_proposed_splits_fields_and_its_scrubbed_text(client
     assert "[telefon]" in text["description"] and "[email]" in text["description"]
 
 
-def test_a_house_and_a_commercial_listing_are_one_side(client):
+def test_a_commercial_ad_beside_a_flat_and_a_house_starts_on_the_flat_s_side(client):
+    """E938: the commercial ad may be one property with the flat or with the house, never with
+    both; no side holds a clash."""
     one = _items(client)[53488]
     assert [(g["label"], _ids(g)) for g in one["groups"]] == [
-        ("prodej · dum + komercni", [534881, 534882, 534884]), ("prodej · byt", [534883])]
+        ("prodej · dum", [534881, 534882]), ("prodej · byt + komercni", [534883, 534884])]
     assert [s["reason"] for s in one["splits"]] == ["category_main: dum vs byt"]
     assert one["groups"][1]["adverts"][0]["origin_property_id"] == 53489
 
 
-def test_every_pair_across_sides_ruled_same_is_confirmed(client):
+def test_a_flat_and_a_commercial_unit_are_one_side_and_the_property_is_not_mixed(client):
+    """9737 since E938: a studio filed as a flat and as a commercial unit is one property by the
+    rule; its two units are a question of letters on the property page, not of categories."""
     one = _items(client)[9737]
+    assert [(g["label"], g["kept"], _ids(g)) for g in one["groups"]] == [
+        ("prodej · byt + komercni", True, [973701, 973702, 973703, 973704])]
+    assert (one["mixed"], one["confirmed"], one["ruled"], one["splits"]) == (
+        False, False, False, [])
+
+
+def test_two_sides_are_named_by_their_first_clashing_pair(client):
+    """36: the canonical ad is commercial, which a house does not clash with; the pair that
+    keeps the sides apart is the flat and the house."""
+    one = _items(client)[36]
+    assert [(g["label"], _ids(g)) for g in one["groups"]] == [
+        ("prodej · byt + komercni", [3601, 3602]), ("prodej · dum", [3603])]
+    assert [(s["listing_lo"], s["listing_hi"], s["reason"]) for s in one["splits"]] == [
+        (3602, 3603, "category_main: byt vs dum")]
+
+
+def test_every_pair_across_sides_ruled_same_is_confirmed(client):
+    one = _items(client)[41]
     assert (one["mixed"], one["confirmed"], one["ruled"]) == (True, True, True)
     assert [(g["label"], g["kept"]) for g in one["groups"]] == [
-        ("prodej · komercni", True), ("prodej · byt", False)]
+        ("prodej · byt", True), ("prodej · dum", False)]
     assert one["splits"][0]["ruling"]["verdict"] == "same"
 
 

@@ -113,9 +113,33 @@ def test_land_merges_with_a_house_or_a_commercial_property(source, other):
 
 
 @pytest.mark.parametrize("source", ["operator", "autodedup"])
+def test_a_flat_merges_with_a_commercial_property(source):
+    """E938 (2026-10-06): one studio filed as a flat on one portal and as a commercial unit on
+    another is one property when the operator or the engine says so."""
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("prodej", "byt"), 7: ("prodej", "komercni")},
+                 canonical={3: 1, 7: 2})
+    out = _merge(db, [3, 7], source=source, **_by(source))
+    assert (out["survivor_id"], out["retired_ids"]) == (3, [7])
+    assert db.listings == {1: 3, 2: 3}
+
+
+@pytest.mark.parametrize("source", ["operator", "autodedup"])
+@pytest.mark.parametrize("other", ["dum", "pozemek"])
+def test_a_set_of_a_flat_a_commercial_unit_and_a_house_or_land_is_refused(source, other):
+    """Rule 15 is a set of PAIRS: komerční meets the flat and the house (or the land), and the
+    set is still refused, on the flat–house (flat–land) pair, before anything merges."""
+    db = _Ledger({1: 3, 2: 7, 3: 9}, cats={3: ("prodej", "byt"), 7: ("prodej", "komercni"),
+                                           9: ("prodej", other)})
+    with pytest.raises(CategoryClash, match="category_main") as refused:
+        _merge(db, [3, 7, 9], source=source, **_by(source))
+    assert (refused.value.field, refused.value.a, refused.value.b) == ("category_main", "byt", other)
+    assert db.events == [] and db.listings == {1: 3, 2: 7, 3: 9}
+
+
+@pytest.mark.parametrize("source", ["operator", "autodedup"])
 @pytest.mark.parametrize("pair", [("byt", "pozemek"), ("byt", "dum"), ("ostatni", "pozemek")],
                          ids=["flat vs land", "flat vs house", "other vs land"])
-def test_a_flat_or_other_still_merges_with_no_other_category(source, pair):
+def test_a_flat_never_merges_with_a_house_or_land_nor_other_with_land(source, pair):
     db = _Ledger({1: 3, 2: 7}, cats={3: ("prodej", pair[0]), 7: ("prodej", pair[1])},
                  canonical={3: 1, 7: 2})
     with pytest.raises(CategoryClash, match="category_main") as refused:

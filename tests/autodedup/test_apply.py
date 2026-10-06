@@ -691,6 +691,36 @@ def test_category_guards_mirror_the_chokepoint() -> None:
     assert reasons[60] == [A.SKIP_CATEGORY_MAIN]  # pozemek with a flat
 
 
+def test_a_flat_merges_with_a_commercial_unit_but_a_set_with_a_house_is_refused() -> None:
+    """E938: byt–komerční is a sanctioned pair; rule 15 is a set of PAIRS, so a set holding a
+    byt and a dům is refused though komerční meets each. `_set_reasons` reads every ad the merge
+    puts on the survivor, so a flat riding on a property filed as komerční refuses it too."""
+    db = FakeDb()
+    db.prop(100, cm="byt")
+    db.prop(200, cm="komercni")
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.listing(11, 200, cm="komercni")
+    db.prop(300, cm="byt")
+    db.prop(400, cm="komercni")
+    db.prop(500, cm="dum")
+    db.group(20, [20, 21, 22])
+    db.listing(20, 300, cm="byt")
+    db.listing(21, 400, cm="komercni")
+    db.listing(22, 500, cm="dum")
+    db.prop(600, cm="komercni")
+    db.prop(700, cm="dum")
+    db.group(30, [31, 32])
+    db.listing(30, 600, cm="byt")
+    db.listing(31, 600, cm="komercni")
+    db.listing(32, 700, cm="dum")
+    groups = {g.cluster_key: g for g in _plan(db).groups}
+    assert groups[10].reasons == []
+    assert groups[20].reasons == [A.SKIP_CATEGORY_MAIN]
+    assert groups[20].detail["category_mains"] == ["byt", "dum", "komercni"]
+    assert A.SKIP_CATEGORY_MAIN in groups[30].reasons
+    assert groups[30].detail["category_mains"] == ["byt", "dum", "komercni"]
+
+
 def test_the_merges_own_asset_refusal_is_reported_as_asset_linked_units() -> None:
     # The plan does not second-guess asset links: the merge carries one onto the survivor and
     # refuses two different ones (decision 17) — and, the engine's, two units the operator
