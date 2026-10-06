@@ -1,8 +1,9 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
 record survives, ONE group and ONE after-step
-(`properties_changed`) per set, every carrier walked per retired property, the operator's cards
-ruled "same"; and migration 560's copy. Over tests/_property_ledger's stateful fake, each carrier
-recorded at the seam."""
+(`properties_changed`) per set, every carrier walked per retired property and what it carried
+written to the carry record before the retire, rule 15's gate over the set's ads, the operator's
+cards ruled "same"; and migration 560's copy. Over tests/_property_ledger's stateful fake, each
+carrier recorded at the seam."""
 
 from __future__ import annotations
 
@@ -17,13 +18,14 @@ import toolkit.property_identity as pi
 from tests._property_ledger import (  # noqa: F401 — the fixture
     OP,
     T0,
+    RecordingCarrier,
     _Ledger,
     keep_real,
     ledger_carriers,
 )
 from tests.test_detach_listing import _appended
 from toolkit import property_carriers as carriers
-from toolkit.property_carriers import MergeStep
+from toolkit.property_carriers import Carried, MergeStep
 from toolkit.property_identity import CategoryClash, MergeError
 
 pytestmark = pytest.mark.usefixtures("ledger_carriers")
@@ -135,6 +137,53 @@ def test_land_and_a_house_for_rent_and_for_sale_are_still_two_properties():
     assert db.events == []
 
 
+# --- the gate reads ads (operator, 2026-10-06; hand-over addendum 14) ----------------------
+
+FLAT, HOUSE, SHOP, LAND = (("prodej", m) for m in ("byt", "dum", "komercni", "pozemek"))
+
+
+@pytest.mark.parametrize("source", ["operator", "autodedup"])
+def test_a_flat_and_a_house_never_meet_on_one_property_by_way_of_a_commercial_one(source):
+    """Addendum 14: a byt + komerční property (10 after its first merge, stored komerční) with a
+    house would put a flat and a house on one property; the stored category let it through. The
+    refusal names the two properties and an ad of each."""
+    db = _Ledger({1: 10, 2: 20, 3: 30}, ad_cats={1: SHOP, 2: FLAT, 3: HOUSE},
+                 canonical={10: 1, 20: 2, 30: 3})
+    assert _merge(db, [10, 20], source=source, **_by(source))["retired_ids"] == [20]
+    with pytest.raises(CategoryClash) as refused:
+        _merge(db, [10, 30], source=source, **_by(source))
+    clash = refused.value
+    assert (clash.field, clash.a, clash.b, clash.properties, clash.ads) == (
+        "category_main", "byt", "dum", (10, 30), (2, 3))
+    assert db.listings == {1: 10, 2: 10, 3: 30} and db.props[30] == "active"
+
+
+def test_a_contentless_record_never_counts():
+    """302749's shape: a cottage (dům) and a contentless record left under the default byt. A
+    house joins it; a flat does not, the record being no flat; an all-contentless property joins
+    anything, a rental house included."""
+    def cottage() -> _Ledger:
+        return _Ledger({1: 10, 2: 10, 3: 20, 4: 30, 5: 40}, contentless={2, 5},
+                       ad_cats={1: HOUSE, 2: FLAT, 3: HOUSE, 4: FLAT, 5: FLAT})
+    assert _merge(cottage(), [10, 20])["retired_ids"] == [20]
+    with pytest.raises(CategoryClash) as refused:
+        _merge(cottage(), [10, 30])
+    assert (refused.value.properties, refused.value.ads) == ((10, 30), (1, 4))
+    db = cottage()
+    db.ad_cats[1] = ("pronajem", "dum")
+    assert _merge(db, [10, 40])["retired_ids"] == [40]
+    assert _merge(cottage(), [30, 40])["retired_ids"] == [40]
+
+
+def test_a_pair_a_member_already_holds_is_not_this_merges():
+    """The default: a property kept as one though it holds a flat and a house takes another flat;
+    land, a pair none of the members holds, is refused."""
+    held = {1: FLAT, 2: HOUSE, 3: FLAT, 4: LAND}
+    assert _merge(_Ledger({1: 10, 2: 10, 3: 20}, ad_cats=held), [10, 20])["retired_ids"] == [20]
+    with pytest.raises(CategoryClash, match="category_main"):
+        _merge(_Ledger({1: 10, 2: 10, 4: 40}, ad_cats=held), [10, 40])
+
+
 def test_the_whole_set_is_brought_current_once():
     """One `properties_changed` over the survivor and every retired id: the rollup (a retired id
     holds no advert, so the recompute skips it), the Browse patch (its row goes) and the broker
@@ -154,9 +203,7 @@ class _RefuseNine:
     def on_merge(self, cur, step):
         if step.retired == 9:
             raise MergeError("a carrier refused 9")
-
-    def on_detach(self, cur, step):
-        return None
+        return []
 
 
 def test_a_refusal_on_a_later_pair_rolls_the_whole_set_back(monkeypatch):
@@ -203,6 +250,31 @@ def test_each_retired_property_walks_every_carrier_then_retires():
     assert db.sql("DELETE FROM properties") == []
 
 
+def test_each_step_writes_its_carry_rows_after_every_carrier_and_before_its_retire(monkeypatch):
+    """One INSERT per carried row, under the merge's group with the step's survivor, after the
+    last carrier and before that step's retire, so the next step's came-from lookups see it;
+    a step that carried nothing writes none."""
+    note = Carried("property_notes", 5, T0, None, 7, "moved", None)
+    card = Carried("property_pipeline", None, T0, "acc", 7, "folded", {"stage_id": 2})
+    monkeypatch.setattr(carriers, "PROPERTY_CARRIERS", (
+        RecordingCarrier("notes", rows=(note,)), RecordingCarrier("pipeline", rows=(card,))))
+    db = _Ledger({1: 3, 2: 7, 3: 9})
+    group = _merge(db, [3, 7, 9])["merge_group_id"]
+    assert [(c["table"], c["from_property"], c["survivor"], c["group"]) for c in db.carries] == [
+        ("property_notes", 7, 3, group), ("property_pipeline", 7, 3, group)] * 2
+    assert db.carries[1]["snapshot"].obj == {"stage_id": 2} and db.carries[0]["snapshot"] is None
+    order = [s.split(" (")[0] if s.startswith("INSERT") else s for s, _p in db.log]
+    retires = [i for i, s in enumerate(order) if s.startswith("UPDATE properties SET status")]
+    assert [db.log[i][1][1] for i in retires] == [7, 9]
+    for at in retires:
+        assert order[at - 3: at] == ["carrier:pipeline", "INSERT INTO property_merge_carries",
+                                     "INSERT INTO property_merge_carries"]
+    monkeypatch.setattr(carriers, "PROPERTY_CARRIERS", (RecordingCarrier("notes"),))
+    quiet = _Ledger({1: 3, 2: 7})
+    _merge(quiet, [3, 7])
+    assert quiet.carries == [] and quiet.sql("property_merge_carries") == []
+
+
 def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
     db = _Ledger({30: 3, 31: 3, 70: 7, 90: 9}, canonical={3: 30, 7: 70, 9: 90})
     out = _merge(db, [3, 7, 9], source="operator", decided_by=OP)
@@ -225,8 +297,21 @@ def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
 
 def test_an_engine_merge_is_never_a_ruling():
     db = _Ledger({30: 3, 70: 7}, canonical={3: 30, 7: 70})
-    assert _merge(db, [3, 7])["pairs_ruled_same"] == 0
+    out = _merge(db, [3, 7])
+    assert out["pairs_ruled_same"] == out["rulings_taken_back"] == 0
     assert db.sql("autodedup.") == [] and db.sql("p.repr_listing_ref_id FROM") == []
+
+
+def test_an_operator_merge_counts_the_different_rulings_it_takes_back():
+    """MS12's slot: the canonical pairs it rules "same" whose newest ruling was negative (W4
+    widens the pair set); a pair already ruled "same" is not taken back."""
+    db = _Ledger({30: 3, 70: 7, 90: 9}, canonical={3: 30, 7: 70, 9: 90})
+    db.rule(30, 70, "different")
+    db.rule(30, 90, "same")
+    db.rule(70, 90, "different")
+    db.rule(70, 90, "same")
+    out = _merge(db, [3, 7, 9], source="operator", decided_by=OP)
+    assert (out["pairs_ruled_same"], out["rulings_taken_back"]) == (3, 1)
 
 
 def _alerted() -> _Ledger:

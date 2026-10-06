@@ -254,11 +254,15 @@ def test_the_unit_holding_the_own_advert_keeps_the_record_when_the_kept_unit_hol
                                                              "outcome": "last_native"}])
 
 
-def test_a_join_the_one_merge_refuses_is_refused_and_nothing_moves():
+def test_a_join_the_one_merge_refuses_raises_its_category_clash_and_nothing_moves():
+    """2 and 3 are born apart (11, 12), and the merge joining them refuses a sale and a rental:
+    its `CategoryClash` reaches the route, which says it in Czech (the route test below)."""
     db = _Ledger({1: 10, 2: 10, 3: 10}, cats={12: ("pronajem", "byt")})
     before = _state(db)
-    refused = _refused(_split, db, [[2, 3]])
-    assert refused.code == "refused" and "category_type" in refused.message
+    with pytest.raises(pi.CategoryClash) as clash:
+        _split(db, [[2, 3]])
+    assert (clash.value.field, clash.value.properties, clash.value.ads) == (
+        "category_type", (11, 12), (2, 3))
     assert _state(db) == before
 
 
@@ -596,22 +600,18 @@ def test_the_route_answers_refusals_with_code_message_and_ids(client):
     assert db.listings == {1: 10, 2: 10, 3: 10}
 
 
-def test_a_leaving_letter_that_mixes_categories_is_refused_in_czech(client, monkeypatch):
+def test_a_leaving_letter_that_mixes_categories_is_refused_in_czech(client):
     """The join of a unit that landed on two records goes through the merge chokepoint, whose
-    rule-15 gate raises `CategoryClash`; the route prints E925's Czech sentence (the pair page's
-    words, the Browse labels) and tells the operator what to do, never the chokepoint's English."""
-    from api import property_merge
+    rule-15 gate over their ads raises `CategoryClash`; the route prints E925's Czech sentence
+    (the pair page's words, the Browse labels) and tells the operator what to do, never the
+    chokepoint's English. Nothing moves."""
     from api.category_clash_text import LETTER_ENDING, SAME_ENDING, clash_sentence
-    from toolkit.property_identity import CategoryClash
 
-    def _clash(*_args, **_kwargs):
-        raise CategoryClash("category_main", "byt", "ostatni")
-
-    monkeypatch.setattr(property_merge, "split_property", _clash)
-    http, _db = client
+    http, db = client
+    db.ad_cats[3] = ("prodej", "ostatni")  # re-filed since the merge
     res = http.post("/properties/10/split", json={
         "adverts": [1, 2, 3], "separate": [[2, 3]], "keep_together": False})
-    assert res.status_code == 409
+    assert res.status_code == 409 and db.listings == {1: 10, 2: 10, 3: 10}
     detail = res.json()["detail"]
     assert (detail["code"], detail["ids"]) == ("refused", [])
     assert detail["message"] == (

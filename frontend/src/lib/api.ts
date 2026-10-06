@@ -53,7 +53,6 @@ import type {
   WatchdogSeenFilter,
   WatchdogSubscription,
   FilterPreset,
-  MergedPropertiesResponse,
 } from './types';
 import type { PresetSpec } from './filters';
 import type { WaterfallRow } from './locationWaterfall';
@@ -3023,40 +3022,39 @@ export const reorderFilterPresets = (
  * new-dedup/CUTOFF.md §2/S5) — the mechanics that survived the decision-layer
  * removal. Every route is `require_admin`, so each call sends `jwt: true`. */
 
-export interface ClusterMergeResult {
+/* What a merge moved of the acting account's own (MS15): notes counted, the
+ * pipeline stage, collections and tags by name. A folded item did not move;
+ * another account's never appear. */
+export interface MergeCarried {
+  notes: number;
+  pipeline: string | null;
+  collections: string[];
+  tags: string[];
+}
+
+export interface MergeResult {
   merge_group_id: string;
   survivor_id: number;
   retired_ids: number[];
   listings_moved: number;
   pairs_ruled_same: number;
+  /* The "Různé" rulings the merge took back (MS12). */
+  rulings_taken_back: number;
+  /* Both null when the receipt could not be read after the merge committed. */
+  carried: MergeCarried | null;
+  /* The acting account has an active dismissal on the survivor (MS13). */
+  hidden_for_you: boolean | null;
 }
 
 /* Merge an operator-checked SET of properties (Browse mergeMode) into its oldest
- * record under one merge group; a detach undoes it advert by advert. */
+ * record under one merge group; a split undoes it. A category clash over the
+ * set's ads is a 409 whose message is the Czech sentence. */
 export const mergePropertySet = (
   propertyIds: number[],
-): Promise<ClusterMergeResult> =>
-  request<ClusterMergeResult>('/properties/merge', {
+): Promise<MergeResult> =>
+  request<MergeResult>('/properties/merge', {
     method: 'POST',
     json: { property_ids: propertyIds },
-    jwt: true,
-  });
-
-/* Browse the RESULTS of merging: already-merged properties whose child-listing
- * count (`source_count`) is in [min_listings, max_listings], biggest groups
- * first. `max_listings`/`category_main` omitted => no upper bound / any type
- * (null query params are dropped by `request`). Admin-gated. */
-export const listMergedProperties = (
-  params: {
-    min_listings?: number;
-    max_listings?: number | null;
-    category_main?: string | null;
-    limit?: number;
-    offset?: number;
-  } = {},
-): Promise<MergedPropertiesResponse> =>
-  request<MergedPropertiesResponse>('/properties/merged', {
-    query: params as Record<string, QueryValue>,
     jwt: true,
   });
 

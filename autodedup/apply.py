@@ -52,6 +52,7 @@ from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
 from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
+from toolkit.property_carriers import curation_preview
 from toolkit.property_identity import (
     CategoryClash,
     MergeError,
@@ -1336,6 +1337,9 @@ def unapply(
                 continue
             counts["listings_moved_back"] += len(state["back"])
             counts["conflicts"] += len(state["conflicts"])
+            target["curation"] = curation_preview(conn, target["merge_group_id"], state["back"])
+            for key, n in target["curation"].items():
+                counts[key] = counts.get(key, 0) + n
             if state["taken"] or state["conflicts"]:
                 target.update(taken_apart=state["taken"], conflicts=state["conflicts"])
                 counts["taken_apart_before"] += 1

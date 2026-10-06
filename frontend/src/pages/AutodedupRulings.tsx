@@ -24,7 +24,7 @@
  * behind a second click. */
 
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ErrorBanner from '@/components/ErrorBanner';
@@ -71,7 +71,13 @@ import {
 import { fmtAbsolute, fmtCount } from '@/lib/format';
 import { useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { propertyPath } from '@/lib/listingUrl';
-import { inzeratu, mergedAdvertsKeys, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
+import {
+  inzeratu,
+  mergedAdvertsKeys,
+  pushMergeReceipt,
+  refreshAfterSplit,
+  unmovedReason,
+} from '@/lib/mergedAdverts';
 import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
 import type { ListingPublic } from '@/lib/types';
@@ -725,6 +731,7 @@ function splitErrorText(err: Error): string {
  * both routes write their ruling as they always do. */
 function Consequence({ row }: { row: RulingPairRow }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [armed, setArmed] = useState<{ kind: 'detach'; listing: number } | { kind: 'merge' } | null>(
     null,
   );
@@ -735,7 +742,8 @@ function Consequence({ row }: { row: RulingPairRow }) {
       if (!armed) return null;
       if (armed.kind === 'merge') {
         const res = await mergePropertySet([row.property_lo!, row.property_hi!]);
-        return `Sloučeno do nemovitosti #${res.survivor_id}.`;
+        pushMergeReceipt(res, (id) => navigate(ROUTES.property.build({ propertyId: id })));
+        return null;
       }
       /* The one split statement (E919) with one advert leaving (the property page
        * states a whole partition by letters; this ruling names one advert): every

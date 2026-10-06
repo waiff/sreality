@@ -4,8 +4,9 @@ then detaching every advert a merge moved gives back every original property, a 
 splits off to a record born the one way, the operator's merge and detach land as rulings the
 apply adapter reads, the one-time copy rules only what the operator judged, and a merged
 property speaks with ONE canonical advert everywhere (decisions 13 and 18), chosen and built by
-the merge sprint's rules (docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19). Runs in
-CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
+the merge sprint's rules (docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19), and rule 15's
+merge gate reads the set's ads (hand-over addendum 14). Runs in CI's migrations job
+(`TEST_DATABASE_URL`); every test rolls back.
 """
 
 from __future__ import annotations
@@ -668,3 +669,39 @@ def test_a_canonical_change_clears_the_city_figure_stamp(cur):
     assert city() == (takeover, False)
     assert city("now()") == (takeover, True)
     assert city("repr_since - interval '1 minute'") == (takeover, False)
+
+
+# --- rule 15's gate reads the set's ads (operator, 2026-10-06; hand-over addendum 14) -------
+
+
+def _filed(cur: Any, pid: int, main: str, price: int | None, area: int | None,
+           disposition: str | None, description: str | None) -> int:
+    cur.execute(
+        "INSERT INTO listings (source, source_id_native, raw_json, category_main, category_type, "
+        "price_czk, area_m2, disposition, description, property_id) "
+        "VALUES ('bazos', %s, '{}'::jsonb, %s, 'prodej', %s, %s, %s, %s, %s) RETURNING id",
+        (f"ms-{uuid.uuid4()}", main, price, area, disposition, description, pid))
+    return int(cur.fetchone()[0])
+
+
+def test_the_gate_reads_each_members_categories_over_its_contentful_ads(cur):
+    """`_SET_ADS_SQL`: one row per member and category, with its lowest ad; an ad counts exactly
+    when `autodedup.category_splits.contentless` does not call it contentless, so each of the
+    four facts alone counts and none, or a blank description, does not."""
+    from autodedup.category_splits import contentless
+    from toolkit.property_identity import _SET_ADS_SQL
+
+    mixed = _property(cur)
+    flat, _flat2, house = (_filed(cur, mixed, main, 1, 1, None, None)
+                           for main in ("byt", "byt", "dum"))
+    facts = {_property(cur): f for f in (
+        (5_000_000, None, None, None), (None, 70, None, None), (None, None, "2+kk", None),
+        (None, None, None, "Chata u lesa"), (None, None, None, None), (None, None, None, " \n\t "))}
+    for pid, f in facts.items():
+        _filed(cur, pid, "byt", *f)
+    cur.execute(_SET_ADS_SQL, {"ids": [mixed, *facts]})
+    rows = cur.fetchall()
+    assert [r for r in rows if r[0] == mixed] == [(mixed, "prodej", "byt", flat),
+                                                (mixed, "prodej", "dum", house)]
+    assert {r[0] for r in rows} - {mixed} == {pid for pid, f in facts.items() if not contentless(*f)}
+    assert len(rows) == 6
