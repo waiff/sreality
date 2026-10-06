@@ -312,6 +312,22 @@ def test_E935_the_subtype_skip_never_reaches_a_pair_rule_15_refuses_or_cannot_re
         assert cross_type_attr_keys(land, other, settings) == frozenset()
 
 
+def test_E938_a_flat_and_a_commercial_unit_drop_the_subtype_slots_a_flat_and_a_house_never() -> None:
+    """E938: the E286 skip reads rule #15's one definition, so a studio filed as `byt` (`1+kk`,
+    2) against `komercni` (`apartmany`, 57) is no subtype contradiction. The rule is a set of
+    pairs: the komerční advert meets the flat and the house, the flat and the house never."""
+    on = variant(attr_cross_type_subtype_skip=True)
+    flat = cammerswalde(1, "byt", "1+kk", 2, "novostavba")
+    studio = cammerswalde(2, "komercni", "apartmany", 57, "dobry")
+    house = cammerswalde(3, "dum", "rodinny_dum", 37, "dobry")
+    assert {c[0] for c in attribute_conflicts(flat, studio, S12)} >= {"subtype", "category_sub_cb"}
+    kept = {c[0] for c in attribute_conflicts(flat, studio, on)}
+    assert "subtype" not in kept and "category_sub_cb" not in kept and "condition" in kept
+    assert cross_type_attr_keys(studio, flat, on) == CROSS_TYPE_SUBTYPE_KEYS
+    assert cross_type_attr_keys(studio, house, on) == CROSS_TYPE_SUBTYPE_KEYS
+    assert cross_type_attr_keys(flat, house, on) == frozenset()
+
+
 # --- E287: Valtice / Úvaly and Popice ---------------------------------------------------------
 UVALY = ("Ve výhradním zastoupení nabízíme ke koupi jedinečný vinný sklep s ubytováním a vlastní "
          "vinicí v lokalitě Úvaly u Valtic. Celková plocha pozemku činí 3 205 m² a díky "
