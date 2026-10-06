@@ -8,7 +8,7 @@
 -- The drain now parks the HOST on a throttle and burns no attempt (scraper/main.py,
 -- THROTTLE_STATUSES); this heal gives the rows it already gave up their attempts back.
 --
--- Count before (2026-10-06 18:40 UTC, listings first seen since 2026-09-25):
+-- Count before (2026-10-06 17:40 UTC, listings first seen since 2026-09-25):
 --   28,160 images on 2,140 ads, all on the iDNES redirector; 17,793 ended on a 429, 10,367 on a 403.
 -- Apply AFTER the drain fix is deployed (the old drain would burn them again within minutes).
 -- Not destructive: counters only; `last_error` is kept as the record of what happened.
