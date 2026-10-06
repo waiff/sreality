@@ -11,8 +11,8 @@ import io
 import logging
 import os
 import time
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Mapping
+from urllib.parse import quote, urljoin
 
 import threading
 
@@ -225,15 +225,36 @@ def _session() -> requests.Session:
 
 
 def download_image(
-    url: str, timeout: float = 15.0, *, transform_ops: str = IMAGE_TRANSFORM_OPS
+    url: str, timeout: float = 15.0, *, transform_ops: str = IMAGE_TRANSFORM_OPS,
+    proxies: Mapping[str, str] | None = None,
 ) -> bytes:
     """Download one image, capped at media.MAX_IMAGE_BYTES.
 
     Streams so an oversize body (e.g. a video served under an image-looking URL)
     is rejected without buffering it all into memory — a Content-Length over the
     cap short-circuits before the first byte. Raises NotAnImageError on oversize.
+
+    `proxies` (the portal's residential egress, see main.image_proxies) is used for
+    ONE hop only: a photo link on a portal's own site is usually a redirector to its
+    static CDN (iDNES: `reality.idnes.cz/file/thumbnail/{id}` → `sta-reality2.1gr.cz`),
+    and that site punishes our datacenter address while the CDN does not. The
+    redirect's 157 bytes travel through the proxy; the bytes come straight from
+    the CDN. A proxied site that serves the bytes itself is read through the proxy.
     """
     target = with_transform(url, transform_ops)
+    if proxies:
+        hop = _session().get(
+            target, timeout=timeout, allow_redirects=False, proxies=dict(proxies))
+        hop.raise_for_status()
+        location = hop.headers.get("Location")
+        if hop.is_redirect and location:
+            target = urljoin(target, location)
+        else:
+            if len(hop.content) > media.MAX_IMAGE_BYTES:
+                raise NotAnImageError(
+                    f"body exceeds {media.MAX_IMAGE_BYTES} bytes"
+                )
+            return bytes(hop.content)
     with _session().get(target, timeout=timeout, stream=True) as response:
         response.raise_for_status()
         declared = response.headers.get("Content-Length")

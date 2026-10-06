@@ -133,6 +133,32 @@ _host_next_at: dict[str, float] = {}
 _host_state_lock = threading.Lock()
 
 
+def image_proxies() -> dict[str, dict[str, str]]:
+    """Proxy settings per hostname for photo links that sit on a portal's OWN site:
+    every client class that declares `USE_PROXY` (its seam, rule 21) and whose
+    `PROXY_ENV` is set contributes its `BASE_URL` host. No portal is named here."""
+    import importlib
+
+    from scraper import portal_factory
+
+    out: dict[str, dict[str, str]] = {}
+    for source, (mod_name, _cls_name) in portal_factory.CLIENT_CLASSES.items():
+        try:
+            cls = portal_factory.build_client_class(source)
+        except Exception:  # noqa: BLE001 - a portal that fails to import never blocks the drain
+            continue
+        if not getattr(cls, "USE_PROXY", False):
+            continue
+        proxy = os.environ.get(getattr(cls, "PROXY_ENV", "SCRAPER_PROXY_URL"))
+        base = getattr(importlib.import_module(mod_name), "BASE_URL", None)
+        if not proxy or not base:
+            continue
+        host = _image_host(base)
+        if host:
+            out[host] = {"http": proxy, "https": proxy}
+    return out
+
+
 def _throttle_status(error: Exception) -> int | None:
     """The HTTP status when `error` is the portal throttling us, else None."""
     resp = getattr(error, "response", None)
@@ -1813,6 +1839,9 @@ def _run_image_downloads(
     from scraper.sreality_client import SrealityClient
 
     r2 = image_storage.R2Client.from_env(max_pool_connections=workers)
+    proxied_hosts = image_proxies()
+    if proxied_hosts:
+        LOG.info("IMAGES proxied hosts: %s", ",".join(sorted(proxied_hosts)))
     counts = {
         "downloaded": 0, "errors": 0, "attempted": 0,
         "taken_down": 0, "source_unavailable": 0, "not_an_image": 0,
@@ -1950,6 +1979,7 @@ def _run_image_downloads(
                     pool.submit(
                         _fetch_one_image, lid, seq, url, r2,
                         _semaphore_for(host_by_image[image_id]),
+                        proxied_hosts.get(host_by_image[image_id]),
                     ): image_id
                     for image_id, lid, seq, url, _cm, _ct in filtered_pending
                 }
@@ -2235,6 +2265,7 @@ def _fetch_one_image(
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
+    proxies: dict[str, str] | None = None,
 ) -> tuple[str, int | None, str, tuple[int, int] | None, Exception | None]:
     """Worker: download from the portal CDN, validate, upload to R2.
     Returns (key, phash, rendition, dimensions, error).
@@ -2259,10 +2290,10 @@ def _fetch_one_image(
         if semaphore is not None:
             with semaphore:
                 _pace_host(_image_host(url))
-                data = image_storage.download_image(url)
+                data = image_storage.download_image(url, proxies=proxies)
         else:
             _pace_host(_image_host(url))
-            data = image_storage.download_image(url)
+            data = image_storage.download_image(url, proxies=proxies)
         content_type = media.is_image_bytes(data)
         if content_type is None:
             raise image_storage.NotAnImageError(
