@@ -36,6 +36,7 @@ describe('hydration key namespace', () => {
   const decorationKeys = [
     hydrationKeys.covers([1, 2, 3]),
     hydrationKeys.brokers([1, 2, 3]),
+    hydrationKeys.propertyBrokers([{ property_id: 1, listing_id: 2 }]),
     hydrationKeys.photos([1, 2, 3], 6),
   ];
 
@@ -71,6 +72,23 @@ describe('hydration key namespace', () => {
 
   it('separates covers from brokers over the same cohort', () => {
     expect(hydrationKeys.covers([1])).not.toEqual(hydrationKeys.brokers([1]));
+  });
+
+  /* Property ids and listing ids overlap as numbers: the board's property-grain
+     broker lists must never be served from the per-ad map, nor the reverse. */
+  it('keys the board’s broker lists apart from the per-ad brokers', () => {
+    const pb = hydrationKeys.propertyBrokers([{ property_id: 1, listing_id: 1 }]);
+    expect(pb).not.toEqual(hydrationKeys.brokers([1]));
+    expect(matchesPrefix(pb, hydrationKeys.brokers([1]))).toBe(false);
+    expect(matchesPrefix(hydrationKeys.brokers([1]), pb)).toBe(false);
+  });
+
+  it('keys a property’s broker list on its canonical ad too, order-free', () => {
+    const a = { property_id: 1, listing_id: 10 };
+    const b = { property_id: 2, listing_id: 20 };
+    expect(hydrationKeys.propertyBrokers([b, a])).toEqual(hydrationKeys.propertyBrokers([a, b]));
+    expect(hydrationKeys.propertyBrokers([{ ...a, listing_id: 11 }, b]))
+      .not.toEqual(hydrationKeys.propertyBrokers([a, b]));
   });
 
   /* W7a. Three decorations over one cohort, three keys. `photos` additionally
@@ -112,15 +130,20 @@ describe('makeHydration lookup', () => {
       ] as unknown as ImagePublic[],
     ],
   ]);
+  /* Keyed on the PROPERTY (MS7), unlike every other decoration. */
   const brokers = new Map([
-    [7, { broker_id: 3, display_name: 'A', firm_label: null, email: null,
-          phone: null, has_email: false, has_phone: false }],
+    [42, {
+      brokers: [{ sreality_id: null, listing_id: 7, broker_id: 3,
+                  broker_display_name: 'A', broker_firm_label: null }],
+      fromInactive: false,
+    }],
   ]);
 
-  it('resolves a decoration by listing id', () => {
+  it('resolves a decoration by its id — the listing’s, or the property’s for brokers', () => {
     const h = makeHydration(covers, brokers);
     expect(h.coverFor(7)).toBe('https://img/7.jpg');
-    expect(h.brokerFor(7)?.broker_id).toBe(3);
+    expect(h.brokersFor(42)?.brokers[0].broker_id).toBe(3);
+    expect(h.brokersFor(7)).toBeNull();
   });
 
   it('returns null for a missing entry and for a null listing id', () => {
@@ -130,8 +153,7 @@ describe('makeHydration lookup', () => {
     expect(h.coverFor(null)).toBeNull();
     expect(h.coverFor(undefined)).toBeNull();
     expect(h.coverFor(999)).toBeNull();
-    expect(h.brokerFor(null)).toBeNull();
-    expect(h.brokerFor(999)).toBeNull();
+    expect(h.brokersFor(999)).toBeNull();
   });
 
   it('carries the pending flags so a card can reserve space', () => {

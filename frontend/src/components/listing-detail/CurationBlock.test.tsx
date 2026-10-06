@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -18,6 +18,8 @@ vi.mock('@/lib/api', async (orig) => ({
   listCollections: vi.fn(),
   listTags: vi.fn(),
   listPropertyNotes: vi.fn(),
+  createPropertyNote: vi.fn(),
+  deletePropertyNote: vi.fn(),
 }));
 
 vi.mock('@/lib/queries', async (orig) => ({
@@ -26,8 +28,8 @@ vi.mock('@/lib/queries', async (orig) => ({
   fetchPropertyTagIds: vi.fn(),
 }));
 
-import { listCollections, listPropertyNotes, listTags } from '@/lib/api';
-import { fetchPropertyCollectionMemberSet, fetchPropertyTagIds } from '@/lib/queries';
+import { createPropertyNote, deletePropertyNote, listCollections, listPropertyNotes, listTags } from '@/lib/api';
+import { curationKeys, fetchPropertyCollectionMemberSet, fetchPropertyTagIds } from '@/lib/queries';
 import CurationBlock from './CurationBlock';
 
 const TAG: Tag = {
@@ -40,21 +42,31 @@ const NOTE: Note = {
   created_at: '2026-05-02T00:00:00+00:00', updated_at: null,
 };
 
-function renderBlock() {
+function mockReads() {
   vi.mocked(listCollections).mockResolvedValue({ data: [] } as never);
   vi.mocked(listTags).mockResolvedValue({ data: [TAG] } as never);
   vi.mocked(listPropertyNotes).mockResolvedValue({ data: [NOTE] } as never);
   vi.mocked(fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
   vi.mocked(fetchPropertyTagIds).mockResolvedValue([]);
+}
 
+function renderBlock() {
+  mockReads();
+  return renderWithReads();
+}
+
+/* Renders over whatever the mocks hold now, so a test can fail one read first. */
+function renderWithReads() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const invalidate = vi.spyOn(qc, 'invalidateQueries');
+  const view = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <CurationBlock property_id={42} sreality_id={900} listing_id={900} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, invalidate };
 }
 
 describe('<CurationBlock> control names', () => {
@@ -112,5 +124,71 @@ describe('<CurationBlock> the add-tag dropdown and its portalled edit popover', 
     fireEvent.mouseDown(document.body);
 
     expect(screen.queryByRole('textbox', { name: 'Find or create a tag' })).toBeNull();
+  });
+});
+
+/* MS16: every Browse row's note mark counts the account's notes, so a note
+ * added or deleted here re-reads the counts. */
+describe('<CurationBlock> note counts', () => {
+  it('re-reads the note marks after a note is added and after one is deleted', async () => {
+    const user = userEvent.setup();
+    mockReads();
+    vi.mocked(createPropertyNote).mockResolvedValue(NOTE as never);
+    vi.mocked(deletePropertyNote).mockResolvedValue({ deleted: true } as never);
+    const { invalidate } = renderWithReads();
+    const counts = () =>
+      invalidate.mock.calls.filter(([f]) => f?.queryKey === curationKeys.noteCounts).length;
+
+    await user.type(await screen.findByRole('textbox', { name: 'Notes' }), 'Volat v pondělí.');
+    await user.click(screen.getByRole('button', { name: 'Save note' }));
+    await waitFor(() => expect(counts()).toBe(1));
+
+    await user.click(screen.getByRole('button', { name: 'Delete note' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(counts()).toBe(2));
+  });
+});
+
+/* MS16: a failed read says so and reads again; it is never drawn as "no notes",
+ * "no tags" or a row of unticked collections. */
+describe('<CurationBlock> failed reads', () => {
+  const banner = (subject: string) =>
+    screen.findByText(subject, { selector: 'strong' }).then((s) => s.parentElement as HTMLElement);
+
+  it('says the notes failed, with no "(0)", and reads them again', async () => {
+    mockReads();
+    vi.mocked(listPropertyNotes).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderWithReads();
+
+    const notes = await banner('Poznámky');
+    expect(screen.getByText('(—)')).toBeInTheDocument();
+    expect(screen.queryByText('(0)')).toBeNull();
+    fireEvent.click(within(notes).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByText('Sousedi jsou hlučni.')).toBeInTheDocument();
+    expect(screen.getByText('(1)')).toBeInTheDocument();
+  });
+
+  it('says the tags failed instead of offering an empty picker, and reads them again', async () => {
+    mockReads();
+    vi.mocked(fetchPropertyTagIds).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderWithReads();
+
+    const tags = await banner('Štítky');
+    expect(screen.queryByRole('button', { name: 'Add tag' })).toBeNull();
+    fireEvent.click(within(tags).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByRole('button', { name: 'Add tag' })).toBeInTheDocument();
+  });
+
+  it('says the collection memberships failed instead of unticking every toggle', async () => {
+    mockReads();
+    vi.mocked(listCollections).mockResolvedValue({ data: [{ id: 7, name: 'Šortlist' }] } as never);
+    vi.mocked(fetchPropertyCollectionMemberSet).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderWithReads();
+
+    const collections = await banner('Kolekce');
+    expect(screen.queryByRole('button', { name: /Šortlist/ })).toBeNull();
+    vi.mocked(fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[42, [7]]]));
+    fireEvent.click(within(collections).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByRole('button', { name: /Šortlist/ })).toHaveAttribute('aria-pressed', 'true');
   });
 });

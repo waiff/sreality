@@ -47,8 +47,9 @@ THE NAMED BLIND SPOTS — real, and listed so nobody has to rediscover them:
     below.
   * TOOLKIT AND SCRAPER WRITES. Only `api/` is scanned. `toolkit/` writes these
     tables too (the merge reconcilers themselves), and must not resolve.
-  * READS. A read keyed on a stale id shows an empty list rather than corrupting
-    state; out of scope here, and deliberately so.
+  * READS. The note list resolves like the note writes (pinned in
+    tests/api/test_curation.py); any other read keyed on a stale id shows an empty
+    list rather than corrupting state, and is out of scope here.
 A rail that documents its own edges cannot manufacture confidence.
 """
 

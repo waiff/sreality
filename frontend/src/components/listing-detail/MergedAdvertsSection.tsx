@@ -47,9 +47,13 @@ import {
   type SplitStatement,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { fetchListingBroker } from '@/lib/brokers';
+import type { ListingBroker } from '@/lib/brokers';
 import { fmtArea, fmtCount, fmtDateSlash, fmtFloor } from '@/lib/format';
-import { taggedImageUrls, useListingPhotos } from '@/lib/hydration/useCardHydration';
+import {
+  taggedImageUrls,
+  useListingBrokers,
+  useListingPhotos,
+} from '@/lib/hydration/useCardHydration';
 import { imageSrc } from '@/lib/imageUrl';
 import { propertyPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
@@ -78,6 +82,12 @@ const PHOTOS_PER_ADVERT = 200;
 
 /* An admin session's read of one advert's origin; null for any other session. */
 type OriginRead = { status: 'pending' | 'error' | 'success'; origin: AdvertOrigin | undefined };
+/* One advert's broker, from the section's one read of every advert's. */
+type BrokerRead = {
+  status: 'pending' | 'error' | 'success';
+  broker: ListingBroker | undefined;
+  retry: () => void;
+};
 
 const NO_LETTERS: UnitMap = {};
 
@@ -137,6 +147,9 @@ export default function MergedAdvertsSection({
   /* Every advert's album in one read (the shared card-photo hydration), so the
    * collapsed strip and the expanded carousel are one cache entry. */
   const { photos, isPending: photosPending } = useListingPhotos(ids, PHOTOS_PER_ADVERT);
+  /* Every advert's broker in one read, on the page's own broker-list key. */
+  const brokersRead = useListingBrokers(ids);
+  const brokerStatus = brokersRead.isError ? 'error' : brokersRead.isPending ? 'pending' : 'success';
 
   const portals = new Set(sources.map((s) => s.source)).size;
   const portalOf = (listingId: number): string => {
@@ -294,6 +307,11 @@ export default function MergedAdvertsSection({
             imagesLoading={photosPending}
             isCanonical={s.id === canonicalListingId}
             opened={s.id === openAdvertId}
+            brokerRead={{
+              status: brokerStatus,
+              broker: brokersRead.brokers.get(s.id),
+              retry: brokersRead.refetch,
+            }}
             originRead={
               isAdmin
                 ? {
@@ -328,6 +346,7 @@ function MergedAdvertRow({
   imagesLoading,
   isCanonical,
   opened,
+  brokerRead,
   originRead,
   split,
 }: {
@@ -338,6 +357,7 @@ function MergedAdvertRow({
   imagesLoading: boolean;
   isCanonical: boolean;
   opened: boolean;
+  brokerRead: BrokerRead;
   originRead: OriginRead | null;
   split: RowSplit | null;
 }) {
@@ -495,7 +515,7 @@ function MergedAdvertRow({
                 {detailsLoading ? 'Načítám popis…' : 'Bez popisu.'}
               </p>
             )}
-            <BrokerLine listingId={source.id} />
+            <BrokerLine read={brokerRead} />
             {originRead && <OriginLine read={originRead} />}
             {!source.source_url && (
               <p className="text-[0.75rem] text-[var(--color-ink-4)]">Odkaz na portál chybí</p>
@@ -571,26 +591,28 @@ function Thumb({ image, sourceKey }: { image: ImagePublic; sourceKey: string }) 
   );
 }
 
-/* Who is selling THIS advert — read only when the row is opened, and on the same
- * cache key as the page's own vizitka. Three outcomes kept apart, as there: a
- * broker, "none attributed" (a 404, which is an answer), and a failed read. */
-function BrokerLine({ listingId }: { listingId: number }) {
-  const q = useQuery({
-    queryKey: ['listing-broker', listingId],
-    queryFn: () => fetchListingBroker(listingId),
-    staleTime: 60_000,
-  });
-  if (q.isLoading) {
+/* Who is selling THIS advert, inactive or not (MS7: each row keeps its own
+ * advert's broker). Four outcomes kept apart: loading, a broker, "none
+ * attributed" (an answer), and a failed read, which offers a retry. */
+function BrokerLine({ read }: { read: BrokerRead }) {
+  if (read.status === 'pending') {
     return <p className="text-[0.72rem] text-[var(--color-ink-4)]">Makléř: načítám…</p>;
   }
-  if (q.isError && !q.data) {
+  if (read.status === 'error') {
     return (
       <p className="text-[0.72rem] text-[var(--color-brick)]">
         Makléře se nepodařilo načíst
+        <button
+          type="button"
+          onClick={read.retry}
+          className="ml-2 font-medium underline underline-offset-2 hover:no-underline"
+        >
+          Zkusit znovu
+        </button>
       </p>
     );
   }
-  const b = q.data ?? null;
+  const b = read.broker;
   if (!b) {
     return <p className="text-[0.72rem] text-[var(--color-ink-4)]">Makléř: nepřiřazen</p>;
   }

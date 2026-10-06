@@ -12,6 +12,7 @@ import type { QueryClient } from '@tanstack/react-query';
 
 import { curationKeys } from '@/lib/queries';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
+import { revalidatePipeline } from '@/lib/pipelineCache';
 
 /** Re-read collections after ANY collection write — one idiom per call site,
  * metadata included. The member map is in the list because a property-grain
@@ -38,4 +39,14 @@ export function revalidateCollections(
     qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
   }
   if (cohortScoped) invalidateBrowseQueries(qc);
+}
+
+/** After a merge, which re-points every carried row onto the survivor in its
+ * txn (toolkit/property_carriers.py): every Browse surface, the member map, the
+ * pipeline card and the note marks' counts (MS16) re-read. */
+export function revalidateAfterMerge(qc: QueryClient): void {
+  invalidateBrowseQueries(qc);
+  revalidateCollections(qc);
+  revalidatePipeline(qc);
+  qc.invalidateQueries({ queryKey: curationKeys.noteCounts });
 }

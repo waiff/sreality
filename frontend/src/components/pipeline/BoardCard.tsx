@@ -30,7 +30,8 @@ import PriceDelta from '@/components/PriceDelta';
 import CityIndexStrip from '@/components/CityIndexStrip';
 import type { CityQualityByObec } from '@/lib/useCityQuality';
 import { useCardHydration } from '@/lib/hydration';
-import type { PipelineBoardCard, PipelineCardBroker } from '@/lib/types';
+import type { ListingBroker } from '@/lib/brokers';
+import type { PipelineBoardCard } from '@/lib/types';
 import {
   PIPELINE_CARD_GEOMETRY,
   type PipelineCardSize,
@@ -69,10 +70,12 @@ function CardThumb({
  * A non-admin session gets has_email/has_phone instead of the values, so the
  * tooltip says the contact exists but is admin-only rather than omitting it and
  * implying the broker has none. Exported for its test. */
-export function brokerHoverTitle(b: PipelineCardBroker): string {
-  const parts = [b.display_name, b.firm_label, b.phone, b.email].filter(Boolean);
-  const hidden = (b.has_phone && !b.phone) || (b.has_email && !b.email);
+export function brokerHoverTitle(b: ListingBroker, fromInactive = false): string {
+  const parts = [b.broker_display_name, b.broker_firm_label, b.primary_phone, b.primary_email]
+    .filter(Boolean);
+  const hidden = (b.has_phone && !b.primary_phone) || (b.has_email && !b.primary_email);
   if (hidden) parts.push('kontakt jen pro adminy');
+  if (fromInactive && parts.length > 0) parts.push('z neaktivních inzerátů');
   return parts.join(' · ') || 'Zobrazit makléře';
 }
 
@@ -90,9 +93,12 @@ export function CardFace({
    * board's structural read no longer carries them, and CardFace renders both
    * in-column and inside the drag overlay, so context is what keeps those two
    * mount points from drifting apart. */
-  const { coverFor, brokerFor, brokersPending } = useCardHydration();
+  const { coverFor, brokersFor, brokersPending } = useCardHydration();
   const cover = coverFor(card.listing_id);
-  const broker = brokerFor(card.listing_id);
+  /* MS7: the property's list, compact — its first broker, "+N" for the rest. */
+  const brokerList = brokersFor(card.property_id);
+  const broker = brokerList?.brokers[0] ?? null;
+  const others = brokerList?.brokers.slice(1) ?? [];
 
   const inactive = !card.is_active;
   const inkColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
@@ -207,13 +213,21 @@ export function CardFace({
             <p className="mt-0.5 truncate text-[0.7rem] text-[var(--color-ink-3)]">
               <Link
                 to={ROUTES.brokerDetail.build({ id: broker.broker_id })}
-                title={brokerHoverTitle(broker)}
+                title={brokerHoverTitle(broker, brokerList?.fromInactive)}
                 className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
               >
-                {broker.display_name ?? 'Makléř'}
+                {broker.broker_display_name ?? 'Makléř'}
               </Link>
-              {broker.firm_label && (
-                <span className="text-[var(--color-ink-4)]"> · {broker.firm_label}</span>
+              {broker.broker_firm_label && (
+                <span className="text-[var(--color-ink-4)]"> · {broker.broker_firm_label}</span>
+              )}
+              {others.length > 0 && (
+                <span
+                  className="text-[var(--color-ink-4)]"
+                  title={others.map((b) => b.broker_display_name ?? 'Makléř').join(', ')}
+                >
+                  {' '}+{others.length}
+                </span>
               )}
             </p>
           ) : brokersPending ? (

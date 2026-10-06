@@ -159,8 +159,8 @@ it (`api/`). They do not apply to the scraper.
    behind these routes needs no route change. `GET /brokers?ids=` itself stays, for the agent
    and other non-SPA consumers; and
    the client treats 404 as an answer only when the body carries this module's own
-   `broker not found` / `listing has no attributed broker` detail — any other 404 (edge,
-   stale base URL, renamed route) must surface as an error, not as "no broker".
+   `broker not found` detail — any other 404 (edge, stale base URL, renamed route) must
+   surface as an error, not as "no broker". One per-ad read: `POST /brokers/by-listings`.
    **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
    `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
    `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed

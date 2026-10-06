@@ -25,6 +25,7 @@ import {
 } from './glyphs';
 import {
   EXTENSION_RELOADED_DETAIL,
+  failureKind,
   mfYieldText,
   runIndexOverlay,
   type IndexOverlayHandle,
@@ -189,6 +190,9 @@ interface PanelState {
   dismissBusy: boolean;
   /* The property's operator notes (null = not loaded). Per-property, not cached. */
   notes: ExtNote[] | null;
+  /* True once every retry of the notes read failed: the panel says so and offers
+   * a retry instead of drawing "no notes" (MS16). */
+  notesFailed: boolean;
   /* True while a note save is in flight (disables the add box). */
   noteBusy: boolean;
   /* id of the note currently open for inline edit, or null. Only one at a time. */
@@ -772,7 +776,15 @@ function mountPanel(): {
     }
     if (state.phase === 'error') {
       renderAuthStrip(body, state);
-      body.appendChild(errorLine(state.errorMessage ?? 'Něco se nepovedlo.'));
+      const line = errorLine(state.errorMessage ?? 'Něco se nepovedlo.');
+      /* The lookup carries the pipeline card, collections and dismissal: a
+       * failed one is retried whole (MS16). A reload or a missing API config is
+       * not fixed by asking again, so those get no retry. */
+      if (panelRef != null && failureKind(state.errorMessage ?? '') === 'error') {
+        const ref = panelRef;
+        line.append(' ', retryLink(() => { void openPanel(ref, panelUrl); }));
+      }
+      body.appendChild(line);
       return;
     }
     if (state.phase === 'deactivated') {
@@ -812,6 +824,15 @@ function mountPanel(): {
     p.className = 'note note--error';
     p.textContent = text;
     return p;
+  }
+
+  function retryLink(onRetry: () => void): HTMLElement {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'coll-link';
+    a.textContent = 'Zkusit znovu';
+    a.onclick = (e) => { e.preventDefault(); onRetry(); };
+    return a;
   }
 
   /* The extension's own sign-in prompt (Wave 1) — every route now requires a
@@ -1085,12 +1106,7 @@ function mountPanel(): {
       p.className = 'coll-state';
       if (state.collectionsFailed) {
         p.textContent = 'Kolekce se nepodařilo načíst. ';
-        const retry = document.createElement('a');
-        retry.href = '#';
-        retry.className = 'coll-link';
-        retry.textContent = 'Zkusit znovu';
-        retry.onclick = (e) => { e.preventDefault(); void loadCollections(true); };
-        p.appendChild(retry);
+        p.appendChild(retryLink(() => { void loadCollections(true); }));
       } else {
         p.textContent = 'Načítám kolekce…';
         p.classList.add('note--loading');
@@ -1210,7 +1226,14 @@ function mountPanel(): {
     eyebrow.textContent = count > 0 ? `Poznámky (${count})` : 'Poznámky';
     sec.appendChild(eyebrow);
 
-    if (state.notes != null && state.notes.length > 0) {
+    /* Not loaded and failed are not "no notes" (MS16). */
+    if (state.notesFailed) {
+      const line = errorLine('Poznámky se nepodařilo načíst. ');
+      line.appendChild(retryLink(() => { void loadNotes(); }));
+      sec.appendChild(line);
+    } else if (state.notes == null) {
+      sec.appendChild(note('Načítám poznámky…', 'note--loading'));
+    } else if (state.notes.length > 0) {
       const list = document.createElement('div');
       list.className = 'notes-list';
       for (const n of state.notes) {
@@ -2260,20 +2283,23 @@ let noteEditDraft = '';
  * their module cache re-apply, which notes deliberately don't have). A duplicate
  * fetch from a rapid same-property re-open is harmless (idempotent, identity-
  * guarded apply). Retried on a transient blip; identity-guarded so a mid-flight
- * panel re-open can't apply one property's notes onto another. */
+ * panel re-open can't apply one property's notes onto another. When every try
+ * fails the panel says so (`notesFailed`) and its retry calls this again. */
 async function loadNotes(): Promise<void> {
   const l = state.listing;
   if (l == null || l.property_id == null || state.notes != null) return;
   const propertyId = l.property_id;
+  const mine = (prev: PanelState): boolean => prev.listing?.property_id === propertyId;
+  if (state.notesFailed) setState((prev) => ({ ...prev, notesFailed: false }));
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await call<ExtNote[]>({ type: 'list_notes', property_id: propertyId });
     if (res.ok) {
-      setState((prev) =>
-        prev.listing?.property_id === propertyId ? { ...prev, notes: res.data } : prev);
+      setState((prev) => (mine(prev) ? { ...prev, notes: res.data } : prev));
       return;
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
+  setState((prev) => (mine(prev) ? { ...prev, notesFailed: true } : prev));
 }
 
 /* Save the draft as a note on the listing's property. `origin_listing_id` is the
@@ -2305,9 +2331,11 @@ async function onAddNote(): Promise<void> {
   // like the prepend, so a mid-request re-open can't wipe another listing's draft.
   if (state.listing?.property_id === propertyId) noteDraft = '';
   setState((prev) =>
-    prev.listing?.property_id === propertyId
-      ? { ...prev, noteBusy: false, notes: [res.data, ...(prev.notes ?? [])] }
+    prev.listing?.property_id === propertyId && prev.notes != null
+      ? { ...prev, noteBusy: false, notes: [res.data, ...prev.notes] }
       : { ...prev, noteBusy: false });
+  /* A list never read is not a list of one: read the whole one, new note included. */
+  if (state.notes == null && state.listing?.property_id === propertyId) void loadNotes();
 }
 
 /* Open a note for inline edit — seeds the edit draft with its current body and
@@ -2440,7 +2468,7 @@ export async function openPanel(
     pipelineBusy: false, pipelineConfirmRemove: false, stages: cachedStages,
     collections: cachedCollections, collectionsFailed: false, collectionsOpen: false,
     collectionBusy: false, collectionError: null, dismissBusy: false,
-    notes: null, noteBusy: false, quota: null, errorMessage: null,
+    notes: null, notesFailed: false, noteBusy: false, quota: null, errorMessage: null,
     noteEditingId: null, noteConfirmDeleteId: null, noteRowBusy: false,
   };
   await minimizedReady;  // persisted minimized pref before first paint → no flash

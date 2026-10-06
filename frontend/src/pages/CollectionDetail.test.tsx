@@ -90,6 +90,13 @@ describe('<CollectionDetail>', () => {
     );
   });
 
+  it('says a failed read with a retry that reads again (MS16)', async () => {
+    vi.mocked(api.getCollection).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByRole('textbox', { name: 'Name' })).toHaveValue('Vinohrady watch');
+  });
+
   it('names the monitoring switch from the visible caption above it', async () => {
     renderPage();
     const toggle = await screen.findByRole('switch', { name: 'Monitoring' });

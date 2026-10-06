@@ -54,6 +54,7 @@ import {
 import { usePageTitle } from '@/lib/pageTitle';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
+import { MergeSelection } from '@/components/CurationMarks';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
 import {
@@ -64,10 +65,8 @@ import {
   mergePropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
-import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { browseKeys } from '@/lib/browseKeys';
-import { revalidateCollections } from '@/lib/collectionCache';
-import { revalidatePipeline } from '@/lib/pipelineCache';
+import { revalidateAfterMerge } from '@/lib/collectionCache';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -231,12 +230,8 @@ export default function BrowseExperience({
        * closing was the only prior signal); errors surface via the global
        * MutationCache. `browse-count` is included so the header total decrements. */
       pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
-      invalidateBrowseQueries(queryClient);
-      /* Same txn re-points collection_properties onto the survivor
-       * (toolkit/property_carriers.py), so the member map's KEYS changed too. */
-      revalidateCollections(queryClient);
-      /* ...and reconcile_pipeline_on_merge re-keys the card onto the survivor. */
-      revalidatePipeline(queryClient);
+      /* The same txn moves collections, the pipeline card and notes onto the survivor. */
+      revalidateAfterMerge(queryClient);
       exitMergeMode();
     },
   });
@@ -844,7 +839,7 @@ export default function BrowseExperience({
                 {f.mergeMode && (
                   <MergeModeBar
                     active={mergeMode}
-                    selectedCount={selectedForMerge.size}
+                    selected={selectedForMerge}
                     merging={mergeMut.isPending}
                     onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
                     onMerge={() => mergeMut.mutate([...selectedForMerge])}
@@ -1289,29 +1284,32 @@ function CardsGlyph() {
   );
 }
 
-function MergeModeBar({
+/* Merge mode's bar: the ticked properties by number, each with its marks
+   (MS16), so what a merge will carry is in view before the click. */
+export function MergeModeBar({
   active,
-  selectedCount,
+  selected,
   merging,
   onToggle,
   onMerge,
 }: {
   active: boolean;
-  selectedCount: number;
+  selected: ReadonlySet<number>;
   merging: boolean;
   onToggle: () => void;
   onMerge: () => void;
 }) {
+  const selectedCount = selected.size;
   const btn = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
   return (
     <div className="flex items-center gap-2 shrink-0">
       {active && (
         <>
-          <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-            {selectedCount === 0
-              ? 'Pick listings to merge'
-              : `${selectedCount} selected`}
-          </span>
+          {selectedCount === 0 ? (
+            <span className="text-[0.75rem] text-[var(--color-ink-3)]">Pick listings to merge</span>
+          ) : (
+            <MergeSelection ids={selected} />
+          )}
           <button
             type="button"
             onClick={onMerge}

@@ -150,7 +150,6 @@ export function refreshAfterSplit(qc: QueryClient): void {
   for (const key of [
     ['property'],
     ['property-sources'],
-    ['property-status-events'],
     ['snapshots'],
     mergedAdvertsKeys.all,
     autodedupKeys.proposedSplits,
