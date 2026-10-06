@@ -31,11 +31,29 @@ class _StreamResp:
 def _patch_get(monkeypatch, captured: list, resp: _StreamResp) -> None:
     import scraper.image_storage as image_storage
 
-    def _get(url, timeout=15.0, stream=False):
-        captured.append(url)
-        return resp
+    class _Session:
+        def get(self, url, timeout=15.0, stream=False):
+            captured.append(url)
+            return resp
 
-    monkeypatch.setattr(image_storage.requests, "get", _get)
+    monkeypatch.setattr(image_storage, "_session", lambda: _Session())
+
+
+def test_the_image_session_wears_the_crawlers_browser_identity():
+    """iDNES serves galleries through its own site's redirector, whose WAF throttled
+    and then blocked python-requests' bare identity (429 → 403, 2026-10-05): the
+    fetch carries portal_base's desktop-Chrome UA, its client hints and an <img>
+    Accept, through one session per process."""
+    import scraper.image_storage as image_storage
+
+    image_storage._SESSION = None
+    headers = image_storage._session().headers
+    assert headers["User-Agent"].startswith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    assert "Chrome/" in headers["User-Agent"]
+    assert headers["Accept"].startswith("image/avif,image/webp")
+    assert headers["sec-ch-ua-mobile"] == "?0"
+    assert image_storage._session() is image_storage._session()
+    image_storage._SESSION = None
 
 
 def test_image_key_pads_sequence():

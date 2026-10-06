@@ -903,3 +903,83 @@ def test_unmeasurable_bytes_store_with_size_left_untouched(monkeypatch):
     )
     assert call["rendition"] == scraper_main.image_storage.RENDITION_SREALITY_MASTER
     assert call["width"] is None and call["height"] is None
+
+
+# --- a throttling portal: the HOST cools down across runs; no attempt is burned ---
+
+
+@pytest.fixture(autouse=True)
+def _fresh_host_state():
+    scraper_main._host_cooldown_until.clear()
+    scraper_main._host_trips.clear()
+    scraper_main._host_next_at.clear()
+    yield
+    scraper_main._host_cooldown_until.clear()
+    scraper_main._host_trips.clear()
+    scraper_main._host_next_at.clear()
+
+
+def _throttle_for_bad(url):
+    return _http_error(429) if "bad.cz" in url else None
+
+
+def test_a_throttle_parks_the_host_and_burns_no_attempt(monkeypatch):
+    """iDNES answered 429 then 403 on 2026-10-05: five attempts within twenty minutes
+    gave 10k photos up for good. A throttle is about our rate, not the image: the row
+    keeps its attempts (mark_image_throttled, never mark_image_attempt), the host is
+    skipped for the rest of the run, and the healthy host keeps draining."""
+    throttled: list[int] = []
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_throttled",
+        lambda conn, iid, error=None: throttled.append(iid),
+    )
+    bad = "https://reality.bad.cz/file/thumbnail/x"
+    good = "https://img.good.cz/x.jpg"
+    batch1 = _rows(bad, 0, 3, 1000) + _rows(good, 100, 2, 2000)
+    batch2 = _rows(bad, 0, 3, 1000) + _rows(good, 200, 2, 3000)
+    out, stored = _drive_image_loop(monkeypatch, [batch1, batch2], _throttle_for_bad)
+    assert out["throttled"] >= 1
+    assert out["images_stored"] == 4 and sorted(stored) == [100, 101, 200, 201]
+    assert out["stopped_suspicious"] is False
+    assert scraper_main.host_cooling("reality.bad.cz")
+    assert throttled and all(i < 3 for i in throttled)
+
+
+def test_a_cooling_host_is_skipped_by_the_next_run_without_an_attempt(monkeypatch):
+    """The cool-down is module state: the worker's next run (a minute later) parks the
+    host's rows untouched instead of re-hammering it; when only that host is left the
+    run stops as quarantined, and it terminates."""
+    touched: list[int] = []
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_throttled",
+        lambda conn, iid, error=None: touched.append(iid),
+    )
+    bad = "https://reality.bad.cz/file/thumbnail/x"
+    scraper_main.trip_host("reality.bad.cz", _http_error(429))
+    out, stored = _drive_image_loop(monkeypatch, [_rows(bad, 0, 3, 1000)], _throttle_for_bad)
+    assert stored == [] and touched == []
+    assert out["throttled"] == 0 and out["stopped_suspicious"] is True
+
+
+def test_the_cooldown_doubles_per_trip_and_honours_a_longer_retry_after():
+    now = 1000.0
+    assert scraper_main.trip_host("h", _http_error(429), now=now) == 15 * 60
+    assert scraper_main.trip_host("h", _http_error(403), now=now) == 30 * 60
+    assert scraper_main.host_cooling("h", now=now + 29 * 60)
+    assert not scraper_main.host_cooling("h", now=now + 31 * 60)
+    for _ in range(6):
+        wait = scraper_main.trip_host("h", _http_error(429), now=now)
+    assert wait == 2 * 60 * 60
+    scraper_main.host_recovered("h")
+    err = _http_error(429)
+    err.response.headers["Retry-After"] = "3600"
+    assert scraper_main.trip_host("h", err, now=now) == 3600
+    assert scraper_main._throttle_status(RuntimeError("read timed out")) is None
+    assert scraper_main._throttle_status(_http_error(503)) is None
+
+
+def test_a_classifier_never_sees_a_throttle(monkeypatch):
+    """403 keeps its old transient reading for anything that reaches the classifier;
+    the drain routes 429/403 to the host cool-down before it."""
+    assert scraper_main._throttle_status(_http_error(403)) == 403
+    assert scraper_main._throttle_status(_http_error(429)) == 429
