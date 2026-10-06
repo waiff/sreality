@@ -1565,6 +1565,26 @@ def mark_image_attempt(
         )
 
 
+def mark_image_throttled(
+    conn: psycopg.Connection,
+    image_id: int,
+    error: str | None = None,
+) -> None:
+    """A throttle (429/403) is the portal answering about our rate, not about the
+    image: record it on `last_error` and the attempt time, but burn no
+    `download_attempts`, so the row stays in the queue for the host's next window."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE images
+            SET last_download_attempt_at = now(),
+                last_error = COALESCE(%s, last_error)
+            WHERE id = %s
+            """,
+            ((error or "")[:500] or None, image_id),
+        )
+
+
 def mark_image_unavailable(
     conn: psycopg.Connection,
     image_id: int,
