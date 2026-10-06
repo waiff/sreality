@@ -16,7 +16,7 @@ it (`api/`). They do not apply to the scraper.
 
 1. **Tools return facts, not opinions.** No "recommended price", no "this looks like a good
    deal." Tools return data + provenance. Reasoning happens at the agent layer.
-2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `asset_identity` / `property_identity` / `location_quality` still omit `data_freshness`):
+2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `property_identity` / `location_quality` still omit `data_freshness`):
    ```python
    {
      "data": ...,
@@ -111,7 +111,7 @@ it (`api/`). They do not apply to the scraper.
    on the theory that the private Railway URL was the perimeter, but that URL ships
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
-   of the token: `/admin/*`, `/properties/merge*`, `/properties/assets/*`, `/labeling/*`,
+   of the token: `/admin/*`, `/properties/merge*`, `/labeling/*`,
    `/outreach/*`, `/broker-review/*`, `/autodedup/*`, `/new-dedup/*`,
    `/skill-refinements/*`, `/location/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;

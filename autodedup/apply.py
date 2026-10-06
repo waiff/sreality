@@ -53,7 +53,6 @@ from autodedup.census import write_json
 from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
-    AssetLinkConflict,
     CategoryClash,
     MergeError,
     detach_listings,
@@ -111,8 +110,6 @@ SKIP_MUST_NOT_LINK = "must_not_link"
 SKIP_CATEGORY_TYPE = "category_type_mix"
 SKIP_CATEGORY_MAIN = "category_main_incompatible"
 SKIP_CARRIES_OUT_OF_SCOPE = "carries_out_of_scope_listings"
-# The merge itself refused two different asset links (decision 17): one survivor keeps one.
-SKIP_ASSET_LINKED = "asset_linked_units"
 SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
 SKIP_REFUSED_BEFORE = "refused_at_chokepoint_before"
@@ -1045,13 +1042,13 @@ def apply_group(
     guards: Sequence[tuple[str, Mapping[str, Any]]] = (),
 ) -> tuple[str, dict[str, Any]]:
     """ONE planned group through THE chokepoint, in its own transaction, with its ledger rows:
-    `applied`, `skipped_at_apply` (the in-transaction re-check or two asset links refused it),
+    `applied`, `skipped_at_apply` (the in-transaction re-check refused it),
     `refused` / `failed` (the chokepoint named why). The batch run and the real-time lane's
     reconcile (A9) both merge through here. An error the chokepoint does not name is recorded
     and RAISED: nothing carries on merging over a database nobody has looked at.
 
     `last` is the member set's newest ledger outcome: a skip or refusal that repeats it files
-    nothing (the lane re-tries a group every sweep; an asset-link conflict would otherwise file
+    nothing (the lane re-tries a group every sweep and would otherwise file
     a row every few minutes). `guards` are statements run first inside the group's transaction
     (the lane's local statement and lock timeouts)."""
     group_id = str(uuid.uuid4())
@@ -1068,15 +1065,12 @@ def apply_group(
             late_reasons, late_detail = recheck_group(conn, group, scope)
             if late_reasons:
                 raise _SkipAtApply(late_reasons, late_detail)
-            try:
-                res = merge(
-                    conn, group.property_ids, source=MERGE_SOURCE,
-                    reason=f"autodedup {generation} {group.cluster_key}",
-                    merge_group_id=group_id, confidence=group.confidence,
-                    markers=markers,
-                )
-            except AssetLinkConflict as exc:
-                raise _SkipAtApply([SKIP_ASSET_LINKED], {"asset_links": str(exc)}) from exc
+            res = merge(
+                conn, group.property_ids, source=MERGE_SOURCE,
+                reason=f"autodedup {generation} {group.cluster_key}",
+                merge_group_id=group_id, confidence=group.confidence,
+                markers=markers,
+            )
             data = res.get("data") or {}
             group.survivor_id = int(data["survivor_id"])
             group.retired_ids = [int(r) for r in data["retired_ids"]]

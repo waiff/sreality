@@ -2,14 +2,14 @@
 
 Everything here starts from a merge the operator (or another caller) has already
 ORDERED: collapse this explicit set of properties, state how one property's adverts split,
-list what was merged, or link properties as one asset without collapsing them.
+or list what was merged.
 Nothing in this module decides *whether* two properties are the same.
 
 The one merge and the one undo live in `toolkit.property_identity` (`merge_property_set` /
-`detach_listings` — the survivor rule, the asset-link carry, operator state, pipeline
+`detach_listings` — the survivor rule, operator state, pipeline
 reconcile, browse sync, the `property_merge_events` ledger and, for the operator, the
 rulings of decision 8); the operator's split statement composes them in
-`toolkit.property_split` (E919); asset links live in `toolkit.asset_identity`. This module is
+`toolkit.property_split` (E919). This module is
 the HTTP + read layer over them. Mounted under `/properties/*`, admin-gated.
 """
 
@@ -23,12 +23,6 @@ from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from api.category_clash_text import LETTER_ENDING, clash_sentence
-from toolkit.asset_identity import (
-    AssetError,
-    get_asset,
-    link_properties,
-    unlink_property,
-)
 from toolkit.property_identity import (
     MOVED,
     CategoryClash,
@@ -52,15 +46,6 @@ router = APIRouter(prefix="/properties", tags=["properties"])
 
 class PropertySetAction(BaseModel):
     property_ids: list[int]
-
-
-class AssetLinkAction(BaseModel):
-    property_ids: list[int]
-    note: str | None = None
-
-
-class AssetUnlinkAction(BaseModel):
-    property_id: int
 
 
 class SplitUndoVeto(BaseModel):
@@ -367,53 +352,3 @@ def get_merged_properties(
         limit=limit,
         offset=offset,
     )
-
-
-# ----- asset links (same physical building, kept as separate cohorts) -------
-# Unlike a merge these never collapse properties — both category facets survive.
-# It is the surface for the cross-category sameness the merge's `CategoryClash` refuses.
-
-
-@router.post("/assets/link")
-def post_asset_link(
-    body: AssetLinkAction,
-    conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
-) -> dict[str, Any]:
-    """Link the chosen properties into one asset (same building)."""
-    try:
-        return link_properties(
-            conn, property_ids=body.property_ids, source="operator",
-            reason="manual_link", note=body.note, created_by="operator",
-        )
-    except AssetError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.post("/assets/unlink")
-def post_asset_unlink(
-    body: AssetUnlinkAction,
-    conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
-) -> dict[str, Any]:
-    """Remove one property from its asset (dissolves the asset if <2 remain)."""
-    try:
-        return unlink_property(
-            conn, property_id=body.property_id, reason="manual_unlink",
-            created_by="operator",
-        )
-    except AssetError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.get("/assets/{asset_id}")
-def get_asset_route(
-    asset_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
-) -> dict[str, Any]:
-    """One asset link group and its member properties."""
-    result = get_asset(conn, asset_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="asset not found")
-    return result

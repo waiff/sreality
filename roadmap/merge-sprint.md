@@ -8,8 +8,8 @@ Full plan, the binding decisions MS1–MS23 and the gates:
 Separate from [AUTODEDUP](autodedup.md), which decides *which* ads are the same unit. This sprint
 owns *what a merge and a split do*: the property's facts, its curation, and what the app says.
 
-## State (2026-10-03)
-- **Plan awaiting the operator's approval.** Decisions come from a four-round design interview; the
+## State (2026-10-06)
+- **Plan approved (PR #1693, merged 2026-10-06).** Decisions come from a four-round design interview; the
   last two questions were answered on 2026-10-03: our condition grades stay for now (Q48), and a
   per-portal "newest on this portal" sort stays, at property grain (Q49). The split rule follows the
   operator's request of the same day: a split by letters, any number of properties in one split.
@@ -21,8 +21,8 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
   destructive window (W6), which waits for a day the operator names.
 
 ## Waves
-- [x] W0 — daily recompute resumes (PR #1695; gate pending)
-- [ ] W1b — asset links and the pipeline note field out
+- [x] W0 — daily recompute resumes (PR #1695; gate passed 2026-10-06: one full cycle in one run)
+- [x] W1b — asset links and the pipeline note field out (PR #1717, +153 / −1,099)
 - [ ] W2a — recompute: canonical-ad order, amenity union, portal lists, per-portal newest-ad dates, price lineage
 - [ ] W2b — property page, pipeline board, Browse rows: broker list, lowest price line, chart of
       every ad, marks and note mark in merge mode, honest failed reads

@@ -159,20 +159,6 @@ def test_an_origin_a_later_merge_retired_elsewhere_is_left_merged_and_the_advert
     assert db.listings[31] == 5
 
 
-@pytest.mark.parametrize("same_asset", [False, True])
-def test_the_asset_link_a_merge_carried_goes_back_with_its_property(same_asset):
-    """Decision 17's carry, inverted: 20 (asset 7) merged into the older 10; the detach that
-    brings 20 back gives it its link, and 10 keeps one only if it held it before the merge."""
-    db = _Ledger({1: 10, 2: 20, 3: 20}, assets={20: 7, **({10: 7} if same_asset else {})})
-    group = _merged(db, [10, 20])["merge_group_id"]
-    assert db.assets == {10: 7, 20: None}
-    _detach(db, 2, decided_by=OP)
-    assert db.assets == {10: 7 if same_asset else None, 20: 7}
-    assert (7, 20, "linked", f"detach {group}") in db.asset_events
-    _detach(db, 3, decided_by=OP)
-    assert db.assets == {10: 7 if same_asset else None, 20: 7}
-
-
 def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_stays():
     db = _Ledger({1: 10, 2: 10, 3: 20})
     _merged(db, [10, 20])
@@ -187,22 +173,19 @@ def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_st
 
 
 def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_changes_both_once():
-    """Undo in the reverse of the carry: every carrier gets ONE step, the asset link last; which
-    of them gives anything back (the pipeline card and the asset link; curation, dispatches and
+    """Undo in the reverse of the carry: every carrier gets ONE step; which
+    of them gives anything back (the pipeline card; curation, dispatches and
     dismissals stay on the property left) is each carrier's own, tests/test_property_carriers.py."""
-    db = _Ledger({1: 10, 2: 20}, assets={20: 7})
+    db = _Ledger({1: 10, 2: 20})
     group = _merged(db, [10, 20])["merge_group_id"]
     for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
         seen.clear()
     _detach(db, 2, decided_by=OP)
     step = DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),), source="operator")
-    walked = [s for s, _p in db.log if s.startswith("carrier:") or s.startswith("WITH carried AS")]
-    assert walked == [f"carrier:{c.name}" for c in reversed(carriers.PROPERTY_CARRIERS)
-                      if c.name != "asset_link"] + [" ".join(
-                          carriers._RESTORE_ASSET_LINK_SQL.split())]
+    walked = [s for s, _p in db.log if s.startswith("carrier:")]
+    assert walked == [f"carrier:{c.name}" for c in reversed(carriers.PROPERTY_CARRIERS)]
     assert {entry for entry in db.carried} == {("detach", c.name, step) for c in
-                                                carriers.PROPERTY_CARRIERS if c.name != "asset_link"}
-    assert db.assets == {10: None, 20: 7}
+                                                carriers.PROPERTY_CARRIERS}
     written = " ".join(s for s, _p in db.log)
     for table in ("property_status_events", "DELETE FROM properties",
                   "DELETE FROM property_merge_events"):
@@ -216,21 +199,18 @@ def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_changes_both_on
 def test_merging_then_detaching_every_advert_restores_every_original_property(backwards):
     """W3's gate at unit scale — a refactor of the mechanics changes no grouping: three set
     merges, one built on another; every advert a merge moved detached in turn, in either order,
-    returns to its own record, and every asset link to its own property — 30's rode 30 -> 10 ->
-    60 (the oldest)."""
+    returns to its own record."""
     original = {1: 10, 2: 10, 3: 20, 4: 30, 5: 30, 6: 40, 7: 50, 8: 60, 9: 70, 11: 80,
                 12: 80, 13: 20}
-    links = {30: 7, 50: 8}
     db = _Ledger(original, first_seen={pid: T0 + timedelta(days=pid % 60)
-                                       for pid in set(original.values())}, assets=links)
+                                       for pid in set(original.values())})
     _merged(db, [10, 20, 30])
     _merged(db, [40, 50], source="autodedup")
     _merged(db, [60, 10, 80])
-    assert len(set(db.listings.values())) == 3 and db.assets[60] == 7
+    assert len(set(db.listings.values())) == 3
     for lid in sorted(pi.listing_origins(db, list(original)), reverse=backwards):
         _detach(db, lid, decided_by=OP)
     assert db.listings == original and set(db.props.values()) == {"active"}
-    assert {pid: a for pid, a in db.assets.items() if a} == links
     assert all(e["undone_by"] for e in db.events), "a detach left a live ledger row behind"
 
 
@@ -279,8 +259,8 @@ def test_a_native_split_takes_the_merges_lock_order_and_leaves_curation_behind()
     # no carrier runs on a native split: the new record starts clean (rules 18, 22)
     assert db.carried == []
     written = " ".join(order)
-    for table in ("asset_membership_events", "DELETE FROM properties"):
-        assert table not in written, f"a native split touched {table} (rules 18, 22)"
+    assert "DELETE FROM properties" not in written, (
+        "a native split touched DELETE FROM properties (rules 18, 22)")
     born = db.listings[2]
     assert db.changed == db.browse == db.broker == [[10, born]]
 

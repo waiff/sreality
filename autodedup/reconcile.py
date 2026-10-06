@@ -16,7 +16,7 @@ What it adds is WHICH groups and WHEN:
     reported (`ruled_different_after_merge`), never undone — the reconcile NEVER splits
     (Decision 9): a grouping the stream no longer supports is a proposal;
   * a skipped or refused row is filed only when a member set's outcome CHANGES — at plan time
-    and at apply time alike (an asset-link conflict surfaces only at the merge) — so a group
+    and at apply time alike — so a group
     waiting on the same rule files one row, not one a minute;
   * a group that failed `QUARANTINE_AFTER` passes running on an error nothing names is
     QUARANTINED (reported, not attempted) until `QUARANTINE_RETRY_H` after its last failure; an

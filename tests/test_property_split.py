@@ -260,10 +260,6 @@ def test_a_join_the_one_merge_refuses_is_refused_and_nothing_moves():
     refused = _refused(_split, db, [[2, 3]])
     assert refused.code == "refused" and "category_type" in refused.message
     assert _state(db) == before
-    db = _screenshot()
-    db.assets.update({20: 7, 30: 8})
-    before = _state(db)
-    assert _refused(_split, db, [[2, 3]]).code == "refused" and _state(db) == before
 
 
 def test_a_join_that_would_drag_an_advert_nobody_named_is_refused():
