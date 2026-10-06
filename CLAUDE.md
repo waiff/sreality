@@ -166,8 +166,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge chokepoint,
     two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listings`, set-shaped) — it re-points `listings.property_id`,
     soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
-    call, and so is a group undo (`merge_group_id=`) — no replay), carries every property-anchored operator-state row through ONE ordered list,
-    `PROPERTY_CARRIERS` (rule #18), brings every touched property current once per call (`properties_changed`, the dirty drain's after-step), and enforces **category compatibility** (`CategoryClash`:
+    call, and so is a group undo (`merge_group_id=`) — no replay). A property shows ONE **canonical ad**, rank 1 of `property_canonical_listings` (migration 588): active first,
+    then with a map point, then the earliest first seen (active ads) / latest last seen (inactive ads), then portal trust, then id; its six amenities are a union (yes if any ad says yes). The chokepoint enforces **category compatibility** (`CategoryClash`:
     sale≠rent, flat≠house — except the sanctioned cross-type PAIRS: any two of **dům, komerční, pozemek**, and **byt↔komerční**; pairs, never classes, so byt↔dům stays refused). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
     the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open

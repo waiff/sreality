@@ -251,7 +251,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 |---|---|---|---|---|
 | **W0** | Daily recompute resumes where the last run stopped (PR #1695, merged 2026-10-03; its gate is pending) | no, but a shared file | — | +630 / −150 |
 | **W1b** | Asset links and the pipeline note field out (code) | yes | "C2 CLOSED" | 0 / −840 |
-| **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage, city figures that follow the canonical ad; stops writing two write-only columns; realitymix joins the portal list; #1655's share-sale rule comes later, with that PR's rebase | yes | "C2 CLOSED"; its additive migration (nine `properties` date columns) applied before merge | +220 / −185 |
+| **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage, city figures that follow the canonical ad; stops writing two write-only columns; realitymix joins the portal list; #1655's share-sale rule comes later, with that PR's rebase | yes | "C2 CLOSED"; its additive migration 588 (nine `properties` date columns, the canonical order) applied before merge | +220 / −185 |
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +360 / −480 |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED" | +330 / −655 |
 | **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview, curation routing per letter with copies, a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties, the brake's dry run counting note moves; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together", "Přesto rozdělit", writing "same" inside a letter (recorded rulings stay) and the split undo | yes | W3 | +1,550 / −2,100 (after #1699) |
@@ -282,13 +282,24 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
   are read or written inside every merge, and every saved ad writes `discovery_seq`; dropping them
   early would fail every merge or every save.
 - **W0:** a completion stamp appears within two runs and the saved position clears.
-- **W2a:** its nine date columns exist in production before the code merges (an additive migration,
-  confirmed by a catalog read). The fill is a one-off script, not a migration: it queues the roughly
-  64,000 properties with two or more ads, at most 2,000 per maintenance tick, off-peak, pausing while
-  the engine is bootstrapping. After it, a 1 % sample shows 0 properties whose stored canonical ad,
-  portal lists or per-portal dates differ from the rule, and reports how many changed their condition
-  grades (expected: about 1.7 % of properties with two or more ads). Single-ad properties get their
-  portal lists and dates from the next full recompute cycle.
+- **W2a:** first a 1 % id window of live properties (`status = 'active'`, with and without an
+  active ad) is captured: each one's canonical ad, both condition grades, shown price, area,
+  category and whether an ad is active. From 588's apply on, the running rollup already ranks by the
+  new order, so nothing measured later is a baseline. Then migration 588 (its nine date columns and
+  the canonical order) is applied in production before the code merges, confirmed by a catalog read.
+  **Rollout deviation (2026-10-06): no fill script.** Since W0 the daily recompute completes
+  (2026-10-06: one run, 11:17–12:39 UTC, 471 batches, all 940,748 ids), so the first full cycle
+  begun after the merge rewrites every property, single-ad ones included, with the new statement;
+  the dirty drain, births and merges use it from the deploy on. After that cycle (the completion
+  stamp's `cycle_started_at` is after the merge: a cycle resumed across the merge ran both
+  statements), the window shows 0 properties whose stored canonical ad, portal lists or per-portal
+  dates differ from the rule (properties still queued in `dirty_properties` excepted; a residual
+  from map points that changed since a property's last recompute is named, not counted). A report
+  against the capture, split by whether an ad is active, counts the properties whose condition
+  grades changed (expected: about 1.8 % of properties with two or more ads; 14 of 764 in the
+  2026-10-06 sample) and whose shown price, area or category changed or emptied (2026-10-06, ids
+  300000–309999: 299 of 1,312 properties with two or more ads change their canonical ad; 8 lose
+  their price and 4 their area, all with no active ad).
 - **W3:** the carry write adds at most 100 ms at the 95th percentile; no new failed engine merge in
   the 24 hours after W3 and W4, merged back to back, are live; the count invariant (MS14) passes.
 - **W4:** the count invariant runs on production before and after the release; a two-account live
@@ -303,7 +314,8 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
   portal's index with no sort step; every read-model object changes in one transaction, off-peak,
   never while a recompute runs, both read models are rebuilt once before the code merges, and the two
   Stats/map functions are restated from their live bodies; order agreed with the street-filter
-  session (its 585 restates both functions) and with the dedup session's wave that deletes the
+  session (its restatement of both functions was planned as 585, which #1715's image fix took on
+  main on 2026-10-06, so it takes another number) and with the dedup session's wave that deletes the
   removed engine's tables.
 - **W6:** on a day the operator names; each object re-checked that day: no view or function depends
   on it, and no cascade is used; backup to R2 read back; engine paused; 05:20–05:30 UTC; a 5-second
@@ -312,7 +324,7 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
   pipeline note field is skipped if a single pipeline card holds a note, else
   `property_pipeline_public` and `pipeline_board_public`, which reads it, are first re-created
   without it.
-- **Migrations** are numbered 586–599.
+- **Migrations** are numbered 588–599 (600 up are the dedup session's).
 
 ## 6. The destructive window (W6)
 
@@ -322,7 +334,7 @@ amenity union into rule 15 in place of two clauses that repeat rules 18 and 20. 
 | Asset links | "same building" links, never used | `assets`, `asset_membership_events`, `properties.asset_id` |
 | Pipeline note field | a field nothing can write | `property_pipeline.note` |
 | Per-ad Browse lane | the "one portal's own page" machinery, replaced by MS19's one-portal "Newest first" | `listing_feed_visible()`, then `listing_feed_public`; the `listing_ids_filter` parameter of `browse_map_cells` (the function re-created with its grants); `listings_portal_feed_idx` (136 MB, dropped concurrently, outside the transaction); `listing_detail_queue.discovery_seq` with its default and `listings.discovery_seq`, then the sequence `listing_discovery_seq` |
-| Write-only columns | written by the recompute, read by nothing | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
+| Write-only columns | no longer written since W2a, read by nothing; `properties_public` still projects `distinct_site_count`, so W5's one restatement of that view leaves it out | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
 | Never-used indexes | built for an old Browse path | `properties_cat_last_seen_keyset_idx`, `properties_last_seen_keyset_idx` (1.15 GB) |
 
 **Never dropped by this sprint:** any curation table; the pipeline history; `properties.all_sources` /
@@ -347,7 +359,7 @@ that session; the two never-used indexes come from migrations 198 and 275.
 - **Its conditions, adopted:** its PR #1655 (share sales: a share sale merged with a sale reads as a
   sale) lands after W6 and is rebased onto this sprint (operator, 2026-10-03); engine-path PRs merge
   only after its "C2 CLOSED" line, back to back; before any merge to main the engine is not
-  bootstrapping and no dispatch holds its writer lease; migrations 586–599; no engine rule numbers
+  bootstrapping and no dispatch holds its writer lease; migrations 588–599; no engine rule numbers
   allocated here; the brake's dry run counts carry rows and note moves; the functions its code calls
   and the four ruling helpers it imports from `toolkit.property_split` stay as the hand-over promised.
 - **The engine is paused for W6 by the operator or by this session**, not by that session, on the
@@ -415,14 +427,25 @@ that session; the two never-used indexes come from migrations 198 and 275.
 ## 10. Risks
 
 - **The database is close to its disk-reading limit.** Browse rebuilds and the daily recompute have
-  timed out this week. Every rollout uses a queue, never a full-table pass, and heavy steps run
-  off-peak.
+  timed out this week. Every rollout uses a queue or the daily recompute that runs anyway, never an
+  extra full-table pass, and heavy steps run off-peak.
 - **More work inside every merge** (the carry record) against the engine's 25-second limit per merge.
-- **Canonical-ad changes** restart price-alert clocks on about 3,600 properties with an active ad. No
-  alert is replayed. Properties with no active ad are re-measured in W2a's sample.
+- **Canonical-ad changes** restart price-alert clocks on about 4,500 properties with an active ad (45
+  of 241 sampled on 2026-10-06). No alert is replayed. Properties with no active ad are re-measured
+  in W2a's sample.
 - **Our condition grades move with the canonical ad** on about 1,200 properties (about 850 lose them),
   nearly all with no active ad. Every surface reads the canonical ad's grades, so Browse, Stats, the
   map, the Watchdog and the estimator's comparables still agree.
+- **A property with no active ad can lose its shown price.** MS5 gives its slot to the latest-ended
+  ad with a map point even when that ad states no price or area (2026-10-06, ids 300000–309999:
+  8 lose their price, 4 their area, 1 gains a price); such a property also leaves the delisted
+  comparables, which admit only the canonical ad. W2a's report counts it.
+- **City figures need a map point.** The hourly job computes them from the canonical ad's point
+  only, so a property whose canonical ad has none keeps the figures of an earlier point, or none,
+  until it gains one (2026-10-06: 101 of 7,363 live properties in ids 300000–309999; it predates W2a).
+- **W2b merges before W2a** (§4 Order). The other way round, until W2b the property page's price
+  figures count W2a's lineage while the moves listed under its chart are the canonical ad's own
+  (2026-10-06: 281 of 8,270 live properties in ids 100000–109999 have a same-portal predecessor).
 - **Browse counts move.** One portal now counts properties, not ads; several portals gain the
   properties the old rule hid.
 - **Browse tabs left open from before W5** fail until reloaded in two places: a broker filter from W5
@@ -444,8 +467,9 @@ that session; the two never-used indexes come from migrations 198 and 275.
 - **Three sessions edit nearby files:** this one, the dedup session (#1655, which makes the recompute
   statement an f-string, rebases onto this sprint after W6; its E934 edits `apply.py` beside W1b's
   asset-link hunk, and whichever lands second rebases) and the street-filter session. That session's
-  584 is applied (2026-10-03); its 585 (unmerged) restates `browse_stats_properties` and
+  584 is applied (2026-10-03); its planned 585 (unmerged; main's 585 is #1715's image fix since
+  2026-10-06, so it needs another number) restates `browse_stats_properties` and
   `browse_map_cells` with unchanged parameters, so W5 restates both from what is live; its untracked
-  `586_chip_codes_and_watchdog_removal.sql` (seen 2026-10-03) sits in this sprint's 586–599 block and
-  must be renumbered before W2a's migration takes a number; its uncommitted edits touch `queries.ts`,
+  `586_chip_codes_and_watchdog_removal.sql` (seen 2026-10-03) stays below this sprint's block, which
+  W2a's 588 opens; its uncommitted edits touch `queries.ts`,
   `filters.ts`, `brokers.ts`, `BrowseExperience.tsx` and `Pipeline.tsx`, W2b and W5 files.

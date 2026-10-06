@@ -23,7 +23,9 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
 ## Waves
 - [x] W0 — daily recompute resumes (PR #1695; gate pending)
 - [ ] W1b — asset links and the pipeline note field out
-- [ ] W2a — recompute: canonical-ad order, amenity union, portal lists, per-portal newest-ad dates, price lineage
+- [ ] W2a — recompute: canonical-ad order, amenity union, portal lists, per-portal newest-ad dates,
+      price lineage, city figures follow the canonical ad; realitymix joins the portal filter (built,
+      PR pending; migration 588 applied before merge)
 - [ ] W2b — property page, pipeline board, Browse rows: broker list, lowest price line, chart of
       every ad, marks and note mark in merge mode, honest failed reads
 - [ ] W3 — carry record, the count invariant, one merge toast

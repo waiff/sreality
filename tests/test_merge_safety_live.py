@@ -1,16 +1,18 @@
-"""Merge safety, executed (migrations 559, 560 and 561): a price step never spans two adverts, a
-merge writes no status row and a detach restores the absorbed property's own state, merging
+"""Merge safety, executed (migrations 559, 560, 561 and 588): a price step never spans two adverts,
+a merge writes no status row and a detach restores the absorbed property's own state, merging
 then detaching every advert a merge moved gives back every original property, a native advert
 splits off to a record born the one way, the operator's merge and detach land as rulings the
 apply adapter reads, the one-time copy rules only what the operator judged, and a merged
-property speaks with ONE canonical advert everywhere (decisions 13 and 18). Runs in CI's
-migrations job (`TEST_DATABASE_URL`); every test rolls back.
+property speaks with ONE canonical advert everywhere (decisions 13 and 18), chosen and built by
+the merge sprint's rules (docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19). Runs in
+CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
 """
 
 from __future__ import annotations
 
 import itertools
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,24 @@ def _recompute(cur: Any, pid: int) -> None:
     from scripts.recompute_property_stats import _RECOMPUTE_ONE_SQL
 
     cur.execute(_RECOMPUTE_ONE_SQL, {"pid": pid})
+
+
+def _seen(cur: Any, listing_id: int, first_days_ago: float, last_days_ago: float = 0) -> None:
+    """Both seen dates, which the insert leaves at the test transaction's one now()."""
+    cur.execute(
+        "UPDATE listings SET first_seen_at = now() - make_interval(secs => %s), "
+        "last_seen_at = now() - make_interval(secs => %s) WHERE id = %s",
+        (first_days_ago * 86400, last_days_ago * 86400, listing_id))
+
+
+def _located(cur: Any, *listing_ids: int) -> None:
+    """A map point per advert (`listing_location.geom`, the canonical order's second key)."""
+    for lid in listing_ids:
+        cur.execute(
+            "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
+            "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
+            "  registry_version) VALUES (%s, ST_SetSRID(ST_MakePoint(17.91, 49.01), 4326), "
+            "  'exact', 'building', 5, 'cz', 'test', '\\x00'::bytea, 'test')", (lid,))
 
 
 def test_a_step_never_spans_two_adverts(cur):
@@ -437,12 +457,7 @@ def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(c
     canon, twin = _advert(cur, two_portal, source="sreality"), _advert(cur, two_portal, source="bazos")
     alone = _advert(cur, single, source="remax")
     ids = {subject, sibling, canon, twin, alone}
-    for lid in ids:
-        cur.execute(
-            "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
-            "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
-            "  registry_version) VALUES (%s, ST_SetSRID(ST_MakePoint(17.91, 49.01), 4326), "
-            "  'exact', 'building', 5, 'cz', 'test', '\\x00'::bytea, 'test')", (lid,))
+    _located(cur, *ids)
     for pid in (subject_p, two_portal, single):
         _recompute(cur, pid)
     sql, params = build_query(
@@ -450,3 +465,212 @@ def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(c
         ComparableFilters(radius_m=500, category_main="byt", category_type="prodej"))
     cur.execute(sql, params)
     assert {int(r[0]) for r in cur.fetchall()} & ids == {canon, alone}
+
+
+# --- the merge sprint's rollup (migration 588) ------------------------------------------
+
+
+def _ranked(cur: Any, pid: int) -> list[int]:
+    cur.execute("SELECT listing_id FROM property_canonical_listings(%s) ORDER BY canonical_rank",
+                (pid,))
+    return [int(r[0]) for r in cur.fetchall()]
+
+
+def _recomputed_canonical(cur: Any, pid: int) -> int:
+    _recompute(cur, pid)
+    cur.execute("SELECT repr_listing_ref_id FROM properties WHERE id = %s", (pid,))
+    return int(cur.fetchone()[0])
+
+
+def test_an_active_advert_speaks_by_its_map_point_then_its_first_sighting(cur):
+    """MS5, active adverts: a map point, then the earliest first sighting, then trust; ended last."""
+    pid = _property(cur)
+    unlocated, later = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    earliest = _advert(cur, pid, source="bazos")
+    ended = _advert(cur, pid, source="sreality", active=False)
+    _located(cur, later, earliest, ended)
+    for lid, first, last in ((unlocated, 30, 0), (later, 10, 0), (earliest, 20, 0), (ended, 60, 40)):
+        _seen(cur, lid, first, last)
+    assert _ranked(cur, pid) == [earliest, later, unlocated, ended]
+    assert _recomputed_canonical(cur, pid) == earliest
+
+
+def test_with_no_active_advert_the_latest_ended_advert_with_a_map_point_speaks(cur):
+    """MS5, every advert ended: a map point, then the latest last sighting; not first seen or trust."""
+    pid = _property(cur)
+    recent = _advert(cur, pid, source="idnes", active=False)
+    older = _advert(cur, pid, source="sreality", active=False)
+    unlocated = _advert(cur, pid, source="bazos", active=False)
+    _located(cur, recent, older)
+    for lid, first, last in ((recent, 40, 2), (older, 20, 10), (unlocated, 15, 1)):
+        _seen(cur, lid, first, last)
+    assert _ranked(cur, pid) == [recent, older, unlocated]
+    assert _recomputed_canonical(cur, pid) == recent
+
+
+def test_a_live_adverts_sighting_never_moves_the_canonical_advert(cur):
+    """561's moving key is gone: two live adverts first seen together keep their order (trust,
+    then id) when the other is seen again, and `repr_since` is not restamped."""
+    pid = _property(cur)
+    canon, other = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    _located(cur, canon, other)
+    for lid in (canon, other):
+        _seen(cur, lid, 10, 1)
+
+    def speaker() -> tuple[Any, ...]:
+        _recompute(cur, pid)
+        cur.execute("SELECT repr_listing_ref_id, repr_since::text FROM properties WHERE id = %s",
+                    (pid,))
+        return cur.fetchone()
+
+    before = speaker()
+    _seen(cur, other, 10, 0)
+    assert speaker() == before and before[0] == canon
+
+
+@pytest.mark.parametrize(("canonical", "ended", "union"), [
+    (False, True, True), (True, False, True), (None, True, True),
+    (False, None, False), (False, False, False), (None, None, None)])
+def test_the_six_amenities_are_a_union(cur, canonical, ended, union):
+    """MS6: yes if any advert (an ended one too) says yes, no if one says no, else unknown."""
+    amenities = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
+    pid = _property(cur)
+    canon = _advert(cur, pid, source="sreality")
+    other = _advert(cur, pid, source="idnes", active=False)
+    for lid, value in ((canon, canonical), (other, ended)):
+        cur.execute("UPDATE listings SET " + ", ".join(f"{c} = %s" for c in amenities)
+                    + " WHERE id = %s", (*[value] * len(amenities), lid))
+    assert _recomputed_canonical(cur, pid) == canon
+    cur.execute(f"SELECT {', '.join(amenities)} FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (union,) * len(amenities)
+
+
+def test_the_portal_lists_and_newest_ad_dates_follow_every_advert(cur):
+    """MS19: both portal lists and each portal's newest-advert date follow a merge and a detach."""
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    p, q = _property(cur), _property(cur)
+    old_idnes = _advert(cur, p, source="idnes")
+    new_idnes = _advert(cur, p, source="idnes", active=False)
+    sreality, bazos = _advert(cur, p, source="sreality"), _advert(cur, q, source="bazos")
+    for lid, first, last in ((old_idnes, 20, 0), (new_idnes, 5, 2), (sreality, 10, 0), (bazos, 3, 0)):
+        _seen(cur, lid, first, last)
+    for pid in (p, q):
+        _recompute(cur, pid)
+    cur.execute("SELECT id, first_seen_at FROM listings WHERE id = ANY(%s)",
+                ([new_idnes, sreality, bazos],))
+    first = {int(lid): at for lid, at in cur.fetchall()}
+    dates = {"idnes": first[new_idnes], "sreality": first[sreality]}
+
+    def portals() -> tuple[Any, ...]:
+        cur.execute("SELECT all_sources, active_sources, "
+                    + ", ".join(f"newest_ad_at_{o.value}" for o in PORTAL_OPTIONS)
+                    + " FROM properties WHERE id = %s", (p,))
+        row = cur.fetchone()
+        return row[0], row[1], {o.value: d for o, d in zip(PORTAL_OPTIONS, row[2:]) if d}
+
+    assert portals() == (["idnes", "sreality"], ["idnes", "sreality"], dates)
+    _merge(cur, [p, q])
+    assert portals() == (["bazos", "idnes", "sreality"], ["bazos", "idnes", "sreality"],
+                         {**dates, "bazos": first[bazos]})
+    assert _detach(cur, bazos)["outcome"] == "detached"
+    cur.execute("UPDATE listings SET is_active = false WHERE property_id = %s", (p,))
+    _recompute(cur, p)
+    assert portals() == (["idnes", "sreality"], [], dates)
+
+
+def test_a_same_portal_relist_counts_its_predecessors_steps_and_one_handover(cur):
+    """MS10: a predecessor's own cut plus one handover step count; alerts quote the canonical's own."""
+    from api.notifications import _recent_price_drops
+
+    pid = _property(cur)
+    before = _advert(cur, pid, source="sreality", price=5_200_000, active=False)
+    relist = _advert(cur, pid, source="sreality", price=4_900_000)
+    _seen(cur, before, 40, 10)
+    _seen(cur, relist, 5)
+    _snapshot(cur, before, 5_300_000, 30 * 24)
+    _snapshot(cur, before, 5_200_000, 20 * 24)
+    _snapshot(cur, relist, 5_000_000, 4 * 24)
+    cut = _snapshot(cur, relist, 4_900_000, 24)
+    assert _recomputed_canonical(cur, pid) == relist
+    cur.execute(
+        "SELECT price_drop_count, price_rise_count, price_change_count, price_change_count_30d, "
+        "       round(max_price_drop_pct, 2), round(total_price_change_pct, 2) "
+        "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (3, 0, 3, 3, Decimal("3.85"), Decimal("-7.55"))
+    drops = [d for d in _recent_price_drops(cur.connection, window_days=40) if d[0] == pid]
+    assert drops == [(pid, cut, 4_900_000, 5_000_000)]
+
+
+@pytest.mark.parametrize(("chain", "figures"), [
+    pytest.param([(60, 40, [(5_500_000, 50)]), (30, 10, [(5_300_000, 25), (5_200_000, 15)]),
+                  (5, 0, [(5_000_000, 4)])], (3, 3, 3, 3, Decimal("-9.09")), id="three-adverts"),
+    pytest.param([(40, 10, [(5_300_000, 30), (5_200_000, 20)]),
+                  (5, 0, [(5_200_000, 4), (5_000_000, 1)])], (2, 2, 2, 2, Decimal("-5.66")),
+                 id="same-price-relist"),
+    pytest.param([(40, 10, [(5_300_000, 30)]), (5, 0, [(5_000_000, 4)])],
+                 (1, 1, 1, 1, Decimal("-5.66")), id="one-priced-snapshot-each"),
+    pytest.param([(100, 60, [(5_300_000, 80)]), (50, 0, [(5_000_000, 45), (4_900_000, 1)])],
+                 (2, 2, 1, 2, Decimal("-7.55")), id="handover-before-the-30-days"),
+    pytest.param([(40, 5, [(5_300_000, 30)]), (5, 0, [(5_000_000, 4), (4_900_000, 1)])],
+                 (1, 1, 1, 1, Decimal("-2.00")), id="ended-as-the-next-began"),
+])
+def test_the_lineage_walks_every_predecessor_and_dates_each_handover(cur, chain, figures):
+    """MS10 on one portal, oldest advert first as (first seen, last seen, [(price, at)]) in days
+    ago, the last one live: every predecessor counts, a handover is a step only when the price
+    moves, dated at the newer advert's first price, and the total runs from the oldest priced
+    advert; one that ended the instant the next began ran beside it. Figures: drops, changes,
+    30- and 90-day changes, total."""
+    pid = _property(cur)
+    for i, (first, last, prices) in enumerate(chain):
+        lid = _advert(cur, pid, source="sreality", price=prices[-1][0], active=i == len(chain) - 1)
+        _seen(cur, lid, first, last)
+        for price, days in prices:
+            _snapshot(cur, lid, price, days * 24)
+    assert _recomputed_canonical(cur, pid) == lid
+    cur.execute("SELECT price_drop_count, price_change_count, price_change_count_30d, "
+                "price_change_count_90d, round(total_price_change_pct, 2) "
+                "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == figures
+
+
+def test_adverts_that_ran_at_the_same_time_never_form_a_step(cur):
+    """A same-portal advert that overlapped the canonical one, or another portal's, adds no step."""
+    pid = _property(cur)
+    canon = _advert(cur, pid, source="sreality", price=4_900_000)
+    overlapping = _advert(cur, pid, source="sreality", price=5_500_000, active=False)
+    other_portal = _advert(cur, pid, source="idnes", price=5_800_000, active=False)
+    for lid, first, last in ((canon, 5, 0), (overlapping, 20, 3), (other_portal, 30, 10)):
+        _seen(cur, lid, first, last)
+    for lid, older, newer, at in ((canon, 5_000_000, 4_900_000, 4),
+                                  (overlapping, 5_600_000, 5_500_000, 15),
+                                  (other_portal, 6_000_000, 5_800_000, 25)):
+        _snapshot(cur, lid, older, at * 24)
+        _snapshot(cur, lid, newer, (at - 3) * 24)
+    assert _recomputed_canonical(cur, pid) == canon
+    cur.execute("SELECT price_drop_count, price_change_count, round(max_price_drop_pct, 2), "
+                "round(total_price_change_pct, 2) FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (1, 1, Decimal("2.00"), Decimal("-2.00"))
+
+
+def test_a_canonical_change_clears_the_city_figure_stamp(cur):
+    """The city stamp survives a kept canonical advert, clears on a takeover and when older than it."""
+    pid = _property(cur)
+    first = _advert(cur, pid, source="sreality")
+    _recompute(cur, pid)
+
+    def city(stamp_sql: str | None = None) -> tuple[int, bool]:
+        if stamp_sql:
+            cur.execute(f"UPDATE properties SET city_proximity_computed_at = {stamp_sql} "
+                        "WHERE id = %s", (pid,))
+        _recompute(cur, pid)
+        cur.execute("SELECT repr_listing_ref_id, city_proximity_computed_at IS NOT NULL "
+                    "FROM properties WHERE id = %s", (pid,))
+        return cur.fetchone()
+
+    assert city("now() - interval '1 hour'") == (first, True)
+    takeover = _advert(cur, pid, source="idnes")
+    _located(cur, takeover)
+    assert city() == (takeover, False)
+    assert city("now()") == (takeover, True)
+    assert city("repr_since - interval '1 minute'") == (takeover, False)

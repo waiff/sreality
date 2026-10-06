@@ -276,13 +276,13 @@ latest definer): take both rebuild advisory locks (`statement_timeout` > the 180
 `null::<type> as <col>` ONLY while the matview lacks the column (EXECUTE + `-- ci-allow-dynamic:`; a static bridge
 breaks re-runs); then, `lock_timeout 0` under the held re-entrant keys, force the map rebuild + restore its source, then the list's.
 
-**A property row is its canonical advert's** (migration 561): `properties.repr_listing_ref_id` =
-rank 1 of `property_canonical_listings(property_id)` (active, trust, last seen, id), written by
-the one rollup; every read model joins place/floor/description/broker through it, and
-`properties_public.listing_id` is it (`repr_since`: when it last changed; alerts count only its
-later price steps). `browse_projection` (and so `browse_list` /
-`properties_map_mv`) no longer projects `all_sources` / `active_sources`; the two never-written
-`properties` columns wait for W8's destructive drop.
+**A property row is its canonical advert's** (migrations 561, 588): `properties.repr_listing_ref_id`
+= rank 1 of `property_canonical_listings(property_id)` (active, map point, earliest first seen among
+active / latest last seen among inactive, trust, id), written by the one rollup; every read model
+joins place/floor/description/broker through it, and `properties_public.listing_id` is it
+(`repr_since`: when it last changed; alerts count only its later price steps; the rollup clears
+`city_proximity_computed_at` with it). The rollup also writes `all_sources` / `active_sources` (sorted
+portal lists) and the nine `newest_ad_at_<portal>` dates (MS19); no read model projects them before W5.
 
 **Three functions depend on `browse_projection`'s row type** (migration 537:
 `browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on

@@ -345,7 +345,7 @@ describe('<AutodedupCategorySplits> the list', () => {
     expect(
       within(blocked).getByText('kategorie neuvedena — bez písmena, zůstane se skupinou, která zůstává'),
     ).toBeInTheDocument();
-    expect(within(blocked).queryByLabelText(LETTER(534885, 'Realitymix'))).toBeNull();
+    expect(within(blocked).queryByLabelText(LETTER(534885, 'RealityMix'))).toBeNull();
     expect(
       within(blocked).getByText(
         'Nelze oddělit: nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam.',

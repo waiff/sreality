@@ -144,7 +144,8 @@ def list_merged_properties(
     delisted) is in [min_listings, max_listings]. The audit view for spotting
     over-merges — biggest groups first. Reads the base `properties` table
     (service role), so it sees rows the `*_public` views hide. The per-property
-    portal list + active count come from a LATERAL over the children."""
+    portal list, its count and the active count come from a LATERAL over the
+    children (`properties.distinct_site_count` is no longer written, W2a)."""
     where_sql, params = _merged_property_filters(
         min_listings=min_listings,
         max_listings=max_listings,
@@ -159,7 +160,8 @@ def list_merged_properties(
         cur.execute(
             f"""
             SELECT
-              p.id, p.repr_listing_id, p.source_count, p.distinct_site_count,
+              p.id, p.repr_listing_id, p.source_count,
+              coalesce(cardinality(agg.sources), 0) AS distinct_site_count,
               p.category_main, p.category_type, p.disposition, p.area_m2,
               p.estate_area, p.current_price_czk,
               -- W4-a: ONE place string, the same server-composed label every
