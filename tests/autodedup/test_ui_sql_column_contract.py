@@ -95,6 +95,10 @@ _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("judged facets",
      usql.JUDGEMENTS_FACETS_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM f\n")[0],
      usql.RULING_FACET_COLUMNS),
+    # The category review (E937).
+    ("category split adverts",
+     _between(usql.CATEGORY_SPLIT_ADVERTS_SQL, "SELECT", "FROM public.properties"),
+     usql.CATEGORY_SPLIT_ADVERT_COLUMNS),
 )
 
 

@@ -20,54 +20,29 @@
  * would take back the operator's own earlier "různé" (E52). */
 
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
-import { VERDICT_LABELS, displayVerdict } from '@/components/autodedup/VerdictButtons';
 import {
   DETACH_REASON_MAX,
   getProposedSplits,
-  splitProperty,
-  splitRefusal,
-  undoSplit,
   type AutodedupMember,
-  type AutodedupVerdictValue,
   type ProposedSplit,
   type ProposedSplitAdvert,
-  type SplitRefusal,
-  type SplitResult,
   type SplitStatement,
-  type SplitUndoResult,
 } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
-import { useListingPhotos } from '@/lib/hydration/useCardHydration';
-import { propertyPath } from '@/lib/listingUrl';
-import {
-  inzeratu,
-  mergedAdvertsKeys,
-  refreshAfterSplit,
-  unitLanding,
-  unmovedReason,
-} from '@/lib/mergedAdverts';
-import { fetchListingsForListingIds } from '@/lib/queries';
-import { ROUTES, withQuery } from '@/lib/routes';
-import type { ListingPublic } from '@/lib/types';
+import { inzeratu, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
 import { autodedupKeys } from '@/lib/autodedupKeys';
-import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
+import { PropertyLinks, SplitReasons } from '@/components/autodedup/SplitCardParts';
+import SplitOutcomeBody from '@/components/autodedup/SplitOutcomeBody';
+import { followUpSplit, sendSplit, type SplitOutcome } from '@/components/autodedup/splitOutcome';
+import { useAdvertMembers } from '@/components/autodedup/useAdvertMembers';
 
 const PAGE_SIZE = 20;
-
-const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], string> = {
-  conflict: 'konflikt',
-  pair: 'dvojice',
-  must_not_link: 'zákaz sloučení',
-  none: 'bez uvedeného důvodu',
-  not_compared: 'neporovnáno',
-};
 
 /* The outcomes that can never move an advert: it cannot be ticked. `last_native`
  * stays tickable — the server keeps the record with the unit holding the
@@ -170,27 +145,6 @@ function planLine(plan: Plan): string {
   );
 }
 
-type Outcome = { propertyId: number; statement: SplitStatement; sources: Record<number, string> } & (
-  | { kind: 'ok'; result: SplitResult }
-  | { kind: 'undone'; result: SplitUndoResult }
-  | { kind: 'reverses'; refusal: SplitRefusal }
-  | { kind: 'stale' }
-  | { kind: 'error'; message: string }
-);
-type Base = Pick<Outcome, 'propertyId' | 'statement' | 'sources'>;
-
-/* One card's statement, never throwing: a refusal is an outcome the panel shows. */
-async function state(base: Base): Promise<Outcome> {
-  try {
-    return { ...base, kind: 'ok', result: await splitProperty(base.propertyId, base.statement) };
-  } catch (e) {
-    const refusal = splitRefusal(e);
-    if (refusal?.code === 'reverses_rulings') return { ...base, kind: 'reverses', refusal };
-    if (refusal?.code === 'stale') return { ...base, kind: 'stale' };
-    return { ...base, kind: 'error', message: (e as Error).message };
-  }
-}
-
 export default function AutodedupProposedSplits() {
   const qc = useQueryClient();
   const [cursors, setCursors] = useState<Array<number | null>>([null]);
@@ -209,20 +163,14 @@ export default function AutodedupProposedSplits() {
       items.flatMap((i) => [...i.groups.flatMap((g) => g.adverts), ...i.unseen]).map((a) => a.listing_id),
     [items],
   );
-  const detailsQ = useQuery<Map<number, ListingPublic>, Error>({
-    queryKey: mergedAdvertsKeys.listings(ids),
-    queryFn: ({ signal }) => fetchListingsForListingIds(ids, { signal }),
-    enabled: ids.length > 0,
-    staleTime: 60_000,
-  });
-  const { photos } = useListingPhotos(ids, PHOTOS_PER_ADVERT);
+  const { member, error: detailsError } = useAdvertMembers(ids);
 
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [edited, setEdited] = useState<ReadonlyMap<number, ReadonlySet<number>>>(new Map());
   const [armed, setArmed] = useState(false);
   const [reason, setReason] = useState('');
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
-  const [outcomes, setOutcomes] = useState<Outcome[]>([]);
+  const [outcomes, setOutcomes] = useState<SplitOutcome[]>([]);
 
   const ticksOf = (item: ProposedSplit) => edited.get(item.property_id) ?? defaultTicks(item);
   const chosen = items
@@ -235,14 +183,14 @@ export default function AutodedupProposedSplits() {
   const run = useMutation({
     mutationFn: async () => {
       const note = reason.trim() || undefined;
-      const out: Outcome[] = [];
+      const out: SplitOutcome[] = [];
       setProgress({ done: 0, total: chosen.length });
       for (const { item, plan } of chosen) {
         const sources = Object.fromEntries(
           groupsOf(item).flatMap((g) => g.adverts).map((a) => [a.listing_id, a.source]),
         );
         out.push(
-          await state({
+          await sendSplit({
             propertyId: item.property_id,
             statement: { ...plan.statement, ...(note ? { reason: note } : {}) },
             sources,
@@ -270,18 +218,7 @@ export default function AutodedupProposedSplits() {
   /* The panel's second word on one card: take a split back, or re-send one that
    * would take back an earlier "různé" of the operator's own. */
   const followUp = useMutation({
-    mutationFn: async (o: Outcome): Promise<Outcome> => {
-      const base: Base = { propertyId: o.propertyId, statement: o.statement, sources: o.sources };
-      if (o.kind === 'reverses') return state({ ...base, statement: { ...o.statement, confirm_retract: true } });
-      if (o.kind !== 'ok' || !o.result.undo) return o;
-      try {
-        return { ...base, kind: 'undone', result: await undoSplit(o.result.property_id, o.result.undo) };
-      } catch (e) {
-        return splitRefusal(e)?.code === 'stale'
-          ? { ...base, kind: 'stale' }
-          : { ...base, kind: 'error', message: (e as Error).message };
-      }
-    },
+    mutationFn: followUpSplit,
     onSuccess: (next) => {
       setOutcomes((prev) => prev.map((o) => (o.propertyId === next.propertyId ? next : o)));
       refreshAfterSplit(qc);
@@ -428,7 +365,7 @@ export default function AutodedupProposedSplits() {
         </div>
       )}
 
-      {detailsQ.isError && <ErrorBanner message={`Údaje inzerátů: ${detailsQ.error.message}`} />}
+      {detailsError && <ErrorBanner message={`Údaje inzerátů: ${detailsError.message}`} />}
 
       <ul className="mt-4 space-y-5">
         {items.map((item) => (
@@ -440,9 +377,7 @@ export default function AutodedupProposedSplits() {
             disabled={armed || run.isPending}
             onToggle={() => toggleCard(item.property_id)}
             onTicks={(ids, on) => setTicks(item, ids, on)}
-            member={(a) =>
-              memberFromListing(a.listing_id, a, detailsQ.data?.get(a.listing_id),
-                photos.get(a.listing_id) ?? [])}
+            member={member}
           />
         ))}
       </ul>
@@ -509,18 +444,7 @@ function ProposalCard({
           />
           <span className="text-[var(--color-ink)]">Nemovitost #{item.property_id}</span>
         </label>
-        <Link
-          to={propertyPath(item.property_id)}
-          className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-        >
-          detail
-        </Link>
-        <Link
-          to={withQuery(ROUTES.autodedupRulings.build(), { property: item.property_id })}
-          className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-        >
-          Rozhodnutí o těchto inzerátech
-        </Link>
+        <PropertyLinks propertyId={item.property_id} />
         <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
           {fmtCount(adverts)} {inzeratu(adverts)} · {fmtCount(groups.length)} skupiny
         </span>
@@ -597,28 +521,10 @@ function ProposalCard({
         })}
       </div>
 
-      <ul className="mt-3 space-y-0.5 text-[0.75rem] text-[var(--color-ink-2)]">
-        {item.splits.map((s) => (
-          <li key={`${s.listing_lo}-${s.listing_hi}`}>
-            <span className="font-mono tabular-nums text-[var(--color-ink-3)]">
-              #{s.listing_lo} × #{s.listing_hi}
-            </span>{' '}
-            · {REASON_SOURCE[s.reason_source]}: {s.reason}
-            {s.ruling && (
-              <span className="text-[var(--color-ink-3)]">
-                {' '}
-                · rozhodnutí: {VERDICT_LABELS[displayVerdict(s.ruling.verdict as AutodedupVerdictValue)]} (
-                {s.ruling.decided_by})
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
+      <SplitReasons splits={item.splits} />
     </li>
   );
 }
-
-const linkClass = 'text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2';
 
 /* The last batch, card by card — it stays on screen after the list refreshes,
  * since a card the operator decided leaves the list. */
@@ -627,9 +533,9 @@ function OutcomePanel({
   busy,
   onFollowUp,
 }: {
-  outcomes: Outcome[];
+  outcomes: SplitOutcome[];
   busy: boolean;
-  onFollowUp: (o: Outcome) => void;
+  onFollowUp: (o: SplitOutcome) => void;
 }) {
   const done = outcomes.filter((o) => o.kind === 'ok').length;
   return (
@@ -644,84 +550,10 @@ function OutcomePanel({
         {outcomes.map((o) => (
           <li key={o.propertyId} data-testid={`outcome-${o.propertyId}`}>
             <p className="text-[var(--color-ink)]">Nemovitost #{o.propertyId}</p>
-            <OutcomeBody outcome={o} busy={busy} onFollowUp={() => onFollowUp(o)} />
+            <SplitOutcomeBody outcome={o} busy={busy} onFollowUp={() => onFollowUp(o)} />
           </li>
         ))}
       </ul>
     </section>
   );
-}
-
-function OutcomeBody({
-  outcome: o,
-  busy,
-  onFollowUp,
-}: {
-  outcome: Outcome;
-  busy: boolean;
-  onFollowUp: () => void;
-}) {
-  const tag = (id: number) => `#${id}${o.sources[id] ? ` (${o.sources[id]})` : ''}`;
-  const button =
-    'ml-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[0.72rem] text-[var(--color-ink-2)] hover:bg-[var(--color-rule-soft)] disabled:opacity-50';
-  if (o.kind === 'ok') {
-    const r = o.result;
-    return (
-      <div className="text-[var(--color-ink-2)]">
-        <ul className="space-y-0.5">
-          {r.units.map((u) => (
-            <li key={u.unit}>
-              {u.role === 'kept' ? 'zůstávají spolu' : 'odděleno'}
-              {u.role === 'separated' && u.unit === r.record_kept_by
-                ? ' (drží záznam nemovitosti: poznámky, štítky, karta v pipeline)'
-                : ''}
-              : {u.listing_ids.map(tag).join(', ')} →{' '}
-              <Link to={propertyPath(u.property_id)} className={linkClass}>
-                {unitLanding(u, o.propertyId)}
-              </Link>
-            </li>
-          ))}
-        </ul>
-        {r.undo ? (
-          <button type="button" disabled={busy} onClick={onFollowUp} className={button}>
-            Vrátit
-          </button>
-        ) : (
-          <p className="text-[var(--color-ink-3)]">Beze změny — už platí.</p>
-        )}
-      </div>
-    );
-  }
-  if (o.kind === 'undone') {
-    const pid = o.result.property_id;
-    return (
-      <p className="text-[var(--color-ink-2)]">
-        Vráceno — inzeráty jsou znovu jedna nemovitost
-        {pid != null && (
-          <>
-            {' '}
-            <Link to={propertyPath(pid)} className={linkClass}>
-              #{pid}
-            </Link>
-          </>
-        )}
-        , rozhodnutí jsou jako předtím.
-      </p>
-    );
-  }
-  if (o.kind === 'reverses') {
-    const pairs = (o.refusal.ids as number[][]).map(([lo, hi]) => `#${lo} × #${hi}`).join(', ');
-    return (
-      <p className="text-[var(--color-brick)]">
-        Nic se nezapsalo: tím byste vzali zpět své dřívější rozhodnutí „různé“ u {pairs}.
-        <button type="button" disabled={busy} onClick={onFollowUp} className={button}>
-          Přesto uložit
-        </button>
-      </p>
-    );
-  }
-  if (o.kind === 'stale') {
-    return <p className="text-[var(--color-brick)]">Karta se mezitím změnila — načteno znovu, nic se nezapsalo.</p>;
-  }
-  return <p className="text-[var(--color-brick)]">Chyba: {o.message}</p>;
 }
