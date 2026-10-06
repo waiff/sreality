@@ -1534,11 +1534,13 @@ renumber.** Navigate by area:
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
     rows before it merges; the live `rt` generation may be planned by a dry run but is never
     applied here (the lane reconciles it, above), and a live run holds the lane's lease
-    `autodedup.rt_lease` (one writer). An engine
-    merge the operator took
-    apart stays apart: its separated LISTINGS are never re-united by a later generation, even
-    once the restored property has been merged into another one, and an `unapply` that finds
-    the merge already partly taken apart records its undo as the operator's. `unapply` skips a
+    `autodedup.rt_lease` (one writer). Only the operator's rulings keep ads apart (E934): his
+    split statement rules `different` + a must-not-link across its units, and an engine merge
+    taken apart outside the engine bans nothing by itself, so a split-off property may receive
+    engine merges again; an `unapply` that finds the merge already partly taken apart records
+    its undo as theirs (`undone_by = 'external'`), and a merge that records a (survivor,
+    retired) pair again closes that pair's stale live row the same way, in its own transaction,
+    so the ledger's live-pair index holds. `unapply` skips a
     group a later engine merge still builds on (more listings merged onto its survivor by a
     merge whose own undo is not refused for moving nothing back, or a retirement of its
     survivor that still stands) and names the merge to undo first — and only then: a group

@@ -225,25 +225,18 @@ class FakeDb:
                              and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
             ids = set(p["listing_ids"])
-            return [(r["generation"], r["cluster_key"], r["retired_property_id"],
-                     r["outcome"], r["undone_at"] is not None, r["undone_by"],
-                     list(r["member_ids"] or ()))
-                    for r in self.ledger
-                    if not r["dry_run"]
-                    and ((r["outcome"] == "refused" and r["generation"] == p["generation"]
-                          and ids & set(r["member_ids"] or ()))
-                         or (r["outcome"] == "applied"
-                             and r["retired_property_id"] in p["property_ids"]))]
+            return [(list(r["member_ids"] or ()),) for r in self.ledger
+                    if not r["dry_run"] and r["outcome"] == "refused"
+                    and r["generation"] == p["generation"] and ids & set(r["member_ids"] or ())]
         if sql == S.ENGINE_MERGES_SQL:
             ids, seen, out = set(p["listing_ids"]), set(), []
             for r in self.ledger:
-                if (r["dry_run"] or r["outcome"] != "applied"
+                if (r["dry_run"] or r["outcome"] != "applied" or r["undone_at"] is not None
                         or r["merge_group_id"] in seen or not ids & set(r["member_ids"])):
                     continue
                 seen.add(r["merge_group_id"])
                 out.append((r["generation"], r["cluster_key"], r["merge_group_id"],
-                            r["survivor_property_id"], list(r["member_ids"]),
-                            r["undone_at"] is not None, r["undone_by"]))
+                            r["survivor_property_id"], list(r["member_ids"])))
             return out
         if sql == S.LATER_LIVE_MERGES_SQL:
             return [(r["generation"], r["cluster_key"], r["merge_group_id"],
@@ -299,6 +292,15 @@ class FakeDb:
                 if (r["merge_group_id"] == p["merge_group_id"] and not r["dry_run"]
                         and r["outcome"] == "applied" and r["undone_at"] is None):
                     r.update(undone_at=T0, undone_by=p["undone_by"],
+                             undo_result=json.loads(p["undo_result"]))
+            return []
+        if sql == S.LEDGER_CLOSE_PAIRS_SQL:
+            for r in self.ledger:
+                if (r["survivor_property_id"] == p["survivor_property_id"]
+                        and r["retired_property_id"] in p["retired_property_ids"]
+                        and not r["dry_run"] and r["outcome"] == "applied"
+                        and r["undone_at"] is None):
+                    r.update(undone_at=self.now, undone_by=p["undone_by"],
                              undo_result=json.loads(p["undo_result"]))
             return []
         raise AssertionError(f"unknown statement: {sql[:80]!r}")
@@ -432,6 +434,18 @@ def _plan(db: FakeDb, **scope: Any) -> A.Plan:
 def _only(plan: A.Plan) -> A.GroupPlan:
     assert len(plan.groups) == 1, plan.groups
     return plan.groups[0]
+
+
+def _split_rulings(db: FakeDb, *units: Sequence[int]) -> None:
+    """The split statement's rulings across units (E919): `different` + an operator veto."""
+    for i, unit in enumerate(units):
+        for other in units[i + 1:]:
+            for lo, hi in sorted((min(a, b), max(a, b)) for a in unit for b in other):
+                db.verdicts.append({"kind": "pair", "lo": lo, "hi": hi, "verdict": "different"})
+                db.mnl.append((lo, hi, "operator"))
+
+
+RULED_APART = [A.SKIP_PAIR_VERDICT, A.SKIP_MUST_NOT_LINK]
 
 
 # ------------------------------------------------------------------ the plan
@@ -1106,11 +1120,12 @@ def test_the_apply_time_recheck_locks_and_re_reads_categories_and_scope() -> Non
     assert first_lock < db.statements.index(S.LOCK_PROPERTY_LISTINGS_SQL)
 
 
-def test_an_operator_split_during_the_run_that_keeps_the_same_listings_stops_the_group(
-) -> None:
+@pytest.mark.parametrize("ruled", [False, True])
+def test_an_undo_during_the_run_stops_the_group_only_where_a_ruling_landed(ruled: bool) -> None:
     # g12 merged 200 into 100 (10, 11). g13 plans {10, 11, 80}: 100 and 800. Before the run
-    # reaches it the operator undoes g12's merge and merges 200 into 800: the SAME listings on
-    # the same two properties, so the set check passes — but 10 and 11 are now separated.
+    # reaches it, g12's merge is undone and 200 merged into 800 by hand: the SAME listings on
+    # the same two properties, so the set check passes. The undo bans nothing (E934); the
+    # operator's split also rules 10 x 11 different, and the locked re-check reads that.
     db = FakeDb()
     scope, calls = _applied_two(db)
     db.prop(800)
@@ -1121,10 +1136,16 @@ def test_an_operator_split_during_the_run_that_keeps_the_same_listings_stops_the
         (100, [800], [])]
     db.undo_group(calls[0]["merge_group_id"])
     db.merge_pair(800, 200)
+    if ruled:
+        _split_rulings(db, [10], [11])
     late: list[dict[str, Any]] = []
     result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(late))
-    assert late == [] and result["skipped_at_apply"][0]["reasons"] == [
-        A.SKIP_RESTORED_ELSEWHERE]
+    if ruled:
+        assert late == [] and result["skipped_at_apply"][0]["reasons"] == RULED_APART
+        assert db.listings[11]["property_id"] == 800
+    else:
+        assert [(c["survivor_id"], c["retired_id"]) for c in late] == [(100, 800)]
+        assert {db.listings[lid]["property_id"] for lid in (10, 11, 80)} == {100}
 
 
 def test_an_engine_merge_ruled_different_afterwards_is_reported_not_counted_away(
@@ -1289,20 +1310,30 @@ def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
     assert external[0]["undo_result"]["noted_by"].startswith(A.UNAPPLY_BY_PREFIX)
 
 
-def test_an_operator_undo_noted_by_unapply_still_blocks_a_later_generation() -> None:
-    # g12 merged 400 into 300; the operator undid it on the merge ledger, then `unapply` rolled
-    # back the rest of g12. g13 may re-merge what the ENGINE undid (group 10), never what the
-    # operator separated (group 20).
+@pytest.mark.parametrize("ruled", [False, True])
+def test_an_undo_noted_by_unapply_bans_nothing_a_ruling_does(ruled: bool) -> None:
+    # g12 merged 400 into 300; someone undid it (an operator split also rules 20 x 21
+    # different), then `unapply` rolled back the rest of g12 and noted 20's undo as theirs.
+    # g13 re-merges whatever the rulings allow: who undid a merge bans nothing (E934).
     db = FakeDb()
     scope, calls = _applied_two(db)
     db.undo_group(calls[1]["merge_group_id"])
+    if ruled:
+        _split_rulings(db, [20], [21])
+    banned = RULED_APART if ruled else []
     assert {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups} == {
-        20: [A.SKIP_RESTORED_ELSEWHERE]}
+        20: banned}
     A.unapply(db, GEN, dry_run=False, detach=db.detach([]))
+    undone = {r["cluster_key"]: r["undone_by"] for r in db.ledger if r["outcome"] == "applied"}
+    assert undone[10].startswith(A.UNAPPLY_BY_PREFIX) and undone[20] == A.EXTERNAL_UNDO
     db.group(10, [10, 11], gen="g13")
     db.group(20, [20, 21], gen="g13")
-    later = {g.cluster_key: g.reasons for g in A.plan_apply(db, "g13", scope).groups}
-    assert later == {10: [], 20: [A.SKIP_RESTORED_ELSEWHERE]}
+    later = A.plan_apply(db, "g13", scope)
+    assert {g.cluster_key: g.reasons for g in later.groups} == {10: [], 20: banned}
+    result = A.apply_plan(db, later, dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == (1 if ruled else 2)
+    assert db.listings[11]["property_id"] == 100
+    assert db.listings[21]["property_id"] == (400 if ruled else 300)
 
 
 def test_unapply_skips_a_group_whose_survivor_a_later_generation_merged_away() -> None:
@@ -1659,49 +1690,207 @@ def test_a_merge_undone_and_then_redone_by_hand_is_noted_undone_by_the_dry_run_t
             == calls[0]["merge_group_id"]] == [A.EXTERNAL_UNDO]
 
 
-def test_a_merge_restored_outside_the_engine_is_never_re_merged() -> None:
+@pytest.mark.parametrize("ruled", [False, True])
+def test_a_merge_taken_apart_outside_the_engine_is_planned_again_unless_ruled(
+        ruled: bool) -> None:
+    # g12 merged 200 (11) into 100 (10), and someone took it apart: 200 is active again. Only a
+    # ruling keeps 10 and 11 apart — the split's `different` 10 x 11 (E934).
     db = FakeDb()
     scope, calls = _applied_two(db)
     db.undo_group(calls[0]["merge_group_id"])
-    reasons = {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups}
-    assert reasons == {10: [A.SKIP_RESTORED_ELSEWHERE]}
+    if ruled:
+        _split_rulings(db, [10], [11])
+    group = _only(A.plan_apply(db, GEN, scope))
+    assert (group.survivor_id, group.retired_ids) == (100, [200])
+    assert group.reasons == (RULED_APART if ruled else [])
 
 
-def test_an_operator_undo_survives_the_restored_property_being_merged_on() -> None:
-    # g12 merged 200 (11) into 100 (10). The operator undid it, then merged 200 into an older
-    # 500 holding 11's true duplicate 50. g13 groups {10, 11, 50} on 100 and 500: 200 is no
-    # longer among its properties, but 10 and 11 are the listings the operator separated.
+def _pair_rows(db: FakeDb, survivor: int, retired: int) -> list[dict[str, Any]]:
+    """The applied ledger rows of one (survivor, retired) pair, oldest first."""
+    return [r for r in db.ledger if r["outcome"] == "applied"
+            and (r["survivor_property_id"], r["retired_property_id"]) == (survivor, retired)]
+
+
+def test_the_same_pair_merged_again_closes_its_stale_live_row() -> None:
+    # As above, unruled. g12's row for (100, 200) is still live — an undo outside the engine
+    # leaves it so — and the ledger's live-pair index (migration 558; the fake's check stands
+    # in for it) allows one live row per pair. The merge that records the pair again closes the
+    # old row as someone else's undo, in its own transaction (E934); a dry run closes nothing.
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    old = calls[0]["merge_group_id"]
+    db.undo_group(old)
+    plan = A.plan_apply(db, GEN, scope)
+    A.apply_plan(db, plan, dry_run=True)
+    assert [r["undone_at"] for r in _pair_rows(db, 100, 200)] == [None]
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge([]), run_id="run-again")
+    assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    (new,) = [brief["merge_group_id"] for brief in result["applied"]]
+    first, second = _pair_rows(db, 100, 200)
+    assert (first["merge_group_id"], first["undone_by"]) == (old, A.EXTERNAL_UNDO)
+    assert first["undone_at"] is not None
+    assert first["undo_result"] == {"noted_by": "run-again", "merged_again_by": new}
+    assert (second["merge_group_id"], second["undone_at"]) == (new, None)
+
+
+def test_only_the_pair_merged_again_is_closed() -> None:
+    # g12 retired 200 (11) and 300 (12) into 100 (10). The operator split 11 off — 200 is
+    # active again — and g13 merges 200 into 100 once more: g12's row for (100, 200) is
+    # closed; its row for (100, 300), whose merge still stands, stays live and untouched.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    db.prop(100, first=T0 - timedelta(days=5))
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    merged: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(merged))
+    old = merged[0]["merge_group_id"]
+    db.detach([])(db, [11], decided_by="operator", merge_group_id=old)
+    assert db.properties[200]["status"] == "active" and db.listings[12]["property_id"] == 100
+    standing = copy.deepcopy(_pair_rows(db, 100, 300))
+    db.group(10, [10, 11], gen="g13")
+    result = A.apply_plan(db, A.plan_apply(db, "g13", scope), dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    assert _pair_rows(db, 100, 300) == standing and standing[0]["undone_at"] is None
+    assert [(r["merge_group_id"] == old, r["undone_by"]) for r in _pair_rows(db, 100, 200)] == [
+        (True, A.EXTERNAL_UNDO), (False, None)]
+
+
+def test_a_split_ruled_same_again_merges_the_same_pair_and_closes_its_old_row() -> None:
+    # The operator's change of mind, end to end: the engine merged 200 (11) into 100 (10); the
+    # operator split 11 off (200 active again, 10 x 11 ruled different) and later ruled the
+    # pair "same" — the newest word wins and his must-not-link is retracted. The engine's group
+    # {10, 11} merges the same pair again: g12's row is closed as someone else's undo, and the
+    # new row is the pair's one live row (E934).
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    old = calls[0]["merge_group_id"]
+    db.undo_group(old)
+    _split_rulings(db, [10], [11])
+    assert _only(A.plan_apply(db, GEN, scope)).reasons == RULED_APART
+    db.verdicts.append({"kind": "pair", "lo": 10, "hi": 11, "verdict": "same"})
+    db.mnl.remove((10, 11, "operator"))  # a `same` retracts the operator's own veto
+    plan = A.plan_apply(db, GEN, scope)
+    assert [(g.survivor_id, g.retired_ids, g.reasons) for g in plan.groups] == [
+        (100, [200], [])]
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1 and db.listings[11]["property_id"] == 100
+    rows = _pair_rows(db, 100, 200)
+    assert [(r["merge_group_id"] == old, r["undone_by"]) for r in rows] == [
+        (True, A.EXTERNAL_UNDO), (False, None)]
+    assert [r for r in rows if r["undone_at"] is None] == rows[1:]
+
+
+def test_a_split_off_property_takes_a_re_list_of_its_flat() -> None:
+    # g12 merged 200 (11) into 100 (10); the operator split 11 off — back on 200, ruled
+    # different from 10. A re-list of 11's flat, 30 on 3000, is grouped with 11 in g13: the
+    # restored 200 receives it, since no ruling stands between 11 and 30 (E934).
     db = FakeDb()
     scope, calls = _applied_two(db)
     db.undo_group(calls[0]["merge_group_id"])
+    _split_rulings(db, [10], [11])
+    _pair_group(db, 11, [11, 30], [200, 3000], gen="g13")
+    plan = A.plan_apply(db, "g13", scope)
+    group = _only(plan)
+    assert group.property_ids == [200, 3000] and group.reasons == []
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1
+    assert db.listings[30]["property_id"] == db.listings[11]["property_id"] == 200
+
+
+def test_two_ads_of_one_flat_split_apart_and_ruled_same_merge_but_not_with_the_other_flat(
+) -> None:
+    # The production case of 2026-10-03 (E934), modelled: the engine merged two flats into one
+    # property; the operator split it — each ad back on the property it came from, every pair
+    # across the units ruled different — and ruled the two ads of one flat (11, 12) "same".
+    # The lane grouped them and refused the merge (`restored_outside_engine`): both properties
+    # were engine-retired and active again. Now they merge, and the split's rulings refuse a
+    # group that would merge them back with the other flat (10).
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    db.prop(100, first=T0 - timedelta(days=5))
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    merged: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(merged))
+    db.undo_group(merged[0]["merge_group_id"])
+    _split_rulings(db, [10], [11], [12])
+    db.verdicts.append({"kind": "pair", "lo": 11, "hi": 12, "verdict": "same"})
+    db.mnl.remove((11, 12, "operator"))  # a `same` retracts the operator's own veto
+    assert {lid: db.listings[lid]["property_id"] for lid in (10, 11, 12)} == {
+        10: 100, 11: 200, 12: 300}
+    assert db.properties[200]["status"] == db.properties[300]["status"] == "active"
+
+    db.group(11, [11, 12], gen="g13")
+    plan = A.plan_apply(db, "g13", scope)
+    assert [(g.property_ids, g.survivor_id, g.reasons) for g in plan.groups] == [
+        ([200, 300], 200, [])]
+    assert A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))["counts"]["applied"] == 1
+    assert db.listings[11]["property_id"] == db.listings[12]["property_id"] == 200
+
+    db.group(10, [10, 11, 12], gen="g14")
+    rejoin = _only(A.plan_apply(db, "g14", scope))
+    assert rejoin.property_ids == [100, 200] and rejoin.reasons == RULED_APART
+    assert rejoin.detail["negative_pairs"] == [[10, 11], [10, 12]]
+
+
+@pytest.mark.parametrize("ruled", [False, True])
+def test_a_ruling_against_a_carried_ad_refuses_the_merge_that_would_carry_it(
+        ruled: bool) -> None:
+    # g11 merged 250 (12) into 200 (11); g12 merged 200 into 100 (10). Someone took g12 apart:
+    # 11 and 12 are back on 200, where g11 still vouches for 12. g13 groups 10 with 11 only,
+    # so 12 rides along: a ruling between 10 and the CARRIED 12 refuses the merge (E934).
+    db = FakeDb()
+    _engine_merged(db, 11, [11, 12], [200, 250])
+    _engine_merged(db, 10, [10, 11], [100, 200], gen=GEN)
+    db.undo_group(next(r["merge_group_id"] for r in db.ledger if r["generation"] == GEN))
+    if ruled:
+        _split_rulings(db, [10], [12])
+    db.group(10, [10, 11], gen="g13")
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    group = _only(A.plan_apply(db, "g13", scope))
+    assert group.property_ids == [100, 200] and group.listing_ids == [10, 11, 12]
+    assert group.reasons == (RULED_APART if ruled else [])
+    if ruled:
+        assert group.detail["negative_pairs"] == [[10, 12]]
+
+
+@pytest.mark.parametrize("ruled", [False, True])
+def test_a_ruling_not_an_undo_follows_the_ads_onto_another_property(ruled: bool) -> None:
+    # g12 merged 200 (11) into 100 (10). Someone undid it, then merged 200 into an older 500
+    # holding 11's true duplicate 50. g13 groups {10, 11, 50} on 100 and 500. The undo bans
+    # nothing; a ruling on 10 x 11 refuses wherever the two ads sit now, before and after
+    # `unapply` notes the undo as someone else's (E934).
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    db.undo_group(calls[0]["merge_group_id"])
+    if ruled:
+        _split_rulings(db, [10], [11])
     db.prop(500, first=T0 - timedelta(days=30))
     db.listing(50, 500)
     db.merge_pair(500, 200)
     db.group(10, [10, 11, 50], gen="g13")
+    banned = RULED_APART if ruled else []
     group = _only(A.plan_apply(db, "g13", scope))
-    assert group.property_ids == [100, 500]
-    assert group.reasons == [A.SKIP_RESTORED_ELSEWHERE]
-    assert group.detail["separated_engine_merges"] == [{
-        "generation": GEN, "cluster_key": 10, "merge_group_id": calls[0]["merge_group_id"],
-        "listings": [10, 11]}]
-    # ... and still once `unapply` has noted that undo as someone else's.
+    assert group.property_ids == [100, 500] and group.reasons == banned
     A.unapply(db, GEN, dry_run=False, detach=db.detach([]))
     assert [r["undone_by"] for r in db.ledger if r["merge_group_id"]
             == calls[0]["merge_group_id"]] == [A.EXTERNAL_UNDO]
-    assert _only(A.plan_apply(db, "g13", scope)).reasons == [A.SKIP_RESTORED_ELSEWHERE]
+    assert _only(A.plan_apply(db, "g13", scope)).reasons == banned
 
 
 def test_unapply_after_an_operator_split_records_the_split_as_the_operators() -> None:
     # g12 merged 200 (11) into 100 (10). The operator split 100 into singletons: 11 stayed, 10
-    # went to a fresh 901. `unapply` then moves 11 back to 200 — but separating 10 and 11 was
-    # the operator's word, so the ledger records the undo as theirs and g13 never re-unites them.
+    # went to a fresh 901, ruled different from 11. `unapply` then moves 11 back to 200 and
+    # records the undo as the operator's; the split's ruling is what keeps g13 from re-uniting
+    # 10 and 11 (E934).
     db = FakeDb()
     scope, calls = _applied_two(db)
     db.prop(901)
     db.listings[10]["property_id"] = 901
+    _split_rulings(db, [10], [11])
     db.group(10, [10, 11], gen="g13")
-    assert [g.reasons for g in A.plan_apply(db, "g13", scope).groups] == [
-        [A.SKIP_RESTORED_ELSEWHERE]]
+    assert [g.reasons for g in A.plan_apply(db, "g13", scope).groups] == [RULED_APART]
     dry = A.unapply(db, GEN, dry_run=True, cluster_key=10)
     assert dry["groups"][0]["taken_apart"] == [10] and dry["counts"]["taken_apart_before"] == 1
     result = A.unapply(db, GEN, dry_run=False, cluster_key=10, detach=db.detach([]))
@@ -1713,13 +1902,14 @@ def test_unapply_after_an_operator_split_records_the_split_as_the_operators() ->
     assert rows[0]["undo_result"]["noted_by"].startswith(A.UNAPPLY_BY_PREFIX)
     assert rows[0]["undo_result"]["taken_apart"] == [10]
     group = _only(A.plan_apply(db, "g13", scope))
-    assert group.property_ids == [200, 901] and group.reasons == [A.SKIP_RESTORED_ELSEWHERE]
+    assert group.property_ids == [200, 901] and group.reasons == RULED_APART
 
 
 def test_a_whole_generation_unapply_after_a_split_with_conflicts_keeps_the_split() -> None:
     # g12 retired 200 (11) and 300 (12) into 100 (10). The operator split 100: 11 stayed, 10
-    # and 12 went to 901 / 902. The whole-generation undo moves 11 back and reports 12 as a
-    # conflict; recorded as the operator's undo, so g13's {10, 11} stays refused.
+    # and 12 went to 901 / 902, each ruled different from the others. The whole-generation
+    # undo moves 11 back and reports 12 as a conflict, recorded as the operator's undo; the
+    # split's rulings keep g13's {10, 11} refused.
     db = FakeDb()
     db.live_scope()
     scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
@@ -1730,12 +1920,13 @@ def test_a_whole_generation_unapply_after_a_split_with_conflicts_keeps_the_split
     db.prop(902)
     db.listings[10]["property_id"] = 901
     db.listings[12]["property_id"] = 902
+    _split_rulings(db, [11], [10], [12])
     result = A.unapply(db, GEN, dry_run=False, detach=db.detach([]))
     assert result["counts"]["conflicts"] == 1 and result["counts"]["taken_apart_before"] == 1
     assert {r["undone_by"] for r in db.ledger if r["outcome"] == "applied"} == {
         A.EXTERNAL_UNDO}
     db.group(10, [10, 11], gen="g13")
-    assert _only(A.plan_apply(db, "g13", scope)).reasons == [A.SKIP_RESTORED_ELSEWHERE]
+    assert _only(A.plan_apply(db, "g13", scope)).reasons == RULED_APART
 
 
 def test_unapply_refuses_a_group_a_later_generation_built_on() -> None:

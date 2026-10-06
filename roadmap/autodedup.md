@@ -17,9 +17,10 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   (`merge_property_set`, `source='autodedup'`) and only inside `app_settings.autodedup_apply_scope`.
 - **Brake:** `realtime_autodedup_interval_seconds` = 0, then `mode=unapply`.
 - **Operator split (2026-10-03):** the property page states a whole partition by letters, in one
-  `POST /properties/{id}/split` (frontend only; the route is E919's). Open with the operator: lift
-  E905's property-grain freeze (`restored_outside_engine`) so a split-off property can receive
-  engine merges again; only his pair rulings would stay as bans.
+  `POST /properties/{id}/split` (frontend only; the route is E919's). Decided 2026-10-03 and done
+  (E934): `restored_outside_engine` is deleted, so a split-off property receives engine merges
+  again and only the operator's rulings are bans; owed: migration 558's `undone_by` column
+  comment (E934).
 - **Category review (2026-10-05, E937):** `/autodedup/category-splits?properties=…` shows the
   properties a link names whose ads carry categories rule 15 never joins, side by side with photos
   and text, ten per page. Every ad has a letter, one per category to start, so a side that bundles
