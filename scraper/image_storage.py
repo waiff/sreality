@@ -14,6 +14,8 @@ import time
 from typing import Any
 from urllib.parse import quote
 
+import threading
+
 import requests
 
 from scraper import media
@@ -192,6 +194,36 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
         return None
 
 
+# The image fetch wears the crawlers' desktop-Chrome identity (portal_base), not
+# python-requests': iDNES serves its galleries through its own site
+# (`reality.idnes.cz/file/thumbnail/{id}`, a redirector to the static CDN), whose WAF
+# rate-limits and then blocks a bare client (429 → 403 from 2026-10-05). One session
+# per process keeps the connection pool; the Accept header is what a browser sends
+# for an <img>.
+_IMAGE_HEADERS: dict[str, str] = {
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "cs,en;q=0.9",
+}
+_SESSION: requests.Session | None = None
+_SESSION_LOCK = threading.Lock()
+
+
+def _session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        with _SESSION_LOCK:
+            if _SESSION is None:
+                from scraper.portal_base import _BASE_HEADERS, client_hints
+
+                session = requests.Session()
+                session.headers.update({
+                    **_BASE_HEADERS, **_IMAGE_HEADERS,
+                    **client_hints(_BASE_HEADERS["User-Agent"]),
+                })
+                _SESSION = session
+    return _SESSION
+
+
 def download_image(
     url: str, timeout: float = 15.0, *, transform_ops: str = IMAGE_TRANSFORM_OPS
 ) -> bytes:
@@ -202,7 +234,7 @@ def download_image(
     cap short-circuits before the first byte. Raises NotAnImageError on oversize.
     """
     target = with_transform(url, transform_ops)
-    with requests.get(target, timeout=timeout, stream=True) as response:
+    with _session().get(target, timeout=timeout, stream=True) as response:
         response.raise_for_status()
         declared = response.headers.get("Content-Length")
         if declared and declared.isdigit() and int(declared) > media.MAX_IMAGE_BYTES:
