@@ -598,3 +598,35 @@ def test_the_route_answers_refusals_with_code_message_and_ids(client):
     api_main.app.dependency_overrides[deps.require_admin] = lambda: {"is_admin": True}
     assert http.post("/properties/10/split", json=body).status_code == 403
     assert db.listings == {1: 10, 2: 10, 3: 10}
+
+
+def test_a_leaving_letter_that_mixes_categories_is_refused_in_czech(client, monkeypatch):
+    """The join of a unit that landed on two records goes through the merge chokepoint, whose
+    rule-15 gate raises `CategoryClash`; the route prints E925's Czech sentence (the pair page's
+    words, the Browse labels) and tells the operator what to do, never the chokepoint's English."""
+    from api import property_merge
+    from api.category_clash_text import LETTER_ENDING, SAME_ENDING, clash_sentence
+    from toolkit.property_identity import CategoryClash
+
+    def _clash(*_args, **_kwargs):
+        raise CategoryClash("category_main", "byt", "ostatni")
+
+    monkeypatch.setattr(property_merge, "split_property", _clash)
+    http, _db = client
+    res = http.post("/properties/10/split", json={
+        "adverts": [1, 2, 3], "separate": [[2, 3]], "keep_together": False})
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert (detail["code"], detail["ids"]) == ("refused", [])
+    assert detail["message"] == (
+        "Inzerát v kategorii Byty a inzerát v kategorii Ostatní systém nikdy nespojí do jedné "
+        "nemovitosti (výjimkou jsou jen dvojice dům – komerční objekt, dům – pozemek, komerční "
+        "objekt – pozemek a byt – komerční objekt), proto nemohou mít stejné písmeno. Dejte jim "
+        "různá písmena.")
+    assert "mismatch" not in detail["message"]
+    # one sentence, two endings: the pair page's refusal differs only in its ending
+    assert clash_sentence("category_main", "byt", "ostatni", ending=SAME_ENDING).endswith(
+        "proto je nelze označit jako stejné.")
+    assert clash_sentence("category_type", "prodej", "pronajem", ending=LETTER_ENDING) == (
+        "Inzerát typu Prodej a inzerát typu Pronájem systém nikdy nespojí do jedné nemovitosti"
+        + LETTER_ENDING)
