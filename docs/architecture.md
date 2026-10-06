@@ -1396,13 +1396,16 @@ renumber.** Navigate by area:
     — the rollup and both notification producers read `listing_price_steps` with no fallback.
     **Category compatibility is enforced at the chokepoint** via the single
     `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
-    flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔ komercni** (the same
-    building listed as a house on one portal and commercial on another is one real-world
-    property, irrespective of sub-type). This guard is deliberately *at the merge*, not in the
-    caller, so no future decision layer can route around it. It is distinct from the
-    **asset-link** grain (migration 224), which links genuinely *different* units in one
-    building (a `byt` and its ground-floor `komercni`, a `dum` and its `pozemek`) WITHOUT
-    collapsing them into one property.
+    flat ≠ a house — **except** the sanctioned cross-types, irrespective of sub-type: **dum ↔
+    komercni** (the same building listed as a house on one portal and commercial on another is
+    one real-world property) and, since 2026-10-04 (AUTODEDUP E935), **pozemek ↔ dum** and
+    **pozemek ↔ komercni** (a plot with a house on it listed as a house on one portal and as
+    land on another; the operator's own merge of property 38803). A `byt` and an `ostatni`
+    merge with no other category. This guard is deliberately *at the merge*, not in the caller,
+    so no future decision layer can route around it. It is distinct from the **asset-link**
+    grain (migration 224), which links genuinely *different* units in one building (a `byt` and
+    its ground-floor `komercni`, a `dum` and a separate parcel beside it) WITHOUT collapsing
+    them into one property.
     **Who orders a merge today.** The operator — and, only inside the area its scope row
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`; **`POST /properties/{id}/split`**

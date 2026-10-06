@@ -92,6 +92,45 @@ def test_a_set_whose_members_clash_is_refused_though_the_survivor_is_unknown(cat
     assert _merge(sanctioned, [3, 7, 9])["retired_ids"] == [7, 9]
 
 
+def _by(source: str) -> dict[str, str]:
+    return {"decided_by": OP} if source == "operator" else {}
+
+
+@pytest.mark.parametrize("source", ["operator", "autodedup"])
+@pytest.mark.parametrize("other", ["dum", "komercni"])
+def test_land_merges_with_a_house_or_a_commercial_property(source, other):
+    """E935 (2026-10-04): a pozemek and a dům or komerční property are one property when the
+    operator or the engine says so — property 38803's plot with a house, filed as a house on
+    one portal and as land on another."""
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("prodej", other), 7: ("prodej", "pozemek")},
+                 canonical={3: 1, 7: 2})
+    out = _merge(db, [3, 7], source=source, **_by(source))
+    assert (out["survivor_id"], out["retired_ids"]) == (3, [7])
+    assert db.listings == {1: 3, 2: 3}
+    three = _Ledger({1: 3, 2: 7, 3: 9}, cats={3: ("prodej", "pozemek"), 7: ("prodej", "dum"),
+                                              9: ("prodej", "komercni")})
+    assert _merge(three, [3, 7, 9], source=source, **_by(source))["retired_ids"] == [7, 9]
+
+
+@pytest.mark.parametrize("source", ["operator", "autodedup"])
+@pytest.mark.parametrize("pair", [("byt", "pozemek"), ("byt", "dum"), ("ostatni", "pozemek")],
+                         ids=["flat vs land", "flat vs house", "other vs land"])
+def test_a_flat_or_other_still_merges_with_no_other_category(source, pair):
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("prodej", pair[0]), 7: ("prodej", pair[1])},
+                 canonical={3: 1, 7: 2})
+    with pytest.raises(CategoryClash, match="category_main") as refused:
+        _merge(db, [3, 7], source=source, **_by(source))
+    assert (refused.value.field, refused.value.a, refused.value.b) == ("category_main", *pair)
+    assert db.events == [] and db.listings == {1: 3, 2: 7}
+
+
+def test_land_and_a_house_for_rent_and_for_sale_are_still_two_properties():
+    db = _Ledger({1: 3, 2: 7}, cats={3: ("pronajem", "dum"), 7: ("prodej", "pozemek")})
+    with pytest.raises(CategoryClash, match="category_type"):
+        _merge(db, [3, 7])
+    assert db.events == []
+
+
 def test_two_different_asset_links_refuse_the_set_before_anything_merges():
     db = _Ledger({1: 3, 2: 7, 3: 9}, assets={3: 41, 9: 42})
     with pytest.raises(AssetLinkConflict):

@@ -547,7 +547,10 @@ _NOTHING_WRITTEN = (usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQ
     (("pronajem", "byt", "prodej", "byt"), ("Inzerát typu Pronájem", "typu Prodej")),
     (("prodej", "byt", "prodej", "komercni"), ("v kategorii Byty", "v kategorii Komerční")),
     (("prodej", "komercni", "prodej", "byt"), ("v kategorii Komerční", "v kategorii Byty")),
-], ids=["rent vs sale", "flat vs commercial", "commercial vs flat"])
+    (("prodej", "byt", "prodej", "pozemek"), ("v kategorii Byty", "v kategorii Pozemky")),
+    (("prodej", "pozemek", "prodej", "ostatni"), ("v kategorii Pozemky", "v kategorii Ostatní")),
+], ids=["rent vs sale", "flat vs commercial", "commercial vs flat", "flat vs land",
+        "land vs other"])
 def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
         client, conn, sides, named):
     """422, never 409: the rulings page reads every 409 as "ruled again since the page loaded"
@@ -562,10 +565,12 @@ def test_a_same_between_two_properties_is_a_422_in_czech_and_writes_nothing(
 
 
 @pytest.mark.parametrize("sides", [
-    ("prodej", "dum", "prodej", "komercni"),  # the one sanctioned cross-type
+    ("prodej", "dum", "prodej", "komercni"),  # rule 15's cross-types: dům, komerční, pozemek
+    ("prodej", "dum", "prodej", "pozemek"),
+    ("prodej", "pozemek", "prodej", "komercni"),
     ("prodej", "byt", "prodej", "byt"),
     (None, "byt", "prodej", None),  # unknown is never a conflict
-], ids=["house vs commercial", "flat vs flat", "unknown"])
+], ids=["house vs commercial", "house vs land", "land vs commercial", "flat vs flat", "unknown"])
 def test_a_same_rule_15_allows_is_written(client, conn, sides):
     conn.canned[usql.PAIR_CATEGORIES_SQL] = [sides]
     conn.canned[usql.VERDICT_PAIR_APPEND_SQL] = [_verdict(verdict="same")]
@@ -611,6 +616,19 @@ def test_the_route_and_the_merge_chokepoint_read_one_gate():
     assert str(CategoryClash(*category_clash(("prodej", "byt"), ("prodej", "komercni")))) == (
         "category_main mismatch (byt vs komercni); refusing to merge")
     assert category_clash(("prodej", "dum"), ("prodej", "komercni")) is None
+    assert category_clash(("prodej", "pozemek"), ("prodej", "dum")) is None
+    assert category_clash(("prodej", "komercni"), ("prodej", "pozemek")) is None
+    assert category_clash(("prodej", "byt"), ("prodej", "pozemek")) == (
+        "category_main", "byt", "pozemek")
+
+
+def test_the_category_refusal_names_the_cross_types_rule_15_allows(client, conn):
+    """E935: the 422 states the rule as it stands, so it names land beside house and commercial."""
+    conn.canned[usql.PAIR_CATEGORIES_SQL] = [("prodej", "byt", "prodej", "pozemek")]
+    response = _post(client, kind="pair", verdict="same", listing_lo=11, listing_hi=12)
+    assert response.status_code == 422
+    assert "výjimkou jsou dům, komerční objekt a pozemek" in response.json()["detail"]
+    assert "jediná výjimka" not in response.json()["detail"]
 
 
 # ------------------------------------------------------ newest wins, at every reader (the lane)

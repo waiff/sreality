@@ -21,6 +21,12 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   (E934): `restored_outside_engine` is deleted, so a split-off property receives engine merges
   again and only the operator's rulings are bans; owed: migration 558's `undone_by` column
   comment (E934).
+- **Land cross-types (2026-10-04, E935):** the operator's ruling on 38803: a `pozemek` merges with a
+  `dům` or a `komerční` property (Browse merge, a `same` ruling, the engine). Blocking groups, the area
+  guard and every feature are unchanged, so the engine joins such pairs only where both ads state one
+  size: offline +27 / +54 / +13 merge-zone pairs on trial / c18 / c17, M1–M3 and every ruling equal; the
+  fan-out cap drops 10 / 9 weak-probe rejects on c18 / c17. Release after C2 with E929's re-seed. Open:
+  a plot-aware area comparison for house × land, so the engine finds a 38803 by itself.
 - **Category review (2026-10-05, E937):** `/autodedup/category-splits?properties=…` shows the
   properties a link names whose ads carry categories rule 15 never joins, side by side with photos
   and text, ten per page. Every ad has a letter, one per category to start, so a side that bundles

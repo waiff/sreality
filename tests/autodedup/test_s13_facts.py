@@ -20,7 +20,7 @@ from pathlib import Path
 
 from autodedup.dataset import Listing
 from autodedup.demonstrate import corroboration_warrant, demonstration_shortfall
-from autodedup.features import attribute_conflicts
+from autodedup.features import CROSS_TYPE_SUBTYPE_KEYS, attribute_conflicts, cross_type_attr_keys
 from autodedup.fingerprint import build_fingerprint
 from autodedup.d43 import ClusterRelation
 from autodedup.guards import cluster_invariants_ok
@@ -284,6 +284,32 @@ def test_E286_one_category_keeps_its_subtype() -> None:
     b = cammerswalde(2, "dum", "vicegeneracni_dum", 54, "dobry")
     kept = {c[0] for c in attribute_conflicts(a, b, variant(attr_cross_type_subtype_skip=True))}
     assert "subtype" in kept
+
+
+def test_E935_land_across_a_house_or_commercial_drops_the_subtype_slots_too() -> None:
+    """E935: the E286 skip reads rule #15's one definition, so a plot filed as `pozemek`
+    (`zahrada`, 23) against a `dum` or a `komercni` ad is no subtype contradiction; every
+    other slot is still compared."""
+    on = variant(attr_cross_type_subtype_skip=True)
+    land = cammerswalde(1, "pozemek", "zahrada", 23, "novostavba")
+    for main, subtype, sub_cb in (("dum", "rodinny_dum", 37), ("komercni", "sklady", 26)):
+        other = cammerswalde(2, main, subtype, sub_cb, "dobry")
+        off = {c[0] for c in attribute_conflicts(land, other, S12)}
+        assert off >= {"subtype", "category_sub_cb"}
+        kept = {c[0] for c in attribute_conflicts(land, other, on)}
+        assert "subtype" not in kept and "category_sub_cb" not in kept and "condition" in kept
+        assert cross_type_attr_keys(other, land, on) == CROSS_TYPE_SUBTYPE_KEYS
+
+
+def test_E935_the_subtype_skip_never_reaches_a_pair_rule_15_refuses_or_cannot_read() -> None:
+    on = variant(attr_cross_type_subtype_skip=True)
+    land = cammerswalde(1, "pozemek", "zahrada", 23, "dobry")
+    flat = cammerswalde(2, "byt", "2+kk", 4, "dobry")
+    other_land = cammerswalde(3, "pozemek", "louka", 22, "dobry")
+    unknown = cammerswalde(4, None, "rodinny_dum", 37, "dobry")
+    house = cammerswalde(5, "dum", "rodinny_dum", 37, "dobry")
+    for other, settings in ((flat, on), (other_land, on), (unknown, on), (house, S12)):
+        assert cross_type_attr_keys(land, other, settings) == frozenset()
 
 
 # --- E287: Valtice / Úvaly and Popice ---------------------------------------------------------

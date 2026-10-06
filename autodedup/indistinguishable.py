@@ -1156,8 +1156,8 @@ def headline_vs_column_conflict(
     860; one Přízřenice advert leads with an 18 m² office and the other with the 291 m² hall,
     under one stored 291 and two rents, 6,500 against 50,000.
     """
-    # BOTH sides commercial. The one sanctioned cross-type is dům<->komerční, and there the
-    # house side leads with a flat inside the house: one Senice na Hané two-generation house of
+    # BOTH sides commercial. Across the dům<->komerční cross-type (rule #15) the house side
+    # leads with a flat inside the house: one Senice na Hané two-generation house of
     # 190 m² is met by its own commercial twin leading with the 100 m² ground-floor 4+1.
     if {a.category_main, b.category_main} != {COMMERCIAL_CATEGORY}:
         return None
@@ -2626,8 +2626,9 @@ def distinguishing_facts(
     if (a.category_type is not None and b.category_type is not None
             and a.category_type != b.category_type):
         add("category_type", a.category_type, b.category_type)
-    # `category_main_compatible`, not raw inequality: dům <-> komerční is the one sanctioned
-    # cross-type (rule #15), and the operator has confirmed 8 merges across it in this cohort.
+    # `category_main_compatible`, not raw inequality: rule #15 sanctions any two of dům,
+    # komerční and pozemek (dům <-> komerční: the operator confirmed 8 merges across it in this
+    # cohort; pozemek since E935).
     if not category_main_compatible(a.category_main, b.category_main):
         add("category_main", a.category_main, b.category_main)
 

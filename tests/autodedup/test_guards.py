@@ -42,8 +42,27 @@ def test_byt_never_pairs_with_dum() -> None:
     assert pair_veto(fp(1, category_main="byt"), fp(2, category_main="dum")) == "category_main"
 
 
-def test_dum_and_komercni_are_the_one_sanctioned_cross_type() -> None:
+def test_dum_and_komercni_are_a_sanctioned_cross_type() -> None:
     assert pair_veto(fp(1, category_main="dum"), fp(2, category_main="komercni")) is None
+
+
+@pytest.mark.parametrize("other", ["dum", "komercni"])
+def test_land_with_a_house_or_commercial_is_judged_on_its_area_not_its_category(other) -> None:
+    """E935: the category no longer vetoes; the area guard is unchanged, and a house's floor
+    area against the plot (38803: 100 m2 house, 466 m2 plot) is far past 8 %."""
+    house = fp(1, category_main=other, category_type="prodej", area_m2=100.0)
+    land = fp(2, category_main="pozemek", category_type="prodej", area_m2=466.0)
+    assert pair_veto(house, land) == "area"
+    assert pair_veto(land, house) == "area"
+    same_area = fp(3, category_main="pozemek", category_type="prodej", area_m2=100.0)
+    assert pair_veto(house, same_area) is None
+    assert pair_veto(house, fp(4, category_main="pozemek", category_type="prodej")) is None
+
+
+@pytest.mark.parametrize("other", ["byt", "ostatni"])
+def test_land_never_pairs_with_a_flat_or_other(other) -> None:
+    land = fp(1, category_main="pozemek", area_m2=60.0)
+    assert pair_veto(land, fp(2, category_main=other, area_m2=60.0)) == "category_main"
 
 
 def test_areas_more_than_eight_percent_apart_are_a_veto() -> None:
@@ -132,6 +151,11 @@ def test_cluster_invariants_catch_each_violation() -> None:
 
     mixed_class = [fp(1, category_main="byt"), fp(2, category_main="pozemek")]
     assert cluster_invariants_ok(mixed_class, SETTINGS) == "compat_class"
+    # E935: dům, komerční and pozemek are one compat class; a flat beside them still is not
+    cross = [fp(1, category_main="dum"), fp(2, category_main="pozemek"),
+             fp(3, category_main="komercni")]
+    assert cluster_invariants_ok(cross, SETTINGS) is None
+    assert cluster_invariants_ok([*cross, fp(4, category_main="byt")], SETTINGS) == "compat_class"
 
     spread = [base, fp(2, category_main="byt", category_type="prodej", area_m2=80.0,
                        disposition="3+kk", floor=4)]

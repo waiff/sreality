@@ -683,10 +683,26 @@ def test_category_guards_mirror_the_chokepoint() -> None:
     _pair_group(db, 30, [30, 31], [500, 600])
     db.listing(30, 500, cm="dum")
     db.listing(31, 600, cm="komercni")
+    # E935: pozemek merges with a dům or a komerční property; never with a flat
+    db.prop(700, cm="pozemek")
+    db.prop(800, cm="dum")
+    _pair_group(db, 40, [40, 41], [700, 800])
+    db.listing(40, 700, cm="pozemek")
+    db.listing(41, 800, cm="dum")
+    db.prop(900, cm="pozemek")
+    db.prop(1000, cm="komercni")
+    _pair_group(db, 50, [50, 51], [900, 1000])
+    db.listing(50, 900, cm="pozemek")
+    db.listing(51, 1000, cm="komercni")
+    db.prop(1100, cm="pozemek")
+    _pair_group(db, 60, [60, 61], [1100, 1200])
+    db.listing(60, 1100, cm="pozemek")
     reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
     assert reasons[10] == [A.SKIP_CATEGORY_TYPE]
     assert reasons[20] == [A.SKIP_CATEGORY_MAIN]
-    assert reasons[30] == []  # dum <-> komercni is the one sanctioned cross-type
+    assert reasons[30] == []  # dum <-> komercni: a sanctioned cross-type
+    assert reasons[40] == [] and reasons[50] == []  # pozemek with dum, with komercni
+    assert reasons[60] == [A.SKIP_CATEGORY_MAIN]  # pozemek with a flat
 
 
 def test_the_merges_own_asset_refusal_is_reported_as_asset_linked_units() -> None:

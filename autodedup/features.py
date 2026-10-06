@@ -21,7 +21,7 @@ from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64, l
 from autodedup.normalize import canonical_attr
 from autodedup.stock import PLAIN as STOCK_PLAIN, StockIndex
 from autodedup.text_facts import MAX_CODE_POPULATION, reference_codes
-from toolkit.room_taxonomy import ROOM_FAMILIES
+from toolkit.room_taxonomy import ROOM_FAMILIES, category_main_compatible
 
 if TYPE_CHECKING:  # the sibling modules are imported for their types only, never at runtime
     from autodedup.fingerprint import Fingerprint
@@ -653,20 +653,21 @@ def vocabulary_attr_keys(settings: "Settings | None") -> frozenset[str]:
     return frozenset(settings.vocabulary_attr_keys)
 
 
-# E286: the slots that name a CATEGORY's own subtype. Across the sanctioned dům <-> komerční
-# cross they differ because the categories do (`vicegeneracni_dum` against `apartmany`, 54
-# against 57), which is the one difference rule #15 already allows.
+# E286: the slots that name a CATEGORY's own subtype. Across a cross-type rule #15 sanctions
+# (`category_main_compatible`: any two of dům, komerční and pozemek since E935) they differ
+# because the categories do (`vicegeneracni_dum` against `apartmany`, 54 against 57; a land
+# subtype such as `zahrada`, 23, names no house), which is the one difference the rule allows.
 CROSS_TYPE_SUBTYPE_KEYS: frozenset[str] = frozenset({"subtype", "category_sub_cb"})
-CROSS_TYPE_PAIR: frozenset[str] = frozenset({"dum", "komercni"})
 
 
 def cross_type_attr_keys(
     la: Listing, lb: Listing, settings: "Settings | None"
 ) -> frozenset[str]:
-    """E286: the subtype slots, where the two adverts sit across the dům <-> komerční cross."""
+    """E286: the subtype slots, where the two ads sit in two categories rule #15 lets merge."""
     if settings is None or not getattr(settings, "attr_cross_type_subtype_skip", False):
         return frozenset()
-    if {la.category_main, lb.category_main} != CROSS_TYPE_PAIR:
+    a, b = la.category_main, lb.category_main
+    if a is None or b is None or a == b or not category_main_compatible(a, b):
         return frozenset()
     return CROSS_TYPE_SUBTYPE_KEYS
 
