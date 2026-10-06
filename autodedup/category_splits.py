@@ -1,9 +1,12 @@
 """The category review (E937): the named live properties whose ads carry categories rule 15 never
 joins, as sides for the operator to split or keep. Read-only.
 
-Two ads are on one side when `toolkit.property_identity.category_clash` passes them -- the one
-definition, so the sides move with the rule -- and the sides are the connected components over the
-ads whose deal type and category are both known. An ad with either unknown, or a contentless record
+Every two ads of one side pass `toolkit.property_identity.category_clash` -- the one definition,
+so the sides move with the rule. The rule is a set of pairs, not an equivalence (a komerční may
+meet a byt and a dům, the byt and the dům never), so the sides are not its connected components:
+the ads whose deal type and category are both known are walked in one fixed order (deal type, then
+byt, dům, komerční, pozemek, ostatní, then the ad's id) and each joins the first side it clashes
+with no member of, else opens one. An ad with either unknown, or a contentless record
 (no price, area, disposition or description: an index sighting whose page was never read, stored
 under the default `byt` / `prodej`), never makes a property mixed: it rides with the kept side,
 flagged `unknown` / `empty`. The kept side holds most of the property's own ads (no standing merge
@@ -57,18 +60,30 @@ def rides(ad: Ad) -> bool:
     return ad.contentless or ad.category_type is None or ad.category_main is None
 
 
+_MAIN_ORDER: tuple[str, ...] = ("byt", "dum", "komercni", "pozemek", "ostatni")
+
+
 def _clash(a: Ad, b: Ad) -> tuple[str, str | None, str | None] | None:
     return category_clash((a.category_type, a.category_main), (b.category_type, b.category_main))
 
 
+def _walk(ad: Ad) -> tuple[str, int, str, int]:
+    main = str(ad.category_main)
+    rank = _MAIN_ORDER.index(main) if main in _MAIN_ORDER else len(_MAIN_ORDER)
+    return (str(ad.category_type), rank, main, ad.listing_id)
+
+
 def sides(ads: Sequence[Ad], canonical: int | None) -> list[Side]:
-    """The property's sides: the canonical ad's first, then by lowest ad."""
-    components: list[list[Ad]] = []
-    for ad in (a for a in ads if not rides(a)):
-        touching = [c for c in components if any(_clash(ad, b) is None for b in c)]
-        components = [c for c in components if all(c is not t for t in touching)]
-        components.append([ad, *(b for c in touching for b in c)])
-    order = sorted((tuple(sorted(a.listing_id for a in c)) for c in components),
+    """The property's sides, every two ads of a side compatible: the canonical ad's first, then
+    by lowest ad."""
+    walked: list[list[Ad]] = []
+    for ad in sorted((a for a in ads if not rides(a)), key=_walk):
+        home = next((side for side in walked if all(_clash(ad, b) is None for b in side)), None)
+        if home is None:
+            walked.append([ad])
+        else:
+            home.append(ad)
+    order = sorted((tuple(sorted(a.listing_id for a in side)) for side in walked),
                    key=lambda ids: (canonical not in ids, ids[0]))
     riders = tuple(sorted(a.listing_id for a in ads if rides(a)))
     if not order:
@@ -126,17 +141,20 @@ def _item(
     pid: int, canonical: int | None, ads: Mapping[int, Ad],
     rulings: Mapping[tuple[int, int], dict[str, Any]], advert: Callable[[Ad], dict[str, Any]],
 ) -> dict[str, Any]:
-    """One property as a card: its sides, a clash per pair of sides, and whether it is decided."""
+    """One property as a card: its sides, a clash per pair of sides, and whether it is decided.
+    A pair of sides is named by its first clashing pair, each side read from its canonical (else
+    lowest) ad: two sides always hold one, as the later side's first ad clashed with the earlier."""
     found = sides(list(ads.values()), canonical)
     members = [s.ads for s in found if s.ads]
     across = [(min(p), max(p)) for i, one in enumerate(members) for other in members[i + 1:]
               for p in product(one, other)]
     words = [(rulings.get(p) or {}).get("verdict") for p in across]
-    reps = [ads[canonical if canonical in ids else ids[0]] for ids in members]
+    reads = [[ads[i] for i in sorted(ids, key=lambda i: (i != canonical, i))] for ids in members]
     splits = []
-    for i, one in enumerate(reps):
-        for other in reps[i + 1:]:
-            lo, hi = sorted((one, other), key=lambda ad: ad.listing_id)
+    for i, one in enumerate(reads):
+        for other in reads[i + 1:]:
+            pairs = (sorted(p, key=lambda ad: ad.listing_id) for p in product(one, other))
+            lo, hi = next(p for p in pairs if _clash(*p) is not None)
             field, a, b = _clash(lo, hi)
             splits.append({"listing_lo": lo.listing_id, "listing_hi": hi.listing_id,
                            "reason_source": REASON_SOURCE, "reason": f"{field}: {a} vs {b}",

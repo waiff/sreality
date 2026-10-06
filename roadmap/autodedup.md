@@ -33,6 +33,14 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   two flats splits into two properties; per property the operator splits by the letters (the
   property page's `splitPlan`) or keeps it as one (both `POST /properties/{id}/split`). Open with
   the operator: "keep" writes `same` across categories, the word E925 refuses on the verdict route.
+- **Flat ↔ commercial (2026-10-06, E938):** the operator's ruling: a `byt` merges with a `komerční`
+  ad (one studio or atelier filed both ways). Rule 15 is now four PAIRS, not classes: byt + komerční
+  and komerční + dům, never byt + dům or byt + pozemek; every reader compares pairs and the category
+  review's sides are pairwise. Blocking, guards and features unchanged: offline +16 / +20 / +62 /
+  +84 merge-zone pairs on trial / live / c18 / c17, every one read by hand (one unit filed both
+  ways), M1–M3 and every ruling equal. Release after C2 with E929's re-seed. Open: the chokepoint
+  reads a property by its canonical category, so a merged byt + komerční property can still meet a
+  dům by hand.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.

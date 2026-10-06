@@ -1,7 +1,7 @@
 /* AUTODEDUP · Rozdělení podle kategorií (E937).
  *
  * A property whose ads carry categories rule 15 never joins — a sale and a
- * rental of one flat, a flat and a commercial unit — is a question only the
+ * rental of one flat, a flat and a house — is a question only the
  * operator answers, from the photos and the ads' own words. The page opens
  * from a link that names the properties (`?properties=12664,9737`; no stored
  * list) and reads them ten at a time (`GET /autodedup/category-splits`). Each
@@ -132,7 +132,7 @@ export default function AutodedupCategorySplits() {
         <h1 className="text-2xl leading-tight">AUTODEDUP · Rozdělení podle kategorií</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
           Nemovitosti, ve kterých jsou inzeráty různých kategorií — třeba prodej a pronájem, nebo
-          byt a komerční prostor. Takové inzeráty systém do jedné nemovitosti sám nikdy nespojí.
+          byt a dům. Takové inzeráty systém do jedné nemovitosti sám nikdy nespojí.
           Prohlédněte si fotky a texty a u každé nemovitosti rozhodněte: <strong>rozdělit podle
           písmen</strong> (každé další písmeno odejde jako samostatná nemovitost, inzerát se vrátí
           tam, odkud přišel, nebo dostane novou, a mezi písmeny se zapíše „různé“), nebo{' '}

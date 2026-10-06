@@ -653,10 +653,11 @@ def vocabulary_attr_keys(settings: "Settings | None") -> frozenset[str]:
     return frozenset(settings.vocabulary_attr_keys)
 
 
-# E286: the slots that name a CATEGORY's own subtype. Across a cross-type rule #15 sanctions
-# (`category_main_compatible`: any two of dům, komerční and pozemek since E935) they differ
-# because the categories do (`vicegeneracni_dum` against `apartmany`, 54 against 57; a land
-# subtype such as `zahrada`, 23, names no house), which is the one difference the rule allows.
+# E286: the slots that name a CATEGORY's own subtype. Across a cross-type pair rule #15
+# sanctions (`category_main_compatible`: dům–komerční, pozemek with either since E935,
+# byt–komerční since E938) they differ because the categories do (`vicegeneracni_dum` against
+# `apartmany`, 54 against 57; a land subtype such as `zahrada`, 23, names no house), which is
+# the one difference the rule allows.
 CROSS_TYPE_SUBTYPE_KEYS: frozenset[str] = frozenset({"subtype", "category_sub_cb"})
 
 

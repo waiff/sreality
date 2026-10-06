@@ -168,7 +168,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
     call, and so is a group undo (`merge_group_id=`) — no replay), carries every property-anchored operator-state row through ONE ordered list,
     `PROPERTY_CARRIERS` (rule #18), brings every touched property current once per call (`properties_changed`, the dirty drain's after-step), and enforces **category compatibility** (`CategoryClash`:
-    sale≠rent, flat≠house — except the sanctioned cross-types, any two of **dům, komerční, pozemek**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
+    sale≠rent, flat≠house — except the sanctioned cross-type PAIRS: any two of **dům, komerční, pozemek**, and **byt↔komerční**; pairs, never classes, so byt↔dům stays refused). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
     the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open
     operator decision, `roadmap/autodedup.md`); until then the brake is interval 0, then `mode=unapply` — its only detach besides `retire_legacy=1` (until W8:

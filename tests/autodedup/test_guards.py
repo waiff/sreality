@@ -46,6 +46,18 @@ def test_dum_and_komercni_are_a_sanctioned_cross_type() -> None:
     assert pair_veto(fp(1, category_main="dum"), fp(2, category_main="komercni")) is None
 
 
+def test_a_flat_and_a_commercial_unit_are_judged_on_their_facts_not_their_category() -> None:
+    """E938: the category no longer vetoes a byt against a komerční; the area guard and the
+    disposition guard (both stated) are unchanged, and a byt against a dům still vetoes."""
+    flat = fp(1, category_main="byt", category_type="prodej", area_m2=35.0, disposition="1+kk")
+    studio = fp(2, category_main="komercni", category_type="prodej", area_m2=35.0)
+    assert pair_veto(flat, studio) is None
+    assert pair_veto(studio, flat) is None
+    assert pair_veto(flat, fp(3, category_main="komercni", area_m2=60.0)) == "area"
+    assert pair_veto(flat, fp(4, category_main="komercni", disposition="2+kk")) == "disposition"
+    assert pair_veto(flat, fp(5, category_main="dum", area_m2=35.0)) == "category_main"
+
+
 @pytest.mark.parametrize("other", ["dum", "komercni"])
 def test_land_with_a_house_or_commercial_is_judged_on_its_area_not_its_category(other) -> None:
     """E935: the category no longer vetoes; the area guard is unchanged, and a house's floor
@@ -151,7 +163,8 @@ def test_cluster_invariants_catch_each_violation() -> None:
 
     mixed_class = [fp(1, category_main="byt"), fp(2, category_main="pozemek")]
     assert cluster_invariants_ok(mixed_class, SETTINGS) == "compat_class"
-    # E935: dům, komerční and pozemek are one compat class; a flat beside them still is not
+    # E935: dům, komerční and pozemek are pairwise compatible; a flat beside a house or land
+    # still is not (E938 lets it beside a komerční only)
     cross = [fp(1, category_main="dum"), fp(2, category_main="pozemek"),
              fp(3, category_main="komercni")]
     assert cluster_invariants_ok(cross, SETTINGS) is None
@@ -166,6 +179,22 @@ def test_cluster_invariants_catch_each_violation() -> None:
 
     floors = [base, fp(2, disposition="3+kk", floor=5, **flat)]
     assert cluster_invariants_ok(floors, SETTINGS) == "floor_spread"
+
+
+def test_a_group_of_flat_commercial_and_house_is_refused_by_its_flat_and_house_pair() -> None:
+    """E938: rule #15 is a set of pairs. Each adjacent pair (byt–komerční, komerční–dům) is
+    allowed, so a chain of merge edges can reach the set; the cluster pass refuses it on the
+    byt–dům pair, read pair by pair, and lets the flat and the commercial unit be one group."""
+    flat = fp(1, category_main="byt", category_type="prodej")
+    studio = fp(2, category_main="komercni", category_type="prodej")
+    house = fp(3, category_main="dum", category_type="prodej")
+    assert pair_veto(flat, studio) is None and pair_veto(studio, house) is None
+    assert cluster_invariants_ok([flat, studio, house], SETTINGS) == "compat_class"
+    assert cluster_invariants_ok([house, studio, flat], SETTINGS) == "compat_class"
+    land = fp(4, category_main="pozemek", category_type="prodej")
+    assert cluster_invariants_ok([flat, studio, land], SETTINGS) == "compat_class"
+    assert cluster_invariants_ok([flat, studio], SETTINGS) is None
+    assert cluster_invariants_ok([studio, house, land], SETTINGS) is None
 
 
 def test_land_members_are_exempt_from_the_disposition_invariant() -> None:
