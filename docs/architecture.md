@@ -1396,16 +1396,24 @@ renumber.** Navigate by area:
     — the rollup and both notification producers read `listing_price_steps` with no fallback.
     **Category compatibility is enforced at the chokepoint** via the single
     `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
-    flat ≠ a house — **except** the sanctioned cross-types, irrespective of sub-type: **dum ↔
-    komercni** (the same building listed as a house on one portal and commercial on another is
-    one real-world property) and, since 2026-10-04 (AUTODEDUP E935), **pozemek ↔ dum** and
+    flat ≠ a house — **except** four sanctioned cross-type PAIRS, irrespective of sub-type:
+    **dum ↔ komercni** (the same building listed as a house on one portal and commercial on
+    another is one real-world property); since 2026-10-04 (AUTODEDUP E935) **pozemek ↔ dum** and
     **pozemek ↔ komercni** (a plot with a house on it listed as a house on one portal and as
-    land on another; the operator's own merge of property 38803). A `byt` and an `ostatni`
-    merge with no other category. This guard is deliberately *at the merge*, not in the caller,
-    so no future decision layer can route around it. It is distinct from the **asset-link**
-    grain (migration 224), which links genuinely *different* units in one building (a `byt` and
-    its ground-floor `komercni`, a `dum` and a separate parcel beside it) WITHOUT collapsing
-    them into one property.
+    land on another; the operator's own merge of property 38803); and since 2026-10-06 (E938)
+    **byt ↔ komercni** (a studio listed as a flat on one portal and as a commercial unit on
+    another). The relation is a set of pairs, **not transitive**: byt ↔ komercni and komercni ↔
+    dum do not make byt ↔ dum, so a `byt` never merges with a `dum` or a `pozemek`, and an
+    `ostatni` with no other category. Every reader compares two categories at a time, never a
+    class: the chokepoint's `_gate_set` every pair of the set's properties (each property read
+    by its stored category, the canonical ad's, so a property already holding a byt and a
+    komercni ad counts as one of them: the gap E938 names), the verdict route its one pair
+    (E925), the engine's `pair_veto` its pair, its cluster invariant and `apply._set_reasons`
+    every pair of the group's categories (the apply plan reads every ad the merge would move).
+    This guard is deliberately *at the merge*, not in the caller, so no future decision layer
+    can route around it. It is distinct from the **asset-link** grain (migration 224), which
+    links genuinely *different* units in one building (a `byt` and its ground-floor `komercni`
+    shop, a `dum` and a separate parcel beside it) WITHOUT collapsing them into one property.
     **Who orders a merge today.** The operator — and, only inside the area its scope row
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`; **`POST /properties/{id}/split`**
@@ -1588,9 +1596,11 @@ renumber.** Navigate by area:
     asset link; collections, tags, notes, dispatches and dismissals stay on the property left
     (rule #18). **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
     ?properties=…` (`autodedup/category_splits.py`, read-only, 1 to 100 ids) puts each named live
-    property's ads into SIDES, the ads `category_clash` (rule 15's one gate) passes together; an
-    ad of unknown category and a contentless record (no price, area, disposition or text) ride
-    with the kept side (most own ads) and never make a property mixed. Its page
+    property's ads into SIDES, every two ads of a side passed by `category_clash` (rule 15's one
+    gate; the ads walked in one fixed order, each joining the first side it clashes with no member
+    of, because the rule is a set of pairs, E938); an ad of unknown category and a contentless
+    record (no price, area, disposition or text) ride with the kept side (most own ads) and never
+    make a property mixed. Its page
     `/autodedup/category-splits` opens from a link that names the properties (no menu entry, no
     stored list), reads them ten per request and shows each side's ads with photos and their
     scrubbed text, each ad with a letter (the property page's select, one letter per side to
