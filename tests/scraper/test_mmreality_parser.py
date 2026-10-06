@@ -443,3 +443,54 @@ def test_has_balcony_is_balcony_or_loggia_never_the_terrace():
         _detail_html(loggia_only), source_url="https://www.mmreality.cz/nemovitosti/944449/"
     )
     assert other.has_balcony is True
+
+
+# A COMMERCIAL unit, the ruling-3 case: 956067 (2026-09-30, live) states usableArea =
+# parcelArea = builtUpArea = productionArea = 52 — the broker typed one number into every
+# box; 955739 fills five boxes with 108 on a two-storey shop. 4 of 4 live komerční
+# samples; 53 of the portal's 762 active komerční parcels.
+WAREHOUSE = {
+    **ESTATE,
+    "id": "956067",
+    "title": "Pronájem, Sklad, 52 m², Srnojedy",
+    "category": {"id": "11", "name": "Pronájem"},
+    "group": {"id": "2", "name": "Komerční objekt"},
+    "type": {"id": "80", "name": "Sklad"},
+    "usableArea": "52",
+    "parcelArea": "52",
+    "builtUpArea": "52",
+    "productionArea": "52",
+    "totalArea": "52",
+}
+
+
+def test_a_commercial_parcel_that_repeats_the_usable_figure_is_not_a_parcel():
+    listing = parse_detail(
+        _detail_html(WAREHOUSE), source_url="https://www.mmreality.cz/nemovitosti/956067/"
+    )
+    assert listing.category_main == "komercni"
+    assert (listing.area_m2, listing.area_basis, listing.usable_area) == (52.0, "usable", 52.0)
+    assert listing.estate_area is None
+    assert listing.raw["parcelArea"] == "52"      # the page's statement is kept verbatim
+
+
+def test_a_commercial_parcel_equal_to_the_built_up_area_but_not_the_usable_one_is_real():
+    # 945419 (Ostrava, a tenement): parcelArea 327 = builtUpArea 327 against usableArea
+    # 960 — a genuine footprint parcel under a multi-storey building. Zastavěná plocha
+    # is NOT compared (ruling 3): a building may cover its whole parcel.
+    tenement = {**WAREHOUSE, "id": "945419", "usableArea": "960", "parcelArea": "327",
+                "builtUpArea": "327", "productionArea": None, "totalArea": "960"}
+    listing = parse_detail(
+        _detail_html(tenement), source_url="https://www.mmreality.cz/nemovitosti/945419/"
+    )
+    assert (listing.usable_area, listing.estate_area) == (960.0, 327.0)
+
+
+def test_the_house_control_keeps_its_parcel():
+    """`location_w2a_refetch/mmreality_a1.html` (951726, a chata): Užitná 140, Plocha
+    parcely 279, Zastavěná 250. A house's rule is unchanged."""
+    html = (pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+            / "location_w2a_refetch" / "mmreality_a1.html").read_text(encoding="utf-8")
+    listing = parse_detail(html, source_url="https://www.mmreality.cz/nemovitosti/951726/")
+    assert listing.category_main == "dum"
+    assert (listing.usable_area, listing.area_m2, listing.estate_area) == (140.0, 140.0, 279.0)

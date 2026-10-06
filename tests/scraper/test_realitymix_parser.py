@@ -396,3 +396,56 @@ def test_spaced_thousands_in_a_spec_cell_is_one_number():
     html = DUM_HTML.replace("<span>3028 m²</span>", "<span>3 028 m²</span>")
     listing = parse_detail(html, source_url=_DUM_URL)
     assert listing.estate_area == 3028.0
+
+
+_KOMERCE_URL = (
+    "https://realitymix.cz/detail/nove-mesto-pod-smrkem/"
+    "prodej-prumyslovy-objekt-nove-mesto-pod-smrkem-8710333.html"
+)
+
+
+def _komerce_html(title: str, rows: str) -> str:
+    """DUM_HTML re-filed under the Komerce breadcrumb family, with its own spec rows."""
+    head, _, _ = DUM_HTML.partition("<h1>")
+    head = head.replace("/reality/domy", "/reality/komerce").replace('"Domy"', '"Komerce"')
+    return (head + f"<h1>{title}</h1>\n<ul class=\"detail-information\">\n{rows}\n</ul>"
+            "\n</body></html>\n")
+
+
+def _row(label: str, value: str) -> str:
+    return f'  <li class="detail-information__data-item"><span>{label}:</span><span>{value}</span></li>'
+
+
+def test_a_commercial_parcel_that_repeats_the_labelled_plocha_is_not_a_parcel():
+    """General ruling 3 on realitymix's two commercial form shapes (4 of 4 live pages,
+    2026-09-30). The "Druh prostor" form (8710333, a hall) prints "Plocha: 852 m²" and
+    "Plocha parcely: 852 m²" with NO užitná — the headline comes from the labelled
+    total, which the rule compares against too (427 of 1,976 active komerční plots equal
+    area_m2, only 95 the usable column). The "Typ zařízení" form (8710521, a pizzeria in
+    a metro vestibule) prints Zastavěná / Užitná / Plocha parcely all 30. The real
+    6 841 m² parcel of the hall is only in its prose, so NULL means "not stated"."""
+    from scraper.area import parse_area_text
+
+    hall = parse_detail(_komerce_html(
+        "Prodej výrobní prostory, 852 m²",
+        "\n".join((_row("Plocha", "852 m²"), _row("Plocha parcely", "852 m²")))),
+        source_url=_KOMERCE_URL)
+    assert hall.category_main == "komercni"
+    assert (hall.area_m2, hall.area_basis, hall.usable_area) == (852.0, "total", None)
+    assert hall.estate_area is None
+    assert parse_area_text(hall.raw["params"]["plocha parcely"]) == 852.0
+
+    pizzeria = parse_detail(_komerce_html(
+        "Pronájem restaurace, 30 m²",
+        "\n".join((_row("Zastavěná plocha", "30 m²"), _row("Užitná plocha", "30 m²"),
+                   _row("Plocha parcely", "30 m²")))),
+        source_url=_KOMERCE_URL)
+    assert (pizzeria.area_m2, pizzeria.area_basis, pizzeria.usable_area) == (30.0, "usable", 30.0)
+    assert pizzeria.estate_area is None
+
+    # a parcel the page states as its own figure stays, labelled total beside it or not
+    stated = parse_detail(_komerce_html(
+        "Prodej výrobní prostory, 852 m²",
+        "\n".join((_row("Plocha", "852 m²"), _row("Plocha parcely", "6841 m²")))),
+        source_url=_KOMERCE_URL)
+    assert (stated.area_m2, stated.area_basis, stated.estate_area) == (852.0, "total", 6841.0)
