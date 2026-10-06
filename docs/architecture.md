@@ -1054,7 +1054,20 @@ renumber.** Navigate by area:
    photos. The `images` table tracks per-image download state via `storage_path`,
    `download_attempts`, and `last_download_attempt_at`. Image-download is a separate phase
    after the scrape phase; it's a no-op if R2 env vars are missing, so a partial deploy
-   never breaks the scrape. sreality photos are fetched through their `SQUARE_1800_JPG` template
+   never breaks the scrape. **A throttle is the portal's answer about our rate, never the image's
+   failure** (2026-10-06): a 429, or the 403 a WAF follows a burst with, burns no `download_attempts`
+   (`db.mark_image_throttled` stamps the error and the time only) and parks the HOST — a cool-down that
+   outlives the run (module state in `scraper/main.py`: 15 min doubling to 2 h, or the portal's
+   `Retry-After`), so the worker's minute-by-minute lane cannot re-hammer it; fetches to one host are
+   spaced ≥ 0.2 s apart and wear the crawlers' desktop-Chrome identity (`image_storage._session`),
+   because iDNES serves galleries through its own site's redirector, not a CDN; **a photo link on a
+   portal's OWN site resolves through that portal's residential proxy** (`main.image_proxies`, derived
+   from each client's `USE_PROXY` / `BASE_URL`, no portal named; one redirect hop, the bytes come
+   straight from the CDN), since such a site punishes our datacenter address while its CDN does not.
+   Incident: 2026-10-01 →
+   10-05 the bare python-requests identity was rate-limited then blocked there, five attempts in twenty
+   minutes gave 28k photos on 2.1k ads up for good, and the engine's evidence rule held every merge
+   touching them; migration 585 re-queued those rows. sreality photos are fetched through their `SQUARE_1800_JPG` template
    (whole frame, ≤1800px, no watermark) and a legacy chain on a stored URL is NORMALISED onto it at
    download, never passed through — see § Data source (sreality) for the allowlist mechanics.
    Migration 496 adds provenance, and **every stored row is stamped with what was actually stored**:
