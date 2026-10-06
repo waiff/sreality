@@ -135,7 +135,7 @@ describe('unitLanding', () => {
 });
 
 describe('refreshAfterSplit', () => {
-  it('re-reads the property page, the proposals and every Browse surface', () => {
+  it('re-reads the property page, the proposals, the category review and every Browse surface', () => {
     const qc = new QueryClient();
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
 
@@ -148,6 +148,7 @@ describe('refreshAfterSplit', () => {
       ['snapshots'],
       ['merged-adverts'],
       ['autodedup', 'proposed-splits'],
+      ['autodedup', 'category-splits'],
       ['cards'],
       ['map'],
       ['table'],

@@ -21,6 +21,7 @@ each advert carries what its detach would answer now (`detach_outcome`) and whet
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -38,6 +39,28 @@ def _fetch(conn: Any, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return list(cur.fetchall())
+
+
+def pair_rulings(conn: Any, ids: list[int]) -> dict[tuple[int, int], dict[str, Any]]:
+    """The newest ruling on every pair drawn from `ids`, as a split card shows it."""
+    rulings: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in _fetch(conn, U.MEMBER_PAIR_VERDICTS_SQL, {"ids": ids}):  # newest first
+        v = dict(zip(U.VERDICT_COLUMNS, row))
+        at = v["decided_at"]
+        rulings.setdefault((v["listing_lo"], v["listing_hi"]), {
+            "verdict": v["verdict"], "decided_by": v["decided_by"], "note": v["note"],
+            "decided_at": at.isoformat() if isinstance(at, datetime) else at,
+            "reasons": list(v["reasons"] or [])})
+    return rulings
+
+
+def split_facts(
+    listing_id: int, origins: Mapping[int, tuple[Any, ...]], outcomes: Mapping[int, str],
+) -> dict[str, Any]:
+    """One advert's split facts now: its origin, what its detach answers, whether that moves it."""
+    return {"origin_property_id": origins[listing_id][0] if listing_id in origins else None,
+            "detach_outcome": outcomes.get(listing_id),
+            "splittable": outcomes.get(listing_id) in MOVED}
 
 
 def _groups(adverts: list[tuple], canonical: int) -> list[tuple[int | None, list[int]]]:
@@ -64,14 +87,7 @@ def proposed_splits(
         return []
     negatives = {(lo, hi): f"must_not_link ({src})" for lo, hi, src in _fetch(
         conn, A.MUST_NOT_LINK_SQL, {"listing_ids": ids})}
-    rulings: dict[tuple[int, int], dict[str, Any]] = {}
-    for row in _fetch(conn, U.MEMBER_PAIR_VERDICTS_SQL, {"ids": ids}):  # newest first
-        v = dict(zip(U.VERDICT_COLUMNS, row))
-        at = v["decided_at"]
-        rulings.setdefault((v["listing_lo"], v["listing_hi"]), {
-            "verdict": v["verdict"], "decided_by": v["decided_by"], "note": v["note"],
-            "decided_at": at.isoformat() if isinstance(at, datetime) else at,
-            "reasons": list(v["reasons"] or [])})
+    rulings = pair_rulings(conn, ids)
 
     candidates: dict[int, list[tuple[int, int]]] = {}
     apart: set[tuple[int, int]] = set()
@@ -119,9 +135,7 @@ def proposed_splits(
 
     def advert(a: tuple) -> dict[str, Any]:
         return {"listing_id": a[0], "source": a[1], "is_active": a[2],
-                "origin_property_id": origins[a[0]][0] if a[0] in origins else None,
-                "detach_outcome": outcomes.get(a[0]),
-                "splittable": outcomes.get(a[0]) in MOVED}
+                **split_facts(a[0], origins, outcomes)}
 
     items = []
     for pid in sorted(splits):

@@ -140,6 +140,9 @@ export const ROUTES = {
   autodedupPair: def('/autodedup/pair/:lo/:hi'),
   // Decision 9: engine splits are propose-only; the operator splits from here.
   autodedupProposedSplits: def('/autodedup/proposed-splits'),
+  // E937: properties whose ads carry categories rule 15 never joins, split or
+  // kept by the operator; opened from a link that names them (?properties=…).
+  autodedupCategorySplits: def('/autodedup/category-splits'),
   // E920: every operator ruling, beside the engine's view; flip / withdraw.
   autodedupRulings: def('/autodedup/rulings'),
   // Every pair the LLM judge read, for the operator to check; blind by default.
