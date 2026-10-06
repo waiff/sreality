@@ -270,10 +270,10 @@ name: "AUTODEDUP: engine lane"
 #             counted per reason in the summary), two properties the operator asset-linked
 #             (asset_linked_units), a property the engine split across two groups, a property
 #             carrying a listing no group holds (unless this engine already merged it there
-#             with a member), a chokepoint refusal on an earlier run, listings of an engine
-#             merge the operator took apart, or a property this engine merged once that is
-#             active again. Group size is capped by the engine alone, when it builds the
-#             group. A group already on one property that an operator negative covers is
+#             with a member), or a chokepoint refusal on an earlier run. An undo of an engine
+#             merge, by anyone, refuses nothing: the operator's rulings are the bans (E934).
+#             Group size is capped by the engine alone, when it builds the group. A group
+#             already on one property that an operator negative covers is
 #             REPORTED (ruled_different_after_merge, with the unapply args when the engine
 #             made that merge), never acted on. The real-time generation (`rt`) may be
 #             PLANNED by a dry run (G3's prediction of the lane's first reconcile) and is never
@@ -335,8 +335,8 @@ name: "AUTODEDUP: engine lane"
 #             the merge to undo first; a group taken apart outside the engine (its survivor
 #             merged on by another merge, or nothing of it left to move back) is skipped
 #             naming nothing - the dry run reports each group as the live run would treat it;
-#             a group the operator already undid is noted as undone by someone else, and its
-#             listings stay apart in every later generation's merges.
+#             a group the operator already undid is noted as undone by someone else - a
+#             record, not a ban: only the operator's rulings keep ads apart (E934).
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
