@@ -3,15 +3,21 @@
 1. Attach stragglers: every `property_id IS NULL` listing (the batched detail-drain writes them)
    is born a bare singleton (`scraper.db.NEW_SINGLETONS_SQL`, the one birth path) and recomputed
    in the same transaction. No cross-listing matching, ever (CLAUDE.md rule 15).
-2. Recompute, ONE RULE PER FIELD (migration 561, decision 18). The canonical advert is rank 1 of
-   `property_canonical_listings(property_id)` (active, trust, last seen, id). Every advert field
-   is its own: price and ITS price history (`listing_price_steps`, migration 559: no other
-   advert's steps count), area (no fallback), layout, category, subtype, source, condition with
-   both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through which the read
-   models take place, floor, description, photos, broker and link. Every physical fact (building
-   type, ownership, energy rating, amenities, estate/usable/garden area, parking) is the first
-   non-empty value in the same order. Lifecycle: any advert active, min/max seen, newest snapshot.
-   `repr_since` is stamped when the canonical advert changes (the price alerts start there).
+2. Recompute, ONE RULE PER FIELD (docs/design/merge-sprint/PROGRAM.md MS11). The canonical advert
+   is rank 1 of `property_canonical_listings(property_id)` (migration 588, MS5: active, a map
+   point, earliest first seen among active / latest last seen among inactive, trust, id). Every
+   advert field is its own: price, area (no fallback), layout, category, subtype, source,
+   condition with both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through
+   which the read models take place, floor, description, photos, broker and link. The six
+   amenities are a union over every advert (MS6); every other physical fact is the first
+   non-empty value in the canonical order. The price figures are the canonical advert's lineage
+   (MS10): its own and its same-portal predecessors' `listing_price_steps` plus one handover step
+   per link, the total compounded. Lifecycle: any advert active, min/max seen, newest snapshot;
+   the portal lists and one newest-advert date per offered portal (MS19). `repr_since` is
+   stamped when the canonical advert changes (the price alerts start there), and
+   `city_proximity_computed_at` is cleared then and whenever it predates `repr_since`, so the
+   hourly city job recomputes the figures from the canonical advert's point (an advert without
+   one keeps the earlier figures until it gains one: the job reads only a point).
 
 Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
@@ -62,6 +68,7 @@ from typing import Any
 
 from scraper import db
 from toolkit.browse_read_model import sync_browse_list
+from toolkit.filter_registry import PORTAL_OPTIONS
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -77,12 +84,22 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
 STRAGGLER_BATCH = 2000
 _STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL LIMIT %(limit)s"
 
-_RECOMPUTE_BATCH_SQL = """
+# MS19: one date per portal Browse offers (`PORTAL_OPTIONS`; migration 588 holds the columns), the
+# first sighting of the property's newest advert there, active or not. A portal added to the
+# registry fails tests/test_recompute_property_stats.py until a migration gives it its column.
+# The statement below is an f-string that splices these in: a literal brace in it is doubled.
+_NEWEST_AD_AT_AGG = "\n".join(
+    f"        max(k.first_seen_at) FILTER (WHERE k.source = '{o.value}') AS newest_ad_at_{o.value},"
+    for o in PORTAL_OPTIONS)
+_NEWEST_AD_AT_SET = "\n".join(
+    f"      newest_ad_at_{o.value} = r.newest_ad_at_{o.value}," for o in PORTAL_OPTIONS)
+
+_RECOMPUTE_BATCH_SQL = f"""
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
-    -- Every advert of the batch's properties in THE canonical order (migration 561); rank 1 is
-    -- the canonical advert. The order is spelled there and nowhere else.
+    -- Every advert of the batch's properties in THE canonical order (migration 588, MS5); rank 1
+    -- is the canonical advert. The order is spelled there and nowhere else.
     kids AS (
       SELECT l.*, o.canonical_rank
       FROM batch b
@@ -92,22 +109,26 @@ _RECOMPUTE_BATCH_SQL = """
     canon AS (
       SELECT * FROM kids WHERE canonical_rank = 1
     ),
-    -- Lifecycle over every advert; each physical fact is the first non-empty value in the
-    -- canonical order.
+    -- Lifecycle and the portals over every advert, active or not; the six amenities are a union
+    -- (yes when any advert says yes, MS6); every other physical fact is the first non-empty value
+    -- in the canonical order.
     child_agg AS (
       SELECT
         k.property_id              AS pid,
         bool_or(k.is_active)       AS is_active,
         count(*)                   AS source_count,
-        count(distinct k.source)   AS distinct_site_count,
         min(k.first_seen_at)       AS first_seen_at,
         max(k.last_seen_at)        AS last_seen_at,
-        (array_agg(k.has_lift ORDER BY k.canonical_rank) FILTER (WHERE k.has_lift IS NOT NULL))[1] AS has_lift,
-        (array_agg(k.has_balcony ORDER BY k.canonical_rank) FILTER (WHERE k.has_balcony IS NOT NULL))[1] AS has_balcony,
-        (array_agg(k.has_parking ORDER BY k.canonical_rank) FILTER (WHERE k.has_parking IS NOT NULL))[1] AS has_parking,
-        (array_agg(k.terrace ORDER BY k.canonical_rank) FILTER (WHERE k.terrace IS NOT NULL))[1] AS terrace,
-        (array_agg(k.garage ORDER BY k.canonical_rank) FILTER (WHERE k.garage IS NOT NULL))[1] AS garage,
-        (array_agg(k.cellar ORDER BY k.canonical_rank) FILTER (WHERE k.cellar IS NOT NULL))[1] AS cellar,
+        array_agg(DISTINCT k.source ORDER BY k.source) AS all_sources,
+        coalesce(array_agg(DISTINCT k.source ORDER BY k.source) FILTER (WHERE k.is_active),
+                 ARRAY[]::text[]) AS active_sources,
+{_NEWEST_AD_AT_AGG}
+        bool_or(k.has_lift)        AS has_lift,
+        bool_or(k.has_balcony)     AS has_balcony,
+        bool_or(k.has_parking)     AS has_parking,
+        bool_or(k.terrace)         AS terrace,
+        bool_or(k.garage)          AS garage,
+        bool_or(k.cellar)          AS cellar,
         (array_agg(k.usable_area ORDER BY k.canonical_rank) FILTER (WHERE k.usable_area IS NOT NULL))[1] AS usable_area,
         (array_agg(k.estate_area ORDER BY k.canonical_rank) FILTER (WHERE k.estate_area IS NOT NULL))[1] AS estate_area,
         (array_agg(k.garden_area ORDER BY k.canonical_rank) FILTER (WHERE k.garden_area IS NOT NULL))[1] AS garden_area,
@@ -118,13 +139,56 @@ _RECOMPUTE_BATCH_SQL = """
       FROM kids k
       GROUP BY k.property_id
     ),
-    -- The canonical advert's OWN steps (`listing_price_steps`, migration 559, the one step
-    -- definition the watchdog and the collection monitor read too), each dated by its own
-    -- scraped_at. The windowed counts decay as events age out, so they are only as fresh as the
-    -- last recompute of the row -- the daily full sweep is the bound.
+    -- The canonical advert and its same-portal predecessors (MS10): each predecessor is the advert
+    -- on that portal last seen latest, strictly before the later link was first seen, so adverts
+    -- that ran at the same time never link; first_seen_at falls along the chain, so it ends.
+    lineage AS (
+      WITH RECURSIVE link AS (
+        SELECT c.property_id AS pid, c.id, c.source, c.first_seen_at, 0 AS hop FROM canon c
+        UNION ALL
+        SELECT k.pid, pre.id, k.source, pre.first_seen_at, k.hop + 1
+        FROM link k
+        CROSS JOIN LATERAL (
+          SELECT l.id, l.first_seen_at FROM listings l
+          WHERE l.property_id = k.pid AND l.source = k.source
+            AND l.last_seen_at < k.first_seen_at AND l.first_seen_at < k.first_seen_at
+          ORDER BY l.last_seen_at DESC, l.id DESC
+          LIMIT 1
+        ) pre
+      )
+      SELECT * FROM link
+    ),
+    -- Each priced link's first and last price over its own snapshots, dated by the first.
+    members AS (
+      SELECT g.pid, g.hop,
+        (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
+        min(s.scraped_at)                                                 AS first_at,
+        (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
+        count(*)                                                          AS price_points
+      FROM lineage g
+      JOIN listing_snapshots s ON s.listing_id = g.id
+      WHERE s.price_czk IS NOT NULL
+      GROUP BY g.pid, g.hop
+    ),
+    -- The steps the price figures count: each link's OWN steps (`listing_price_steps`, migration
+    -- 559, the one step definition the alerts read too) plus one handover step into each priced
+    -- link from the last price of the next older priced link, dated at the newer link's first.
+    steps AS (
+      SELECT g.pid, ps.scraped_at, ps.price_czk, ps.prev_price_czk
+      FROM lineage g
+      JOIN listing_price_steps ps ON ps.listing_id = g.id
+      UNION ALL
+      SELECT h.pid, h.first_at, h.first_price, h.prev_price_czk
+      FROM (SELECT m.pid, m.first_at, m.first_price,
+                   lead(m.last_price) OVER (PARTITION BY m.pid ORDER BY m.hop) AS prev_price_czk
+            FROM members m) h
+      WHERE h.first_price <> h.prev_price_czk
+    ),
+    -- Each step dated by its own scraped_at. The windowed counts decay as events age out, so they
+    -- are only as fresh as the last recompute of the row -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
-        c.property_id AS pid,
+        ps.pid,
         count(*) FILTER (WHERE ps.price_czk < ps.prev_price_czk) AS drops,
         count(*) FILTER (WHERE ps.price_czk > ps.prev_price_czk) AS rises,
         count(*)                                                 AS changes,
@@ -133,24 +197,21 @@ _RECOMPUTE_BATCH_SQL = """
         count(*) FILTER (WHERE ps.scraped_at >= now() - interval '365 days') AS changes_365d,
         max((ps.prev_price_czk - ps.price_czk)::numeric / ps.prev_price_czk * 100)
           FILTER (WHERE ps.price_czk < ps.prev_price_czk)        AS max_drop_pct
-      FROM canon c
-      JOIN listing_price_steps ps ON ps.listing_id = c.id
-      GROUP BY c.property_id
+      FROM steps ps
+      GROUP BY ps.pid
     ),
-    -- The headline delta: first-to-last of the canonical advert's own priced snapshots, the
-    -- series its price is the last point of. (No literal percent sign in this comment on
+    -- The headline delta, compounded over those steps: it telescopes to the oldest priced link's
+    -- first price against the canonical advert's last. (No literal percent sign in this comment on
     -- purpose -- prose percent inside executed SQL is an `incomplete placeholder` crash in
-    -- psycopg; tests/test_sql_placeholders.py guards it.) NULL under two priced snapshots.
-    canon_span AS (
-      SELECT
-        c.property_id AS pid,
-        (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
-        (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
-        count(*)                                                          AS price_points
-      FROM canon c
-      JOIN listing_snapshots s ON s.listing_id = c.id
-      WHERE s.price_czk IS NOT NULL
-      GROUP BY c.property_id
+    -- psycopg; tests/test_sql_placeholders.py guards it.) NULL under two priced snapshots or with
+    -- an unpriced canonical advert.
+    lineage_span AS (
+      SELECT pid,
+        (array_agg(first_price ORDER BY hop DESC))[1]     AS first_price,
+        (array_agg(last_price) FILTER (WHERE hop = 0))[1] AS last_price,
+        sum(price_points)                                 AS price_points
+      FROM members
+      GROUP BY pid
     ),
     -- Last content change = the newest snapshot of any advert (snapshots are content-change
     -- only, rule 2): the "recently changed" timestamp Browse filters on (migration 158).
@@ -164,11 +225,11 @@ _RECOMPUTE_BATCH_SQL = """
     UPDATE properties p SET
       is_active           = r.is_active,
       source_count        = r.source_count,
-      distinct_site_count = r.distinct_site_count,
       first_seen_at       = r.first_seen_at,
       last_seen_at        = r.last_seen_at,
       repr_listing_id     = c.sreality_id,
       repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
+      city_proximity_computed_at = CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since THEN NULL ELSE p.city_proximity_computed_at END,
       repr_listing_ref_id = c.id,
       category_main       = c.category_main,
       category_type       = c.category_type,
@@ -177,12 +238,13 @@ _RECOMPUTE_BATCH_SQL = """
       disposition         = c.disposition,
       area_m2             = c.area_m2,
       current_price_czk   = c.price_czk,
-      price_per_m2_source_listing_id = price_per_m2_source_id(c.price_czk, c.area_m2, c.id),
       condition           = c.condition,
       building_condition_level  = c.building_condition_level,
       apartment_condition_level = c.apartment_condition_level,
       furnished           = c.furnished,
       source              = c.source,
+      all_sources         = r.all_sources,
+      active_sources      = r.active_sources,
       has_lift            = r.has_lift,
       has_balcony         = r.has_balcony,
       has_parking         = r.has_parking,
@@ -208,11 +270,12 @@ _RECOMPUTE_BATCH_SQL = """
           THEN (cs.last_price - cs.first_price)::numeric / cs.first_price * 100
       END,
       last_change_at      = coalesce(ch.last_change_at, r.first_seen_at),
+{_NEWEST_AD_AT_SET}
       stats_computed_at   = now()
     FROM child_agg r
     JOIN canon c ON c.property_id = r.pid
     LEFT JOIN price_hist ph ON ph.pid = r.pid
-    LEFT JOIN canon_span cs ON cs.pid = r.pid
+    LEFT JOIN lineage_span cs ON cs.pid = r.pid
     LEFT JOIN changes ch ON ch.pid = r.pid
     WHERE p.id = r.pid
 """
@@ -269,7 +332,8 @@ _CLEAR_DIRTY_SWEPT_SQL = (
 
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
-# property drops out of the UPDATE and keeps stale columns -- the merge's retire
+# property drops out of the UPDATE and keeps stale columns (its portal lists and
+# dates too; nothing serves a merged-away row) -- the merge's retire
 # (`toolkit.property_identity._RETIRE_SQL`) sets the loser is_active=false, but this guards the general case
 # (a partially-failed merge, or any childless active property) so Browse never
 # shows a ghost active dot.

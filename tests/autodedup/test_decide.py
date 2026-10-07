@@ -98,7 +98,8 @@ def test_present_value_reads_absence_as_unknown() -> None:
     "over, expected",
     [
         ({"category_type": "pronajem"}, "category_type"),
-        ({"category_main": "komercni"}, "category_main"),
+        ({"category_main": "dum"}, "category_main"),
+        ({"category_main": "pozemek"}, "category_main"),
         ({"area_m2": 95.0}, "area"),
         ({"disposition": "2+kk"}, "disposition"),
         ({"floor": 6}, "floor"),
@@ -111,6 +112,14 @@ def test_guards_veto_before_anything_is_scored(over: dict[str, Any], expected: s
     assert decision.reason == f"guard:{expected}"
     assert decision.score == 0.0
     assert decision.certificate is None
+
+
+def test_a_flat_and_a_commercial_unit_are_scored_not_vetoed() -> None:
+    """E938: byt <-> komerční is a rule #15 pair, so the floor scores it on its facts; the
+    commercial ad states no disposition, which is never a mismatch (E12)."""
+    decision = _decide(_listing(1), _listing(2, category_main="komercni", disposition=None),
+                       _feats(), probability=0.999)
+    assert decision.veto is None and decision.zone != "veto"
 
 
 def test_veto_normalises_pair_order() -> None:

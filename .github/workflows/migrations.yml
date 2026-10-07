@@ -455,10 +455,13 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_judgements_live.py -q
 
-      # E919's split statement, EXECUTED: one advert leaves, the rest are confirmed one
-      # property, the lane's must-link read and the operator must-not-links say so, and the
-      # undo gives every advert and every word back. The fakes cannot run the chokepoint's SQL.
-      - name: The operator's split statement and its undo (E919)
+      # The split by letters (MS18), EXECUTED: two accounts' curation routed per letter on a
+      # split into two letters and into three (a note with its ad, the rest back along the carry
+      # record, folds re-made only while their twin stands, the acting account's picks and
+      # copies), the count invariant per account and table, nothing of another account shown,
+      # and only "different" ruled across letters (a letter's join rules as the merge it is,
+      # MS12). The fakes cannot run the chokepoint's or the routing's SQL.
+      - name: The split by letters and its curation routing (MS18, the W4 gate)
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -466,8 +469,8 @@ jobs:
         run: pytest tests/test_property_split_live.py -q
 
       # Every property-anchored row a merge carries, EXECUTED through the public writers: one
-      # test per carrier (collections, tags, notes, dispatches, pipeline, dismissals, the asset
-      # link), each over two accounts, each proving the retired property is left holding no
+      # test per carrier (collections, tags, notes, dispatches, pipeline, dismissals), each
+      # over two accounts, each proving the retired property is left holding no
       # row. The record-only cursors in the unit tests cannot run the carriers' SQL. Two known
       # defects run as strict xfails until their fix PRs remove the marker.
       - name: Every property-anchored row follows a merge and a detach

@@ -10,7 +10,7 @@ Browse the instant the API returns, not up to a rebuild-interval later (the
 patches exactly the touched rows; the periodic rebuild stays the backstop.
 
 Called by `scripts.recompute_property_stats.properties_changed` (both identity writers and the
-dirty drain) and by the two asset writers. The drain is there since W6
+dirty drain). The drain is there since W6
 (docs/design/field-capture/PROGRAM.md, A15) — a post-publication attribute fill reaches
 `properties` in ~2 min and then waited a measured 11.7 min on average (94 rebuilds over 24 h;
 worst 36.6) for the wholesale rebuild to carry it into Browse. It is a FAST PATH, not a

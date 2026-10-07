@@ -464,6 +464,5 @@ def test_t_the_straggler_attach_births_recomputes_and_browse_syncs(conn, monkeyp
     pids = [_one(conn, "SELECT property_id FROM listings WHERE id = %s", (lid,)) for lid in lids]
     assert None not in pids and len(set(pids)) == 2
     for lid, pid in zip(lids, pids):
-        assert _one(conn, "SELECT price_per_m2_source_listing_id FROM properties WHERE id = %s",
-                    (pid,)) == lid
+        assert _one(conn, "SELECT repr_listing_ref_id FROM properties WHERE id = %s", (pid,)) == lid
     assert set(pids) <= set(synced)

@@ -105,26 +105,6 @@ def get_geo_options(
     return _policy(brokers.geo_options(conn, geo_level=geo_level), claims)
 
 
-@router.get("/by-listing")
-def get_listing_broker_by_query(
-    sreality_id: int | None = Query(default=None),
-    listing_id: int | None = Query(default=None),
-    conn: Any = Depends(deps.get_db_conn),
-    claims: dict = Depends(deps.verify_jwt),
-) -> dict[str, Any]:
-    return _by_listing(conn, sreality_id, listing_id, claims)
-
-
-@router.get("/by-listing/{sreality_id}")
-def get_listing_broker(
-    sreality_id: int,
-    listing_id: int | None = Query(default=None),
-    conn: Any = Depends(deps.get_db_conn),
-    claims: dict = Depends(deps.verify_jwt),
-) -> dict[str, Any]:
-    return _by_listing(conn, sreality_id, listing_id, claims)
-
-
 @router.post("/by-listings")
 def post_listing_brokers(
     body: ListingIdsIn,
@@ -177,14 +157,3 @@ def get_broker_contacts(
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return brokers.broker_contacts(conn, broker_id)
-
-
-def _by_listing(conn: Any, sreality_id: int | None, listing_id: int | None,
-                claims: dict[str, Any]) -> dict[str, Any]:
-    try:
-        result = brokers.listing_broker(conn, sreality_id, listing_id=listing_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if result is None:
-        raise HTTPException(status_code=404, detail="listing has no attributed broker")
-    return _policy(result, claims)

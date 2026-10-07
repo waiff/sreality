@@ -18,7 +18,7 @@ import {
   type CSSProperties,
 } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import ResizeHandle from '@/components/ResizeHandle';
 import {
@@ -54,6 +54,8 @@ import {
 import { usePageTitle } from '@/lib/pageTitle';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
+import { MergeSelection } from '@/components/CurationMarks';
+import MergeTakenBack from '@/components/MergeTakenBack';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
 import {
@@ -61,14 +63,10 @@ import {
   fetchRegionDispositionAnnotations,
   isApiConfigured,
   latestEstimationsByListing,
-  linkAssetProperties,
-  mergePropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
-import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { browseKeys } from '@/lib/browseKeys';
-import { revalidateCollections } from '@/lib/collectionCache';
-import { revalidatePipeline } from '@/lib/pipelineCache';
+import { useMergePreview, useMergeProperties } from '@/lib/useMergeProperties';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -205,7 +203,6 @@ export default function BrowseExperience({
   const [watchdogModalOpen, setWatchdogModalOpen] = useState(false);
 
   /* Dedup merge mode (page only). */
-  const queryClient = useQueryClient();
   const [mergeMode, setMergeMode] = useState(false);
   const [selectedForMerge, setSelectedForMerge] = useState<ReadonlySet<number>>(
     () => new Set(),
@@ -222,39 +219,7 @@ export default function BrowseExperience({
     setMergeMode(false);
     setSelectedForMerge(new Set());
   }, []);
-  const mergeMut = useMutation({
-    mutationFn: (propertyIds: number[]) => mergePropertySet(propertyIds),
-    onSuccess: (res) => {
-      /* The server has already patched the browse_list read model in the merge
-       * txn (toolkit.browse_read_model.sync_browse_list), so this refetch serves
-       * the post-merge state — the retired cards drop out immediately instead of
-       * lingering until the next 5-min rebuild. Success is toasted (the toolbar
-       * closing was the only prior signal); errors surface via the global
-       * MutationCache. `browse-count` is included so the header total decrements. */
-      pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
-      invalidateBrowseQueries(queryClient);
-      /* Same txn re-points collection_properties onto the survivor
-       * (toolkit/property_carriers.py), so the member map's KEYS changed too. */
-      revalidateCollections(queryClient);
-      /* ...and reconcile_pipeline_on_merge re-keys the card onto the survivor. */
-      revalidatePipeline(queryClient);
-      exitMergeMode();
-    },
-  });
-  /* Link selected properties as the SAME physical building without collapsing
-   * them — the same-building-but-distinct-unit case (e.g. a `byt` + a `komercni`,
-   * or a `dum` + a `pozemek`, at one address) a merge correctly refuses. (dum <->
-   * komercni IS now a single mergeable unit, so it is no longer an asset-link-only
-   * case.) Errors surface via the global MutationCache. */
-  const linkMut = useMutation({
-    mutationFn: (propertyIds: number[]) => linkAssetProperties(propertyIds),
-    onSuccess: (res) => {
-      const n = res.data.member_property_ids.length;
-      pushToast('ok', `Linked ${n} listings as the same building.`);
-      invalidateBrowseQueries(queryClient);
-      exitMergeMode();
-    },
-  });
+  const mergeMut = useMergeProperties(exitMergeMode);
   const handleLocationPick = useCallback((s: MapySuggestion) => {
     if (!s.position) return;
     setMapFlyTo({
@@ -859,13 +824,10 @@ export default function BrowseExperience({
                 {f.mergeMode && (
                   <MergeModeBar
                     active={mergeMode}
-                    selectedCount={selectedForMerge.size}
-                    busy={mergeMut.isPending || linkMut.isPending}
+                    selected={selectedForMerge}
                     merging={mergeMut.isPending}
-                    linking={linkMut.isPending}
                     onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
                     onMerge={() => mergeMut.mutate([...selectedForMerge])}
-                    onLink={() => linkMut.mutate([...selectedForMerge])}
                   />
                 )}
               </div>
@@ -1307,59 +1269,49 @@ function CardsGlyph() {
   );
 }
 
-function MergeModeBar({
+/* Merge mode's bar: the ticked properties by number, each with its marks
+   (MS16), so what a merge will carry is in view before the click, and the
+   "Různé" rulings it would take back (MS12), read before the merge is offered. */
+export function MergeModeBar({
   active,
-  selectedCount,
-  busy,
+  selected,
   merging,
-  linking,
   onToggle,
   onMerge,
-  onLink,
 }: {
   active: boolean;
-  selectedCount: number;
-  busy: boolean;
+  selected: ReadonlySet<number>;
   merging: boolean;
-  linking: boolean;
   onToggle: () => void;
   onMerge: () => void;
-  onLink: () => void;
 }) {
+  const selectedCount = selected.size;
+  const preview = useMergePreview(selected);
   const btn = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
   return (
     <div className="flex items-center gap-2 shrink-0">
       {active && (
         <>
-          <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-            {selectedCount === 0
-              ? 'Pick listings to merge or link'
-              : `${selectedCount} selected`}
-          </span>
+          {selectedCount === 0 ? (
+            <span className="text-[0.75rem] text-[var(--color-ink-3)]">Pick listings to merge</span>
+          ) : (
+            <MergeSelection ids={selected} />
+          )}
+          {selectedCount >= 2 && <MergeTakenBack preview={preview} className="text-[0.75rem]" />}
           <button
             type="button"
             onClick={onMerge}
-            disabled={busy || selectedCount < 2}
+            disabled={merging || selectedCount < 2 || preview.isPending}
             className={`${btn} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
           >
             {merging ? 'Merging…' : `Merge ${selectedCount >= 2 ? selectedCount : ''}`.trim()}
-          </button>
-          {/* Cross-category same-building grouping a merge refuses. */}
-          <button
-            type="button"
-            onClick={onLink}
-            disabled={busy || selectedCount < 2}
-            title="Mark as the same physical building without merging — keeps each listing's category"
-            className={`${btn} border border-[var(--color-copper)] text-[var(--color-copper-2)] hover:bg-[var(--color-copper-soft)]`}
-          >
-            {linking ? 'Linking…' : 'Link as same building'}
           </button>
         </>
       )}
       <button
         type="button"
         onClick={onToggle}
-        disabled={busy}
+        disabled={merging}
         className={`${btn} border ${
           active
             ? 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)]'

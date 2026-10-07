@@ -37,6 +37,8 @@ import { matchesCollections } from '@/lib/collectionScope';
 import { type ListingStatus } from '@/lib/filters';
 import { filterById } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
+import ErrorBanner from '@/components/ErrorBanner';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { FunnelIcon, InfoIcon } from '@/components/icons';
 import SizeToggle, {
   LargeImageGlyph,
@@ -303,6 +305,10 @@ export default function Pipeline() {
                 />
               </Field>
             )}
+            {readFailed(membersQ) && (
+              /* The filter fails open (rule #22) and says so (MS16). */
+              <ReadFailedMark what="Kolekce" variant="header" onRetry={() => void membersQ.refetch()} />
+            )}
             {bar.showCollections && (
               <Field label="Kolekce">
                 <MultiselectChips
@@ -363,10 +369,15 @@ export default function Pipeline() {
         </div>
       )}
 
-      {stagesQ.error || boardQ.error ? (
-        <p className="mt-8 text-sm text-[var(--color-brick)]">
-          Nepodařilo se načíst pipeline.
-        </p>
+      {readFailed(stagesQ) || readFailed(boardQ) ? (
+        <ErrorBanner
+          title="Pipeline"
+          message="se nepodařilo načíst."
+          onRetry={() => {
+            void stagesQ.refetch();
+            void boardQ.refetch();
+          }}
+        />
       ) : boardQ.isLoading ? (
         /* The stages arrive in their own (cached, often already-warm) query, so
            the columns can be drawn — labelled, coloured, in order — while the
@@ -385,7 +396,7 @@ export default function Pipeline() {
           /* The board's card face: one 48px thumbnail and a broker line. No
              carousel — asking the multi-image read for one photo per card is
              exactly what W4's listing_cover_public replaced. */
-          renders={{ covers: true, brokers: true }}
+          renders={{ covers: true, brokers: cards }}
         >
           <Board
             stages={stages}

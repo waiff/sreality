@@ -47,6 +47,17 @@ describe('<Collections>', () => {
     ).toBeInTheDocument();
   });
 
+  it('says a failed list with a retry that reads again (MS16)', async () => {
+    vi.mocked(api.listCollections)
+      .mockRejectedValueOnce(new Error('HTTP 500'))
+      .mockResolvedValue({ data: [], total: 0 });
+    renderPage();
+    const retry = await screen.findByRole('button', { name: 'Zkusit znovu' });
+    expect(screen.queryByText('No collections yet')).toBeNull();
+    fireEvent.click(retry);
+    expect(await screen.findByText('No collections yet')).toBeInTheDocument();
+  });
+
   it('submits what was typed into the named fields', async () => {
     vi.mocked(api.createCollection).mockResolvedValue({} as never);
     renderPage();

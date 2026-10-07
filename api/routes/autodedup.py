@@ -36,7 +36,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
+from api.category_clash_text import SAME_ENDING, clash_sentence
 from autodedup import candidates as candidate_groups
+from autodedup import category_splits as categories
 from autodedup import progress_sql as psql
 from autodedup import proposed_splits as splits
 from autodedup import ui_sql as usql
@@ -46,7 +48,6 @@ from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, s
 from autodedup.export import listing_digest, scrubbed_text
 from autodedup.harness import model_of_version
 from autodedup.model import hand_initialised
-from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
 from toolkit.property_identity import category_clash, record_ruling
 from toolkit.property_split import (
     newest_pair_rulings,
@@ -2190,7 +2191,7 @@ def verdict(
     APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
 
     A pair `same`, typed or a correction, between adverts rule 15 keeps apart (a sale and a
-    rental, a flat and a commercial unit) is a 422 in the operator's words (E925), never a 409:
+    rental, a flat and a house) is a 422 in the operator's words (E925), never a 409:
     the rulings page reads every 409 as "ruled again since the page loaded".
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
@@ -2229,9 +2230,8 @@ def verdict(
                         status_code=404, detail="one of the two adverts does not exist")
                 if body.verdict == "same" and (
                         clash := category_clash(sides[0][:2], sides[0][2:])) is not None:
-                    raise HTTPException(status_code=422, detail=_SAME_REFUSED[clash[0]].format(
-                        a=_CATEGORY_LABELS.get(clash[1], clash[1]),
-                        b=_CATEGORY_LABELS.get(clash[2], clash[2])))
+                    raise HTTPException(status_code=422, detail=clash_sentence(
+                        clash[0], clash[1], clash[2], ending=SAME_ENDING))
                 stored_row = record_ruling(
                     conn, lo, hi, verdict=body.verdict, decided_by=str(decided_by),
                     note=body.note, reasons=reasons,
@@ -2315,23 +2315,6 @@ def verdict(
         },
         "store_ready": True,
     }
-
-
-# E925: a `same` the merge chokepoint's category gate refuses; stored, it would be a must-link
-# the lane dissolves and re-seeds every pass, and a positive label. The pair page and the rulings
-# page print the detail as it is: the system's rule, not a claim about the property (an auction
-# and a sale of one flat ARE one flat), in the Browse filters' own Czech labels.
-_SAME_REFUSED: dict[str, str] = {
-    "category_type": "Inzerát typu {a} a inzerát typu {b} systém nikdy nespojí do jedné "
-                     "nemovitosti, proto je nelze označit jako stejné.",
-    "category_main": "Inzerát v kategorii {a} a inzerát v kategorii {b} systém nikdy nespojí "
-                     "do jedné nemovitosti (jediná výjimka je dům a komerční objekt), proto je "
-                     "nelze označit jako stejné.",
-}
-_CATEGORY_LABELS: dict[str, str] = {
-    option.value: option.label_cs
-    for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)
-}
 
 
 def _superseded(conn: Any, body: VerdictIn) -> dict[str, Any]:
@@ -2879,6 +2862,43 @@ def proposed_split(
     return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}
 
 
+# ------------------------------------------------------------------ the category review (E937)
+
+CATEGORY_SPLITS_MAX = 100
+_PROPERTY_IDS = re.compile(r"[0-9]{1,18}(?:,[0-9]{1,18})*")
+
+
+def _property_ids(raw: str) -> list[int]:
+    """`12664,9737` -> the distinct ids in the order named; 422 unless 1 to 100 of them."""
+    if not _PROPERTY_IDS.fullmatch(raw):
+        raise HTTPException(status_code=422, detail="properties: property ids separated by commas")
+    ids = list(dict.fromkeys(int(part) for part in raw.split(",")))
+    if len(ids) > CATEGORY_SPLITS_MAX:
+        raise HTTPException(status_code=422,
+                            detail=f"properties: at most {CATEGORY_SPLITS_MAX} property ids")
+    return ids
+
+
+@router.get("/category-splits")
+def category_splits(
+    request: Request, properties: str = Query(...), conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The named live properties as sides of ads rule 15 never joins, for the operator to split
+    or keep (E937); `missing` names the ids that are not a live property of two or more ads.
+    Read-only: the decision is `POST /properties/{id}/split`."""
+    _reject_unknown_filters(request, frozenset({"properties"}))
+    ids = _property_ids(properties)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        items = categories.category_splits(conn, ids)
+    except _STORE_BEHIND:
+        return _not_ready()
+    shown = {item["property_id"] for item in items}
+    return {"data": {"items": items, "missing": [pid for pid in ids if pid not in shown]},
+            "store_ready": True}
+
+
 # ------------------------------------------------------------------ the rulings page (E920)
 #
 # Every operator ruling in one list, beside the engine's current view and the state of
@@ -3112,7 +3132,7 @@ def _dissolved_closures(conn: Any, page: list[dict[str, Any]],
 _CLOSURE_REFUSED = {
     "size": "spojují skupinu o {n} inzerátech, větší, než pevné pravidlo dovolí",
     "category_type": "spojují prodej s pronájmem, což pevné pravidlo nedovolí",
-    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a komerční prostor), "
+    "compat_class": ("spojují neslučitelné druhy nemovitostí (např. byt a dům), "
                      "což pevné pravidlo nedovolí"),
     "must_not_link": "odporují vašemu vlastnímu rozhodnutí „různé“ uvnitř téže skupiny",
 }

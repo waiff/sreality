@@ -1,16 +1,20 @@
 """The stateful fake of `listings.property_id`, `properties`, the merge ledger and the operator's
-ruling store (`autodedup.verdicts` + `autodedup.must_not_link`) that the one merge, the one undo
-and the split statement run against end to end: tests/test_detach_listing.py,
+ruling store (`autodedup.verdicts`, pairs and sets, + `autodedup.must_not_link`) that the one
+merge, the one undo and the split by letters run against end to end: tests/test_detach_listing.py,
 tests/test_property_merge_set.py and tests/test_property_split.py; executed:
-tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
+tests/test_merge_safety_live.py, tests/test_property_carriers_live.py and
+tests/test_property_split_live.py.
 
-STRICT: it answers each statement by its exact text and raises on one it does not model. The
-carriers other than the asset link are swapped for `RecordingCarrier`s by the `ledger_carriers`
-fixture, which every suite over this fake opts into; `db.carried` then holds each
-(merge|detach, carrier name, step) the writers handed the seam. The fake also models the
-dispatch carrier with the `channel_sends` its collapse must not strand; a test runs it for real
-with `keep_real`. `db.changed`, `db.browse` and `db.broker` each id list the after-step
-(`properties_changed`) recomputed, patched into Browse and queued for the broker drain."""
+STRICT: it answers each statement by its exact text and raises on one it does not model. Every
+carrier is swapped for a `RecordingCarrier` by the `ledger_carriers` fixture, which every suite
+over this fake opts into; `db.carried` then holds each ("merge", carrier name, step) the merge
+handed the seam, and `db.carries` each carry record row written (`RecordingCarrier.rows` is what a
+recording carrier hands back). The fixture also plans no curation (`curation_plan` answers []) and
+records each `route_curation` call in `db.routed` (left, routes, landed): the routing SQL runs
+live only. The fake also models the dispatch carrier with the `channel_sends` its collapse must
+not strand; a test runs it for real with `keep_real`. `db.changed`, `db.browse` and `db.broker`
+each id list the after-step (`properties_changed`) recomputed, patched into Browse and queued for
+the broker drain."""
 
 from __future__ import annotations
 
@@ -34,24 +38,27 @@ T0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 class _Tx:
-    def __init__(self, db: "_Ledger") -> None:
-        self.db = db
+    def __init__(self, db: "_Ledger", force_rollback: bool = False) -> None:
+        self.db, self.force_rollback = db, force_rollback
 
     def __enter__(self) -> "_Tx":
         self.saved = (dict(self.db.listings), dict(self.db.props), [dict(e) for e in self.db.events],
-                      dict(self.db.into), dict(self.db.assets),
+                      dict(self.db.into),
                       [dict(r) for r in self.db.verdicts], dict(self.db.mnl),
                       list(self.db.carried), list(self.db.changed), list(self.db.browse),
                       list(self.db.broker), {k: dict(v) for k, v in self.db.dispatches.items()},
-                      {k: dict(v) for k, v in self.db.sends.items()})
+                      {k: dict(v) for k, v in self.db.sends.items()},
+                      [dict(c) for c in self.db.carries], [dict(x) for x in self.db.sets],
+                      list(self.db.routed))
         return self
 
     def __exit__(self, exc_type: Any, *exc: Any) -> bool:
-        if exc_type is not None:
+        if exc_type is not None or self.force_rollback:
             (self.db.listings, self.db.props, self.db.events, self.db.into,
-             self.db.assets, self.db.verdicts, self.db.mnl,
+             self.db.verdicts, self.db.mnl,
              self.db.carried, self.db.changed, self.db.browse, self.db.broker,
-             self.db.dispatches, self.db.sends) = self.saved
+             self.db.dispatches, self.db.sends, self.db.carries, self.db.sets,
+             self.db.routed) = self.saved
             self.db.log.append(("rollback", None))
         return False
 
@@ -86,34 +93,44 @@ class _Cur:
 
 class _Ledger:
     """listings: id -> property_id; props: id -> status; into: id -> merged_into; first_seen /
-    assets / cats / canonical: per property; events: the merge ledger; asset_events: the asset
-    membership log; verdicts: the pair rulings LEDGER (migration 574), appended on change like
-    `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; mnl: (lo, hi) -> (source,
+    cats / canonical: per property; ad_cats: an ad's own category where it is not its property's
+    `cats`; ad_seen: an ad's first seen date (default T0); contentless: the ads the merge gate
+    never counts; events: the merge ledger; verdicts: the pair rulings LEDGER (migration 574),
+    appended on change like `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; sets:
+    the set rulings, appended like `VERDICT_CLUSTER_APPEND_SQL`; mnl: (lo, hi) -> (source,
     reason); dispatches: notification_dispatches id -> {property_id, *its collapse keys} (a key
     left out is NULL); sends: channel_sends id -> {consumer, notification_id}; claiming: the
     sends an outbox claim is inserting while the merge runs (not yet committed)."""
 
     def __init__(self, listings: dict[int, int], *, first_seen: dict[int, datetime] | None = None,
-                 assets: dict[int, int] | None = None, canonical: dict[int, int] | None = None,
+                 canonical: dict[int, int] | None = None,
                  props: dict[int, str] | None = None,
                  cats: dict[int, tuple[str | None, str | None]] | None = None,
+                 ad_cats: dict[int, tuple[str | None, str | None]] | None = None,
+                 ad_seen: dict[int, datetime] | None = None,
+                 contentless: set[int] | None = None,
                  dispatches: dict[str, dict[str, Any]] | None = None,
                  sends: dict[int, dict[str, Any]] | None = None,
                  claiming: dict[int, dict[str, Any]] | None = None) -> None:
         self.listings = dict(listings)
         self.props = {pid: "active" for pid in set(listings.values())} | (props or {})
         self.into: dict[int, int] = {}
-        self.first_seen, self.assets = first_seen or {}, dict(assets or {})
+        self.first_seen = first_seen or {}
         self.cats = cats or {}
+        self.ad_cats = ad_cats or {}
+        self.ad_seen = ad_seen or {}
+        self.contentless = contentless or set()
         self.canonical = canonical or {}
         self.events: list[dict[str, Any]] = []
-        self.asset_events: list[tuple[int, int, str, str]] = []
         self.log: list[tuple[str, Any]] = []
         self.count: int | None = None
         self.verdicts: list[dict[str, Any]] = []
+        self.sets: list[dict[str, Any]] = []
+        self.routed: list[tuple[int, tuple, dict[int, int]]] = []
         self.mnl: dict[tuple[int, int], tuple[str, str]] = {}
         self.clock = 0
         self.carried: list[tuple[str, str, Any]] = []
+        self.carries: list[dict[str, Any]] = []
         self.changed: list[list[int]] = []
         self.browse: list[list[int]] = []
         self.broker: list[list[int]] = []
@@ -129,6 +146,17 @@ class _Ledger:
                       "reasons": reasons or [], "decided_by": by})
         if verdict in usql.NEGATIVE_VERDICTS:
             self.mnl[(lo, hi)] = ("operator", note or "")
+
+    def rule_set(self, key: int, members: list[int], verdict: str, *,
+                 generation: str | None = "g1", note: str | None = None) -> None:
+        """Seed a stored set ruling, as the group routes would have written it."""
+        self._cluster_append({"cluster_key": key, "generation": generation,
+                              "member_ids": sorted(members), "verdict": verdict, "note": note,
+                              "reasons": [], "decided_by": OP})
+
+    def newest_set(self, members: list[int]) -> dict[str, Any] | None:
+        rows = [r for r in self.sets if sorted(r["member_ids"]) == sorted(members)]
+        return max(rows, key=lambda r: (r["decided_at"], r["id"])) if rows else None
 
     def newest(self, lo: int, hi: int, by: str | None = None) -> dict[str, Any] | None:
         """The pair's newest row (`decided_at desc, id desc`), or `by`'s newest."""
@@ -179,8 +207,8 @@ class _Ledger:
     def cursor(self) -> _Cur:
         return _Cur(self)
 
-    def transaction(self) -> _Tx:
-        return _Tx(self)
+    def transaction(self, *, force_rollback: bool = False) -> _Tx:
+        return _Tx(self, force_rollback)
 
     def sql(self, needle: str) -> list[Any]:
         return [p for s, p in self.log if needle in s]
@@ -219,28 +247,58 @@ class _Ledger:
         if self.mnl.get(key, ("",))[0] == "operator":
             del self.mnl[key]
 
-    def _mnl_pairs(self, p: Any) -> list[tuple]:
-        ids = set(p["ids"])
-        return [(lo, hi, src, why) for (lo, hi), (src, why) in sorted(self.mnl.items())
-                if lo in ids and hi in ids]
+    def _cluster_append(self, p: Any) -> None:
+        """`VERDICT_CLUSTER_APPEND_SQL`: a new set row unless the newest of (key, generation)
+        already says exactly this about exactly these members."""
+        rows = [r for r in self.sets if (r["cluster_key"], r["generation"])
+                == (p["cluster_key"], p["generation"])]
+        last = max(rows, key=lambda r: (r["decided_at"], r["id"])) if rows else None
+        if last is None or (last["verdict"], last["note"], last["member_ids"]) != (
+                p["verdict"], p["note"], list(p["member_ids"])):
+            self.clock += 1
+            self.sets.append({"id": len(self.sets) + 1, "cluster_key": p["cluster_key"],
+                              "generation": p["generation"], "member_ids": list(p["member_ids"]),
+                              "verdict": p["verdict"], "note": p["note"],
+                              "decided_by": p["decided_by"], "decided_at": self.clock})
 
-    def _mnl_restore(self, p: Any) -> None:
-        self.mnl[(p["listing_lo"], p["listing_hi"])] = (p["source"], p["reason"])
+    def _negative_sets(self, p: Any) -> list[tuple]:
+        """`_NEGATIVE_SETS_SQL`: the newest row per member set within these ads (any verdict)."""
+        ids, newest = set(p["ids"]), {}
+        for r in sorted(self.sets, key=lambda r: (r["decided_at"], r["id"])):
+            members = tuple(sorted(set(r["member_ids"])))
+            if set(members) <= ids:
+                newest[members] = r
+        return [(r["cluster_key"], r["generation"], list(m), r["verdict"])
+                for m, r in sorted(newest.items())]
+
+    def _ad_categories(self, p: Any) -> list[tuple]:
+        return [(lid, *self.ad_cats.get(lid, self.cats.get(pid, ("prodej", "byt"))),
+                 self.ad_seen.get(lid, T0), lid in self.contentless)
+                for lid, pid in sorted(self.listings.items()) if lid in p["ids"]]
 
     def _adverts_on(self, p: Any) -> list[tuple]:
         return [(lid, pid) for lid, pid in sorted(self.listings.items()) if pid in p["ids"]]
 
     def _lock_set(self, p: Any) -> list[tuple]:
-        cat = lambda pid: self.cats.get(pid, ("prodej", "byt"))  # noqa: E731
-        return [(pid, self.props[pid], self.first_seen.get(pid, T0), self.assets.get(pid),
-                 *cat(pid)) for pid in sorted(p["ids"]) if pid in self.props]
+        return [(pid, self.props[pid], self.first_seen.get(pid, T0))
+                for pid in sorted(p["ids"]) if pid in self.props]
+
+    def _set_ads(self, p: Any) -> list[tuple]:
+        """`_SET_ADS_SQL`: per (member, category) its lowest contentful ad; an ad's category is
+        its `ad_cats` entry, else its property's `cats` (default prodej/byt)."""
+        lowest: dict[tuple, int] = {}
+        for lid, pid in sorted(self.listings.items()):
+            if pid in p["ids"] and lid not in self.contentless:
+                cat = self.ad_cats.get(lid, self.cats.get(pid, ("prodej", "byt")))
+                lowest.setdefault((pid, *cat), lid)
+        return sorted(((*key, lid) for key, lid in lowest.items()), key=lambda r: (r[0], r[3]))
+
+    def _carry(self, p: Any) -> None:
+        self.carries.append(dict(p))
 
     def _status(self, p: Any) -> list[tuple]:
         return [(pid, self.props[pid], self.into.get(pid))
                 for pid in sorted(p["ids"]) if pid in self.props]
-
-    def _retired_asset(self, p: Any) -> list[tuple]:
-        return [(self.assets.get(p["retired"]),)]
 
     def _canonical_adverts(self, p: Any) -> list[tuple]:
         return [(self.canonical[pid],) for pid in p["ids"] if pid in self.canonical]
@@ -248,7 +306,7 @@ class _Ledger:
     def _ingest_grouping(self, p: Any) -> list[tuple]:
         self.events.append({"id": len(self.events) + 1, "group": p["group"],
                             "survivor": p["left"], "listing": p["listing"], "prev": p["born"],
-                            "source": "operator", "undone_by": p["by"]})
+                            "source": "operator", "undone_by": p["by"], "reason": p["reason"]})
         return [(len(self.events),)]
 
     def _new_singletons(self, p: Any) -> list[tuple]:
@@ -257,6 +315,7 @@ class _Ledger:
             if lid in self.listings and self.listings[lid] is None:
                 pid = max(self.props) + 1
                 self.props[pid], self.listings[lid] = "active", pid
+                self.canonical[pid] = lid  # born with its one advert as its canonical ad
                 born.append((pid,))
         return born
 
@@ -306,9 +365,6 @@ class _Ledger:
             self.props[p["pid"]] = "active"
             self.into.pop(p["pid"], None)
 
-    def _staying(self, p: Any) -> list[tuple]:
-        return [(lid,) for lid, pid in sorted(self.listings.items()) if pid == p[0]]
-
     def _recompute_scoped(self, p: Any) -> None:
         self.changed.append(list(p["ids"]))
 
@@ -319,14 +375,6 @@ class _Ledger:
         self.broker.append(list(p["ids"]))
 
     def _nothing(self, p: Any) -> None:
-        return None
-
-    def _carry(self, p: dict[str, Any]) -> None:
-        for pid, want in ((p["survivor"], p["asset"]), (p["retired"], None)):
-            if self.assets.get(pid) != want:
-                self.assets[pid] = want
-                self.asset_events.append((p["asset"], pid, "linked" if want else "unlinked",
-                                          p["reason"]))
         return None
 
     def _twin(self, nid: str, survivor: int) -> str | None:
@@ -386,21 +434,6 @@ class _Ledger:
             row["property_id"] = p["survivor"]
         self.count = len(moved)
 
-    def _restore(self, p: dict[str, Any]) -> None:
-        carried = [a for a, pid, act, why in self.asset_events
-                   if pid == p["restored"] and act == "unlinked" and why == p["merge"]]
-        holders = [h for h in p["path"] if carried and self.assets.get(h) == carried[-1]]
-        if not holders:
-            return None
-        asset = carried[-1]
-        moved = [(p["restored"], asset)] if self.assets.get(p["restored"]) is None else []
-        moved += [(h, None) for h in holders
-                  if any((asset, h, "linked", m) in self.asset_events for m in p["merges"])]
-        for pid, want in moved:
-            self.assets[pid] = want
-            self.asset_events.append((asset, pid, "linked" if want else "unlinked", p["detach"]))
-        return None
-
 
 def _n(sql: str) -> str:
     return " ".join(sql.split())
@@ -422,16 +455,16 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (usql.VERDICT_PAIR_APPEND_SQL, _Ledger._append),
         (usql.MUST_NOT_LINK_UPSERT_SQL, _Ledger._mnl_upsert),
         (usql.MUST_NOT_LINK_RETRACT_SQL, _Ledger._mnl_retract),
-        (usql.MUST_NOT_LINK_PAIRS_SQL, _Ledger._mnl_pairs),
-        (usql.MUST_NOT_LINK_RESTORE_SQL, _Ledger._mnl_restore),
-        (ps._ADVERTS_ON_SQL, _Ledger._adverts_on),
-        *((timeout, _Ledger._nothing) for timeout in ps._TIMEOUTS),
+        (usql.VERDICT_CLUSTER_APPEND_SQL, _Ledger._cluster_append),
+        (pi._MEMBER_ADS_SQL, _Ledger._adverts_on),
+        (pi._NEGATIVE_SETS_SQL, _Ledger._negative_sets),
+        (pi._AD_CATEGORIES_SQL, _Ledger._ad_categories),
+        *((timeout, _Ledger._nothing) for timeout in (*ps._TIMEOUTS, ps._READ_ONLY)),
         (pi._LOCK_SET_SQL, _Ledger._lock_set),
+        (pi._SET_ADS_SQL, _Ledger._set_ads),
+        (pi._CARRY_SQL, _Ledger._carry),
         (pi._STATUS_SQL, _Ledger._status),
         (pi._STATUS_SQL + " FOR UPDATE", _Ledger._status),
-        (carriers.AssetLink.RETIRED_ASSET_SQL, _Ledger._retired_asset),
-        (carriers._CARRY_ASSET_LINK_SQL, _Ledger._carry),
-        (carriers._RESTORE_ASSET_LINK_SQL, _Ledger._restore),
         (pi._CANONICAL_ADVERTS_SQL, _Ledger._canonical_adverts),
         (pi._INGEST_GROUPING_SQL, _Ledger._ingest_grouping),
         (NEW_SINGLETONS_SQL, _Ledger._new_singletons),
@@ -445,7 +478,6 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (pi._MOVE_ADVERT_SQL, _Ledger._move_advert),
         (pi._UNDO_SQL, _Ledger._undo),
         (pi._REACTIVATE_SQL, _Ledger._reactivate),
-        (pi._STAYING_SQL, _Ledger._staying),
         (rps._RECOMPUTE_SCOPED_SQL, _Ledger._recompute_scoped),
         (brm._DELETE_SQL, _Ledger._browse_delete),
         (brm._INSERT_SQL, _Ledger._nothing),
@@ -461,28 +493,36 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
 @dataclass
 class RecordingCarrier:
     """A carrier that only records the step it was handed (in `db.carried` and `db.log`), so a
-    suite over this fake asserts at the carrier seam instead of each carrier's SQL."""
+    suite over this fake asserts at the carrier seam instead of each carrier's SQL; it hands
+    back `rows` (none by default) as what it carried."""
 
     name: str
     columns: tuple = ()
     sql: tuple = ()
+    rows: tuple = ()
 
-    def on_merge(self, cur: _Cur, step: carriers.MergeStep) -> None:
+    def on_merge(self, cur: _Cur, step: carriers.MergeStep) -> list[carriers.Carried]:
         cur.db.carried.append(("merge", self.name, step))
         cur.db.log.append((f"carrier:{self.name}", step))
+        return list(self.rows)
 
-    def on_detach(self, cur: _Cur, step: carriers.DetachStep) -> None:
-        cur.db.carried.append(("detach", self.name, step))
-        cur.db.log.append((f"carrier:{self.name}", step))
+
+def record_routes(cur: _Cur, routes: Any, *, left: int, landed: Any) -> dict[str, int]:
+    """`route_curation` recorded, not executed: (left, routes, landed) into `db.routed`."""
+    cur.db.routed.append((left, tuple(routes), dict(landed)))
+    cur.db.log.append(("route_curation", left))
+    return {"carry_rows": 0, "note_moves": 0}
 
 
 @pytest.fixture()
 def ledger_carriers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every carrier but the asset link (which this fake models) recorded, not executed: a suite
-    that forgets it fails on the first carrier statement the strict fake does not model."""
+    """Every carrier recorded, not executed, no curation planned and every routing recorded: a
+    suite that forgets it fails on the first carrier or routing statement the strict fake does
+    not model."""
     monkeypatch.setattr(carriers, "PROPERTY_CARRIERS", tuple(
-        c if c.name == "asset_link" else RecordingCarrier(c.name)
-        for c in carriers.PROPERTY_CARRIERS))
+        RecordingCarrier(c.name) for c in carriers.PROPERTY_CARRIERS))
+    monkeypatch.setattr(carriers, "curation_plan", lambda cur, **kw: [])
+    monkeypatch.setattr(carriers, "route_curation", record_routes)
 
 
 def keep_real(monkeypatch: pytest.MonkeyPatch, carrier: carriers.Carrier) -> None:

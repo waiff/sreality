@@ -20,6 +20,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchPipelineMembers, fetchPipelineStages, pipelineKeys } from '@/lib/queries';
 import PipelineMark from '@/components/PipelineMark';
 import PipelineStageMenu from '@/components/pipeline/PipelineStageMenu';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { stageAccent, stageBadge } from '@/lib/pipelineStage';
 import { usePipelineCard } from '@/lib/usePipelineCard';
 
@@ -56,6 +57,13 @@ export default function PipelineToggle({ property_id }: { property_id: number })
         className="inline-flex h-[1.9rem] w-32 animate-pulse rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]"
         aria-hidden
       />
+    );
+  }
+
+  /* A failed read is not "out of the pipeline" (MS16): say so and read again. */
+  if (readFailed(membersQ)) {
+    return (
+      <ReadFailedMark what="Pipeline" onRetry={() => void membersQ.refetch()} variant="header" />
     );
   }
 

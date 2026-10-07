@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import DismissButton from '@/components/DismissButton';
+import NoteMark from '@/components/NoteMark';
 import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import {
@@ -29,11 +30,12 @@ interface Column {
 
 const COLUMNS: ReadonlyArray<Column> = [
   /* The triage verbs — the deal-pipeline funnel (rule #22 — the affordance
-     belongs on EVERY surface a property appears on) and the dismiss control.
-     Not sortable: both are operator state, not listing attributes; the
-     cohort-level views are the Pipeline scope and the dismissed reveal. */
+     belongs on EVERY surface a property appears on) and the dismiss control —
+     and the note mark (MS16). Not sortable: all are operator state, not listing
+     attributes; the cohort-level views are the Pipeline scope and the
+     dismissed reveal. */
   { field: 'pipeline',      label: '',            align: 'left',  sortable: false,
-    srLabel: 'Pipeline a skrytí' },
+    srLabel: 'Pipeline, skrytí a poznámky' },
   /* Not sortable: sreality_id mixes real positive ids with synthetic negative
    * ones (non-sreality portals), so ordering by it is meaningless. */
   { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: false },
@@ -242,6 +244,7 @@ function Row({
             variant="inline"
           />
           <DismissButton property_id={row.property_id} variant="inline" />
+          <NoteMark property_id={row.property_id} variant="inline" />
         </div>
       </td>
       <td className="px-4 py-2.5 align-middle">

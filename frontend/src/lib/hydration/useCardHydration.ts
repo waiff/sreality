@@ -1,8 +1,9 @@
-/* The two card decorations, as independent non-blocking reads.
+/* The card decorations, as independent non-blocking reads.
  *
- * Both are keyed on the SURROGATE `listing_id` (migration 343), never
- * `sreality_id`: a post-Gate-2 non-sreality representative has a NULL
- * sreality_id and would silently lose its thumbnail and its broker line.
+ * Per-ad reads are keyed on the SURROGATE `listing_id` (migration 343), never
+ * `sreality_id`: a post-Gate-2 non-sreality ad has a NULL sreality_id and would
+ * silently lose its thumbnail and its broker. The board's broker line is
+ * property-grain (MS7) and keyed on the property.
  *
  * `placeholderData: keepPreviousData` is what makes a re-sort or a filter
  * change feel free — the previous cohort's decorations stay on screen while the
@@ -11,17 +12,22 @@
 import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import { fetchListingBrokersByIds } from '@/lib/brokers';
+import {
+  fetchListingBrokersByIds,
+  propertyBrokers,
+  type ListingBroker,
+  type PropertyBrokers,
+} from '@/lib/brokers';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { imageSrc } from '@/lib/imageUrl';
 import {
   fetchImagesForListingIds,
   fetchListingCovers,
-  pipelineCardBroker,
+  fetchPropertySourcesByPropertyIds,
 } from '@/lib/queries';
-import type { ImagePublic, PipelineCardBroker } from '@/lib/types';
+import type { ImagePublic } from '@/lib/types';
 
-import { hydrationKeys } from './keys';
+import { hydrationKeys, type BrokerSubject } from './keys';
 
 /* Decorations are worth re-reading far less often than the cards themselves: a
  * listing's cover photo and its attributed broker change on the scrape's
@@ -30,7 +36,8 @@ import { hydrationKeys } from './keys';
 const DECORATION_STALE_MS = 5 * 60_000;
 
 export type CoverByListingId = ReadonlyMap<number, string>;
-export type BrokerByListingId = ReadonlyMap<number, PipelineCardBroker>;
+export type BrokerByListingId = ReadonlyMap<number, ListingBroker>;
+export type BrokersByPropertyId = ReadonlyMap<number, PropertyBrokers>;
 /* Raw rows, not URLs — deliberately lossless where `covers` is not. The
  * comparables modal calls imageSrc itself and its map preview wants the same
  * rows, so narrowing here would just push a second shape onto every consumer.
@@ -69,26 +76,15 @@ export function useListingCovers(listingIds: readonly number[]): {
   };
 }
 
-/* The canonical broker per listing, contact fields included — ONE round trip.
- *
- * W6 (migration 419) put primary_email / primary_phone on listing_broker_public,
- * the view /brokers/by-listings already reads, so the chained /brokers?ids= call
- * that used to follow it is gone. It never bought anything: the contact pair sits
- * on the same `brokers` row this view already joins, so the second statement
- * re-read heap pages the first had in hand (measured: 207 execution + 436
- * planning buffers, all duplicate) and paid a second Railway round trip's
- * ~270-410 ms floor to do it — serialized, because its broker_ids came out of the
- * first response.
- *
- * No `.catch(() => new Map())` swallow. The old inline version had to muffle
- * errors because a broker failure would have taken the whole board's queryFn
- * down with it; as its own query it fails alone, the cards keep their broker
- * line blank, and the error stays visible to React Query (and to the global
- * toast) instead of being silently converted into "this listing has no
- * broker". Structural isolation replaces a hand-written swallow. */
+/* The broker behind each ad, contact included (migration 419), in ONE round trip:
+ * the property page's broker list and every advert row read this one map. No
+ * previous-data placeholder (another property's map would read as "unattributed")
+ * and no swallow: a failed read is `isError`, which the page says out loud. */
 export function useListingBrokers(listingIds: readonly number[]): {
   brokers: BrokerByListingId;
   isPending: boolean;
+  isError: boolean;
+  refetch: () => void;
 } {
   const ids = useMemo(
     () => [...new Set(listingIds)].sort((a, b) => a - b),
@@ -96,22 +92,47 @@ export function useListingBrokers(listingIds: readonly number[]): {
   );
   const q = useQuery({
     queryKey: hydrationKeys.brokers(ids),
-    queryFn: async () => {
-      const listingBrokers = await fetchListingBrokersByIds(ids);
-      const out = new Map<number, PipelineCardBroker>();
-      for (const [listingId, lb] of listingBrokers) {
-        const projected = pipelineCardBroker(lb);
-        if (projected) out.set(listingId, projected);
-      }
-      return out as BrokerByListingId;
-    },
+    queryFn: () => fetchListingBrokersByIds(ids) as Promise<BrokerByListingId>,
     enabled: ids.length > 0,
-    placeholderData: keepPreviousData,
     staleTime: DECORATION_STALE_MS,
   });
   return {
     brokers: q.data ?? EMPTY_BROKERS,
-    isPending: ids.length > 0 && q.data === undefined,
+    isPending: ids.length > 0 && q.data === undefined && !q.isError,
+    isError: q.isError && q.data === undefined,
+    refetch: () => void q.refetch(),
+  };
+}
+
+/* The board's broker line (MS7): each card's property's list, by the property
+ * page's `propertyBrokers` rule, from two batched reads (the cards' ads, then
+ * their brokers), never one per card. A failure costs the cards that line only. */
+export function usePropertyBrokers(subjects: readonly BrokerSubject[]): {
+  brokers: BrokersByPropertyId;
+  isPending: boolean;
+} {
+  const q = useQuery({
+    queryKey: hydrationKeys.propertyBrokers(subjects),
+    queryFn: async ({ signal }) => {
+      const ads = await fetchPropertySourcesByPropertyIds(
+        subjects.map((s) => s.property_id),
+        { signal },
+      );
+      const byListing = await fetchListingBrokersByIds([...ads.values()].flat().map((a) => a.id));
+      const out = new Map<number, PropertyBrokers>();
+      for (const s of subjects) {
+        const list = propertyBrokers(ads.get(s.property_id) ?? [], byListing, s.listing_id);
+        if (list.brokers.length > 0) out.set(s.property_id, list);
+      }
+      return out as BrokersByPropertyId;
+    },
+    enabled: subjects.length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: DECORATION_STALE_MS,
+  });
+  return {
+    brokers: q.data ?? EMPTY_PROPERTY_BROKERS,
+    isPending: subjects.length > 0 && q.data === undefined,
   };
 }
 
@@ -227,5 +248,6 @@ export function taggedImageUrls(
 
 const EMPTY_COVERS: CoverByListingId = new Map();
 const EMPTY_BROKERS: BrokerByListingId = new Map();
+const EMPTY_PROPERTY_BROKERS: BrokersByPropertyId = new Map();
 const EMPTY_PHOTOS: PhotosByListingId = new Map();
 export const NO_PHOTOS: readonly ImagePublic[] = [];

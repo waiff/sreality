@@ -1,16 +1,16 @@
-/* Pure helpers behind the property page's price history: the canonical
- * advert's own price snapshots as a chart series, the property's active windows,
- * and the dated price moves. Kept side-effect-free (now injected, never
- * Date.now()) so the transforms are unit-testable. */
-import type {
-  ListingSnapshotPublic,
-  PropertyStatusEventPublic,
-} from '@/lib/types';
+/* Pure helpers behind the property page's price history: every advert's own
+ * price snapshots as one chart track each (MS9), and the dated price moves
+ * (MS10). Kept side-effect-free (now injected, never Date.now()) so the
+ * transforms are unit-testable. */
+import { fmtDateSlash } from '@/lib/format';
+import { portalLabel } from '@/lib/portals';
+import type { ListingSnapshotPublic } from '@/lib/types';
 
-/* The advert whose price the property shows (its canonical advert). A price step
- * never spans two adverts, so the history is this advert's own series. */
+/* One advert of the property. A price step never spans two adverts, so each is
+ * its own track; together the tracks are the property's time on the market. */
 export interface PriceAdvert {
   id: number;
+  source: string;
   is_active: boolean;
   price_czk: number | null;
   first_seen_at: string;
@@ -24,63 +24,44 @@ export interface PriceSeries {
   endT: number;
 }
 
-/* The advert's price snapshots as one step-line (held flat between changes),
- * extended to `nowMs` while it is live; none when it never had a price. */
+/* One step-line per advert that has a price, in the order given (the canonical
+ * advert first), held flat between changes and running to `nowMs` while its
+ * advert is live, else to its last sighting. Labelled by portal; two tracks on
+ * one portal also carry the day their advert was first seen, as its row does. */
 export function buildPriceSeries(
-  advert: PriceAdvert,
-  snapshots: ListingSnapshotPublic[],
+  adverts: readonly PriceAdvert[],
+  snapshots: readonly ListingSnapshotPublic[],
   nowMs: number,
 ): PriceSeries[] {
-  const points = snapshots
-    .filter((s) => s.listing_id === advert.id && s.price_czk != null)
-    .map((s) => ({ t: new Date(s.scraped_at).getTime(), price: s.price_czk as number }))
-    .sort((a, b) => a.t - b.t);
-  if (points.length === 0 && advert.price_czk != null) {
-    points.push({ t: new Date(advert.first_seen_at).getTime(), price: advert.price_czk });
+  const observed = new Map<number, { t: number; price: number }[]>();
+  for (const s of snapshots) {
+    if (s.price_czk == null) continue;
+    const point = { t: new Date(s.scraped_at).getTime(), price: s.price_czk };
+    const points = observed.get(s.listing_id);
+    if (points) points.push(point);
+    else observed.set(s.listing_id, [point]);
   }
-  if (points.length === 0) return [];
-  const endT = advert.is_active ? nowMs : new Date(advert.last_seen_at).getTime();
-  return [{ id: advert.id, label: 'Price', points, endT: Math.max(endT, points[points.length - 1].t) }];
-}
-
-/* Property-grain windows (ms) during which >=1 source was active, derived
- * from property_status_events (migration 392: a trigger-maintained log of
- * properties.is_active flips, reusing the SAME aggregate Browse/badges
- * already trust rather than re-deriving "any active source" from raw listing
- * data here). `fallback.end` is the caller's best current-truth close point
- * (now if the property reads active today, else its last-seen instant) —
- * used both when there are no events at all (nothing seeded/loaded yet) and
- * to close a trailing window the trigger hasn't stamped a deactivation for.
- * With no events this returns one window spanning the whole fallback range,
- * i.e. today's pre-gap-logic behavior exactly — a strict narrowing, never a
- * regression, once real events are present. A property is born active, so a
- * FIRST event that is a deactivation closes a window opened at `fallback.start`
- * (an unmerged property whose only row was the pre-559 merge's 'inactive'). */
-export function buildActiveWindows(
-  events: PropertyStatusEventPublic[],
-  fallback: { start: number; end: number },
-): [number, number][] {
-  const sorted = [...events]
-    .map((e) => ({ isActive: e.is_active, t: new Date(e.event_at).getTime() }))
-    .sort((a, b) => a.t - b.t);
-  if (sorted.length === 0) return [[fallback.start, fallback.end]];
-
-  const windows: [number, number][] = [];
-  let openAt: number | null = sorted[0].isActive ? null : fallback.start;
-  for (const e of sorted) {
-    if (e.isActive) {
-      if (openAt == null) openAt = e.t;
-    } else if (openAt != null) {
-      windows.push([openAt, e.t]);
-      openAt = null;
+  const tracks = adverts.flatMap((advert) => {
+    const points = [...(observed.get(advert.id) ?? [])].sort((a, b) => a.t - b.t);
+    if (points.length === 0 && advert.price_czk != null) {
+      points.push({ t: new Date(advert.first_seen_at).getTime(), price: advert.price_czk });
     }
-  }
-  if (openAt != null) windows.push([openAt, fallback.end]);
-  return windows;
-}
-
-function withinWindows(t: number, windows: [number, number][]): boolean {
-  return windows.some(([start, end]) => t >= start && t <= end);
+    return points.length > 0 ? [{ advert, points }] : [];
+  });
+  const perPortal = new Map<string, number>();
+  for (const { advert } of tracks) perPortal.set(advert.source, (perPortal.get(advert.source) ?? 0) + 1);
+  return tracks.map(({ advert, points }) => {
+    const portal = portalLabel(advert.source) ?? advert.source;
+    const endT = advert.is_active ? nowMs : new Date(advert.last_seen_at).getTime();
+    return {
+      id: advert.id,
+      label: (perPortal.get(advert.source) ?? 0) > 1
+        ? `${portal} · ${fmtDateSlash(advert.first_seen_at)}`
+        : portal,
+      points,
+      endT: Math.max(endT, points[points.length - 1].t),
+    };
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -95,14 +76,10 @@ export const seriesObservedKey = (id: number): string => `o${id}`;
 export type PriceChartRow = Record<string, number | boolean | null>;
 
 /* Every track merged onto one sorted time axis, each carrying its last known
- * price forward (the step) and NULL outside its own [start, endT] window OR
- * outside every property-level active window (activeWindows, from
- * buildActiveWindows) — a period the property had zero active listings gaps
- * the line for every track at once, not just the track that went inactive.
- * activeWindows is optional so existing callers (and this file's chart-row
- * tests) keep the pre-existing unconstrained behavior. Lives here rather than
- * in the chart component so the step semantics are unit-tested and the
- * component stays pure rendering.
+ * price forward (the step) and NULL outside its own [start, endT] window, so a
+ * stretch with no live advert is a gap in every line. Lives here rather than in
+ * the chart component so the step semantics are unit-tested and the component
+ * stays pure rendering.
  *
  * `sampleCount` resamples the step onto that many evenly spaced instants
  * across the domain, ON TOP OF every real observation (which stay exact, and
@@ -116,19 +93,12 @@ export type PriceChartRow = Record<string, number | boolean | null>;
  * same curve however finely it is sampled. */
 export function buildChartRows(
   series: PriceSeries[],
-  activeWindows?: [number, number][],
   sampleCount = 0,
 ): PriceChartRow[] {
   const times = new Set<number>();
   for (const s of series) {
     for (const p of s.points) times.add(p.t);
     if (s.points.length) times.add(s.endT);
-  }
-  if (activeWindows) {
-    for (const [start, end] of activeWindows) {
-      times.add(start);
-      times.add(end);
-    }
   }
   if (sampleCount > 1 && times.size > 1) {
     const known = [...times];
@@ -139,7 +109,6 @@ export function buildChartRows(
     }
   }
   const axis = [...times].sort((a, b) => a - b);
-  const gapped = axis.map((t) => !!activeWindows && !withinWindows(t, activeWindows));
   const rows: PriceChartRow[] = axis.map((t) => ({ t }));
   // Track-major with a forward-only cursor into that track's points: both the
   // axis and each track's points are sorted, so the whole grid fills in one
@@ -152,7 +121,7 @@ export function buildChartRows(
     for (let i = 0; i < axis.length; i++) {
       const t = axis[i];
       while (cursor + 1 < s.points.length && s.points[cursor + 1].t <= t) cursor++;
-      if (!s.points.length || t < s.points[0].t || t > s.endT || gapped[i]) {
+      if (!s.points.length || t < s.points[0].t || t > s.endT) {
         rows[i][vKey] = null;
         rows[i][oKey] = false;
         continue;
@@ -162,6 +131,24 @@ export function buildChartRows(
     }
   }
   return rows;
+}
+
+/* MS8: the lowest asking price among the active adverts, when it differs from
+ * the price the header shows (a header with no price differs from any price).
+ * Display only: it feeds no per-m² figure, yield, alert or filter. `sources`
+ * names every portal quoting that price. */
+export function lowestActivePrice(
+  adverts: ReadonlyArray<Pick<PriceAdvert, 'source' | 'is_active' | 'price_czk'>>,
+  headerPrice: number | null,
+): { price: number; sources: string[] } | null {
+  const priced = adverts.filter((a) => a.is_active && a.price_czk != null);
+  if (priced.length === 0) return null;
+  const price = Math.min(...priced.map((a) => a.price_czk as number));
+  if (price === headerPrice) return null;
+  return {
+    price,
+    sources: [...new Set(priced.filter((a) => a.price_czk === price).map((a) => a.source))],
+  };
 }
 
 export interface PriceChangeEvent {

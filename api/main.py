@@ -297,8 +297,8 @@ app.include_router(unsubscribe_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)
-# /properties/merge|merges|merged|assets/* (merge MECHANICS: collapse an operator-
-# chosen set, the merge ledger, unmerge, the over-merge audit browse, asset links)
+# /properties/merge|{id}/split|{id}/origins (merge MECHANICS: collapse an
+# operator-chosen set, split one property's adverts, where each came from)
 # — mutating operator actions, admin-gated (require_admin). Mounted before the
 # /properties/{property_id}/... routes below; none of those can shadow these.
 app.include_router(property_merge_router)

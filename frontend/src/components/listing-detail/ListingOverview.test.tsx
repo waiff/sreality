@@ -78,3 +78,35 @@ describe('<ListingOverview> section order', () => {
     expect(screen.getByTestId('estimates')).toBeInTheDocument();
   });
 });
+
+/* MS8: the property page's lowest active price — labelled, display only. */
+describe('<ListingOverview> price note', () => {
+  const NOTE = { text: 'Nejnižší aktivní cena: 4 900 000 Kč · iDNES Reality', title: 'jen pro informaci' };
+
+  it('sits under the headline price and leaves the price alone', () => {
+    render(
+      <MemoryRouter>
+        <ListingOverview listing={LISTING} priceNote={NOTE} />
+      </MemoryRouter>,
+    );
+
+    const h1 = screen.getByRole('heading', { level: 1 });
+    const note = screen.getByText(NOTE.text);
+    expect(h1).not.toHaveTextContent(NOTE.text);
+    expect(note).toHaveAttribute('title', NOTE.title);
+    expect(precedes(h1, note)).toBe(true);
+  });
+
+  it('takes the headline’s place, still labelled, when the listing states no price', () => {
+    render(
+      <MemoryRouter>
+        <ListingOverview listing={{ ...LISTING, price_czk: null }} priceNote={NOTE} />
+      </MemoryRouter>,
+    );
+
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent(NOTE.text);
+    expect(h1).toHaveAttribute('title', NOTE.title);
+    expect(screen.queryByText('Cena na vyžádání')).toBeNull();
+  });
+});
