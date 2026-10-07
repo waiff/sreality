@@ -38,6 +38,7 @@ import * as queries from '@/lib/queries';
 import { fmtShortDate } from '@/lib/format';
 import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
+import type { CoverTag } from '@/lib/imageTags';
 
 vi.mock('@/lib/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/queries')>();
@@ -140,6 +141,8 @@ function renderGrid(
     estimates?: Record<number, ListingEstimate>;
     row?: CardRow;
     orderPortal?: string | null;
+    coverTag?: CoverTag;
+    onCoverTag?: (next: CoverTag) => void;
   } = {},
 ) {
   const qc = new QueryClient({
@@ -156,6 +159,8 @@ function renderGrid(
             sort={{ field: 'last_seen_at', dir: 'desc' } as never}
             orderPortal={opts.orderPortal}
             imageLarge={false}
+            coverTag={opts.coverTag ?? 'default'}
+            onCoverTag={opts.onCoverTag ?? (() => {})}
             isLoading={false}
             isFetchingNextPage={false}
             hasNextPage={false}
@@ -281,6 +286,52 @@ describe('<ListingCards> photo hydration', () => {
     expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
     expect(queries.fetchListingCovers).not.toHaveBeenCalled();
     expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
+  });
+});
+
+/* The Cover dropdown: which tagged photo every card opens on. */
+describe('<ListingCards> the cover photo', () => {
+  const tagged = (id: number, clip_fine_tag: string | null, tag_head_scores: Record<string, number> | null = null) =>
+    ({ ...photo(id), clip_fine_tag, clip_confidence: 0.9, tag_head_scores }) as unknown as ImagePublic;
+  const kitchenThird = () =>
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [tagged(1, 'exterior_facade'), tagged(2, 'hallway'), tagged(3, 'kitchen'), tagged(4, 'bedroom')]]]),
+    );
+
+  it('opens the card on the kitchen photo, keeping the gallery order', async () => {
+    kitchenThird();
+    renderGrid({ coverTag: 'kitchen' });
+    expect(await screen.findByText(counterIs('3 / 4'))).toBeInTheDocument();
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/3.jpg');
+  });
+
+  it('shows the first photo when the ad has no photo with the tag', async () => {
+    kitchenThird();
+    renderGrid({ coverTag: 'garden' });
+    expect(await screen.findByText(counterIs('1 / 4'))).toBeInTheDocument();
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/1.jpg');
+  });
+
+  it('lets the trained head overrule CLIP where it scored the photos', async () => {
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [
+        tagged(1, 'exterior_facade', { '25': 0.02 }),
+        tagged(2, 'kitchen', { '25': 0.1 }),
+        tagged(3, 'hallway', { '25': 0.91 }),
+      ]]]),
+    );
+    renderGrid({ coverTag: 'kitchen' });
+    expect(await screen.findByText(counterIs('3 / 3'))).toBeInTheDocument();
+  });
+
+  it('reports the operator\'s pick from the dropdown beside Sort', async () => {
+    const onCoverTag = vi.fn();
+    renderGrid({ onCoverTag });
+    fireEvent.change(await screen.findByRole('combobox', { name: /Cover/ }), {
+      target: { value: 'garage' },
+    });
+    expect(onCoverTag).toHaveBeenCalledWith('garage');
+    expect(screen.getByRole('option', { name: 'Fasáda' })).toBeInTheDocument();
   });
 });
 

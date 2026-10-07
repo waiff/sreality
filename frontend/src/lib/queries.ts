@@ -1621,7 +1621,9 @@ export const fetchImagesByListingIds = async (
 /* Sibling of fetchImagesByListingIds keyed on the surrogate `listing_id`
  * (images_public.listing_id, migration 335). The Browse card hydration uses this
  * so a post-Gate-2 non-sreality card (sreality_id NULL) still gets its photos.
- * `listing_id` is appended to the select just for keying the result map. */
+ * `listing_id` is appended to the select just for keying the result map, and
+ * `tag_head_scores` for the card's cover choice — only this read asks for it, so
+ * every other images_public reader skips that join (migration 591). */
 export const fetchImagesForListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,
@@ -1631,7 +1633,7 @@ export const fetchImagesForListingIds = async (
   const { data } = await pgRead<Array<ImagePublic & { listing_id: number }> | null>(
     supabase
       .from('images_public')
-      .select(`${IMAGE_PUBLIC_COLS},listing_id`)
+      .select(`${IMAGE_PUBLIC_COLS},listing_id,tag_head_scores`)
       .in('listing_id', ids as number[])
       .order('sequence', { ascending: true, nullsFirst: false })
       .order('id', { ascending: true }),

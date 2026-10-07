@@ -114,7 +114,10 @@ group by 1 order by 2 desc;
 
 …or through the admin-gated API: `GET /new-dedup/tags/models`,
 `GET /new-dedup/tags/models/{version}/heads`, `GET /new-dedup/tags/images/{image_id}`.
-There is no page yet.
+No admin page yet. The one product reader is Browse: `images_public.tag_head_scores` (migration
+591) publishes the ACTIVE model's `scores` per photo, and the card "Cover" choice prefers a head
+score (≥ 0.5) over CLIP wherever the photo has one (`frontend/src/lib/imageTags.ts` `coverIndex`).
+Activating a new version switches what Browse reads, with no other change.
 
 ## Rails you must not step over
 

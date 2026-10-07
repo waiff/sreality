@@ -1701,7 +1701,10 @@ renumber.** Navigate by area:
     ruling, ask 1 of five — the full list is in `docs/design/new-dedup/PROGRAM.md`'s
     `2026-09-09 (b)` ledger entry).
     Adding heads is a new version, never an edit, and `activate` is a separate step from `score`
-    so no consumer ever reads a half-scored version. Nothing has been promoted or scored yet.
+    so no consumer ever reads a half-scored version. `v1` (11 heads) is active since 2026-09-09; a
+    one-off 2026-09-27 run scored ~9% of active listings' photos, and nothing scores new photos yet.
+    The one product reader is Browse's card cover (`images_public.tag_head_scores`, migration 591):
+    a head score decides wherever the active model scored the photo, CLIP everywhere else.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056). The definition is the filter registry,
     rendered per relation. `toolkit/filter_compiler.compile_filter_where` compiles every

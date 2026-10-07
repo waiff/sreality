@@ -25,6 +25,7 @@ import PriceDelta from '@/components/PriceDelta';
 import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import { taggedImageUrls, useCardHydration } from '@/lib/hydration';
+import { COVER_OPTIONS, coverIndex, type CoverTag } from '@/lib/imageTags';
 import {
   curationKeys,
   fetchPropertyCollectionMemberSet,
@@ -83,6 +84,10 @@ interface Props {
    * and untouched. Shared identically by the Split and Cards (map-collapsed)
    * layouts, since both render this one grid — see ImageSizeToggle. */
   imageLarge: boolean;
+  /* Which tagged photo every card opens on — see COVER_OPTIONS. A per-browser
+   * display preference beside the sort, not part of the shareable view. */
+  coverTag: CoverTag;
+  onCoverTag: (next: CoverTag) => void;
   isLoading: boolean;
   /* The list query errored (e.g. a statement timeout). Suppresses the
    * "no results — clear filters" empty state, which otherwise renders on an
@@ -146,6 +151,8 @@ export default function ListingCards({
   sort,
   orderPortal = null,
   imageLarge,
+  coverTag,
+  onCoverTag,
   isLoading,
   isError = false,
   isFetchingNextPage,
@@ -211,6 +218,7 @@ export default function ListingCards({
                 : `${loaded.toLocaleString('cs-CZ')} of ${totalApprox ? '~' : ''}${total.toLocaleString('cs-CZ')}`}
         </span>
         <div className="flex items-center gap-2 shrink-0">
+          <CoverDropdown coverTag={coverTag} onChange={onCoverTag} />
           <SortDropdown sort={sort} onChange={onSort} />
         </div>
       </div>
@@ -232,6 +240,7 @@ export default function ListingCards({
                 <li key={r.listing_id}>
                   <Card
                     r={r}
+                    coverTag={coverTag}
                     hovered={hoveredIds.has(r.listing_id)}
                     dimmed={mapHover && !hoveredIds.has(r.listing_id)}
                     scrollOnHover={mapHover && r.listing_id === firstHoveredId}
@@ -337,6 +346,7 @@ function CollectionSaveButton({
 
 function Card({
   r,
+  coverTag,
   hovered,
   dimmed,
   scrollOnHover,
@@ -352,6 +362,7 @@ function Card({
   orderPortal,
 }: {
   r: CardRow;
+  coverTag: CoverTag;
   hovered: boolean;
   /* A map-origin hover is lighting OTHER cards — this one recedes so
    * the group reads at a glance. */
@@ -448,6 +459,7 @@ function Card({
      across renders, so this recomputes only when this listing's photos change. */
   const photos = useCardHydration().photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
+  const cover = useMemo(() => coverIndex(photos, coverTag), [photos, coverTag]);
 
   /* `relative` is load-bearing, not decoration: it is what the stretched
    * link's / selection label's `::after` measures itself against. */
@@ -473,7 +485,13 @@ function Card({
       onMouseLeave={mergeMode ? undefined : () => onHover(null)}
       className={wrapperClass}
     >
-      <ImageCarousel images={images} imgClassName={imageFilter} hoverZoom fadeChevrons>
+      <ImageCarousel
+        images={images}
+        startIndex={cover}
+        imgClassName={imageFilter}
+        hoverZoom
+        fadeChevrons
+      >
         {mergeMode && (
           <div className="absolute top-1 left-1 z-[var(--z-card-action)] w-6 h-6">
             {/* A REAL checkbox, not a drawn facsimile: it carries `checked`,
@@ -852,6 +870,37 @@ function SortDropdown({
         {SORT_PRESETS.map((p) => (
           <option key={sortToParam(p.spec)} value={sortToParam(p.spec)}>
             {p.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function CoverDropdown({
+  coverTag,
+  onChange,
+}: {
+  coverTag: CoverTag;
+  onChange: (next: CoverTag) => void;
+}) {
+  return (
+    <label className="inline-flex items-center gap-1.5">
+      <span className="text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)]">
+        Cover
+      </span>
+      <select
+        value={coverTag}
+        onChange={(e) => {
+          const picked = COVER_OPTIONS.find((o) => o.key === e.target.value);
+          if (picked) onChange(picked.key);
+        }}
+        title="Which photo each card opens on. An ad without that photo shows its own first photo."
+        className="px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] transition-colors"
+      >
+        {COVER_OPTIONS.map((o) => (
+          <option key={o.key} value={o.key}>
+            {o.label}
           </option>
         ))}
       </select>

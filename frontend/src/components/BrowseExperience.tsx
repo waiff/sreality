@@ -26,6 +26,7 @@ import {
   useMapSplitFraction,
   useMapCollapsed,
   useCardImageLarge,
+  useCardCoverTag,
 } from '@/lib/browseLayout';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
 import { FilterSidebar } from '@/components/Filters';
@@ -268,6 +269,7 @@ export default function BrowseExperience({
   const mapSplit = useMapSplitFraction();
   const mapCollapsed = useMapCollapsed();
   const cardImageLarge = useCardImageLarge();
+  const cardCoverTag = useCardCoverTag();
   const sortOrderPortal = orderPortal(filters, sort);
   /* The map is only present on the Listings tab AND only when not collapsed —
    * the single source of truth the data-fetch gates and the layout both read,
@@ -856,6 +858,8 @@ export default function BrowseExperience({
                 onReachEnd={cards.fetchNextPage}
                 restorationKey={cardsRestorationKey}
                 imageLarge={cardImageLarge.value}
+                coverTag={cardCoverTag.value}
+                onCoverTag={cardCoverTag.set}
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 pipelineScoped={filters.pipeline != null}

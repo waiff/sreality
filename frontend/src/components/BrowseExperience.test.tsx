@@ -2,10 +2,11 @@
  * order and each card shows its date on that portal beside its own first seen. Which
  * filters turn it on is queries.test.ts's (orderPortal); these pin the wiring from the
  * view to the header and to the cards. Also the card's "N inzeráty" badge, from the same
- * read. The reads are stubbed and the map is collapsed (tests never render a live map). */
+ * read, and the Cover pick (#1726) beside them. The reads are stubbed and the map is
+ * collapsed (tests never render a live map). */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -15,6 +16,7 @@ import { DEFAULT_FILTERS, type ListingFilters } from '@/lib/filters';
 import { fmtShortDate } from '@/lib/format';
 import * as queries from '@/lib/queries';
 import { DEFAULT_SORT, type CardRow, type SortSpec } from '@/lib/queries';
+import type { ImagePublic } from '@/lib/types';
 
 vi.mock('@/lib/queries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/queries')>()),
@@ -122,5 +124,48 @@ describe('<BrowseExperience> the cards\' ad counts', () => {
 
     const badge = await screen.findByTitle(/^Nemovitost spojuje 3 inzeráty/);
     expect(badge).toHaveTextContent(/^3\s*inzeráty$/);
+  });
+});
+
+/* The Cover dropdown beside Sort (#1726) as the page wires it: the pick is this
+ * browser's own (`sreality.browse.cardCoverTag`) and opens each card on that photo,
+ * with the same card's portal badge, ad count and portal date still on it. */
+describe('<BrowseExperience> the cards\' cover photo', () => {
+  const COVER_KEY = 'sreality.browse.cardCoverTag';
+  const tagged = (id: number, clip_fine_tag: string) =>
+    ({ id, sreality_url: `https://img/${id}.jpg`, storage_path: null, clip_fine_tag,
+       clip_confidence: 0.9, tag_head_scores: null }) as unknown as ImagePublic;
+  const counterIs = (want: string) => (_t: string, el: Element | null) =>
+    el != null && el.children.length === 0 && el.textContent?.trim() === want;
+
+  beforeEach(() => {
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [tagged(1, 'exterior_facade'), tagged(2, 'hallway'), tagged(3, 'kitchen'), tagged(4, 'bedroom')]]]),
+    );
+  });
+  afterEach(() => {
+    localStorage.removeItem(COVER_KEY);
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(new Map());
+  });
+
+  it('opens the card on the picked photo and keeps the pick for this browser', async () => {
+    renderBrowse(['idnes']);
+    expect(await screen.findByText(counterIs('1 / 4'))).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('combobox', { name: /Cover/ }), { target: { value: 'kitchen' } });
+
+    expect(await screen.findByText(counterIs('3 / 4'))).toBeInTheDocument();
+    expect(localStorage.getItem(COVER_KEY)).toBe('kitchen');
+    const card = screen.getByTitle(/^Portály/).closest('li')!;
+    expect(within(card).getByText(counterIs('3 / 4'))).toBeInTheDocument();
+    expect(within(card).getByTitle(/^Portály/).textContent).toBe('portáliDNES Reality · Sreality');
+    expect(within(card).getByTitle(/^Nemovitost spojuje 2 inzeráty/)).toHaveTextContent(/^2\s*inzeráty$/);
+    expect(within(card).getByTitle(/^Aktivní/).textContent).toContain(`·iDNESod${fmtShortDate(IDNES_DAY)}`);
+  });
+
+  it('opens on the stored pick when the page loads', async () => {
+    localStorage.setItem(COVER_KEY, 'kitchen');
+    renderBrowse([]);
+    expect(await screen.findByText(counterIs('3 / 4'))).toBeInTheDocument();
   });
 });
