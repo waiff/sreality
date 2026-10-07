@@ -37,6 +37,7 @@ import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
 import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
+import type { CoverTag } from '@/lib/imageTags';
 
 vi.mock('@/lib/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/queries')>();
@@ -136,6 +137,8 @@ function renderGrid(
     merge?: { selected: boolean };
     onToggleSelect?: (propertyId: number) => void;
     estimates?: Record<number, ListingEstimate>;
+    coverTag?: CoverTag;
+    onCoverTag?: (next: CoverTag) => void;
   } = {},
 ) {
   const qc = new QueryClient({
@@ -151,6 +154,8 @@ function renderGrid(
             total={1}
             sort={{ field: 'last_seen_at', dir: 'desc' } as never}
             imageLarge={false}
+            coverTag={opts.coverTag ?? 'default'}
+            onCoverTag={opts.onCoverTag ?? (() => {})}
             isLoading={false}
             isFetchingNextPage={false}
             hasNextPage={false}
@@ -279,6 +284,40 @@ describe('<ListingCards> photo hydration', () => {
   });
 });
 
+/* The Cover dropdown: which tagged photo every card opens on. */
+describe('<ListingCards> the cover photo', () => {
+  const tagged = (id: number, clip_logical_tag: string | null) =>
+    ({ ...photo(id), clip_logical_tag, clip_confidence: 0.9 }) as unknown as ImagePublic;
+  const kitchenThird = () =>
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [tagged(1, 'exterior_facade'), tagged(2, 'hallway'), tagged(3, 'kitchen'), tagged(4, 'bedroom')]]]),
+    );
+
+  it('opens the card on the kitchen photo, keeping the gallery order', async () => {
+    kitchenThird();
+    renderGrid({ coverTag: 'kitchen' });
+    expect(await screen.findByText(counterIs('3 / 4'))).toBeInTheDocument();
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/3.jpg');
+  });
+
+  it('shows the first photo when the ad has no photo with the tag', async () => {
+    kitchenThird();
+    renderGrid({ coverTag: 'garden' });
+    expect(await screen.findByText(counterIs('1 / 4'))).toBeInTheDocument();
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/1.jpg');
+  });
+
+  it('reports the operator\'s pick from the dropdown beside Sort', async () => {
+    const onCoverTag = vi.fn();
+    renderGrid({ onCoverTag });
+    fireEvent.change(await screen.findByRole('combobox', { name: /Cover/ }), {
+      target: { value: 'exterior_facade' },
+    });
+    expect(onCoverTag).toHaveBeenCalledWith('exterior_facade');
+    expect(screen.getByRole('option', { name: 'Fasáda' })).toBeInTheDocument();
+  });
+});
+
 /* How many ads the card's property holds: a decoration like the photos, since
  * browse_projection carries no `source_count`. Two ads or more only — most
  * properties are one ad, and a badge on each would be noise. */
@@ -313,6 +352,8 @@ describe('<ListingCards> the ad-count badge', () => {
               total={rows.length}
               sort={{ field: 'last_seen_at', dir: 'desc' } as never}
               imageLarge={false}
+              coverTag="default"
+              onCoverTag={() => {}}
               isLoading={false}
               isFetchingNextPage={false}
               hasNextPage={false}

@@ -7,6 +7,18 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### Browse card cover photo by tag (done, 2026-10-07)
+- A "Cover" dropdown beside Sort picks which photo every card opens on: Default (the ad's own first
+  photo) or a CLIP logical tag (fasáda, kuchyně, obývací pokoj, ložnice, koupelna, WC,
+  balkon/terasa, zahrada, půdorys, situační plán). The card opens on the photo CLIP is most sure
+  carries that tag; an ad without one keeps its first photo. The carousel keeps the gallery order
+  (the counter reads e.g. "3 / 12"), and paging still works.
+- Front-end only: the cards already load every photo with its `clip_logical_tag` +
+  `clip_confidence`. No confidence floor, so the chosen cover always agrees with its tag badge.
+  The choice is a per-browser preference (`sreality.browse.cardCoverTag`, like the card image
+  size), not part of the URL or a preset. Code: `lib/imageTags.ts` `COVER_TAGS` / `coverIndex`,
+  `ImageCarousel` `startIndex`.
+
 ### SPA read seam: every PostgREST read through `pgRead` (done, 2026-10-01)
 - `lib/pgRead.ts` is now the one way the SPA awaits a supabase-js read (56 direct awaits plus the
   18 `fetchAllRows` sites, whose every page it awaits; across `queries.ts`, `priceStats`, `pinAudit`,

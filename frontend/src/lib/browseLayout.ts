@@ -1,6 +1,12 @@
 import { useCallback, useRef, useState } from 'react';
 
-import { usePersistedFlag, type PersistedFlag } from '@/lib/persistedFlag';
+import { COVER_TAGS, type CoverTag } from '@/lib/imageTags';
+import {
+  usePersistedChoice,
+  usePersistedFlag,
+  type PersistedChoice,
+  type PersistedFlag,
+} from '@/lib/persistedFlag';
 
 /* Persisted layout preferences for the Browse page. The three columns are the
  * filter sidebar (column 1) and, on the Listings/map tab, the cards list
@@ -8,13 +14,14 @@ import { usePersistedFlag, type PersistedFlag } from '@/lib/persistedFlag';
  * between them, and collapse the map away entirely; we remember the result
  * per-browser in localStorage so the layout survives a reload. The card
  * image size (small/large) is the same kind of per-browser display
- * preference — not a column — so Browse's key for it lives here too; the
+ * preference — not a column — so Browse's key for it lives here too, as does
+ * the card cover photo (which tagged photo a card opens on); the
  * boolean-flag machinery itself is `@/lib/persistedFlag`, shared with the
  * surfaces outside Browse that keep the same kind of preference.
  *
  * These are workspace preferences, NOT part of the shareable view (the URL).
  * A `/browse?…` link carries the cohort + overlays; the recipient still sees
- * their OWN sidebar width / map split / map-collapsed / image-size state.
+ * their OWN sidebar width / map split / map-collapsed / image-size / cover state.
  *
  * The sidebar is stored as a pixel width (sidebars are conventionally
  * fixed-width). The cards|map split is stored as the map column's
@@ -27,6 +34,7 @@ const SIDEBAR_KEY = 'sreality.browse.sidebarWidth';
 const MAP_SPLIT_KEY = 'sreality.browse.mapSplitFraction';
 const MAP_COLLAPSED_KEY = 'sreality.browse.mapCollapsed';
 const CARD_IMAGE_LARGE_KEY = 'sreality.browse.cardImageLarge';
+const CARD_COVER_TAG_KEY = 'sreality.browse.cardCoverTag';
 const GRAIN_NOTICE_KEY_PREFIX = 'sreality.browse.grainNoticeDismissed.';
 
 export const SIDEBAR_DEFAULT = 320;
@@ -131,6 +139,11 @@ export const useMapCollapsed = (): PersistedFlag =>
  * different in one view than the other. Default false (today's size). */
 export const useCardImageLarge = (): PersistedFlag =>
   usePersistedFlag(CARD_IMAGE_LARGE_KEY, false);
+
+/* Which photo every Browse card opens on (the "Cover" dropdown beside Sort).
+ * Default 'default' — the ad's own first photo, as before the choice existed. */
+export const useCardCoverTag = (): PersistedChoice<CoverTag> =>
+  usePersistedChoice(CARD_COVER_TAG_KEY, COVER_TAGS, 'default');
 
 /* Which of the two row-grain explanations the operator has already read and
  * dismissed. Tracked SEPARATELY per variant: they say opposite things ("rows
