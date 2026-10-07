@@ -1554,39 +1554,6 @@ export interface ScraperHealthChecks {
   checks: ScraperHealthCheck[];
 }
 
-/* ----- Operator merge mechanics (multi-portal) --------------------------- */
-
-/* One already-merged property (survivor) in the merged-properties audit
- * browse. `source_count` is every
- * child listing ever grouped under it (active or delisted); `active_count` the
- * still-live subset; `sources` the distinct portals those children span. */
-export interface MergedProperty {
-  property_id: number;
-  sreality_id: number | null;   // representative listing (app-wide listing identity)
-  source_count: number;         // listings merged together (the range filter's axis)
-  distinct_site_count: number;  // distinct portals
-  active_count: number;         // children still is_active
-  sources: string[];            // distinct portal keys, e.g. ['bazos','sreality']
-  category_main: string | null;
-  category_type: string | null;
-  disposition: string | null;
-  area_m2: number | null;
-  estate_area: number | null;
-  price_czk: number | null;
-  /* The one server-composed place label (location_display_label), same as every
-   * other surface. Replaced `district` + `street`, which came from two different
-   * children of the merge and were rendered by nothing. */
-  display_label: string | null;
-  first_seen_at: string | null;
-  last_seen_at: string | null;
-}
-
-export interface MergedPropertiesResponse {
-  data: MergedProperty[];
-  total: number;       // total matching the filter (the page is capped by `limit`)
-  returned: number;    // rows on this page
-}
-
 /* One row of property_sources_public — one advert of a property: a row of the
  * property page's merged-adverts section. */
 export interface PropertySource {

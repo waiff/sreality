@@ -1,5 +1,6 @@
 """The one Czech sentence for a category clash rule 15 refuses (E925), in the Browse filters' own
-labels: the pair page prints it with `SAME_ENDING`, the property split's join with `LETTER_ENDING`."""
+labels: the pair page prints it with `SAME_ENDING`, the property split's join with `LETTER_ENDING`,
+the merge route with `MERGE_ENDING`."""
 from __future__ import annotations
 
 from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
@@ -13,6 +14,7 @@ _CLASH: dict[str, str] = {
 }
 SAME_ENDING: str = ", proto je nelze označit jako stejné."
 LETTER_ENDING: str = ", proto nemohou mít stejné písmeno. Dejte jim různá písmena."
+MERGE_ENDING: str = ", proto je nelze sloučit."
 LABELS: dict[str, str] = {
     option.value: option.label_cs
     for option in (*CATEGORY_TYPE_OPTIONS, *CATEGORY_MAIN_OPTIONS)

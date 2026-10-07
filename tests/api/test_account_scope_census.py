@@ -96,6 +96,11 @@ _HANDROLLED_RESOLVER_ALLOWLIST: dict[str, str] = {
         "same nullable-account-means-default-plan contract as get_billing_me, evaluated "
         "as a dependency instead of in a handler"
     ),
+    "api/property_merge.py::post_merge_property_set": (
+        "the merge is an admin's service-role write and must succeed for an admin with no "
+        "membership; the account scopes only the receipt read back after it (the acting "
+        "account's own carry rows, tenancy shape 3), and no account is an empty receipt"
+    ),
     "api/dependencies.py::account_scope": (
         "the FOURTH tenancy shape, and the one worth naming so nobody rediscovers it as a "
         "divergence: it returns a READ SCOPE `[account_id, SYSTEM]` mirroring migration "

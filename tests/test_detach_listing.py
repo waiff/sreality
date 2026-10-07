@@ -1,8 +1,8 @@
 """The one undo: `toolkit.property_identity.detach_listings` (one advert at a time through
 `_detach`, then whole sets) and the origins route over it (decision 8). Over the stateful fake in
 tests/_property_ledger.py, so a merge and its undo replay end to end here (and in
-tests/test_property_merge_set.py), each carrier recorded at the seam and each after-step in
-`db.changed`; executed: tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
+tests/test_property_merge_set.py), each after-step in `db.changed`; a detach runs no carrier.
+Executed: tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
 The operator's split route over it is tests/test_property_split.py.
 """
 
@@ -15,8 +15,6 @@ import pytest
 
 import toolkit.property_identity as pi
 from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
-from toolkit import property_carriers as carriers
-from toolkit.property_carriers import DetachStep, Hop
 from toolkit.property_identity import (
     MergeError,
     detach_listings,
@@ -49,11 +47,6 @@ def _detach(db: _Ledger, lid: int, **kw: Any) -> dict[str, Any]:
     return {**data["adverts"][0], "rulings_written": data["rulings_written"]}
 
 
-def _restores(db: _Ledger, name: str = "pipeline") -> list[DetachStep]:
-    """The steps one carrier was handed by a detach (only one that reactivated a property)."""
-    return [step for kind, carrier, step in db.carried if kind == "detach" and carrier == name]
-
-
 def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
     db = _Ledger({1: 10, 2: 20, 3: 20})
     group = _merged(db, [10, 20])["merge_group_id"]
@@ -62,14 +55,11 @@ def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
                    "left_property_id": 10, "restored_property_id": 20,
                    "reactivated": True, "merge_group_ids": [group]}
     assert db.listings == {1: 10, 2: 20, 3: 10} and db.props[20] == "active"
-    # the ledger keeps every row; the restored property's card comes from THAT merge's snapshot
+    # the ledger keeps every row
     assert [(e["listing"], e["undone_by"]) for e in db.events] == [(2, OP), (3, None)]
-    assert _restores(db) == [DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),),
-                                        source="operator")]
-    # its sibling joins it without reactivating (or restoring) anything a second time
+    # its sibling joins it without reactivating anything a second time
     assert not _detach(db, 3, decided_by=OP)["reactivated"]
     assert db.listings == {1: 10, 2: 20, 3: 20}
-    assert len(_restores(db)) == 1
 
 
 def test_a_second_detach_and_a_native_advert_are_no_ops_that_say_so():
@@ -98,11 +88,6 @@ def test_an_advert_goes_back_to_its_origin_across_a_chain_of_merges():
     assert out["restored_property_id"] == 20 and len(out["merge_group_ids"]) == 2
     assert db.listings == {1: 5, 2: 20, 9: 5}
     assert [e["undone_by"] for e in db.events if e["listing"] == 2] == [OP, OP]
-    # the whole path goes to the carriers: 20 -> 10 -> 5; 5 never held the card of the merge
-    # that retired 20, so the pipeline restores it and cleans nothing off 5 (test_property_carriers)
-    (step,) = _restores(db)
-    assert (step.restored, step.left, [h.survivor for h in step.undo]) == (20, 5, [10, 5])
-    assert step.left != step.undo[0].survivor
 
 
 def test_a_group_scoped_detach_undoes_only_that_merge_while_it_is_the_newest():
@@ -136,20 +121,18 @@ def test_an_advert_moved_outside_the_ledger_stays_and_a_missing_one_is_an_error(
 
 def test_an_origin_a_later_merge_retired_elsewhere_is_left_merged_and_the_advert_stays():
     """x1, x2 were 30's own. {10, 30} merged; x1 detached (30 back); the engine then merged 30
-    into the older 5. Detaching x2 from 10 would half-undo that merge and restore 30's card a
-    second time: nothing moves, and the outcome says why (rule 22)."""
+    into the older 5. Detaching x2 from 10 would half-undo that merge: nothing moves, and the
+    outcome says why."""
     db = _Ledger({1: 10, 31: 30, 32: 30, 9: 5}, first_seen={5: T0 - timedelta(days=9)})
     _merged(db, [10, 30])
     assert _detach(db, 31, decided_by=OP)["reactivated"]
     _merged(db, [5, 30], source="autodedup")
-    restores = len(_restores(db))
     # x1 may go back to 30 from 5; x2 may not from 10 while that merge stands
     assert pi.detach_outcomes(db, [31, 32]) == {31: "detached", 32: "origin_moved_on"}
     out = _detach(db, 32, decided_by=OP)
     assert (out["detached"], out["outcome"], out["rulings_written"]) == (
         False, "origin_moved_on", 0)
     assert db.listings[32] == 10 and db.props[30] == "merged_away" and db.into[30] == 5
-    assert len(_restores(db)) == restores
     assert [e["undone_by"] for e in db.events if e["listing"] == 32] == [None]
     # retired elsewhere between the unlocked read and the lock: the lock's read decides
     dispatch = db.dispatch
@@ -172,23 +155,19 @@ def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_st
     assert {r["decided_by"] for r in _appended(db)} == {OP}
 
 
-def test_a_reactivating_detach_walks_the_carriers_in_reverse_and_changes_both_once():
-    """Undo in the reverse of the carry: every carrier gets ONE step; which
-    of them gives anything back (the pipeline card; curation, dispatches and
-    dismissals stay on the property left) is each carrier's own, tests/test_property_carriers.py."""
+def test_a_reactivating_detach_runs_no_carrier_and_changes_both_once():
+    """Curation, the pipeline card, dispatches and dismissals stay on the property left until a
+    split routes them (W4): no carrier runs and nothing reaches the carry record."""
     db = _Ledger({1: 10, 2: 20})
-    group = _merged(db, [10, 20])["merge_group_id"]
+    _merged(db, [10, 20])
     for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
         seen.clear()
-    _detach(db, 2, decided_by=OP)
-    step = DetachStep(restored=20, left=10, undo=(Hop(1, group, 10, 20),), source="operator")
-    walked = [s for s, _p in db.log if s.startswith("carrier:")]
-    assert walked == [f"carrier:{c.name}" for c in reversed(carriers.PROPERTY_CARRIERS)]
-    assert {entry for entry in db.carried} == {("detach", c.name, step) for c in
-                                                carriers.PROPERTY_CARRIERS}
+    assert _detach(db, 2, decided_by=OP)["reactivated"]
+    assert db.carried == [] and db.carries == []
+    assert not [s for s, _p in db.log if s.startswith("carrier:")]
     written = " ".join(s for s, _p in db.log)
     for table in ("property_status_events", "DELETE FROM properties",
-                  "DELETE FROM property_merge_events"):
+                  "DELETE FROM property_merge_events", "property_merge_carries"):
         assert table not in written, f"a detach touched {table}"
     assert db.changed == db.browse == db.broker == [[10, 20]]
     (reactivate,) = [s for s, _p in db.log if "SET status = 'active'" in s]
@@ -346,8 +325,8 @@ def _set(db: _Ledger, ids: list[int], **kw: Any) -> dict[str, Any]:
 
 def test_a_set_detach_rules_movers_only_against_the_stayers():
     """10 = {1 its own, 2 and 3 merged from 20}: detaching 2 and 3 in ONE call sends both home,
-    reactivates 20 once (one carrier walk), rules each `different` from 1 only (never from each
-    other: they sit together again) and brings 10 and 20 current ONCE."""
+    reactivates 20 once, rules each `different` from 1 only (never from each other: they sit
+    together again) and brings 10 and 20 current ONCE."""
     db = _Ledger({1: 10, 2: 20, 3: 20})
     group = _merged(db, [10, 20])["merge_group_id"]
     for seen in (db.log, db.carried, db.changed, db.browse, db.broker):
@@ -360,7 +339,6 @@ def test_a_set_detach_rules_movers_only_against_the_stayers():
     note = "operator detach from 10: jiné patro"
     assert sorted(_verdicts(db)) == [(1, 2, "different", note), (1, 3, "different", note)]
     assert out["rulings_written"] == 2 and db.word(2, 3) is None and (2, 3) not in db.mnl
-    assert len(_restores(db)) == 1
     assert db.changed == db.browse == db.broker == [[10, 20]], "the after-step runs once per set"
     # every property the steps lock, locked first in id order, before anything moves
     first_lock = next(i for i, (s, _p) in enumerate(db.log) if s.endswith("FOR UPDATE"))

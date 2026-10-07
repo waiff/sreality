@@ -7,7 +7,8 @@ tests/test_merge_safety_live.py and tests/test_property_carriers_live.py.
 STRICT: it answers each statement by its exact text and raises on one it does not model. Every
 carrier is swapped for a `RecordingCarrier` by the `ledger_carriers`
 fixture, which every suite over this fake opts into; `db.carried` then holds each
-(merge|detach, carrier name, step) the writers handed the seam. The fake also models the
+("merge", carrier name, step) the merge handed the seam, and `db.carries` each carry record row
+written (`RecordingCarrier.rows` is what a recording carrier hands back). The fake also models the
 dispatch carrier with the `channel_sends` its collapse must not strand; a test runs it for real
 with `keep_real`. `db.changed`, `db.browse` and `db.broker` each id list the after-step
 (`properties_changed`) recomputed, patched into Browse and queued for the broker drain."""
@@ -43,7 +44,8 @@ class _Tx:
                       [dict(r) for r in self.db.verdicts], dict(self.db.mnl),
                       list(self.db.carried), list(self.db.changed), list(self.db.browse),
                       list(self.db.broker), {k: dict(v) for k, v in self.db.dispatches.items()},
-                      {k: dict(v) for k, v in self.db.sends.items()})
+                      {k: dict(v) for k, v in self.db.sends.items()},
+                      [dict(c) for c in self.db.carries])
         return self
 
     def __exit__(self, exc_type: Any, *exc: Any) -> bool:
@@ -51,7 +53,7 @@ class _Tx:
             (self.db.listings, self.db.props, self.db.events, self.db.into,
              self.db.verdicts, self.db.mnl,
              self.db.carried, self.db.changed, self.db.browse, self.db.broker,
-             self.db.dispatches, self.db.sends) = self.saved
+             self.db.dispatches, self.db.sends, self.db.carries) = self.saved
             self.db.log.append(("rollback", None))
         return False
 
@@ -86,7 +88,8 @@ class _Cur:
 
 class _Ledger:
     """listings: id -> property_id; props: id -> status; into: id -> merged_into; first_seen /
-    cats / canonical: per property; events: the merge ledger; verdicts: the pair rulings LEDGER
+    cats / canonical: per property; ad_cats: an ad's own category where it is not its property's
+    `cats`; contentless: the ads the merge gate never counts; events: the merge ledger; verdicts: the pair rulings LEDGER
     (migration 574), appended on change like
     `VERDICT_PAIR_APPEND_SQL`, the newest row per pair the ruling; mnl: (lo, hi) -> (source,
     reason); dispatches: notification_dispatches id -> {property_id, *its collapse keys} (a key
@@ -97,6 +100,8 @@ class _Ledger:
                  canonical: dict[int, int] | None = None,
                  props: dict[int, str] | None = None,
                  cats: dict[int, tuple[str | None, str | None]] | None = None,
+                 ad_cats: dict[int, tuple[str | None, str | None]] | None = None,
+                 contentless: set[int] | None = None,
                  dispatches: dict[str, dict[str, Any]] | None = None,
                  sends: dict[int, dict[str, Any]] | None = None,
                  claiming: dict[int, dict[str, Any]] | None = None) -> None:
@@ -105,6 +110,8 @@ class _Ledger:
         self.into: dict[int, int] = {}
         self.first_seen = first_seen or {}
         self.cats = cats or {}
+        self.ad_cats = ad_cats or {}
+        self.contentless = contentless or set()
         self.canonical = canonical or {}
         self.events: list[dict[str, Any]] = []
         self.log: list[tuple[str, Any]] = []
@@ -113,6 +120,7 @@ class _Ledger:
         self.mnl: dict[tuple[int, int], tuple[str, str]] = {}
         self.clock = 0
         self.carried: list[tuple[str, str, Any]] = []
+        self.carries: list[dict[str, Any]] = []
         self.changed: list[list[int]] = []
         self.browse: list[list[int]] = []
         self.broker: list[list[int]] = []
@@ -230,9 +238,21 @@ class _Ledger:
         return [(lid, pid) for lid, pid in sorted(self.listings.items()) if pid in p["ids"]]
 
     def _lock_set(self, p: Any) -> list[tuple]:
-        cat = lambda pid: self.cats.get(pid, ("prodej", "byt"))  # noqa: E731
-        return [(pid, self.props[pid], self.first_seen.get(pid, T0),
-                 *cat(pid)) for pid in sorted(p["ids"]) if pid in self.props]
+        return [(pid, self.props[pid], self.first_seen.get(pid, T0))
+                for pid in sorted(p["ids"]) if pid in self.props]
+
+    def _set_ads(self, p: Any) -> list[tuple]:
+        """`_SET_ADS_SQL`: per (member, category) its lowest contentful ad; an ad's category is
+        its `ad_cats` entry, else its property's `cats` (default prodej/byt)."""
+        lowest: dict[tuple, int] = {}
+        for lid, pid in sorted(self.listings.items()):
+            if pid in p["ids"] and lid not in self.contentless:
+                cat = self.ad_cats.get(lid, self.cats.get(pid, ("prodej", "byt")))
+                lowest.setdefault((pid, *cat), lid)
+        return sorted(((*key, lid) for key, lid in lowest.items()), key=lambda r: (r[0], r[3]))
+
+    def _carry(self, p: Any) -> None:
+        self.carries.append(dict(p))
 
     def _status(self, p: Any) -> list[tuple]:
         return [(pid, self.props[pid], self.into.get(pid))
@@ -400,6 +420,8 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
         (ps._ADVERTS_ON_SQL, _Ledger._adverts_on),
         *((timeout, _Ledger._nothing) for timeout in ps._TIMEOUTS),
         (pi._LOCK_SET_SQL, _Ledger._lock_set),
+        (pi._SET_ADS_SQL, _Ledger._set_ads),
+        (pi._CARRY_SQL, _Ledger._carry),
         (pi._STATUS_SQL, _Ledger._status),
         (pi._STATUS_SQL + " FOR UPDATE", _Ledger._status),
         (pi._CANONICAL_ADVERTS_SQL, _Ledger._canonical_adverts),
@@ -431,19 +453,18 @@ _HANDLERS: dict[str, Callable[[_Ledger, Any], Any]] = {
 @dataclass
 class RecordingCarrier:
     """A carrier that only records the step it was handed (in `db.carried` and `db.log`), so a
-    suite over this fake asserts at the carrier seam instead of each carrier's SQL."""
+    suite over this fake asserts at the carrier seam instead of each carrier's SQL; it hands
+    back `rows` (none by default) as what it carried."""
 
     name: str
     columns: tuple = ()
     sql: tuple = ()
+    rows: tuple = ()
 
-    def on_merge(self, cur: _Cur, step: carriers.MergeStep) -> None:
+    def on_merge(self, cur: _Cur, step: carriers.MergeStep) -> list[carriers.Carried]:
         cur.db.carried.append(("merge", self.name, step))
         cur.db.log.append((f"carrier:{self.name}", step))
-
-    def on_detach(self, cur: _Cur, step: carriers.DetachStep) -> None:
-        cur.db.carried.append(("detach", self.name, step))
-        cur.db.log.append((f"carrier:{self.name}", step))
+        return list(self.rows)
 
 
 @pytest.fixture()

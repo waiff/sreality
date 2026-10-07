@@ -167,7 +167,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listings`, set-shaped) — it re-points `listings.property_id`,
     soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
     call, and so is a group undo (`merge_group_id=`) — no replay). A property shows ONE **canonical ad**, rank 1 of `property_canonical_listings` (migration 588): active first,
-    then with a map point, then the earliest first seen (active ads) / latest last seen (inactive ads), then portal trust, then id; its six amenities are a union (yes if any ad says yes). The chokepoint enforces **category compatibility** (`CategoryClash`:
+    then with a map point, then the earliest first seen (active ads) / latest last seen (inactive ads), then portal trust, then id; its six amenities are a union (yes if any ad says yes). The chokepoint enforces **category compatibility** over the set's ads, a contentless record never counting (`CategoryClash`:
     sale≠rent, flat≠house — except the sanctioned cross-type PAIRS: any two of **dům, komerční, pozemek**, and **byt↔komerční**; pairs, never classes, so byt↔dům stays refused). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
     the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open
@@ -190,7 +190,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     tables incl. `notification_dispatches`, pipeline (rule #22), **dismissals** (mig 536: lift, never delete; a LIVE deal wins)), run inside the merge
     transaction, so no such row orphans onto `merged_away`; every other column naming a property sits in `NOT_CARRIED` with its reason, and a census (offline
     over migrations, live over the replayed schema) fails on a column in neither. A SET/APPEND table = one `CurationTable(...)` line; any other shape = one
-    adapter. A detach that reactivates a property gives back its pipeline card; curation, dispatches and dismissals stay on the property left.
+    adapter. Each merge writes one `property_merge_carries` row per curation row it moved or folded (alerts none); a detach moves no curation.
     Collections carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via `listing_detail_queue`** (migration 105).
     Index-walk (`--index-only`) walks the full index, `portal_runner.reconcile_sightings` (touch + enqueue) + end-gated nomination (rule #3); detail-drain
@@ -210,7 +210,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `supports_complete_walk` is posture. A per-portal need is a `Portal` seam, never an `if source ==`; seams + owed: `docs/architecture.md` § rule 21.
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline` holds ≤1 card per property at one
     `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of a row at the entry stage. It has its OWN carrier in `PROPERTY_CARRIERS` (over
-    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property.
+    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one); the losing card is folded into the carry record (rule #18).
     Writes go through the JWT-gated API (`tenant_conn`); every SPA card write (Browse cards/rows, listing header, kanban drag + trash) is ONE hook,
     `lib/usePipelineCard` (id per call), over ONE write policy, `lib/useOptimisticWrite` (`lib/pipelineCache`: patches + re-read list). `<PipelineMark>` +
     `<PipelineStageMenu>` serve Browse + the listing header; the kanban (no mark; drag, own trash and confirm) and the extension (glyph, stage `<select>`) keep

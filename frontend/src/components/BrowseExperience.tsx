@@ -18,7 +18,7 @@ import {
   type CSSProperties,
 } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import ResizeHandle from '@/components/ResizeHandle';
 import {
@@ -62,11 +62,10 @@ import {
   fetchRegionDispositionAnnotations,
   isApiConfigured,
   latestEstimationsByListing,
-  mergePropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
 import { browseKeys } from '@/lib/browseKeys';
-import { revalidateAfterMerge } from '@/lib/collectionCache';
+import { useMergeProperties } from '@/lib/useMergeProperties';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -203,7 +202,6 @@ export default function BrowseExperience({
   const [watchdogModalOpen, setWatchdogModalOpen] = useState(false);
 
   /* Dedup merge mode (page only). */
-  const queryClient = useQueryClient();
   const [mergeMode, setMergeMode] = useState(false);
   const [selectedForMerge, setSelectedForMerge] = useState<ReadonlySet<number>>(
     () => new Set(),
@@ -220,21 +218,7 @@ export default function BrowseExperience({
     setMergeMode(false);
     setSelectedForMerge(new Set());
   }, []);
-  const mergeMut = useMutation({
-    mutationFn: (propertyIds: number[]) => mergePropertySet(propertyIds),
-    onSuccess: (res) => {
-      /* The server has already patched the browse_list read model in the merge
-       * txn (toolkit.browse_read_model.sync_browse_list), so this refetch serves
-       * the post-merge state — the retired cards drop out immediately instead of
-       * lingering until the next 5-min rebuild. Success is toasted (the toolbar
-       * closing was the only prior signal); errors surface via the global
-       * MutationCache. `browse-count` is included so the header total decrements. */
-      pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
-      /* The same txn moves collections, the pipeline card and notes onto the survivor. */
-      revalidateAfterMerge(queryClient);
-      exitMergeMode();
-    },
-  });
+  const mergeMut = useMergeProperties(exitMergeMode);
   const handleLocationPick = useCallback((s: MapySuggestion) => {
     if (!s.position) return;
     setMapFlyTo({

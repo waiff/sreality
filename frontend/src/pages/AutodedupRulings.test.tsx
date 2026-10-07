@@ -14,6 +14,7 @@ import AutodedupRulings, {
   corrections,
   sanitizeRulingFilters,
 } from './AutodedupRulings';
+import ToastViewport from '@/components/ToastViewport';
 import * as api from '@/lib/api';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
@@ -422,19 +423,29 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
     );
   });
 
-  it('offers the merge a same on two properties needs', async () => {
+  it('offers the merge a same on two properties needs, behind its confirm, and toasts the receipt', async () => {
     vi.mocked(api.mergePropertySet).mockResolvedValue({
       merge_group_id: 'g',
       survivor_id: 100,
       retired_ids: [200],
       listings_moved: 1,
       pairs_ruled_same: 1,
+      rulings_taken_back: 1,
+      carried: { notes: 1, pipeline: null, collections: [], tags: [] },
+      hidden_for_you: false,
     });
     setup();
+    render(<ToastViewport />);
     const card = await screen.findByTestId('ruling-11-12');
     fireEvent.click(within(card).getByRole('button', { name: 'Sloučit #100 a #200' }));
+    expect(api.mergePropertySet).not.toHaveBeenCalled();
     fireEvent.click(within(card).getByRole('button', { name: 'Ano, sloučit' }));
     await waitFor(() => expect(api.mergePropertySet).toHaveBeenCalledWith([100, 200]));
+    const receipt =
+      'Sloučeno do nemovitosti #100. Přesunuto: 1 poznámka. Zrušená rozhodnutí „Různé“: 1.';
+    expect(await screen.findByText(receipt)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Otevřít #100' }));
+    expect(screen.queryByText(receipt)).not.toBeInTheDocument();
   });
 });
 

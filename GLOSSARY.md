@@ -101,6 +101,17 @@ _Avoid_: list, folder, favourites, saved list
 An account's decision to hide a property from its own Browse.
 _Avoid_: hide, mute, ignore, archive
 
+**Fold**:
+An item of one account's curation that gives way in a merge: the losing one of two of a kind (two
+pipeline cards, collection entries, tags or dismissals), or a dismissal that a live deal lifts. It
+is kept in the carry record, never lost.
+_Avoid_: absorb, collapse, drop, dedupe
+
+**Carry record**:
+What a merge writes down about each item of curation it moved or folded, so a split can send it
+back where it came from.
+_Avoid_: carry log, curation ledger, snapshot
+
 **Watchdog**:
 A saved filter that alerts an account when a property newly matches it or drops its price.
 _Avoid_: alert (for the saved filter), subscription, notification

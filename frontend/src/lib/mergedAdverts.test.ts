@@ -1,20 +1,30 @@
 /* lib/mergedAdverts — the words for a merge's origin, why an advert cannot move
  * and where a split left a unit, the property page's letters as ONE split
- * statement, and the read-your-writes refresh after a split. */
+ * statement, the one receipt after a merge, and the read-your-writes refresh
+ * after a split or a merge. */
 
 import { describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
-import type { SplitUnit } from './api';
+import type { MergeResult, SplitUnit } from './api';
 import {
   inzeratu,
   mergeOriginLabel,
+  mergeReceiptText,
+  pushMergeReceipt,
   refreshAfterSplit,
   splitPlan,
   stateStays,
   unitLanding,
   unmovedReason,
 } from './mergedAdverts';
+import * as toast from './toast';
+
+vi.mock('./toast', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./toast')>();
+  let id = 0;
+  return { ...actual, pushToast: vi.fn(() => ++id), dismissToast: vi.fn() };
+});
 
 describe('inzeratu', () => {
   it('declines the Czech noun by count', () => {
@@ -23,6 +33,71 @@ describe('inzeratu', () => {
     expect(inzeratu(4)).toBe('inzeráty');
     expect(inzeratu(5)).toBe('inzerátů');
     expect(inzeratu(0)).toBe('inzerátů');
+  });
+});
+
+const merged = (over: Partial<MergeResult> = {}): MergeResult => ({
+  merge_group_id: 'g',
+  survivor_id: 310481,
+  retired_ids: [876074],
+  listings_moved: 2,
+  pairs_ruled_same: 1,
+  rulings_taken_back: 0,
+  carried: { notes: 0, pipeline: null, collections: [], tags: [] },
+  hidden_for_you: false,
+  ...over,
+});
+const carrying = (
+  notes: number,
+  collections: string[],
+  tags: string[],
+  pipeline: string | null = null,
+) =>
+  mergeReceiptText(merged({ carried: { notes, pipeline, collections, tags } }));
+
+describe('mergeReceiptText', () => {
+  it('names the survivor and what moved: notes counted, the rest by name, declined', () => {
+    expect(mergeReceiptText(merged())).toBe('Sloučeno do nemovitosti #310481.');
+    expect(carrying(2, ['Brno 2+kk'], ['výhled'], 'Prohlídka')).toBe(
+      'Sloučeno do nemovitosti #310481. Přesunuto: 2 poznámky, zařazení v pipeline (Prohlídka), ' +
+        'kolekce „Brno 2+kk“, štítek „výhled“.',
+    );
+    expect(carrying(1, ['A', 'B'], ['x', 'y'])).toBe(
+      'Sloučeno do nemovitosti #310481. Přesunuto: 1 poznámka, kolekce „A“, „B“, štítky „x“, „y“.',
+    );
+    expect(carrying(5, [], [])).toBe('Sloučeno do nemovitosti #310481. Přesunuto: 5 poznámek.');
+  });
+
+  it('counts the "Různé" rulings taken back and says when the property is hidden', () => {
+    expect(mergeReceiptText(merged({ rulings_taken_back: 3, hidden_for_you: true }))).toBe(
+      'Sloučeno do nemovitosti #310481. Zrušená rozhodnutí „Různé“: 3. Pro vás je skrytá.',
+    );
+  });
+
+  it('says a receipt it could not read, never that nothing moved', () => {
+    expect(mergeReceiptText(merged({ carried: null, hidden_for_you: null }))).toBe(
+      'Sloučeno do nemovitosti #310481. Co se přesunulo, se nepodařilo načíst.',
+    );
+  });
+});
+
+describe('pushMergeReceipt', () => {
+  it('replaces the previous receipt, and its action opens the survivor', () => {
+    const open = vi.fn();
+    pushMergeReceipt(merged({ survivor_id: 7 }), open);
+    pushMergeReceipt(merged({ survivor_id: 8 }), open);
+    const [first, second] = vi.mocked(toast.pushToast).mock.results.map((r) => r.value);
+    expect(toast.dismissToast).toHaveBeenCalledWith(first);
+    const [kind, message, ttl, action] = vi.mocked(toast.pushToast).mock.calls[1];
+    expect([kind, message, ttl, action?.label]).toEqual([
+      'ok',
+      'Sloučeno do nemovitosti #8.',
+      0,
+      'Otevřít #8',
+    ]);
+    action?.onClick();
+    expect(open).toHaveBeenCalledWith(8);
+    expect(toast.dismissToast).toHaveBeenLastCalledWith(second);
   });
 });
 
@@ -145,6 +220,7 @@ describe('refreshAfterSplit', () => {
       ['property'],
       ['property-sources'],
       ['snapshots'],
+      ['curation'],
       ['merged-adverts'],
       ['autodedup', 'proposed-splits'],
       ['autodedup', 'category-splits'],

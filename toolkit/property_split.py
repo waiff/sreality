@@ -26,6 +26,7 @@ from psycopg import errors as pg_errors
 from autodedup import ui_sql as usql
 from toolkit.property_identity import (
     MOVED,
+    CategoryClash,
     MergeError,
     detach_listings,
     detach_outcomes,
@@ -253,6 +254,8 @@ def _join(
             joined[index] = merge_property_set(
                 conn, props, source="operator", reason="operator_split", decided_by=decided_by,
             )["data"]
+        except CategoryClash:
+            raise
         except MergeError as exc:
             raise SplitRefused(409, "refused", str(exc), props) from exc
     return joined

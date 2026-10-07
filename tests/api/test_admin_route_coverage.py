@@ -45,8 +45,7 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
 
 # Every route under these must resolve to require_admin. `/properties` as a whole is
 # NOT an admin prefix (notes/tags under it ride the plain bearer gate), so the merge
-# mechanics are listed by their own sub-paths — "/properties/merge" covers /merge,
-# /merges and /merged.
+# mechanics are listed by their own sub-paths — "/properties/merge" covers /merge.
 _ADMIN_PREFIXES: tuple[str, ...] = (
     "/admin", "/properties/merge", "/labeling",
     "/outreach", "/broker-review", "/skill-refinements", "/location",

@@ -1,10 +1,11 @@
 """The carrier list, `toolkit.property_carriers` (rules 15, 18, 22), offline: the FK census over
 `migrations/*.sql` (every column that references `properties` is carried or named in
 `NOT_CARRIED`), the order the list must keep, the protocol every carrier meets, and a strict
-cursor that runs each REAL carrier and fails on any statement it did not declare or any param it
-did not supply. What each carrier does to rows is executed in tests/test_property_carriers_live.py
-(with the live column census); the writers' use of the seam is tests/test_property_merge_set.py
-and tests/test_detach_listing.py."""
+cursor that runs each REAL carrier, fails on any statement it did not declare or any param it
+did not supply, and answers canned RETURNING rows, so what each carrier hands the carry record is
+pinned here. What each carrier does to rows is executed in tests/test_property_carriers_live.py
+(with the live column census and the count invariant); the merge's use of the seam is
+tests/test_property_merge_set.py."""
 
 from __future__ import annotations
 
@@ -15,20 +16,20 @@ from typing import Any
 import pytest
 
 from tests import sql_corpus
+from toolkit import pipeline_identity
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import (
     CARRIER_SQL,
     NOT_CARRIED,
     PROPERTY_CARRIERS,
+    Carried,
     Carrier,
-    DetachStep,
-    Hop,
     MergeStep,
     carried_columns,
 )
 
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
-G, G2 = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+G = "11111111-1111-1111-1111-111111111111"
 _HOW_TO_FIX = (
     "carry it (a SET/APPEND table keyed on property_id = one `CurationTable(...)` line before "
     "`Pipeline()`; any other shape = one class meeting `Carrier`), or name it in `NOT_CARRIED` "
@@ -221,9 +222,9 @@ def test_the_status_log_stays_with_its_own_property():
 
 
 def test_no_carrier_deletes_history():
-    """The one sanctioned delete is a SET table's collision collapse (and the pipeline's
-    current-state card, snapshotted to its ledger first); never a ledger or log row."""
-    history = ("property_dismissals", "property_pipeline_events",
+    """The sanctioned deletes are a SET table's collision collapse and the losing pipeline card,
+    each folded into the carry record with its snapshot; never a ledger or log row."""
+    history = ("property_dismissals", "property_pipeline_events", "property_merge_carries",
                "property_merge_events", "property_status_events", "properties")
     for statement in CARRIER_SQL:
         deleted = re.findall(r"\bDELETE\s+FROM\s+(\w+)", statement, re.I)
@@ -236,10 +237,13 @@ _NAMED = re.compile(r"%\((\w+)\)s")
 
 
 class _StrictCur:
-    def __init__(self, carrier: Carrier) -> None:
+    def __init__(self, carrier: Carrier, canned: dict[str, list[tuple]] | None = None) -> None:
         self.carrier = carrier
         self.declared = {_n(s) for s in carrier.sql}
+        self.canned = {_n(sql): rows for sql, rows in (canned or {}).items()}
         self.ran: list[tuple[str, Any]] = []
+        self.rows: list[tuple] = []
+        self.carried: list[Carried] = []
 
     def execute(self, sql: str, params: Any = None) -> None:
         s = _n(sql)
@@ -251,13 +255,16 @@ class _StrictCur:
         else:
             assert s.count("%s") == len(params or ()), f"{self.carrier.name}: param count"
         self.ran.append((s, params))
+        self.rows = list(self.canned.get(s, []))
+
+    def fetchall(self) -> list[tuple]:
+        return self.rows
 
 
-def _walk(carrier: Carrier, *, undo: tuple[Hop, ...] = (Hop(1, G, 10, 20),),
-          left: int = 10) -> _StrictCur:
-    cur = _StrictCur(carrier)
-    carrier.on_merge(cur, MergeStep(10, 20, G, "operator"))
-    carrier.on_detach(cur, DetachStep(20, left, undo, "operator"))
+def _walk(carrier: Carrier, canned: dict[str, list[tuple]] | None = None) -> _StrictCur:
+    """One merge step, S=10 survives R=20, each statement answering its canned rows."""
+    cur = _StrictCur(carrier, canned)
+    cur.carried = carrier.on_merge(cur, MergeStep(10, 20, G, "operator"))
     return cur
 
 
@@ -296,27 +303,65 @@ def test_the_retired_dispatches_are_locked_in_their_own_statement_before_the_res
     assert "FOR UPDATE" not in _n(carriers.Dispatches.RESEND_SQL)
 
 
-def test_curation_dispatches_and_dismissals_give_nothing_back_on_a_detach():
-    """Rule 18 best-effort: these rows stay on the property the advert left."""
-    for carrier in PROPERTY_CARRIERS:
-        if carrier.name == "pipeline":
-            continue
-        cur = _StrictCur(carrier)
-        carrier.on_detach(cur, DetachStep(20, 10, (Hop(1, G, 10, 20),), "operator"))
-        assert cur.ran == [], carrier.name
+# --- what each carrier hands the carry record (migration 589) ----------------------------
+
+A, B, T1, T2, T3, T4 = "acc-a", "acc-b", "t1", "t2", "t3", "t4"
 
 
-def test_the_pipeline_restore_drops_the_absorbed_card_only_where_today_does():
-    """With one hop (or any detach whose property left is that merge's survivor) the card the
-    survivor absorbed comes off it; off a later survivor on a chain, the restore runs alone."""
-    pipeline = next(c for c in PROPERTY_CARRIERS if c.name == "pipeline")
-    one_hop = _walk(pipeline)
-    detach = one_hop.ran[4:]
-    assert [p for _s, p in detach] == [{"g": G, "r": 20, "s": 10}] * 2
-    chained = _StrictCur(pipeline)
-    pipeline.on_detach(chained, DetachStep(20, 5, (Hop(1, G, 10, 20), Hop(2, G2, 5, 10)),
-                                           "operator"))
-    assert [(s.split()[0], p) for s, p in chained.ran] == [("INSERT", {"g": G, "r": 20, "s": None})]
+def _carrier(name: str) -> Any:
+    return next(c for c in PROPERTY_CARRIERS if c.name == name)
+
+
+@pytest.mark.parametrize("name", ["collection_properties", "property_tags", "property_notes"])
+def test_a_curation_table_folds_what_it_collapses_and_moves_the_rest(name):
+    """Each from the retired property, keyed on `keys[0]` (else `id`) and dated by `at`; a row
+    with no account moves as it is."""
+    table = _carrier(name)
+    *collapse, move = table.sql
+    key = (table.keys or ("id",))[0]
+    assert _n(move).endswith(f"RETURNING {key}, {table.at}, account_id")
+    snap = {key: 5}
+    cur = _walk(table, {**{s: [(5, T1, A, snap)] for s in collapse}, move: [(6, T2, None)]})
+    assert cur.carried == [Carried(name, 5, T1, A, 20, "folded", snap)] * len(collapse) + [
+        Carried(name, 6, T2, None, 20, "moved", None)]
+
+
+def test_alert_events_get_no_carry_rows_and_five_tables_get_them():
+    """MS14's default: the dispatch carrier runs its four statements and hands back nothing. The
+    carry record's five tables (no CHECK pins them): the three above, the card, the dismissal."""
+    cur = _walk(_carrier("notification_dispatches"))
+    assert len(cur.ran) == 4 and cur.carried == []
+    assert {c.name for c in PROPERTY_CARRIERS if getattr(c, "at", None)} == {
+        "collection_properties", "property_tags", "property_notes"}
+
+
+def test_the_pipeline_folds_each_losing_card_from_where_it_came_and_moves_the_winner():
+    """S's losing card is folded from the property its standing carry row names (7, an earlier
+    step's), else from S; R's losing card from R; the rest move."""
+    fold_s, fold_r, move = pipeline_identity.STATEMENTS
+    snap = {"stage_id": 1}
+    cur = _walk(_carrier("pipeline"), {fold_s: [(A, T1, snap, None), (B, T2, snap, 7)],
+                                       fold_r: [(A, T3, snap)], move: [(B, T4)]})
+    card = "property_pipeline"
+    assert cur.carried == [Carried(card, None, T1, A, 10, "folded", snap),
+                           Carried(card, None, T2, B, 7, "folded", snap),
+                           Carried(card, None, T3, A, 20, "folded", snap),
+                           Carried(card, None, T4, B, 20, "moved", None)]
+
+
+def test_one_dismissal_one_carry_row_its_last_kind_wins():
+    """1 is lifted 'merge' on R, then moved: folded. 2 moves, then a card lifts it: folded from R.
+    S's own 3 came from 7 by an earlier merge, S's 4 never moved: folded from 7 and from S."""
+    lift_twin, repoint, lift_deal = carriers.Dismissals.sql
+    s1, s2, s3, s4 = ({"id": i} for i in range(1, 5))
+    cur = _walk(_carrier("dismissals"), {
+        lift_twin: [(1, T1, A, s1)], repoint: [(1, T1, A), (2, T2, B)],
+        lift_deal: [(2, T2, B, s2, None), (3, T3, A, s3, 7), (4, T4, A, s4, None)]})
+    row = "property_dismissals"
+    assert cur.carried == [Carried(row, 1, T1, A, 20, "folded", s1),
+                           Carried(row, 2, T2, B, 20, "folded", s2),
+                           Carried(row, 3, T3, A, 7, "folded", s3),
+                           Carried(row, 4, T4, A, 10, "folded", s4)]
 
 
 def test_every_carrier_statement_is_in_the_prepare_corpus():

@@ -1,11 +1,12 @@
 """Two writers for the canonical `properties` parent (rule 15, decisions 8 and 17).
 
-`merge_property_set` merges an active set into its oldest record under one lock and one gate;
-`detach_listings` moves a set of adverts back to their ledger origins, or (the operator only) a
-native advert to a new record through the one birth path, under one lock taken up front. Both
-carry every property-anchored operator-state row through
-`toolkit.property_carriers.PROPERTY_CARRIERS` and finish with `properties_changed` once per call
-(rollup, Browse row, broker queue). Callers: `api.property_merge` and `toolkit.property_split`
+`merge_property_set` merges an active set into its oldest record under one lock and one gate,
+carrying every property-anchored operator-state row through
+`toolkit.property_carriers.PROPERTY_CARRIERS` and writing what it carried to the carry record
+(migration 589); `detach_listings` moves a set of adverts back to their ledger origins, or (the
+operator only) a native advert to a new record through the one birth path, under one lock taken
+up front, and moves no curation. Both finish with `properties_changed` once per call (rollup,
+Browse row, broker queue). Callers: `api.property_merge` and `toolkit.property_split`
 (the operator), `autodedup.apply` and `autodedup.reconcile` (merge, inside
 `app_settings.autodedup_apply_scope`), `autodedup.apply.unapply` and `autodedup.legacy_retire`
 (detach, one call per group). `source='operator'` is also a ruling (decision 8); an engine merge
@@ -37,11 +38,24 @@ class MergeError(ValueError):
 
 
 class CategoryClash(MergeError):
-    """Rule 15's refusal: two members differ on `field` (category_type or category_main)."""
+    """Rule 15's refusal: two members differ on `field` (category_type or category_main); the
+    merge's gate also names the two properties and an ad of each (`properties`, `ads`)."""
 
-    def __init__(self, field: str, a: str | None, b: str | None) -> None:
+    def __init__(self, field: str, a: str | None, b: str | None, *,
+                 properties: tuple[int, int] | None = None,
+                 ads: tuple[int, int] | None = None) -> None:
         super().__init__(f"{field} mismatch ({a} vs {b}); refusing to merge")
         self.field, self.a, self.b = field, a, b
+        self.properties, self.ads = properties, ads
+
+
+class Hop(NamedTuple):
+    """One live ledger row a detach undoes, oldest first."""
+
+    event_id: int
+    group: str
+    survivor: int
+    prev: int
 
 
 def _now_iso() -> str:
@@ -67,10 +81,25 @@ SELECT root, id FROM chain WHERE status = 'active'
 """
 
 _LOCK_SET_SQL = """
-SELECT id, status, first_seen_at, category_type, category_main
+SELECT id, status, first_seen_at
 FROM properties WHERE id = ANY(%(ids)s::bigint[])
 ORDER BY id
 FOR UPDATE
+"""
+
+# Rule 15's gate reads ads: one row per (member, deal type, category) among its contentful ads,
+# with the lowest such ad. A contentless record (no price, area or layout and a blank text: an
+# index sighting whose page was never read, stored under the default category) never counts, as
+# in `autodedup.category_splits.contentless`; the TOASTed description is read only for an ad that
+# lacks the other three.
+_SET_ADS_SQL = """
+SELECT l.property_id, l.category_type, l.category_main, min(l.id)
+FROM listings l
+WHERE l.property_id = ANY(%(ids)s::bigint[])
+  AND NOT CASE WHEN l.price_czk IS NULL AND l.area_m2 IS NULL AND l.disposition IS NULL
+               THEN coalesce(l.description, '') !~ '[^[:space:]]' ELSE false END
+GROUP BY 1, 2, 3
+ORDER BY 1, 4
 """
 
 # One ledger row per advert the retired property holds; `listing_id` is the LEGACY sreality_id,
@@ -88,6 +117,14 @@ WHERE l.property_id = %(retired)s
 """
 
 _REPOINT_SQL = "UPDATE listings SET property_id = %s WHERE property_id = %s"
+
+# One carry record row per curation row a step moved or folded (migration 589, MS14).
+_CARRY_SQL = """
+INSERT INTO property_merge_carries (merge_group_id, table_name, row_key, row_at, account_id,
+    from_property_id, to_property_id, kind, snapshot)
+VALUES (%(group)s, %(table)s, %(row_key)s, %(row_at)s, %(account_id)s, %(from_property)s,
+        %(survivor)s, %(kind)s, %(snapshot)s)
+"""
 
 # One statement touching `status` and `is_active` together, so the status-event trigger
 # (migration 559) sees a retirement, not a plain is_active flip; the last write of a pair.
@@ -297,7 +334,7 @@ def category_clash(
     properties and its two values — sale != rent, flat != house, except the sanctioned pairs of
     `room_taxonomy.category_main_compatible` (dum–komercni, pozemek with either, byt–komercni)
     — or None. NULL = unknown, not a conflict. The pairs are not transitive, so a set is read
-    pair by pair (`_gate_set`). The chokepoint and the verdict route (E925) read this one
+    pair by pair (`_gate_ads`). The chokepoint and the verdict route (E925) read this one
     definition."""
     if a[0] is not None and b[0] is not None and a[0] != b[0]:
         return ("category_type", a[0], b[0])
@@ -315,25 +352,33 @@ def _canonical_pairs(conn: psycopg.Connection, property_ids: list[int]) -> set[t
 
 
 def _gate_set(rows: Mapping[int, tuple], ids: list[int]) -> None:
-    """The set's refusals, read under its lock: a member missing or not active, and any rule-15
-    category clash between ANY two members — the survivor's stored category is not recomputed
-    until the whole set has merged, so a NULL there would otherwise let a sale and a rent
-    through."""
+    """The set's refusal read under its lock: a member missing or not active."""
     missing = [pid for pid in ids if pid not in rows]
     inactive = [pid for pid in ids if pid in rows and rows[pid][1] != "active"]
     if missing or inactive:
         raise MergeError(f"properties not found {missing} or not active {inactive}")
-    for i, a in enumerate(ids):
-        for b in ids[i + 1:]:
-            clash = category_clash(rows[a][3:5], rows[b][3:5])
-            if clash:
-                raise CategoryClash(*clash)
+
+
+def _gate_ads(conn: psycopg.Connection, ids: list[int]) -> None:
+    """Rule 15 over the set's ads (the operator, 2026-10-06): refused when the merge would newly
+    put on one property two contentful ads `category_clash` refuses, pair by pair. A contentless
+    record never counts, and a pair of categories one member already holds is that member's,
+    not this merge's (default); stored categories do not gate."""
+    with conn.cursor() as cur:
+        cur.execute(_SET_ADS_SQL, {"ids": ids})
+        ads = [(int(pid), (kind, main), int(lid)) for pid, kind, main, lid in cur.fetchall()]
+    held = {frozenset((a[1], b[1])) for a in ads for b in ads if a[0] == b[0]}
+    for i, (pa, ca, la) in enumerate(ads):
+        for pb, cb, lb in ads[i + 1:]:
+            if pa != pb and frozenset((ca, cb)) not in held and (clash := category_clash(ca, cb)):
+                raise CategoryClash(*clash, properties=(pa, pb), ads=(la, lb))
 
 
 def _merge_pair(cur: psycopg.Cursor, step: carriers.MergeStep, *, reason: str,
                 confidence: float | None, markers: dict[str, Any] | None) -> int:
     """One retired property into the survivor under the set's lock and gate: the ledger, the
-    re-point, every carrier in order, the retire. Returns the ledger rows written."""
+    re-point, every carrier in order, the carry record of what they moved or folded, the retire.
+    Returns the ledger rows written."""
     cur.execute(_LEDGER_SQL, {
         "group": step.group, "survivor": step.survivor, "retired": step.retired,
         "reason": reason, "confidence": confidence,
@@ -342,8 +387,13 @@ def _merge_pair(cur: psycopg.Cursor, step: carriers.MergeStep, *, reason: str,
     })
     moved = cur.rowcount or 0
     cur.execute(_REPOINT_SQL, (step.survivor, step.retired))
-    for carrier in carriers.PROPERTY_CARRIERS:
-        carrier.on_merge(cur, step)
+    carried = [row for carrier in carriers.PROPERTY_CARRIERS
+               for row in carrier.on_merge(cur, step)]
+    if carried:
+        cur.executemany(_CARRY_SQL, [
+            {**row._asdict(), "group": step.group, "survivor": step.survivor,
+             "snapshot": None if row.snapshot is None else Jsonb(row.snapshot)}
+            for row in carried])
     cur.execute(_RETIRE_SQL, (step.survivor, step.retired))
     return moved
 
@@ -360,8 +410,9 @@ def merge_property_set(
     decided_by: str | None = None,
 ) -> dict[str, Any]:
     """Merge an active SET into its oldest record under ONE group, in one transaction: one lock
-    over every member in id order, one gate (`_gate_set`), then each retired property through
-    `_merge_pair`. `source='operator'` rules the canonical adverts "same"; then
+    over every member in id order, one gate (`_gate_set`, then `_gate_ads`), then each retired
+    property through `_merge_pair`. `source='operator'` rules the canonical adverts "same",
+    counting the "different" rulings that takes back (`rulings_taken_back`); then
     `properties_changed` once over the survivor and the retired."""
     ids = sorted({int(p) for p in property_ids})
     if len(ids) < 2:
@@ -375,9 +426,16 @@ def merge_property_set(
             cur.execute(_LOCK_SET_SQL, {"ids": ids})
             rows = {int(r[0]): r for r in cur.fetchall()}
         _gate_set(rows, ids)
+        _gate_ads(conn, ids)
         survivor = survivor_of({pid: rows[pid][2] for pid in ids})
         retired = [pid for pid in ids if pid != survivor]
         pairs = _canonical_pairs(conn, ids) if source == "operator" else set()
+        taken_back = 0
+        if pairs:
+            # imported here: toolkit.property_split imports this module
+            from toolkit.property_split import newest_pair_rulings, reversed_pairs
+            stored = newest_pair_rulings(conn, {lid for pair in pairs for lid in pair})
+            taken_back = len(reversed_pairs({p: v["verdict"] for p, v in stored.items()}, pairs))
         moved = 0
         with conn.cursor() as cur:
             for rid in retired:
@@ -398,6 +456,7 @@ def merge_property_set(
             "retired_ids": retired,
             "listings_moved": moved,
             "pairs_ruled_same": ruled,
+            "rulings_taken_back": taken_back,
         },
         "metadata": {
             "tool": "merge_property_set",
@@ -539,7 +598,7 @@ class _Detached(NamedTuple):
     outcome: str
     left: int | None  # the property it sat on
     target: int | None  # where it went: its origin or a new record (`left` when it stayed)
-    undo: tuple[carriers.Hop, ...]
+    undo: tuple[Hop, ...]
     reactivated: bool
 
 
@@ -591,16 +650,12 @@ def _detach_one(
                 cur.execute(_MOVE_ADVERT_SQL, (target, listing_id, current))
                 if not cur.rowcount:
                     outcome, undo, target = "moved_since", [], current
-    hops = tuple(carriers.Hop(int(m[0]), str(m[1]), int(m[2]), int(m[3])) for m in undo)
+    hops = tuple(Hop(int(m[0]), str(m[1]), int(m[2]), int(m[3])) for m in undo)
     if outcome == "detached":
         with conn.cursor() as cur:
             cur.execute(_UNDO_SQL, (decided_by, [h.event_id for h in hops]))
             cur.execute(_REACTIVATE_SQL, {"pid": target})
             reactivated = (cur.rowcount or 0) == 1
-            if reactivated:
-                step = carriers.DetachStep(int(target), int(current), hops, source)
-                for carrier in reversed(carriers.PROPERTY_CARRIERS):
-                    carrier.on_detach(cur, step)
     return _Detached(listing_id, outcome, current, target, hops, reactivated)
 
 
@@ -633,18 +688,17 @@ def detach_listings(
 ) -> dict[str, Any]:
     """Split a SET of adverts off their properties, in the caller's order, in ONE transaction: a
     merged one back to its ORIGIN (with `merge_group_id`, to where it sat before that merge, only
-    while it is the newest to move it); if that merge retired the origin it is reactivated and
-    every carrier's inverse runs, in reverse `PROPERTY_CARRIERS` order (its pipeline card
-    comes back; curation, dispatches and dismissals stay on the property left, rules
-    18, 22). A native one (no standing merge moved it), while another own advert stays, goes to
-    a NEW record (`split_native`: the operator only, never group-scoped; any other source answers
-    `propose_only`, decision 9); no carrier runs. Idempotent, each `outcome` saying why nothing
-    moved. Every property the steps lock is locked first, in id order. `source='operator'` rules
-    each moved advert "different" from every advert left where it was, never from another that
-    moved (`_rule_detached`); then `properties_changed` ONCE over every property left and reached.
-    An unknown advert refuses the set before anything moves; an empty set is a no-op. Callers:
-    `toolkit.property_split`; `autodedup.apply.unapply` and `autodedup.legacy_retire`, one call
-    per group."""
+    while it is the newest to move it); if that merge retired the origin it is reactivated. A
+    native one (no standing merge moved it), while another own advert stays, goes to a NEW record
+    (`split_native`: the operator only, never group-scoped; any other source answers
+    `propose_only`, decision 9). No carrier runs: curation, the pipeline card, dispatches and
+    dismissals stay on the property left until a split routes them (W4; rules 18, 22).
+    Idempotent, each `outcome` saying why nothing moved. Every property the steps lock is locked
+    first, in id order. `source='operator'` rules each moved advert "different" from every advert
+    left where it was, never from another that moved (`_rule_detached`); then `properties_changed`
+    ONCE over every property left and reached. An unknown advert refuses the set before anything
+    moves; an empty set is a no-op. Callers: `toolkit.property_split`; `autodedup.apply.unapply`
+    and `autodedup.legacy_retire`, one call per group."""
     ids = list(dict.fromkeys(int(i) for i in listing_ids))
     done: list[_Detached] = []
     ruled = 0

@@ -26,7 +26,7 @@ from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import lane
 from autodedup.incremental_sql import RT_LEASE_READ_SQL, RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
-from toolkit import property_identity
+from toolkit import property_carriers, property_identity
 from tests._property_ledger import _Ledger
 from toolkit.property_identity import (
     CategoryClash,
@@ -300,6 +300,8 @@ class FakeDb:
                     r.update(undone_at=self.now, undone_by=p["undone_by"],
                              undo_result=json.loads(p["undo_result"]))
             return []
+        if sql == property_carriers._CURATION_PREVIEW_SQL:  # one carry row per ad going back
+            return [(len(p["ids"]),)]
         raise AssertionError(f"unknown statement: {sql[:80]!r}")
 
     def _ledger_insert(self, p: dict[str, Any]) -> list[tuple]:
@@ -1223,6 +1225,9 @@ def test_unapply_undoes_a_generation_newest_first_and_a_later_apply_may_redo_it(
     listing = A.unapply(db, GEN, dry_run=True)
     assert [g["merge_group_id"] for g in listing["groups"]] == groups[::-1]
     assert all(r["undone_at"] is None for r in db.ledger)
+    # the hook counts per group over exactly the ads that would go back, summed into the counts
+    assert [g["curation"] for g in listing["groups"]] == [{"carry_rows": 1}] * 2
+    assert listing["counts"]["carry_rows"] == listing["counts"]["listings_moved_back"] == 2
 
     del db.settings[A.SCOPE_SETTING]  # undo is NOT gated by the scope
     undone: list[str] = []
@@ -1464,8 +1469,9 @@ def test_a_later_merge_on_the_survivor_is_not_named_when_undoing_it_frees_nothin
 
 def _undone_the_same(dry: Mapping[str, Any], live: Mapping[str, Any]) -> None:
     # The dry run the operator approves reports every count the live run then produces, bar
-    # `undone`: a dry run undoes nothing.
-    assert {k: v for k, v in dry["counts"].items() if k != "undone"} == {
+    # `undone` (a dry run undoes nothing) and the curation preview (the live undo routes no
+    # curation until the split does, W4).
+    assert {k: v for k, v in dry["counts"].items() if k not in ("undone", "carry_rows")} == {
         k: v for k, v in live["counts"].items() if k != "undone"}
     assert [_outcome(g) for g in dry["groups"]] == [_outcome(g) for g in live["groups"]]
 

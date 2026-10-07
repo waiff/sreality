@@ -1,20 +1,24 @@
 /* The merged-adverts section on the property page, the proposed-splits page and
  * the category review: their query keys, their words for a merge's origin, a
- * split's outcome and where a unit landed, and the refresh after a split. All
- * write through ONE route, `POST /properties/{id}/split` (E919), and each states
- * a whole partition in one call: the property page and the category review as
- * letters over the adverts (`splitPlan` — every letter group but the one keeping
- * the record leaves as one property), a proposal card as ticks. */
+ * split's outcome and where a unit landed, and the refresh after a split or a
+ * merge. Splits write through ONE route, `POST /properties/{id}/split` (E919),
+ * and each states a whole partition in one call: the property page and the
+ * category review as letters over the adverts (`splitPlan` — every letter group
+ * but the one keeping the record leaves as one property), a proposal card as
+ * ticks. A merge, from Browse or the Rulings page, answers with one toast
+ * (`pushMergeReceipt`, MS15). */
 
 import type { QueryClient } from '@tanstack/react-query';
 
-import type { SplitStatement, SplitUnit } from '@/lib/api';
+import type { MergeCarried, MergeResult, SplitStatement, SplitUnit } from '@/lib/api';
 import { distinctUnits, unitOf, type UnitMap } from '@/components/autodedup/UnitSplit';
 
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { revalidateCollections } from '@/lib/collectionCache';
+import { czPlural } from '@/lib/format';
 import { revalidatePipeline } from '@/lib/pipelineCache';
 import { autodedupKeys } from '@/lib/autodedupKeys';
+import { dismissToast, pushToast } from '@/lib/toast';
 
 export const mergedAdvertsKeys = {
   all: ['merged-adverts'] as const,
@@ -30,9 +34,49 @@ export const propertyKeys = {
 
 /* 1 inzerát · 2–4 inzeráty · 0 / 5+ inzerátů. */
 export function inzeratu(n: number): string {
-  if (n === 1) return 'inzerát';
-  if (n >= 2 && n <= 4) return 'inzeráty';
-  return 'inzerátů';
+  return czPlural(n, 'inzerát', 'inzeráty', 'inzerátů');
+}
+
+const quoted = (names: readonly string[]): string => names.map((n) => `„${n}“`).join(', ');
+const NOTHING_CARRIED: MergeCarried = { notes: 0, pipeline: null, collections: [], tags: [] };
+
+/* The one toast after a merge (MS15): the surviving property, only the acting
+ * account's MOVED items (notes as a count, the rest by name), the "Různé"
+ * rulings it took back (MS12) and whether the property is hidden from the
+ * account (MS13); an unread receipt is said, never shown as nothing moved. */
+export function mergeReceiptText(r: MergeResult): string {
+  const { notes, pipeline, collections, tags } = r.carried ?? NOTHING_CARRIED;
+  const moved = [
+    notes > 0 ? `${notes} ${czPlural(notes, 'poznámka', 'poznámky', 'poznámek')}` : null,
+    pipeline != null ? `zařazení v pipeline (${pipeline})` : null,
+    collections.length > 0 ? `kolekce ${quoted(collections)}` : null,
+    tags.length > 0 ? `${tags.length === 1 ? 'štítek' : 'štítky'} ${quoted(tags)}` : null,
+  ].filter((part): part is string => part != null);
+  return [
+    `Sloučeno do nemovitosti #${r.survivor_id}.`,
+    r.carried == null ? 'Co se přesunulo, se nepodařilo načíst.' : null,
+    moved.length > 0 ? `Přesunuto: ${moved.join(', ')}.` : null,
+    r.rulings_taken_back > 0 ? `Zrušená rozhodnutí „Různé“: ${r.rulings_taken_back}.` : null,
+    r.hidden_for_you ? 'Pro vás je skrytá.' : null,
+  ]
+    .filter((part) => part != null)
+    .join(' ');
+}
+
+let receiptToast: number | null = null;
+
+/* Pushes the receipt with "Otevřít #S", replacing the previous receipt so
+ * merges in a row never stack; it stays until dismissed or opened. */
+export function pushMergeReceipt(r: MergeResult, open: (propertyId: number) => void): void {
+  if (receiptToast != null) dismissToast(receiptToast);
+  const id = pushToast('ok', mergeReceiptText(r), 0, {
+    label: `Otevřít #${r.survivor_id}`,
+    onClick: () => {
+      dismissToast(id);
+      open(r.survivor_id);
+    },
+  });
+  receiptToast = id;
 }
 
 /* The adjective the origin line puts before "sloučení". Explicit per source: an
@@ -141,16 +185,17 @@ export function unitLanding(unit: SplitUnit, from: number): string {
   return unit.property_id === from ? `zůstává #${unit.property_id}` : `už v #${unit.property_id}`;
 }
 
-/* Read-your-writes after a split (or its undo), for the property page, the
- * proposals page, the category review AND every Browse surface. The property
- * page is keyed on the property, so a plain invalidation re-reads the property
- * (a separated canonical advert hands the header to the next one) and its
- * advert list. */
+/* Read-your-writes after a split (or its undo) or a merge, for the property
+ * page, the proposals page, the category review AND every Browse surface. The
+ * property page is keyed on the property, so a plain invalidation re-reads the
+ * property (a separated canonical advert hands the header to the next one) and
+ * its advert list; `curation` re-reads notes and tags, which a merge moves. */
 export function refreshAfterSplit(qc: QueryClient): void {
   for (const key of [
     ['property'],
     ['property-sources'],
     ['snapshots'],
+    ['curation'],
     mergedAdvertsKeys.all,
     autodedupKeys.proposedSplits,
     autodedupKeys.categorySplits,
