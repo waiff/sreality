@@ -300,8 +300,14 @@ class FakeDb:
                     r.update(undone_at=self.now, undone_by=p["undone_by"],
                              undo_result=json.loads(p["undo_result"]))
             return []
-        if sql == property_carriers._CURATION_PREVIEW_SQL:  # one carry row per ad going back
-            return [(len(p["ids"]),)]
+        if sql == property_carriers._ROUTES_SQL:
+            # per group: a note written on an ad going back, an item carried from its origin
+            moved = [e for e in self.events if e["merge_group_id"] == p["group"]
+                     and e["survivor"] == p["left"] and not e["undone"]]
+            return [("move", "property_notes", 1, None, "note:1", "n", None, None,
+                     moved[0]["listing"], None, None, [], None),
+                    ("move", "property_tags", 2, None, "tag:2", "t", None, None, None, None,
+                     moved[0]["retired"], [9], None)] if moved else []
         raise AssertionError(f"unknown statement: {sql[:80]!r}")
 
     def _ledger_insert(self, p: dict[str, Any]) -> list[tuple]:
@@ -1226,8 +1232,9 @@ def test_unapply_undoes_a_generation_newest_first_and_a_later_apply_may_redo_it(
     assert [g["merge_group_id"] for g in listing["groups"]] == groups[::-1]
     assert all(r["undone_at"] is None for r in db.ledger)
     # the hook counts per group over exactly the ads that would go back, summed into the counts
-    assert [g["curation"] for g in listing["groups"]] == [{"carry_rows": 1}] * 2
-    assert listing["counts"]["carry_rows"] == listing["counts"]["listings_moved_back"] == 2
+    assert [g["curation"] for g in listing["groups"]] == [{"carry_rows": 1, "note_moves": 1}] * 2
+    assert (listing["counts"]["carry_rows"] == listing["counts"]["note_moves"]
+            == listing["counts"]["listings_moved_back"] == 2)
 
     del db.settings[A.SCOPE_SETTING]  # undo is NOT gated by the scope
     undone: list[str] = []
@@ -1469,9 +1476,10 @@ def test_a_later_merge_on_the_survivor_is_not_named_when_undoing_it_frees_nothin
 
 def _undone_the_same(dry: Mapping[str, Any], live: Mapping[str, Any]) -> None:
     # The dry run the operator approves reports every count the live run then produces, bar
-    # `undone` (a dry run undoes nothing) and the curation preview (the live undo routes no
-    # curation until the split does, W4).
-    assert {k: v for k, v in dry["counts"].items() if k not in ("undone", "carry_rows")} == {
+    # `undone` (a dry run undoes nothing) and the curation preview (the live run's detach
+    # reports what it routed in its own payload, which this run does not sum).
+    assert {k: v for k, v in dry["counts"].items()
+            if k not in ("undone", "carry_rows", "note_moves")} == {
         k: v for k, v in live["counts"].items() if k != "undone"}
     assert [_outcome(g) for g in dry["groups"]] == [_outcome(g) for g in live["groups"]]
 

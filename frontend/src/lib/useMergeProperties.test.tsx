@@ -1,12 +1,12 @@
 /* useMergeProperties — Browse's merge, through the one transport and the app's
  * MutationCache (lib/mutationCache): a success is the one receipt, the refresh
  * (the note marks' counts included, MS16) and `onMerged` (merge mode closes); a
- * refusal is the route's Czech sentence toasted once, merge mode left open.
- * lib/api reads its base URL at module evaluation, hence the dynamic imports
- * after the env stub. */
+ * refusal is the route's Czech sentence toasted once, merge mode left open. And
+ * useMergePreview, MS12's count before the click. lib/api reads its base URL at
+ * module evaluation, hence the dynamic imports after the env stub. */
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -78,4 +78,32 @@ it('toasts the route’s Czech refusal once and leaves merge mode open', async (
   await act(() => expect(merge()).rejects.toThrow(clash));
   expect(vi.mocked(toast.pushToast).mock.calls).toEqual([['err', clash]]);
   expect(onMerged).not.toHaveBeenCalled();
+});
+
+it('reads the count a merge would take back once two properties are ticked, ids ascending', async () => {
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+    calls.push(`${init.method ?? 'GET'} ${url} ${(init.headers as Record<string, string>).Authorization}`);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ property_ids: [10, 20], rulings_taken_back: 4 }),
+    } as Response;
+  });
+  const { useMergePreview } = await import('./useMergeProperties');
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  );
+  const one = renderHook(() => useMergePreview([20]), { wrapper });
+  expect(one.result.current.fetchStatus).toBe('idle');
+  const two = renderHook(() => useMergePreview(new Set([20, 10])), { wrapper });
+  await waitFor(() => expect(two.result.current.data?.rulings_taken_back).toBe(4));
+  expect(calls).toEqual([
+    'GET https://api.test.invalid/properties/merge?properties=10%2C20 Bearer USER-JWT',
+  ]);
+  expect(qc.getQueryData(['merged-adverts', 'merge-preview', [10, 20]])).toEqual({
+    property_ids: [10, 20],
+    rulings_taken_back: 4,
+  });
 });

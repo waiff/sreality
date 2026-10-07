@@ -3058,91 +3058,126 @@ export const mergePropertySet = (
     jwt: true,
   });
 
-/* The operator's split statement (E919), `POST /properties/{id}/split`: every
- * advert the operator was shown (`adverts`, the stale-view guard), the units to
- * separate (`separate`: each leaves as ONE record — back where it came from, or
- * new), and `keep_together` (the rest ruled one property). Across units the
- * adverts are ruled "different" with a permanent must-not-link. One transaction:
- * all of it or nothing. The property page sends its letters as one statement
- * (`keep_together: false`, every letter group but the kept one a unit); the
- * proposals page always keeps the rest together. */
+/* How many "Různé" rulings a merge of these properties would take back (MS12),
+ * read before the click; the merge itself answers the same count. */
+export interface MergePreview {
+  property_ids: number[];
+  rulings_taken_back: number;
+}
+
+export const getMergePreview = (propertyIds: readonly number[]): Promise<MergePreview> =>
+  request<MergePreview>('/properties/merge', {
+    query: { properties: propertyIds.join(',') },
+    jwt: true,
+  });
+
+/* The split by letters (MS18), `GET`/`POST /properties/{id}/split`: every ad of
+ * the property with a letter, one letter = one property afterwards. The preview
+ * says where each letter and each of the acting account's items would land and
+ * what would be ruled; `plan` is its digest, sent back as `expect` — a property
+ * (or an item of yours) that changed since is refused as `stale`. Other
+ * accounts' items follow the rule unseen; the split rules only "Různé", only
+ * between letters; one merge takes it back (no undo). */
 export const DETACH_REASON_MAX = 500;
 
+/* listings.id -> letter (A–Z). */
+export type SplitLetters = Record<number, string>;
+
+export interface SplitChoice {
+  to: string;
+  copies: string[];
+}
+
 export interface SplitStatement {
-  adverts: number[];
-  separate: number[][];
-  keep_together: boolean;
+  letters: SplitLetters;
+  /* Item key (`note:11`, `pipeline`, `collection:5`, `tag:7`, `dismissal`) ->
+   * the letter that gets it and its copies; an absent key follows the preview. */
+  choices?: Record<string, SplitChoice>;
   reason?: string;
-  confirm_retract?: boolean;
+  expect: string;
 }
 
-/* Issued by the server in a split's response; `undoSplit` posts it back verbatim. */
-export interface SplitUndoBody {
-  call_id: string;
-  placements: Record<string, number>;
-  rulings: {
-    listing_lo: number;
-    listing_hi: number;
-    verdict: string | null;
-    note: string | null;
-    reasons: string[];
-    /* The pair's must-not-link row before the split (a machine's included), put back by the undo. */
-    must_not_link?: { source: string; reason: string | null } | null;
-  }[];
-}
+export type SplitItemKind = 'note' | 'pipeline' | 'collection' | 'tag' | 'dismissal';
 
-export interface SplitUnit {
-  unit: string;
-  /* 'kept' = the adverts the operator left together; 'separated' = a unit that left. */
-  role: 'kept' | 'separated';
+/* Why a fold is not re-created or a copy not made: you hold the item there
+ * already (`held`), a hidden property where your live pipeline card lands
+ * (`card`), or what the fold merged into is no longer on the property (`gone`). */
+export type SplitSkip = 'held' | 'card' | 'gone';
+
+export interface SplitPreviewLetter {
+  letter: string;
   listing_ids: number[];
-  /* Where the unit sits now. */
+  /* `kept`: stays on this property; `origin`: back where it came from; `new`. */
+  lands: 'kept' | 'origin' | 'new';
+  property_id: number | null;
+  /* Properties the letter lands on before they are merged into one (0: one). */
+  joins: number;
+  /* Rule 15 refuses the letter's join: the click is withheld. */
+  refused: SplitRefusal | null;
+}
+
+export interface SplitPreviewItem {
+  item: string;
+  kind: SplitItemKind;
+  label: string | null;
+  letter: string;
+  /* `ad`: with the ad it was written on; `came_from`: back to the property it
+   * came from; `stays`; `fold`: re-created where it came from (not choosable). */
+  why: 'ad' | 'came_from' | 'stays' | 'fold';
+  from_property_id?: number;
+  /* A fold: null when it is re-created, else why not (with your picks, as the
+   * click would leave it). */
+  skipped?: SplitSkip | null;
+  /* With your picks: each copy the click would make, null when it is made. */
+  copies?: { letter: string; skipped: SplitSkip | null }[];
+}
+
+export interface SplitInside {
+  letter: string;
+  pairs: [number, number][];
+  sets: number;
+  /* The letter's join takes them back (MS12); otherwise they stand. */
+  taken_back: boolean;
+}
+
+export interface SplitPreview {
   property_id: number;
-  moved: { listing_id: number; outcome: string; from: number; to: number }[];
-  /* Set when the unit landed on two records and the one merge joined them. */
-  merge_group_id: string | null;
+  letters: SplitPreviewLetter[];
+  curation: SplitPreviewItem[];
+  rulings: { different: number; taken_back: number; inside: SplitInside[] };
+  plan: string;
 }
 
 export interface SplitResult {
-  call_id: string;
   property_id: number;
-  /* The unit that keeps the property record (its notes, tags, pipeline card). */
-  record_kept_by: string;
-  units: SplitUnit[];
-  moved: number;
-  rulings: {
-    written: number;
-    same: number;
-    different: number;
-    must_not_link_written: number;
-    must_not_link_retracted: number;
-  };
-  reversed_pairs: [number, number][];
-  /* Null when the statement changed nothing (a re-send). */
-  undo: SplitUndoBody | null;
-}
-
-export interface SplitUndoResult {
   call_id: string;
-  undone: true;
-  property_id: number | null;
-  merge_group_id: string | null;
-  rulings: { restored: number };
+  letters: {
+    letter: string;
+    listing_ids: number[];
+    property_id: number;
+    lands: 'kept' | 'origin' | 'new';
+    /* The merge group of the letter's join, when it landed on two properties. */
+    joined: string | null;
+  }[];
+  /* The acting account's items only; a fold or a copy not made says why. */
+  curation: {
+    item: string;
+    kind: SplitItemKind;
+    label: string | null;
+    letter: string;
+    property_id: number;
+    copies: { letter: string; property_id: number; skipped?: SplitSkip }[];
+    why?: 'fold';
+    skipped?: SplitSkip;
+  }[];
+  /* `same`: what the letters' joins ruled, each a merge (MS12). */
+  rulings: { different: number; same: number; taken_back: number };
 }
 
-export type SplitRefusalCode =
-  | 'invalid'
-  | 'not_found'
-  | 'stale'
-  | 'reverses_rulings'
-  | 'cannot_move'
-  | 'join_would_drag'
-  | 'refused'
-  | 'busy';
+export type SplitRefusalCode = 'invalid' | 'not_found' | 'stale' | 'refused' | 'busy';
 
-/* Why a statement wrote nothing: `reverses_rulings` names the pairs (E52) and a
- * re-send with `confirm_retract` goes ahead; `stale` means the property changed
- * since the page read it. */
+/* Why a split wrote nothing, in Czech: `stale` means the property or one of your
+ * items changed since the preview; `refused` is rule 15's sentence. */
 export interface SplitRefusal {
   code: SplitRefusalCode;
   message: string;
@@ -3156,6 +3191,16 @@ export function splitRefusal(err: unknown): SplitRefusal | null {
   return null;
 }
 
+/* `letters` as the route reads them, `94020:A,94492:B` (`lettersParam`); `choices`
+ * the click's own choices as JSON (`choicesParam`), so the preview says what the
+ * click would skip. */
+export const getSplitPreview = (
+  propertyId: number,
+  letters: string,
+  choices?: string,
+): Promise<SplitPreview> =>
+  request<SplitPreview>(`/properties/${propertyId}/split`, { query: { letters, choices }, jwt: true });
+
 export const splitProperty = (propertyId: number, statement: SplitStatement): Promise<SplitResult> =>
   request<SplitResult>(`/properties/${propertyId}/split`, {
     method: 'POST',
@@ -3163,24 +3208,14 @@ export const splitProperty = (propertyId: number, statement: SplitStatement): Pr
     jwt: true,
   });
 
-export const undoSplit = (propertyId: number, undo: SplitUndoBody): Promise<SplitUndoResult> =>
-  request<SplitUndoResult>(`/properties/${propertyId}/split`, {
-    method: 'POST',
-    json: { undo },
-    jwt: true,
-  });
-
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
- * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
- * what separating it would do now; `splittable`: that moves it (back to its
- * origin, or to a new record). */
+ * not a view. All three origin fields null: no merge brought it (the property's
+ * own advert). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
   merge_source: string | null;
   merged_at: string | null;
-  detach_outcome: string | null;
-  splittable: boolean;
 }
 
 export const fetchPropertyOrigins = (
@@ -3194,17 +3229,12 @@ export const fetchPropertyOrigins = (
 /* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
  * generation groups its adverts apart (the canonical advert's group first), each
  * split pair with the engine's stated reason and the operator's newest ruling.
- * The split itself is the operator's statement, `splitProperty`, one per card;
- * `detach_outcome` is what separating an advert would do now and `splittable`
- * says it moves it (one no merge brought gets a new record while another own
- * advert stays). */
+ * The split itself is the operator's, on the property page (`?letters=`). */
 export interface ProposedSplitAdvert {
   listing_id: number;
   source: string;
   is_active: boolean;
   origin_property_id: number | null;
-  detach_outcome: string | null;
-  splittable: boolean;
 }
 
 export interface ProposedSplit {
@@ -3254,8 +3284,8 @@ export const getProposedSplits = (
  * unknown deal type or category (`unknown`) and a contentless record (`empty`:
  * no price, area, disposition or text) ride with the kept side and never make a
  * property `mixed`. `confirmed`: every pair across sides is ruled "stejné".
- * The decision is `splitProperty`. `missing`: ids that are not a live property
- * of two or more ads. */
+ * The split is the property page's (`?letters=`). `missing`: ids that are not a
+ * live property of two or more ads. */
 export interface CategorySplitAdvert extends ProposedSplitAdvert {
   empty: boolean;
   unknown: boolean;

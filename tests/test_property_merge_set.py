@@ -303,8 +303,8 @@ def test_an_engine_merge_is_never_a_ruling():
 
 
 def test_an_operator_merge_counts_the_different_rulings_it_takes_back():
-    """MS12's slot: the canonical pairs it rules "same" whose newest ruling was negative (W4
-    widens the pair set); a pair already ruled "same" is not taken back."""
+    """A canonical pair whose newest ruling was negative is taken back; one newest "same" is
+    not."""
     db = _Ledger({30: 3, 70: 7, 90: 9}, canonical={3: 30, 7: 70, 9: 90})
     db.rule(30, 70, "different")
     db.rule(30, 90, "same")
@@ -312,6 +312,38 @@ def test_an_operator_merge_counts_the_different_rulings_it_takes_back():
     db.rule(70, 90, "same")
     out = _merge(db, [3, 7, 9], source="operator", decided_by=OP)
     assert (out["pairs_ruled_same"], out["rulings_taken_back"]) == (3, 1)
+
+
+def test_an_operator_merge_takes_back_every_different_between_its_members():
+    """MS12: 3 = {30, 31}, 7 = {70}. The cross negative (31, 70) is ruled "same" with the merge's
+    note and its must-not-link retracted; the negative inside 3, (30, 31), is not between what
+    the merge joins and stands; a negative set spanning both gets its cluster "same", a set
+    inside 3 does not; the count is the preview's."""
+    db = _Ledger({30: 3, 31: 3, 70: 7}, canonical={3: 30, 7: 70})
+    db.rule(31, 70, "different", note="jiné patro")
+    db.rule(30, 31, "same_building_different_unit")
+    db.rule_set(500, [31, 70], "different")
+    db.rule_set(501, [30, 31], "different")
+    assert pi.merge_preview(db, [7, 3]) == {"property_ids": [3, 7], "rulings_taken_back": 2}
+    out = _merge(db, [3, 7], source="operator", decided_by=OP)
+    note = f"operator merge {out['merge_group_id']}"
+    assert (out["pairs_ruled_same"], out["rulings_taken_back"]) == (2, 2)
+    assert db.word(31, 70) == ("same", note) and db.word(30, 70) == ("same", note)
+    assert (31, 70) not in db.mnl and db.history(31, 70)[0][0] == "different"
+    assert db.word(30, 31)[0] == "same_building_different_unit" and (30, 31) in db.mnl
+    assert db.newest_set([31, 70])["verdict"] == "same"
+    assert db.newest_set([31, 70])["note"] == note
+    assert db.newest_set([30, 31])["verdict"] == "different"
+    assert len(db.sets) == 3, "one cluster row appended, under the set's own key"
+
+
+def test_an_engine_merge_takes_back_nothing():
+    db = _Ledger({30: 3, 70: 7}, canonical={3: 30, 7: 70})
+    db.rule(30, 70, "different")
+    db.rule_set(500, [30, 70], "different")
+    out = _merge(db, [3, 7])
+    assert out["rulings_taken_back"] == 0 and db.word(30, 70)[0] == "different"
+    assert len(db.sets) == 1 and db.sql("autodedup.") == []
 
 
 def _alerted() -> _Ledger:

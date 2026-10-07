@@ -55,6 +55,7 @@ import { usePageTitle } from '@/lib/pageTitle';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import { MergeSelection } from '@/components/CurationMarks';
+import MergeTakenBack from '@/components/MergeTakenBack';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
 import {
@@ -65,7 +66,7 @@ import {
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
 import { browseKeys } from '@/lib/browseKeys';
-import { useMergeProperties } from '@/lib/useMergeProperties';
+import { useMergePreview, useMergeProperties } from '@/lib/useMergeProperties';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -1269,7 +1270,8 @@ function CardsGlyph() {
 }
 
 /* Merge mode's bar: the ticked properties by number, each with its marks
-   (MS16), so what a merge will carry is in view before the click. */
+   (MS16), so what a merge will carry is in view before the click, and the
+   "Různé" rulings it would take back (MS12), read before the merge is offered. */
 export function MergeModeBar({
   active,
   selected,
@@ -1284,6 +1286,7 @@ export function MergeModeBar({
   onMerge: () => void;
 }) {
   const selectedCount = selected.size;
+  const preview = useMergePreview(selected);
   const btn = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
   return (
     <div className="flex items-center gap-2 shrink-0">
@@ -1294,10 +1297,11 @@ export function MergeModeBar({
           ) : (
             <MergeSelection ids={selected} />
           )}
+          {selectedCount >= 2 && <MergeTakenBack preview={preview} className="text-[0.75rem]" />}
           <button
             type="button"
             onClick={onMerge}
-            disabled={merging || selectedCount < 2}
+            disabled={merging || selectedCount < 2 || preview.isPending}
             className={`${btn} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
           >
             {merging ? 'Merging…' : `Merge ${selectedCount >= 2 ? selectedCount : ''}`.trim()}

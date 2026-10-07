@@ -8,47 +8,34 @@
  * the engine's stated reason per split pair and whether the operator has
  * already ruled on it.
  *
- * The split is the operator's statement, per card: tick the adverts to separate
- * (per advert, or a whole group at once). The ticked adverts of ONE group leave
- * together as one property, those of different groups as different properties,
- * and the unticked rest is confirmed as ONE property — nothing ticked is
- * "confirm as one", which stops the proposal. The ticks start at the proposal.
- * Selected cards run through ONE route, `POST /properties/{id}/split` (E919),
- * one call per card, each all or nothing, behind a two-step confirm with one
- * optional shared reason. The result names, per unit, the property it sits on
- * now (a link), offers the undo the server issued, and asks again when a card
- * would take back the operator's own earlier "různé" (E52). */
+ * The split is the operator's, on the property page: each card links to its
+ * split dialog (MS18) with the engine's groups as letters (group 1 → A, …),
+ * where the preview says where each letter and each of the operator's items
+ * goes, the letters can be changed, and the split is made. */
 
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
+import { UNIT_LETTERS } from '@/components/autodedup/UnitSplit';
 import {
-  DETACH_REASON_MAX,
   getProposedSplits,
   type AutodedupMember,
   type ProposedSplit,
   type ProposedSplitAdvert,
-  type SplitStatement,
+  type SplitLetters,
 } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
-import { inzeratu, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
+import { inzeratu, splitPath } from '@/lib/mergedAdverts';
 import { autodedupKeys } from '@/lib/autodedupKeys';
 import Notice, { StoreNotReady } from '@/components/autodedup/Notice';
 import { PropertyLinks, SplitReasons } from '@/components/autodedup/SplitCardParts';
-import SplitOutcomeBody from '@/components/autodedup/SplitOutcomeBody';
-import { followUpSplit, sendSplit, type SplitOutcome } from '@/components/autodedup/splitOutcome';
 import { useAdvertMembers } from '@/components/autodedup/useAdvertMembers';
 
 const PAGE_SIZE = 20;
-
-/* The outcomes that can never move an advert: it cannot be ticked. `last_native`
- * stays tickable — the server keeps the record with the unit holding the
- * property's own advert and sends the rest home. */
-const NEVER_MOVES = new Set(['on_origin', 'moved_since', 'origin_moved_on']);
-const movable = (a: ProposedSplitAdvert) => !NEVER_MOVES.has(a.detach_outcome ?? '');
 
 type Group = { key: string; n: number; unseen: boolean; adverts: ProposedSplitAdvert[] };
 
@@ -70,83 +57,16 @@ function groupsOf(item: ProposedSplit): Group[] {
   ];
 }
 
-/* The ticks the proposal starts from. The group holding the property's own
- * adverts (no merge brought them) is the kept one, else the canonical advert's.
- * Every other group a split pair states apart from it — by a reason other than
- * `not_compared`, which states nothing — has its movable adverts ticked, a group
- * of two or more whole. An advert the engine never saw is never pre-ticked. */
-function defaultTicks(item: ProposedSplit): Set<number> {
-  const kept = Math.max(0, item.groups.findIndex((g) => g.adverts.some((a) => a.origin_property_id == null)));
-  const stays = new Set(item.groups[kept]?.adverts.map((a) => a.listing_id));
-  const apart = new Set(
-    item.splits.filter((s) => s.reason_source !== 'not_compared').flatMap((s) =>
-      stays.has(s.listing_lo) ? [s.listing_hi] : stays.has(s.listing_hi) ? [s.listing_lo] : [],
-    ),
-  );
-  const ticks = new Set<number>();
-  item.groups.forEach((g, i) => {
-    if (i === kept || !g.adverts.some((a) => apart.has(a.listing_id))) return;
-    for (const a of g.adverts) if (a.splittable) ticks.add(a.listing_id);
-  });
-  return ticks;
-}
-
-type Plan = {
-  propertyId: number;
-  statement: SplitStatement;
-  units: ProposedSplitAdvert[][];
-  kept: ProposedSplitAdvert[];
-};
-
-/* The card's statement: the ticked adverts of each group are one unit, the rest
- * is kept together. */
-function planOf(item: ProposedSplit, ticks: ReadonlySet<number>): Plan {
-  const groups = groupsOf(item);
-  const all = groups.flatMap((g) => g.adverts);
-  const units = groups.map((g) => g.adverts.filter((a) => ticks.has(a.listing_id))).filter((u) => u.length > 0);
-  return {
-    propertyId: item.property_id,
-    statement: {
-      adverts: all.map((a) => a.listing_id),
-      separate: units.map((u) => u.map((a) => a.listing_id)),
-      keep_together: true,
-    },
-    units,
-    kept: all.filter((a) => !ticks.has(a.listing_id)),
-  };
-}
-
-/* The separated unit that keeps the property record (its notes, tags and pipeline
- * card), as the server picks it (E919): none while a kept advert is the
- * property's own (no merge brought it) or no advert is; else the unit holding
- * most of its own adverts, the first on a tie. The kept adverts then go home. */
-function recordKeeper(plan: Plan): ProposedSplitAdvert[] | null {
-  const own = (u: ProposedSplitAdvert[]) => u.filter((a) => a.origin_property_id == null).length;
-  if (own(plan.kept) > 0) return null;
-  let keeper: ProposedSplitAdvert[] | null = null;
-  for (const u of plan.units) if (own(u) > (keeper ? own(keeper) : 0)) keeper = u;
-  return keeper;
-}
-
-function planLine(plan: Plan): string {
-  if (plan.kept.length === 0) return 'Nelze: jedna skupina musí zůstat.';
-  if (plan.units.length === 0) return 'Plán: potvrdit jako jednu nemovitost';
-  const tag = (a: ProposedSplitAdvert) => `#${a.listing_id} (${a.source})`;
-  const keeper = recordKeeper(plan);
-  return (
-    'Plán: ' +
-    plan.units.map((u) => `oddělit ${u.map(tag).join(' + ')}`).join(' · ') +
-    ` · zbytek (${plan.kept.map((a) => `#${a.listing_id}`).join(', ')}) potvrdit jako jednu nemovitost` +
-    (keeper
-      ? ` · záznam #${plan.propertyId} (poznámky, štítky, karta v pipeline) zůstane u ` +
-        `${keeper.map((a) => `#${a.listing_id}`).join(' + ')}, vlastního inzerátu nemovitosti; ` +
-        'zbytek se vrátí tam, odkud přišel'
-      : '')
-  );
+/* The engine's groups as letters, group n → the n-th letter (the 26th and on → Z). */
+function proposalLetters(item: ProposedSplit): SplitLetters {
+  const letters: SplitLetters = {};
+  for (const g of groupsOf(item)) {
+    for (const a of g.adverts) letters[a.listing_id] = UNIT_LETTERS[Math.min(g.n, 26) - 1];
+  }
+  return letters;
 }
 
 export default function AutodedupProposedSplits() {
-  const qc = useQueryClient();
   const [cursors, setCursors] = useState<Array<number | null>>([null]);
   const after = cursors[cursors.length - 1];
   const q = useQuery({
@@ -165,94 +85,16 @@ export default function AutodedupProposedSplits() {
   );
   const { member, error: detailsError } = useAdvertMembers(ids);
 
-  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
-  const [edited, setEdited] = useState<ReadonlyMap<number, ReadonlySet<number>>>(new Map());
-  const [armed, setArmed] = useState(false);
-  const [reason, setReason] = useState('');
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
-  const [outcomes, setOutcomes] = useState<SplitOutcome[]>([]);
-
-  const ticksOf = (item: ProposedSplit) => edited.get(item.property_id) ?? defaultTicks(item);
-  const chosen = items
-    .filter((i) => selected.has(i.property_id))
-    .map((item) => ({ item, plan: planOf(item, ticksOf(item)) }));
-  const blocked = chosen.filter((c) => c.plan.kept.length === 0);
-  const leaving = chosen.reduce((n, c) => n + c.plan.units.flat().length, 0);
-  const confirmOnly = chosen.filter((c) => c.plan.units.length === 0).length;
-
-  const run = useMutation({
-    mutationFn: async () => {
-      const note = reason.trim() || undefined;
-      const out: SplitOutcome[] = [];
-      setProgress({ done: 0, total: chosen.length });
-      for (const { item, plan } of chosen) {
-        const sources = Object.fromEntries(
-          groupsOf(item).flatMap((g) => g.adverts).map((a) => [a.listing_id, a.source]),
-        );
-        out.push(
-          await sendSplit({
-            propertyId: item.property_id,
-            statement: { ...plan.statement, ...(note ? { reason: note } : {}) },
-            sources,
-          }),
-        );
-        setProgress({ done: out.length, total: chosen.length });
-      }
-      return out;
-    },
-    onSuccess: (out) => {
-      setOutcomes(out);
-      setSelected(new Set());
-      setEdited((prev) => {
-        const next = new Map(prev);
-        for (const o of out) next.delete(o.propertyId);
-        return next;
-      });
-      setArmed(false);
-      setReason('');
-      refreshAfterSplit(qc);
-    },
-    onSettled: () => setProgress(null),
-  });
-
-  /* The panel's second word on one card: take a split back, or re-send one that
-   * would take back an earlier "různé" of the operator's own. */
-  const followUp = useMutation({
-    mutationFn: followUpSplit,
-    onSuccess: (next) => {
-      setOutcomes((prev) => prev.map((o) => (o.propertyId === next.propertyId ? next : o)));
-      refreshAfterSplit(qc);
-    },
-  });
-
-  const toggleCard = (pid: number) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(pid)) next.delete(pid);
-      else next.add(pid);
-      return next;
-    });
-  const setTicks = (item: ProposedSplit, ids: number[], on: boolean) =>
-    setEdited((prev) => {
-      const ticks = new Set(ticksOf(item));
-      for (const id of ids) {
-        if (on) ticks.add(id);
-        else ticks.delete(id);
-      }
-      return new Map(prev).set(item.property_id, ticks);
-    });
-
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
       <header>
         <h1 className="text-2xl leading-tight">AUTODEDUP · Návrhy rozdělení</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
           Nemovitosti, jejichž inzeráty by engine po poslední generaci rozdělil. Engine sám nikdy
-          nerozděluje: rozhodujete vy. U každého inzerátu (nebo celé skupiny) zaškrtněte „Oddělit“.
-          Zaškrtnuté inzeráty jedné skupiny odejdou spolu jako jedna nemovitost (každý se vrátí
-          tam, odkud přišel, nebo dostane novou), inzeráty různých skupin jako různé nemovitosti a
-          zapíše se mezi nimi pravidlo „různé“. Zbytek se potvrdí jako jedna nemovitost („stejné“)
-          — bez zaškrtnutí je to potvrzení celé nemovitosti a návrh zmizí.
+          nerozděluje: rozhodujete vy, na stránce nemovitosti. „Rozdělit na stránce nemovitosti“
+          ji otevře s písmeny podle skupin engine (skupina 1 = A, skupina 2 = B, …); tam uvidíte,
+          kam které písmeno a která vaše položka odejde, písmena můžete změnit a rozdělení
+          potvrdíte.
         </p>
         {page && (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
@@ -276,109 +118,11 @@ export default function AutodedupProposedSplits() {
         </Notice>
       )}
 
-      {outcomes.length > 0 && (
-        <OutcomePanel
-          outcomes={outcomes}
-          busy={followUp.isPending}
-          onFollowUp={(o) => followUp.mutate(o)}
-        />
-      )}
-
-      {items.length > 0 && (
-        <div className="sticky top-0 z-[2] mt-6 flex flex-wrap items-center gap-3 border-b border-[var(--color-rule)] bg-[var(--color-paper)] py-2">
-          <span className="text-sm text-[var(--color-ink-2)] tabular-nums">
-            Vybráno {fmtCount(chosen.length)} · oddělit {fmtCount(leaving)} {inzeratu(leaving)} · potvrdit{' '}
-            {fmtCount(confirmOnly)} jako jednu
-          </span>
-          {!armed && (
-            <button
-              type="button"
-              disabled={chosen.length === 0 || blocked.length > 0 || run.isPending}
-              onClick={() => setArmed(true)}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-3 py-1 text-[0.8rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick-soft)] disabled:opacity-40"
-            >
-              Provést vybrané
-            </button>
-          )}
-          {blocked.length > 0 && (
-            <span className="text-[0.75rem] text-[var(--color-brick)]">
-              U {blocked.map((c) => `#${c.item.property_id}`).join(', ')} musí jedna skupina zůstat.
-            </span>
-          )}
-          {progress && (
-            <span className="flex items-center gap-2 text-sm text-[var(--color-ink-3)] tabular-nums">
-              <Spinner /> Provádím {progress.done} / {progress.total}…
-            </span>
-          )}
-        </div>
-      )}
-
-      {armed && (
-        <div
-          role="group"
-          aria-label="Potvrdit provedení"
-          className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-4 py-3"
-        >
-          <p className="text-sm text-[var(--color-ink-2)]">
-            <strong className="font-medium text-[var(--color-ink)]">
-              Provést {fmtCount(chosen.length)} {chosen.length === 1 ? 'návrh' : chosen.length <= 4 ? 'návrhy' : 'návrhů'}?
-            </strong>{' '}
-            Oddělené inzeráty se vrátí tam, odkud přišly (ty, které nepřišly sloučením, dostanou
-            novou nemovitost), a zbytek každé karty se zapíše jako jedna nemovitost.
-          </p>
-          <ul className="mt-1 space-y-0.5 text-[0.75rem] text-[var(--color-ink-2)]">
-            {chosen.map(({ item, plan }) => (
-              <li key={item.property_id}>
-                #{item.property_id}: {planLine(plan)}
-              </li>
-            ))}
-          </ul>
-          <textarea
-            aria-label="Společný důvod (nepovinné)"
-            placeholder="Důvod (nepovinné)"
-            maxLength={DETACH_REASON_MAX}
-            rows={2}
-            value={reason}
-            disabled={run.isPending}
-            onChange={(e) => setReason(e.target.value)}
-            className="mt-2 block w-full max-w-[36rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.8rem] text-[var(--color-ink)]"
-          />
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
-              autoFocus
-              disabled={run.isPending}
-              onClick={() => run.mutate()}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-3 py-1 text-[0.8rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 disabled:opacity-50"
-            >
-              {run.isPending ? 'Provádím…' : 'Ano, provést'}
-            </button>
-            <button
-              type="button"
-              disabled={run.isPending}
-              onClick={() => setArmed(false)}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[0.8rem] text-[var(--color-ink-2)] transition-colors hover:bg-[var(--color-rule-soft)] disabled:opacity-50"
-            >
-              Zrušit
-            </button>
-          </div>
-        </div>
-      )}
-
       {detailsError && <ErrorBanner message={`Údaje inzerátů: ${detailsError.message}`} />}
 
       <ul className="mt-4 space-y-5">
         {items.map((item) => (
-          <ProposalCard
-            key={item.property_id}
-            item={item}
-            ticks={ticksOf(item)}
-            checked={selected.has(item.property_id)}
-            disabled={armed || run.isPending}
-            onToggle={() => toggleCard(item.property_id)}
-            onTicks={(ids, on) => setTicks(item, ids, on)}
-            member={member}
-          />
+          <ProposalCard key={item.property_id} item={item} member={member} />
         ))}
       </ul>
 
@@ -408,23 +152,12 @@ export default function AutodedupProposedSplits() {
 
 function ProposalCard({
   item,
-  ticks,
-  checked,
-  disabled,
-  onToggle,
-  onTicks,
   member,
 }: {
   item: ProposedSplit;
-  ticks: ReadonlySet<number>;
-  checked: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-  onTicks: (ids: number[], on: boolean) => void;
   member: (a: ProposedSplitAdvert) => AutodedupMember;
 }) {
   const groups = groupsOf(item);
-  const plan = planOf(item, ticks);
   const adverts = groups.reduce((n, g) => n + g.adverts.length, 0);
   const uncompared =
     item.splits.length > 0 && item.splits.every((s) => s.reason_source === 'not_compared');
@@ -434,16 +167,7 @@ function ProposalCard({
       data-testid={`proposal-${item.property_id}`}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <label className="inline-flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={checked}
-            disabled={disabled}
-            onChange={onToggle}
-            aria-label={`Vybrat nemovitost #${item.property_id}`}
-          />
-          <span className="text-[var(--color-ink)]">Nemovitost #{item.property_id}</span>
-        </label>
+        <span className="text-sm text-[var(--color-ink)]">Nemovitost #{item.property_id}</span>
         <PropertyLinks propertyId={item.property_id} />
         <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
           {fmtCount(adverts)} {inzeratu(adverts)} · {fmtCount(groups.length)} skupiny
@@ -458,102 +182,27 @@ function ProposalCard({
             engine tyto inzeráty neporovnal — rozdělení nenavrhuje
           </span>
         )}
+        <Link
+          to={splitPath(item.property_id, proposalLetters(item))}
+          className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-3 py-1 text-[0.8rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick-soft)]"
+        >
+          Rozdělit na stránce nemovitosti
+        </Link>
       </div>
-      <p
-        className={`mt-1 text-[0.8rem] ${
-          plan.kept.length === 0 ? 'text-[var(--color-brick)]' : 'text-[var(--color-ink-2)]'
-        }`}
-      >
-        {planLine(plan)}
-      </p>
 
       <div className="mt-3 space-y-3">
-        {groups.map((g) => {
-          const canMove = g.adverts.filter(movable).map((a) => a.listing_id);
-          const on = g.adverts.filter((a) => ticks.has(a.listing_id)).length;
-          const all = canMove.length > 0 && canMove.every((id) => ticks.has(id));
-          return (
-            <section key={g.key}>
-              <div className="mb-1.5 flex flex-wrap items-center gap-x-3">
-                <p className="text-[0.7rem] uppercase tracking-[0.12em] text-[var(--color-ink-3)]">
-                  {g.unseen ? `Skupina ${g.n} · engine neviděl` : `Skupina ${g.n}`} ·{' '}
-                  {on === 0 ? 'zůstává' : on === g.adverts.length ? 'oddělit' : 'oddělit část'}
-                </p>
-                <label className="inline-flex items-center gap-1.5 text-[0.72rem] text-[var(--color-ink-2)]">
-                  <input
-                    type="checkbox"
-                    checked={all}
-                    disabled={disabled || canMove.length === 0}
-                    ref={(el) => {
-                      if (el) el.indeterminate = on > 0 && !all;
-                    }}
-                    onChange={() => onTicks(canMove, !all)}
-                    aria-label={`Oddělit skupinu ${g.n}`}
-                  />
-                  Oddělit skupinu
-                </label>
-              </div>
-              <MemberGrid
-                members={g.adverts.map(member)}
-                renderUnder={(m) => {
-                  const a = g.adverts.find((x) => x.listing_id === m.listing_id);
-                  if (!a) return null;
-                  return movable(a) ? (
-                    <label className="inline-flex items-center gap-1.5 text-[0.72rem] text-[var(--color-ink-2)]">
-                      <input
-                        type="checkbox"
-                        checked={ticks.has(a.listing_id)}
-                        disabled={disabled}
-                        onChange={() => onTicks([a.listing_id], !ticks.has(a.listing_id))}
-                        aria-label={`Oddělit inzerát #${a.listing_id}`}
-                      />
-                      Oddělit
-                    </label>
-                  ) : (
-                    <p className="text-[0.66rem] text-[var(--color-ink-4)]">
-                      {unmovedReason(a.detach_outcome ?? '')} — zůstane
-                    </p>
-                  );
-                }}
-              />
-            </section>
-          );
-        })}
+        {groups.map((g) => (
+          <section key={g.key}>
+            <p className="mb-1.5 text-[0.7rem] uppercase tracking-[0.12em] text-[var(--color-ink-3)]">
+              {g.unseen ? `Skupina ${g.n} · engine neviděl` : `Skupina ${g.n}`} ·{' '}
+              {UNIT_LETTERS[Math.min(g.n, 26) - 1]}
+            </p>
+            <MemberGrid members={g.adverts.map(member)} />
+          </section>
+        ))}
       </div>
 
       <SplitReasons splits={item.splits} />
     </li>
-  );
-}
-
-/* The last batch, card by card — it stays on screen after the list refreshes,
- * since a card the operator decided leaves the list. */
-function OutcomePanel({
-  outcomes,
-  busy,
-  onFollowUp,
-}: {
-  outcomes: SplitOutcome[];
-  busy: boolean;
-  onFollowUp: (o: SplitOutcome) => void;
-}) {
-  const done = outcomes.filter((o) => o.kind === 'ok').length;
-  return (
-    <section
-      aria-label="Výsledek rozdělení"
-      className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3"
-    >
-      <p className="text-sm text-[var(--color-ink)]">
-        Provedeno {fmtCount(done)} z {fmtCount(outcomes.length)}.
-      </p>
-      <ul className="mt-2 space-y-2 text-[0.75rem]">
-        {outcomes.map((o) => (
-          <li key={o.propertyId} data-testid={`outcome-${o.propertyId}`}>
-            <p className="text-[var(--color-ink)]">Nemovitost #{o.propertyId}</p>
-            <SplitOutcomeBody outcome={o} busy={busy} onFollowUp={() => onFollowUp(o)} />
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }

@@ -164,8 +164,10 @@ There, RLS is off (BYPASSRLS) and the predicate is the SOLE gate rather than a s
 about a caller the database has already scoped. The live sites: `toolkit/property_carriers.py` and `toolkit/pipeline_identity.py`
 (the carriers, which run inside `merge_property_set`'s service-role transaction
 and must partition every join between the retired and survivor sides: by an explicit `account_id`,
-or through a key one account owns, as a `CurationTable`'s collection/tag/subscription id does), the
-merge's receipt (`api/property_merge.merge_receipt`: the acting account's own carry rows), `api/estimation_runs.py`
+or through a key one account owns, as a `CurationTable`'s collection/tag/subscription id does; and the
+routing inside `detach_listings`, whose carry-row identity, twins and conflicts all name the account), the
+merge's receipt (`api/property_merge.merge_receipt`: the acting account's own carry rows), the split's preview
+and receipt (`toolkit/property_split`: the acting account's own items only, nothing of another's), `api/estimation_runs.py`
 (service-role child runs from `building_runs`), and the Stripe webhook (no caller identity at
 all — the HMAC over the raw body is the auth). On a tenant connection the same predicate is the
 #917 bug: `POST /listings/lookup` bound `NULL` into three `account_id IS NOT DISTINCT FROM %s`

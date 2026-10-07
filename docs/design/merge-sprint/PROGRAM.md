@@ -38,15 +38,16 @@ Every wave is tested against this sentence. Work that does not serve it is cut (
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path
 beside an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines** when
-approved; as built so far (W0–W3, 2026-10-07) **+4,929 / −3,512**, with W4–W5 still estimated at
-+1,840 / −2,970; **−3 tables, +1**; about **1.5 GB** dropped from the database, 1.15 GB of it two
+approved; as built so far (W0–W4, 2026-10-07) **+9,783 / −7,792**, with W5 still estimated at
++290 / −870; **−3 tables, +1**; about **1.5 GB** dropped from the database, 1.15 GB of it two
 indexes nothing has ever used, while the Browse read models grow by roughly 0.2 GB (the two portal
 lists, the nine per-portal dates and their indexes). Not counted: about 750 lines of migration text
 that restate views. Our own condition grades stay for now (Q48, §9). Every wave removes more than it
 adds except W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the
 migration, live tests and the plan's gate text), W2b (+1,866 / −990 as built: MS16's honesty on
-every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed") and
-W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4).
+every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed"),
+W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4) and W4 (+4,854 / −4,280 as
+built: its code about even, its tests and the reviews' cases larger, §4; the operator's ruling owed).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -216,6 +217,24 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
     are never copied, never deleted and never shown to the person splitting. No notice (Q33).
   - **The toast** after a split says where each letter landed and which of the acting account's items
     went or were copied.
+  - *Note (W4, as built 2026-10-07; defaults the operator can overrule):* folds follow the
+    preselection and are shown, never chosen (the item they folded into is the user's copy
+    already); a copy or a re-created fold never lands where the same account already holds that
+    item after routing, nor a dismissal where that account's live card lands (it is skipped, and
+    the preview, read again with each of the user's picks, says so and why; so does a fold whose
+    twin is gone), so a split displaces nothing and MS13 settles two cards only inside a letter's
+    join; the user's copies are settled before the re-created folds; a note whose ad is not on the
+    property follows the rule for other items; a copied card enters its stage now; a merge takes
+    back a negative SET ruling only when the set spans two of the merged properties (MS12); the
+    preview names no count of "same" rulings a split would overwrite (a split writes none of its
+    own; a letter's join, being a merge, rules "same" between its landings' canonical ads, which
+    the preview says and the receipt counts); the
+    review pages link to the property page's dialog with prefilled letters (`?letters=`) instead
+    of mounting it; the category review's "Ponechat" (a keep-together statement) is gone with the
+    statement, its 19 kept properties stay confirmed by their rulings, and wiring it to the
+    dedup session's verdict route waits for that session's yes; a move onto an origin that is
+    active again and already holds the account's item leaves the item where it was, uncounted,
+    its carry row unspent (the brake's dry run, which reads the plan, counts it).
 
 ### Filters
 - **MS19 — Portal and broker filters select ads; rows are always properties.** A property matches
@@ -265,7 +284,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | **W2a** | Recompute: canonical-ad order, amenity union, the two portal lists and one "newest ad" date per portal (MS19), price lineage, city figures that follow the canonical ad; stops writing two write-only columns; realitymix joins the portal list; #1655's share-sale rule comes later, with that PR's rebase | yes | "C2 CLOSED"; its additive migration 588 (nine `properties` date columns, the canonical order) applied before merge | +756 / −332 (built, #1719) |
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +1,866 / −990 (built, #1720) |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; the category gate reads ads (MS13 note); split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED"; its additive migration 589 (`property_merge_carries`) applied before merge | +1,524 / −941 (built, #1721; planned +330 / −655): code −20 net, tests +475 net (MS14's invariant and fold snapshots on every live merge, the came-from cases, the ad-grain gate and the receipt, all new since the plan), docs +64, migration 589's 64 lines |
-| **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview, curation routing per letter with copies, a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties, the brake's dry run counting note moves; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together", "Přesto rozdělit", writing "same" inside a letter (recorded rulings stay) and the split undo | yes | W3 | +1,550 / −2,100 (after #1699) |
+| **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview and its digest, curation routing per letter with copies (the brake routes by the same plan), a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties (counted before the click), the brake's dry run counting note moves; the review pages link to the dialog; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together" (the category review's "Ponechat"), "Přesto rozdělit", writing "same" inside a letter (a letter's join still rules as the merge it is; recorded rulings stay) and the split undo | yes | W3 | +4,854 / −4,280 (built, #____; planned +1,550 / −2,100): code +48 net, tests +429 net (the split's hermetic and live suites rewritten, the gate's two-account suite and MS12 new, then the two reviews' cases: every fold's twin, no account, the digest's counts and landings, the brake onto an origin active again, the preview with the user's picks, the count held before a merge), docs +97; no migration |
 | **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +290 / −870 |
 | **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live; a day the operator names | database |
 
@@ -317,7 +336,28 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
   The ad-grain gate refuses no engine group: its refusals are a subset of the engine's own re-check
   (`apply.recheck_group` reads every ad of the group, contentless records included).
 - **W4:** the count invariant runs on production before and after the release; a two-account live
-  test passes for every curation table, on a split into two letters and into three.
+  test passes for every curation table, on a split into two letters and into three
+  (`tests/test_property_split_live.py`, CI's migrations job). The two reads, read-only with
+  `SET statement_timeout = '30s'`:
+  ```sql
+  SELECT t, account_id, count(*) FROM (
+    SELECT 'property_notes' t, account_id FROM property_notes
+    UNION ALL SELECT 'property_pipeline', account_id FROM property_pipeline
+    UNION ALL SELECT 'collection_properties', account_id FROM collection_properties
+    UNION ALL SELECT 'property_tags', account_id FROM property_tags
+    UNION ALL SELECT 'property_dismissals', account_id FROM property_dismissals
+  ) x GROUP BY 1, 2;
+  SELECT count(*) FROM (
+    SELECT property_id FROM property_notes UNION ALL SELECT property_id FROM property_pipeline
+    UNION ALL SELECT property_id FROM collection_properties
+    UNION ALL SELECT property_id FROM property_tags
+    UNION ALL SELECT property_id FROM property_dismissals
+  ) c JOIN properties p ON p.id = c.property_id WHERE p.status = 'merged_away';
+  ```
+  The counts are equal unless users wrote curation between the reads (a release writes none), and
+  the second read is 0. Baseline 2026-10-07: account e93e… 86 notes, 127 cards, 59 collection
+  entries, 1 tag, 201 dismissals (lifted ones included); b246… 5 cards; 1 note with no account;
+  0 rows on a merged-away property.
 - **W5:** a full recompute cycle begun after W2a has completed; a sample of active properties that
   includes single-ad ones shows 0 whose stored portal lists or per-portal dates differ from their ads,
   and 0 where a portal is listed without its date or dated without being listed; one fixture pins the
@@ -369,16 +409,33 @@ that session; the two never-used indexes come from migrations 198 and 275.
   removes its Proposed-splits page's batch run, "keep together" and "Vrátit". The dialog grows from
   that session's letter split (PR #1699: `MergedAdvertsSection.tsx`, `splitPlan`), not beside it.
   These replace three of that session's recorded decisions. MS12's rule that a user's merge takes back
-  every standing "different" between the ads it joins is new to it: W4 waits for its yes.
+  every standing "different" between the ads it joins was new to it; it said yes (addendum 7), and W4
+  builds it as it asked (the note `operator merge <group>`, the negative pairs plus the canonical
+  pairs, the count before the click), but for one default that session may contest: a negative SET
+  ruling gets its cluster "same" only when the set spans two or more of the merged properties, not
+  when it lies wholly inside one of them (addendum 7 asked for a set inside the merged property;
+  none exists today).
 - **Its conditions, adopted:** its PR #1655 (share sales: a share sale merged with a sale reads as a
   sale) lands after W6 and is rebased onto this sprint (operator, 2026-10-03); engine-path PRs merge
   only after its "C2 CLOSED" line, back to back; before any merge to main the engine is not
   bootstrapping and no dispatch holds its writer lease; migrations 588–599; no engine rule numbers
   allocated here; the brake's dry run counts carry rows and note moves, through one hook,
-  `toolkit.property_carriers.curation_preview` (W3: `carry_rows`, the merge's standing carry rows
-  whose from-property gets one of the ads back, which the undo routes once the split does; W4 adds
-  `note_moves` inside the hook, so `autodedup/apply.py` is edited once); the functions its code calls
-  and the four ruling helpers it imports from `toolkit.property_split` stay as the hand-over promised.
+  `toolkit.property_carriers.curation_preview` (W4: the hook plans the undo's own routing,
+  `curation_plan` along the undone merge's carry rows, and counts `note_moves` and `carry_rows`, so
+  the dry run equals what the undo routes, bar an item an origin active again already holds, which
+  the undo leaves in place and does not count; `autodedup/apply.py` is edited once, in W3); the functions
+  its code calls and the four ruling helpers it imports from `toolkit.property_split` stay as the
+  hand-over promised.
+- **W4's hand-over, as built (2026-10-07):** `tests/autodedup/test_apply.py` models the routing read
+  (`property_carriers._ROUTES_SQL`), asserts `{carry_rows, note_moves}` in the dry run and widens
+  `_undone_the_same`'s exclusion to `note_moves` (the live undo's detach reports what it routed in its
+  own payload, `curation`, which `apply.py` does not sum); `autodedup/ui_sql.py` loses the two
+  must-not-link statements only the split used (agreed 2026-10-03); `split_facts`' `detach_outcome` /
+  `splittable` are no longer read by any page and are that session's to drop (then `_SIZES_SQL` and
+  `last_native` can go); `rulings_written` stays in the detach payload at 0; the category review's
+  "Ponechat" is removed until that session's verdict route lets a "same" through for a pair one live
+  property already holds (its call); its PROGRAM.md still describes the old split statement (E919,
+  E937), its to update.
 - **The engine is paused for W6 by the operator or by this session**, not by that session, on the
   day the operator names: set `realtime_autodedup_interval_seconds` to 0 at 05:00 UTC, wait for its
   lease to expire, run the window, set it back to 60, confirm the next pass.
@@ -420,13 +477,13 @@ that session; the two never-used indexes come from migrations 198 and 275.
    following its canonical ad; under one portal, "Newest first" following that portal's newest ad,
    and the property's first seen with no portal or several; our own first sighting on every portal,
    bazos and ceskereality included; a row showing its date on the selected portal when that differs
-   from its first seen.
+   from its first seen. The split's routing defaults (W4) are listed in MS18's note.
 5. **The repair merge of properties 310481 and 876074 is still not done.** The operator chose "your
    request" (Q26); the permission layer blocked it. Either click it in Browse or allow the request in
    an interactive session. Until then the extension shows no note on the re-listed ads.
-6. **Three properties await splits** (14655, 120548, 687023; reported by the dedup session). The
-   letter split on the property page can separate them today; until W4 ships, all curation stays on
-   the property that keeps its number and a split still records "same" inside a letter.
+6. **Closed (W4).** The three properties that awaited splits (14655, 120548, 687023) were split by
+   the operator with the letter split on 2026-10-04 (dedup addendum 6c). Since W4 a split routes
+   every account's curation per letter and records only "different", only across letters.
 
 ## 9. Cut from scope (reported, not built)
 
@@ -448,16 +505,13 @@ that session; the two never-used indexes come from migrations 198 and 275.
   timed out this week. Every rollout uses a queue or the daily recompute that runs anyway, never an
   extra full-table pass, and heavy steps run off-peak.
 - **More work inside every merge** (the carry record) against the engine's 25-second limit per merge.
-- **The W3–W4 window.** From W3's deploy until W4's, a split moves no curation: notes, collections,
-  tags, dismissals, dispatches and now the pipeline card stay on the property left (W3 deletes the
-  single-hop restore, which restored nothing in production: 15 of 15 snapshots were survivor-side).
-  Nothing is deleted, and the carry rows still name each item's origin. Exposed: a merge made after
-  W3 whose retired side held curation, split before W4 (engine survivors hold none, 0 of 1,367; 2
-  of 32 recent operator merges touched a curated survivor; the brake has never run). No stopgap
-  router is built (W4 replaces it); W4 is green before W3 merges and they merge back to back. A
-  carry row counts only while its merge step's ledger rows stand: W3's came-from lookups and the
-  brake's dry run already read it so (`pipeline_identity.STANDING_CARRY`), and W4's routing reads
-  the same definition, so a carry whose merge was split in the window is never routed later.
+- **The W3–W4 window (closed: W4 is green and merges right after W3).** Between the two deploys a
+  split moves no curation; nothing is deleted. A carry row counts only while a ledger row of its
+  merge step retiring its from-property stands (`pipeline_identity.STANDING_CARRY`, which W4's
+  routing reads too): when a split in the window gave back every ad that merge brought from that
+  property, the carry is never routed later and those items stay where they were left; when it
+  gave back only some, a later split or brake still routes them along the rows that stand, and an
+  item that property, active again, already holds stays where it is.
 - **Canonical-ad changes** restart price-alert clocks on about 4,500 properties with an active ad (45
   of 241 sampled on 2026-10-06). No alert is replayed. Properties with no active ad are re-measured
   in W2a's sample.
