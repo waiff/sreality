@@ -26,14 +26,12 @@ import {
   useMapSplitFraction,
   useMapCollapsed,
   useCardImageLarge,
-  useGrainNotice,
 } from '@/lib/browseLayout';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
-import RowGrainNotice from '@/components/RowGrainNotice';
 import type { AnchorPoint, MapFlyToCommand } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
 import { fetchDatasets, fetchGrowth, fetchGrowthShapes, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
@@ -52,6 +50,7 @@ import {
   type ListingFilters,
 } from '@/lib/filters';
 import { usePageTitle } from '@/lib/pageTitle';
+import { portalLabel } from '@/lib/portals';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import { MergeSelection } from '@/components/CurationMarks';
@@ -80,7 +79,7 @@ import {
   fetchBrowseStats,
   fetchRentMapChoropleth,
   fetchRentMapKraje,
-  portalMirrorSource,
+  orderPortal,
   sortToParam,
   CARD_PAGE_SIZE,
   TABLE_PAGE_SIZE,
@@ -94,6 +93,7 @@ import {
   type MapResult,
   type RentMapKraj,
   type RentMapPolygon,
+  type SortDirection,
   type SortField,
   type TableRow,
 } from '@/lib/queries';
@@ -127,12 +127,8 @@ export interface BrowseFeatures {
    * own fixed cohort and has no sidebar-driven filter for the operator to
    * change. Page and the area-explore modal both keep it shown. */
   sidebar?: boolean;
-  /* The Stats tab — property-grain and deliberately NOT scoped by a broker
-   * (mirrors the portal filter's own accepted Stats-tab gap, queries.ts
-   * fetchBrowseStats). Showing it inside a broker-scoped view would display
-   * the WHOLE market's numbers next to that one broker's map/cards, which
-   * reads as a bug rather than a documented limitation — so the broker
-   * modal hides the tab outright instead of shipping a self-contradiction. */
+  /* The Stats tab — hidden by the broker-explore modal, a read-only scoped
+   * view. Stats itself carries the broker scope (property_ids_filter, MS19). */
   stats?: boolean;
 }
 
@@ -272,7 +268,7 @@ export default function BrowseExperience({
   const mapSplit = useMapSplitFraction();
   const mapCollapsed = useMapCollapsed();
   const cardImageLarge = useCardImageLarge();
-  const grainNotice = useGrainNotice();
+  const sortOrderPortal = orderPortal(filters, sort);
   /* The map is only present on the Listings tab AND only when not collapsed —
    * the single source of truth the data-fetch gates and the layout both read,
    * so they can never disagree. */
@@ -409,11 +405,7 @@ export default function BrowseExperience({
     queryFn: (cursor, signal) =>
       fetchListingsForCards(filters, sort, cursor as KeysetCursor | null, { signal }),
     pageSize: CARD_PAGE_SIZE,
-    /* `listing_id`, not `property_id`: in portal-mirror mode the rows are
-     * listing-grain and 7,951 properties carry more than one active listing on
-     * a single portal, so a property_id row key would silently collapse those
-     * siblings out of the list. `listing_id` is unique on both read models. */
-    getRowId: (r) => r.listing_id,
+    getRowId: (r) => r.property_id,
     enabled: tab === 'map',
     gcTime: 10 * 60_000,
   });
@@ -565,8 +557,7 @@ export default function BrowseExperience({
     queryFn: (cursor, signal) =>
       fetchListingsForTable(filters, sort, cursor as KeysetCursor | null, { signal }),
     pageSize: TABLE_PAGE_SIZE,
-    /* See the cards lane above — listing-grain rows need a listing-grain key. */
-    getRowId: (r) => r.listing_id,
+    getRowId: (r) => r.property_id,
     enabled: tab === 'table',
     gcTime: 10 * 60_000,
   });
@@ -770,7 +761,7 @@ export default function BrowseExperience({
         <div className="px-6 pt-5">
           <FilterSummary
             filters={filters}
-            portalMirror={portalMirrorSource(filters)}
+            order={sortOrderPortal ? { portal: sortOrderPortal, direction: sort.direction } : null}
             count={cohortTotal}
             countApprox={cohortTotalApprox}
             countStale={cohortCountStale}
@@ -790,10 +781,6 @@ export default function BrowseExperience({
                 : undefined
             }
             onCreateWatchdog={f.watchdog ? () => setWatchdogModalOpen(true) : undefined}
-          />
-          <RowGrainNotice
-            portalMirror={portalMirrorSource(filters)}
-            notice={grainNotice}
           />
           {f.presetBar && (
             <div className="mt-3">
@@ -861,6 +848,7 @@ export default function BrowseExperience({
                 total={cohortTotal}
                 totalApprox={cohortTotalApprox}
                 sort={sort}
+                orderPortal={sortOrderPortal}
                 isLoading={cards.isLoading}
                 isError={cards.isError}
                 isFetchingNextPage={cards.isFetchingNextPage}
@@ -905,7 +893,6 @@ export default function BrowseExperience({
                     total={mapQuery.data?.total ?? null}
                     cohortTotal={cohortTotal}
                     cohortTotalApprox={cohortTotalApprox}
-                    capped={mapQuery.data?.capped ?? false}
                     isLoading={mapQuery.isLoading}
                     bounds={filters.bounds}
                     onBoundsChange={view.setBounds}
@@ -1049,9 +1036,24 @@ function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
   return 'asc';
 }
 
+/* One portal's "Newest first" / "Oldest first" (MS19, queries.ts orderPortal), named in
+ * the header: the rows are placed by their newest ad on that portal, not by their own
+ * first seen, and nothing else on the row says so. */
+function PortalOrderChip({ portal, direction }: { portal: string; direction: SortDirection }) {
+  const label = portalLabel(portal);
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]"
+      title={`Newest first follows ${label}: each property is placed by when its newest ${label} ad was first seen, so a property advertised there again moves to the top. Dates on the rows are the property's own. With no portal or several, Newest first follows when the property was first seen.`}
+    >
+      {direction === 'desc' ? 'newest' : 'oldest'} on {label}
+    </span>
+  );
+}
+
 function FilterSummary({
   filters,
-  portalMirror,
+  order,
   count,
   countApprox,
   countStale,
@@ -1064,11 +1066,7 @@ function FilterSummary({
   onCreateWatchdog,
 }: {
   filters: ListingFilters;
-  /* The single selected portal, or null. Non-null means Browse is reading that
-   * portal's own listings rather than the deduped market view — a real change
-   * in what the count and the rows mean, so it is stated rather than left for
-   * the operator to infer from a number that moved. */
-  portalMirror: string | null;
+  order: { portal: string; direction: SortDirection } | null;
   count: number | null;
   /* `count` is the planner estimate (exact count exceeded budget) — render
    * "~N" so the headline figure is never silently approximate. */
@@ -1104,14 +1102,7 @@ function FilterSummary({
           >
             {loading && count == null ? 'Loading…' : summarise(filters, count, countApprox)}
           </p>
-          {portalMirror && (
-            <span
-              className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]"
-              title={`Showing ${portalMirror}'s own listings in that portal's order, with that listing's own data. With one portal selected Browse reads the listing feed instead of the deduped market view, so a property listed twice on ${portalMirror} appears twice — and one listed elsewhere too is no longer hidden behind another portal's record.`}
-            >
-              mirroring {portalMirror}
-            </span>
-          )}
+          {order && <PortalOrderChip portal={order.portal} direction={order.direction} />}
           {countStale && (
             <span
               className="inline-flex items-center text-[0.7rem] tracking-wide text-[var(--color-ink-3)]"

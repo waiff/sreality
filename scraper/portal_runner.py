@@ -74,15 +74,11 @@ class DrainItem:
     kind: str  # "ok" | "gone" | "error"
     payload: Any = None
     error: str | None = None
-    # The claimed queue row's enqueue-time sequence value (migration 368),
-    # attached below in run_detail_drain (not by fetch_detail, which is a
-    # portal-specific network+parse step that has nothing to do with the queue).
-    # Threaded into each portal's write_details so listings.discovery_seq can be
-    # stamped independent of fetch/claim/write order.
-    discovery_seq: int | None = None
-    # The same claimed row's enqueued_at (migration 444) — when the walk first SAW
-    # this id, as distinct from when this fetch is written. Carried for the same
-    # reason and by the same route as discovery_seq.
+    # The claimed queue row's enqueued_at (migration 444): when the walk first SAW this
+    # id, as distinct from when this fetch is written. Attached in run_detail_drain (not
+    # by fetch_detail, a portal-specific network+parse step that knows nothing of the
+    # queue) and threaded into each portal's write_details, so listings.discovered_at
+    # is stamped independent of fetch/claim/write order.
     discovered_at: datetime | None = None
     # W2a-0 churn instrument (migration 402): the identity of this FETCH, minted
     # once when the item is created and carried through every replay of the
@@ -208,9 +204,7 @@ class PortalDefaults:
             for it in items
         ]
         outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
+            listing_write.from_scraped(it.payload["listing"], discovered_at=it.discovered_at)
             for it in items
         ])
         for page_id in pages:
@@ -931,19 +925,18 @@ def run_detail_drain(
             if not claimed:
                 break
             total_claimed += len(claimed)
-            # discovery_seq is a property of the CLAIM (when this id was originally
+            # discovered_at is a property of the CLAIM (when this id was originally
             # enqueued), not of the fetch — looked up by native_id after the fetch
             # completes rather than threaded through fetch_detail, which is a
             # portal-specific network+parse seam that shouldn't need to know about
             # the queue's internals.
-            dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq, _enq in claimed}
-            enq_by_nid = {nid: enq for nid, _ref, _price, _dseq, enq in claimed}
+            enq_by_nid = {nid: enq for nid, _ref, _price, enq in claimed}
             prio_by_nid = db.queue_priorities(
                 conn, portal.source, [nid for nid, *_ in claimed]) if conn is not None else {}
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
                 futures = {
                     pool.submit(portal.fetch_detail, client, nid, ref): nid
-                    for nid, ref, _price, _dseq, _enq in claimed
+                    for nid, ref, _price, _enq in claimed
                 }
                 for future in as_completed(futures):
                     item = future.result()  # never raises
@@ -954,7 +947,6 @@ def run_detail_drain(
                         # deferred too -- the safe direction: a retry, never an attempt).
                         deferred.append(item.native_id)
                         continue
-                    item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
                     prio = prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW)
                     if breaker.observe(prio, item.kind):

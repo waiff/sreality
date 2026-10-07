@@ -601,7 +601,7 @@ rules. Identify which one a task belongs to before you start.
   registries) — these MUST go through `frontend/src/lib/fetchAllRows.ts`
   (complete-or-throw paging, correct under any `db-max-rows`; ESLint bans `.range()`
   everywhere else); or a *bounded* read with an explicit `.limit()` and, where "more
-  exists" matters, a communicated flag (the `MAP_CAP` + `capped` pattern).
+  exists" matters, a communicated flag (the broker allowlist's `limit + 1` → `capped`).
   PostgREST's server clamp is itself VERSIONED config — migration 394 pins
   `pgrst.db_max_rows = 50000` (= `MAP_CAP`) on the `authenticator` role, after the
   unversioned dashboard value shipped two silent-truncation bugs at 1,000 and was then
@@ -617,8 +617,8 @@ rules. Identify which one a task belongs to before you start.
   anywhere — and reports the cohort's exact total alongside it. Reach for that shape
   whenever a surface renders a summary of many rows rather than the rows themselves;
   reach for `.limit()` + `capped` only when the rows themselves are the point AND the
-  read is ordered. Two lanes still read the map unbounded on purpose: the portal mirror
-  (`listing_feed_public` has no matview twin) and the `?map=legacy` bisect hatch.
+  read is ordered. No lane reads the map unbounded any more (W5, merge sprint): points are
+  read only once the server says the cohort fits, so the map's `capped` pill is gone.
 - **Every PostgREST read is awaited through `frontend/src/lib/pgRead.ts`** — the
   supabase-js twin of `lib/api.ts`'s `send()`, and another ESLint-enforced chokepoint
   (destructuring `data`, `error` or `count` straight off an awaited builder call is banned;
@@ -1731,6 +1731,33 @@ renumber.** Navigate by area:
     `_shared_filter_where` admits an advert only as its property's canonical advert and drops
     every advert of the subject's property (`exclude_listing_ids`, the one exclusion; decision
     13), so comparables, velocity and the corridor count each property once.
+    **PORTALS AND BROKERS are one rule too (MS19, migration 590): a filter selects ADS, the
+    rows stay properties.** A property matches portal set P when any of its ads is on P,
+    active or not (`properties.all_sources`); the status switch is judged on those ads (active =
+    an active ad on P, `active_sources`; inactive = ads on P and none active); several portals =
+    any of them; with no portal the status is the property's own. A broker filter is the same
+    rule over that broker's ads only, so broker + portal means one ad satisfies both. ONE SQL
+    function, `public.portal_status_matches`, is read by both aggregate RPCs and the broker
+    lookup (`toolkit/brokers.broker_property_ids`, `GET /brokers/{id}/property-ids`); the
+    Watchdog compiles its `any` arm (`PROPERTIES_GRAIN.clauses`: `l.all_sources && …`, it has
+    no status filter); the SPA renders it on PostgREST (`queries.ts applyPortalRule`: `ov` /
+    `not.ov` on the two lists, a property-id allowlist under a broker). All four are pinned to
+    one table, `tests/fixtures/portal_rule.json` (`tests/test_portal_rule.py` in CI's
+    migrations lane, `queries.test.ts`). The named exception: estimation cohorts keep each
+    ad's own portal (`LISTINGS_GRAIN`, `l.source = ANY`) until the estimation subject is a
+    property (MS20, PROGRAM.md §9). The badge on a Browse card lists the portals with an
+    active ad, or every portal marked inactive.
+    **One portal orders by its own newest ad (Q49 b).** With exactly one portal P selected,
+    "Newest first" / "Oldest first" order by `newest_ad_at_<P>` (when the property's newest ad
+    on P was first seen, active or not; nine `properties` columns written by the rollup since
+    588, copied into `browse_list` with one partial index each by 590), `property_id` breaking
+    ties, so a property advertised on P again rises to the top. No portal, several portals or
+    any other sort: unchanged; a broker filter changes neither rule. Only the order changes:
+    every filter, "added in the last N days" included, keeps its meaning, rows keep the
+    property's own dates, a header chip names the order and a card whose day on P differs
+    from its first seen shows both (`effectiveSort`, never in a URL). A redundant
+    `newest_ad_at_<P> is not null` conjunct rides on the list, cards and count alike, so the
+    portal's partial index serves the page and the count from ONE filter chain.
     **PLACE is the same rule (W3 S3, migration 504): ONE code predicate,
     `<level>_id = any(codes)`, plain equality per level.** A location chip is a LEVEL plus a
     RÚIAN CODE at four levels — `region_id` / `okres_id` / `obec_id` / `cast_obce_id` — and
@@ -1979,8 +2006,7 @@ renumber.** Navigate by area:
     cohort. The membership read is complete-or-throw (`fetchAllRows`); the RPC stays in the
     database until the SPA deploy has rolled out. `fetchBrowseStats` was the one Browse fetcher
     that named its prefilters by hand; it now resolves through `resolveBrowsePrefilters` like
-    every other lane (with `brokerId` cleared — Stats is deliberately not broker-scoped and has
-    no listing-grain parameter, while the broker resolver throws without a session), so a new
+    every other lane (the broker allowlist rides in `property_ids_filter` since W5, MS19), so a new
     property-grain filter cannot narrow the list and leave the panel above it counting the whole
     market. A membership write invalidates the Browse reads only when membership IS the cohort
     (`revalidateCollections`' `cohortScoped`, passed by the Browse card alone — the mirror of
@@ -2136,15 +2162,13 @@ renumber.** Navigate by area:
     claiming, concurrent thread-pool fetch, batch-constant `now()`, and (for 7/9 portals) two
     independent drain processes racing the same queue all reorder a listing between discovery and
     write (full analysis: `docs/design/portal-order-fidelity.md`). `listing_detail_queue.discovery_seq`
-    / `listings.discovery_seq` (migration 368) is a dedicated sequence assigned once at true
-    enqueue time — immune to all of the above because it's fixed before any of it happens — carried
-    through `claim_detail_batch` → `listing_write.write_listings` and written
-    **once**, never on a later re-fetch (`COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)`,
-    the same shape as `source_id_native`'s preserve-if-set rail). It is the true relative-discovery-order
-    signal; `first_seen_at` (this rule's write-time stamp) is display-only going forward.
-    **`listings.discovered_at` (migration 444) is its companion in TIME** — the same claimed row's
-    `enqueued_at`, carried on the same path, written once by the same COALESCE. `discovery_seq`
-    answers "in what order did we discover this", `discovered_at` answers "when". The pair exists
+    / `listings.discovery_seq` (migration 368) carried a sequence value from enqueue to write for
+    the per-ad Browse lane; since W5 (merge sprint, MS19) nothing writes it, and W6 drops both
+    columns and the sequence (the queue keeps its `nextval` default until then).
+    **`listings.discovered_at` (migration 444) is the claim's time** — the claimed row's
+    `enqueued_at`, carried through `claim_detail_batch` → `listing_write.write_listings` and
+    written **once**, never on a later re-fetch (`COALESCE(listings.discovered_at,
+    EXCLUDED.discovered_at)`), answering "when did we discover this". It exists
     because `first_seen_at` has always meant *when the drain wrote the row*, and that was
     indistinguishable from discovery only while the queue was healthy: during the 2026-08-17
     starvation the gap opened to **nine days**, so days-on-market, listing velocity, the price-drop
@@ -2285,7 +2309,10 @@ renumber.** Navigate by area:
     `toolkit.filter_registry.PORTAL_OPTIONS` code, from which the rollup's statement is generated;
     a portal added there fails `tests/test_recompute_property_stats.py` until a migration gives it
     its column, and `PORTAL_OPTIONS` must name every `scraper.portal_factory.PORTAL_CLASSES`
-    portal (`tests/toolkit/test_filter_registry.py`). **The seams.** Attributes: `source`,
+    portal (`tests/toolkit/test_filter_registry.py`). 590 carries the seam into the read model:
+    the `browse_projection` line plus one static index line (and its rename) per portal in
+    `rebuild_browse_list()`; a tenth portal is offered only with all three, and the same test
+    fails until it has them. **The seams.** Attributes: `source`,
     `index_rate`, `price_change_min_pct` (+ optional `shared_rate_limiter`). Required:
     `categories`, `category_labels`, `walk_category`, `fetch_detail`. Defaulted on
     `PortalDefaults`, overridden only where the portal differs: `connect_index` (idnes: staleness

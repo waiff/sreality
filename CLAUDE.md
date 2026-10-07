@@ -178,7 +178,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     operator owns the apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"**, rendered per relation: the Watchdog + every cohort compile
     the registry in `toolkit/filter_compiler.compile_filter_where`; Browse's TS + RPCs are pinned per shared predicate only
-    (`sql_kind`, place plan, rule-23 measures, served predicate). `notification_dispatches` = the append-only event table,
+    (`sql_kind`, place plan, rule-23 measures, served predicate, portal rule). **Portal + broker filters select ADS, rows stay properties (MS19):**
+    P matches when any ad is on P (`all_sources`), status judged on those ads; a broker likewise, both = one ad; estimation cohorts stay per-ad. `notification_dispatches` = the append-only event table,
     **three producers**: `watchdog` + `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}`
     per-snapshot; a `monitor_since` anchor so a pre-membership change never fires) + `system_health` (**NOT** property-grain;
     `ops_incidents`, mig 462). **Delivery is separate from detection**: in-app = the row; external = `channel_sends`. A merge re-points them (#18), collapsing a twin (the merge's one delete) once its `channel_sends` move to the kept row.

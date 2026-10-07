@@ -40,7 +40,6 @@ class ListingWrite:
     images: tuple[Mapping[str, Any], ...] = ()   # {"url", "sequence"}
     videos: tuple[Mapping[str, Any], ...] = ()   # {"url", "sequence"}
     sreality_id: int | None = None         # sreality's own id; None = a crawler row (first sight mints per Gate 2)
-    discovery_seq: int | None = None
     discovered_at: datetime | None = None
     content_hash: str = field(init=False)
 
@@ -68,27 +67,25 @@ class SnapshotRef:
 
 def from_sreality(
     raw: Mapping[str, Any], row: Mapping[str, Any], images: Iterable[Mapping[str, Any]], *,
-    discovery_seq: int | None = None, discovered_at: datetime | None = None,
+    discovered_at: datetime | None = None,
 ) -> ListingWrite:
     """sreality's adapter: parse_listing's row + parse_images' rows; hashes the wire payload."""
     sid = int(row["sreality_id"])
     return ListingWrite(
         source="sreality", source_id_native=str(sid), row=dict(row), raw=raw,
         hash_doc=hashing.sreality_hash_doc(dict(raw)), images=tuple(images),
-        sreality_id=sid, discovery_seq=discovery_seq, discovered_at=discovered_at)
+        sreality_id=sid, discovered_at=discovered_at)
 
 
 def from_scraped(
-    listing: ScrapedListing, *,
-    discovery_seq: int | None = None, discovered_at: datetime | None = None,
+    listing: ScrapedListing, *, discovered_at: datetime | None = None,
 ) -> ListingWrite:
     """The 8 crawlers' adapter: the contract's columns + its media split; hashes the 28 _HASH_FIELDS."""
     image_rows, video_rows = media.split_media_rows((listing.raw or {}).get("image_urls") or [])
     return ListingWrite(
         source=listing.source, source_id_native=listing.source_id_native,
         row=listing.listing_columns(), raw=listing.raw or {}, hash_doc=listing.hash_doc(),
-        images=tuple(image_rows), videos=tuple(video_rows),
-        discovery_seq=discovery_seq, discovered_at=discovered_at)
+        images=tuple(image_rows), videos=tuple(video_rows), discovered_at=discovered_at)
 
 
 # jsonb_to_recordset keeps every statement's text fixed (only the one jsonb param varies), so
@@ -115,7 +112,7 @@ def _upsert_sql(source: str) -> str:
     WITH j AS (
         SELECT * FROM jsonb_to_recordset(%(rows)s::jsonb) AS j(
             source_id_native text, sreality_id bigint, {_RECORD_SPEC},
-            raw_json jsonb, discovery_seq bigint, discovered_at timestamptz)
+            raw_json jsonb, discovered_at timestamptz)
     ), prior AS (
         SELECT l.source_id_native, l.is_active, {stored_broker} AS stored_broker
         FROM listings l
@@ -124,13 +121,13 @@ def _upsert_sql(source: str) -> str:
     ), up AS (
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active, {cols},
-            source, source_id_native, raw_json, discovery_seq, discovered_at)
+            source, source_id_native, raw_json, discovered_at)
         SELECT
             COALESCE(j.sreality_id,
                      CASE WHEN prior.source_id_native IS NULL AND %(mint)s
                           THEN nextval('synthetic_listing_id_seq') END),
             now(), true, {j_cols},
-            %(source)s, j.source_id_native, j.raw_json, j.discovery_seq, j.discovered_at
+            %(source)s, j.source_id_native, j.raw_json, j.discovered_at
         FROM j LEFT JOIN prior ON prior.source_id_native = j.source_id_native
         ORDER BY j.source_id_native
         ON CONFLICT (source, source_id_native) DO UPDATE SET
@@ -139,7 +136,6 @@ def _upsert_sql(source: str) -> str:
           inactive_at = NULL,
           {_listing_update_set_sql(source)},
           raw_json = EXCLUDED.raw_json,
-          discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
           discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)
         RETURNING id, source_id_native, (xmax = 0) AS inserted
     )
@@ -308,7 +304,7 @@ def _stage(batch: Mapping[str, ListingWrite]) -> tuple[
         _coerce_numerics(obj)
         sane_listing_numerics(obj)
         obj |= {"source_id_native": native, "sreality_id": w.sreality_id, "raw_json": dict(w.raw),
-                "discovery_seq": w.discovery_seq, "discovered_at": w.discovered_at}
+                "discovered_at": w.discovered_at}
         rows.append(obj)
         snaps.append({"source_id_native": native, "price_czk": obj["price_czk"],
                       "content_hash": w.content_hash})

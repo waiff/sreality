@@ -1,8 +1,9 @@
-{"_why": "THE table for how a column-backed FilterDef compiles (C4, rule 16), read by both languages: pytest pins toolkit/filter_compiler._KIND_SQL to `sql`, vitest pins registryQueryBuilder's dispatch to `postgrest` (a list value) and `postgrest_single` (a one-element list must be .eq(), never .in(): the planner rule in registryQueryBuilder.ts). `enum_or_unknown` and a null kind are hand-coded on Browse.",
+{"_why": "THE table for how a column-backed FilterDef compiles (C4, rule 16), read by both languages: pytest pins toolkit/filter_compiler._KIND_SQL to `sql`, vitest pins registryQueryBuilder's dispatch to `postgrest` (a list value) and `postgrest_single` (a one-element list must be .eq(), never .in(): the planner rule in registryQueryBuilder.ts). `enum_or_unknown` and a null kind are hand-coded on Browse, and so is every id in `property_grain_clauses`: a filter a property-grain relation spells in its own shape whatever its kind (MS19's portal rule: toolkit/filter_compiler PROPERTIES_GRAIN.clauses for the Watchdog, queries.ts applyPortalRule for Browse).",
  "kinds": {
   "eq":  {"sql": "{expr} = %({id})s",      "postgrest": "eq",  "postgrest_single": "eq"},
   "any": {"sql": "{expr} = ANY(%({id})s)", "postgrest": "in",  "postgrest_single": "eq"},
   "gte": {"sql": "{expr} >= %({id})s",     "postgrest": "gte", "postgrest_single": "gte"},
   "lte": {"sql": "{expr} <= %({id})s",     "postgrest": "lte", "postgrest_single": "lte"},
   "enum_or_unknown": {"sql": null, "postgrest": null, "postgrest_single": null}},
- "browse_hand_coded_kinds": [null, "enum_or_unknown"]}
+ "browse_hand_coded_kinds": [null, "enum_or_unknown"],
+ "property_grain_clauses": ["portals"]}

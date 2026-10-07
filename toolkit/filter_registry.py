@@ -746,11 +746,13 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column=None,  # synthetic: drives is_active filter at the UI layer
             default="any",
             description=(
-                "Listing status filter for Browse. `any` shows both "
-                "live and delisted; `active` only is_active=true; "
-                "`inactive` only is_active=false. The Watchdog matcher "
-                "ignores this (it fires on new listings only) — use "
-                "`lifecycle` for the analytical surfaces."
+                "Status filter for Browse. `any` shows both live and "
+                "delisted properties; `active` = a property with an active "
+                "ad on the selected portals (any active ad when none is "
+                "selected); `inactive` = ads there and none of them active. "
+                "The Watchdog matcher ignores this (it fires on new "
+                "properties only) — use `lifecycle` for the analytical "
+                "surfaces."
             ),
             category=CATEGORY_STATUS,
             ui_control=UiControl.PILL_GROUP,
@@ -1041,11 +1043,13 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column="source",
             default=None,
             description=(
-                "Restrict the cohort to listings from one or more source "
-                "portals (`listings.source`): sreality, bazos, idnes, "
-                "maxima, ceskereality, bezrealitky, mmreality, remax, realitymix. A "
-                "listing matches if its source is in the list. Empty list / "
-                "null = all portals."
+                "Restrict the cohort to one or more source portals: sreality, "
+                "bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, "
+                "remax, realitymix. A property matches when any of its ads is "
+                "on a listed portal, active or not; several = any of them; "
+                "with a status filter the status is judged on those ads; "
+                "estimation cohorts read each ad's own portal (§9). Empty "
+                "list / null = all portals."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
@@ -1503,9 +1507,9 @@ def _build_registry() -> dict[str, FilterDef]:
         # None: the SPA's `registryQueryBuilder.applyRegistryFilters` skips any
         # browse filter whose `pg_column` is null, so a None here is not a note
         # about how the filter is applied — it is the filter silently not being
-        # applied at all. Migration 535 publishes `plot_area_m2` on all three
-        # Browse relations (browse_projection -> browse_list, properties_map_mv,
-        # listing_feed_public) precisely so this can point at a column; the
+        # applied at all. Migration 535 publishes `plot_area_m2` on the Browse
+        # relations (browse_projection -> browse_list, properties_map_mv)
+        # precisely so this can point at a column; the
         # API-side readers call `toolkit.measures.plot_area_sql` over `listings`,
         # which has no such column. One definition, two spellings, same answer.
         FilterDef(

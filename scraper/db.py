@@ -2253,13 +2253,11 @@ def claim_detail_batch(
     source: str,
     limit: int,
     acquisition_reserve: float | None = None,
-) -> list[tuple[str, str | None, int | None, int, datetime | None]]:
+) -> list[tuple[str, str | None, int | None, datetime | None]]:
     """Atomically claim up to `limit` available rows for `source`. Returns
-    (native_id, detail_ref, index_price_czk, discovery_seq, enqueued_at) —
-    discovery_seq is the row's enqueue-time sequence value (see migration 368) and
-    enqueued_at is when the walk first saw the id (migration 444); both are carried
-    through so the drain can stamp listings.discovery_seq / listings.discovered_at
-    at write time, independent of claim/fetch/write order.
+    (native_id, detail_ref, index_price_czk, enqueued_at) — enqueued_at is when the
+    walk first saw the id (migration 444), carried through so the drain can stamp
+    listings.discovered_at at write time, independent of claim/fetch/write order.
 
     The batch is composed from two classes rather than taken off one ranking:
     up to ceil(limit * QUEUE_ACQUISITION_RESERVE) never-fetched rows
@@ -2325,8 +2323,7 @@ def claim_detail_batch(
             )
             UPDATE listing_detail_queue q SET claimed_at = now()
             FROM c WHERE q.source = c.source AND q.native_id = c.native_id
-            RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq,
-                      q.enqueued_at
+            RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.enqueued_at
             """,
             {
                 "source": source,
@@ -2337,10 +2334,7 @@ def claim_detail_batch(
                 "limit": limit,
             },
         )
-        return [
-            (nid, ref, price, dseq, enq)
-            for nid, ref, price, dseq, enq in cur.fetchall()
-        ]
+        return [(nid, ref, price, enq) for nid, ref, price, enq in cur.fetchall()]
 
 
 def queue_priorities(conn: psycopg.Connection, source: str, native_ids: Sequence[str]) -> dict[str, int]:

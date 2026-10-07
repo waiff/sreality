@@ -106,6 +106,15 @@ describe('URL round-trip', () => {
     expect(fromSearchParams(dirty).conditionMatch).toEqual(['novostavba']);
   });
 
+  it('round-trips the portals and drops a code that is not one of them', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, portals: ['idnes', 'realitymix'] };
+    expect(fromSearchParams(toSearchParams(f)).portals).toEqual(['idnes', 'realitymix']);
+    // One portal names a column (its newest-ad date), so a stale or mistyped code
+    // would answer 400 on the list, the count and the map.
+    const dirty = new URLSearchParams('portal=idnes,IDNES,retired');
+    expect(fromSearchParams(dirty).portals).toEqual(['idnes']);
+  });
+
   it('round-trips the condition-level bounds and price-change filters', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,

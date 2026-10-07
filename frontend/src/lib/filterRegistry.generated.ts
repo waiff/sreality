@@ -377,7 +377,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string",
       "pg_column": null,
       "default": "any",
-      "description": "Listing status filter for Browse. `any` shows both live and delisted; `active` only is_active=true; `inactive` only is_active=false. The Watchdog matcher ignores this (it fires on new listings only) — use `lifecycle` for the analytical surfaces.",
+      "description": "Status filter for Browse. `any` shows both live and delisted properties; `active` = a property with an active ad on the selected portals (any active ad when none is selected); `inactive` = ads there and none of them active. The Watchdog matcher ignores this (it fires on new properties only) — use `lifecycle` for the analytical surfaces.",
       "category": "Status",
       "ui_control": "pill_group",
       "agendas": [
@@ -1097,7 +1097,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "source",
       "default": null,
-      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax, realitymix. A listing matches if its source is in the list. Empty list / null = all portals.",
+      "description": "Restrict the cohort to one or more source portals: sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax, realitymix. A property matches when any of its ads is on a listed portal, active or not; several = any of them; with a status filter the status is judged on those ads; estimation cohorts read each ad's own portal (§9). Empty list / null = all portals.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [

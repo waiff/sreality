@@ -142,8 +142,8 @@ def _sreality(sid: int | None = None, *, k: str = "a", images: int = 1,
 
 
 def _scraped(source: str, native: str | None = None, *, images: int = 1, video: bool = False,
-             broker: dict[str, Any] | None = None, discovery_seq: int | None = None,
-             discovered_at: datetime | None = None, **kw: Any) -> listing_write.ListingWrite:
+             broker: dict[str, Any] | None = None, discovered_at: datetime | None = None,
+             **kw: Any) -> listing_write.ListingWrite:
     native = native or f"lw-{uuid.uuid4()}"
     urls = [_IMG.format(native=native, i=i) for i in range(images)]
     if video:
@@ -157,8 +157,7 @@ def _scraped(source: str, native: str | None = None, *, images: int = 1, video: 
     listing = ScrapedListing(
         source=source, source_id_native=native,
         source_url=f"https://{source}.example.test/{native}", raw=raw, **fields)
-    return listing_write.from_scraped(
-        listing, discovery_seq=discovery_seq, discovered_at=discovered_at)
+    return listing_write.from_scraped(listing, discovered_at=discovered_at)
 
 
 def _write(conn: Any, *writes: listing_write.ListingWrite) -> list[listing_write.WriteOutcome]:
@@ -387,15 +386,16 @@ def test_n_preserve_if_null_follows_the_contract(conn):
     assert _one(conn, "SELECT condition FROM listings WHERE id = %s", (s.listing_id,)) is None
 
 
-def test_o_discovery_fields_are_set_once(conn):
+def test_o_discovered_at_is_set_once_and_discovery_seq_is_never_written(conn):
+    """MS19 (W5): nothing writes discovery_seq any more; the column stays until W6."""
     native = f"lw-{uuid.uuid4()}"
     t5 = datetime(2026, 9, 1, 5, tzinfo=timezone.utc)
     t9 = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
-    [o] = _write(conn, _scraped("idnes", native, discovery_seq=5, discovered_at=t5))
-    _write(conn, _scraped("idnes", native, discovery_seq=9, discovered_at=t9))
+    [o] = _write(conn, _scraped("idnes", native, discovered_at=t5))
+    _write(conn, _scraped("idnes", native, discovered_at=t9))
 
     assert _one(conn, "SELECT discovery_seq, discovered_at FROM listings WHERE id = %s",
-                (o.listing_id,)) == (5, t5)
+                (o.listing_id,)) == (None, t5)
 
 
 def test_p_float_numerics_are_coerced_not_rejected(conn):

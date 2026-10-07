@@ -235,38 +235,53 @@ describe('withKeysetColumns', () => {
 });
 
 /* ---------------------------------------------------------------------- */
-/* Portal-mirror lane: a caller-supplied tiebreaker (listing_feed_public,  */
-/* migrations 369/370, where property_id is NOT unique — 7,951 properties  */
-/* hold >1 active listing on one portal, so it cannot impose a total order)*/
+/* One portal's order column (MS19, migration 590): NOT NULL on every row   */
+/* it pages (applyPortalRule's conjunct), so single-phase and btree-default */
+/* null placement, which the DESC partial index serves both ways.           */
+/* ---------------------------------------------------------------------- */
+
+describe("applyKeyset on one portal's order column", () => {
+  it('emits the btree-default null placement in both directions', () => {
+    for (const direction of ['desc', 'asc'] as const) {
+      const r = applyKeyset(new Recorder(), sort('newest_ad_at_idnes', direction), null);
+      expect(r.calls).toEqual([
+        { m: 'order', column: 'newest_ad_at_idnes', ascending: direction === 'asc', nullsFirst: undefined },
+        { m: 'order', column: 'property_id', ascending: direction === 'asc' },
+      ]);
+    }
+  });
+
+  it('pages single-phase: no `is.null` disjunct to defeat the index', () => {
+    const r = applyKeyset(
+      new Recorder(),
+      sort('newest_ad_at_maxima', 'desc'),
+      { value: '2026-10-01T08:00:00+00:00', id: 900 },
+    );
+    const or = r.calls.find((c) => c.m === 'or') as { m: 'or'; filters: string };
+    expect(or.filters).toBe(
+      'newest_ad_at_maxima.lt."2026-10-01T08:00:00+00:00",'
+      + 'and(newest_ad_at_maxima.eq."2026-10-01T08:00:00+00:00",property_id.lt.900)',
+    );
+  });
+
+  it('selects the order column so the cursor can be derived', () => {
+    const cols = withKeysetColumns('listing_id,price_czk', sort('newest_ad_at_remax', 'asc')).split(',');
+    expect(cols).toEqual(['listing_id', 'price_czk', 'property_id', 'newest_ad_at_remax']);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* A caller-supplied tiebreaker: the listing-grain pin audit                */
+/* (lib/pinAudit.ts), whose unique key is listing_id.                       */
 /* ---------------------------------------------------------------------- */
 
 describe('applyKeyset with a custom tiebreak', () => {
   it('orders by the tiebreak column it was given, not property_id', () => {
-    const r = applyKeyset(
-      new Recorder(),
-      sort('portal_sort_key', 'desc'),
-      null,
-      'listing_id',
-    );
+    const r = applyKeyset(new Recorder(), sort('first_seen_at', 'desc'), null, 'listing_id');
     expect(r.calls).toEqual([
-      { m: 'order', column: 'portal_sort_key', ascending: false, nullsFirst: undefined },
+      { m: 'order', column: 'first_seen_at', ascending: false, nullsFirst: undefined },
       { m: 'order', column: 'listing_id', ascending: false },
     ]);
-  });
-
-  it('treats portal_sort_key as NOT NULL — no `is.null` disjunct to defeat the index', () => {
-    const r = applyKeyset(
-      new Recorder(),
-      sort('portal_sort_key', 'desc'),
-      { value: '000000000000' + '0'.repeat(19), id: 900 },
-      'listing_id',
-    );
-    const or = r.calls.find((c) => c.m === 'or');
-    expect(or).toBeDefined();
-    const filters = (or as { m: 'or'; filters: string }).filters;
-    expect(filters).not.toContain('portal_sort_key.is.null');
-    expect(filters).toContain('listing_id.lt.900');
-    expect(filters).not.toContain('property_id');
   });
 
   it('carries the tiebreak into the NULLS-LAST tail phase too', () => {
@@ -283,13 +298,12 @@ describe('applyKeyset with a custom tiebreak', () => {
   it('pages ASC with `>` on the tiebreak, same as the default lane', () => {
     const r = applyKeyset(
       new Recorder(),
-      sort('portal_sort_key', 'asc'),
+      sort('first_seen_at', 'asc'),
       { value: 'abc', id: 7 },
       'listing_id',
     );
     const or = r.calls.find((c) => c.m === 'or') as { m: 'or'; filters: string };
-    expect(or.filters).toContain('portal_sort_key.gt."abc"');
-    expect(or.filters).toContain('and(portal_sort_key.eq."abc",listing_id.gt.7)');
+    expect(or.filters).toBe('first_seen_at.gt."abc",and(first_seen_at.eq."abc",listing_id.gt.7)');
   });
 
   it('still defaults to property_id when no tiebreak is passed', () => {
@@ -301,10 +315,10 @@ describe('applyKeyset with a custom tiebreak', () => {
 describe('nextCursorFrom / withKeysetColumns with a custom tiebreak', () => {
   it('reads the cursor id off the given tiebreak column', () => {
     const rows = [
-      { listing_id: 11, property_id: 999, portal_sort_key: 'k1' },
-      { listing_id: 12, property_id: 999, portal_sort_key: 'k2' },
+      { listing_id: 11, property_id: 999, first_seen_at: 'k1' },
+      { listing_id: 12, property_id: 999, first_seen_at: 'k2' },
     ];
-    expect(nextCursorFrom(rows, sort('portal_sort_key', 'desc'), 'listing_id')).toEqual({
+    expect(nextCursorFrom(rows, sort('first_seen_at', 'desc'), 'listing_id')).toEqual({
       value: 'k2',
       id: 12,
     });
@@ -313,10 +327,10 @@ describe('nextCursorFrom / withKeysetColumns with a custom tiebreak', () => {
   it('selects the tiebreak + sort column so the cursor can be derived', () => {
     const cols = withKeysetColumns(
       'listing_id,price_czk',
-      sort('portal_sort_key', 'desc'),
+      sort('area_m2', 'desc'),
       'listing_id',
     ).split(',');
-    expect(cols).toContain('portal_sort_key');
+    expect(cols).toContain('area_m2');
     expect(cols.filter((c) => c === 'listing_id')).toHaveLength(1);
     expect(cols).not.toContain('property_id');
   });

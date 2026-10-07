@@ -38,16 +38,17 @@ Every wave is tested against this sentence. Work that does not serve it is cut (
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path
 beside an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines** when
-approved; as built so far (W0–W4, 2026-10-07) **+9,783 / −7,792**, with W5 still estimated at
-+290 / −870; **−3 tables, +1**; about **1.5 GB** dropped from the database, 1.15 GB of it two
-indexes nothing has ever used, while the Browse read models grow by roughly 0.2 GB (the two portal
-lists, the nine per-portal dates and their indexes). Not counted: about 750 lines of migration text
-that restate views. Our own condition grades stay for now (Q48, §9). Every wave removes more than it
-adds except W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the
-migration, live tests and the plan's gate text), W2b (+1,866 / −990 as built: MS16's honesty on
+approved; as built so far (W0–W5, 2026-10-07) **+11,641 / −9,006**; **−3 tables, +1**; about
+**1.5 GB** dropped from the database, 1.15 GB of it two indexes nothing has ever used, while the
+Browse read models grow by roughly 0.2 GB (the two portal lists, the nine per-portal dates and their
+indexes). Not counted: migration 590's 1,255 lines, which restate views and the two aggregate RPCs
+whole. Our own condition grades stay for now (Q48, §9). Every wave removes more than it adds except
+W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the migration, live
+tests and the plan's gate text), W2b (+1,866 / −990 as built: MS16's honesty on
 every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed"),
-W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4) and W4 (+4,854 / −4,280 as
-built: its code about even, its tests and the reviews' cases larger, §4; the operator's ruling owed).
+W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4), W4 (+4,854 / −4,280 as
+built: its code about even, its tests and the reviews' cases larger, §4; the operator's ruling owed)
+and W5 (+1,858 / −1,214 as built: code −179 net, tests +921 net, §4; the operator's ruling owed).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -285,7 +286,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +1,866 / −990 (built, #1720) |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; the category gate reads ads (MS13 note); split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED"; its additive migration 589 (`property_merge_carries`) applied before merge | +1,524 / −941 (built, #1721; planned +330 / −655): code −20 net, tests +475 net (MS14's invariant and fold snapshots on every live merge, the came-from cases, the ad-grain gate and the receipt, all new since the plan), docs +64, migration 589's 64 lines |
 | **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview and its digest, curation routing per letter with copies (the brake routes by the same plan), a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties (counted before the click), the brake's dry run counting note moves; the review pages link to the dialog; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together" (the category review's "Ponechat"), "Přesto rozdělit", writing "same" inside a letter (a letter's join still rules as the merge it is; recorded rulings stay) and the split undo | yes | W3 | +4,854 / −4,280 (built, #1722; planned +1,550 / −2,100): code +48 net, tests +429 net (the split's hermetic and live suites rewritten, the gate's two-account suite and MS12 new, then the two reviews' cases: every fold's twin, no account, the digest's counts and landings, the brake onto an origin active again, the preview with the user's picks, the count held before a merge), docs +97; no migration |
-| **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +290 / −870 |
+| **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +1,858 / −1,214 (built, #____; planned +290 / −870; the operator's ruling owed): code −179 net (the per-ad lane, the grain notice, the map's capped pill and `discovery_seq`'s threading out), tests +921 net (one fixture through the database, the RPCs, the Watchdog, the broker lookup and the SPA; migration 590's offline rail and its receipt; the tenth-portal rail; the page's one-portal wiring), docs −113 net, CI +15 (the fixture's push path); migration 590 (1,255 lines, 515 of them the two RPC bodies restated whole) not counted |
 | **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live; a day the operator names | database |
 
 **Order.** Before the dedup session's review closes (2026-10-06 13:45 UTC): W0 (merged) and W2b.
@@ -365,12 +366,12 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
   indexes add at most 30 s to a rebuild, the whole new rebuild stays within 1.25 times today's (7 days:
   median 255 s, p90 751 s), every new index serves a measured page or count or is not built, and a
   24-row "Newest first" page for the largest and the smallest portal (idnes, maxima) reads that
-  portal's index with no sort step; every read-model object changes in one transaction, off-peak,
-  never while a recompute runs, both read models are rebuilt once before the code merges, and the two
-  Stats/map functions are restated from their live bodies; order agreed with the street-filter
-  session (its restatement of both functions was planned as 585, which #1715's image fix took on
-  main on 2026-10-06, so it takes another number) and with the dedup session's wave that deletes the
-  removed engine's tables.
+  portal's index with no sort step; every read-model shape changes in one transaction, then the list
+  is rebuilt, then the map's rebuild and the two Stats/map functions (restated from their live bodies)
+  switch together in a second, off-peak, never while a recompute runs, before the code merges; order
+  agreed with the street-filter session (its restatement of both functions was planned as 585,
+  which #1715's image fix took on main on 2026-10-06, so it takes another number) and with the
+  dedup session's wave that deletes the removed engine's tables.
 - **W6:** on a day the operator names; each object re-checked that day: no view or function depends
   on it, and no cascade is used; backup to R2 read back; engine paused; 05:20–05:30 UTC; a 5-second
   lock limit with retries; indexes dropped outside the transaction, after a query plan shows the
@@ -385,10 +386,10 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
 | Group | What it is | Objects |
 |---|---|---|
 | Status log | the stored on/off-market log, replaced by MS9 | `property_status_events`, its view, trigger and function |
-| Asset links | "same building" links, never used | `assets`, `asset_membership_events`, `properties.asset_id` |
+| Asset links | "same building" links, never used | `assets`, `asset_membership_events`, `properties.asset_id` (W5's 590 already took it out of `browse_projection`, `properties_public` and the `browse_list` cache, re-created views and a rebuilt cache column, no data) |
 | Pipeline note field | a field nothing can write | `property_pipeline.note` |
 | Per-ad Browse lane | the "one portal's own page" machinery, replaced by MS19's one-portal "Newest first" | `listing_feed_visible()`, then `listing_feed_public`; the `listing_ids_filter` parameter of `browse_map_cells` (the function re-created with its grants); `listings_portal_feed_idx` (136 MB, dropped concurrently, outside the transaction); `listing_detail_queue.discovery_seq` with its default and `listings.discovery_seq`, then the sequence `listing_discovery_seq` |
-| Write-only columns | no longer written since W2a, read by nothing; `properties_public` still projects `distinct_site_count`, so W5's one restatement of that view leaves it out | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
+| Write-only columns | no longer written since W2a, read by nothing; W5's one restatement of `properties_public` (590) left `distinct_site_count` out | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
 | Never-used indexes | built for an old Browse path | `properties_cat_last_seen_keyset_idx`, `properties_last_seen_keyset_idx` (1.15 GB) |
 
 **Never dropped by this sprint:** any curation table; the pipeline history; `properties.all_sources` /
@@ -544,14 +545,21 @@ that session; the two never-used indexes come from migrations 198 and 275.
   advertised again comes last in its batch.
 - **Order and filter can disagree under one portal.** A property advertised there again can lead
   "Newest first" while "added in the last N days" leaves it out; rule 16 keeps the filter's meaning.
-- **A tenth portal** needs its date column on `properties` and the read models before it can be
-  offered; a test fails until it has one.
+- **A tenth portal** needs its date column on `properties`, its `browse_projection` line and its
+  index line in `rebuild_browse_list()` before it can be offered; a test fails until it has all three.
 - **Three sessions edit nearby files:** this one, the dedup session (#1655, which makes the recompute
   statement an f-string, rebases onto this sprint after W6; its E934 edits `apply.py` beside W1b's
   asset-link hunk, and whichever lands second rebases) and the street-filter session. That session's
   584 is applied (2026-10-03); its planned 585 (unmerged; main's 585 is #1715's image fix since
   2026-10-06, so it needs another number) restates `browse_stats_properties` and
-  `browse_map_cells` with unchanged parameters, so W5 restates both from what is live; its untracked
+  `browse_map_cells` with unchanged parameters, so W5 restates both from what is live. 590's md5
+  preconditions refuse a body neither 549's nor its own, so whichever lands second regenerates its
+  two bodies from live and holds the HIGHER migration number (CI replays in numeric order: a lower
+  number applied later would be overwritten in the replay and diverge from production); its untracked
   `586_chip_codes_and_watchdog_removal.sql` (seen 2026-10-03) stays below this sprint's block, which
   W2a's 588 opens; its uncommitted edits touch `queries.ts`,
-  `filters.ts`, `brokers.ts`, `BrowseExperience.tsx` and `Pipeline.tsx`, W2b and W5 files.
+  `filters.ts`, `brokers.ts`, `BrowseExperience.tsx` and `Pipeline.tsx`, W2b and W5 files. A
+  three-way merge (2026-10-07) of its tree with W5's conflicts, beyond `ROADMAP.md` (in conflict with
+  main already), in `tests/fixtures/filter_compile_rows.json` (its `ulice_id` and W5's two portal
+  lists on the same `properties_public` rows: keep both keys) and `tests/test_one_place_predicate.py`
+  (`_LATEST_RPC_DEFINITION`: the higher-numbered restatement, which carries both edits).

@@ -275,6 +275,9 @@ latest definer): take both rebuild advisory locks (`statement_timeout` > the 180
 `l.*` must never see it narrower than the view), the view, then bridge `properties_map_visible()` with
 `null::<type> as <col>` ONLY while the matview lacks the column (EXECUTE + `-- ci-allow-dynamic:`; a static bridge
 breaks re-runs); then, `lock_timeout 0` under the held re-entrant keys, force the map rebuild + restore its source, then the list's.
+**Removing a column** (590's recipe): in ONE transaction alter `browse_list` FIRST (`sync_browse_list` locks it before the view), rename the
+view aside (the matview + its source follow by OID), create the new one, re-create both row-type sources (the map's as a static bridge); then
+the rebuild at top level (a body inside a DO block is apply-time DDL to the receipt parser); force the list, then map + legacy drop.
 
 **A property row is its canonical advert's** (migrations 561, 588): `properties.repr_listing_ref_id`
 = rank 1 of `property_canonical_listings(property_id)` (active, map point, earliest first seen among
@@ -282,7 +285,7 @@ active / latest last seen among inactive, trust, id), written by the one rollup;
 joins place/floor/description/broker through it, and `properties_public.listing_id` is it
 (`repr_since`: when it last changed; alerts count only its later price steps; the rollup clears
 `city_proximity_computed_at` with it). The rollup also writes `all_sources` / `active_sources` (sorted
-portal lists) and the nine `newest_ad_at_<portal>` dates (MS19); no read model projects them before W5.
+portal lists) and the nine `newest_ad_at_<portal>` dates (MS19), projected since 590 (one partial index per portal on `browse_list`).
 
 **Three functions depend on `browse_projection`'s row type** (migration 537:
 `browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on
@@ -301,8 +304,7 @@ DEFAULT cohort (byt+pronájem, 105k rows, `LIMIT 24`): `= ANY('{byt}')` → 15,8
 8 s `statement_timeout`, which is how the flagship surface came to answer HTTP 500 on its own
 front page); `= 'byt'` → **6 buffers / 0.174 ms**, no Sort node. The client side is fixed in
 `frontend/src/lib/registryQueryBuilder.ts` (a length-1 `string_list` emits `.eq()`), pinned by
-three tests in its `.test.ts`, and the same rule governs the portal-mirror lane
-(`source` → `listing_feed_public`). Genuine multi-selects still sort — that is a server-side
+three tests in its `.test.ts`. Genuine multi-selects still sort — that is a server-side
 relation question, not this one. When reading a slow `browse_list` plan, check the operator
 before anything else: a `Sort` node above the index scan is this defect's signature.
 

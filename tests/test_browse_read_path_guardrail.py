@@ -282,7 +282,7 @@ def _projection_columns() -> set[str]:
     start = src.index("view browse_projection as")
     body = src[start:]
     body = body[body.index("select") + len("select"):]
-    body = body[: body.index("\nfrom properties")]
+    body = body[: re.search(r"\n\s*from properties", body).start()]
     items, depth, cur = [], 0, []
     for ch in body:
         if ch == "(":

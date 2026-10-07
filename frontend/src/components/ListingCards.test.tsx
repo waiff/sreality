@@ -35,6 +35,7 @@ import { expectNoNestedInteractive } from '@/test/a11y';
 import * as api from '@/lib/api';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
+import { fmtShortDate } from '@/lib/format';
 import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
 
@@ -85,6 +86,8 @@ const ROW = {
   mf_gross_yield_pct: null,
   total_price_change_pct: null,
   price_change_count: null,
+  all_sources: ['sreality'],
+  active_sources: ['sreality'],
 } as unknown as CardRow;
 
 /* The card's own title, and therefore the accessible name its ONE link must
@@ -134,6 +137,8 @@ function renderGrid(
     merge?: { selected: boolean };
     onToggleSelect?: (propertyId: number) => void;
     estimates?: Record<number, ListingEstimate>;
+    row?: CardRow;
+    orderPortal?: string | null;
   } = {},
 ) {
   const qc = new QueryClient({
@@ -145,9 +150,10 @@ function renderGrid(
         <LocationProbe />
         <CardHydrationProvider listingIds={[111]} renders={{ photos: 50 }}>
           <ListingCards
-            rows={[ROW]}
+            rows={[opts.row ?? ROW]}
             total={1}
             sort={{ field: 'last_seen_at', dir: 'desc' } as never}
+            orderPortal={opts.orderPortal}
             imageLarge={false}
             isLoading={false}
             isFetchingNextPage={false}
@@ -563,5 +569,50 @@ describe('<ListingCards> merge mode with a multi-photo card', () => {
       fireEvent.click(next);
       expect(onToggleSelect).not.toHaveBeenCalled();
     }
+  });
+});
+
+/* MS19: a card is a property. Its badge names the portals where it has an active ad
+ * (or, with none active, every portal it had, marked inactive), and under one
+ * portal's "Newest first" a card whose date there is not its own first seen says so. */
+describe('<ListingCards> the portal badge and the order date', () => {
+  const badge = () => screen.getByTitle(/^Portály/);
+
+  it('lists every portal with an active ad', () => {
+    renderGrid({ row: { ...ROW, all_sources: ['idnes', 'sreality'], active_sources: ['idnes', 'sreality'] } });
+    expect(badge().textContent).toBe('portáliDNES Reality · Sreality');
+  });
+
+  it('lists only the live portals while one is live', () => {
+    renderGrid({ row: { ...ROW, all_sources: ['bazos', 'idnes'], active_sources: ['idnes'] } });
+    expect(badge().textContent).toBe('portáliDNES Reality');
+  });
+
+  it('marks every portal inactive when no ad is live', () => {
+    renderGrid({ row: { ...ROW, is_active: false, all_sources: ['bazos', 'idnes'], active_sources: [] } });
+    expect(badge().textContent).toBe('neaktivníBazoš · iDNES Reality');
+  });
+
+  const lifespan = () => screen.getByTitle(/^Aktivní/).textContent;
+
+  it("shows the portal's date beside the card's own when the two days differ", () => {
+    renderGrid({
+      orderPortal: 'idnes',
+      row: { ...ROW, newest_ad_at_idnes: '2026-03-05T10:00:00Z' } as CardRow,
+    });
+    expect(lifespan()).toContain(`·iDNESod${fmtShortDate('2026-03-05T10:00:00Z')}`);
+  });
+
+  it('shows one date when the newest ad there is the first seen', () => {
+    renderGrid({
+      orderPortal: 'idnes',
+      row: { ...ROW, newest_ad_at_idnes: '2026-01-01T09:00:00Z' } as CardRow,
+    });
+    expect(lifespan()).not.toContain('iDNES');
+  });
+
+  it('shows no portal date without the one-portal order', () => {
+    renderGrid({ row: { ...ROW, newest_ad_at_idnes: '2026-03-05T10:00:00Z' } as CardRow });
+    expect(lifespan()).not.toContain('iDNES');
   });
 });

@@ -35,7 +35,10 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
       an operator merge taking back every "different" it joins (MS12), the brake routing by the carry
       record; the review pages link to the dialog (PR #1722, +4,854 / −4,280, no migration;
       gate: the count invariant on production before and after, the two-account live suite)
-- [ ] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first"
+- [x] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first",
+      the card's portal badge, the broker lookup by property; the per-ad lane deleted in code (PR #____,
+      +1,858 / −1,214, the operator's ruling on the size owed; migration 590 applied before merge; gate: a
+      cycle begun after W2a, the parity samples, the shadow rebuild, the nine page plans; objects wait for W6)
 - [ ] W6 — the one destructive window
 
 ## Owed after W4

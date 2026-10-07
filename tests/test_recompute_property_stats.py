@@ -1305,6 +1305,30 @@ def test_one_newest_ad_date_per_offered_portal_and_the_two_portal_lists():
         assert _rhs(setc, column) == f"r.{column}"
 
 
+def test_a_tenth_portal_is_offered_only_with_its_read_model_lines():
+    """MS19 (migration 590): a PORTAL_OPTIONS code is a portal Browse can order by only when
+    the latest browse_projection projects its date (after the two lists, in PORTAL_OPTIONS
+    order) and the latest rebuild_browse_list builds and renames its partial index. With the
+    properties column above, a tenth portal needs all three before it can be offered."""
+    from tests.migration_defs import latest_definition
+    from tests.test_browse_read_path_guardrail import _latest_migration_defining
+    from tests.test_location_w3_projection import _columns, _sql
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    codes = [o.value for o in PORTAL_OPTIONS]
+    view = _latest_migration_defining("browse_projection").name
+    assert _columns(_sql(view), "browse_projection")[-(len(codes) + 2):] == [
+        "all_sources", "active_sources", *(f"newest_ad_at_{c}" for c in codes)]
+    rebuild = " ".join(latest_definition("rebuild_browse_list").read_text(encoding="utf-8").split())
+    for c in codes:
+        assert (f"create index browse_list_next_newest_ad_at_{c}_idx on browse_list_next "
+                f"(category_main, category_type, newest_ad_at_{c} desc, property_id desc) "
+                f"where newest_ad_at_{c} is not null") in rebuild, c
+        assert (f"alter index browse_list_next_newest_ad_at_{c}_idx rename to "
+                f"browse_list_newest_ad_at_{c}_idx") in rebuild, c
+    assert rebuild.count("browse_list_next_newest_ad_at_") == 2 * len(codes)
+
+
 def test_the_price_history_is_the_canonical_adverts_lineage():
     """MS10: the canonical advert's same-portal predecessors' steps plus one handover per link."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL

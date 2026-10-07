@@ -43,8 +43,10 @@ import { REGISTRY_KEY_MAP, type ListingFilters } from './filters';
 /* Registry IDs whose shape is too irregular for the auto-dispatcher.
  * `queries.ts:applyFilters` handles these directly. */
 export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
-  // Multi-value enum → boolean column predicate.
+  // The portal rule (MS19): status and portals are judged together on the
+  // property's ads (all_sources / active_sources), queries.ts:applyPortalRule.
   'status',
+  'portals',
   // Days-ago integers → ISO timestamp predicates on first/last seen.
   'last_seen_min_days',
   'last_seen_max_days',
@@ -206,8 +208,7 @@ export const applyAgendaFilters = <T>(
          *   eq.byt   -> Limit -> Index Scan, no Sort, 24 rows, 5 buffers, 0.2 ms
          * Cold it crossed `authenticated`'s 8 s statement_timeout, so the
          * flagship surface answered HTTP 500 (SQLSTATE 57014) on its own
-         * default view. Same defect, same fix, on the portal-mirror lane
-         * (`portals` -> `source`, listing_feed_public).
+         * default view.
          *
          * A genuine multi-select still emits `.in()` and still sorts — that is
          * a server-side relation question, tracked separately; this only makes

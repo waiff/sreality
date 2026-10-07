@@ -18,12 +18,10 @@ Three drifts are possible and all three are silent. This file is the net for eac
   2. A parameter the map RPC carries and the Stats RPC does not, or vice versa. Divergence
      here is the count-vs-list class migration 351 was written to close.
 
-  3. A prefilter id space the RPC does not carry. `applyPrefilters` emits `.in()` on THREE
-     spaces — listing_id, obec_id AND property_id. `browse_stats_properties` carries only
-     the last two, because the LEGACY city-quality path reaches it as `city_index_rules`
-     instead; the map resolves that path client-side into a listing_id allowlist. An RPC
-     modelled on the Stats parameter list alone drops it silently, and the listing_id
-     space is live whenever `?cityQualityLegacy=1` sits in localStorage.
+  3. A prefilter id space the RPC does not carry. `applyPrefilters` emits `.in()` on two
+     spaces, obec_id and property_id (the broker allowlist among the latter since W5,
+     MS19), and the RPC read has no `.in()` to inherit. `browse_map_cells` still takes
+     `listing_ids_filter`, which no caller has sent since W5; W6 drops the parameter.
 
 Offline; runs in the normal `pytest -q` lane. Nothing here needs a database — the
 behaviour of the shipped SQL is tests/test_browse_map_cells_live.py's subject.
@@ -145,8 +143,7 @@ def test_the_two_rpcs_take_the_same_cohort_parameters() -> None:
     stats = _sql_params("browse_stats_properties")
     cells = _sql_params("browse_map_cells")
     assert not _MAP_ONLY_PARAMS - cells, (
-        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)} — see this file's "
-        "header for why listing_ids_filter cannot be dropped."
+        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)} before W6 (Rule 0)."
     )
     assert not cells - stats - _MAP_ONLY_PARAMS, (
         f"browse_map_cells takes {sorted(cells - stats - _MAP_ONLY_PARAMS)} and "
@@ -159,31 +156,23 @@ def test_the_two_rpcs_take_the_same_cohort_parameters() -> None:
     )
 
 
-def test_the_map_rpc_carries_all_three_prefilter_id_spaces() -> None:
+def test_the_map_rpc_carries_both_prefilter_id_spaces() -> None:
     """Whatever applyPrefilters filters on, the map RPC must receive.
 
-    `applyPrefilters` is the ONE place the cohort reads apply their id allowlists, and it
-    emits `.in()` on three columns. The RPC read has no `.in()` to inherit, so each space
-    has to be handed over by name.
+    `applyPrefilters` is the ONE place the cohort reads apply their id allowlists. The
+    RPC read has no `.in()` to inherit, so each space has to be handed over by name.
 
-    RED by: deleting `listing_ids_filter: pre.brokerListingIds` from the browse_map_cells
-    call (the shape an RPC modelled on browse_stats_properties' parameter list alone
-    would have had), or by adding a fourth `.in()` to applyPrefilters without a matching
-    argument. Neither raises: the map would simply show a cohort the rest of Browse does
-    not.
+    RED by: adding an `.in()` to applyPrefilters without a matching argument, or by
+    sending the retired `listing_ids_filter` again (W6 drops the parameter; a bundle
+    that still names it would then fail every map read).
     """
     src = _ts()
     at = src.index("export const applyPrefilters")
     body = _strip_ts_comments(_balanced_block(src, src.index("{", at)))
-    # Every (column, field) pair, NOT a dict keyed on column: the shape has to
-    # survive two allowlists sharing one column again (W3 S4 deleted the legacy
-    # city-quality listing-id space, which was listing_id's second claimant), and
-    # a dict would keep only the last, silently un-pinning the other.
     pairs = re.findall(r"\.in\('([a-z_]+)',\s*p\.([A-Za-z]+)\)", body)
-    assert {column for column, _ in pairs} == {"listing_id", "obec_id", "property_id"}, (
+    assert {column for column, _ in pairs} == {"obec_id", "property_id"}, (
         f"applyPrefilters' id spaces changed: {pairs}"
     )
-    assert len(pairs) >= 3, f"applyPrefilters lost an allowlist: {pairs}"
 
     call = _rpc_call_block("browse_map_cells")
     for column, field in pairs:
@@ -192,35 +181,7 @@ def test_the_map_rpc_carries_all_three_prefilter_id_spaces() -> None:
             f"browse_map_cells call never passes `pre.{field}` — that allowlist is "
             "silently dropped on the map and applied everywhere else."
         )
-
-
-def test_every_listing_grain_scope_takes_the_point_lane() -> None:
-    """A listing-grain scope must never be aggregated by the property-grain RPC.
-
-    The relation swap (`listSource` / `mapSource` / `keysetTiebreak`) and the map's
-    lane choice both key on ONE predicate, `isListingGrain` — the single portal mirror
-    and the broker scope. browse_map_cells aggregates the property-grain projection and
-    matches `listing_ids_filter` against the REPRESENTATIVE listing, so routing a broker
-    scope there would drop every property whose repr is another broker's listing (the
-    repr lottery), while the cards/table beside the map read the listing feed.
-
-    RED by: guarding the lane on `isPortalMirror(f)` alone again, or by swapping the
-    relations on a predicate the lane guard does not share.
-    """
-    src = _strip_ts_comments(_ts())
-    at = src.index("export const fetchListingsForMap")
-    body = _balanced_block(src, src.index("{", at))
-    assert re.search(r"if \(isListingGrain\(f\)\)", body), (
-        "fetchListingsForMap's point-lane guard is no longer `isListingGrain(f)` "
-        "— a listing-grain scope can reach the property-grain browse_map_cells lane."
-    )
-    for fn in ("listSource", "mapSource", "keysetTiebreak"):
-        decl = src[src.index(f"const {fn} = "):]
-        decl = decl[: decl.index(";")]
-        assert "isListingGrain(f)" in decl, (
-            f"{fn} no longer keys on isListingGrain — the relation swap and the map lane "
-            "guard can now disagree on grain."
-        )
+    assert "listing_ids_filter" not in call
 
 
 def test_the_map_lane_is_chosen_from_the_filters_alone() -> None:

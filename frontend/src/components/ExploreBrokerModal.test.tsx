@@ -4,10 +4,9 @@
  *
  *   - the cohort it opens is the broker scope (brokerId) seeded from the page's
  *     Typ/Nabídka selection, with NO viewport constraint;
- *   - the sidebar AND the Stats tab are switched off. Stats is property-grain
- *     and deliberately not scoped by a broker, so showing it here would put the
- *     whole market's numbers beside one broker's map — hiding it is the whole
- *     point of the `stats` feature flag, and a regression here reads as a bug;
+ *   - the sidebar AND the Stats tab are switched off: a read-only scoped view
+ *     (Stats itself carries the broker scope since W5, MS19), and hiding the tab
+ *     is the whole point of the `stats` feature flag;
  *   - and, since it moved onto <Dialog>, the shared dialog contract plus the
  *     close-on-navigation property its provider now carries.
  */

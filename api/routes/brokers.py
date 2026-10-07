@@ -21,8 +21,10 @@ from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from toolkit import brokers
+from toolkit.filter_registry import PORTAL_OPTIONS
 
 router = APIRouter(prefix="/brokers", tags=["brokers"])
+_PORTALS = frozenset(o.value for o in PORTAL_OPTIONS)
 
 
 class ListingIdsIn(BaseModel):
@@ -136,9 +138,11 @@ def get_broker_listings(
     return _policy(brokers.broker_listings(conn, broker_id, limit=limit), claims)
 
 
-@router.get("/{broker_id}/listing-ids")
-def get_broker_listing_ids(
+@router.get("/{broker_id}/property-ids")
+def get_broker_property_ids(
     broker_id: int,
+    status: Literal["any", "active", "inactive"] = "any",
+    portal: list[str] = Query(default=[]),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
@@ -146,8 +150,11 @@ def get_broker_listing_ids(
     # every non-admin /brokers route runs through it uniformly (see
     # test_the_pii_gate_covers_every_non_admin_broker_route), so this one does too
     # rather than being a hand-picked exception someone has to remember to update.
-    # Feeds Browse's brokerId prefilter (see toolkit.brokers.broker_listing_ids).
-    return _policy(brokers.broker_listing_ids(conn, broker_id), claims)
+    unknown = sorted(set(portal) - _PORTALS)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown portal(s): {', '.join(unknown)}")
+    return _policy(brokers.broker_property_ids(conn, broker_id, status=status, portals=portal),
+                   claims)
 
 
 @router.get("/{broker_id}/contacts")

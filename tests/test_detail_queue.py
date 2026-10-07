@@ -240,10 +240,10 @@ def test_enqueue_detail_nulls_overflow_index_price():
 def test_claim_detail_batch_skip_locked_priority_order():
     conn = _FakeConn([
         (lambda s: "FOR UPDATE SKIP LOCKED" in s,
-         [("5", None, 100, 42, None), ("6", "/p", None, 43, None)]),
+         [("5", None, 100, None), ("6", "/p", None, None)]),
     ])
     claimed = db.claim_detail_batch(conn, "sreality", 50)
-    assert claimed == [("5", None, 100, 42, None), ("6", "/p", None, 43, None)]
+    assert claimed == [("5", None, 100, None), ("6", "/p", None, None)]
     sql, params = conn.executed[0]
     # Acquisition is claimed by age alone; the old ranking survives only INSIDE refresh.
     assert "AND priority = %(new_priority)s ORDER BY enqueued_at" in sql
@@ -254,9 +254,9 @@ def test_claim_detail_batch_skip_locked_priority_order():
     assert params["verify_priority"] == db.QUEUE_PRIORITY_VERIFY
     assert "claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
-    assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq" in sql
-    # migration 444: the claim also carries when the walk first SAW the id.
-    assert "q.enqueued_at" in sql
+    # migration 444: the claim carries when the walk first SAW the id (W5: and no
+    # discovery_seq, which nothing writes any more).
+    assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.enqueued_at" in sql
     assert params["source"] == "sreality"
     assert params["limit"] == 50
     assert params["new_priority"] == db.QUEUE_PRIORITY_NEW
