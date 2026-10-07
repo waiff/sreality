@@ -1,6 +1,7 @@
-"""Tests for GET /images/{key} — the public presigned-R2 redirect.
+"""Tests for GET /images/{key} — the public presigned-R2 redirect — and for
+GET /listings/{id}/photos.zip, the same photos zipped server-side.
 
-The endpoint is unauthenticated (like /health), redirects a listing-image key
+The redirect is unauthenticated (like /health), redirects a listing-image key
 to a presigned R2 URL, and refuses any key that isn't the listing-image shape
 so it can never presign the operator-private `custom-attachments/` uploads that
 share the bucket.
@@ -8,11 +9,15 @@ share the bucket.
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
+from api import dependencies as deps
 from api import main as api_main
 from api.routes import images as images_route
 from scraper import image_storage
@@ -21,12 +26,16 @@ from scraper import image_storage
 class _FakeR2:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int, int]] = []
+        self.objects: dict[str, bytes] = {}
 
     def presigned_get(
         self, key: str, expires_in: int = 0, anchor_seconds: int = 0
     ) -> str:
         self.calls.append((key, expires_in, anchor_seconds))
         return f"https://example.r2.cloudflarestorage.com/bucket/{key}?sig=abc"
+
+    def download_bytes(self, key: str) -> bytes:
+        return self.objects[key]
 
 
 @pytest.fixture()
@@ -113,3 +122,60 @@ def test_unconfigured_storage_returns_503(client, monkeypatch):
     images_route._client = None
     res = client.get("/images/2872083276/0001.jpg", follow_redirects=False)
     assert res.status_code == 503
+
+
+class _FakeConn:
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = keys
+        self.params: tuple | None = None
+
+    def execute(self, sql: str, params: tuple) -> _FakeConn:
+        self.params = params
+        return self
+
+    def fetchall(self) -> list[tuple[str]]:
+        return [(k,) for k in self.keys]
+
+
+@pytest.fixture()
+def signed_in(client):
+    conn = _FakeConn([])
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": "u1"}
+    yield conn
+    api_main.app.dependency_overrides.clear()
+
+
+def test_photos_zip_holds_every_stored_photo_in_gallery_order(client, fake_r2, signed_in):
+    signed_in.keys = ["-4671/0003.jpg", "-4671/0001.jpg"]
+    fake_r2.objects = {"-4671/0003.jpg": b"third", "-4671/0001.jpg": b"first"}
+    res = client.get("/listings/42/photos.zip")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert "listing-42-photos.zip" in res.headers["content-disposition"]
+    assert signed_in.params == (42,)
+    archive = zipfile.ZipFile(io.BytesIO(res.content))
+    # Entries follow the query's order (the gallery's), not the storage keys.
+    assert archive.namelist() == ["01.jpg", "02.jpg"]
+    assert archive.read("01.jpg") == b"third"
+    assert archive.read("02.jpg") == b"first"
+
+
+def test_photos_zip_without_stored_photos_is_404(client, signed_in):
+    assert client.get("/listings/42/photos.zip").status_code == 404
+
+
+def test_photos_zip_fails_whole_when_a_photo_cannot_be_read(client, fake_r2, signed_in):
+    """A half-filled zip would pass for the full set — fail loudly instead."""
+    signed_in.keys = ["-4671/0001.jpg", "-4671/0002.jpg"]
+    fake_r2.objects = {"-4671/0001.jpg": b"first"}
+    assert client.get("/listings/42/photos.zip").status_code == 502
+
+
+def test_photos_zip_requires_a_signed_in_user(client):
+    """It proxies photo bytes through the API, so the public bundle token is not enough."""
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _FakeConn(["-4671/0001.jpg"])
+    try:
+        assert client.get("/listings/42/photos.zip").status_code == 401
+    finally:
+        api_main.app.dependency_overrides.clear()

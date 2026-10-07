@@ -74,6 +74,7 @@ import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import DismissButton from '@/components/DismissButton';
 import CollectionSaveToggle from '@/components/listing-detail/CollectionSaveToggle';
 import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
+import DownloadPhotosButton from '@/components/listing-detail/DownloadPhotosButton';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
 import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
@@ -282,6 +283,14 @@ export default function PropertyDetail() {
               prefill={newEstimationPrefill}
             />
           </Suspense>
+        }
+        photosAction={
+          /* The canonical advert's photos — the ones the gallery shows. */
+          <DownloadPhotosButton
+            listingId={property.id}
+            images={images}
+            fileName={`property-${propertyId}-photos.zip`}
+          />
         }
       />
       <BrokerList
