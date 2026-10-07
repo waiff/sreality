@@ -1626,14 +1626,19 @@ def _recluster(
     # keeps slots for (`storable`) — without it `d43_cluster_invariant` and both repartition
     # repairs ran here on no relation at all, a looser engine than the one the cohorts validated.
     slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
+    # E303: the price limb's K-C excuse reads the certificate each stored pair earned; this is
+    # the relation's one production caller, so without it the dial was inert in every lane.
+    certificates: dict[tuple[int, int], str] = {}
     for row in store.pairs_within(every):
         index = of_component.get(row.lo)
         if index is not None and index == of_component.get(row.hi):
             edges[index].append(row)
+            if row.certificate:
+                certificates[(row.lo, row.hi)] = row.certificate
             if storable({"zone": row.zone, "score": row.score, "evidence": row.evidence},
                         settings.store_floor):
                 slots[(row.lo, row.hi)] = dict(row.slots or {})
-    relation = relation_for(settings, working.listings, slots)
+    relation = relation_for(settings, working.listings, slots, certificates)
     touched = store.clusters_touching(every)
 
     rows: list[dict[str, Any]] = []
