@@ -121,6 +121,11 @@ _Avoid_: carry log, curation ledger, snapshot
 A saved filter that alerts an account when a property newly matches it or drops its price.
 _Avoid_: alert (for the saved filter), subscription, notification
 
+**Broker contact record**:
+A broker's email and phone that one account captured from one ad's portal page after showing
+interest in that ad. It belongs to that account and stays tied to the ad, not the property.
+_Avoid_: lead, contact (alone), broker contact (alone), revealed contact
+
 ### AI work
 
 **Assistant**:
