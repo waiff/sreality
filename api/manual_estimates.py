@@ -2,9 +2,10 @@
 
 Operator-recorded point-estimate rental figures attached to a listing.
 Mutable rows; history trigger captures the pre-state on UPDATE and
-DELETE (migration 046). Read path: SPA reads from
-`manual_rental_estimates_public` with the anon key. Write path: these
-bearer-gated endpoints from the FastAPI service.
+DELETE (migration 046). Shared reference data (migration 290): every
+account reads; the write routes require an admin JWT, and the admin's
+identity is stamped into `updated_by` (and their account into `account_id`
+on insert) — never taken from the request body.
 
 Pattern mirrors api/curation.py:
   - one transaction per write,
@@ -15,15 +16,13 @@ Pattern mirrors api/curation.py:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import psycopg
 from fastapi import HTTPException
 
 from api import schemas as s
-
-if TYPE_CHECKING:
-    pass
+from api import tenant_pool
 
 
 _COLS = (
@@ -50,21 +49,24 @@ def create_manual_estimate(
     conn: "psycopg.Connection",
     sreality_id: int,
     body: s.CreateManualEstimateIn,
+    claims: dict,
 ) -> dict[str, Any]:
     # listing_id is the surrogate mirror of sreality_id (R2 dual-write); resolved
     # inline so the caller keeps passing only the legacy id.
     sql = (
         "INSERT INTO manual_rental_estimates "
-        "  (sreality_id, listing_id, rent_czk, author, source_kind, notes, updated_by) "
+        "  (sreality_id, listing_id, rent_czk, author, source_kind, notes, "
+        "   updated_by, account_id) "
         "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
-        "        %s, %s, %s, %s, %s) "
+        "        %s, %s, %s, %s, %s, %s) "
         f"RETURNING {_SELECT}"
     )
+    account_id = tenant_pool.resolve_account_id(conn, claims)
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(sql, (
                 sreality_id, sreality_id, body.rent_czk, body.author,
-                body.source_kind, body.notes, body.updated_by,
+                body.source_kind, body.notes, _actor(claims), account_id,
             ))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:
@@ -77,6 +79,7 @@ def update_manual_estimate(
     conn: "psycopg.Connection",
     estimate_id: int,
     body: s.UpdateManualEstimateIn,
+    claims: dict,
 ) -> dict[str, Any]:
     sets: list[str] = []
     params: list[Any] = []
@@ -100,7 +103,7 @@ def update_manual_estimate(
 
     sets.append("updated_at = now()")
     sets.append("updated_by = %s")
-    params.append(body.updated_by)
+    params.append(_actor(claims))
     params.append(estimate_id)
 
     sql = (
@@ -126,6 +129,10 @@ def delete_manual_estimate(
         if cur.rowcount == 0:
             raise HTTPException(404, "manual estimate not found")
     return {"deleted": True}
+
+
+def _actor(claims: dict) -> str | None:
+    return claims.get("email") or claims.get("sub")
 
 
 def _fetch_estimate(

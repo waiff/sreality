@@ -418,3 +418,42 @@ def test_the_route_corrects_a_group_ruling_by_copying_its_pass_and_set(cur):
         verdict(VerdictIn(kind="cluster", verdict="same", supersedes=old_id), claims,
                 cur.connection)
     assert stale.value.status_code == 409
+
+
+def test_the_reconciles_history_starts_at_the_generations_last_seed(cur):
+    """A9 files a skipped or refused group only when its outcome changed, compared with the
+    newest ledger row for the identical member set. Read across seeds, a refusal filed under a
+    previous seed silenced every later one (2026-10-07: 94 standing refusals, none visible since
+    the 10-06 re-seed). The history now starts at `rt_seed_version:<generation>`'s last write;
+    a generation without that key (a batch one) reads its whole ledger."""
+    gen = f"t{uuid.uuid4().hex[:8]}"
+    members = [9_500_000_001, 9_500_000_002]
+
+    def ledger_row(when_sql: str, run: str) -> None:
+        cur.execute(
+            "INSERT INTO autodedup.applied_merges (run_id, generation, cluster_key, dry_run, "
+            "outcome, error, member_ids, applied_at) VALUES (%s, %s, 1, false, 'skipped', "
+            f"'carries_out_of_scope_listings', %s, {when_sql})",
+            (run, gen, members),
+        )
+
+    ledger_row("now() - interval '2 days'", "rt:old")
+    cur.execute(
+        "INSERT INTO autodedup.settings (key, value, updated_at) VALUES (%s, '\"w5\"', now() - interval '1 day')",
+        (f"rt_seed_version:{gen}",),
+    )
+    ledger_row("now() - interval '1 hour'", "rt:new")
+
+    def history() -> list[str]:
+        cur.execute(apply_sql.RC_OUTCOME_HISTORY_SQL,
+                    {"generation": gen, "listing_ids": members, "depth": 5})
+        return [row[1] + "@" + ("new" if row[3] > _one_day_ago(cur) else "old") for row in cur.fetchall()]
+
+    assert history() == ["skipped@new"]
+    cur.execute("DELETE FROM autodedup.settings WHERE key = %s", (f"rt_seed_version:{gen}",))
+    assert history() == ["skipped@new", "skipped@old"]
+
+
+def _one_day_ago(cur: Any):
+    cur.execute("SELECT now() - interval '1 day'")
+    return cur.fetchone()[0]

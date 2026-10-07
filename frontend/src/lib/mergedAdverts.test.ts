@@ -267,6 +267,7 @@ describe('refreshAfterSplit', () => {
       ['snapshots'],
       ['curation'],
       ['merged-adverts'],
+      ['hydration', 'ad-counts'],
       ['autodedup', 'proposed-splits'],
       ['autodedup', 'category-splits'],
       ['cards'],
@@ -276,6 +277,22 @@ describe('refreshAfterSplit', () => {
       ['browse-count'],
     ]) {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: key });
+    }
+  });
+
+  /* A merge or a split changes the Browse cards' ad counts (re-read above) and
+     not their photos: no key the refresh invalidates may prefix a photos key. */
+  it('leaves the card photos cached', () => {
+    const qc = new QueryClient();
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
+
+    refreshAfterSplit(qc);
+
+    const photos = ['hydration', 'photos', '1', 50];
+    expect(invalidate).toHaveBeenCalled();
+    for (const [filters] of invalidate.mock.calls) {
+      const prefix: readonly unknown[] = filters?.queryKey ?? [];
+      expect(prefix.every((p, i) => JSON.stringify(p) === JSON.stringify(photos[i]))).toBe(false);
     }
   });
 });

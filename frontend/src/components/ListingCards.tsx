@@ -42,6 +42,7 @@ import { portalLabel, portalShort } from '@/lib/portals';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { propertyPath } from '@/lib/listingUrl';
+import { inzeratu } from '@/lib/mergedAdverts';
 
 /* The card grid is CONTAINER-intrinsic, not viewport-keyed: columns flow to
  * fit the cards COLUMN's own width via `auto-fill`, each at least --card-min
@@ -445,8 +446,11 @@ function Card({
      rows the layer holds (the comparables surface consumes those same rows
      un-projected), memoized on the array identity — the cohort map is stable
      across renders, so this recomputes only when this listing's photos change. */
-  const photos = useCardHydration().photosFor(r.listing_id);
+  const hydration = useCardHydration();
+  const photos = hydration.photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
+  /* How many ads the property holds, a decoration like the photos. */
+  const adCount = hydration.adCountFor(r.property_id);
 
   /* `relative` is load-bearing, not decoration: it is what the stretched
    * link's / selection label's `::after` measures itself against. */
@@ -529,8 +533,9 @@ function Card({
             <NoteMark property_id={r.property_id} />
           </div>
         )}
-        {/* Metadata margin: two file-tab badges down the right edge of
-          * the photo — the lifespan run, then the source portal. Status
+        {/* Metadata margin: file-tab badges down the right edge of the
+          * photo — the lifespan run, the source portal, then the number of
+          * ads the property holds when it holds more than one. Status
           * is carried by the card surface, not a pill. Borders-only,
           * paper-3/85 + backdrop-blur over the photo. */}
         <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
@@ -571,6 +576,17 @@ function Card({
               <span className="opacity-60 mr-1">{activePortals.length ? 'portál' : 'neaktivní'}</span>
               {badgePortals.map((p) => portalLabel(p)).join(' · ')}
             </CardBadge>
+          )}
+          {adCount != null && adCount >= 2 && (
+            /* Inset by the next-photo chevron (24px at right-1, z above the
+               badges): on a card narrower than ~215px its vertical band reaches
+               this third row and, on hover, would cover the badge's end. */
+            <span className="flex mr-7">
+              <CardBadge title={`Nemovitost spojuje ${adCount} ${inzeratu(adCount)} (počítají se i neaktivní)`}>
+                {adCount}
+                <span className="opacity-60 ml-1">{inzeratu(adCount)}</span>
+              </CardBadge>
+            </span>
           )}
         </div>
       </ImageCarousel>

@@ -652,7 +652,8 @@ Scope:
 - API: new `api/manual_estimates.py` exposing CRUD over
   `/listings/{id}/manual_estimates` (GET + POST) and
   `/manual_estimates/{id}` (PATCH + DELETE). All bearer-gated
-  per CLAUDE.md toolkit rule #8. Pydantic schemas appended to
+  per CLAUDE.md toolkit rule #8 (since 2026-10-04 the three writes
+  take `require_admin` — `roadmap/public-release-track.md` item 11). Pydantic schemas appended to
   `api/schemas.py`.
 - Toolkit: `toolkit/manual_estimates.py:get_manual_rental_estimates(conn,
   sreality_id)` returns the standard `{data, metadata}` envelope

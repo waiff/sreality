@@ -657,7 +657,6 @@ class CreateManualEstimateIn(BaseModel):
     author:      str = Field(min_length=1, max_length=120)
     source_kind: ManualEstimateSourceKind
     notes:       str | None = Field(default=None, min_length=1, max_length=4000)
-    updated_by:  str | None = Field(default=None, max_length=120)
 
 
 class UpdateManualEstimateIn(BaseModel):
@@ -665,7 +664,6 @@ class UpdateManualEstimateIn(BaseModel):
     author:      str | None = Field(default=None, min_length=1, max_length=120)
     source_kind: ManualEstimateSourceKind | None = None
     notes:       str | None = Field(default=None, max_length=4000)
-    updated_by:  str | None = Field(default=None, max_length=120)
 
 
 class GetManualRentalEstimatesIn(BaseModel):

@@ -34,7 +34,9 @@ from autodedup.blocking import (
 from autodedup.d43 import ClusterRelation
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
 from autodedup.fingerprint import Fingerprint, build_fingerprint
-from autodedup.incremental import Keyer, guard_row, retrieve
+from autodedup.incremental import (Keyer, Limits, PairRow, PassResult, _recluster, _Working,
+                                  guard_row, retrieve)
+from autodedup.incremental_store import CohortFacts, MemoryStore
 from autodedup.indistinguishable import CLUSTER, GATE, PROMOTE, distinguishing_facts
 from autodedup.settings import Settings
 from tests.autodedup.test_incremental import _calibration, _drain, arrival_order, invariant_state
@@ -368,6 +370,34 @@ def test_E303_needs_the_certificate_the_house_number_two_portals_and_five_percen
                         ).ok(*PRAZSKA)
     assert not relation(E303, *PRAZSKA, **{str(PRAZSKA[1]): {
         "price": 4_200_000.0, "price_history": []}}).ok(*PRAZSKA)
+
+
+def _prazska_groups(cfg: Settings, certificate: str | None = "K-C") -> list[list[int]]:
+    """The lane's own re-cluster over the two Pražská adverts and their one stored edge."""
+    listings = {i: trial(i) for i in PRAZSKA}
+    images = {i: [Image(listing_id=i, image_id=i * 10, seq=0, phash=7_000, pop=1)]
+              for i in listings}
+    facts = CohortFacts(Dataset(meta=Meta(), listings=listings, images_by_listing=images))
+    store = MemoryStore()
+    store.upsert_pairs([PairRow(
+        lo=PRAZSKA[0], hi=PRAZSKA[1], probes=["attr_area"], from_lo=True, from_hi=True,
+        zone="merge", score=1.0, families=["ATTR", "IMG", "LOC", "TXT"],
+        certificate=certificate, veto=None,
+        reason=f"certificate:{certificate}" if certificate else "model", evidence={},
+        context={}, fp_lo="a", fp_hi="b")])
+    _recluster(store, facts, cfg, _Working(facts, cfg), set(PRAZSKA), Limits(),
+               PassResult(generation="rt", calibration_digest="x"))
+    return sorted(map(sorted, store.clusters.values()))
+
+
+def test_E303_reaches_the_lanes_recluster_through_the_stored_certificate() -> None:
+    """The excuse reads the pair's certificate and `_recluster` handed the relation none, so
+    the dial switched on still refused Pražská 930/47 in every lane (rt, 10-07)."""
+    w31 = Settings.from_json(SETTINGS / "w31.json")
+    on = Settings.from_dict({**w31.to_dict(), "d43_cluster_price_kc_house_number": True})
+    assert _prazska_groups(w31) == [], "the control: w31's price limb holds the two apart"
+    assert _prazska_groups(on) == [sorted(PRAZSKA)]
+    assert _prazska_groups(on, certificate=None) == [], "a model edge earns no K-C excuse"
 
 
 def test_E303_is_pair_grain_and_off_in_w30() -> None:

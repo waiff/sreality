@@ -1777,10 +1777,8 @@ def decide_skill_refinement(
 
 # --- manual rental estimates --------------------------------------------
 # Phase U-ME: point-estimate rental figures attached to a listing.
-# Reads are also exposed via the manual_rental_estimates_public view
-# (anon select grant from migration 046) for the SPA; these bearer-gated
-# endpoints carry the write path and a token-gated read for direct API
-# callers.
+# Shared reference data (migration 290): every account reads, only platform
+# admins write. The read stays token-gated; the writes require an admin JWT.
 
 
 @app.get("/listings/{sreality_id}/manual_estimates")
@@ -1797,9 +1795,9 @@ def post_listing_manual_estimate(
     sreality_id: int,
     body: s.CreateManualEstimateIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    return me.create_manual_estimate(conn, sreality_id, body)
+    return me.create_manual_estimate(conn, sreality_id, body, claims)
 
 
 @app.patch("/manual_estimates/{estimate_id}")
@@ -1807,16 +1805,16 @@ def patch_manual_estimate(
     estimate_id: int,
     body: s.UpdateManualEstimateIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    return me.update_manual_estimate(conn, estimate_id, body)
+    return me.update_manual_estimate(conn, estimate_id, body, claims)
 
 
 @app.delete("/manual_estimates/{estimate_id}")
 def delete_manual_estimate(
     estimate_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return me.delete_manual_estimate(conn, estimate_id)
 
