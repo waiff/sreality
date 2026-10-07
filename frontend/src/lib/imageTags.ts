@@ -63,6 +63,47 @@ export const FINE_TAG_KEYS = Object.keys(IMAGE_TAG_LABELS).filter(
   (k) => !COLLAPSE_ONLY_TAGS.has(k),
 );
 
+/** The photo a Browse card opens on: 'default' is the ad's own first photo,
+ * anything else is a LOGICAL tag, so "situační plán" also finds a cadastral map
+ * or an aerial shot. The list leaves out the tags nobody wants as a cover
+ * (chodba is CLIP's catch-all, schodiště, dokument, ostatní). */
+export const COVER_TAGS = [
+  'default',
+  'exterior_facade',
+  'kitchen',
+  'living_room',
+  'bedroom',
+  'bathroom',
+  'toilet',
+  'balcony_terrace',
+  'garden',
+  'floor_plan',
+  'site_plan',
+] as const;
+export type CoverTag = (typeof COVER_TAGS)[number];
+
+/** Index of the cover photo for `tag`: the photo CLIP is most sure carries it
+ * (the earlier one on a tie), else 0 — an ad without that photo keeps its own
+ * first photo. No confidence floor, so the cover agrees with the tag badge
+ * drawn on it. */
+export function coverIndex(
+  photos: ReadonlyArray<{ clip_logical_tag: string | null; clip_confidence: number | null }>,
+  tag: CoverTag,
+): number {
+  if (tag === 'default') return 0;
+  let best = 0;
+  let bestConfidence = -1;
+  photos.forEach((p, i) => {
+    if (p.clip_logical_tag !== tag) return;
+    const confidence = p.clip_confidence ?? 0;
+    if (confidence > bestConfidence) {
+      best = i;
+      bestConfidence = confidence;
+    }
+  });
+  return best;
+}
+
 /** A render-ready image plus its CLIP tag — the shape the photo carousels consume. */
 export interface TaggedImageUrl {
   url: string;
