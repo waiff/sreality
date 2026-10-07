@@ -434,6 +434,11 @@ export default function BrowseExperience({
     () => cards.rows.map((r) => r.listing_id),
     [cards.rows],
   );
+  /* The card's "N inzeráty" badge counts its PROPERTY's ads. */
+  const cardPropertyIds = useMemo(
+    () => cards.rows.map((r) => r.property_id),
+    [cards.rows],
+  );
 
   /* The ONE canonical cohort total — consumed by the header, the tab badge,
    * the cards/table "of N" labels, and (as the denominator of its mappable
@@ -850,11 +855,12 @@ export default function BrowseExperience({
                   : ({ '--map-w': `${mapSplit.value * 100}%` } as CSSProperties)
               }
             >
-              {/* Photos ONLY. The card grid renders no cover thumbnail and no
-                  broker line, so it must not fetch either — see CardDecorations. */}
+              {/* Photos and the ad counts ONLY. The card grid renders no cover
+                  thumbnail and no broker line, so it must not fetch either — see
+                  CardDecorations. */}
               <CardHydrationProvider
                 listingIds={cardListingIds}
-                renders={{ photos: CARD_PHOTOS_PER_CARD }}
+                renders={{ photos: CARD_PHOTOS_PER_CARD, adCounts: cardPropertyIds }}
               >
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}
