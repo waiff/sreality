@@ -4,7 +4,7 @@
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
  *    Collections list, Pipeline, Watchdog subscriptions, /estimations (incl.
- *    trace payload + feedback since 2026-10-02),
+ *    trace payload + feedback since 2026-10-02), the listing photos zip,
  *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
@@ -685,6 +685,11 @@ export const fetchBuildingAttachmentBlob = (
   attachmentId: number,
 ): Promise<Blob> =>
   requestBlob(`/buildings/${buildingId}/attachments/${attachmentId}/raw`);
+
+/* One listing's stored photos, zipped by the API: R2 sends no CORS header, so the
+ * SPA cannot read the bytes behind /images/{key} and zip them itself. */
+export const fetchListingPhotosZip = (listingId: number): Promise<Blob> =>
+  requestBlob(`/listings/${listingId}/photos.zip`, { jwt: true });
 
 /* ----- admin / Settings page --------------------------------------------
  *

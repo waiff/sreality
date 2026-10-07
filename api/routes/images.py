@@ -10,19 +10,28 @@ Unauthenticated (like /health) — listing photos are public data and an <img>
 tag can't send a bearer header. The key is constrained to the listing-image
 shape `-?<id>/<seq>.jpg` so this can never presign the operator-private
 `custom-attachments/` building uploads that share the bucket.
+
+Also GET /listings/{listing_id}/photos.zip: one listing's stored photos as a zip
+(the property page's "download all" button), signed-in users only.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import re
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse, Response
 
+from api import dependencies as deps
 from scraper import image_storage
 
 router = APIRouter(prefix="/images", tags=["images"])
+listing_photos_router = APIRouter(tags=["images"])
 
 # `{native_id}/{seq:04d}.jpg`; native_id is negative for non-sreality portals.
 _KEY_RE = re.compile(r"^-?\d+/\d{4}\.jpg$")
@@ -79,4 +88,57 @@ def get_image(key: str) -> RedirectResponse:
         url,
         status_code=302,
         headers={"Cache-Control": f"public, max-age={_REDIRECT_MAX_AGE}"},
+    )
+
+
+# Parallel R2 reads: a 40-photo listing fetched serially spends seconds on round trips alone.
+_ZIP_FETCH_WORKERS = 8
+
+
+@listing_photos_router.get("/listings/{listing_id}/photos.zip")
+def get_listing_photos_zip(
+    listing_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _claims: dict = Depends(deps.verify_jwt),
+) -> Response:
+    """Every stored photo of one listing, in gallery order, as one zip.
+
+    Built here rather than in the browser because the bucket sends no CORS header, so
+    the SPA cannot read the bytes behind /images/{key}. Photos with no R2 copy yet are
+    left out. Stored, not deflated: JPEG bytes don't compress.
+    """
+    keys = [
+        row[0]
+        for row in conn.execute(
+            "select storage_path from images"
+            " where listing_id = %s and storage_path is not null"
+            " order by sequence nulls last, id",
+            (listing_id,),
+        ).fetchall()
+    ]
+    if not keys:
+        raise HTTPException(status_code=404, detail="No stored photos for this listing")
+    client = _r2()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Image storage not configured")
+
+    width = max(2, len(str(len(keys))))
+    buf = io.BytesIO()
+    try:
+        with (
+            ThreadPoolExecutor(max_workers=_ZIP_FETCH_WORKERS) as pool,
+            zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as archive,
+        ):
+            for n, data in enumerate(pool.map(client.download_bytes, keys), start=1):
+                archive.writestr(f"{n:0{width}d}.jpg", data)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="A photo could not be read from storage"
+        ) from exc
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="listing-{listing_id}-photos.zip"'
+        },
     )

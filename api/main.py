@@ -70,6 +70,7 @@ from api.routes.brokers import router as brokers_router
 from api.routes.broker_review import router as broker_review_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
+from api.routes.images import listing_photos_router
 from api.routes.images import router as images_router
 from api.new_dedup_bakeoff import router as new_dedup_bakeoff_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
@@ -322,6 +323,9 @@ app.include_router(filter_presets_router)
 # /health) — an <img> tag can't send a bearer header and these are public
 # photos; the key regex keeps it scoped to listing images only.
 app.include_router(images_router)
+# /listings/{id}/photos.zip — the same photos zipped server-side (R2 sends no CORS
+# header, so the SPA can't zip them itself). JWT-gated: it proxies bytes through us.
+app.include_router(listing_photos_router)
 # /new-dedup/settings/* (simulation-engine settings registry: list + per-key
 # update/reset) — operator config, admin-gated (require_admin). See
 # toolkit/dedup_sim_settings.py and docs/design/new-dedup/PROGRAM.md (Wave 1).
