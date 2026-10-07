@@ -198,7 +198,7 @@ function StagedFile({
       name={file.name}
       size={file.size}
       thumbnail={preview}
-      remove={{ label: `Remove ${file.name}`, onClick: onRemove, disabled }}
+      remove={{ label: `Remove ${file.name}`, onClick: onRemove, disabled, always: true }}
     />
   );
 }
@@ -405,7 +405,9 @@ function FileTile({
   loading?: boolean;
   uploading?: boolean;
   status?: string;
-  remove?: { label: string; onClick: () => void; disabled?: boolean };
+  /* `always`: the × shows without hover (a staged file); a saved file's shows on hover, like
+   * the note's own edit/delete. */
+  remove?: { label: string; onClick: () => void; disabled?: boolean; always?: boolean };
 }) {
   const title = `${name} · ${fmtBytes(size)}`;
   const removeButton = remove && (
@@ -415,7 +417,7 @@ function FileTile({
       disabled={remove.disabled}
       aria-label={remove.label}
       title={remove.label}
-      className="absolute -top-1.5 -right-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] text-[0.65rem] leading-none text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)] opacity-0 group-hover/tile:opacity-100 focus-visible:opacity-100 disabled:opacity-40 transition-opacity"
+      className={`absolute -top-1.5 -right-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] text-[0.65rem] leading-none text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)] disabled:opacity-40 transition-opacity ${remove.always ? '' : 'opacity-0 group-hover/tile:opacity-100 focus-visible:opacity-100'}`}
     >
       ×
     </button>
