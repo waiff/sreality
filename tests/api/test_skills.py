@@ -36,19 +36,102 @@ def test_update_skill_rejects_unknown_tool():
         sk._validate_allowed_tools(["find_comparables_relaxed", "boguscallout"])
 
 
-def test_update_skill_rejects_partial_preferred_model():
-    sk.AGENT_TOOL_NAMES = set()
-    sk.PROVIDER_NAMES = {"anthropic", "gemini"}
-    with pytest.raises(sk.SkillValidationError, match="missing entries"):
-        sk._validate_preferred_model({"anthropic": "claude-sonnet-4-5"})
-    sk.PROVIDER_NAMES = set()
+# The live registry (api/dependencies.py:_build_providers); the seeded skills
+# name only anthropic + gemini.
+_REGISTERED_PROVIDERS = {"anthropic", "gemini", "openai", "qwen", "oss"}
+
+
+def test_update_skill_accepts_preferred_model_naming_a_provider_subset():
+    sk.PROVIDER_NAMES = set(_REGISTERED_PROVIDERS)
+    try:
+        assert sk._validate_preferred_model({
+            "anthropic": "claude-sonnet-4-5",
+            "gemini": "gemini-2.5-pro",
+        }) == {"anthropic": "claude-sonnet-4-5", "gemini": "gemini-2.5-pro"}
+    finally:
+        sk.PROVIDER_NAMES = set()
 
 
 def test_update_skill_rejects_unknown_provider():
-    sk.PROVIDER_NAMES = {"anthropic", "gemini"}
-    with pytest.raises(sk.SkillValidationError, match="unknown provider"):
-        sk._validate_preferred_model({"anthropic": "x", "gemini": "y", "fake": "z"})
-    sk.PROVIDER_NAMES = set()
+    sk.PROVIDER_NAMES = set(_REGISTERED_PROVIDERS)
+    try:
+        with pytest.raises(sk.SkillValidationError, match="unknown provider"):
+            sk._validate_preferred_model(
+                {"anthropic": "x", "gemini": "y", "fake": "z"}
+            )
+    finally:
+        sk.PROVIDER_NAMES = set()
+
+
+def test_update_skill_rejects_empty_preferred_model():
+    sk.PROVIDER_NAMES = set(_REGISTERED_PROVIDERS)
+    try:
+        with pytest.raises(sk.SkillValidationError, match="provider"):
+            sk._validate_preferred_model({})
+    finally:
+        sk.PROVIDER_NAMES = set()
+
+
+class _UpdateCapturingConn:
+    """Records the UPDATE update_skill issues, then serves the row back."""
+
+    def __init__(self, row: tuple) -> None:
+        self.row = row
+        self.updates: list[dict] = []
+        self._last: tuple | None = None
+
+    def cursor(self) -> "_UpdateCapturingConn":
+        return self
+
+    def transaction(self) -> "_UpdateCapturingConn":
+        return self
+
+    def __enter__(self) -> "_UpdateCapturingConn":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = ()) -> None:
+        self._last = self.row
+        if sql.lstrip().lower().startswith("update skills"):
+            self.updates.append(dict(params))
+            self._last = (self.row[0],)
+
+    def fetchone(self) -> tuple | None:
+        return self._last
+
+
+def test_update_skill_saves_the_settings_payload_against_the_full_registry():
+    """The Settings page resends the row's own two-provider map on every save."""
+    sk.AGENT_TOOL_NAMES = {
+        "find_comparables_relaxed", "analyze_distribution", "record_estimate",
+    }
+    sk.PROVIDER_NAMES = set(_REGISTERED_PROVIDERS)
+    try:
+        row = make_skill_row(name="rental_estimator_v1")
+        current = sk.load_skill(
+            _FakeConn(skills={"rental_estimator_v1": row}), "rental_estimator_v1",
+        )
+        conn = _UpdateCapturingConn(row)
+        sk.update_skill(conn, "rental_estimator_v1", {
+            "system_prompt": "you are a fox",
+            "allowed_tools": current.allowed_tools,
+            "preferred_model": current.preferred_model,
+            "limits": {
+                "max_iterations": current.limits.max_iterations,
+                "max_cost_usd": current.limits.max_cost_usd,
+                "wall_clock_timeout_s": current.limits.wall_clock_timeout_s,
+            },
+        })
+        assert len(conn.updates) == 1
+        assert json.loads(conn.updates[0]["preferred_model"]) == {
+            "anthropic": "claude-sonnet-4-5",
+            "gemini": "gemini-2.5-pro",
+        }
+    finally:
+        sk.AGENT_TOOL_NAMES = set()
+        sk.PROVIDER_NAMES = set()
 
 
 def test_update_skill_rejects_limit_out_of_range():
@@ -68,7 +151,7 @@ def test_update_skill_rejects_limit_out_of_range():
 
 def test_update_skill_accepts_well_formed_payload():
     sk.AGENT_TOOL_NAMES = {"find_comparables_relaxed", "record_estimate"}
-    sk.PROVIDER_NAMES = {"anthropic", "gemini"}
+    sk.PROVIDER_NAMES = set(_REGISTERED_PROVIDERS)
     assert sk._validate_allowed_tools(["find_comparables_relaxed"]) == [
         "find_comparables_relaxed"
     ]
