@@ -6,8 +6,7 @@ must-never-abort-the-caller swallow behaviour are all exercised without a DB.
 
 Who patches is asserted by behaviour, where each writer runs: the after-step
 (`properties_changed`) in tests/test_recompute_property_stats.py, the identity writers'
-`db.browse` in tests/test_property_merge_set.py and tests/test_detach_listing.py, the asset
-writers in tests/test_asset_identity.py.
+`db.browse` in tests/test_property_merge_set.py and tests/test_detach_listing.py.
 """
 
 from __future__ import annotations

@@ -665,14 +665,17 @@ def test_create_tag_helper_409_on_unique_violation():
 
 
 def test_list_notes_helper_orders_newest_first():
-    conn = _FakeConn(results=[[
-        (2, 42, "second", None, "2026-05-10T00:00:02+00:00", None),
-        (1, 42, "first",  777,  "2026-05-10T00:00:01+00:00", None),
-    ]])
+    conn = _FakeConn(results=[
+        [(42, 42)],
+        [
+            (2, 42, "second", None, "2026-05-10T00:00:02+00:00", None),
+            (1, 42, "first",  777,  "2026-05-10T00:00:01+00:00", None),
+        ],
+    ])
     out = curation.list_notes(conn, property_id=42)
     assert [n["body"] for n in out["data"]] == ["second", "first"]
     assert out["data"][1]["origin_listing_id"] == 777
-    assert "ORDER BY created_at DESC" in conn.executions[0][0]
+    assert "ORDER BY created_at DESC" in conn.executions[1][0]
 
 
 # --- merged-away redirect against a predicate-scripted fake connection -------
@@ -819,6 +822,27 @@ def test_update_note_redirects_merged_away_to_survivor():
     assert out["property_id"] == 42
     ups = [p for q, p in conn.executed if "UPDATE property_notes" in q]
     assert ups and ups[0] == ("edited", 5, 42)
+
+
+def test_list_notes_follows_a_merged_away_id_to_the_survivor():
+    """A tab opened before a merge reads the survivor's notes, not an empty list:
+    the merge moved them there, and every note write already follows the id."""
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "FROM property_notes" in q,
+         [(5, 42, "on the survivor", None, datetime(2026, 1, 1), None)]),
+    ])
+    out = curation.list_notes(conn, 99)
+    assert [n["property_id"] for n in out["data"]] == [42]
+    reads = [p for q, p in conn.executed if "FROM property_notes" in q]
+    assert reads == [(42,)]
+
+
+def test_list_notes_unresolvable_id_reads_its_own_id():
+    conn = _ScriptConn([(lambda q: "RECURSIVE chain" in q, [])])
+    assert curation.list_notes(conn, 7) == {"data": []}
+    reads = [p for q, p in conn.executed if "FROM property_notes" in q]
+    assert reads == [(7,)]
 
 
 def test_delete_note_redirects_merged_away_to_survivor():

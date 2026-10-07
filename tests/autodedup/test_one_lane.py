@@ -905,13 +905,13 @@ def test_the_scope_rows_run_cap_bounds_the_merges_of_one_pass() -> None:
     assert db.listings[11]["property_id"] == 100 and db.listings[21]["property_id"] == 300
 
 
-def test_an_apply_time_skip_that_repeats_files_no_new_row() -> None:
-    """Review A7: an asset-link conflict surfaces only at the merge, so the plan's dedupe never
+def test_an_apply_time_skip_that_repeats_files_no_new_row(monkeypatch) -> None:
+    """Review A7: a late re-check skip surfaces only at apply time, so the plan's dedupe never
     saw it; the lane re-tries the group every sweep and must not file a row each time."""
     db = LaneDb()
     db.live_scope()
-    db.prop(100, asset=1)
-    db.prop(200, asset=2)
+    monkeypatch.setattr(AP, "recheck_group",
+                        lambda conn, group, scope: ([AP.SKIP_CHANGED_SINCE_PLAN], {}))
     _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
     _read(db, 10, 11)
 
@@ -920,7 +920,7 @@ def test_an_apply_time_skip_that_repeats_files_no_new_row() -> None:
     second = _lane(db, run_id="rt:2")
 
     assert first["counts"]["skipped_at_apply"] == second["counts"]["skipped_at_apply"] == 1
-    assert first["skipped_at_apply"][0]["reasons"] == [AP.SKIP_ASSET_LINKED]
+    assert first["skipped_at_apply"][0]["reasons"] == [AP.SKIP_CHANGED_SINCE_PLAN]
     assert rows == 1 and len(db.ledger) == rows, "one row for the one outcome"
 
 

@@ -1,27 +1,28 @@
 /* The merged-adverts section: the property page's only list of adverts — one
  * row per advert, photos and the portal link collapsed, words on expand, the
  * asked-for advert's row open, and for an admin session each advert's origin
- * and the exact two-step per-advert split, any property size, any merge origin,
- * the property's own advert included (to a new record) — the split route's
- * statement `separate: [[id]], keep_together: false` over every advert shown. */
+ * and a split letter per advert (or the letters a link brought): two letters in
+ * use open the one split dialog over every advert shown (its own behaviour:
+ * components/autodedup/SplitPanel.test.tsx). */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import MergedAdvertsSection, { COLLAPSED_THUMBS } from './MergedAdvertsSection';
 import * as api from '@/lib/api';
 import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
+import { fmtCzk } from '@/lib/format';
 import * as queries from '@/lib/queries';
-import { STATE_STAYS } from '@/lib/mergedAdverts';
 import * as toast from '@/lib/toast';
 import type { ImagePublic, ListingPublic, PropertySource } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   fetchPropertyOrigins: vi.fn(),
+  getSplitPreview: vi.fn(),
   splitProperty: vi.fn(),
 }));
 vi.mock('@/lib/auth', async (importOriginal) => ({
@@ -30,7 +31,7 @@ vi.mock('@/lib/auth', async (importOriginal) => ({
 }));
 vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
-  fetchListingBroker: vi.fn(),
+  fetchListingBrokersByIds: vi.fn(),
 }));
 vi.mock('@/lib/queries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/queries')>()),
@@ -98,57 +99,111 @@ function images(listingId: number, n: number): ImagePublic[] {
   }));
 }
 
-/* 101 is the property's own advert (the header's, grouped at ingest with another
- * own advert unless `own` says otherwise); 202 came from #43 by the operator's merge. */
-function origins(extra: api.AdvertOrigin[] = [], { own = 'split_native' } = {}) {
-  return {
+/* Origins: an advert of the property's own (no merge brought it) and one a merge
+ * brought from `from`. */
+const ownAd = (listing_id: number): api.AdvertOrigin => ({
+  listing_id,
+  origin_property_id: null,
+  merge_source: null,
+  merged_at: null,
+});
+const mergedAd = (
+  listing_id: number,
+  from: number,
+  over: Partial<api.AdvertOrigin> = {},
+): api.AdvertOrigin => ({
+  listing_id,
+  origin_property_id: from,
+  merge_source: 'operator',
+  merged_at: '2026-09-21T09:00:00Z',
+  ...over,
+});
+const originsOf = (...adverts: api.AdvertOrigin[]) => ({ property_id: 42, adverts });
+
+/* 101 is the property's own advert (the header's); 202 came from #43 by the
+ * operator's merge. */
+function origins() {
+  return originsOf(ownAd(101), mergedAd(202, 43));
+}
+
+/* The server's preview of a statement: A stays, every other letter goes back to #43. */
+function previewOf(_id: number, letters: string): Promise<api.SplitPreview> {
+  const groups = new Map<string, number[]>();
+  for (const part of letters.split(',')) {
+    const [id, letter] = part.split(':');
+    groups.set(letter, [...(groups.get(letter) ?? []), Number(id)]);
+  }
+  return Promise.resolve({
     property_id: 42,
-    adverts: [
-      {
-        listing_id: 101,
-        origin_property_id: null,
-        merge_source: null,
-        merged_at: null,
-        detach_outcome: own,
-        splittable: own === 'split_native',
-      },
-      {
-        listing_id: 202,
-        origin_property_id: 43,
-        merge_source: 'operator',
-        merged_at: '2026-09-21T09:00:00Z',
-        detach_outcome: 'detached',
-        splittable: true,
-      },
-      ...extra,
-    ],
-  };
+    letters: [...groups].sort().map(([letter, ids]) => ({
+      letter,
+      listing_ids: ids,
+      lands: letter === 'A' ? 'kept' : 'origin',
+      property_id: letter === 'A' ? 42 : 43,
+      joins: 0,
+      refused: null,
+    })),
+    curation: [],
+    rulings: { different: 1, taken_back: 0, inside: [] },
+    plan: `plan:${letters}`,
+  });
+}
+
+const RESULT: api.SplitResult = {
+  property_id: 42,
+  call_id: 'c',
+  letters: [
+    { letter: 'A', listing_ids: [101], property_id: 42, lands: 'kept', joined: null },
+    { letter: 'B', listing_ids: [202], property_id: 43, lands: 'origin', joined: null },
+  ],
+  curation: [],
+  rulings: { different: 1, same: 0, taken_back: 0 },
+};
+
+function Where() {
+  return <p data-testid="where">{useLocation().pathname}</p>;
 }
 
 function setup({
   sources = SOURCES,
   openAdvertId = null,
-}: { sources?: PropertySource[]; openAdvertId?: number | null } = {}) {
+  canonicalListingId = 101,
+  initialLetters,
+}: {
+  sources?: PropertySource[];
+  openAdvertId?: number | null;
+  canonicalListingId?: number;
+  initialLetters?: api.SplitLetters;
+} = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const view = render(
+  const tree = (list: PropertySource[]) => (
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <MergedAdvertsSection
           propertyId={42}
-          canonicalListingId={101}
-          sources={sources}
+          canonicalListingId={canonicalListingId}
+          sources={list}
           openAdvertId={openAdvertId}
+          initialLetters={initialLetters}
         />
+        <Where />
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { qc, view };
+  const view = render(tree(sources));
+  /* The page re-read its advert list: same section, new list. */
+  const rerender = (list: PropertySource[]) => view.rerender(tree(list));
+  return { qc, view, rerender };
 }
 
+/* The advert's row — not a line of the split panel, which names portals too. */
 function rowOf(portal: string): HTMLElement {
-  return screen.getAllByText(portal)[0].closest('li') as HTMLElement;
+  return screen
+    .getAllByText(portal)
+    .map((el) => el.closest('li'))
+    .find((li) => li && !li.closest('[role="group"]')) as HTMLElement;
 }
 
 beforeEach(() => {
@@ -166,46 +221,20 @@ beforeEach(() => {
       [202, images(202, 2)],
     ]),
   );
-  vi.mocked(brokers.fetchListingBroker).mockResolvedValue({
-    listing_id: 202,
-    sreality_id: null,
-    broker_id: 7,
-    broker_display_name: 'Jana Nováková',
-    broker_firm_label: 'RE/MAX Alfa',
-  } as unknown as Awaited<ReturnType<typeof brokers.fetchListingBroker>>);
+  vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(
+    new Map([
+      [202, {
+        listing_id: 202,
+        sreality_id: null,
+        broker_id: 7,
+        broker_display_name: 'Jana Nováková',
+        broker_firm_label: 'RE/MAX Alfa',
+      }],
+    ]),
+  );
   vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins());
-  vi.mocked(api.splitProperty).mockResolvedValue(splitResult(202, 'detached', 43));
-});
-
-/* The split route's answer when `listingId` left for `to` (nothing moved: `outcome` null). */
-function splitResult(listingId: number, outcome: string | null, to: number): api.SplitResult {
-  return {
-    call_id: '5b0c0000-0000-4000-8000-000000000000',
-    property_id: 42,
-    record_kept_by: 'A',
-    units: [
-      { unit: 'A', role: 'kept', listing_ids: [101, 202].filter((i) => i !== listingId), property_id: 42, moved: [], merge_group_id: null },
-      {
-        unit: 'B',
-        role: 'separated',
-        listing_ids: [listingId],
-        property_id: to,
-        moved: outcome ? [{ listing_id: listingId, outcome, from: 42, to }] : [],
-        merge_group_id: null,
-      },
-    ],
-    moved: outcome ? 1 : 0,
-    rulings: { written: outcome ? 1 : 0, same: 0, different: outcome ? 1 : 0, must_not_link_written: 0, must_not_link_retracted: 0 },
-    reversed_pairs: [],
-    undo: null,
-  };
-}
-
-const statement = (listingId: number, adverts = [101, 202], reason?: string) => ({
-  adverts,
-  separate: [[listingId]],
-  keep_together: false,
-  ...(reason ? { reason } : {}),
+  vi.mocked(api.getSplitPreview).mockImplementation(previewOf);
+  vi.mocked(api.splitProperty).mockResolvedValue(RESULT);
 });
 
 describe('<MergedAdvertsSection> rows', () => {
@@ -223,7 +252,12 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(screen.getByText('Sloučené inzeráty')).toBeInTheDocument();
 
     const sreality = rowOf('Sreality');
-    expect(within(sreality).getByText('v záhlaví')).toBeInTheDocument();
+    /* The primary advert (the header's) is named on its row, and only there. */
+    expect(within(sreality).getByText('hlavní inzerát')).toHaveAttribute(
+      'title',
+      'Záhlaví nemovitosti ukazuje fotky a údaje tohoto inzerátu.',
+    );
+    expect(screen.getAllByText('hlavní inzerát')).toHaveLength(1);
     expect(within(sreality).getByText('5 000 000 Kč')).toBeInTheDocument();
     expect(await within(sreality).findByText('54 m² · 2+kk')).toBeInTheDocument();
     expect(within(sreality).getByText(/05\/01\/2026 –\s*dosud/)).toBeInTheDocument();
@@ -245,7 +279,9 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(within(strip).getByText('+2')).toBeInTheDocument();
 
     expect(screen.queryByText('Byt č. 14, orientace na jih.')).not.toBeInTheDocument();
-    expect(brokers.fetchListingBroker).not.toHaveBeenCalled();
+    // Every advert's broker in ONE batched read for the section, not one per row.
+    await waitFor(() => expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledTimes(1));
+    expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledWith([101, 202]);
   });
 
   it('expanded: the description, every photo and the broker — no link to another detail page', async () => {
@@ -261,13 +297,26 @@ describe('<MergedAdvertsSection> rows', () => {
     await waitFor(() => expect(idnes.textContent).toContain('Byt č. 14, orientace na jih.'));
     expect(within(idnes).queryByRole('link', { name: 'Otevřít detail' })).toBeNull();
     expect(await within(idnes).findByText('Jana Nováková')).toBeInTheDocument();
-    expect(brokers.fetchListingBroker).toHaveBeenCalledWith(202);
+    // An advert with no attributed broker says so on its own row.
+    const sreality = rowOf('Sreality');
+    fireEvent.click(within(sreality).getAllByRole('button')[0]);
+    expect(await within(sreality).findByText('Makléř: nepřiřazen')).toBeInTheDocument();
     // The carousel pages the whole album (2 photos → a counter).
     expect(within(idnes).getByText('1 / 2')).toBeInTheDocument();
     // Where it came from, as information.
     expect(
       await within(idnes).findByText('nemovitost #43 · ruční sloučení ze dne 21/09/2026'),
     ).toBeInTheDocument();
+  });
+
+  it('says a failed broker read failed, with a retry — never "nepřiřazen"', async () => {
+    vi.mocked(brokers.fetchListingBrokersByIds).mockRejectedValueOnce(new Error('HTTP 500'));
+    setup({ openAdvertId: 202 });
+    const idnes = rowOf('iDNES Reality');
+    expect(await within(idnes).findByText('Makléře se nepodařilo načíst')).toBeInTheDocument();
+    expect(within(idnes).queryByText('Makléř: nepřiřazen')).toBeNull();
+    fireEvent.click(within(idnes).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await within(idnes).findByText('Jana Nováková')).toBeInTheDocument();
   });
 
   it('opens the row an old advert address asked for, and only that one', async () => {
@@ -285,190 +334,199 @@ describe('<MergedAdvertsSection> rows', () => {
   });
 });
 
-describe('<MergedAdvertsSection> Rozdělit', () => {
-  it('is absent for a session that is not an admin, which never reads the ledger', () => {
+/* Two flats, two adverts each: 101 (the header's, the property's own) and 202 are
+ * one; 303 and 404, which merges brought, are the other. */
+const FOUR: PropertySource[] = [
+  ...SOURCES,
+  { ...SOURCES[1], id: 303, sreality_id: -78, source: 'bazos', source_id_native: 'z9', source_url: null },
+  {
+    ...SOURCES[1],
+    id: 404,
+    sreality_id: -79,
+    source: 'ceskereality',
+    source_id_native: 'c4',
+    source_url: 'https://www.ceskereality.cz/prodej/byty/c4.html',
+  },
+];
+const FIVE: PropertySource[] = [
+  ...FOUR,
+  { ...SOURCES[1], id: 505, sreality_id: -80, source: 'bezrealitky', source_id_native: 'b5', source_url: null },
+];
+const FOUR_ORIGINS = originsOf(
+  ownAd(101),
+  mergedAd(202, 43),
+  mergedAd(303, 44, { merge_source: 'autodedup' }),
+  mergedAd(404, 45),
+);
+
+const LABEL: Record<number, string> = {
+  101: 'Nemovitost inzerátu Sreality #101',
+  202: 'Nemovitost inzerátu iDNES Reality #202',
+  303: 'Nemovitost inzerátu Bazoš #303',
+  404: 'Nemovitost inzerátu Českéreality #404',
+  505: 'Nemovitost inzerátu Bezrealitky #505',
+};
+/* A plan line names an advert as its row does: portal and price. */
+const AD: Record<number, string> = {
+  101: `Sreality ${fmtCzk(5_000_000)}`,
+  202: `iDNES Reality ${fmtCzk(5_200_000)}`,
+  303: `Bazoš ${fmtCzk(5_200_000)}`,
+  404: `Českéreality ${fmtCzk(5_200_000)}`,
+  505: `Bezrealitky ${fmtCzk(5_200_000)}`,
+};
+
+/* Gives each named advert its letter, once the origins have been read. */
+async function assign(letters: Record<number, string>) {
+  for (const [id, letter] of Object.entries(letters)) {
+    fireEvent.change(await screen.findByLabelText(LABEL[Number(id)]), { target: { value: letter } });
+  }
+}
+
+const panel = () => screen.getByRole('group', { name: 'Rozdělení nemovitosti' });
+const noPanel = () => expect(screen.queryByRole('group', { name: 'Rozdělení nemovitosti' })).toBeNull();
+const planLines = async () => {
+  await within(panel()).findByText(/zůstává v nemovitosti/);
+  return within(panel())
+    .getAllByRole('listitem')
+    .map((li) => li.textContent)
+    .filter((t) => /^[A-Z] — /.test(t ?? ''));
+};
+const splitNow = () => fireEvent.click(within(panel()).getByRole('button', { name: 'Rozdělit nemovitost' }));
+
+describe('<MergedAdvertsSection> the split letters', () => {
+  it('offers no letter to a session that is not an admin, which never reads the ledger', async () => {
     vi.mocked(auth.useAuth).mockReturnValue({ isAdmin: false } as ReturnType<typeof auth.useAuth>);
     setup();
-    expect(screen.queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+    expect(await screen.findByText('54 m² · 2+kk')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByText('vlastní inzerát')).toBeNull();
     expect(api.fetchPropertyOrigins).not.toHaveBeenCalled();
   });
 
-  it('is offered on every advert a detach would move, and on no other', async () => {
+  it('offers no letter on a property of one advert', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(originsOf(ownAd(101)));
+    setup({ sources: SOURCES.slice(0, 1) });
+    fireEvent.click(within(rowOf('Sreality')).getAllByRole('button')[0]);
+    expect(await screen.findByText('tato nemovitost (nepřišel sloučením)')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByText('vlastní inzerát')).toBeNull();
+  });
+
+  it('offers no letter while the origins are being read', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockReturnValue(new Promise(() => {}));
     setup();
-    expect(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('54 m² · 2+kk')).toBeInTheDocument();
     expect(api.fetchPropertyOrigins).toHaveBeenCalledWith(42);
-    expect(within(rowOf('Sreality')).getByRole('button', { name: /Rozdělit/ })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).toBeNull();
   });
 
-  it('says why instead on a row whose detach would move nothing', async () => {
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([], { own: 'last_native' }));
+  it('offers no letter when the origins could not be read', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockRejectedValue(new Error('ledger down'));
     setup();
-    expect(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
-    ).toBeInTheDocument();
-    const own = rowOf('Sreality');
-    expect(within(own).queryByRole('button', { name: /Rozdělit/ })).toBeNull();
-    expect(
-      within(own).getByText(/Nelze oddělit: je to poslední vlastní inzerát nemovitosti; oddělte místo něj sloučené inzeráty/),
-    ).toBeInTheDocument();
+    fireEvent.click(within(rowOf('Sreality')).getAllByRole('button')[0]);
+    expect(await screen.findByText('nepodařilo se načíst')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).toBeNull();
   });
 
-  it('points to where an origin merged elsewhere went, and says nothing on a lone advert', async () => {
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue({
-      property_id: 42,
-      adverts: [
-        { ...origins().adverts[0], detach_outcome: 'not_merged', splittable: false },
-        {
-          ...origins().adverts[1],
-          detach_outcome: 'origin_moved_on',
-          splittable: false,
-        },
-      ],
-    });
+  it('starts every advert at A and opens the dialog only once a second letter is in use', async () => {
     setup();
-    const moved = rowOf('iDNES Reality');
-    expect(await within(moved).findByText(/Nelze oddělit: nemovitost, ze které přišel/)).toBeInTheDocument();
-    expect(within(moved).getByRole('link', { name: 'kam odešla #43' })).toHaveAttribute(
-      'href',
-      '/property/43',
-    );
-    expect(within(rowOf('Sreality')).queryByText(/Nelze oddělit/)).toBeNull();
-    expect(screen.queryByRole('button', { name: /Rozdělit/ })).toBeNull();
-  });
-
-  it('splits the header’s own advert off to a new record, saying the property’s state stays', async () => {
-    vi.mocked(api.splitProperty).mockResolvedValue(splitResult(101, 'split_native', 9001));
-    setup();
-    fireEvent.click(await within(rowOf('Sreality')).findByRole('button', { name: /Rozdělit/ }));
-    const confirm = screen.getByRole('group', { name: 'Oddělit inzerát' });
-    expect(confirm.textContent).toMatch(/Nepřivedlo ho sloučení: dostane novou vlastní nemovitost/);
-    expect(confirm.textContent).toContain(STATE_STAYS);
-    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() => expect(api.splitProperty).toHaveBeenCalledWith(42, statement(101)));
-    await waitFor(() =>
-      expect(toast.pushToast).toHaveBeenCalledWith(
-        'ok',
-        `Odděleno — inzerát má novou vlastní nemovitost #9001. ${STATE_STAYS}`,
-        0,
-        expect.objectContaining({ label: 'Otevřít #9001' }),
-      ),
-    );
-  });
-
-  it('asks twice, then detaches that one advert with the typed reason and refreshes', async () => {
-    const { qc } = setup();
-    const invalidate = vi.spyOn(qc, 'invalidateQueries');
-
-    fireEvent.click(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
-    );
-    expect(screen.getByText('Oddělit tento inzerát?')).toBeInTheDocument();
+    const idnes = await screen.findByLabelText(LABEL[202]);
+    expect(idnes).toHaveValue('A');
+    expect(screen.getByLabelText(LABEL[101])).toHaveValue('A');
+    // As many letters as adverts.
+    expect(within(idnes).getAllByRole('option').map((o) => o.textContent)).toEqual(['A', 'B']);
     expect(
-      screen.getByText(/Vrátí se do nemovitosti #43, odkud ho přivedlo ruční sloučení ze dne 21\/09\/2026/),
+      screen.getByText(/stejné písmeno = jedna nemovitost, různá písmena = různé nemovitosti/),
     ).toBeInTheDocument();
+    // The property's own advert says so; one a merge brought does not.
+    expect(within(rowOf('Sreality')).getByText('vlastní inzerát')).toHaveAttribute(
+      'title',
+      'Nepřišel sloučením — inzeráty s jeho písmenem při rozdělení zůstanou v této nemovitosti.',
+    );
+    expect(within(rowOf('iDNES Reality')).queryByText('vlastní inzerát')).toBeNull();
+    noPanel();
+    expect(api.getSplitPreview).not.toHaveBeenCalled();
+
+    fireEvent.change(idnes, { target: { value: 'B' } });
+    expect(await planLines()).toEqual([
+      `A — zůstává v nemovitosti #42: ${AD[101]}`,
+      `B — vrátí se do nemovitosti #43: ${AD[202]}`,
+    ]);
+    expect(api.getSplitPreview).toHaveBeenLastCalledWith(42, '101:A,202:B');
     expect(api.splitProperty).not.toHaveBeenCalled();
 
-    // Step two is the write, with the optional reason trimmed.
-    fireEvent.change(screen.getByRole('textbox', { name: /Důvod/ }), {
-      target: { value: '  jiné patro ' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() =>
-      expect(api.splitProperty).toHaveBeenCalledWith(42, statement(202, [101, 202], 'jiné patro')),
-    );
-    await waitFor(() =>
-      expect(toast.pushToast).toHaveBeenCalledWith(
-        'ok',
-        'Odděleno — inzerát je zpět v nemovitosti #43.',
-        0,
-        expect.objectContaining({ label: 'Otevřít #43' }),
-      ),
-    );
-    // Read-your-writes: the property and its advert list, and every Browse surface.
-    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property-sources'] });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['cards'] });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['browse-count'] });
+    fireEvent.change(idnes, { target: { value: 'A' } });
+    noPanel();
   });
 
-  it('Zrušit steps back without writing', async () => {
-    setup();
-    fireEvent.click(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Zrušit' }));
-    expect(screen.queryByText('Oddělit tento inzerát?')).toBeNull();
-    expect(
-      within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }),
-    ).toBeInTheDocument();
-    expect(api.splitProperty).not.toHaveBeenCalled();
-  });
-
-  it('splits any row of a bigger property, an AUTODEDUP merge like any other; no reason sends none', async () => {
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(
-      origins([
-        {
-          listing_id: 303,
-          origin_property_id: 44,
-          merge_source: 'autodedup',
-          merged_at: '2026-09-22T09:00:00Z',
-          detach_outcome: 'detached',
-          splittable: true,
-        },
-      ]),
-    );
-    const three = [
-      ...SOURCES,
-      { ...SOURCES[1], id: 303, source: 'bazos', source_id_native: 'z9', source_url: null },
-    ];
-    setup({ sources: three });
-
-    fireEvent.click(await within(rowOf('Bazoš')).findByRole('button', { name: /Rozdělit/ }));
-    expect(
-      screen.getByText(/nemovitosti #44, odkud ho přivedlo automatické \(AUTODEDUP\) sloučení/),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
+  it('the dialog reads every advert shown, each with its letter, and the click sends them all', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(FOUR_ORIGINS);
+    // The page's order is not the ids' order.
+    setup({ sources: [FOUR[0], FOUR[3], FOUR[1], FOUR[2]] });
+    await assign({ 404: 'C', 202: 'B', 303: 'C' });
+    expect(within(screen.getByLabelText(LABEL[303])).getAllByRole('option')).toHaveLength(4);
+    expect(await planLines()).toEqual([
+      `A — zůstává v nemovitosti #42: ${AD[101]}`,
+      `B — vrátí se do nemovitosti #43: ${AD[202]}`,
+      `C — vrátí se do nemovitosti #43: ${AD[303]}, ${AD[404]}`,
+    ]);
+    expect(api.getSplitPreview).toHaveBeenLastCalledWith(42, '101:A,202:B,303:C,404:C');
+    splitNow();
     await waitFor(() =>
-      expect(api.splitProperty).toHaveBeenCalledWith(42, statement(303, [101, 202, 303])),
-    );
-  });
-
-  it('a split that moved nothing (a re-send) says so, and still refreshes', async () => {
-    vi.mocked(api.splitProperty).mockResolvedValue(splitResult(202, null, 43));
-    const { qc } = setup();
-    const invalidate = vi.spyOn(qc, 'invalidateQueries');
-    fireEvent.click(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() =>
-      expect(toast.pushToast).toHaveBeenCalledWith('info', 'Nic se nepřesunulo — inzerát už je oddělen.'),
-    );
-    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
-  });
-
-  it('a property that changed since the page read it refuses, says why and re-reads', async () => {
-    vi.mocked(api.splitProperty).mockRejectedValue(
-      new api.ApiError('property 42 holds adverts the statement did not name: 404', 409, {
-        detail: { code: 'stale', message: 'property 42 holds adverts the statement did not name: 404', ids: [404] },
+      expect(api.splitProperty).toHaveBeenCalledWith(42, {
+        letters: { 101: 'A', 202: 'B', 303: 'C', 404: 'C' },
+        expect: 'plan:101:A,202:B,303:C,404:C',
       }),
     );
-    const { qc } = setup();
-    const invalidate = vi.spyOn(qc, 'invalidateQueries');
-    fireEvent.click(
-      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+  });
+
+  it('opens on the letters a review page’s link brought, the adverts shown only', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(FOUR_ORIGINS);
+    setup({ sources: FOUR, initialLetters: { 303: 'B', 404: 'B', 999: 'C' } });
+    expect(await screen.findByLabelText(LABEL[303])).toHaveValue('B');
+    expect(screen.getByLabelText(LABEL[101])).toHaveValue('A');
+    await waitFor(() => expect(api.getSplitPreview).toHaveBeenCalledWith(42, '101:A,202:A,303:B,404:B'));
+    expect(panel()).toBeInTheDocument();
+  });
+
+  it('done: every letter back at A and the dialog closed; the receipt is the dialog’s', async () => {
+    setup();
+    await assign({ 202: 'B' });
+    await planLines();
+    splitNow();
+    await waitFor(noPanel);
+    expect(screen.getByLabelText(LABEL[202])).toHaveValue('A');
+    expect(toast.pushToast).toHaveBeenCalledTimes(1);
+  });
+
+  it('a list that changed (a newcomer, a split elsewhere) starts again at A', async () => {
+    const { rerender } = setup();
+    await assign({ 202: 'B' });
+    await planLines();
+    rerender([...SOURCES, FIVE[4]]);
+    expect(await screen.findByLabelText(LABEL[505])).toHaveValue('A');
+    expect(screen.getByLabelText(LABEL[202])).toHaveValue('A');
+    noPanel();
+  });
+
+  it('Zrušit puts every letter back at A', async () => {
+    setup();
+    await assign({ 202: 'B' });
+    await planLines();
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Zrušit' }));
+    noPanel();
+    expect(screen.getByLabelText(LABEL[202])).toHaveValue('A');
+    expect(api.splitProperty).not.toHaveBeenCalled();
+  });
+
+  it('marks own adverts: under two letters, the group holding more of them stays', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(
+      originsOf(ownAd(101), mergedAd(202, 43), ownAd(303), ownAd(404)),
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() =>
-      expect(toast.pushToast).toHaveBeenCalledWith(
-        'err',
-        'property 42 holds adverts the statement did not name: 404',
-      ),
+    setup({ sources: FOUR });
+    expect(await within(rowOf('Bazoš')).findByText('vlastní inzerát')).toHaveAttribute(
+      'title',
+      'Nepřišel sloučením — při rozdělení zůstanou v této nemovitosti inzeráty písmena, které má nejvíc vlastních inzerátů.',
     );
-    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
-    // the panel stays open: nothing looks done
-    expect(screen.getByRole('group', { name: 'Oddělit inzerát' })).toBeInTheDocument();
   });
 });

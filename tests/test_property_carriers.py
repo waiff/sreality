@@ -1,10 +1,11 @@
 """The carrier list, `toolkit.property_carriers` (rules 15, 18, 22), offline: the FK census over
 `migrations/*.sql` (every column that references `properties` is carried or named in
 `NOT_CARRIED`), the order the list must keep, the protocol every carrier meets, and a strict
-cursor that runs each REAL carrier and fails on any statement it did not declare or any param it
-did not supply. What each carrier does to rows is executed in tests/test_property_carriers_live.py
-(with the live column census); the writers' use of the seam is tests/test_property_merge_set.py
-and tests/test_detach_listing.py."""
+cursor that runs each REAL carrier, fails on any statement it did not declare or any param it
+did not supply, and answers canned RETURNING rows, so what each carrier hands the carry record is
+pinned here. What each carrier does to rows is executed in tests/test_property_carriers_live.py
+(with the live column census and the count invariant); the merge's use of the seam is
+tests/test_property_merge_set.py."""
 
 from __future__ import annotations
 
@@ -15,20 +16,21 @@ from typing import Any
 import pytest
 
 from tests import sql_corpus
+from tests._property_ledger import ledger_carriers  # noqa: F401 — the fixture
+from toolkit import pipeline_identity
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import (
     CARRIER_SQL,
     NOT_CARRIED,
     PROPERTY_CARRIERS,
+    Carried,
     Carrier,
-    DetachStep,
-    Hop,
     MergeStep,
     carried_columns,
 )
 
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
-G, G2 = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+G = "11111111-1111-1111-1111-111111111111"
 _HOW_TO_FIX = (
     "carry it (a SET/APPEND table keyed on property_id = one `CurationTable(...)` line before "
     "`Pipeline()`; any other shape = one class meeting `Carrier`), or name it in `NOT_CARRIED` "
@@ -199,10 +201,6 @@ def _names() -> list[str]:
     return [c.name for c in PROPERTY_CARRIERS]
 
 
-def test_the_asset_link_runs_first():
-    assert _names()[0] == "asset_link"
-
-
 def test_dismissals_run_after_the_pipeline():
     """The dismissal lift reads the live card the pipeline carry just put on the survivor."""
     assert _names().index("pipeline") < _names().index("dismissals")
@@ -225,9 +223,9 @@ def test_the_status_log_stays_with_its_own_property():
 
 
 def test_no_carrier_deletes_history():
-    """The one sanctioned delete is a SET table's collision collapse (and the pipeline's
-    current-state card, snapshotted to its ledger first); never a ledger or log row."""
-    history = ("property_dismissals", "property_pipeline_events", "asset_membership_events",
+    """The sanctioned deletes are a SET table's collision collapse and the losing pipeline card,
+    each folded into the carry record with its snapshot; never a ledger or log row."""
+    history = ("property_dismissals", "property_pipeline_events", "property_merge_carries",
                "property_merge_events", "property_status_events", "properties")
     for statement in CARRIER_SQL:
         deleted = re.findall(r"\bDELETE\s+FROM\s+(\w+)", statement, re.I)
@@ -240,10 +238,13 @@ _NAMED = re.compile(r"%\((\w+)\)s")
 
 
 class _StrictCur:
-    def __init__(self, carrier: Carrier, fetch: tuple | None = None) -> None:
-        self.carrier, self.fetch = carrier, fetch
+    def __init__(self, carrier: Carrier, canned: dict[str, list[tuple]] | None = None) -> None:
+        self.carrier = carrier
         self.declared = {_n(s) for s in carrier.sql}
+        self.canned = {_n(sql): rows for sql, rows in (canned or {}).items()}
         self.ran: list[tuple[str, Any]] = []
+        self.rows: list[tuple] = []
+        self.carried: list[Carried] = []
 
     def execute(self, sql: str, params: Any = None) -> None:
         s = _n(sql)
@@ -255,16 +256,16 @@ class _StrictCur:
         else:
             assert s.count("%s") == len(params or ()), f"{self.carrier.name}: param count"
         self.ran.append((s, params))
+        self.rows = list(self.canned.get(s, []))
 
-    def fetchone(self) -> tuple | None:
-        return self.fetch
+    def fetchall(self) -> list[tuple]:
+        return self.rows
 
 
-def _walk(carrier: Carrier, *, fetch: tuple | None = (41,), source: str = "operator",
-          undo: tuple[Hop, ...] = (Hop(1, G, 10, 20),), left: int = 10) -> _StrictCur:
-    cur = _StrictCur(carrier, fetch)
-    carrier.on_merge(cur, MergeStep(10, 20, G, source))  # type: ignore[arg-type]
-    carrier.on_detach(cur, DetachStep(20, left, undo, source))  # type: ignore[arg-type]
+def _walk(carrier: Carrier, canned: dict[str, list[tuple]] | None = None) -> _StrictCur:
+    """One merge step, S=10 survives R=20, each statement answering its canned rows."""
+    cur = _StrictCur(carrier, canned)
+    cur.carried = carrier.on_merge(cur, MergeStep(10, 20, G, "operator"))
     return cur
 
 
@@ -273,19 +274,6 @@ def test_every_carrier_runs_only_its_declared_sql_with_its_params_supplied(carri
     cur = _walk(carrier)
     assert {s for s, _p in cur.ran} == {_n(s) for s in carrier.sql}, (
         f"{carrier.name} declares SQL it never runs")
-
-
-def test_the_asset_link_reads_the_retired_link_and_logs_the_engine_as_auto():
-    linked = _walk(carriers.AssetLink(), source="autodedup")
-    carry, restore = linked.ran[1][1], linked.ran[2][1]
-    assert carry == {"survivor": 10, "retired": 20, "asset": 41, "reason": f"merge {G}",
-                     "source": "auto"}
-    assert restore == {"restored": 20, "merge": f"merge {G}", "merges": [f"merge {G}"],
-                       "path": [10], "detach": f"detach {G}", "source": "auto"}
-    unlinked = _walk(carriers.AssetLink(), fetch=(None,), source="autodedup")
-    assert [s for s, _p in unlinked.ran][:1] == [_n(carriers.AssetLink.RETIRED_ASSET_SQL)]
-    assert len(unlinked.ran) == 2, "no link on the retired property: nothing to carry"
-    assert _walk(carriers.AssetLink()).ran[1][1]["source"] == "operator"
 
 
 def test_the_dispatch_collapse_hands_its_sends_to_the_kept_twin_first():
@@ -316,27 +304,65 @@ def test_the_retired_dispatches_are_locked_in_their_own_statement_before_the_res
     assert "FOR UPDATE" not in _n(carriers.Dispatches.RESEND_SQL)
 
 
-def test_curation_dispatches_and_dismissals_give_nothing_back_on_a_detach():
-    """Rule 18 best-effort: these rows stay on the property the advert left."""
-    for carrier in PROPERTY_CARRIERS:
-        if carrier.name in ("asset_link", "pipeline"):
-            continue
-        cur = _StrictCur(carrier)
-        carrier.on_detach(cur, DetachStep(20, 10, (Hop(1, G, 10, 20),), "operator"))
-        assert cur.ran == [], carrier.name
+# --- what each carrier hands the carry record (migration 589) ----------------------------
+
+A, B, T1, T2, T3, T4 = "acc-a", "acc-b", "t1", "t2", "t3", "t4"
 
 
-def test_the_pipeline_restore_drops_the_absorbed_card_only_where_today_does():
-    """With one hop (or any detach whose property left is that merge's survivor) the card the
-    survivor absorbed comes off it; off a later survivor on a chain, the restore runs alone."""
-    pipeline = next(c for c in PROPERTY_CARRIERS if c.name == "pipeline")
-    one_hop = _walk(pipeline)
-    detach = one_hop.ran[4:]
-    assert [p for _s, p in detach] == [{"g": G, "r": 20, "s": 10}] * 2
-    chained = _StrictCur(pipeline)
-    pipeline.on_detach(chained, DetachStep(20, 5, (Hop(1, G, 10, 20), Hop(2, G2, 5, 10)),
-                                           "operator"))
-    assert [(s.split()[0], p) for s, p in chained.ran] == [("INSERT", {"g": G, "r": 20, "s": None})]
+def _carrier(name: str) -> Any:
+    return next(c for c in PROPERTY_CARRIERS if c.name == name)
+
+
+@pytest.mark.parametrize("name", ["collection_properties", "property_tags", "property_notes"])
+def test_a_curation_table_folds_what_it_collapses_and_moves_the_rest(name):
+    """Each from the retired property, keyed on `keys[0]` (else `id`) and dated by `at`; a row
+    with no account moves as it is."""
+    table = _carrier(name)
+    *collapse, move = table.sql
+    key = (table.keys or ("id",))[0]
+    assert _n(move).endswith(f"RETURNING {key}, {table.at}, account_id")
+    snap = {key: 5}
+    cur = _walk(table, {**{s: [(5, T1, A, snap)] for s in collapse}, move: [(6, T2, None)]})
+    assert cur.carried == [Carried(name, 5, T1, A, 20, "folded", snap)] * len(collapse) + [
+        Carried(name, 6, T2, None, 20, "moved", None)]
+
+
+def test_alert_events_get_no_carry_rows_and_five_tables_get_them():
+    """MS14's default: the dispatch carrier runs its four statements and hands back nothing. The
+    carry record's five tables (no CHECK pins them): the three above, the card, the dismissal."""
+    cur = _walk(_carrier("notification_dispatches"))
+    assert len(cur.ran) == 4 and cur.carried == []
+    assert {c.name for c in PROPERTY_CARRIERS if getattr(c, "at", None)} == {
+        "collection_properties", "property_tags", "property_notes"}
+
+
+def test_the_pipeline_folds_each_losing_card_from_where_it_came_and_moves_the_winner():
+    """S's losing card is folded from the property its standing carry row names (7, an earlier
+    step's), else from S; R's losing card from R; the rest move."""
+    fold_s, fold_r, move = pipeline_identity.STATEMENTS
+    snap = {"stage_id": 1}
+    cur = _walk(_carrier("pipeline"), {fold_s: [(A, T1, snap, None), (B, T2, snap, 7)],
+                                       fold_r: [(A, T3, snap)], move: [(B, T4)]})
+    card = "property_pipeline"
+    assert cur.carried == [Carried(card, None, T1, A, 10, "folded", snap),
+                           Carried(card, None, T2, B, 7, "folded", snap),
+                           Carried(card, None, T3, A, 20, "folded", snap),
+                           Carried(card, None, T4, B, 20, "moved", None)]
+
+
+def test_one_dismissal_one_carry_row_its_last_kind_wins():
+    """1 is lifted 'merge' on R, then moved: folded. 2 moves, then a card lifts it: folded from R.
+    S's own 3 came from 7 by an earlier merge, S's 4 never moved: folded from 7 and from S."""
+    lift_twin, repoint, lift_deal = carriers.Dismissals.sql
+    s1, s2, s3, s4 = ({"id": i} for i in range(1, 5))
+    cur = _walk(_carrier("dismissals"), {
+        lift_twin: [(1, T1, A, s1)], repoint: [(1, T1, A), (2, T2, B)],
+        lift_deal: [(2, T2, B, s2, None), (3, T3, A, s3, 7), (4, T4, A, s4, None)]})
+    row = "property_dismissals"
+    assert cur.carried == [Carried(row, 1, T1, A, 20, "folded", s1),
+                           Carried(row, 2, T2, B, 20, "folded", s2),
+                           Carried(row, 3, T3, A, 7, "folded", s3),
+                           Carried(row, 4, T4, A, 10, "folded", s4)]
 
 
 def test_every_carrier_statement_is_in_the_prepare_corpus():
@@ -344,3 +370,193 @@ def test_every_carrier_statement_is_in_the_prepare_corpus():
     corpus = {_n(i.sql) for i in sql_corpus.discover(resolve_imports=True)}
     missing = [_n(s)[:100] for s in CARRIER_SQL if _n(s) not in corpus]
     assert not missing, missing
+
+
+# --- routing (MS17, MS18): the plan over canned rows, the writes through a strict cursor -----
+
+L, R1, R2 = 10, 20, 30
+ME, THEM = "acc-me", "acc-them"
+
+
+def _row(kind: str, table: str, key: Any, acc: Any, item: str, *, ad: int | None = None,
+         origin: int | None = None, ids: tuple[int, ...] = (), twin: bool | None = None,
+         to: int | None = None, live: bool | None = None, stage: int | None = None) -> tuple:
+    """One `_ROUTES_SQL` row: kind, table, key, account, item, label, stage, live, the note's ad
+    on `left`, the fold's to-property, the came-from property, the carry ids, the fold's twin."""
+    return (kind, table, key, acc, item, item, stage, live, ad, to, origin, list(ids), twin)
+
+
+class _RouteCur:
+    """Answers the routing read with canned rows; refuses any statement outside `ROUTE_SQL` and
+    the dismissal lift, and any named param not supplied. A write changes one row, but a write
+    whose (table, key, account) `held` names, which changes none."""
+
+    def __init__(self, rows: list[tuple] = (), held: set[tuple] = frozenset()) -> None:
+        self.rows, self.ran, self.held, self.rowcount = list(rows), [], held, 0
+        self.known = {_n(s) for s in (*carriers.ROUTE_SQL,
+                                      carriers._DISMISSAL_LIFT_LIVE_DEAL_SQL)}
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = _n(sql)
+        assert s in self.known, f"routing ran SQL it does not declare: {s[:120]}"
+        assert set(_NAMED.findall(s)) <= set(params or {}), s[:120]
+        self.ran.append((s, params))
+        table = s.split()[1 if s.startswith("UPDATE") else 2]
+        key = (table, (params or {}).get("key"), (params or {}).get("account"))
+        self.rowcount = 0 if key in self.held else 1
+
+    def fetchall(self) -> list[tuple]:
+        return self.rows
+
+
+def _plan(rows: list[tuple], movers: dict[int, int | None], **kw: Any) -> list[carriers.Route]:
+    return carriers.curation_plan(_RouteCur(rows), left=L, movers=movers, **kw)
+
+
+def _where(routes: list[carriers.Route]) -> dict[str, tuple]:
+    return {r.item: (r.action, r.anchor, r.carry_ids, r.skipped) for r in routes}
+
+
+def test_the_preselection_routes_notes_with_their_ad_and_the_rest_along_the_carry_record():
+    """2 goes home to 20 (its anchor: the lowest ad going there), 3 is born new, 1 stays. A note
+    follows its ad on `left` (consuming its carry rows only when it leaves); an item goes back
+    where its oldest standing carry row says when that property gets ads back, else stays."""
+    rows = [_row("move", "property_notes", 1, ME, "note:1", ad=2, ids=(7,)),
+            _row("move", "property_notes", 2, ME, "note:2", ad=1, ids=(8,)),
+            _row("move", "property_notes", 3, ME, "note:3", origin=R1, ids=(9,)),
+            _row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5, 6),
+                 live=True, stage=4),
+            _row("move", "collection_properties", 50, ME, "collection:50", origin=R2, ids=(4,)),
+            _row("move", "property_tags", 60, THEM, "tag:60")]
+    assert _where(_plan(rows, {2: R1, 4: R1, 3: None})) == {
+        "note:1": ("move", 2, (7,), None), "note:2": ("move", 1, (), None),
+        "note:3": ("move", 2, (9,), None), "pipeline": ("move", 2, (5, 6), None),
+        "collection:50": ("move", None, (), None), "tag:60": ("move", None, (), None)}
+
+
+def test_folds_are_recreated_where_they_came_from_only_while_their_twin_is_on_left():
+    """A fold from 20 (which gets ads back) is re-created there while its twin stands on `left`;
+    with the twin gone it is not ('gone'), but its carry row is spent. A fold of `left`'s own item
+    is re-created on `left` once the item it folded into leaves ('held' while it stays); a fold
+    from a property that gets nothing back is not routed."""
+    rows = [_row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("fold", "collection_properties", 50, ME, "fold:11", origin=R1, ids=(11,),
+                 twin=True, to=L),
+            _row("fold", "property_tags", 60, ME, "fold:12", origin=R1, ids=(12,), twin=False,
+                 to=L),
+            _row("fold", "property_pipeline", None, ME, "fold:13", origin=L, ids=(13,),
+                 twin=True, to=L, live=True, stage=3),
+            _row("fold", "property_tags", 61, ME, "fold:14", origin=R2, ids=(14,), twin=True,
+                 to=L)]
+    assert _where(_plan(rows, {2: R1})) == {
+        "pipeline": ("move", 2, (5,), None), "fold:11": ("recreate", 2, (11,), None),
+        "fold:12": ("recreate", 2, (12,), "gone"), "fold:13": ("recreate", None, (13,), None)}
+    # the card it folded into stays: the account still holds a card on `left`, nothing re-made
+    stays = [rows[0][:10] + (None, [], None), rows[3]]
+    assert _where(_plan(stays, {2: R1}))["fold:13"] == ("recreate", None, (), "held")
+
+
+def test_choices_override_only_the_acting_accounts_items_and_add_copies():
+    rows = [_row("move", "property_notes", 1, ME, "note:1", ad=2),
+            _row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("move", "property_pipeline", None, THEM, "pipeline", origin=R1, ids=(6,),
+                 live=False, stage=9),
+            _row("move", "collection_properties", 50, ME, "collection:50", ids=(4,))]
+    plan = _plan(rows, {2: R1, 3: None}, account=ME,
+                 choices={"note:1": (None, (3,)), "pipeline": (3, ()),
+                          "collection:50": (None, ())})
+    assert [(r.item, r.account_id, r.action, r.anchor, r.carry_ids) for r in plan] == [
+        ("note:1", ME, "move", None, ()), ("pipeline", ME, "move", 3, (5,)),
+        ("pipeline", THEM, "move", 2, (6,)), ("collection:50", ME, "move", None, ()),
+        ("note:1", ME, "copy", 3, ())]
+    # overriding the preselection spends the carry rows even when the item stays
+    plan = _plan(rows, {2: R1, 3: None}, account=ME, choices={"pipeline": (None, ())})
+    assert _where([r for r in plan if r.account_id == ME])["pipeline"] == (
+        "move", None, (5,), None)
+    assert _plan(rows, {2: R1}, account=None, choices={"pipeline": (None, ())})[1].anchor == 2
+
+
+def test_the_conflict_pass_never_lands_a_copy_or_a_fold_on_a_twin_and_no_dismissal_on_a_deal():
+    rows = [_row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("move", "collection_properties", 50, ME, "collection:50", origin=R1, ids=(4,)),
+            _row("move", "property_dismissals", 70, THEM, "dismissal"),
+            _row("fold", "property_pipeline", None, ME, "fold:13", origin=R1, ids=(13,),
+                 twin=True, to=L, live=False, stage=3),
+            _row("fold", "property_dismissals", 71, ME, "fold:14", origin=R1, ids=(14,),
+                 twin=True, to=L)]
+    plan = _plan(rows, {2: R1, 3: None}, account=ME,
+                 choices={"collection:50": (2, (None, 3))})
+    assert _where(plan) == {
+        "pipeline": ("move", 2, (5,), None),
+        "collection:50": ("copy", 3, (), None),
+        "dismissal": ("move", None, (), None),
+        "fold:13": ("recreate", 2, (13,), "held"),   # 20 gets my card back: no second one
+        "fold:14": ("recreate", 2, (14,), "card")}   # nor a dismissal where my live deal lands
+    copies = [(r.anchor, r.skipped) for r in plan if r.action == "copy"]
+    assert copies == [(None, None), (3, None)], "a copy to the property left, once its source went"
+
+
+def test_the_writes_run_in_order_and_spend_only_what_moved():
+    """Moves, copies, re-creations, the carry stamp, then the lift on `left` and every landing;
+    a route whose anchor did not move routes and spends nothing; counts as the dry run's. A move
+    that changes no row (its account holds the item where it would land: an origin active again)
+    is neither counted nor spends its carry rows."""
+    Route = carriers.Route
+    routes = [Route("property_notes", 1, ME, "move", 2, None, None, (7,), "note:1", None),
+              Route("property_pipeline", None, ME, "move", 2, R1, 4, (5,), "pipeline", None),
+              Route("property_tags", 60, ME, "move", 4, R2, None, (8,), "tag:60", None),
+              Route("property_notes", 1, ME, "copy", None, None, None, (), "note:1", None),
+              Route("collection_properties", 50, ME, "recreate", 2, R1, None, (11,), "fold:11",
+                    None),
+              Route("property_tags", 61, ME, "recreate", 2, R1, None, (12,), "fold:12", None,
+                    skipped="gone"),
+              Route("property_tags", 63, ME, "recreate", 4, R2, None, (13,), "fold:13", None)]
+    cur = _RouteCur()
+    counts = carriers.route_curation(cur, routes, left=L, landed={2: R1})
+    ran = [(f"{s.split()[0]} {s.split()[1 if s.startswith('UPDATE') else 2]}", p.get("to"))
+           for s, p in cur.ran]
+    assert ran == [("UPDATE property_notes", R1), ("UPDATE property_pipeline", R1),
+                   ("INSERT property_notes", L), ("INSERT collection_properties", R1),
+                   ("UPDATE property_merge_carries", None), ("UPDATE property_dismissals", None),
+                   ("UPDATE property_dismissals", None)]
+    assert cur.ran[4][1] == {"ids": [5, 7, 11, 12]}, "what rides an ad that did not move: nothing"
+    assert [p for _s, p in cur.ran[5:]] == [{"s": L}, {"s": R1}]
+    assert counts == {"note_moves": 1, "carry_rows": 2}
+    held = _RouteCur(held={("property_pipeline", None, ME)})
+    assert carriers.route_curation(held, routes, left=L, landed={2: R1}) == {
+        "note_moves": 1, "carry_rows": 1}
+    assert held.ran[4][1] == {"ids": [7, 11, 12]}, "the card that did not move keeps its row"
+
+
+@pytest.mark.usefixtures("ledger_carriers")
+def test_the_dry_run_counts_the_live_plan_per_property_left(monkeypatch):
+    """`curation_preview` plans exactly what the undo would: the group-scoped movers on the
+    property they sit on, the routing read along that merge's carry rows only."""
+    import toolkit.property_identity as pi
+    from tests._property_ledger import _Ledger
+
+    db = _Ledger({1: 10, 2: 20, 3: 20})
+    group = pi.merge_property_set(db, [10, 20], source="autodedup", reason="r")["data"][
+        "merge_group_id"]
+    seen: list[dict[str, Any]] = []
+    Route = carriers.Route
+    canned = [Route("property_notes", 1, ME, "move", 2, None, None, (), "note:1", None),
+              Route("property_pipeline", None, ME, "move", 3, R1, 4, (5,), "pipeline", None),
+              Route("property_tags", 61, ME, "recreate", 2, R1, None, (12,), "fold:12", None),
+              Route("property_tags", 62, ME, "move", None, None, None, (), "tag:62", None)]
+    monkeypatch.setattr(carriers, "curation_plan",
+                        lambda cur, **kw: seen.append(kw) or canned)
+    assert carriers.curation_preview(db, group, [3, 2, 1]) == {"carry_rows": 2, "note_moves": 1}
+    assert seen == [{"left": 10, "movers": {2: 20, 3: 20}, "group": group}]
+
+
+def test_every_routing_statement_is_in_the_prepare_corpus_and_none_deletes():
+    corpus = {_n(i.sql) for i in sql_corpus.discover(resolve_imports=True)}
+    assert not [_n(s)[:100] for s in carriers.ROUTE_SQL if _n(s) not in corpus]
+    assert not [s for s in carriers.ROUTE_SQL if re.search(r"\bDELETE\b", s, re.I)]
+    assert set(carriers._MOVE_SQL) == set(carriers._INSERT_SQL) == {
+        "property_notes", "property_pipeline", "collection_properties", "property_tags",
+        "property_dismissals"}

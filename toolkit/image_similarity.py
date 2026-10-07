@@ -126,6 +126,7 @@ def compare_listing_images(
     force_refresh: bool = False,
     listing_id_a: int | None = None,
     listing_id_b: int | None = None,
+    estimation_run_id: int | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
@@ -175,11 +176,17 @@ def compare_listing_images(
             data_freshness = _max_listing_last_seen(conn, lid_a, lid_b)
         else:
             comparison, model, cost_usd, n_a, n_b, data_freshness = (
-                _produce_comparison(conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images)
+                _produce_comparison(
+                    conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images,
+                    estimation_run_id=estimation_run_id,
+                )
             )
     else:
         comparison, model, cost_usd, n_a, n_b, data_freshness = (
-            _produce_comparison(conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images)
+            _produce_comparison(
+                conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images,
+                estimation_run_id=estimation_run_id,
+            )
         )
 
     return {
@@ -259,6 +266,8 @@ def _produce_comparison(
     lid_a: int,
     lid_b: int,
     n_images: int,
+    *,
+    estimation_run_id: int | None = None,
 ) -> tuple[dict[str, Any], str, float | None, int, int, str | None]:
     if not image_storage.is_configured():
         raise ImageCompareError(
@@ -304,6 +313,7 @@ def _produce_comparison(
         system=system,
         tools=[RECORD_IMAGE_COMPARISON_TOOL],
         model=model,
+        estimation_run_id=estimation_run_id,
     )
     comparison = _extract_tool_call(response.tool_calls)
 

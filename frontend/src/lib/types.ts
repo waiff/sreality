@@ -122,7 +122,6 @@ export interface ListingPublic {
 
 export interface ListingSnapshotPublic {
   id: number;
-  sreality_id: number;
   /* The owning listing's SURROGATE id (listing_snapshots_public.listing_id,
    * migration 334/343). Group/join snapshots on this, not sreality_id — a
    * post-Gate-2 non-sreality listing's snapshots all carry NULL sreality_id
@@ -130,11 +129,6 @@ export interface ListingSnapshotPublic {
   listing_id: number;
   scraped_at: string;
   price_czk: number | null;
-  /* Migration 084 — projected from listing_snapshots.raw_json so the
-   * HistoryBlock can flag description changes between snapshots
-   * without us materialising another typed column on the history
-   * table. Null on snapshots whose raw_json lacks a text.value. */
-  description: string | null;
 }
 
 export interface ListingFreshnessCheckPublic {
@@ -903,23 +897,6 @@ export interface PipelineStage {
   code: string | null;
 }
 
-/* The canonical (resolved) broker for a card, with the contact the hover box
- * shows. broker_id links to the broker page. NULL when the listing has no
- * resolved broker (e.g. private bazos sellers). */
-export interface PipelineCardBroker {
-  broker_id: number;
-  display_name: string | null;
-  firm_label: string | null;
-  /* NULL both when no contact exists AND when the caller isn't an admin — the
-   * /brokers API masks the value columns per session. `has_*` is the un-masked
-   * signal that separates the two, so the card can say "admin only" instead of
-   * implying the broker is unreachable. */
-  email: string | null;
-  phone: string | null;
-  has_email: boolean;
-  has_phone: boolean;
-}
-
 /* A board card = the property_pipeline row joined to its property's display
  * fields (from properties_public) for rendering on the kanban. */
 export interface PipelineBoardCard {
@@ -1549,7 +1526,6 @@ export interface CreateManualEstimateIn {
   author: string;
   source_kind: ManualEstimateSourceKind;
   notes?: string | null;
-  updated_by?: string | null;
 }
 
 export interface UpdateManualEstimateIn {
@@ -1557,7 +1533,6 @@ export interface UpdateManualEstimateIn {
   author?: string;
   source_kind?: ManualEstimateSourceKind;
   notes?: string | null;
-  updated_by?: string | null;
 }
 
 // scraper_health_checks() RPC (migration 088)
@@ -1577,39 +1552,6 @@ export interface ScraperHealthChecks {
   checks: ScraperHealthCheck[];
 }
 
-/* ----- Operator merge mechanics (multi-portal) --------------------------- */
-
-/* One already-merged property (survivor) in the merged-properties audit
- * browse. `source_count` is every
- * child listing ever grouped under it (active or delisted); `active_count` the
- * still-live subset; `sources` the distinct portals those children span. */
-export interface MergedProperty {
-  property_id: number;
-  sreality_id: number | null;   // representative listing (app-wide listing identity)
-  source_count: number;         // listings merged together (the range filter's axis)
-  distinct_site_count: number;  // distinct portals
-  active_count: number;         // children still is_active
-  sources: string[];            // distinct portal keys, e.g. ['bazos','sreality']
-  category_main: string | null;
-  category_type: string | null;
-  disposition: string | null;
-  area_m2: number | null;
-  estate_area: number | null;
-  price_czk: number | null;
-  /* The one server-composed place label (location_display_label), same as every
-   * other surface. Replaced `district` + `street`, which came from two different
-   * children of the merge and were rendered by nothing. */
-  display_label: string | null;
-  first_seen_at: string | null;
-  last_seen_at: string | null;
-}
-
-export interface MergedPropertiesResponse {
-  data: MergedProperty[];
-  total: number;       // total matching the filter (the page is capped by `limit`)
-  returned: number;    // rows on this page
-}
-
 /* One row of property_sources_public — one advert of a property: a row of the
  * property page's merged-adverts section. */
 export interface PropertySource {
@@ -1626,15 +1568,6 @@ export interface PropertySource {
   price_czk: number | null;
   first_seen_at: string;
   last_seen_at: string;
-}
-
-/* One row of property_status_events_public — a property-grain log of
- * properties.is_active flips (migration 392, trigger-populated). Drives the
- * price-history chart's inactive-period gaps: lib/priceHistory.buildActiveWindows. */
-export interface PropertyStatusEventPublic {
-  property_id: number;
-  is_active: boolean;
-  event_at: string;
 }
 
 /* One registered sale, as `sold_comparables(p_lat, p_lng, p_radius_m)` answers

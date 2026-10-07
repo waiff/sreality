@@ -19,15 +19,16 @@
  * A withdrawal is a newer `unsure`. The lane reads the newest word on its next
  * pass. It never splits a property (decision 9) and merges only inside its
  * scope, so where a ruling and a property disagree the row offers the existing
- * split (the operator's split statement, `POST /properties/{id}/split`, as the
- * property page's row split sends it) or merge (`POST /properties/merge`), each
- * behind a second click. */
+ * split (a link to the property page's split dialog with the two adverts on two
+ * letters, MS18) or merge (`POST /properties/merge`, behind a second click that
+ * says how many "Různé" rulings it takes back, MS12). */
 
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ErrorBanner from '@/components/ErrorBanner';
+import MergeTakenBack from '@/components/MergeTakenBack';
 import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
@@ -50,13 +51,9 @@ import {
 } from '@/components/autodedup/VerdictButtons';
 import {
   ApiError,
-  DETACH_REASON_MAX,
-  fetchPropertyOrigins,
   getAutodedupRulings,
   mergePropertySet,
   postAutodedupVerdict,
-  splitProperty,
-  splitRefusal,
   type AutodedupMember,
   type AutodedupVerdictInput,
   type AutodedupVerdictRow,
@@ -71,7 +68,8 @@ import {
 import { fmtAbsolute, fmtCount } from '@/lib/format';
 import { useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { propertyPath } from '@/lib/listingUrl';
-import { inzeratu, mergedAdvertsKeys, refreshAfterSplit, unmovedReason } from '@/lib/mergedAdverts';
+import { mergedAdvertsKeys, pushMergeReceipt, refreshAfterSplit, splitPath } from '@/lib/mergedAdverts';
+import { useMergePreview } from '@/lib/useMergeProperties';
 import { fetchListingsForListingIds } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
 import type { ListingPublic } from '@/lib/types';
@@ -704,80 +702,36 @@ function CorrectionBar({
 
 /* ------------------------------------------------------------ the consequence */
 
-const STALE_PROPERTY =
-  'Nemovitost se mezitím změnila. Seznam se načetl znovu — rozhodněte podle aktuálního stavu.';
-
-/* Why the split wrote nothing, in the page's words: an advert that cannot move
- * says why (`unmovedReason`), a changed property says so; anything else raw. */
-function splitErrorText(err: Error): string {
-  const refusal = splitRefusal(err);
-  if (err.message === STALE_PROPERTY || refusal?.code === 'stale') return STALE_PROPERTY;
-  const stuck = refusal?.code === 'cannot_move' ? refusal.ids[0] : null;
-  if (stuck && typeof stuck === 'object' && 'outcome' in stuck) {
-    return `Nelze oddělit: ${unmovedReason(String((stuck as { outcome: unknown }).outcome))}.`;
-  }
-  return `Chyba: ${err.message}`;
-}
-
 /* A ruling production does not reflect, with the existing tool that would: a
- * negative on one property is split (the engine never splits, decision 9); a
- * `same` on two properties is merged. Neither is a ruling of its own making —
- * both routes write their ruling as they always do. */
+ * negative on one property opens its split dialog (the engine never splits,
+ * decision 9) with the two adverts on two letters; a `same` on two properties
+ * is merged, a merge that takes back the "Různé" rulings between them (MS12),
+ * counted before the second click. Neither is a ruling of its own making. */
 function Consequence({ row }: { row: RulingPairRow }) {
   const qc = useQueryClient();
-  const [armed, setArmed] = useState<{ kind: 'detach'; listing: number } | { kind: 'merge' } | null>(
-    null,
-  );
-  const [reason, setReason] = useState('');
+  const navigate = useNavigate();
+  const [armed, setArmed] = useState(false);
   const [done, setDone] = useState<string | null>(null);
-  const act = useMutation({
-    mutationFn: async () => {
-      if (!armed) return null;
-      if (armed.kind === 'merge') {
-        const res = await mergePropertySet([row.property_lo!, row.property_hi!]);
-        return `Sloučeno do nemovitosti #${res.survivor_id}.`;
-      }
-      /* The one split statement (E919), as the property page's row split sends it:
-       * every advert the property holds, read at the click, the named one leaving and
-       * the rest not ruled among themselves. The count the confirm named is the
-       * operator's view; a property that has changed since is re-read, never ruled. */
-      const origins = await fetchPropertyOrigins(row.property_lo!);
-      const adverts = origins.adverts.map((a) => a.listing_id);
-      if (row.adverts_on_property != null && adverts.length !== row.adverts_on_property) {
-        throw new Error(STALE_PROPERTY);
-      }
-      const res = await splitProperty(origins.property_id, {
-        adverts,
-        separate: [[armed.listing]],
-        keep_together: false,
-        ...(reason.trim() ? { reason: reason.trim() } : {}),
-      });
-      const left = res.units.find((u) => u.role === 'separated');
-      return left && left.moved.length > 0
-        ? `Inzerát #${armed.listing} oddělen → nemovitost #${left.property_id}.`
-        : 'Nic se nepřesunulo — inzerát už je oddělen.';
-    },
-    onSuccess: (text) => {
-      setDone(text);
-      setArmed(null);
-      setReason('');
+  const negative = NEGATIVE_VERDICTS.includes(row.verdict);
+  const standing = row.status === 'standing' && row.property_lo != null && row.property_hi != null;
+  const needsSplit = standing && negative && row.together_now;
+  const needsMerge = standing && row.verdict === 'same' && !row.together_now;
+  const preview = useMergePreview(armed && needsMerge ? [row.property_lo!, row.property_hi!] : []);
+  const merge = useMutation({
+    mutationFn: () => mergePropertySet([row.property_lo!, row.property_hi!]),
+    onSuccess: (res) => {
+      pushMergeReceipt(res, (id) => navigate(ROUTES.property.build({ propertyId: id })));
+      setDone(`Sloučeno do #${res.survivor_id}.`);
+      setArmed(false);
       refreshAfterSplit(qc);
       qc.invalidateQueries({ queryKey: autodedupKeys.all });
     },
-    onError: (e) => {
-      if (e.message === STALE_PROPERTY || splitRefusal(e)?.code === 'stale') {
-        refreshAfterSplit(qc);
-        qc.invalidateQueries({ queryKey: autodedupKeys.all });
-      }
-    },
   });
 
-  if (row.status !== 'standing' || row.property_lo == null || row.property_hi == null) return null;
-  const negative = NEGATIVE_VERDICTS.includes(row.verdict);
-  const needsSplit = negative && row.together_now;
-  const needsMerge = row.verdict === 'same' && !row.together_now;
   if (!needsSplit && !needsMerge) return done ? <p className="mt-2 text-[0.75rem]">{done}</p> : null;
-  const many = (row.adverts_on_property ?? 2) > 2;
+  /* The count is read before the merge is offered: Enter on the focused
+   * button waits for it rather than merging unseen. */
+  const counting = preview.isPending;
 
   return (
     <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)]/40 px-3 py-2">
@@ -786,67 +740,48 @@ function Consequence({ row }: { row: RulingPairRow }) {
           ? `Rozhodnuto „Různé“, ale inzeráty jsou teď v jedné nemovitosti (#${row.property_lo}). Engine sám nerozděluje.`
           : `Rozhodnuto „Stejné“, ale inzeráty jsou v různých nemovitostech (#${row.property_lo}, #${row.property_hi}).`}
       </p>
-      {!armed && (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {needsSplit ? (
-            [row.listing_lo, row.listing_hi].map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setArmed({ kind: 'detach', listing: id })}
-                className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-3 py-1 text-[0.78rem] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)]"
-              >
-                Rozdělit: oddělit #{id}
-              </button>
-            ))
-          ) : (
-            <button
-              type="button"
-              onClick={() => setArmed({ kind: 'merge' })}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-sage)] px-3 py-1 text-[0.78rem] text-[var(--color-sage)] hover:bg-[var(--color-sage-soft)]"
-            >
-              Sloučit #{row.property_lo} a #{row.property_hi}
-            </button>
-          )}
+      {needsSplit ? (
+        <div className="mt-2">
+          <Link
+            to={splitPath(row.property_lo!, { [row.listing_lo]: 'A', [row.listing_hi]: 'B' })}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-3 py-1 text-[0.78rem] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)]"
+          >
+            Rozdělit na stránce nemovitosti #{row.property_lo}
+          </Link>
         </div>
-      )}
-      {armed && (
+      ) : !armed ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setArmed(true)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-sage)] px-3 py-1 text-[0.78rem] text-[var(--color-sage)] hover:bg-[var(--color-sage-soft)]"
+          >
+            Sloučit #{row.property_lo} a #{row.property_hi}
+          </button>
+        </div>
+      ) : (
         <div role="group" aria-label="Potvrdit" className="mt-2">
           <p className="text-[0.78rem] text-[var(--color-ink-2)]">
-            {armed.kind === 'merge'
-              ? `Sloučit nemovitosti #${row.property_lo} a #${row.property_hi} do starší z nich?`
-              : `Oddělit inzerát #${armed.listing} z nemovitosti #${row.property_lo}?${
-                  many
-                    ? ` Nemovitost má ${fmtCount(row.adverts_on_property)} ${inzeratu(row.adverts_on_property ?? 0)}: oddělený inzerát bude zapsán jako různý od všech, které zůstanou.`
-                    : ''
-                }`}
+            {`Sloučit nemovitosti #${row.property_lo} a #${row.property_hi} do starší z nich?`}{' '}
+            <MergeTakenBack preview={preview} />
           </p>
-          {armed.kind === 'detach' && (
-            <textarea
-              aria-label="Důvod rozdělení (nepovinné)"
-              placeholder="Důvod (nepovinné)"
-              maxLength={DETACH_REASON_MAX}
-              rows={2}
-              value={reason}
-              disabled={act.isPending}
-              onChange={(e) => setReason(e.target.value)}
-              className="mt-2 block w-full max-w-[36rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.78rem]"
-            />
-          )}
           <div className="mt-2 flex gap-2">
             <button
               type="button"
               autoFocus
-              disabled={act.isPending}
-              onClick={() => act.mutate()}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-ink-2)] px-3 py-1 text-[0.78rem] disabled:opacity-50"
+              disabled={merge.isPending}
+              aria-disabled={counting}
+              onClick={() => !counting && merge.mutate()}
+              className={`rounded-[var(--radius-sm)] border border-[var(--color-ink-2)] px-3 py-1 text-[0.78rem] disabled:opacity-50 ${
+                counting ? 'opacity-50' : ''
+              }`}
             >
-              {act.isPending ? 'Probíhá…' : armed.kind === 'merge' ? 'Ano, sloučit' : 'Ano, rozdělit'}
+              {merge.isPending ? 'Probíhá…' : 'Ano, sloučit'}
             </button>
             <button
               type="button"
-              disabled={act.isPending}
-              onClick={() => setArmed(null)}
+              disabled={merge.isPending}
+              onClick={() => setArmed(false)}
               className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[0.78rem] text-[var(--color-ink-2)]"
             >
               Zrušit
@@ -854,9 +789,9 @@ function Consequence({ row }: { row: RulingPairRow }) {
           </div>
         </div>
       )}
-      {act.error && (
+      {merge.error && (
         <p role="alert" className="mt-2 text-[0.75rem] text-[var(--color-brick)]">
-          {splitErrorText(act.error)}
+          Chyba: {(merge.error as Error).message}
         </p>
       )}
       {done && <p className="mt-2 text-[0.75rem] text-[var(--color-ink-2)]">{done}</p>}

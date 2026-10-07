@@ -1,8 +1,7 @@
 # CLAUDE.md
 
-**The project brain** — standing context for any session that touches this repo. This file
-holds the hard rules only; the WHY (full rationale, edge cases, incident history) lives in
-`docs/architecture.md`, and operational how-tos live in on-demand skills under
+This file holds the hard rules only; the WHY (full rationale, edge cases, incident history)
+lives in `docs/architecture.md`, and operational how-tos live in on-demand skills under
 `.claude/skills/`. Read the relevant one before changing code it governs. When a rule here
 keeps getting broken, fix it here — don't repeat the correction by hand.
 ## What this project is
@@ -13,13 +12,10 @@ hourly sreality.cz scraper and now collects, enriches, and reasons over property
 listing history.
 
 Data layered together:
-- **Scraped listings** from nine portals — **sreality** (JSON v1 API, the steady hourly
-  ingest), **bazos** (HTML crawler), **bezrealitky** (GraphQL API), **idnes** (structured
-  HTML), **mmreality** (Vue-embedded JSON, proxied), **remax** (structured HTML),
-  **ceskereality** (structured HTML), **realitymix** (structured HTML, Centrum.cz aggregator),
-  and **maxima** (structured HTML) — landing in one `listings`/`listing_snapshots`
-  contract with one canonical vocabulary. Per-portal ingest detail: `docs/architecture.md`
-  § Data sources.
+- **Scraped listings** from nine portals — sreality (JSON v1 API), bazos (HTML crawler), bezrealitky (GraphQL
+  API), mmreality (Vue-embedded JSON, proxied), idnes / remax / ceskereality / maxima (structured HTML) and
+  realitymix (structured HTML, Centrum.cz aggregator) — landing in one `listings`/`listing_snapshots` contract
+  with one canonical vocabulary. Per-portal ingest detail: `docs/architecture.md` § Data sources.
 - **Geo data** — coordinates, districts, ČÚZK/RÚIAN admin boundaries, transit geometry, OSM amenities.
 - **Operator-supplied** — curated city-quality indexes, collections, building decompositions, estimation inputs.
 - **Derived** — condition scores, velocity, statistics, LLM summaries / comparisons / value estimates.
@@ -32,8 +28,7 @@ any saved filter, and more (ROADMAP.md is the sequencing source of truth).
 
 Surfaces: an analytical **toolkit + FastAPI service** (Railway), a **React SPA** (Railway,
 reads public data directly and routes every write through the API), and a **Chrome extension**
-that overlays estimates on portal pages. Multi-portal rows sit behind a thin `properties`
-parent (migration 091) so one real-world property seen on several portals can be grouped.
+that overlays estimates on portal pages.
 
 A **dark-by-default always-on worker** (`scraper/realtime_worker.py`, a 2nd Railway service from the SAME image, gated by
 `REALTIME_WORKER_ENABLED`) runs every lane registered in `_amain`: the latency layer over the GH crons (newest-first probes,
@@ -62,11 +57,10 @@ When in doubt which territory a task is in, ask. Don't import frontend deps into
 ## Working with the operator
 
 The owner works locally in **VS Code on WSL2 Ubuntu** with a full terminal, local Git/Python,
-and authenticated `gh` — so suggest and run local commands (tests, git, `gh`, debugging).
-Production still runs in the cloud (Actions + Railway); local is for dev/test/debug. The
-operator is **non-technical by training but learns fast** — explain the *why*, define jargon
-on first use ("upsert", "JWT", "RLS", "draft PR"), and give click-by-click steps for browser
-tasks (Supabase SQL editor, GitHub settings pages).
+and authenticated `gh` — so suggest and run local commands (tests, git, `gh`, debugging). The
+operator is **non-technical by training but learns fast** — explain the *why*, define jargon on first
+use ("upsert", "JWT", "RLS", "draft PR"), and give click-by-click steps for browser tasks (Supabase
+SQL editor, GitHub settings pages).
 ## Git workflow and pull requests
 
 Short-lived branches, merge via PR. **Never push directly to `main`** — Railway auto-deploys
@@ -75,8 +69,7 @@ from `main`, so a merged PR *is* the deploy; PR + branch protection + CI is the 
 - **Start:** `git checkout main && git pull && git checkout -b <branch>`.
 - **One PR = one purpose.** Don't mix a feature with an unrelated docs/ROADMAP rewrite (a
   *large* ROADMAP restructure is its own PR; small phase-entry bookkeeping rides with the work).
-- **End** by pushing the branch + opening a PR; return the URL. Commit messages / PR bodies
-  follow the harness footer convention.
+- **End** by pushing the branch + opening a PR; return the URL.
 - **If a PR changes behavior that a skill or `docs/architecture.md` documents, update that
   document in the same PR.** A stale skill is worse than a missing one — sessions trust it
   and load it by default. CI warns (non-blocking) when this is skipped for a mapped path.
@@ -98,7 +91,6 @@ operator can watch, and work to completion.
 ## Fetching live state (fetch, don't ask)
 
 Dynamic state lives outside Git — don't ask, fetch it:
-- Recent activity → `git log --oneline -10`; branch / tree → `git status`, `git branch --show-current`.
 - Migrations on disk → `ls migrations/ | tail -5`; Actions runs → `gh run list --limit 10`.
 - **DB reads (counts, freshness, schema, verification SELECTs) → `psql "$SUPABASE_DB_URL" -c "…" | head`**,
   NOT the Supabase MCP (its verbose output persists in context) — but when `psql` or that env
@@ -107,18 +99,15 @@ Dynamic state lives outside Git — don't ask, fetch it:
 ## Roadmap maintenance
 
 `ROADMAP.md` is a **<120-line index**; phase content lives in `roadmap/<track>.md` and completed
-work in `roadmap/archive.md`. After shipping meaningful work, in the SAME PR update **only** the
-relevant `roadmap/<track>.md` (move a bullet to done, add new "next" items) + the index's status
-cell if the track's status changed — **never open all track files to make one edit**. A large
-restructure is its own PR.
+work in `roadmap/archive.md`. **Read the index only; open a track file only to edit it.** After
+shipping meaningful work, in the SAME PR update **only** the relevant `roadmap/<track>.md` (move a
+bullet to done, add new "next" items) + the index's status cell if the track's status changed.
 ## Context discipline
 
 - Prefer `grep` / targeted line-range reads over whole-file reads for files >500 lines (this file,
   most `toolkit/` / `api/` / `scraper/` modules, any `roadmap/` track).
-- Read the `ROADMAP.md` index only; open a `roadmap/<track>.md` only when editing that track.
 - Summarize tool output instead of quoting it back; delegate verbose searches to subagents so their
   output stays out of the main context.
-- Load a skill (`database`, `toolkit-api`, `llm-pipelines`, `scraper-ops`) when its trigger fits, rather than re-deriving from memory.
 ## Architectural rules (do not violate without asking)
 
 **Numbers are cited by code/tests/design-docs — never renumber.** Full rationale, edge cases and incident
@@ -176,10 +165,10 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band, never inline at insert (new rows land
     `property_id` NULL; straggler-attach births a singleton).** Every merge, operator or engine, goes through the **link mechanics**: `toolkit/property_identity.py` is the single merge chokepoint,
     two public writers (`merge_property_set` → a private `_merge_pair` per retired property; `detach_listings`, set-shaped) — it re-points `listings.property_id`,
-    soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split is ONE
-    call, and so is a group undo (`merge_group_id=`) — no replay), carries every property-anchored operator-state row through ONE ordered list,
-    `PROPERTY_CARRIERS` (rule #18), brings every touched property current once per call (`properties_changed`, the dirty drain's after-step), and enforces **category compatibility** (`CategoryClash`:
-    sale≠rent, flat≠house — except the sanctioned **dům↔komerční**). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
+    soft-retires the loser, logs `property_merge_events` (read by `detach_listings`: each advert back to its origin or a refusal, e.g. `moved_since`; a split by letters sends one that cannot go
+    home to a new property (`new=`) and itself rules only `different`, across letters — a letter's join is a merge; a split is ONE call, and so is a group undo (`merge_group_id=`) — no replay; an operator merge rules `same` every negative pair it joins). A property shows ONE **canonical ad**, rank 1 of `property_canonical_listings` (migration 588): active first,
+    then with a map point, then the earliest first seen (active ads) / latest last seen (inactive ads), then portal trust, then id; its six amenities are a union (yes if any ad says yes). The chokepoint enforces **category compatibility** over the set's ads, a contentless record never counting (`CategoryClash`:
+    sale≠rent, flat≠house — except the sanctioned cross-type PAIRS: any two of **dům, komerční, pozemek**, and **byt↔komerční**; pairs, never classes, so byt↔dům stays refused). `db.presence_candidates` / `active_count` are source-scoped. **Merges are ordered by the
     operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, only inside `app_settings.autodedup_apply_scope`, never a split):
     the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`); batch `mode=apply`/`unapply` stay until C2 (undo after C2: an open
     operator decision, `roadmap/autodedup.md`); until then the brake is interval 0, then `mode=unapply` — its only detach besides `retire_legacy=1` (until W8:
@@ -197,11 +186,11 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).
 18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections`, `tags`, `property_notes`, all keyed on `property_id`; migration 202). Every
-    property-anchored operator-state row follows a merge through ONE ordered list, `PROPERTY_CARRIERS` (`toolkit/property_carriers.py`: asset link, curation
+    property-anchored operator-state row follows a merge through ONE ordered list, `PROPERTY_CARRIERS` (`toolkit/property_carriers.py`: curation
     tables incl. `notification_dispatches`, pipeline (rule #22), **dismissals** (mig 536: lift, never delete; a LIVE deal wins)), run inside the merge
     transaction, so no such row orphans onto `merged_away`; every other column naming a property sits in `NOT_CARRIED` with its reason, and a census (offline
     over migrations, live over the replayed schema) fails on a column in neither. A SET/APPEND table = one `CurationTable(...)` line; any other shape = one
-    adapter. A detach that reactivates a property gives back its pipeline card and asset link; curation, dispatches and dismissals stay on the property left.
+    adapter. Each merge writes one `property_merge_carries` row per curation row it moved or folded (alerts none); a detach routes it back (`route_curation`: a note with its ad, the rest by its carry rows, folds re-created; a split's user picks per item, copies allowed).
     Collections carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via `listing_detail_queue`** (migration 105).
     Index-walk (`--index-only`) walks the full index, `portal_runner.reconcile_sightings` (touch + enqueue) + end-gated nomination (rule #3); detail-drain
@@ -221,7 +210,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     `supports_complete_walk` is posture. A per-portal need is a `Portal` seam, never an `if source ==`; seams + owed: `docs/architecture.md` § rule 21.
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline` holds ≤1 card per property at one
     `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of a row at the entry stage. It has its OWN carrier in `PROPERTY_CARRIERS` (over
-    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one) + a lossless restore when a detach reactivates the merged property.
+    `toolkit/pipeline_identity.py`; TERMINAL-AWARE — a live stage always beats a closed one); the losing card is folded into the carry record (rule #18).
     Writes go through the JWT-gated API (`tenant_conn`); every SPA card write (Browse cards/rows, listing header, kanban drag + trash) is ONE hook,
     `lib/usePipelineCard` (id per call), over ONE write policy, `lib/useOptimisticWrite` (`lib/pipelineCache`: patches + re-read list). `<PipelineMark>` +
     `<PipelineStageMenu>` serve Browse + the listing header; the kanban (no mark; drag, own trash and confirm) and the extension (glyph, stage `<select>`) keep
@@ -255,27 +244,29 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     (browse/map/feed/watchdog/dedup) serve a listing only when its location is resolved or determined foreign — ONE
     predicate (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id surfaces stay reachable. Invariant:
     **every served listing has a row, every active Czech listing has a town** (`location_town_coverage` red until
-    zero; foreign is a determination, never a default); a field is added only by operator ruling (katastr_kod,
-    2026-09) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
+    zero; foreign is a determination, never a default); a field is added only by operator ruling (katastr_kod
+    2026-09, ulice_id 2026-10) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 ## Coding conventions
 
-- Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.
+- Type hints on every signature. `requests` for HTTP, `psycopg` for DB — don't add `httpx` / `aiohttp` / `sqlalchemy` / `supabase-py` lightly (rule #7).
 - No comments unless the WHY is non-obvious; no multi-paragraph docstrings (one-liners fine).
-- `requests` for HTTP, `psycopg` for DB — don't add `httpx` / `aiohttp` / `sqlalchemy` / `supabase-py` lightly.
 - Small single-purpose files: `<portal>_client.py` = HTTP only, `parser.py` / `<portal>_parser.py` = payload→row only;
   `db.py` is for DB I/O — put new policy beside its caller (the policy + dead sweep it still holds are owed, scraper track).
 ## How to test changes
 
 - **Locally:** one-time `pip install -e ".[dev,api,geo]"`, then `pytest -q` (or `pytest tests/path -q`).
   Interpreter is `python3`. `scripts/test-summary.sh` runs quiet pytest + prints only failures. Mirrors CI.
-- **CI:** every push runs `.github/workflows/test.yml` (`gh run watch`, or `scripts/logs.sh <run-id> [pattern]`
-  to fetch pre-filtered logs) — CI + branch protection is the autopilot safety net.
+- **CI:** every push runs `.github/workflows/test.yml` (`gh run watch`, or `scripts/logs.sh <run-id> [pattern]` for pre-filtered logs).
 - No-DB end-to-end: `--dry-run`. Single listing: `--detail-only <id>`. Small live run: `--limit 10`.
 ## Secrets
 
 Never commit secrets (`.env` is gitignored). API keys are **backend-only** — never `VITE_*`-prefix a backend
-secret (the frontend build must not see it). **Full env-var / secrets reference** (DB, R2, LLM, maps, API,
-notifications, scraper orchestration, frontend build-time): the `toolkit-api` skill.
+secret (the frontend build must not see it). **Full env-var / secrets reference:** the `toolkit-api` skill.
+## Agent skills
+
+- **Issue tracker:** GitHub Issues on this PUBLIC repo, via `gh` — always with `--json` (plain `gh issue view` / `gh pr view` exit 1 here). See `docs/agents/issue-tracker.md`.
+- **Triage labels:** the five default role names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+- **Domain docs:** single-context — root `GLOSSARY.md` + `docs/adr/`; the numbered rules above bind as ADRs do. See `docs/agents/domain.md`.
 ## What is explicitly out of scope right now
 
 - **Team accounts + user-admin surfaces** — per-user auth is LIVE, not out of scope (Supabase
@@ -288,7 +279,6 @@ notifications, scraper orchestration, frontend build-time): the `toolkit-api` sk
 ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`);
 nor are the email/Telegram channels (rule #16). Don't start out-of-scope work without explicit direction.
 ## Where the detail lives
-
 | Need | Load |
 | --- | --- |
 | SQL, migrations, connection modes, Supabase MCP, schema conventions | `.claude/skills/database` |
@@ -298,3 +288,4 @@ nor are the email/Telegram channels (rule #16). Don't start out-of-scope work wi
 | Dashboards, admin panels, apps, tools — interface/UI design craft | `.claude/skills/interface-design` |
 | Full rule rationale, per-portal data sources, territory deep-dives | `docs/architecture.md` |
 | Sequencing / what's next | `ROADMAP.md` → `roadmap/<track>.md` |
+| Vocabulary: property, ad, canonical ad, merge, split, survivor, curation | `GLOSSARY.md` |

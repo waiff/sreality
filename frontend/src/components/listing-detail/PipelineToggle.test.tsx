@@ -89,6 +89,20 @@ describe('<PipelineToggle>', () => {
     await waitFor(() => expect(api.addPipelineCard).toHaveBeenCalledWith(42));
   });
 
+  /* MS16: a failed read is not "out of the pipeline" — offering "Přidat" there
+     would add a card the board may already hold. */
+  it('offers a retry instead of the add verb when the read fails', async () => {
+    vi.mocked(queries.fetchPipelineMembers).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderToggle();
+    const retry = await screen.findByRole('button', { name: /Pipeline se nepodařilo načíst/ });
+    expect(screen.queryByTitle('Přidat do pipeline')).toBeNull();
+
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(MEMBERS);
+    fireEvent.click(retry);
+    expect(await screen.findByRole('button', { name: /V pipeline/ })).toBeInTheDocument();
+    expect(api.addPipelineCard).not.toHaveBeenCalled();
+  });
+
   it('changes the stage through the shared menu', async () => {
     vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(MEMBERS);
     renderToggle();

@@ -1,14 +1,19 @@
-"""Every property-anchored operator-state row follows a merge and a detach, executed through the
-public writers (`merge_property_set`, `detach_listings`) against the replayed schema: one test
-per carrier, each over two accounts, each proving the retired property is left holding nothing;
-then the live census — every foreign key to `properties` and every `%property_id%` column of the
-replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`); then the after-step
-(`properties_changed`: rollup, Browse row, broker queue) both writers run; then a set detach's
-rulings. Runs in CI's migrations job with DB_RAILS_REQUIRED=1; every test rolls back."""
+"""Every property-anchored operator-state row follows a merge, executed through the public writer
+(`merge_property_set`) against the replayed schema: one test per carrier, each over two accounts,
+each proving the retired property is left holding nothing, every merge checked against MS14's
+count invariant over the carry record (`_merged`), and a detach routing every item back where it
+came from (MS17); the receipt, the brake's routing along the undone merge's own carry rows and
+its dry run; then the live census — every foreign key to `properties` and every `%property_id%`
+column of the replayed schema is carried (`PROPERTY_CARRIERS`) or named (`NOT_CARRIED`); then the
+after-step (`properties_changed`: rollup, Browse row, broker queue) both writers run; then a set
+detach, which rules nothing. Runs in CI's migrations job with DB_RAILS_REQUIRED=1; every test
+rolls back."""
 
 from __future__ import annotations
 
+import itertools
 import uuid
+from collections import Counter
 from typing import Any
 
 import pytest
@@ -26,14 +31,12 @@ from tests._live_property import (  # `cur` is the fixture
     _tag,
     cur,
 )
-from toolkit.property_carriers import NOT_CARRIED, carried_columns
+from toolkit.property_carriers import NOT_CARRIED, carried_columns, curation_preview
 from toolkit.property_identity import detach_listings, merge_property_set
 
 pytestmark = REQUIRED_DB
 
-# The current-state tables a merge re-points (rule 18, 22, migration 536). The two ledgers it
-# also writes, property_pipeline_events and asset_membership_events, name the retired property
-# by design: a detach replays them.
+# The current-state tables a merge re-points (rule 18, 22, migration 536).
 _CARRIED = (
     "collection_properties",
     "property_tags",
@@ -51,7 +54,7 @@ def accounts(cur: Any) -> tuple[uuid.UUID, uuid.UUID]:
 
 
 def _require(ok: bool, why: str) -> None:
-    # Not `assert`: a strict xfail(raises=AssertionError) must not swallow a broken setup.
+    # Not `assert`: a seed that did not take is a broken test, not a failed claim.
     if not ok:
         pytest.fail(why)
 
@@ -70,27 +73,122 @@ def _left_on(cur: Any, pid: int) -> dict[str, int]:
     for table in _CARRIED:
         cur.execute(f"SELECT count(*) FROM {table} WHERE property_id = %s", (pid,))
         out[table] = int(cur.fetchone()[0])
-    cur.execute("SELECT count(*) FROM properties WHERE id = %s AND asset_id IS NOT NULL", (pid,))
-    out["properties.asset_id"] = int(cur.fetchone()[0])
     return out
 
 
-def _merged(cur: Any, survivor: int, retired: int, *, source: str = "operator") -> str:
-    """Merge the pair through the public writer; the orphan probe runs on the retired side."""
-    out = merge_property_set(cur.connection, [survivor, retired], source=source,
+# A curation row's identity in the carry record: (table, row key, own timestamp, account); the
+# key of a pipeline card is its account and property.
+_IDENTITY = {
+    "property_notes": ("id", "created_at"),
+    "property_pipeline": ("NULL::bigint", "added_at"),
+    "collection_properties": ("collection_id", "added_at"),
+    "property_tags": ("tag_id", "attached_at"),
+    "property_dismissals": ("id", "dismissed_at"),
+}
+_FOLD_DELETES = ("property_pipeline", "collection_properties", "property_tags")
+_AGO = itertools.count(1)  # now() is one instant per transaction: seeded rows get their own
+
+
+def _curation(cur: Any, pids: list[int]) -> dict[tuple, tuple[int, bool, dict[str, Any]]]:
+    """Every curation row on these properties: identity -> (property, lifted, the row as JSON)."""
+    out = {}
+    for table, (key, at) in _IDENTITY.items():
+        lifted = "lifted_at IS NOT NULL" if table == "property_dismissals" else "false"
+        cur.execute(f"SELECT {key}, {at}, account_id, property_id, {lifted}, to_jsonb({table}) "
+                    f"FROM {table} WHERE property_id = ANY(%s)", (pids,))
+        out |= {(table, k, t, acc): (int(pid), bool(gone), row)
+                for k, t, acc, pid, gone, row in cur}
+    return out
+
+
+def _unplaced(row: dict[str, Any]) -> dict[str, Any]:
+    """A row without the property it sat on, which an earlier step of the merge may have moved."""
+    return {k: v for k, v in row.items() if k != "property_id"}
+
+
+def _census(cur: Any) -> Counter:
+    """Each account's rows per curation table, lifted dismissals included."""
+    out: Counter = Counter()
+    for table in _IDENTITY:
+        cur.execute(f"SELECT account_id, count(*) FROM {table} GROUP BY 1")
+        out.update({(table, acc): int(n) for acc, n in cur.fetchall()})
+    return out
+
+
+def _carries(cur: Any, group: str) -> list[tuple]:
+    """The merge's carry rows in write order: table, key, at, account, from, to, kind, snapshot."""
+    cur.execute("SELECT table_name, row_key, row_at, account_id, from_property_id, "
+                "to_property_id, kind, snapshot FROM property_merge_carries "
+                "WHERE merge_group_id = %s::uuid ORDER BY id", (group,))
+    return cur.fetchall()
+
+
+def _carried_whole(cur: Any, group: str, survivor: int, retired: tuple[int, ...],
+                   before: dict[tuple, tuple[int, bool, dict[str, Any]]], census: Counter) -> None:
+    """MS14 over one merge: each account's count per table holds but for one fewer per folded
+    card, collection entry or tag; each retired row has carry rows, each fold is one row deleted
+    or lifted, once, its snapshot the row as it stood before the merge; every carry row names the
+    survivor and the row's own timestamp, a snapshot exactly when folded, never an alert event."""
+    carries = _carries(cur, group)
+    assert {c[5] for c in carries} <= {survivor}, "a carry row names another survivor"
+    assert all((c[6] == "folded") == (c[7] is not None) for c in carries)
+    assert {c[0] for c in carries} <= set(_IDENTITY), "an alert event entered the carry record"
+    folded = [tuple(c[:4]) for c in carries if c[6] == "folded"]
+    assert len(folded) == len(set(folded)), "a row folded twice"
+    after = _curation(cur, [survivor])
+    ended = {row for row, (_pid, lifted, _row) in before.items()
+             if row not in after or (after[row][1] and not lifted)}
+    assert set(folded) == ended, "a fold without its deletion or lift, or the other way"
+    assert all(_unplaced(c[7]) == _unplaced(before[tuple(c[:4])][2])
+               for c in carries if c[6] == "folded"), "a fold's snapshot is not its row before"
+    assert {row for row, (pid, _l, _r) in before.items() if pid in retired} == {
+        tuple(c[:4]) for c in carries if c[4] in retired}, "a retired row with no carry row"
+    deleted = Counter((t, acc) for t, _k, _at, acc in folded if t in _FOLD_DELETES)
+    now = _census(cur)
+    keys = now.keys() | census.keys()
+    assert {k: now[k] for k in keys} == {k: census[k] - deleted[k] for k in keys}, (
+        "a curation count moved by more than its folds")
+
+
+def _merged(cur: Any, survivor: int, *retired: int) -> str:
+    """Merge the set through the public writer: the orphan probe runs on the retired side and
+    MS14's invariant over the whole merge (`_carried_whole`)."""
+    before, census = _curation(cur, [survivor, *retired]), _census(cur)
+    out = merge_property_set(cur.connection, [survivor, *retired], source="operator",
                              reason="manual_subset", decided_by=OP)["data"]
-    _require((out["survivor_id"], out["retired_ids"]) == (survivor, [retired]),
+    _require((out["survivor_id"], out["retired_ids"]) == (survivor, list(retired)),
              f"the seed order did not pick the survivor: {out}")
-    left = _left_on(cur, retired)
-    _require(not any(left.values()), f"rows left on the merged_away property {retired}: {left}")
-    return str(out["merge_group_id"])
+    for pid in retired:
+        left = _left_on(cur, pid)
+        _require(not any(left.values()), f"rows left on the merged_away property {pid}: {left}")
+    group = str(out["merge_group_id"])
+    _carried_whole(cur, group, survivor, retired, before, census)
+    return group
 
 
-def _detached(cur: Any, listing_id: int, origin: int, *, source: str = "operator") -> None:
-    (out,) = detach_listings(cur.connection, [listing_id], decided_by=OP,
-                             source=source)["data"]["adverts"]
+def _carried(cur: Any, group: str) -> list[tuple]:
+    """(table, account, kind, from) per carry row, sorted for comparison."""
+    return sorted(((t, acc, kind, int(frm)) for t, _k, _at, acc, frm, _to, kind, _s
+                   in _carries(cur, group)), key=str)
+
+
+def _detached(cur: Any, listing_id: int, origin: int, **kw: Any) -> dict[str, int]:
+    """One advert home through the public writer; what it routed."""
+    data = detach_listings(cur.connection, [listing_id], decided_by=OP, **kw)["data"]
+    (out,) = data["adverts"]
     _require((out["outcome"], out["restored_property_id"], out["reactivated"])
              == ("detached", origin, True), f"the detach did not bring {origin} back: {out}")
+    return data["curation"]
+
+
+def _detached_before_w4(cur: Any, listing_id: int, origin: int) -> None:
+    """A split in the W3–W4 window, as it ran: the ledger stamped, the advert home, its origin
+    active again, and no curation routed (so the carry rows stand unspent)."""
+    cur.execute("UPDATE property_merge_events SET undone_at = now(), undone_by = 'w3-window' "
+                "WHERE listing_ref_id = %s AND undone_at IS NULL", (listing_id,))
+    cur.execute("UPDATE listings SET property_id = %s WHERE id = %s", (origin, listing_id))
+    cur.execute("UPDATE properties SET status = 'active', merged_into = NULL, merged_at = NULL, "
+                "is_active = true WHERE id = %s", (origin,))
 
 
 # --- curation tables (SET and APPEND) ---------------------------------------------------
@@ -110,39 +208,47 @@ def test_collections_and_tags_union_onto_the_survivor_per_account(cur, accounts)
     s, r, _s_advert, advert = _pair(cur)
     ca, cb, ta, tb = _collection(cur, a), _collection(cur, b), _tag(cur, a), _tag(cur, b)
     for acc, coll, tag, pid in ((a, ca, ta, s), (a, ca, ta, r), (b, cb, tb, r)):
-        cur.execute("INSERT INTO collection_properties (account_id, collection_id, property_id) "
-                    "VALUES (%s, %s, %s)", (acc, coll, pid))
-        cur.execute("INSERT INTO property_tags (account_id, property_id, tag_id) "
-                    "VALUES (%s, %s, %s)", (acc, pid, tag))
+        cur.execute("INSERT INTO collection_properties (account_id, collection_id, property_id, "
+                    "added_at) VALUES (%s, %s, %s, now() - make_interval(secs => %s))",
+                    (acc, coll, pid, next(_AGO)))
+        cur.execute("INSERT INTO property_tags (account_id, property_id, tag_id, attached_at) "
+                    "VALUES (%s, %s, %s, now() - make_interval(secs => %s))",
+                    (acc, pid, tag, next(_AGO)))
     union = {"collection_properties": [(a, ca, s), (b, cb, s)],
              "property_tags": [(a, ta, s), (b, tb, s)]}
+    apart = {"collection_properties": [(a, ca, s), (a, ca, r), (b, cb, r)],
+             "property_tags": [(a, ta, s), (a, ta, r), (b, tb, r)]}
 
     _merged(cur, s, r)
     assert _memberships(cur, [ca, cb], [ta, tb]) == union
 
-    _detached(cur, advert, r)
-    assert _memberships(cur, [ca, cb], [ta, tb]) == union, "a detach moved curation back"
+    # R's own go home with its advert; A's collapsed twins are re-made there (MS17)
+    assert _detached(cur, advert, r) == {"carry_rows": 4, "note_moves": 0}
+    assert _memberships(cur, [ca, cb], [ta, tb]) == apart
 
 
 def test_notes_all_move(cur, accounts):
+    """Each account's, and one with no account, which moves as it is."""
+    a, b = accounts
     s, r, _s_advert, advert = _pair(cur)
-    notes: dict[int, uuid.UUID] = {}
-    for acc in accounts:
-        for pid in (s, r):
-            cur.execute("INSERT INTO property_notes (account_id, property_id, body) "
-                        "VALUES (%s, %s, %s) RETURNING id", (acc, pid, f"lp {uuid.uuid4()}"))
-            notes[int(cur.fetchone()[0])] = acc
+    notes: dict[int, uuid.UUID | None] = {}
+    for acc, pid in ((a, s), (a, r), (b, s), (b, r), (None, r)):
+        cur.execute("INSERT INTO property_notes (account_id, property_id, body) "
+                    "VALUES (%s, %s, %s) RETURNING id", (acc, pid, f"lp {uuid.uuid4()}"))
+        notes[int(cur.fetchone()[0])] = acc
 
-    def placed() -> dict[int, tuple[uuid.UUID, int]]:
+    def placed() -> dict[int, tuple[uuid.UUID | None, int]]:
         cur.execute("SELECT id, account_id, property_id FROM property_notes WHERE id = ANY(%s)",
                     (list(notes),))
         return {int(nid): (acc, int(pid)) for nid, acc, pid in cur.fetchall()}
 
+    before = placed()
     _merged(cur, s, r)
     assert placed() == {nid: (acc, s) for nid, acc in notes.items()}
 
-    _detached(cur, advert, r)
-    assert placed() == {nid: (acc, s) for nid, acc in notes.items()}
+    # written on no advert, each note goes back where its carry row says it came from
+    assert _detached(cur, advert, r) == {"carry_rows": 3, "note_moves": 0}
+    assert placed() == before
 
 
 # --- notification dispatches ------------------------------------------------------------
@@ -236,8 +342,9 @@ def test_a_delivered_alert_does_not_abort_the_merge(cur, accounts):
 
 
 def _card(cur: Any, acc: uuid.UUID, pid: int, stage: int) -> None:
-    cur.execute("INSERT INTO property_pipeline (account_id, property_id, stage_id) "
-                "VALUES (%s, %s, %s)", (acc, pid, stage))
+    cur.execute("INSERT INTO property_pipeline (account_id, property_id, stage_id, added_at) "
+                "VALUES (%s, %s, %s, now() - make_interval(secs => %s))",
+                (acc, pid, stage, next(_AGO)))
 
 
 def _cards(cur: Any, acc: uuid.UUID) -> dict[int, int]:
@@ -246,50 +353,112 @@ def _cards(cur: Any, acc: uuid.UUID) -> dict[int, int]:
     return {int(pid): int(stage) for pid, stage in cur.fetchall()}
 
 
-def test_pipeline_terminal_aware_merge_and_lossless_detach(cur, accounts):
-    """A's card moves over; B's live card on R beats B's closed card on S, though the closed
-    stage sits further right. The detach gives R both cards back and takes A's off S
-    (move-if-empty); B's survivor card stays (best-effort)."""
+def _added(cur: Any, acc: uuid.UUID) -> dict[int, Any]:
+    cur.execute("SELECT property_id, added_at FROM property_pipeline WHERE account_id = %s",
+                (acc,))
+    return {int(pid): at for pid, at in cur.fetchall()}
+
+
+def test_pipeline_terminal_aware_merge_folds_the_losing_card(cur, accounts):
+    """A's card on S, further along, stays and A's card on R folds; B's live card on R beats B's
+    closed card on S, though the closed stage sits further right: S's folds and R's moves as
+    itself, its own dates kept. Each fold is in the carry record; no pipeline history row is
+    written. The detach gives each side its card back: B's moved card goes home and S's closed
+    card is re-made, A's folded card is re-made on R."""
     a, b = accounts
     s, r, _s_advert, advert = _pair(cur)
-    live_a = _stage(cur, a, position=2)
+    near_a, far_a = _stage(cur, a, position=2), _stage(cur, a, position=3)
     live_b, closed_b = _stage(cur, b, position=2), _stage(cur, b, position=5, terminal=True)
-    _card(cur, a, r, live_a)
+    _card(cur, a, s, far_a)
+    _card(cur, a, r, near_a)
     _card(cur, b, s, closed_b)
     _card(cur, b, r, live_b)
+    winner = _added(cur, b)[r]
 
     group = _merged(cur, s, r)
-    assert _cards(cur, a) == {s: live_a}
+    assert _cards(cur, a) == {s: far_a}
     assert _cards(cur, b) == {s: live_b}, "a closed card buried a live deal"
-    cur.execute("SELECT account_id, property_id, to_stage_id FROM property_pipeline_events "
-                "WHERE merge_group_id = %s::uuid AND reason = 'merge_absorb'", (group,))
-    assert sorted(cur.fetchall()) == sorted([(a, r, live_a), (b, s, closed_b), (b, r, live_b)])
+    assert _added(cur, b) == {s: winner}
+    assert _carried(cur, group) == sorted([
+        ("property_pipeline", a, "folded", r), ("property_pipeline", b, "folded", s),
+        ("property_pipeline", b, "moved", r)], key=str)
+    cur.execute("SELECT count(*) FROM property_pipeline_events WHERE merge_group_id = %s::uuid",
+                (group,))
+    assert cur.fetchone()[0] == 0
 
-    _detached(cur, advert, r)
-    assert _cards(cur, a) == {r: live_a}
-    assert _cards(cur, b) == {s: live_b, r: live_b}
+    assert _detached(cur, advert, r) == {"carry_rows": 3, "note_moves": 0}
+    assert (_cards(cur, a), _cards(cur, b)) == ({s: far_a, r: near_a}, {s: closed_b, r: live_b})
+    assert _added(cur, b)[r] == winner, "the card that went home is the same row"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="PR 5: a chained detach restores the card on B and leaves the one "
-                          "the last survivor absorbed")
-def test_a_chained_detach_restores_one_card(cur, accounts):
-    x, y = accounts
-    c, a, b = _property(cur), _property(cur), _property(cur)
-    adverts = {pid: _advert(cur, pid, source=src)
-               for pid, src in ((c, "sreality"), (a, "idnes"), (b, "remax"))}
-    for pid in (c, a, b):
+def test_a_card_a_later_step_overwrites_folds_from_where_it_came(cur, accounts):
+    """{S, R1, R2} is one merge in two steps. A's closed card on R1 moves to S in the first; in
+    the second R2's live card wins, so the card on S folds from R1, not from S, and lifts A's own
+    dismissal of S, folded from S though B's dismissal of R1 (lifted before the merge, it stays
+    lifted) moved to S in the first step. B's note on R2 moves."""
+    a, b = accounts
+    s, r1, r2 = _property(cur), _property(cur), _property(cur)
+    for pid, source in ((s, "sreality"), (r1, "idnes"), (r2, "remax")):
+        _advert(cur, pid, source=source)
         _recompute(cur, pid)
-    live_x, live_y = _stage(cur, x, position=2), _stage(cur, y, position=2)
-    _card(cur, x, b, live_x)
-    _card(cur, y, c, live_y)
+    closed, live = _stage(cur, a, position=2, terminal=True), _stage(cur, a, position=3)
+    _card(cur, a, r1, closed)
+    _card(cur, a, r2, live)
+    cur.execute("INSERT INTO property_notes (account_id, property_id, body) "
+                "VALUES (%s, %s, 'lp') RETURNING id", (b, r2))
+    note = int(cur.fetchone()[0])
+    cur.execute("INSERT INTO property_dismissals (account_id, property_id, lifted_at, lift_reason) "
+                "VALUES (%s, %s, now(), 'operator') RETURNING id", (b, r1))
+    dismissal = int(cur.fetchone()[0])
+    cur.execute("INSERT INTO property_dismissals (account_id, property_id) VALUES (%s, %s) "
+                "RETURNING id", (a, s))
+    own = int(cur.fetchone()[0])
 
-    _merged(cur, a, b)
-    _merged(cur, c, a)
-    _require(_cards(cur, x) == {c: live_x}, "the card did not follow both merges")
-    _detached(cur, adverts[b], b)
-    assert _cards(cur, x) == {b: live_x}, "one deal, two cards"
-    assert _cards(cur, y) == {c: live_y}
+    group = _merged(cur, s, r1, r2)
+    assert _cards(cur, a) == {s: live}
+    assert [(t, k, acc, kind, frm) for t, k, _at, acc, frm, _to, kind, _s
+            in _carries(cur, group)] == [
+        ("property_pipeline", None, a, "moved", r1),
+        ("property_dismissals", dismissal, b, "moved", r1),
+        ("property_notes", note, b, "moved", r2),
+        ("property_pipeline", None, a, "folded", r1),
+        ("property_pipeline", None, a, "moved", r2),
+        ("property_dismissals", own, a, "folded", s)]
+
+
+def test_a_fold_names_only_its_own_standing_carry_row(cur, accounts):
+    """{S, R1, R1x}: A's and B's cards come from R1, C's closed card and dismissal from R1x. A
+    then removes its card and adds it again, dated like B's, and R1x's ad was split off in the
+    W3–W4 window (nothing went back with it). In {S, R2} each card and the dismissal folded on S
+    names S: A's new card is neither the row A's carry row names nor B's, and C's carry rows
+    belong to a merge step the split undid (`pipeline_identity.STANDING_CARRY`)."""
+    a, b = accounts
+    c = _account(cur)
+    s, r1, r1x, r2 = (_property(cur) for _ in range(4))
+    ads = {pid: _advert(cur, pid, source=source) for pid, source in
+           ((s, "sreality"), (r1, "idnes"), (r1x, "remax"), (r2, "bazos"))}
+    for pid in ads:
+        _recompute(cur, pid)
+    _card(cur, a, r1, _stage(cur, a, position=1))
+    _card(cur, b, r1, _stage(cur, b, position=1))
+    _card(cur, c, r1x, _stage(cur, c, position=9, terminal=True))
+    cur.execute("INSERT INTO property_dismissals (account_id, property_id) VALUES (%s, %s)",
+                (c, r1x))
+    _merged(cur, s, r1, r1x)
+    cur.execute("DELETE FROM property_pipeline WHERE account_id = %s AND property_id = %s "
+                "RETURNING stage_id", (a, s))
+    cur.execute("INSERT INTO property_pipeline (account_id, property_id, stage_id, added_at) "
+                "SELECT %s, %s, %s, added_at FROM property_pipeline "
+                "WHERE account_id = %s AND property_id = %s", (a, s, cur.fetchone()[0], b, s))
+    _detached_before_w4(cur, ads[r1x], r1x)
+    _card(cur, a, r2, _stage(cur, a, position=2))
+    _card(cur, c, r2, _stage(cur, c, position=1))
+
+    group = _merged(cur, s, r2)
+    assert _carried(cur, group) == sorted([
+        ("property_pipeline", a, "folded", s), ("property_pipeline", a, "moved", r2),
+        ("property_pipeline", c, "folded", s), ("property_pipeline", c, "moved", r2),
+        ("property_dismissals", c, "folded", s)], key=str)
 
 
 # --- dismissals -------------------------------------------------------------------------
@@ -297,64 +466,252 @@ def test_a_chained_detach_restores_one_card(cur, accounts):
 
 def test_dismissals_lift_never_delete_and_follow_the_pipeline(cur, accounts):
     """A's dismissal of R is lifted 'merge' where A's of S stands; B's dismissal of S is lifted
-    'pipeline' by the live card the pipeline carry just put there, so Pipeline ran first."""
+    'pipeline' by the live card the pipeline carry just put there, so Pipeline ran first; C's of
+    R moves and is lifted 'pipeline' by C's own card on S. Each lift is folded, from where the
+    dismissal sat. The detach lifts nothing back: each fold is re-made as a new dismissal where
+    it came from once its twin allows (B's card went home), and the lifted rows stay."""
     a, b = accounts
+    c = _account(cur)
     s, r, _s_advert, advert = _pair(cur)
-    live_b = _stage(cur, b, position=2)
-    _card(cur, b, r, live_b)
+    _card(cur, b, r, _stage(cur, b, position=2))
+    _card(cur, c, s, _stage(cur, c, position=2))
     ids = {}
-    for key, acc, pid in (("a_s", a, s), ("a_r", a, r), ("b_s", b, s)):
+    for key, acc, pid in (("a_s", a, s), ("a_r", a, r), ("b_s", b, s), ("c_r", c, r)):
         cur.execute("INSERT INTO property_dismissals (account_id, property_id) VALUES (%s, %s) "
                     "RETURNING id", (acc, pid))
         ids[key] = int(cur.fetchone()[0])
 
     def rows() -> dict[int, tuple[uuid.UUID, int, str | None]]:
         cur.execute("SELECT id, account_id, property_id, lift_reason FROM property_dismissals "
-                    "WHERE account_id = ANY(%s)", (list(accounts),))
+                    "WHERE account_id = ANY(%s)", ([a, b, c],))
         return {int(i): (acc, int(pid), why) for i, acc, pid, why in cur.fetchall()}
 
     after = {ids["a_s"]: (a, s, None), ids["a_r"]: (a, s, "merge"),
-             ids["b_s"]: (b, s, "pipeline")}
+             ids["b_s"]: (b, s, "pipeline"), ids["c_r"]: (c, s, "pipeline")}
 
-    _merged(cur, s, r)
-    assert _cards(cur, b) == {s: live_b}
+    group = _merged(cur, s, r)
     assert rows() == after, "a dismissal was deleted, or not lifted, or not moved"
+    assert sorted((k, acc, kind, frm) for t, k, _at, acc, frm, _to, kind, _s
+                  in _carries(cur, group) if t == "property_dismissals") == sorted([
+        (ids["a_r"], a, "folded", r), (ids["b_s"], b, "folded", s),
+        (ids["c_r"], c, "folded", r)])
 
     _detached(cur, advert, r)
-    assert rows() == after, "a detach moved a dismissal back"
+    again = {k: v for k, v in rows().items() if k not in ids.values()}
+    assert {k: v for k, v in rows().items() if k in ids.values()} == after
+    assert sorted(again.values(), key=str) == sorted([(a, r, None), (b, s, None), (c, r, None)],
+                                                     key=str)
 
 
-# --- the asset link ---------------------------------------------------------------------
+# --- what the operator and the brake read from the carry record ----------------------------
 
 
-@pytest.mark.parametrize(("source", "ledger"), [("operator", "operator"), ("autodedup", "auto")])
-def test_the_asset_link_follows_and_comes_back(cur, source, ledger):
-    s, r, _s_advert, advert = _pair(cur)
-    # The asset row and its link as toolkit/asset_identity.py writes them.
-    cur.execute("INSERT INTO assets (note, created_by) VALUES (%s, %s) RETURNING id", ("lp", OP))
-    asset = int(cur.fetchone()[0])
-    cur.execute("UPDATE properties SET asset_id = %s WHERE id = %s", (asset, r))
-    cur.execute(
-        "INSERT INTO asset_membership_events "
-        "    (asset_id, property_id, action, reason, source, confidence, created_by) "
-        "VALUES (%s, %s, 'linked', 'lp seed', 'operator', NULL, %s)", (asset, r, OP))
+def _named(cur: Any, table: str, acc: uuid.UUID, name: str) -> int:
+    """A collection or a tag (whose colour is a named-palette CHECK) the receipt names."""
+    cur.execute(f"INSERT INTO {table} (account_id, name, color) VALUES (%s, %s, 'slate') "
+                "RETURNING id" if table == "tags" else
+                f"INSERT INTO {table} (account_id, name) VALUES (%s, %s) RETURNING id",
+                (acc, name))
+    return int(cur.fetchone()[0])
 
-    def links() -> dict[int, int | None]:
-        cur.execute("SELECT id, asset_id FROM properties WHERE id = ANY(%s)", ([s, r],))
-        return {int(pid): aid for pid, aid in cur.fetchall()}
 
-    def logged(reason: str) -> list[tuple[int, str, str]]:
-        cur.execute("SELECT property_id, action, source FROM asset_membership_events "
-                    "WHERE asset_id = %s AND reason = %s ORDER BY property_id", (asset, reason))
-        return [(int(pid), action, src) for pid, action, src in cur.fetchall()]
+def test_the_receipt_names_only_the_acting_accounts_moved_items(cur, accounts):
+    """MS15 and MS13 over the carry record: A's moved note, card stage, collection and tag by
+    name, never the collection entry that folded, never B's (B's own stage on S included); B is
+    told the survivor is hidden from it, A not, its dismissal lifted by its card; no account, no
+    receipt."""
+    from api.property_merge import merge_receipt
 
-    group = _merged(cur, s, r, source=source)
-    assert links() == {s: asset, r: None}
-    assert logged(f"merge {group}") == [(s, "linked", ledger), (r, "unlinked", ledger)]
+    a, b = accounts
+    s, r, _s_advert, _advert = _pair(cur)
+    brno, both = _named(cur, "collections", a, "Brno 2+kk"), _named(cur, "collections", a, "Oba")
+    view, theirs = _named(cur, "tags", a, "výhled"), _named(cur, "collections", b, "Jejich")
+    for acc, table, column, key, pid in ((a, "collection_properties", "collection_id", brno, r),
+                                         (a, "collection_properties", "collection_id", both, r),
+                                         (a, "collection_properties", "collection_id", both, s),
+                                         (a, "property_tags", "tag_id", view, r),
+                                         (b, "collection_properties", "collection_id", theirs, r)):
+        at = _IDENTITY[table][1]
+        cur.execute(f"INSERT INTO {table} (account_id, {column}, property_id, {at}) "
+                    "VALUES (%s, %s, %s, now() - make_interval(secs => %s))",
+                    (acc, key, pid, next(_AGO)))
+    _card(cur, a, r, _stage(cur, a, position=2))
+    _card(cur, b, s, _stage(cur, b, position=1, terminal=True))  # "lp 1" sorts before "lp 2"
+    for _ in range(2):
+        cur.execute("INSERT INTO property_notes (account_id, property_id, body) "
+                    "VALUES (%s, %s, 'lp')", (a, r))
+    cur.execute("INSERT INTO property_dismissals (account_id, property_id) "
+                "VALUES (%s, %s), (%s, %s)", (a, s, b, s))  # A's is lifted by A's card coming
 
-    _detached(cur, advert, r, source=source)
-    assert links() == {s: None, r: asset}
-    assert logged(f"detach {group}") == [(s, "unlinked", ledger), (r, "linked", ledger)]
+    merged = {"merge_group_id": _merged(cur, s, r), "survivor_id": s}
+    assert merge_receipt(cur.connection, merged, a) == {"carried": {
+        "notes": 2, "pipeline": "lp 2", "collections": ["Brno 2+kk"], "tags": ["výhled"]},
+        "hidden_for_you": False}
+    assert merge_receipt(cur.connection, merged, b) == {"carried": {
+        "notes": 0, "pipeline": None, "collections": ["Jejich"], "tags": []},
+        "hidden_for_you": True}
+    assert merge_receipt(cur.connection, merged, None)["carried"]["collections"] == []
+
+
+def test_the_brakes_dry_run_counts_what_its_undo_routes(cur, accounts):
+    """MS17 by the live routing's own plan: R's note written on R's ad goes with it
+    (`note_moves`), R's other note and its live card go home along their carry rows, and S's own
+    card, folded by R's, is re-made on S once R's leaves (`carry_rows`); a carry row spent
+    already routes nothing, nor does an ad that already went back. The dry run equals what the
+    undo then reports."""
+    a, _b = accounts
+    s, r, s_advert, r_advert = _pair(cur)
+    cur.execute("INSERT INTO property_notes (account_id, property_id, body, origin_listing_ref_id) "
+                "VALUES (%s, %s, 'lp', %s), (%s, %s, 'lp', NULL), (%s, %s, 'lp', %s) RETURNING id",
+                (a, r, r_advert, a, r, a, s, s_advert))
+    _with_ad, bare, _on_s = (int(row[0]) for row in cur.fetchall())
+    _card(cur, a, s, _stage(cur, a, position=5, terminal=True))
+    _card(cur, a, r, _stage(cur, a, position=1))
+    group = _merged(cur, s, r)
+    assert curation_preview(cur.connection, group, [r_advert]) == {
+        "carry_rows": 3, "note_moves": 1}
+    assert curation_preview(cur.connection, group, [s_advert]) == {
+        "carry_rows": 0, "note_moves": 0}
+    cur.execute("UPDATE property_merge_carries SET undone_at = now() WHERE merge_group_id = "
+                "%s::uuid AND table_name = 'property_notes' AND row_key = %s", (group, bare))
+    dry = curation_preview(cur.connection, group, [r_advert, s_advert])
+    assert dry == {"carry_rows": 2, "note_moves": 1}
+    assert _detached(cur, r_advert, r, source="autodedup", merge_group_id=group) == dry
+    assert curation_preview(cur.connection, group, [r_advert]) == {
+        "carry_rows": 0, "note_moves": 0}
+
+
+def _note_on(cur: Any, acc: uuid.UUID, pid: int, ad: int | None) -> int:
+    cur.execute("INSERT INTO property_notes (account_id, property_id, body, origin_listing_ref_id) "
+                "VALUES (%s, %s, 'lp', %s) RETURNING id", (acc, pid, ad))
+    return int(cur.fetchone()[0])
+
+
+def _placed_rows(cur: Any, table: str, column: str, keys: list[int]) -> dict[int, int]:
+    cur.execute(f"SELECT {column}, property_id FROM {table} WHERE {column} = ANY(%s)", (keys,))
+    return {int(k): int(pid) for k, pid in cur.fetchall()}
+
+
+def test_the_brake_routes_notes_by_their_ad_and_the_rest_along_its_own_merges_carry_rows(
+        cur, accounts):
+    """X merged into R (g1), then R into S (g2); the brake undoes g2 alone. Each note follows the
+    ad it was written on (x1's and r1's go to R, s1's stays); every other item follows only g2's
+    own carry rows, so the tag X brought in goes to R, not X; nothing is copied, the counts hold,
+    g1's carry rows still stand, and the dry run reported exactly what the undo routed."""
+    a, _b = accounts
+    s, r, x = _property(cur), _property(cur), _property(cur)
+    s1, r1, x1 = (_advert(cur, pid, source=src)
+                  for pid, src in ((s, "sreality"), (r, "idnes"), (x, "remax")))
+    for pid in (s, r, x):
+        _recompute(cur, pid)
+    n_x, n_r, n_s = _note_on(cur, a, x, x1), _note_on(cur, a, r, r1), _note_on(cur, a, s, s1)
+    tag, coll = _tag(cur, a), _collection(cur, a)
+    cur.execute("INSERT INTO property_tags (account_id, property_id, tag_id) VALUES (%s, %s, %s)",
+                (a, x, tag))
+    cur.execute("INSERT INTO collection_properties (account_id, property_id, collection_id) "
+                "VALUES (%s, %s, %s)", (a, r, coll))
+    g1 = merge_property_set(cur.connection, [r, x], source="autodedup", reason="r")["data"]
+    g2 = merge_property_set(cur.connection, [s, r], source="autodedup", reason="r")["data"]
+    _require((g1["survivor_id"], g2["survivor_id"]) == (r, s), "the seed order did not hold")
+    census = _census(cur)
+    dry = curation_preview(cur.connection, g2["merge_group_id"], [x1, r1])
+    assert dry == {"note_moves": 2, "carry_rows": 2}
+    out = detach_listings(cur.connection, [x1, r1], decided_by="autodedup-unapply:t",
+                          source="autodedup", merge_group_id=g2["merge_group_id"])["data"]
+    assert [a_["restored_property_id"] for a_ in out["adverts"]] == [r, r]
+    assert out["curation"] == dry
+    assert _placed_rows(cur, "property_notes", "id", [n_x, n_r, n_s]) == {n_x: r, n_r: r, n_s: s}
+    assert _placed_rows(cur, "property_tags", "tag_id", [tag]) == {tag: r}
+    assert _placed_rows(cur, "collection_properties", "collection_id", [coll]) == {coll: r}
+    assert _census(cur) == census, "the brake copies and re-makes nothing here"
+    cur.execute("SELECT merge_group_id::text, count(*) FILTER (WHERE undone_at IS NULL), count(*) "
+                "FROM property_merge_carries WHERE merge_group_id = ANY(%s::uuid[]) GROUP BY 1",
+                ([g1["merge_group_id"], g2["merge_group_id"]],))
+    assert dict((g, (live, n)) for g, live, n in cur.fetchall()) == {
+        g1["merge_group_id"]: (2, 2), g2["merge_group_id"]: (0, 4)}
+
+
+def test_the_brake_onto_an_origin_active_again_leaves_what_its_accounts_hold_there(
+        cur, accounts):
+    """R = {r1, r2} merged into S: A's note written on r1, A's closed card, collection entry, tag
+    and dismissal moved from R; B's card on R folded into B's on S. r1 went home in the W3–W4
+    window (nothing routed), then A and B curated R again. The brake undoing that merge for r2
+    does not abort: every item of A's stays on S (R holds A's own), B's fold is not re-made over
+    B's new card, R's own items are untouched, and none of it is counted or spends a moved row;
+    the note, whose ad is no longer on S, follows its carry row to R (MS17: the rule for other
+    items). The dry run counts what the plan routes; the undo, what its writes changed."""
+    a, b = accounts
+    s, r = _property(cur), _property(cur)
+    _advert(cur, s, source="sreality")
+    r1, r2 = _advert(cur, r, source="idnes"), _advert(cur, r, source="remax")
+    for pid in (s, r):
+        _recompute(cur, pid)
+    note = _note_on(cur, a, r, r1)
+    coll, tag = _collection(cur, a), _tag(cur, a)
+    closed = _stage(cur, a, position=5, terminal=True)
+
+    def curate(pid: int) -> None:
+        _card(cur, a, pid, closed)
+        cur.execute("INSERT INTO collection_properties (account_id, property_id, collection_id) "
+                    "VALUES (%s, %s, %s)", (a, pid, coll))
+        cur.execute("INSERT INTO property_tags (account_id, property_id, tag_id) "
+                    "VALUES (%s, %s, %s)", (a, pid, tag))
+        cur.execute("INSERT INTO property_dismissals (account_id, property_id) VALUES (%s, %s)",
+                    (a, pid))
+
+    curate(r)
+    b_far, b_near = _stage(cur, b, position=3), _stage(cur, b, position=2)
+    _card(cur, b, s, b_far)
+    _card(cur, b, r, b_near)
+    group = merge_property_set(cur.connection, [s, r], source="autodedup", reason="r")["data"][
+        "merge_group_id"]
+    _require(_cards(cur, a) == {s: closed} and _cards(cur, b) == {s: b_far}, "seed order")
+    _detached_before_w4(cur, r1, r)
+    curate(r)
+    _card(cur, b, r, b_near)
+    census, before = _census(cur), _curation(cur, [s, r])
+    assert curation_preview(cur.connection, group, [r2]) == {"carry_rows": 6, "note_moves": 0}
+
+    out = detach_listings(cur.connection, [r2], decided_by="autodedup-unapply:t",
+                          source="autodedup", merge_group_id=group)["data"]
+    assert [(x["outcome"], x["restored_property_id"]) for x in out["adverts"]] == [
+        ("detached", r)]
+    assert out["curation"] == {"carry_rows": 1, "note_moves": 0}
+    after = _curation(cur, [s, r])
+    assert set(after) == set(before) and _census(cur) == census, "an item was made or removed"
+    assert {k: after[k][0] for k in before if after[k] != before[k]} == {
+        k: r for k in before if k[0] == "property_notes"}, "only the note moved: to R"
+    cur.execute("SELECT table_name, account_id, kind, undone_at IS NOT NULL "
+                "FROM property_merge_carries WHERE merge_group_id = %s::uuid", (group,))
+    spent = {(t, acc, kind): gone for t, acc, kind, gone in cur.fetchall()}
+    assert spent == {("property_notes", a, "moved"): True, ("property_pipeline", a, "moved"): False,
+                     ("collection_properties", a, "moved"): False,
+                     ("property_tags", a, "moved"): False,
+                     ("property_dismissals", a, "moved"): False,
+                     ("property_pipeline", b, "folded"): True}
+
+
+def test_undoing_a_merge_from_before_the_carry_record_moves_only_notes(cur, accounts):
+    """The removed engine's merges have no carry rows (they predate migration 589): its undo
+    sends each note with the ad it was written on and leaves every other item where it is."""
+    a, _b = accounts
+    s, r, s_advert, r_advert = _pair(cur)
+    note = _note_on(cur, a, r, r_advert)
+    coll = _collection(cur, a)
+    cur.execute("INSERT INTO collection_properties (account_id, property_id, collection_id) "
+                "VALUES (%s, %s, %s)", (a, r, coll))
+    _card(cur, a, r, _stage(cur, a, position=1))
+    group = merge_property_set(cur.connection, [s, r], source="auto", reason="legacy")["data"][
+        "merge_group_id"]
+    cur.execute("DELETE FROM property_merge_carries WHERE merge_group_id = %s::uuid", (group,))
+    assert curation_preview(cur.connection, group, [r_advert]) == {
+        "note_moves": 1, "carry_rows": 0}
+    out = detach_listings(cur.connection, [r_advert], decided_by="legacy-retire:t",
+                          source="auto", merge_group_id=group)["data"]
+    assert out["curation"] == {"note_moves": 1, "carry_rows": 0}
+    assert _placed_rows(cur, "property_notes", "id", [note]) == {note: r}
+    assert _placed_rows(cur, "collection_properties", "collection_id", [coll]) == {coll: s}
+    assert _cards(cur, a) == {s: _cards(cur, a)[s]}
 
 
 # --- the census, over the replayed schema ---------------------------------------------------
@@ -476,7 +833,7 @@ def test_merge_and_detach_bring_derived_state_current(cur):
     assert _queued(cur, advert), "the detach did not queue the attributed advert for brokers"
 
 
-# --- the set detach: rulings once, movers against the stayers ----------------------------------
+# --- the set detach: no ruling, one change ---------------------------------------------------
 
 
 def _ruled(cur: Any, ids: list[int]) -> list[tuple[int, int, str, str]]:
@@ -492,12 +849,11 @@ def _source_count(cur: Any, pid: int) -> int:
     return int(cur.fetchone()[0])
 
 
-def test_a_set_detach_rules_once_and_changes_once(cur):
+def test_a_set_detach_writes_no_ruling_and_changes_once(cur):
     """S holds three adverts from two origins after the merge: its own and R's two. Detaching
-    R's two in ONE call sends both home and reactivates R once; each is ruled `different` from
-    S's advert only and never from the other (they sit together again), and every touched
-    property's rollup counts its adverts. That the after-step runs once is the fake's
-    (`db.changed`, tests/test_detach_listing.py)."""
+    R's two in ONE call sends both home and reactivates R once; nothing is ruled (a split writes
+    its own "different"), and every touched property's rollup counts its adverts. That the
+    after-step runs once is the fake's (`db.changed`, tests/test_detach_listing.py)."""
     s, r = _property(cur), _property(cur)
     stay = _advert(cur, s, source="sreality")
     movers = [_advert(cur, r, source="idnes"), _advert(cur, r, source="remax")]
@@ -510,11 +866,6 @@ def test_a_set_detach_rules_once_and_changes_once(cur):
     assert [(a["listing_id"], a["outcome"], a["left_property_id"], a["restored_property_id"],
              a["reactivated"]) for a in out["adverts"]] == [
         (movers[0], "detached", s, r, True), (movers[1], "detached", s, r, False)]
-    note = f"operator detach from {s}: jiné patro"
-    ruled = _ruled(cur, [stay, *movers])
-    assert sorted((lo, hi, v) for lo, hi, v, n in ruled if n == note) == sorted(
-        (*sorted((stay, m)), "different") for m in movers)
-    assert out["rulings_written"] == 2
-    assert not [row for row in ruled if {row[0], row[1]} == set(movers)], (
-        "two adverts that moved together were ruled against each other")
+    assert out["rulings_written"] == 0
+    assert not [row for row in _ruled(cur, [stay, *movers]) if "detach" in str(row[3])]
     assert (_source_count(cur, s), _source_count(cur, r)) == (1, 2)

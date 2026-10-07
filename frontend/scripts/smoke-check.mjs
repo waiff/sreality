@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Production smoke-check: logs into the live SPA as the dedicated admin test
 // account, confirms Browse renders, and opens+closes Merge mode without ever
-// touching a card checkbox — the two mutating buttons (Merge, Link as same
-// building) stay `disabled` until >=2 cards are selected, so this script can
+// touching a card checkbox — the mutating button (Merge) stays `disabled`
+// until >=2 cards are selected, so this script can
 // never trigger a production write. See CLAUDE.md "Autonomy and the safety
 // net" and the `prod-smoke-check-accounts-and-recipe` memory.
 //
@@ -137,6 +137,14 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    file, so it moves DOWN on a measurement, never up to make
  *                    room; the `baseline` above is left at its last live
  *                    measurement rather than guessing 19 from a local build.
+ *   2026-10-06 merge sprint W2b — /browse +1 (the note marks' one whole-set
+ *                    read of property_notes_public), /pipeline +1 (the broker
+ *                    line reads the cards' ads before their brokers, MS7).
+ *                    Both stay under their ceilings; neither moves.
+ *   2026-10-07 card ad count — /browse +1: each card's "N inzeráty" badge is a
+ *                    hydration decoration, one property_sources_public read per
+ *                    24-card page (browse_projection has no source_count).
+ *                    Stays under its ceiling; nothing moves.
  * Still ahead: W9b appends columns to listings_public for the listing-detail
  * chain; W7a moves Browse + comparables onto the shared hydration layer.
  *
@@ -272,15 +280,13 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
     step('clicked "Merge mode" (local state only, no network call)', true);
 
     const mergeBtn = page.getByRole('button', { name: /^Merge($| \d)/ });
-    const linkBtn = page.getByRole('button', { name: 'Link as same building', exact: true });
     await mergeBtn.waitFor({ state: 'visible', timeout: 5000 });
 
     const mergeDisabled = await mergeBtn.isDisabled();
-    const linkDisabled = await linkBtn.isDisabled();
     step(
-      'mutating buttons disabled pre-selection (no cards clicked)',
-      mergeDisabled && linkDisabled,
-      `merge disabled=${mergeDisabled}, link disabled=${linkDisabled}`
+      'mutating button disabled pre-selection (no cards clicked)',
+      mergeDisabled,
+      `merge disabled=${mergeDisabled}`
     );
 
     await page.screenshot({ path: path.join(SHOT_DIR, '03-merge-mode-active.png') });

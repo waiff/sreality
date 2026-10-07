@@ -316,6 +316,9 @@ def _rls_exempt_tables(sql: str) -> set[str]:
 _ADMIN_ONLY_RELATIONS = frozenset({
     "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
     "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
+    # The carry record (migration 589): read only by the merge route, the brake's dry run
+    # and the split, all service-role; no `_public` view.
+    "property_merge_carries",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
     "llm_calls", "parsed_url_cache", "pipeline_check_results",
     "image_border_cases", "tag_taxonomy", "image_tag_labels",

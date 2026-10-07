@@ -27,6 +27,8 @@ import {
   fetchBrowseCount,
   fetchBrowseStats,
   fetchIsDismissed,
+  fetchNoteCounts,
+  fetchPropertySourcesByPropertyIds,
   fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
@@ -38,7 +40,6 @@ import {
   keysetTiebreak,
   matchesDistricts,
   parseSort,
-  pipelineCardBroker,
   pipelineIdsForScope,
   portalMirrorSource,
   priceNullTolerantOr,
@@ -46,7 +47,7 @@ import {
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
-import { fetchBrokerListingIds, type ListingBroker } from './brokers';
+import { fetchBrokerListingIds } from './brokers';
 import type { DistrictChip } from './filters';
 
 /* THE PostgREST stand-in for this file: every builder method chains (including
@@ -462,67 +463,6 @@ describe('broker scope (listing-grain)', () => {
   });
 });
 
-/* Pipeline board broker hydration.
- *
- * Both broker reads moved onto the identity-gated /brokers API (2026-08-12). The
- * board used to swallow a PostgREST 42501 as an EXPECTED masked state and show no
- * broker at all; the API instead answers 200 with contact columns replaced by
- * has_email / has_phone. The card must therefore be able to say "a contact exists,
- * you just can't see it" — which only works if the flags survive the projection.
- *
- * W6 collapsed the pair to ONE read: migration 419 put primary_email /
- * primary_phone on listing_broker_public, so the projection now takes a single
- * row. The masked/unmasked distinction is unchanged — it was never a property of
- * WHICH read the columns came from, only of the caller's identity. */
-describe('pipelineCardBroker', () => {
-  const row = (over: Partial<ListingBroker> = {}): ListingBroker => ({
-    sreality_id: null,
-    listing_id: 10,
-    broker_id: 7,
-    broker_display_name: 'Jan Novák',
-    broker_firm_label: 'RE/MAX',
-    ...over,
-  });
-
-  it('is null when the listing has no resolved broker', () => {
-    expect(pipelineCardBroker(undefined)).toBeNull();
-  });
-
-  it('keeps an admin session real values and derives both flags from them', () => {
-    expect(
-      pipelineCardBroker(row({ primary_email: 'jan@remax.cz', primary_phone: null })),
-    ).toEqual({
-      broker_id: 7,
-      display_name: 'Jan Novák',
-      firm_label: 'RE/MAX',
-      email: 'jan@remax.cz',
-      phone: null,
-      has_email: true,
-      has_phone: false,
-    });
-  });
-
-  it('carries a non-admin masked row through as flags with no values', () => {
-    const b = pipelineCardBroker(row({ has_email: true, has_phone: false }));
-    expect(b).toMatchObject({ email: null, phone: null, has_email: true, has_phone: false });
-  });
-
-  /* A broker with neither channel on file is a real answer, not a failure — and
-     it is now reachable only in that one way. Before W6 an absent contact ALSO
-     meant "the second read produced nothing", so the card could not tell an
-     unreachable broker from an un-hydrated one; with the contact on the identity
-     row, holding the row means holding the answer. */
-  it('reports no contact for a broker with neither channel on file', () => {
-    expect(pipelineCardBroker(row())).toMatchObject({
-      display_name: 'Jan Novák',
-      email: null,
-      phone: null,
-      has_email: false,
-      has_phone: false,
-    });
-  });
-});
-
 /* The measure travels with its PUBLISHED LABEL on every Browse lane, or the
  * number arrives unlabelable. All six migration-425 relations publish
  * `price_per_m2_basis` — including `browse_list` and `properties_map_mv`, whose
@@ -772,6 +712,27 @@ describe('fetchIsDismissed batches per task', () => {
     stubReads({}, new Error('boom'));
     const outcomes = await Promise.allSettled([fetchIsDismissed(1), fetchIsDismissed(2)]);
     expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+  });
+});
+
+/* One whole-set read answers every Browse row's note mark (MS16), and one batch
+ * every board card's ads (MS7) — never one request per row or card. */
+describe('note counts and board ads, one read each', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('counts the caller’s notes per property', async () => {
+    stubReads({ property_notes_public: [1, 2, 3].map((id) => ({ id, property_id: id < 3 ? 42 : 7 })) });
+    expect([...(await fetchNoteCounts())]).toEqual([[42, 2], [7, 1]]);
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  it('groups the cards’ ads by property', async () => {
+    const { inIds } = stubReads({
+      property_sources_public: [{ id: 1, property_id: 42 }, { id: 2, property_id: 43 }, { id: 3, property_id: 42 }],
+    });
+    const byProperty = await fetchPropertySourcesByPropertyIds([42, 43]);
+    expect(inIds).toEqual([[42, 43]]);
+    expect(byProperty.get(42)?.map((a) => a.id)).toEqual([1, 3]);
   });
 });
 /* Rule #16 again, on the one Browse fetcher that used to name its prefilters by

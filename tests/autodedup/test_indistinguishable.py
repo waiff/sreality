@@ -278,14 +278,36 @@ def test_deal_type_and_category_are_always_differences() -> None:
     b = listing(2, category_type="pronajem")
     assert "category_type" in names(a, b)
     assert "category_main" in names(listing(1, category_main="byt"),
-                                    listing(2, category_main="komercni"))
+                                    listing(2, category_main="dum"))
 
 
 def test_the_sanctioned_cross_type_is_not_a_difference() -> None:
-    """dům <-> komerční is rule #15's one sanctioned cross-type; the operator confirmed 8."""
+    """dům <-> komerční is a rule #15 cross-type; the operator confirmed 8."""
     a = listing(1, category_main="dum", disposition=None, floor=None)
     b = listing(2, category_main="komercni", disposition=None, floor=None)
     assert "category_main" not in names(a, b)
+
+
+def test_land_with_a_house_or_commercial_is_not_a_category_difference() -> None:
+    """E935: pozemek <-> dům and pozemek <-> komerční are rule #15 cross-types too; a flat is
+    not."""
+    land = listing(1, category_main="pozemek", disposition=None, floor=None)
+    for other in ("dum", "komercni"):
+        assert "category_main" not in names(land, listing(2, category_main=other,
+                                                          disposition=None, floor=None))
+    assert "category_main" in names(land, listing(3, category_main="byt",
+                                                  disposition=None, floor=None))
+
+
+def test_a_flat_with_a_commercial_unit_is_not_a_category_difference_with_a_house_it_is() -> None:
+    """E938: byt <-> komerční is a rule #15 pair; the relation is not transitive, so the
+    commercial unit that meets both a flat and a house leaves the flat and the house apart."""
+    flat = listing(1, category_main="byt", disposition=None, floor=None)
+    commercial = listing(2, category_main="komercni", disposition=None, floor=None)
+    house = listing(3, category_main="dum", disposition=None, floor=None)
+    assert "category_main" not in names(flat, commercial)
+    assert "category_main" not in names(commercial, house)
+    assert "category_main" in names(flat, house)
 
 
 # --- contract ---------------------------------------------------------------------------------

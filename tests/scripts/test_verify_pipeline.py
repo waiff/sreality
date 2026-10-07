@@ -108,7 +108,8 @@ def test_worker_liveness_fails_only_when_stale() -> None:
 
 def test_property_maintenance_healthy_day_is_ok() -> None:
     """~24-25h sweep age just before the next daily sweep is the healthy
-    steady state, not a warning; an empty dirty queue (None) trips nothing."""
+    steady state of a one-run cycle, not a warning; an empty dirty queue (None)
+    trips nothing."""
     from scripts.verify_pipeline import _status_for_property_maintenance
 
     t = DEFAULT_THRESHOLDS
@@ -132,14 +133,29 @@ def test_property_maintenance_worst_axis_wins() -> None:
 
     t = DEFAULT_THRESHOLDS
     # Warn axis alone → warn; a fail axis anywhere → fail overall.
-    status, offenders = _status_for_property_maintenance(27.0, None, t)
+    status, offenders = _status_for_property_maintenance(53.0, None, t)
     assert status == "warn" and "last complete sweep" in offenders[0]
-    status, offenders = _status_for_property_maintenance(27.0, 4.0, t)
+    status, offenders = _status_for_property_maintenance(53.0, 4.0, t)
     assert status == "fail"
     assert any("dirty-queue" in o for o in offenders)
     # The 2026-08-06 incident shape: sweep dead for days + frozen dirt.
-    status, offenders = _status_for_property_maintenance(49.0, 2.8, t)
+    status, offenders = _status_for_property_maintenance(73.0, 2.8, t)
     assert status == "fail" and len(offenders) == 2
+
+
+def test_property_sweep_thresholds_fit_a_two_run_cycle() -> None:
+    """A cycle may take two daily runs (the sweep's resume cursor), so its stamp
+    lands every ~48h plus the spread in when a run finishes (~2.5h: GH's
+    scheduled-run delay, the lease wait, the run itself). That must read ok —
+    at 26h/30h the check was red ~18h of every 48h while both runs were green —
+    and a cycle whose second run never stamped must still fail within a third day."""
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    t = DEFAULT_THRESHOLDS
+    two_run_gap_h = 48 + 2.5
+    assert two_run_gap_h < t["property_sweep_warn_hours"] < t["property_sweep_fail_hours"] < 72
+    assert _status_for_property_maintenance(two_run_gap_h, 0.1, t) == ("ok", [])
+    assert _status_for_property_maintenance(72.0, 0.1, t)[0] == "fail"
 
 
 def test_property_dirty_warn_clears_a_full_length_sweep() -> None:

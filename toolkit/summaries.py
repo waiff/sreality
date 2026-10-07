@@ -117,6 +117,7 @@ def summarize_listing(
     snapshot_id: int | None = None,
     force_refresh: bool = False,
     listing_id: int | None = None,
+    estimation_run_id: int | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
@@ -144,10 +145,12 @@ def summarize_listing(
         else:
             summary, model, cost_usd = _produce_summary(
                 conn, llm_client, sreality_id, snapshot, listing_id=listing_id,
+                estimation_run_id=estimation_run_id,
             )
     else:
         summary, model, cost_usd = _produce_summary(
             conn, llm_client, sreality_id, snapshot, listing_id=listing_id,
+            estimation_run_id=estimation_run_id,
         )
 
     data: dict[str, Any] = {
@@ -188,6 +191,7 @@ def _produce_summary(
     snapshot: dict[str, Any],
     *,
     listing_id: int | None = None,
+    estimation_run_id: int | None = None,
 ) -> tuple[dict[str, Any], str, float | None]:
     listing = _fetch_listing(conn, sreality_id, listing_id=listing_id)
     payload = _build_payload(listing, snapshot)
@@ -201,6 +205,7 @@ def _produce_summary(
         system=system,
         tools=[RECORD_LISTING_SUMMARY_TOOL],
         model=model,
+        estimation_run_id=estimation_run_id,
     )
     summary = _extract_tool_call(response.tool_calls)
 

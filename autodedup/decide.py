@@ -617,9 +617,9 @@ def apply_merge_policy(decision: Decision, la: Listing, lb: Listing,
     and reads nothing but the two adverts' own category columns, so a held pair still carries
     its score, its certificate and its evidence into the band for the operator to act on.
 
-    EITHER side's cell holds the pair: a `dům` advertised as `komerční` is the one sanctioned
-    cross-type (rule #15), and holding rentals must not be escapable by pairing one with a row
-    whose type column is null."""
+    EITHER side's cell holds the pair: the two sides of a sanctioned cross-type pair (rule #15:
+    `dům`–`komerční`, `pozemek` with either, `byt`–`komerční`) sit in two cells, and holding
+    rentals must not be escapable by pairing one with a row whose type column is null."""
     if not settings.merge_policy or decision.zone != "merge":
         return decision
     for listing in (la, lb):

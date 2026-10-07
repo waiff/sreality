@@ -68,6 +68,11 @@ def test_every_id_lands_in_exactly_one_range():
     assert seen == max_id
 
 
+def test_a_resumed_walk_starts_its_ranges_at_the_cursor():
+    assert list(_batch_ranges(6000, 2000, 2001)) == [(2001, 4001), (4001, 6001)]
+    assert list(_batch_ranges(6000, 2000, 6001)) == []
+
+
 class _Cur:
     def __init__(self, conn: "_FakeConn") -> None:
         self._conn = conn
@@ -530,13 +535,16 @@ def test_lease_ttl_is_short_everywhere():
 
 class _SweepConn(_FakeConn):
     """Context-manager conn driving main()'s full sweep without stubbing the
-    batch loop: serves now(), the lease CAS (always granted), and max(id)."""
+    batch loop: serves now(), the lease CAS (always granted), max(id), and the
+    saved resume cursor (next_lo, runs, cycle_started_at, young) when given one."""
 
-    def __init__(self, max_id: int) -> None:
+    def __init__(self, max_id: int, cursor: tuple[Any, ...] | None = None) -> None:
         super().__init__([
             (lambda s: s == "SELECT now()", [("CUTOFF",)]),
             (lambda s: "property_maintenance_lease" in s and "RETURNING" in s, [(1,)]),
             (lambda s: "coalesce(max(id), 0) FROM properties" in s, [(max_id,)]),
+            (lambda s: s.startswith("SELECT") and "property_sweep_cursor" in s,
+             [cursor] if cursor else []),
         ])
 
     def __enter__(self) -> "_SweepConn":
@@ -576,9 +584,8 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
               if "property_maintenance_lease" in s and "RETURNING" in s]
     # initial acquisition + one renewal per batch
     assert len(grants) == 1 + 2
-    # complete walk → global dirty clear, no swept-range scope
-    cleared = _find(conn, "DELETE FROM dirty_properties")
-    assert cleared and "property_id <" not in cleared[0]
+    # complete walk → the swept-range clear over its whole range
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 4001}]
     # ...and the completion stamp the health check reads (O(1) liveness signal)
     stamp = _find(conn, "property_sweep_last_complete")
     assert stamp and stamp[1]["max_id"] == 4000 and stamp[1]["batches"] == 2
@@ -599,32 +606,339 @@ def test_the_full_sweep_patches_no_browse_row(monkeypatch: Any) -> None:
     assert not any("browse_list" in s for s in _sqls(conn))
 
 
-def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
-    monkeypatch: Any,
+# monotonic: started_at, _wait_lease entry anchor, batch-1 deadline check, batch-1 per-batch
+# timing, batch-2 deadline check (over a 60s budget), then the elapsed stamps in logging.
+_BUDGET_STOP_CLOCK = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
+_CURSOR_SAVE = "VALUES ('property_sweep_cursor'"
+_CURSOR_DROP = "DELETE FROM app_settings WHERE key = 'property_sweep_cursor'"
+_CURSOR_READ = "SELECT (value->>'next_lo')"
+
+
+def _swept(conn: _FakeConn) -> list[tuple[int, int]]:
+    return [(p["lo"], p["hi"]) for s, p in conn.executed if "WITH batch AS" in s]
+
+
+# Pinned as text, not read from the module: psycopg ignores unused mapping keys, so a dropped
+# bound would still be handed its parameter and pass every params-only assertion.
+_SCOPED_CLEAR = ("DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s "
+                 "AND property_id >= %(lo)s AND property_id < %(hi)s")
+
+
+def _dirty_clears(conn: _FakeConn) -> list[Any]:
+    clears = [(s, p) for s, p in conn.executed if s.startswith("DELETE FROM dirty_properties")]
+    assert all(s == _SCOPED_CLEAR for s, _ in clears), "every sweep clear is bounded both ways"
+    return [p for _, p in clears]
+
+
+def test_a_fresh_cycle_stopped_by_the_budget_saves_its_cursor_and_exits_green(
+    monkeypatch: Any, caplog: Any,
 ) -> None:
-    """Stopping early must (a) exit RED — GH reports a timeout kill as
-    `cancelled` which alerts nobody, an explicit failure emails — and (b) clear
-    dirty rows ONLY below the high-water mark: the global clear would erase the
-    recompute signal for unswept ids, leaving them stale until the next full
-    sweep instead of healed by the next incremental pass."""
+    """The first budget stop of a cycle is tolerated: exit 0 with a warning naming where the
+    next run resumes, and save that cursor. It still clears dirty rows ONLY in the range it
+    swept (a wider clear would erase the recompute signal for unswept ids, leaving them stale
+    until the next cycle instead of healed by the next incremental pass), and stamps nothing:
+    a stale stamp IS the health check's alarm condition."""
     conn = _SweepConn(max_id=6000)  # 3 batches at the default size
-    # monotonic: started_at, _wait_lease entry anchor, batch-1 deadline check,
-    # batch-1 per-batch timing, batch-2 deadline check (over budget), then the
-    # elapsed stamps in logging.
-    clock = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
-    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=clock)
-    assert rc == 1
-    recomputes = [p for s, p in conn.executed if "WITH batch AS" in s]
-    assert [(p["lo"], p["hi"]) for p in recomputes] == [(1, 2001)]
-    cleared = _find(conn, "DELETE FROM dirty_properties")
-    assert cleared and "property_id < %(hi)s" in cleared[0]
-    assert cleared[1] == {"cutoff": "CUTOFF", "hi": 2001}
-    # incomplete walk must NOT reconcile childless, claim a full clear, or
-    # stamp completion — a stale stamp IS the health check's alarm condition
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 0
+    assert "the next run resumes this cycle at id 2001" in caplog.text
+    assert _swept(conn) == [(1, 2001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 2001}]
+    saved = _find(conn, _CURSOR_SAVE)
+    assert saved and saved[1] == {"next_lo": 2001, "cycle_started_at": "CUTOFF", "runs": 1}
     assert not _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
     assert not _find(conn, "property_sweep_last_complete")
-    # the lease is still released
     assert _find(conn, "SET holder = NULL")
+
+
+class _TxnSweepConn(_SweepConn):
+    transaction = _TxnMarkingConn.transaction
+
+
+def test_a_resumed_run_finishes_the_cycle_from_its_cursor(monkeypatch: Any) -> None:
+    """Run 2 walks [next_lo, max_id] only and clears only that range's dirt (ids below it were
+    recomputed by run 1 and may be dirty again), reconciles, stamps the cycle (runs=2, run 1's
+    start) and deletes the cursor in the stamp's own transaction."""
+    conn = _TxnSweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(2001, 4001), (4001, 6001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": 6001}]
+    assert _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 2 and stamp[1]["cycle_started_at"] == "CYCLE"
+    assert stamp[1]["max_id"] == 6000 and stamp[1]["batches"] == 2
+    assert not _find(conn, _CURSOR_SAVE)
+    order = _sqls(conn)
+    clear = next(i for i, s in enumerate(order) if s.startswith("DELETE FROM dirty_properties"))
+    stamped = next(i for i, s in enumerate(order) if "property_sweep_last_complete" in s)
+    dropped = order.index(_CURSOR_DROP)
+    begin = max(i for i in range(clear) if order[i] == "BEGIN")
+    assert begin < clear < stamped < dropped < order.index("COMMIT", begin)
+    assert _find(conn, "SET holder = NULL")
+
+
+def test_a_resumed_run_stopped_by_the_budget_again_is_red_and_advances_the_cursor(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """A cycle that needs three or more runs is genuinely too slow: RED, with the cycle facts
+    in the message, and the cursor still advanced so a run within the age limit continues."""
+    conn = _SweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 1
+    assert "three or more runs" in caplog.text and "investigate per-batch cost" in caplog.text
+    assert _swept(conn) == [(2001, 4001)]
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": 4001}]
+    saved = _find(conn, _CURSOR_SAVE)
+    assert saved and saved[1] == {"next_lo": 4001, "cycle_started_at": "CYCLE", "runs": 2}
+    assert not _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    assert not _find(conn, "property_sweep_last_complete")
+    assert _find(conn, "SET holder = NULL")
+
+
+@pytest.mark.parametrize("cursor", [
+    (2001, 1, "OLD", False),     # the cycle began more than _CURSOR_MAX_AGE ago
+    (8001, 1, "CYCLE", True),    # past max_id
+    (1, 1, "CYCLE", True),       # nothing to skip
+], ids=["stale", "past-max-id", "at-id-1"])
+def test_a_cursor_that_cannot_continue_its_cycle_is_ignored(
+    monkeypatch: Any, caplog: Any, cursor: tuple[Any, ...],
+) -> None:
+    """A stale cursor would let the stamp vouch for a reconcile whose lower half is days old:
+    walk from id 1 as a fresh cycle instead. The age is judged by the database's clock."""
+    import scripts.recompute_property_stats as rps
+
+    conn = _SweepConn(max_id=6000, cursor=cursor)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    read = _find(conn, _CURSOR_READ)
+    assert read and read[1] == {"max_age": rps._CURSOR_MAX_AGE}
+    assert "ignoring the saved cursor" in caplog.text
+    assert _swept(conn) == [(1, 2001), (2001, 4001), (4001, 6001)]
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 1 and stamp[1]["cycle_started_at"] == "CUTOFF"
+    assert _find(conn, _CURSOR_DROP)
+
+
+def test_a_fresh_complete_walk_clears_its_whole_range_and_leaves_no_cursor(
+    monkeypatch: Any,
+) -> None:
+    """No cursor: walk from id 1 as before. The one dirty clear covers [1, max_id + 1), which
+    stands in for the deleted global `_CLEAR_DIRTY_SQL` (why that is the same clear: the comment
+    on `_CLEAR_DIRTY_SWEPT_SQL`)."""
+    import scripts.recompute_property_stats as rps
+
+    conn = _SweepConn(max_id=4000)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(1, 2001), (2001, 4001)]
+    assert not hasattr(rps, "_CLEAR_DIRTY_SQL")
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 1, "hi": 4001}]
+    assert _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 1 and stamp[1]["cycle_started_at"] == "CUTOFF"
+    assert _find(conn, _CURSOR_DROP) and not _find(conn, _CURSOR_SAVE)
+
+
+def test_the_cursor_survives_one_daily_gap_but_not_two() -> None:
+    """The daily cron starts hours late and unevenly, so the next day's run must still find the
+    cycle young enough to resume; the day after must start over at id 1."""
+    import scripts.recompute_property_stats as rps
+
+    assert 24 * 3600 < _interval_seconds(rps._CURSOR_MAX_AGE) < 48 * 3600
+
+
+def test_the_dry_run_reports_the_cursor_and_writes_nothing(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO)
+    conn = _SweepConn(max_id=6000, cursor=(2001, 1, "CYCLE", True))
+    conn.script.append((lambda s: s.startswith("SELECT count(*)"), [(7,)]))
+    assert _run_sweep(monkeypatch, conn, ["--dry-run"]) == 0
+    assert "(2001, 1, 'CYCLE', True)" in caplog.text
+    assert not any(s.startswith(("INSERT", "UPDATE", "DELETE")) for s in _sqls(conn))
+    assert not _find(conn, "property_maintenance_lease")
+
+
+def test_a_fresh_run_stopped_before_its_first_batch_is_red_and_saves_nothing(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """The budget clock starts before the lease wait and the straggler attach, so a backlog can
+    spend it before batch 1. A cursor at id 1 is never resumed, so there is no cycle to continue:
+    RED and nothing saved, or every such day would exit green."""
+    conn = _SweepConn(max_id=6000)
+    # monotonic: started_at, _wait_lease anchor, batch-1 deadline check (past 60s), elapsed
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=[0.0, 1.0, 100.0, 101.0])
+    assert rc == 1
+    assert "before the first batch" in caplog.text and "resumes" not in caplog.text
+    assert _swept(conn) == [] and _dirty_clears(conn) == []
+    assert not _find(conn, _CURSOR_SAVE) and not _find(conn, "property_sweep_last_complete")
+    assert _find(conn, "SET holder = NULL")
+
+
+def test_a_cursor_at_the_last_id_still_resumes(monkeypatch: Any) -> None:
+    """`next_lo <= max_id`: a stop on the batch holding only the last id continues the cycle."""
+    conn = _SweepConn(max_id=6001, cursor=(6001, 1, "CYCLE", True))
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert _swept(conn) == [(6001, 8001)]
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["runs"] == 2
+
+
+def test_an_unreadable_cursor_costs_one_fresh_cycle_not_every_run(
+    monkeypatch: Any, caplog: Any,
+) -> None:
+    """The Settings page edits any app_settings row as raw JSON, and the read casts in SQL. A
+    value the casts reject is a DataError, which run_resilient never retries: it must start a
+    fresh cycle (whose completion deletes the row), not red every run until fixed by hand."""
+    import psycopg
+
+    class _HandEditedCur(_Cur):
+        def execute(self, sql: str, params: Any = None) -> None:
+            if "value->>'next_lo'" in sql:
+                raise psycopg.errors.InvalidTextRepresentation(
+                    'invalid input syntax for type bigint: "540k"')
+            super().execute(sql, params)
+
+    class _HandEditedConn(_SweepConn):
+        def cursor(self) -> Any:
+            return _HandEditedCur(self)
+
+    conn = _HandEditedConn(max_id=4000)
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    assert "unreadable" in caplog.text and "540k" in caplog.text
+    assert _swept(conn) == [(1, 2001), (2001, 4001)]
+    assert _find(conn, _CURSOR_DROP)
+
+
+def test_the_cursor_sql_reads_back_what_it_saves() -> None:
+    """The fakes serve canned rows, not SQL, so pin the SQL's own half of the contract: the read
+    names the keys the save writes, in `_resume_point`'s order; a cursor is young while its
+    cycle began after now() - max_age; both rows are upserts (a resumed run that stops again
+    saves over the cursor); and the stamp carries the cycle's facts."""
+    import re
+
+    import scripts.recompute_property_stats as rps
+
+    def built(sql: str) -> dict[str, str]:
+        return dict(re.findall(r"'(\w+)', %\((\w+)\)s", sql))
+
+    read = " ".join(rps._READ_SWEEP_CURSOR_SQL.split())
+    assert re.findall(r"value->>'(\w+)'", read) == [
+        "next_lo", "runs", "cycle_started_at", "cycle_started_at"]
+    assert "(value->>'cycle_started_at')::timestamptz > now() - %(max_age)s::interval" in read
+    assert built(rps._SAVE_SWEEP_CURSOR_SQL) == {
+        "next_lo": "next_lo", "cycle_started_at": "cycle_started_at", "runs": "runs"}
+    stamp = built(rps._STAMP_SWEEP_COMPLETE_SQL)
+    assert stamp["runs"] == "runs" and stamp["cycle_started_at"] == "cycle_started_at"
+    for sql in (rps._SAVE_SWEEP_CURSOR_SQL, rps._STAMP_SWEEP_COMPLETE_SQL):
+        assert "ON CONFLICT (key) DO UPDATE" in sql
+
+
+class _SettingsCur(_Cur):
+    """app_settings as a dict: an upsert stores the jsonb object its SQL builds from its
+    ('key', %(param)s) pairs, a DELETE pops the row, and the cursor read serves back the keys
+    it names, young by the fake database's clock."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import re
+
+        super().execute(sql, params)
+        s, rows = self._conn.executed[-1][0], self._conn.settings
+        key = re.search(r"'(property_sweep_\w+)'", s)
+        if key is None:
+            return
+        if s.startswith("INSERT INTO app_settings"):
+            rows[key[1]] = {k: params[p] for k, p in re.findall(r"'(\w+)', %\((\w+)\)s", s)}
+        elif s.startswith("DELETE FROM app_settings"):
+            rows.pop(key[1], None)
+        elif s.startswith("SELECT") and key[1] in rows:
+            *values, began = (rows[key[1]].get(k) for k in re.findall(r"value->>'(\w+)'", s))
+            age = (self._conn.now - began).total_seconds()
+            self._rows = [(*values, age < _interval_seconds(params["max_age"]))]
+
+
+class _SettingsSweepConn(_SweepConn):
+    def __init__(self, max_id: int, settings: dict[str, Any], now: Any) -> None:
+        super().__init__(max_id)
+        self.settings, self.now = settings, now
+        self.script.insert(0, (lambda s: s == "SELECT now()", [(now,)]))  # first match wins
+
+    def cursor(self) -> Any:
+        return _SettingsCur(self)
+
+
+@pytest.mark.parametrize("gap_hours, resumed", [(25, True), (37, False)])
+def test_the_next_run_continues_from_exactly_what_the_last_one_saved(
+    monkeypatch: Any, gap_hours: int, resumed: bool,
+) -> None:
+    """Run 1 stops on budget; run 2 reads back the row run 1 wrote and finishes the cycle, or
+    starts over at id 1 once the cycle is past _CURSOR_MAX_AGE. Either way the stamp carries
+    the cycle it completed and the cursor is gone."""
+    from datetime import UTC, datetime, timedelta
+
+    settings: dict[str, Any] = {}
+    start = datetime(2026, 10, 3, 10, tzinfo=UTC)
+    first = _SettingsSweepConn(6000, settings, now=start)
+    rc = _run_sweep(monkeypatch, first, ["--max-seconds", "60"], clock=list(_BUDGET_STOP_CLOCK))
+    assert rc == 0
+    assert settings == {
+        "property_sweep_cursor": {"next_lo": 2001, "cycle_started_at": start, "runs": 1}}
+
+    later = start + timedelta(hours=gap_hours)
+    second = _SettingsSweepConn(6000, settings, now=later)
+    assert _run_sweep(monkeypatch, second, [], clock=[0.0] * 32) == 0
+    stamp = settings.pop("property_sweep_last_complete")
+    assert settings == {}
+    assert _swept(second)[0] == ((2001, 4001) if resumed else (1, 2001))
+    assert (stamp["runs"], stamp["cycle_started_at"]) == ((2, start) if resumed else (1, later))
+
+
+class _DropAfterCur(_Cur):
+    """Runs the statement, then loses the reply ONCE for the first one matching
+    `conn.drop_after`: a drop that may follow the server's COMMIT."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import psycopg
+
+        super().execute(sql, params)
+        if self._conn.drop_after and self._conn.drop_after in self._conn.executed[-1][0]:
+            self._conn.drop_after = None
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+
+class _DropAfterSweepConn(_SweepConn):
+    def __init__(self, max_id: int, cursor: tuple[Any, ...], drop_after: str) -> None:
+        super().__init__(max_id, cursor)
+        self.drop_after: str | None = drop_after
+
+    def cursor(self) -> Any:
+        return _DropAfterCur(self)
+
+
+@pytest.mark.parametrize("drop_after, budget_stop", [
+    (_CURSOR_READ, False), (_CURSOR_SAVE, True), (_CURSOR_DROP, False),
+], ids=["read", "stop", "finalize"])
+def test_a_dropped_cursor_statement_replays_with_identical_values(
+    monkeypatch: Any, drop_after: str, budget_stop: bool,
+) -> None:
+    """Every cursor read and write runs through step(), so a drop replays the whole op. Its
+    values (next_lo, runs + 1, the cycle's start) are fixed before the op, so a replay after a
+    COMMIT the client never saw writes the same row again: never runs + 2."""
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setattr(rps.db.time, "sleep", lambda s: None)
+    conn = _DropAfterSweepConn(6000, cursor=(2001, 1, "CYCLE", True), drop_after=drop_after)
+    argv, clock = (["--max-seconds", "60"], list(_BUDGET_STOP_CLOCK)) if budget_stop else ([], None)
+    assert _run_sweep(monkeypatch, conn, argv, clock=clock) == (1 if budget_stop else 0)
+    replays = 1 if drop_after == _CURSOR_READ else 2
+    hi = 4001 if budget_stop else 6001
+    assert _dirty_clears(conn) == [{"cutoff": "CUTOFF", "lo": 2001, "hi": hi}] * replays
+    if budget_stop:
+        assert [p for s, p in conn.executed if _CURSOR_SAVE in s] == [
+            {"next_lo": 4001, "cycle_started_at": "CYCLE", "runs": 2}] * replays
+    else:
+        assert [(p["runs"], p["cycle_started_at"]) for s, p in conn.executed
+                if "property_sweep_last_complete" in s] == [(2, "CYCLE")] * replays
 
 
 class _FlakyCur(_Cur):
@@ -873,17 +1187,20 @@ def test_late_binding_is_not_fuzzy():
         assert banned not in sql, f"late binding must not use {banned}"
 
 
-# --- one property, one voice (migrations 424 + 561) --------------------------------------
+# --- one property, one voice (migrations 561 + 588) --------------------------------------
 
-MIGRATION_561 = Path(__file__).resolve().parent.parent / "migrations" / "561_one_property_view.sql"
+MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
+MIGRATION_561 = MIGRATIONS / "561_one_property_view.sql"
+MIGRATION_588 = MIGRATIONS / "588_canonical_order_and_portal_dates.sql"
 ADVERT_FIELDS = (
     "repr_listing_id", "repr_listing_ref_id", "category_main", "category_type",
     "category_sub_cb", "subtype", "disposition", "area_m2", "current_price_czk", "condition",
     "building_condition_level", "apartment_condition_level", "furnished", "source",
 )
+AMENITIES = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
 PHYSICAL_FACTS = (
-    "has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar", "usable_area",
-    "estate_area", "garden_area", "parking_lots", "building_type", "ownership", "energy_rating",
+    "usable_area", "estate_area", "garden_area", "parking_lots", "building_type", "ownership",
+    "energy_rating",
 )
 
 
@@ -901,15 +1218,21 @@ def _rhs(set_clause: str, column: str) -> str:
     return m[1].strip().rstrip(",")
 
 
+def _child_agg(sql: str) -> str:
+    return " ".join(sql.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0].split())
+
+
 def test_the_one_order_is_spelled_once_in_the_function():
-    """Decision 18: active first, then portal trust, then the most recently seen, then the id
-    (the tie-break: 1,840 properties were tied at the top). The rollup reads the rank and
-    orders nothing of its own: the trust-first second ordering and the area fallback are gone."""
+    """MS5: active first, then a map point, then the earliest first sighting among active
+    adverts / the latest last sighting among inactive ones, then portal trust, then the id.
+    The rollup reads the rank and orders nothing of its own."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    body = " ".join(MIGRATION_561.read_text().split())
-    assert ("order by l.is_active desc, public.source_trust_rank(l.source), "
-            "l.last_seen_at desc nulls last, l.id))::integer") in body
+    body = " ".join(MIGRATION_588.read_text().split())
+    assert ("order by l.is_active desc, (ll.geom is not null) desc, "
+            "case when l.is_active then l.first_seen_at end, "
+            "case when not l.is_active then l.last_seen_at end desc, "
+            "public.source_trust_rank(l.source), l.id))::integer") in body
     sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
     assert "CROSS JOIN LATERAL property_canonical_listings(b.id) o" in sql
     for gone in ("source_trust_rank", "src_rank", "DISTINCT ON", "best_area", "golden", "coalesce(c."):
@@ -917,15 +1240,16 @@ def test_the_one_order_is_spelled_once_in_the_function():
 
 
 def test_every_advert_field_comes_from_the_canonical_advert():
-    """Price and area from one row (the per-m2 pair, migration 424) and condition with both
-    derived levels from that same row (rule 14): the canonical advert, never a mix."""
+    """Price and area from one row and condition with both derived levels from that same row
+    (rule 14): the canonical advert, never a mix. The two write-only columns are not written
+    (W6 drops them)."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
     for column in ADVERT_FIELDS:
         assert _rhs(setc, column).startswith("c."), f"{column} must be the canonical advert's"
-    assert _rhs(setc, "price_per_m2_source_listing_id") == (
-        "price_per_m2_source_id(c.price_czk, c.area_m2, c.id)")
+    for gone in ("price_per_m2_source", "distinct_site_count"):
+        assert gone not in _RECOMPUTE_BATCH_SQL
 
 
 def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():
@@ -934,37 +1258,85 @@ def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
-    rollup = _RECOMPUTE_BATCH_SQL.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0]
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
     for column in PHYSICAL_FACTS:
         assert _rhs(setc, column) == f"r.{column}"
         assert re.search(
             rf"\(array_agg\(k\.{column} ORDER BY k\.canonical_rank\) "
             rf"FILTER \(WHERE k\.{column} IS NOT NULL\)\)\[1\] AS {column}", rollup,
         ), f"{column} must be the first non-empty value in the canonical order"
-    assert "bool_or(k.is_active)" in rollup, "a property is live while ANY advert is"
+    assert "bool_or(k.is_active) AS is_active" in rollup, "a property is live while ANY advert is"
 
 
-def test_the_price_history_is_the_canonical_adverts_own():
-    """A step never spans two adverts (migration 559) and no other advert's steps are summed
-    in: the counts, the max drop and the headline delta all read the canonical advert."""
+def test_the_six_amenities_are_a_union_over_every_advert():
+    """MS6: yes when any advert says yes, active or not; no order decides an amenity."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
+    for column in AMENITIES:
+        assert _rhs(setc, column) == f"r.{column}"
+        assert f"bool_or(k.{column}) AS {column}," in rollup
+        assert f"array_agg(k.{column}" not in rollup
+
+
+def test_one_newest_ad_date_per_offered_portal_and_the_two_portal_lists():
+    """MS19: a dated column per `PORTAL_OPTIONS` code, each added by a migration; two sorted lists."""
+    import re
+
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    codes = [o.value for o in PORTAL_OPTIONS]
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert re.findall(r"^\s*newest_ad_at_(\w+) = r\.newest_ad_at_\1,$", setc, re.M) == codes
+    assert len(re.findall(r"newest_ad_at_\w+ =", setc)) == len(codes)
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
+    migrations = " ".join(
+        " ".join(path.read_text(encoding="utf-8").split()) for path in MIGRATIONS.glob("*.sql"))
+    for code in codes:
+        assert (f"max(k.first_seen_at) FILTER (WHERE k.source = '{code}') "
+                f"AS newest_ad_at_{code},") in rollup
+        assert f"add column if not exists newest_ad_at_{code} timestamptz" in migrations, code
+    assert "array_agg(DISTINCT k.source ORDER BY k.source) AS all_sources," in rollup
+    assert ("coalesce(array_agg(DISTINCT k.source ORDER BY k.source) FILTER (WHERE k.is_active), "
+            "ARRAY[]::text[]) AS active_sources,") in rollup
+    for column in ("all_sources", "active_sources"):
+        assert _rhs(setc, column) == f"r.{column}"
+
+
+def test_the_price_history_is_the_canonical_adverts_lineage():
+    """MS10: the canonical advert's same-portal predecessors' steps plus one handover per link."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
-    assert "FROM canon c JOIN listing_price_steps ps ON ps.listing_id = c.id" in sql
-    assert "FROM canon c JOIN listing_snapshots s ON s.listing_id = c.id" in sql
+    assert sql.startswith("WITH batch AS (")
+    assert "lineage AS ( WITH RECURSIVE link AS (" in sql
+    assert ("WHERE l.property_id = k.pid AND l.source = k.source "
+            "AND l.last_seen_at < k.first_seen_at AND l.first_seen_at < k.first_seen_at "
+            "ORDER BY l.last_seen_at DESC, l.id DESC LIMIT 1") in sql
+    assert "FROM lineage g JOIN listing_price_steps ps ON ps.listing_id = g.id" in sql
+    assert "FROM lineage g JOIN listing_snapshots s ON s.listing_id = g.id" in sql
+    assert "FROM steps ps GROUP BY ps.pid" in sql
+    assert "LEFT JOIN lineage_span cs ON cs.pid = r.pid" in sql
     assert "ps.property_id" not in sql
 
 
 def test_the_canonical_handover_is_stamped_for_the_price_alerts():
     """`repr_since` moves only when the canonical advert changes from one advert to another,
-    and both alert producers count only steps after it (migration 561)."""
+    and both alert producers count only steps after it (migration 561). The city figures follow
+    the canonical advert: their stamp clears with it, or when it predates `repr_since`."""
     import inspect
 
     from api import notifications as nf
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    assert _rhs(_set_clause(_RECOMPUTE_BATCH_SQL), "repr_since") == (
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "repr_since") == (
         "CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END")
+    assert _rhs(setc, "city_proximity_computed_at") == (
+        "CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since "
+        "THEN NULL ELSE p.city_proximity_computed_at END")
     assert ("add column if not exists repr_since timestamptz not null default '-infinity'"
             in " ".join(MIGRATION_561.read_text().split()))
     assert "ps.scraped_at > p.repr_since" in inspect.getsource(nf._recent_price_drops)
@@ -972,15 +1344,17 @@ def test_the_canonical_handover_is_stamped_for_the_price_alerts():
     assert "p.repr_since" in nf._MONITORED_CTE
 
 
-def test_every_recompute_variant_writes_the_stamp():
+def test_every_recompute_variant_carries_the_whole_statement():
     """The one/scoped variants are derived from the batch SQL by narrowing the
-    batch CTE; if that ever becomes a copy, they must not lose the measure."""
+    batch CTE; if that ever becomes a copy, they must not lose a rule."""
     import scripts.recompute_property_stats as rps
 
     for sql in (rps._RECOMPUTE_BATCH_SQL, rps._RECOMPUTE_ONE_SQL,
                 rps._RECOMPUTE_SCOPED_SQL):
-        assert "price_per_m2_source_listing_id" in sql
-        assert "property_canonical_listings" in sql
+        for rule in ("property_canonical_listings", "lineage AS (", "city_proximity_computed_at",
+                     "newest_ad_at_", "active_sources"):
+            assert rule in sql
+        assert "price_per_m2_source_id" not in sql
 
 
 def test_a_property_is_born_one_way():

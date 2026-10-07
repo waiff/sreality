@@ -74,6 +74,20 @@ describe('<PipelineFunnelButton>', () => {
     await waitFor(() => expect(api.addPipelineCard).toHaveBeenCalledWith(42));
   });
 
+  /* MS16: when the board cannot be read, the funnel retries the read; it never
+     adds, since the property may already be on the board. */
+  it('retries a failed read instead of adding', async () => {
+    vi.mocked(queries.fetchPipelineMembers).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderButton();
+    const retry = await screen.findByRole('button', { name: /Pipeline se nepodařilo načíst/ });
+    expect(screen.queryByRole('button', { name: 'Přidat do pipeline' })).toBeNull();
+
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map([[42, MEMBER]]));
+    fireEvent.click(retry);
+    expect(await screen.findByRole('button', { name: /V pipeline/ })).toBeInTheDocument();
+    expect(api.addPipelineCard).not.toHaveBeenCalled();
+  });
+
   it('opens the stage menu instead of removing when already in the pipeline', async () => {
     vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map([[42, MEMBER]]));
     renderButton();

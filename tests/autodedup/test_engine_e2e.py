@@ -42,7 +42,7 @@ BLOCK_B = "praha"
 DUP_A, DUP_B = 1001, 1002
 REPOST_A, REPOST_B = 1101, 1102
 SALE, RENT = 1201, 1202
-FLAT, COMMERCIAL = 1301, 1302
+FLAT, HOUSE = 1301, 1302
 MODEL_A, MODEL_B = 1401, 1402
 PHOTO_A, PHOTO_B = 1501, 1502
 PROJECT = tuple(range(2001, 2007))
@@ -324,13 +324,14 @@ def build_records() -> list[dict[str, Any]]:
     records.extend(_gallery(SALE, 500_500, UNIT_HASHES))
     records.extend(_gallery(RENT, 500_600, UNIT_HASHES))
 
-    # (5) a flat and a commercial space sharing photos and a template — G2 (E3).
+    # (5) a flat and a house sharing photos and a template — G2 (E3). A flat and a commercial
+    # unit are a sanctioned pair since E938; a flat and a house never are.
     records.append(_listing(FLAT, BLOCK_A, description=TEXT_COMMERCIAL, area_m2=96.0,
                             disposition="4+1", price=9_100_000))
-    records.append(_listing(COMMERCIAL, BLOCK_A, category_main="komercni", disposition=None,
+    records.append(_listing(HOUSE, BLOCK_A, category_main="dum", disposition=None,
                             description=TEXT_COMMERCIAL, area_m2=96.0, price=9_100_000))
     records.extend(_gallery(FLAT, 500_700, CROSS_HASHES))
-    records.extend(_gallery(COMMERCIAL, 500_800, CROSS_HASHES))
+    records.extend(_gallery(HOUSE, 500_800, CROSS_HASHES))
 
     # (3) a development: six units, one catalogue, one template, no unit-specific evidence.
     for index, listing_id in enumerate(PROJECT):
@@ -529,11 +530,11 @@ def test_sale_and_rent_of_one_flat_are_vetoed(engine: dict[str, Any]) -> None:
     assert engine["blocking"]["guarded_pairs"].get("category_type", 0) >= 1
 
 
-def test_flat_and_commercial_are_vetoed(engine: dict[str, Any]) -> None:
-    assert (FLAT, COMMERCIAL) not in engine["pairs"]
+def test_flat_and_house_are_vetoed(engine: dict[str, Any]) -> None:
+    assert (FLAT, HOUSE) not in engine["pairs"]
     decision = decide_pair(
-        engine["fps"][FLAT], engine["fps"][COMMERCIAL],
-        engine["dataset"].listings[FLAT], engine["dataset"].listings[COMMERCIAL],
+        engine["fps"][FLAT], engine["fps"][HOUSE],
+        engine["dataset"].listings[FLAT], engine["dataset"].listings[HOUSE],
         {}, set(), engine["model"], engine["settings"],
     )
     assert decision.zone == "veto"

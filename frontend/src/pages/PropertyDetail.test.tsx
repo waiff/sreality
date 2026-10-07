@@ -1,7 +1,8 @@
 /* The property page (decision 11): the header is the property as its Browse
  * card shows it, the merged-adverts section is the only advert list, and every
  * old advert address lands here with that advert's row open. Plus the freshness
- * affordance and the broker vizitka, both the canonical advert's.
+ * affordance, the broker list (MS7), the lowest active price (MS8) and every
+ * advert's price moves (MS10).
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -15,11 +16,21 @@ import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
 import { fmtCzk } from '@/lib/format';
-import type { PropertySource } from '@/lib/types';
+import type { ListingPublic, PropertySource } from '@/lib/types';
 
+/* The curation reads (header controls, curation block) answer empty, so every
+   page test sees the normal header, not their failed-read retries (MS16). */
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
-  return { ...actual, verifyListingFreshness: vi.fn(), fetchPropertyOrigins: vi.fn() };
+  const empty = async () => ({ data: [], total: 0 });
+  return {
+    ...actual,
+    verifyListingFreshness: vi.fn(),
+    fetchPropertyOrigins: vi.fn(),
+    listCollections: vi.fn(empty),
+    listTags: vi.fn(empty),
+    listPropertyNotes: vi.fn(empty),
+  };
 });
 
 const verifyMock = vi.mocked(api.verifyListingFreshness);
@@ -139,23 +150,27 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchProperty: vi.fn(),
     fetchAdvertProperty: vi.fn(),
     fetchPropertySources: vi.fn(async () => []),
-    fetchPropertyStatusEvents: vi.fn(async () => []),
     fetchSnapshotsForListings: vi.fn(async () => []),
     fetchFreshnessChecksByListing: vi.fn(async () => []),
     fetchImagesByListing: vi.fn(async () => []),
     fetchListingsForListingIds: vi.fn(async () => new Map()),
     fetchImagesForListingIds: vi.fn(async () => new Map()),
+    fetchPipelineMembers: vi.fn(async () => new Map()),
+    fetchPipelineStages: vi.fn(async () => []),
+    fetchPropertyCollectionMemberSet: vi.fn(async () => new Map()),
+    fetchPropertyTagIds: vi.fn(async () => []),
+    fetchIsDismissed: vi.fn(async () => false),
   };
 });
 vi.mock('@/lib/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth')>()),
   useAuth: vi.fn(() => ({ isAdmin: false })),
 }));
-/* Only the network wrapper is stubbed — contactState/prettyPhone stay REAL,
-   because the vizitka's whole point is the three states they encode. */
+/* Only the network wrapper is stubbed — propertyBrokers/contactState/prettyPhone
+   stay REAL, because the list's whole point is the rule and states they encode. */
 vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
-  fetchListingBroker: vi.fn(async () => null),
+  fetchListingBrokersByIds: vi.fn(async () => new Map()),
 }));
 vi.mock('@/components/NewEstimationModal', () => ({
   useNewEstimationModal: () => ({ open: vi.fn() }),
@@ -247,7 +262,8 @@ beforeEach(() => {
   vi.mocked(queries.fetchAdvertProperty).mockReset();
   vi.mocked(queries.fetchPropertySources).mockResolvedValue(SOURCES);
   vi.mocked(queries.fetchImagesByListing).mockClear();
-  vi.mocked(queries.fetchSnapshotsForListings).mockClear();
+  vi.mocked(queries.fetchSnapshotsForListings).mockReset().mockResolvedValue([]);
+  vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(new Map());
 });
 
 describe('<PropertyDetail> one property, one voice', () => {
@@ -259,19 +275,30 @@ describe('<PropertyDetail> one property, one voice', () => {
     expect(h1.textContent).toContain(fmtCzk(5_000_000));
     expect(screen.getByText('Kolbenova, Praha 9')).toBeInTheDocument();
     expect(queries.fetchProperty).toHaveBeenCalledWith(774, expect.anything());
-    // Photos and the price history are the canonical advert's own.
+    // Photos are the canonical advert's own; the chart reads every advert's.
     await waitFor(() => expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105054, expect.anything()));
-    expect(queries.fetchSnapshotsForListings).toHaveBeenCalledWith([105054], expect.anything());
+    await waitFor(() =>
+      expect(queries.fetchSnapshotsForListings).toHaveBeenCalledWith([105053, 105054], expect.anything()));
     // The price moves are the property's, as Browse filters on them.
     expect(screen.getByText('Price changes').nextSibling).toHaveTextContent('2');
     expect(screen.getByText('Days on market').nextSibling).toHaveTextContent('62');
+    // The curation controls read, so the header offers them, never a retry.
+    expect(await screen.findByRole('button', { name: /Přidat do pipeline/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Uložit do kolekce' })).toBeInTheDocument();
+  });
+
+  it('charts the canonical advert alone when the advert list cannot be read', async () => {
+    vi.mocked(queries.fetchPropertySources).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderAt('/property/774');
+    await waitFor(() =>
+      expect(queries.fetchSnapshotsForListings).toHaveBeenCalledWith([105054], expect.anything()));
   });
 
   it('lists the adverts once, in the merged-adverts section, with no duplicate lists', async () => {
     renderAt('/property/774');
 
     expect(await screen.findByText('Sloučené inzeráty')).toBeInTheDocument();
-    expect(within(screen.getByText('Sreality').closest('li') as HTMLElement).getByText('v záhlaví'))
+    expect(within(screen.getByText('Sreality').closest('li') as HTMLElement).getByText('hlavní inzerát'))
       .toBeInTheDocument();
     // The chips row, the "current active listing" jump, the history block's URL
     // list and the price-mismatch note are gone: one list, one price.
@@ -281,6 +308,60 @@ describe('<PropertyDetail> one property, one voice', () => {
     expect(screen.getAllByRole('link', { name: /Na portálu/ })).toHaveLength(2);
     // Nothing asked for, nothing opened.
     expect(rowToggle('iDNES Reality')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  /* MS8: a labelled, display-only line when an active advert of the property's
+     deal type is cheaper than the header (a rental never counts for a sale). */
+  it('names a cheaper active advert of the same deal under the header price', async () => {
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue([
+      { ...SOURCES[0], price_czk: 4_900_000 },
+      SOURCES[1],
+      { ...SOURCES[0], id: 105055, price_czk: 25_000 },
+    ]);
+    const deal = (id: number, category_type: string) => [id, { id, category_type } as ListingPublic] as const;
+    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(
+      new Map([deal(105053, 'prodej'), deal(105054, 'prodej'), deal(105055, 'pronajem')]),
+    );
+    renderAt('/property/774');
+    // The matcher normalizes the formatter's no-break spaces to spaces.
+    const line = await screen.findByText('Nejnižší aktivní cena: 4 900 000 Kč · iDNES Reality');
+    expect(line).toHaveAttribute('title', expect.stringContaining('jen pro informaci'));
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toContain(fmtCzk(5_000_000));
+  });
+
+  it('still names the cheaper advert when the adverts’ deal types cannot be read', async () => {
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue([{ ...SOURCES[0], price_czk: 4_900_000 }, SOURCES[1]]);
+    vi.mocked(queries.fetchListingsForListingIds).mockRejectedValue(new Error('HTTP 500'));
+    renderAt('/property/774');
+    expect(await screen.findByText('Nejnižší aktivní cena: 4 900 000 Kč · iDNES Reality')).toBeInTheDocument();
+  });
+
+  /* Like with like: the header's stored price lags an advert's price change until
+     the recompute, and a lag is not two adverts disagreeing. */
+  it('names no lower price when the cheapest advert is the canonical one', async () => {
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue([SOURCES[0], { ...SOURCES[1], price_czk: 4_800_000 }]);
+    const deal = (id: number) => [id, { id, category_type: 'prodej', disposition: '3+1' } as ListingPublic] as const;
+    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(new Map([deal(105053), deal(105054)]));
+    renderAt('/property/774');
+    expect((await screen.findAllByText(/3\+1/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Nejnižší aktivní cena/)).toBeNull();
+  });
+
+  /* MS9/MS10: every advert draws its own line, so the dated moves are every
+     advert's, each labelled by its portal. */
+  it('lists every advert’s price moves, labelled by portal', async () => {
+    const snap = (id: number, listing_id: number, scraped_at: string, price_czk: number) =>
+      ({ id, listing_id, scraped_at, price_czk });
+    vi.mocked(queries.fetchSnapshotsForListings).mockResolvedValue([
+      snap(1, 105053, '2025-11-01T08:00:00Z', 5_400_000),
+      snap(2, 105053, '2025-12-15T08:00:00Z', 5_200_000),
+      snap(3, 105054, '2025-12-01T08:00:00Z', 5_200_000),
+      snap(4, 105054, '2026-01-01T08:00:00Z', 5_000_000),
+    ]);
+    renderAt('/property/774');
+    const moves = await screen.findByRole('list', { name: 'Price moves' });
+    expect(within(moves).getAllByRole('listitem').map((li) => li.firstChild?.textContent))
+      .toEqual(['Sreality', 'iDNES Reality']);
   });
 
   it('opens the asked-for advert’s row, but not the one the header already is', async () => {
@@ -341,11 +422,11 @@ describe('<AdvertRedirect> old advert addresses', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Broker vizitka (C2) — the header chip's tri-state fetch behaviour, plus the */
-/* per-field 3-state contact rendering the chip never had                     */
+/* Broker list (MS7) — the honest failed read, and the per-field 3-state      */
+/* contact rendering                                                          */
 /* -------------------------------------------------------------------------- */
 
-/* One row now: /brokers/by-listing carries identity AND contact (migration 419).
+/* One row per advert: /brokers/by-listings carries identity AND contact (419).
    Which contact half arrives (primary_* vs has_*) is still a property of the
    CALLER — admin vs not — so each test picks one. broker_id (7) and listing_id
    (105054) are deliberately different values; that difference is what pins the
@@ -360,17 +441,19 @@ const attribution = (
   broker_firm_label: 'RE/MAX Alfa',
   ...contact,
 });
+const EVA = { ...attribution(), listing_id: 105053, broker_id: 8, broker_display_name: 'Eva Malá' };
+const byAdvert = (...rows: brokers.ListingBroker[]) => new Map(rows.map((r) => [r.listing_id, r]));
 
-describe('<BrokerVizitka>', () => {
+describe('<BrokerList>', () => {
   beforeEach(() => {
-    vi.mocked(brokers.fetchListingBroker).mockReset();
-    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(attribution());
+    vi.mocked(brokers.fetchListingBrokersByIds).mockReset();
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(byAdvert(attribution()));
   });
 
   const renderListing = () => renderAt('/property/774');
 
   function withContact(contact: Partial<brokers.BrokerContactFields>) {
-    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(attribution(contact));
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(byAdvert(attribution(contact)));
   }
 
   it('shows the real contact for an admin session, keyed on the attributed broker', async () => {
@@ -382,11 +465,9 @@ describe('<BrokerVizitka>', () => {
     expect(screen.getByText('jan@remax.cz')).toBeInTheDocument();
     expect(screen.getByText('Jan Novák')).toBeInTheDocument();
     expect(screen.getByText('RE/MAX Alfa')).toBeInTheDocument();
-    // W6: identity AND contact come from /brokers/by-listing. One call is the
-    // assertion — a second broker read reappearing here is the regression.
-    // The canonical advert's broker; the other adverts' are read on their rows.
-    expect(brokers.fetchListingBroker).toHaveBeenCalledWith(105054);
-    expect(brokers.fetchListingBroker).toHaveBeenCalledTimes(1);
+    // ONE batched read over every advert: the list and every advert row share it.
+    expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledWith([105053, 105054]);
+    expect(brokers.fetchListingBrokersByIds).toHaveBeenCalledTimes(1);
     // ATTRIBUTION deliberately gives broker_id (7) and listing_id (105054)
     // different values — pins the link to the BROKER dossier, not a
     // listing-id-shaped route that would 404 on every click.
@@ -437,30 +518,29 @@ describe('<BrokerVizitka>', () => {
     expect(screen.queryByText(/na vyžádání/)).not.toBeInTheDocument();
   });
 
-  it('renders nothing at all for a genuinely unattributed listing', async () => {
-    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(null);
+  it('renders nothing at all for a genuinely unattributed property', async () => {
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(new Map());
 
     renderListing();
 
-    await waitFor(() => expect(brokers.fetchListingBroker).toHaveBeenCalled());
+    await waitFor(() => expect(brokers.fetchListingBrokersByIds).toHaveBeenCalled());
     expect(screen.queryByText('Makléř')).toBeNull();
     expect(screen.queryByText('Makléře se nepodařilo načíst')).toBeNull();
   });
 
-  /* fetchListingBroker returns null ONLY for the two 404 bodies that mean "nothing
-     is attributed here"; every other error rethrows. Rendering both as an absent
-     card asserted "no broker" for every outage — the dark state that hid the
-     PostgREST revocation on this surface for a month. */
+  /* Rendering a failed read as an absent block asserted "no broker" for every
+     outage — the dark state that hid the PostgREST revocation on this surface
+     for a month. It says so, and its retry reads again. */
   it('says so when the attribution read fails instead of looking unattributed', async () => {
-    vi.mocked(brokers.fetchListingBroker).mockRejectedValue(
+    vi.mocked(brokers.fetchListingBrokersByIds).mockRejectedValueOnce(
       new api.ApiError('Invalid token', 401, null),
     );
 
     renderListing();
 
-    expect(
-      await screen.findByText('Makléře se nepodařilo načíst'),
-    ).toBeInTheDocument();
+    const failed = await screen.findByText('Makléře se nepodařilo načíst');
+    fireEvent.click(within(failed).getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
   });
 
   /* The distinction that used to need its own read: a broker we could not fetch
@@ -469,7 +549,7 @@ describe('<BrokerVizitka>', () => {
      block to the error line, and an em-dash is only ever drawn from a row we
      actually hold. */
   it('never draws an empty channel for a broker it failed to read', async () => {
-    vi.mocked(brokers.fetchListingBroker).mockRejectedValue(new Error('HTTP 500'));
+    vi.mocked(brokers.fetchListingBrokersByIds).mockRejectedValue(new Error('HTTP 500'));
 
     renderListing();
 
@@ -478,5 +558,29 @@ describe('<BrokerVizitka>', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/telefon —/)).not.toBeInTheDocument();
     expect(screen.queryByText(/e-mail —/)).not.toBeInTheDocument();
+  });
+
+  it('lists each person once, the canonical advert’s broker first', async () => {
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(byAdvert(EVA, attribution()));
+    renderListing();
+    expect(await screen.findByText('Makléři')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: /Jan Novák|Eva Malá/ }).map((a) => a.textContent))
+      .toEqual(['Jan Novák', 'Eva Malá']);
+  });
+
+  it('hides an inactive advert’s broker while an advert is active', async () => {
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue([{ ...SOURCES[0], is_active: false }, SOURCES[1]]);
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(byAdvert(EVA, attribution()));
+    renderListing();
+    expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
+    expect(screen.queryByText('Eva Malá')).toBeNull();
+  });
+
+  it('with no active advert, lists every advert’s broker as from inactive adverts', async () => {
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue(SOURCES.map((s) => ({ ...s, is_active: false })));
+    vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(byAdvert(EVA, attribution()));
+    renderListing();
+    expect(await screen.findByText('z neaktivních inzerátů')).toBeInTheDocument();
+    expect(screen.getByText('Eva Malá')).toBeInTheDocument();
   });
 });

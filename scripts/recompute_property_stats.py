@@ -3,15 +3,21 @@
 1. Attach stragglers: every `property_id IS NULL` listing (the batched detail-drain writes them)
    is born a bare singleton (`scraper.db.NEW_SINGLETONS_SQL`, the one birth path) and recomputed
    in the same transaction. No cross-listing matching, ever (CLAUDE.md rule 15).
-2. Recompute, ONE RULE PER FIELD (migration 561, decision 18). The canonical advert is rank 1 of
-   `property_canonical_listings(property_id)` (active, trust, last seen, id). Every advert field
-   is its own: price and ITS price history (`listing_price_steps`, migration 559: no other
-   advert's steps count), area (no fallback), layout, category, subtype, source, condition with
-   both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through which the read
-   models take place, floor, description, photos, broker and link. Every physical fact (building
-   type, ownership, energy rating, amenities, estate/usable/garden area, parking) is the first
-   non-empty value in the same order. Lifecycle: any advert active, min/max seen, newest snapshot.
-   `repr_since` is stamped when the canonical advert changes (the price alerts start there).
+2. Recompute, ONE RULE PER FIELD (docs/design/merge-sprint/PROGRAM.md MS11). The canonical advert
+   is rank 1 of `property_canonical_listings(property_id)` (migration 588, MS5: active, a map
+   point, earliest first seen among active / latest last seen among inactive, trust, id). Every
+   advert field is its own: price, area (no fallback), layout, category, subtype, source,
+   condition with both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through
+   which the read models take place, floor, description, photos, broker and link. The six
+   amenities are a union over every advert (MS6); every other physical fact is the first
+   non-empty value in the canonical order. The price figures are the canonical advert's lineage
+   (MS10): its own and its same-portal predecessors' `listing_price_steps` plus one handover step
+   per link, the total compounded. Lifecycle: any advert active, min/max seen, newest snapshot;
+   the portal lists and one newest-advert date per offered portal (MS19). `repr_since` is
+   stamped when the canonical advert changes (the price alerts start there), and
+   `city_proximity_computed_at` is cleared then and whenever it predates `repr_since`, so the
+   hourly city job recomputes the figures from the canonical advert's point (an advert without
+   one keeps the earlier figures until it gains one: the job reads only a point).
 
 Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
@@ -21,18 +27,24 @@ Liveness (2026-08-06 incident): the maintenance lease is a SHORT (15 min) TTL
 heartbeat-renewed every batch/slice — never a runtime-sized grant — so a
 SIGKILL at any point freezes maintenance for minutes, not hours. The full
 sweep also takes a --max-seconds wall-clock budget and CLEAN-STOPS at a batch
-boundary when it runs out: finalize what was covered, release the lease, exit
-RED (GH reports a timeout kill as `cancelled`, which alerts nobody). The
+boundary when it runs out: finalize what was covered, save a resume cursor,
+release the lease. The next run continues that CYCLE from the cursor instead
+of id 1 (2026-10-03: four daily runs in a row stopped near id 540k of 927k,
+each restarting at 1, so the tail went days without a reconcile). The first
+stop of a cycle exits 0 with a warning; a resumed run that stops again, or a
+run that stops before its first batch (nothing to resume), exits RED (GH
+reports a timeout kill as `cancelled`, which alerts nobody). The
 `property_maintenance` check in scripts/verify_pipeline.py watches the
-resulting staleness independently.
+completion stamp independently.
 
 Two run modes (Phase 3 -- real-time properties):
 
   * --incremental (cron */5, property_maintenance.yml): attach new stragglers + recompute
     ONLY the properties queued in `dirty_properties` by the writers. O(changes).
   * full (default, daily reconcile, recompute_property_stats.yml): attach +
-    recompute EVERY property + reconcile childless + clear the queue. The
-    self-healing backstop for anything the incremental pass missed.
+    recompute EVERY property (one cycle, resumed across runs when the budget
+    cuts it) + reconcile childless + clear the queue. The self-healing backstop
+    for anything the incremental pass missed.
 
 Usage (typically via the workflows above):
 
@@ -56,6 +68,7 @@ from typing import Any
 
 from scraper import db
 from toolkit.browse_read_model import sync_browse_list
+from toolkit.filter_registry import PORTAL_OPTIONS
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -71,12 +84,22 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
 STRAGGLER_BATCH = 2000
 _STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL LIMIT %(limit)s"
 
-_RECOMPUTE_BATCH_SQL = """
+# MS19: one date per portal Browse offers (`PORTAL_OPTIONS`; migration 588 holds the columns), the
+# first sighting of the property's newest advert there, active or not. A portal added to the
+# registry fails tests/test_recompute_property_stats.py until a migration gives it its column.
+# The statement below is an f-string that splices these in: a literal brace in it is doubled.
+_NEWEST_AD_AT_AGG = "\n".join(
+    f"        max(k.first_seen_at) FILTER (WHERE k.source = '{o.value}') AS newest_ad_at_{o.value},"
+    for o in PORTAL_OPTIONS)
+_NEWEST_AD_AT_SET = "\n".join(
+    f"      newest_ad_at_{o.value} = r.newest_ad_at_{o.value}," for o in PORTAL_OPTIONS)
+
+_RECOMPUTE_BATCH_SQL = f"""
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
-    -- Every advert of the batch's properties in THE canonical order (migration 561); rank 1 is
-    -- the canonical advert. The order is spelled there and nowhere else.
+    -- Every advert of the batch's properties in THE canonical order (migration 588, MS5); rank 1
+    -- is the canonical advert. The order is spelled there and nowhere else.
     kids AS (
       SELECT l.*, o.canonical_rank
       FROM batch b
@@ -86,22 +109,26 @@ _RECOMPUTE_BATCH_SQL = """
     canon AS (
       SELECT * FROM kids WHERE canonical_rank = 1
     ),
-    -- Lifecycle over every advert; each physical fact is the first non-empty value in the
-    -- canonical order.
+    -- Lifecycle and the portals over every advert, active or not; the six amenities are a union
+    -- (yes when any advert says yes, MS6); every other physical fact is the first non-empty value
+    -- in the canonical order.
     child_agg AS (
       SELECT
         k.property_id              AS pid,
         bool_or(k.is_active)       AS is_active,
         count(*)                   AS source_count,
-        count(distinct k.source)   AS distinct_site_count,
         min(k.first_seen_at)       AS first_seen_at,
         max(k.last_seen_at)        AS last_seen_at,
-        (array_agg(k.has_lift ORDER BY k.canonical_rank) FILTER (WHERE k.has_lift IS NOT NULL))[1] AS has_lift,
-        (array_agg(k.has_balcony ORDER BY k.canonical_rank) FILTER (WHERE k.has_balcony IS NOT NULL))[1] AS has_balcony,
-        (array_agg(k.has_parking ORDER BY k.canonical_rank) FILTER (WHERE k.has_parking IS NOT NULL))[1] AS has_parking,
-        (array_agg(k.terrace ORDER BY k.canonical_rank) FILTER (WHERE k.terrace IS NOT NULL))[1] AS terrace,
-        (array_agg(k.garage ORDER BY k.canonical_rank) FILTER (WHERE k.garage IS NOT NULL))[1] AS garage,
-        (array_agg(k.cellar ORDER BY k.canonical_rank) FILTER (WHERE k.cellar IS NOT NULL))[1] AS cellar,
+        array_agg(DISTINCT k.source ORDER BY k.source) AS all_sources,
+        coalesce(array_agg(DISTINCT k.source ORDER BY k.source) FILTER (WHERE k.is_active),
+                 ARRAY[]::text[]) AS active_sources,
+{_NEWEST_AD_AT_AGG}
+        bool_or(k.has_lift)        AS has_lift,
+        bool_or(k.has_balcony)     AS has_balcony,
+        bool_or(k.has_parking)     AS has_parking,
+        bool_or(k.terrace)         AS terrace,
+        bool_or(k.garage)          AS garage,
+        bool_or(k.cellar)          AS cellar,
         (array_agg(k.usable_area ORDER BY k.canonical_rank) FILTER (WHERE k.usable_area IS NOT NULL))[1] AS usable_area,
         (array_agg(k.estate_area ORDER BY k.canonical_rank) FILTER (WHERE k.estate_area IS NOT NULL))[1] AS estate_area,
         (array_agg(k.garden_area ORDER BY k.canonical_rank) FILTER (WHERE k.garden_area IS NOT NULL))[1] AS garden_area,
@@ -112,13 +139,56 @@ _RECOMPUTE_BATCH_SQL = """
       FROM kids k
       GROUP BY k.property_id
     ),
-    -- The canonical advert's OWN steps (`listing_price_steps`, migration 559, the one step
-    -- definition the watchdog and the collection monitor read too), each dated by its own
-    -- scraped_at. The windowed counts decay as events age out, so they are only as fresh as the
-    -- last recompute of the row -- the daily full sweep is the bound.
+    -- The canonical advert and its same-portal predecessors (MS10): each predecessor is the advert
+    -- on that portal last seen latest, strictly before the later link was first seen, so adverts
+    -- that ran at the same time never link; first_seen_at falls along the chain, so it ends.
+    lineage AS (
+      WITH RECURSIVE link AS (
+        SELECT c.property_id AS pid, c.id, c.source, c.first_seen_at, 0 AS hop FROM canon c
+        UNION ALL
+        SELECT k.pid, pre.id, k.source, pre.first_seen_at, k.hop + 1
+        FROM link k
+        CROSS JOIN LATERAL (
+          SELECT l.id, l.first_seen_at FROM listings l
+          WHERE l.property_id = k.pid AND l.source = k.source
+            AND l.last_seen_at < k.first_seen_at AND l.first_seen_at < k.first_seen_at
+          ORDER BY l.last_seen_at DESC, l.id DESC
+          LIMIT 1
+        ) pre
+      )
+      SELECT * FROM link
+    ),
+    -- Each priced link's first and last price over its own snapshots, dated by the first.
+    members AS (
+      SELECT g.pid, g.hop,
+        (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
+        min(s.scraped_at)                                                 AS first_at,
+        (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
+        count(*)                                                          AS price_points
+      FROM lineage g
+      JOIN listing_snapshots s ON s.listing_id = g.id
+      WHERE s.price_czk IS NOT NULL
+      GROUP BY g.pid, g.hop
+    ),
+    -- The steps the price figures count: each link's OWN steps (`listing_price_steps`, migration
+    -- 559, the one step definition the alerts read too) plus one handover step into each priced
+    -- link from the last price of the next older priced link, dated at the newer link's first.
+    steps AS (
+      SELECT g.pid, ps.scraped_at, ps.price_czk, ps.prev_price_czk
+      FROM lineage g
+      JOIN listing_price_steps ps ON ps.listing_id = g.id
+      UNION ALL
+      SELECT h.pid, h.first_at, h.first_price, h.prev_price_czk
+      FROM (SELECT m.pid, m.first_at, m.first_price,
+                   lead(m.last_price) OVER (PARTITION BY m.pid ORDER BY m.hop) AS prev_price_czk
+            FROM members m) h
+      WHERE h.first_price <> h.prev_price_czk
+    ),
+    -- Each step dated by its own scraped_at. The windowed counts decay as events age out, so they
+    -- are only as fresh as the last recompute of the row -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
-        c.property_id AS pid,
+        ps.pid,
         count(*) FILTER (WHERE ps.price_czk < ps.prev_price_czk) AS drops,
         count(*) FILTER (WHERE ps.price_czk > ps.prev_price_czk) AS rises,
         count(*)                                                 AS changes,
@@ -127,24 +197,21 @@ _RECOMPUTE_BATCH_SQL = """
         count(*) FILTER (WHERE ps.scraped_at >= now() - interval '365 days') AS changes_365d,
         max((ps.prev_price_czk - ps.price_czk)::numeric / ps.prev_price_czk * 100)
           FILTER (WHERE ps.price_czk < ps.prev_price_czk)        AS max_drop_pct
-      FROM canon c
-      JOIN listing_price_steps ps ON ps.listing_id = c.id
-      GROUP BY c.property_id
+      FROM steps ps
+      GROUP BY ps.pid
     ),
-    -- The headline delta: first-to-last of the canonical advert's own priced snapshots, the
-    -- series its price is the last point of. (No literal percent sign in this comment on
+    -- The headline delta, compounded over those steps: it telescopes to the oldest priced link's
+    -- first price against the canonical advert's last. (No literal percent sign in this comment on
     -- purpose -- prose percent inside executed SQL is an `incomplete placeholder` crash in
-    -- psycopg; tests/test_sql_placeholders.py guards it.) NULL under two priced snapshots.
-    canon_span AS (
-      SELECT
-        c.property_id AS pid,
-        (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
-        (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
-        count(*)                                                          AS price_points
-      FROM canon c
-      JOIN listing_snapshots s ON s.listing_id = c.id
-      WHERE s.price_czk IS NOT NULL
-      GROUP BY c.property_id
+    -- psycopg; tests/test_sql_placeholders.py guards it.) NULL under two priced snapshots or with
+    -- an unpriced canonical advert.
+    lineage_span AS (
+      SELECT pid,
+        (array_agg(first_price ORDER BY hop DESC))[1]     AS first_price,
+        (array_agg(last_price) FILTER (WHERE hop = 0))[1] AS last_price,
+        sum(price_points)                                 AS price_points
+      FROM members
+      GROUP BY pid
     ),
     -- Last content change = the newest snapshot of any advert (snapshots are content-change
     -- only, rule 2): the "recently changed" timestamp Browse filters on (migration 158).
@@ -158,11 +225,11 @@ _RECOMPUTE_BATCH_SQL = """
     UPDATE properties p SET
       is_active           = r.is_active,
       source_count        = r.source_count,
-      distinct_site_count = r.distinct_site_count,
       first_seen_at       = r.first_seen_at,
       last_seen_at        = r.last_seen_at,
       repr_listing_id     = c.sreality_id,
       repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
+      city_proximity_computed_at = CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since THEN NULL ELSE p.city_proximity_computed_at END,
       repr_listing_ref_id = c.id,
       category_main       = c.category_main,
       category_type       = c.category_type,
@@ -171,12 +238,13 @@ _RECOMPUTE_BATCH_SQL = """
       disposition         = c.disposition,
       area_m2             = c.area_m2,
       current_price_czk   = c.price_czk,
-      price_per_m2_source_listing_id = price_per_m2_source_id(c.price_czk, c.area_m2, c.id),
       condition           = c.condition,
       building_condition_level  = c.building_condition_level,
       apartment_condition_level = c.apartment_condition_level,
       furnished           = c.furnished,
       source              = c.source,
+      all_sources         = r.all_sources,
+      active_sources      = r.active_sources,
       has_lift            = r.has_lift,
       has_balcony         = r.has_balcony,
       has_parking         = r.has_parking,
@@ -202,11 +270,12 @@ _RECOMPUTE_BATCH_SQL = """
           THEN (cs.last_price - cs.first_price)::numeric / cs.first_price * 100
       END,
       last_change_at      = coalesce(ch.last_change_at, r.first_seen_at),
+{_NEWEST_AD_AT_SET}
       stats_computed_at   = now()
     FROM child_agg r
     JOIN canon c ON c.property_id = r.pid
     LEFT JOIN price_hist ph ON ph.pid = r.pid
-    LEFT JOIN canon_span cs ON cs.pid = r.pid
+    LEFT JOIN lineage_span cs ON cs.pid = r.pid
     LEFT JOIN changes ch ON ch.pid = r.pid
     WHERE p.id = r.pid
 """
@@ -246,24 +315,25 @@ _DELETE_DIRTY_SQL = """
     WHERE property_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s
 """
 
-# Enqueue the spatially-linked stragglers so the recompute below picks them up.
-# Full sweep clears the queue (it recomputed everything), but only rows that
-# existed at its start -- anything dirtied mid-sweep is left for the next pass.
-_CLEAR_DIRTY_SQL = "DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s"
-
-# The budget-exhausted variant: a sweep that stops early has only recomputed
-# ids below its high-water mark, so clearing the GLOBAL pre-cutoff queue would
-# erase the recompute signal for unswept ids — those rows would stay stale
-# until the next FULL sweep instead of being healed by the next incremental
-# pass minutes later. Scope the delete to the swept range.
+# The full sweep's one dirty clear: rows queued at or before the run's start (anything dirtied
+# mid-run survives for the next pass) in the id range THIS run recomputed. Never wider: ids
+# above a budget stop were not recomputed, and ids below a resumed run's start were recomputed
+# by an earlier run and may be dirty again -- clearing either would erase their recompute
+# signal until the next cycle instead of the next incremental pass minutes later. A complete
+# walk from id 1 passes [1, max_id + 1), which is the old global pre-cutoff delete for every
+# property it walked: the FK makes each queued row name a property, ids are bigserial from 1
+# and never deleted, and max_id is read after the cutoff. The one row the global delete also
+# dropped was dirt stamped before the cutoff on a property born after max_id was read -- one
+# the walk never recomputed, so keeping it is the fix, not a loss.
 _CLEAR_DIRTY_SWEPT_SQL = (
     "DELETE FROM dirty_properties "
-    "WHERE marked_at <= %(cutoff)s AND property_id < %(hi)s"
+    "WHERE marked_at <= %(cutoff)s AND property_id >= %(lo)s AND property_id < %(hi)s"
 )
 
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
-# property drops out of the UPDATE and keeps stale columns -- the merge's retire
+# property drops out of the UPDATE and keeps stale columns (its portal lists and
+# dates too; nothing serves a merged-away row) -- the merge's retire
 # (`toolkit.property_identity._RETIRE_SQL`) sets the loser is_active=false, but this guards the general case
 # (a partially-failed merge, or any childless active property) so Browse never
 # shows a ghost active dot.
@@ -273,13 +343,15 @@ _RECONCILE_CHILDLESS_SQL = """
       AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
 """
 
-# Written ONLY when a walk covered every id — the O(1) liveness signal the
+# Written ONLY when a cycle covered every id (in one run, or across runs through the cursor
+# below) — the O(1) liveness signal the
 # `property_maintenance` health check reads. Per-row stats_computed_at cannot
 # serve that role: min() over 620k properties with a listings semi-join
 # measured ~3.5 min live, and a check that heavy would blow the hourly acute
 # lane's own 5-min job timeout — recreating the silent-`cancelled` failure
 # mode it exists to catch. A dead, killed, or chronically-incomplete sweep
 # shows up here as a stale stamp within hours, however the process died.
+# `batches` and `elapsed_s` are the finishing run's; `runs` and `cycle_started_at` the cycle's.
 _STAMP_SWEEP_COMPLETE_SQL = """
     INSERT INTO app_settings (key, value, updated_by)
     VALUES ('property_sweep_last_complete',
@@ -287,12 +359,45 @@ _STAMP_SWEEP_COMPLETE_SQL = """
                 'completed_at', now(),
                 'max_property_id', %(max_id)s::bigint,
                 'batches', %(batches)s::int,
-                'elapsed_s', %(elapsed_s)s::numeric),
+                'elapsed_s', %(elapsed_s)s::numeric,
+                'runs', %(runs)s::int,
+                'cycle_started_at', %(cycle_started_at)s::timestamptz),
             'recompute_property_stats')
     ON CONFLICT (key) DO UPDATE
       SET value = excluded.value, updated_at = now(),
           updated_by = excluded.updated_by
 """
+
+# The resume cursor (2026-10-03: four daily runs in a row stopped on budget near id 540k of
+# 927k and each restarted at id 1, so the id tail went days without a reconcile). A budget stop
+# saves where the next run continues the cycle; the run that completes it deletes the row in
+# the stamp's transaction. A cycle that began more than _CURSOR_MAX_AGE ago starts over at id 1
+# instead, or the stamp would vouch for a reconcile whose lower half is days old. The age is
+# judged when a run resumes, not when it stamps, so a stamp's oldest recompute can be
+# _CURSOR_MAX_AGE plus that run's own length (~2h: budget + one in-flight batch) old; the
+# stamp's `cycle_started_at` records it.
+_CURSOR_MAX_AGE = "36 hours"
+
+_READ_SWEEP_CURSOR_SQL = """
+    SELECT (value->>'next_lo')::bigint, (value->>'runs')::int, value->>'cycle_started_at',
+           (value->>'cycle_started_at')::timestamptz > now() - %(max_age)s::interval
+      FROM app_settings WHERE key = 'property_sweep_cursor'
+"""
+
+_SAVE_SWEEP_CURSOR_SQL = """
+    INSERT INTO app_settings (key, value, updated_by)
+    VALUES ('property_sweep_cursor',
+            jsonb_build_object(
+                'next_lo', %(next_lo)s::bigint,
+                'cycle_started_at', %(cycle_started_at)s::timestamptz,
+                'runs', %(runs)s::int),
+            'recompute_property_stats')
+    ON CONFLICT (key) DO UPDATE
+      SET value = excluded.value, updated_at = now(),
+          updated_by = excluded.updated_by
+"""
+
+_DELETE_SWEEP_CURSOR_SQL = "DELETE FROM app_settings WHERE key = 'property_sweep_cursor'"
 
 
 def recompute_one(conn: Any, property_id: int) -> None:
@@ -374,11 +479,11 @@ def _reconcile_childless(conn: Any) -> int:
         return cur.rowcount or 0
 
 
-def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
-    """Yield half-open [lo, hi) id ranges covering 1..max_id inclusive."""
-    if max_id < 1 or batch_size < 1:
+def _batch_ranges(max_id: int, batch_size: int, start: int = 1) -> Iterator[tuple[int, int]]:
+    """Yield half-open [lo, hi) id ranges covering start..max_id inclusive."""
+    if max_id < start or batch_size < 1:
         return
-    for lo in range(1, max_id + 1, batch_size):
+    for lo in range(start, max_id + 1, batch_size):
         yield lo, lo + batch_size
 
 
@@ -500,6 +605,33 @@ def _max_property_id(conn: Any) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT coalesce(max(id), 0) FROM properties")
         return int(cur.fetchone()[0])
+
+
+def _read_sweep_cursor(conn: Any) -> tuple[Any, ...] | None:
+    """The saved cursor as (next_lo, runs, cycle_started_at, younger than _CURSOR_MAX_AGE)."""
+    import psycopg
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_READ_SWEEP_CURSOR_SQL, {"max_age": _CURSOR_MAX_AGE})
+            return cur.fetchone()
+    except psycopg.DataError as exc:
+        # The Settings page edits any app_settings row as raw JSON, and a value the casts reject
+        # is a DataError run_resilient never retries: it would red every run until someone fixed
+        # the row by hand. Like resolve_brokers._sweep_state, treat it as no cursor instead.
+        LOG.warning("RECOMPUTE property_sweep_cursor is unreadable (%s): treated as absent, so "
+                    "a fresh cycle starts at id 1 and its first save replaces the row", exc)
+        return None
+
+
+def _resume_point(saved: tuple[Any, ...] | None, max_id: int) -> tuple[int, int, Any] | None:
+    """(next_lo, runs, cycle_started_at) if the saved cursor can continue its cycle, else None."""
+    if saved is None:
+        return None
+    next_lo, runs, cycle_started_at, young = saved
+    if not young or next_lo is None or not (1 < next_lo <= max_id):
+        return None
+    return int(next_lo), int(runs or 0), cycle_started_at
 
 
 # A single-row LEASE serializes EVERY property-maintenance writer: the GH
@@ -735,14 +867,17 @@ def main() -> int:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Report straggler + dirty + property counts and exit without writing.",
+        help="Report straggler + dirty + property counts and the resume cursor, "
+             "then exit without writing.",
     )
     parser.add_argument(
         "--max-seconds", type=float, default=6000.0,
         help="Full-sweep wall-clock budget (default 6000). On exhaustion the "
              "sweep clean-stops at a batch boundary, finalizes only what it "
-             "covered, releases the lease, and exits RED (1) — a visible "
-             "failure instead of a silent timeout-minutes `cancelled` kill. "
+             "covered, saves where the next run resumes the cycle, and releases "
+             "the lease; a resumed run that runs out again, or a run that runs out "
+             "before its first batch, exits RED (1) — a "
+             "visible failure instead of a silent timeout-minutes `cancelled` kill. "
              f"Clamped to {int(_MAX_BUDGET_SECONDS)}s: the workflow's "
              "timeout-minutes backstop is sized for that ceiling, and a "
              "larger budget would let the runner SIGKILL the job before the "
@@ -793,6 +928,19 @@ def main() -> int:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
 
+        def step(op: Callable[[Any], Any], label: str,
+                 attempts: int | None = None) -> Any:
+            """db.run_resilient with the conn rebinding its docstring demands (it may
+            hand back a FRESH connection after a pooler drop). Every op below is
+            idempotent — recompute statements are pure latest-wins recomputes and the
+            dirty-clear, cursor and stamp are keyed writes, so a replay re-commits
+            identically."""
+            nonlocal conn
+            budget = {} if attempts is None else {"attempts": attempts}
+            result, conn = db.run_resilient(
+                conn, op, reconnect=reconnect, label=label, **budget)
+            return result
+
         if args.dry_run:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM listings WHERE property_id IS NULL")
@@ -801,9 +949,11 @@ def main() -> int:
                 dirty = int(cur.fetchone()[0])
                 cur.execute("SELECT count(*) FROM properties")
                 properties = int(cur.fetchone()[0])
+            saved = step(_read_sweep_cursor, "sweep.cursor")
             LOG.info(
-                "RECOMPUTE dry-run mode=%s stragglers=%d dirty=%d properties=%d; exit",
-                mode, stragglers, dirty, properties,
+                "RECOMPUTE dry-run mode=%s stragglers=%d dirty=%d properties=%d "
+                "cursor(next_lo, runs, cycle_started_at, younger than %s)=%s; exit",
+                mode, stragglers, dirty, properties, _CURSOR_MAX_AGE, saved,
             )
             return 0
 
@@ -834,18 +984,6 @@ def main() -> int:
         holder = _new_holder("full")
         incomplete_at: int | None = None
 
-        def step(op: Callable[[Any], Any], label: str,
-                 attempts: int | None = None) -> Any:
-            """db.run_resilient with the conn rebinding its docstring demands (it may
-            hand back a FRESH connection after a pooler drop). Every op below is
-            idempotent — recompute statements are pure latest-wins recomputes and the
-            dirty-clear / stamp are keyed writes, so a replay re-commits identically."""
-            nonlocal conn
-            budget = {} if attempts is None else {"attempts": attempts}
-            result, conn = db.run_resilient(
-                conn, op, reconnect=reconnect, label=label, **budget)
-            return result
-
         try:
             # Lease ACQUISITION stays unwrapped: its CAS/backoff semantics are its
             # own, and nothing has been done yet when it fails.
@@ -870,9 +1008,27 @@ def main() -> int:
                 )
             deadline = started_at + budget
             max_id = step(_max_property_id, "sweep.max_id")
-            total_batches = -(-max_id // args.batch_size) if max_id else 0
+            saved = step(_read_sweep_cursor, "sweep.cursor")
+            resume = _resume_point(saved, max_id)
+            if resume is not None:
+                start_lo, runs, cycle_started_at = resume
+                LOG.info(
+                    "RECOMPUTE resuming the cycle started %s at id %d (run %d of it)",
+                    cycle_started_at, start_lo, runs + 1,
+                )
+            else:
+                if saved is not None:
+                    LOG.warning(
+                        "RECOMPUTE ignoring the saved cursor %s (cycle older than %s, "
+                        "or next_lo outside 2-%d); a fresh cycle starts at id 1",
+                        saved, _CURSOR_MAX_AGE, max_id,
+                    )
+                # A fresh cycle starts when this run did: its cutoff, by the database clock.
+                start_lo, runs, cycle_started_at = 1, 0, cutoff
+            ranges = list(_batch_ranges(max_id, args.batch_size, start_lo))
+            total_batches = len(ranges)
             batches = 0
-            for lo, hi in _batch_ranges(max_id, args.batch_size):
+            for lo, hi in ranges:
                 # Budget clean-stop (the detail drains' --max-seconds pattern):
                 # stop batching with enough headroom left to finalize + release,
                 # instead of being SIGKILLed mid-statement by timeout-minutes.
@@ -929,33 +1085,37 @@ def main() -> int:
                     )
 
                 def _finalize(c: Any) -> None:
-                    # The full sweep recomputed every property, so clear the dirt
-                    # that existed at its start; anything dirtied mid-sweep survives
-                    # for the next incremental pass.
-                    with c.cursor() as cur:
-                        cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
-                    # Completion stamp — the health check's O(1) liveness signal.
-                    # Complete walks only: an incomplete sweep leaving the stamp
-                    # stale IS the alarm condition.
-                    with c.cursor() as cur:
+                    # This run recomputed [start_lo, max_id]: clear that range's dirt,
+                    # stamp the completed cycle (complete cycles only — an incomplete one
+                    # leaving the stamp stale IS the alarm condition), and delete the
+                    # cursor in the same transaction, so a stamp never coexists with it.
+                    with c.transaction(), c.cursor() as cur:
+                        cur.execute(_CLEAR_DIRTY_SWEPT_SQL, {
+                            "cutoff": cutoff, "lo": start_lo, "hi": max_id + 1})
                         cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
                             "max_id": max_id, "batches": batches,
                             "elapsed_s": round(time.monotonic() - started_at, 1),
+                            "runs": runs + 1, "cycle_started_at": cycle_started_at,
                         })
+                        cur.execute(_DELETE_SWEEP_CURSOR_SQL)
 
                 step(_finalize, "sweep.finalize")
             else:
-                # Only ids < incomplete_at were recomputed — clear their dirt
-                # only, and skip _reconcile_childless (next complete sweep runs
-                # it; its targets are near-zero in practice).
-                def _clear_swept(c: Any) -> None:
-                    with c.cursor() as cur:
-                        cur.execute(
-                            _CLEAR_DIRTY_SWEPT_SQL,
-                            {"cutoff": cutoff, "hi": incomplete_at},
-                        )
+                # Only [start_lo, incomplete_at) was recomputed: clear its dirt only, save
+                # where the next run resumes, and leave _reconcile_childless to the run
+                # that completes the cycle (its targets are near-zero in practice).
+                def _stop(c: Any) -> None:
+                    with c.transaction(), c.cursor() as cur:
+                        cur.execute(_CLEAR_DIRTY_SWEPT_SQL, {
+                            "cutoff": cutoff, "lo": start_lo, "hi": incomplete_at})
+                        cur.execute(_SAVE_SWEEP_CURSOR_SQL, {
+                            "next_lo": incomplete_at,
+                            "cycle_started_at": cycle_started_at, "runs": runs + 1})
 
-                step(_clear_swept, "sweep.clear_swept")
+                # A fresh run stopped before batch 1 swept nothing to clear, and a cursor at
+                # id 1 is never resumed (_resume_point needs 1 < next_lo): save nothing.
+                if incomplete_at > 1:
+                    step(_stop, "sweep.stop")
         finally:
             # `nonlocal conn` keeps this pointing at the last SUCCESSFULLY returned
             # connection, but run_resilient closes both the original and its
@@ -964,25 +1124,51 @@ def main() -> int:
             _release_lease(conn, holder, reconnect)
 
     elapsed = time.monotonic() - started_at
-    if incomplete_at is not None:
-        # RED on purpose: an incomplete reconcile is a broken contract, not a
-        # partial success — GH only emails on scheduled-run FAILURES (a
-        # timeout kill lands as `cancelled` and alerts nobody, which is how
-        # 5 dead sweeps went unnoticed for 4 days). The id tail above
-        # `incomplete_at` keeps its pre-sweep stats until a sweep finishes;
-        # the `property_maintenance` health check tracks that staleness.
+    if incomplete_at == 1:
+        # The budget clock starts before the lease wait and the straggler attach, so a backlog
+        # can spend it all before batch 1. Nothing was recomputed and no cursor saved, so there
+        # is no cycle for the next run to continue: RED, or every such day would exit green
+        # having reconciled nothing.
         LOG.error(
-            "RECOMPUTE budget exhausted after %.0fs: swept ids<%d of %d "
-            "(%d/%d batches); exiting RED — investigate per-batch cost first "
-            "(see the progress logs); raising the budget past %.0fs requires "
-            "editing BOTH --max-seconds and the workflow's timeout-minutes",
-            elapsed, incomplete_at, max_id, batches, total_batches,
+            "RECOMPUTE budget exhausted after %.0fs before the first batch (the lease wait and "
+            "the straggler attach above ran first): nothing recomputed and no cursor saved, so "
+            "the next run starts a fresh cycle at id 1; exiting RED",
+            elapsed,
+        )
+        return 1
+    if incomplete_at is not None and resume is None:
+        # One continuation is tolerated: the cursor is saved and the next run finishes the
+        # cycle from it, stamping it complete like any other.
+        LOG.warning(
+            "RECOMPUTE budget exhausted after %.0fs: swept ids %d to %d of %d (%d/%d batches); "
+            "the next run resumes this cycle at id %d",
+            elapsed, start_lo, incomplete_at - 1, max_id, batches, total_batches, incomplete_at,
+        )
+        return 0
+    if incomplete_at is not None:
+        # RED on purpose: a resumed run that runs out again means the cycle needs three or
+        # more runs — genuinely too slow, not a partial success. GH only emails on
+        # scheduled-run FAILURES (a timeout kill lands as `cancelled` and alerts nobody,
+        # which is how 5 dead sweeps went unnoticed for 4 days). The id tail above
+        # `incomplete_at` keeps its pre-sweep stats until a cycle completes; the
+        # `property_maintenance` health check tracks that staleness.
+        LOG.error(
+            "RECOMPUTE budget exhausted after %.0fs: swept ids %d to %d of %d (%d/%d batches) "
+            "in run %d of the cycle started %s, so the cycle needs three or more runs; "
+            "cursor saved at id %d (resumed by a run within %s of the cycle's start, else "
+            "the next run starts over at id 1); exiting RED — investigate per-batch cost "
+            "first (see the progress logs); raising the budget past %.0fs requires editing "
+            "BOTH --max-seconds and the workflow's timeout-minutes",
+            elapsed, start_lo, incomplete_at - 1, max_id, batches, total_batches,
+            runs + 1, cycle_started_at, incomplete_at, _CURSOR_MAX_AGE,
             _MAX_BUDGET_SECONDS,
         )
         return 1
     LOG.info(
-        "RECOMPUTE done max_property_id=%d batches=%d avg_batch_s=%.1f elapsed=%.1fs",
-        max_id, batches, elapsed / batches if batches else 0.0, elapsed,
+        "RECOMPUTE done max_property_id=%d from_id=%d cycle_runs=%d batches=%d "
+        "avg_batch_s=%.1f elapsed=%.1fs",
+        max_id, start_lo, runs + 1, batches, elapsed / batches if batches else 0.0,
+        elapsed,
     )
     return 0
 

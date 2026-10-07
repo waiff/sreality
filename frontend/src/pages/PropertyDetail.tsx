@@ -4,8 +4,10 @@
  * The header shows the property exactly as its Browse card does: the
  * `properties_public` row, whose advert fields are its canonical advert's and
  * whose physical facts are the first non-empty in the same order (migration 561,
- * decision 18). Photos, broker, price history, manual estimates and freshness
- * checks are that canonical advert's. The merged-adverts section is the only list
+ * decision 18). Photos, manual estimates and freshness checks are that canonical
+ * advert's. The brokers are a list over the adverts (MS7), the price chart draws
+ * every advert's own line (MS9), and a lowest active price that differs from the
+ * header's is named under it (MS8). The merged-adverts section is the only list
  * of adverts, each advert's own facts in its row; `?advert=<id>` opens that row.
  *
  * Every advert address ever handed out (`/listing/{source}/{native}`,
@@ -24,16 +26,18 @@ import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchAdvertProperty,
+  fetchListingsForListingIds,
   fetchProperty,
   fetchPropertySources,
-  fetchPropertyStatusEvents,
   fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
   type PropertyPublic,
 } from '@/lib/queries';
-import { fetchListingBroker } from '@/lib/brokers';
+import { propertyBrokers } from '@/lib/brokers';
+import { useListingBrokers } from '@/lib/hydration';
 import BrokerContactCard from '@/components/BrokerContactCard';
+import { portalLabel } from '@/lib/portals';
 import {
   ApiError,
   fetchPropertyOrigins,
@@ -55,11 +59,10 @@ import type {
   ListingSnapshotPublic,
   ListingFreshnessCheckPublic,
   PropertySource,
-  PropertyStatusEventPublic,
 } from '@/lib/types';
 import {
   buildPriceSeries,
-  buildActiveWindows,
+  lowestActivePrice,
   priceChangeEvents,
   type PriceAdvert,
 } from '@/lib/priceHistory';
@@ -74,7 +77,7 @@ import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
 import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
-import { mergedAdvertsKeys, propertyKeys } from '@/lib/mergedAdverts';
+import { mergedAdvertsKeys, parseLetters, propertyKeys } from '@/lib/mergedAdverts';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -92,11 +95,16 @@ const EstimationsBlock = lazyChunk(
   () => import('@/components/listing-detail/EstimationsBlock'),
 );
 
+const NO_SNAPSHOTS: ListingSnapshotPublic[] = [];
+
 export default function PropertyDetail() {
   const { propertyId: idParam } = useParams();
   const [params] = useSearchParams();
   const propertyId = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
   const advertParam = Number(params.get('advert')) || null;
+  // A review page's link to the split: the letters it proposes (MS18).
+  const lettersParam = params.get('letters');
+  const initialLetters = useMemo(() => parseLetters(lettersParam), [lettersParam]);
 
   const propertyQ = useQuery<PropertyPublic | null, Error>({
     queryKey: propertyKeys.row(propertyId),
@@ -110,22 +118,29 @@ export default function PropertyDetail() {
     enabled: propertyId != null,
     staleTime: 60_000,
   });
-  // Property-grain activity log for the price chart's inactive-period gaps
-  // (migration 392) — see priceHistory.buildActiveWindows for how it's used.
-  const statusEventsQ = useQuery<PropertyStatusEventPublic[], Error>({
-    queryKey: ['property-status-events', propertyId],
-    queryFn: ({ signal }) => fetchPropertyStatusEvents(propertyId as number, { signal }),
-    enabled: propertyId != null,
-    staleTime: 60_000,
-  });
 
   const property = propertyQ.data ?? null;
-  // The canonical advert: its own snapshots, photos and freshness checks.
+  // The canonical advert: its own photos and freshness checks.
   const advertId = property?.id ?? null;
+  const sources = useMemo(() => sourcesQ.data ?? [], [sourcesQ.data]);
+  const sourcesFailed = sourcesQ.isError && sourcesQ.data === undefined;
+  const ids = useMemo(() => sources.map((s) => s.id), [sources]);
+  // Every advert's snapshots (MS9); the canonical advert's if the list failed.
+  const chartIds = useMemo(
+    () => (sourcesFailed && advertId != null ? [advertId] : ids),
+    [sourcesFailed, advertId, ids],
+  );
   const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
-    queryKey: ['snapshots', advertId],
-    queryFn: ({ signal }) => fetchSnapshotsForListings([advertId as number], { signal }),
-    enabled: advertId != null,
+    queryKey: ['snapshots', chartIds],
+    queryFn: ({ signal }) => fetchSnapshotsForListings(chartIds, { signal }),
+    enabled: chartIds.length > 0,
+    staleTime: 60_000,
+  });
+  // The merged-adverts section's read (same key, one request): each advert's deal type.
+  const detailsQ = useQuery<Map<number, ListingPublic>, Error>({
+    queryKey: mergedAdvertsKeys.listings(ids),
+    queryFn: ({ signal }) => fetchListingsForListingIds(ids, { signal }),
+    enabled: ids.length > 0,
     staleTime: 60_000,
   });
   // listing_freshness_checks has no listing_id column at all (append-only
@@ -143,8 +158,36 @@ export default function PropertyDetail() {
     staleTime: 5 * 60_000,
   });
 
-  const sources = useMemo(() => sourcesQ.data ?? [], [sourcesQ.data]);
   const canonical = sources.find((s) => s.id === advertId) ?? null;
+  // Canonical advert first; memoized, as a fresh array re-renders the chart mid-measure (#310).
+  const chartAdverts = useMemo<PriceAdvert[]>(() => {
+    if (!property) return [];
+    if (sources.length === 0) return [property];
+    return canonical ? [canonical, ...sources.filter((s) => s !== canonical)] : sources;
+  }, [property, sources, canonical]);
+
+  // MS8, display only, like with like: against the canonical advert's live price
+  // (the header's stored one waits for the recompute). Only the property's deal
+  // type counts, so a legacy sale-and-rent property never offers a rent as its
+  // price; if the deal types cannot be read, every active advert counts.
+  const priceNote = useMemo(() => {
+    if (!property || (detailsQ.data === undefined && !detailsQ.isError)) return undefined;
+    const deals = detailsQ.data;
+    const low = lowestActivePrice(
+      deals
+        ? sources.filter((s) => deals.get(s.id)?.category_type === property.category_type)
+        : sources,
+      canonical ? canonical.price_czk : property.price_czk,
+    );
+    if (!low) return undefined;
+    const portals = low.sources.map((s) => portalLabel(s) ?? s).join(', ');
+    const perMonth = property.category_type === 'pronajem' ? ' / měs' : '';
+    return {
+      text: `Nejnižší aktivní cena: ${fmtCzk(low.price)}${perMonth} · ${portals}`,
+      title:
+        'Nejnižší cena mezi aktivními inzeráty — jen pro informaci; nevstupuje do ceny za m², výnosu, hlídání ani filtrů',
+    };
+  }, [property, detailsQ.data, detailsQ.isError, sources, canonical]);
 
   // Bind the page's "New estimation" CTA to the canonical advert's stored portal
   // URL (migration 494; never reconstructed). MUST stay above the early returns
@@ -199,6 +242,7 @@ export default function PropertyDetail() {
       </div>
       <ListingOverview
         listing={property}
+        priceNote={priceNote}
         images={images}
         imagesLoading={imagesQ.isLoading}
         mapFooter={
@@ -240,16 +284,25 @@ export default function PropertyDetail() {
           </Suspense>
         }
       />
-      <BrokerVizitka listingId={property.id} />
+      <BrokerList
+        adverts={sources}
+        canonicalId={property.id}
+        advertsFailed={sourcesFailed}
+        onRetryAdverts={() => void sourcesQ.refetch()}
+      />
       {sources.length > 0 && (
         <>
           <Hairline />
+          {/* Keyed on the property: the split letters, reason and refusal are
+              mount-time state, and property → property reuses this instance. */}
           <MergedAdvertsSection
+            key={propertyId}
             propertyId={propertyId}
             canonicalListingId={property.id}
             sources={sources}
             // The header already IS the canonical advert; any other opens its row.
             openAdvertId={advertParam !== property.id ? advertParam : null}
+            initialLetters={initialLetters}
           />
         </>
       )}
@@ -284,9 +337,8 @@ export default function PropertyDetail() {
       <Hairline />
       <PriceHistoryBlock
         property={property}
-        advert={canonical ?? property}
-        snapshots={snapshotsQ.data ?? []}
-        statusEvents={statusEventsQ.data ?? []}
+        adverts={chartAdverts}
+        snapshots={snapshotsQ.data ?? NO_SNAPSHOTS}
       />
       <Hairline />
       {property.sreality_id != null && (
@@ -372,86 +424,80 @@ function SurvivorRedirect({ propertyId }: { propertyId: number }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Broker vizitka (who is selling this, and how to reach them)                 */
+/* Brokers (who is selling this, and how to reach them)                       */
 /* -------------------------------------------------------------------------- */
 
-/* The resolved broker behind the canonical advert: identity + firm + the two
-   channels to reach them, one Hairline-separated block under the header (D7).
-   Each other advert's broker is on its row of the merged-adverts section.
+/* MS7 (lib/brokers.propertyBrokers), from one batched read the advert rows share.
+   A failed read says so with a retry, never "no broker" (the dark state that hid
+   the PostgREST revocation here for a month). Loading and "no broker" render
+   nothing, hairline included: most properties have no attributed broker. */
+function BrokerList({
+  adverts,
+  canonicalId,
+  advertsFailed,
+  onRetryAdverts,
+}: {
+  adverts: PropertySource[];
+  canonicalId: number;
+  advertsFailed: boolean;
+  onRetryAdverts: () => void;
+}) {
+  const ids = useMemo(() => adverts.map((a) => a.id), [adverts]);
+  const read = useListingBrokers(ids);
 
-   THREE fetch outcomes, kept apart. Renders nothing for a listing whose broker
-   isn't resolved yet — but a FAILED read is not that answer. fetchListingBroker
-   returns null only for the two 404 bodies that mean "nothing is attributed here"
-   and rethrows everything else (an expired session, a drifted VITE_API_BASE_URL, a
-   5xx), so a bare `if (!b) return null` asserted "no broker" for every outage. That
-   is how the PostgREST revocation hid here from 2026-07-12 to 2026-08-12; every
-   other repointed broker surface now says so out loud. Gated on `!q.data` too, so a
-   failed background refetch never replaces a good card with an error.
-
-   The leading <Hairline /> lives INSIDE the component (unlike the sibling blocks,
-   which get one from the page): most listings have no attributed broker, and a
-   page-level rule would then stack two hairlines on nothing. */
-function BrokerVizitka({ listingId }: { listingId: number }) {
-  const q = useQuery({
-    queryKey: ['listing-broker', listingId],
-    queryFn: () => fetchListingBroker(listingId),
-    staleTime: 60_000,
-  });
-  // W6: contact now rides on the attribution row itself (migration 419 put
-  // primary_email / primary_phone on listing_broker_public), so the chained
-  // ['broker-contact', brokerId] read by broker_id is gone. It was serialized
-  // behind this one — it could not name its broker_id until this response landed —
-  // which is why the vizitka used to paint its name, then reflow when the card
-  // arrived. One read, one paint, and the "contact failed but identity didn't"
-  // split state no longer exists to render.
-  const b = q.data ?? null;
-
-  if (q.isError && !b)
+  if (advertsFailed || read.isError) {
     return (
-      <BrokerSection>
+      <>
+        <Hairline />
+        <SectionLabel>Makléř</SectionLabel>
         <p className="mt-3 text-sm text-[var(--color-brick)]">
           Makléře se nepodařilo načíst
-        </p>
-      </BrokerSection>
-    );
-  if (!b) return null;
-
-  return (
-    <BrokerSection>
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <Link
-            to={ROUTES.brokerDetail.build({ id: b.broker_id })}
-            title={b.broker_display_name ?? undefined}
-            className="inline-flex items-center gap-1.5 text-[1.05rem] leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper-2)] transition-colors"
+          <button
+            type="button"
+            onClick={advertsFailed ? onRetryAdverts : read.refetch}
+            className="ml-3 font-medium underline underline-offset-2 hover:no-underline"
           >
-            <span className="truncate">{b.broker_display_name ?? 'Neznámý makléř'}</span>
-            <OutArrow />
-          </Link>
-          <p className="mt-1 text-sm text-[var(--color-ink-3)]">
-            {b.broker_firm_label ?? 'nezávislý / neznámá kancelář'}
-          </p>
-        </div>
-        {/* Unconditional now, and that is the point: the contact is part of the
-            row we are already holding, so "we have a broker but not his contact"
-            has stopped being a reachable state. The card still draws the three
-            per-field cases itself (value / masked / none) — only a row we hold may
-            claim an empty channel, and contactState keeps "admin-only" apart from
-            "unreachable". `b` satisfies BrokerContactFields, which is all the card
-            has ever consumed. */}
-        <BrokerContactCard broker={b} />
-      </div>
-    </BrokerSection>
-  );
-}
+            Zkusit znovu
+          </button>
+        </p>
+      </>
+    );
+  }
+  const { brokers, fromInactive } = propertyBrokers(adverts, read.brokers, canonicalId);
+  if (brokers.length === 0) return null;
 
-function BrokerSection({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Hairline />
       <div>
-        <SectionLabel>Makléř</SectionLabel>
-        {children}
+        <SectionLabel>
+          {brokers.length > 1 ? 'Makléři' : 'Makléř'}
+          {fromInactive && (
+            <span className="ml-2 normal-case tracking-normal font-normal text-[var(--color-ink-4)]">
+              z neaktivních inzerátů
+            </span>
+          )}
+        </SectionLabel>
+        <ul className="mt-3 space-y-4">
+          {brokers.map((b) => (
+            <li key={b.broker_id} className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <Link
+                  to={ROUTES.brokerDetail.build({ id: b.broker_id })}
+                  title={b.broker_display_name ?? undefined}
+                  className="inline-flex items-center gap-1.5 text-[1.05rem] leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper-2)] transition-colors"
+                >
+                  <span className="truncate">{b.broker_display_name ?? 'Neznámý makléř'}</span>
+                  <OutArrow />
+                </Link>
+                <p className="mt-1 text-sm text-[var(--color-ink-3)]">
+                  {b.broker_firm_label ?? 'nezávislý / neznámá kancelář'}
+                </p>
+              </div>
+              <BrokerContactCard broker={b} />
+            </li>
+          ))}
+        </ul>
       </div>
     </>
   );
@@ -563,24 +609,23 @@ function MapPinGlyph() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Price history (the canonical advert's own series · the property's span)     */
+/* Price history (every advert's own series · the property's span)            */
 /* -------------------------------------------------------------------------- */
 
 /* One rule per field (decision 18): the span (first / last seen, days on market)
-   is the property's, any advert active; the price moves are the canonical
-   advert's own series, the same `price_change_count` / `total_price_change_pct`
-   Browse filters on. A price step never spans two adverts; each advert's own
-   price and span are in its row of the merged-adverts section. */
+   is the property's, any advert active; the price-change tiles are the canonical
+   advert's lineage (MS10: its same-portal predecessors, one step per handover),
+   the same `price_change_count` / `total_price_change_pct` Browse filters on. The
+   chart and the dated moves are every advert's own (MS9, MS10); a step drawn
+   there never spans two adverts. */
 function PriceHistoryBlock({
   property,
-  advert,
+  adverts,
   snapshots,
-  statusEvents,
 }: {
   property: PropertyPublic;
-  advert: PriceAdvert;
+  adverts: PriceAdvert[];
   snapshots: ListingSnapshotPublic[];
-  statusEvents: PropertyStatusEventPublic[];
 }) {
   // Date.now() is captured once at mount (not per render) and threaded into the
   // pure helpers so they stay deterministic. A per-render `now` gave `series` a
@@ -588,21 +633,8 @@ function PriceHistoryBlock({
   // PriceLineChart mid-measure and tripping recharts' #310 crash.
   const [now] = useState(() => Date.now());
   const series = useMemo(
-    () => buildPriceSeries(advert, snapshots, now),
-    [advert, snapshots, now],
-  );
-  const firstSeenT = new Date(property.first_seen_at).getTime();
-  const lastSeenT = new Date(property.last_seen_at).getTime();
-  // Property-level "had >=1 active advert" windows — gaps the line for any
-  // stretch the whole property went dark. Falls back to one window spanning the
-  // property's life when statusEvents is empty (still loading).
-  const activeWindows = useMemo(
-    () =>
-      buildActiveWindows(statusEvents, {
-        start: firstSeenT,
-        end: property.is_active ? now : lastSeenT,
-      }),
-    [statusEvents, firstSeenT, property.is_active, lastSeenT, now],
+    () => buildPriceSeries(adverts, snapshots, now),
+    [adverts, snapshots, now],
   );
   // Dated price moves, from the same series the chart draws: the exact day and
   // size of each step (readable even if the chart itself fails to render).
@@ -624,7 +656,12 @@ function PriceHistoryBlock({
           title={fmtAbsolute(property.last_seen_at)}
         />
         <Stat label="Days on market" value={String(property.tom_days ?? '—')} mono />
-        <Stat label="Price changes" value={String(property.price_change_count ?? 0)} mono />
+        <Stat
+          label="Price changes"
+          value={String(property.price_change_count ?? 0)}
+          title="Změny ceny hlavního inzerátu a jeho předchůdců na stejném portálu, včetně kroku při každém novém vložení; seznam pod grafem ukazuje změny všech inzerátů"
+          mono
+        />
         <Stat
           label="Price change"
           value={fmtPct(property.total_price_change_pct, { signed: true })}
@@ -648,19 +685,20 @@ function PriceHistoryBlock({
                 <div className="h-[230px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
               }
             >
-              <PriceLineChart series={series} activeWindows={activeWindows} />
+              <PriceLineChart series={series} />
             </Suspense>
           </ErrorBoundary>
         </div>
       )}
 
       {changes.length > 0 && (
-        <ul className="mt-4 flex flex-wrap gap-x-5 gap-y-1.5">
+        <ul aria-label="Price moves" className="mt-4 flex flex-wrap gap-x-5 gap-y-1.5">
           {changes.map((c) => (
             <li
               key={`${c.seriesId}-${c.t}`}
               className="flex items-center gap-2 text-[0.78rem] tabular-nums"
             >
+              <span className="text-[var(--color-ink-2)]">{c.label}</span>
               <span className="font-mono text-[var(--color-ink-3)]">
                 {timeLabelFull(c.t, 'day')}
               </span>

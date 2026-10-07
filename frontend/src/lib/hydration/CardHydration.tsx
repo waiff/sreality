@@ -15,14 +15,18 @@
 
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 
-import type { ImagePublic, PipelineCardBroker } from '@/lib/types';
+import type { PropertyBrokers } from '@/lib/brokers';
+import type { ImagePublic } from '@/lib/types';
 
+import type { BrokerSubject } from './keys';
 import {
   NO_PHOTOS,
-  useListingBrokers,
   useListingCovers,
   useListingPhotos,
-  type BrokerByListingId,
+  usePropertyAdCounts,
+  usePropertyBrokers,
+  type AdCountByPropertyId,
+  type BrokersByPropertyId,
   type CoverByListingId,
   type PhotosByListingId,
 } from './useCardHydration';
@@ -30,14 +34,18 @@ import {
 export interface CardHydration {
   /* The cover image URL for a listing, or null when there is none / not yet. */
   coverFor: (listingId: number | null | undefined) => string | null;
-  /* The canonical broker for a listing, or null when there is none / not yet. */
-  brokerFor: (listingId: number | null | undefined) => PipelineCardBroker | null;
+  /* A property's broker list (MS7), or null when it has none / not yet. */
+  brokersFor: (propertyId: number) => PropertyBrokers | null;
   /* Every photo a listing's carousel renders (W7a) — as opposed to coverFor's
    * single thumbnail. Always an array, never null: a card with no photos and a
    * card whose photos have not landed both render the carousel's own empty
    * state, and `photosPending` is what tells them apart. Returns a stable empty
    * singleton so a consumer can memoize on identity. */
   photosFor: (listingId: number | null | undefined) => readonly ImagePublic[];
+  /* How many ads a property holds, or null when not read / not yet. No pending
+   * flag: the one reader draws it as a badge over the photo, which reserves no
+   * space. */
+  adCountFor: (propertyId: number) => number | null;
   /* True while the decoration is still in flight, so a card can reserve its
    * space instead of reflowing when the value lands. Distinct from "resolved to
    * nothing", which is a real answer and must not render as a skeleton. */
@@ -48,8 +56,9 @@ export interface CardHydration {
 
 const EMPTY: CardHydration = {
   coverFor: () => null,
-  brokerFor: () => null,
+  brokersFor: () => null,
   photosFor: () => NO_PHOTOS,
+  adCountFor: () => null,
   coversPending: false,
   brokersPending: false,
   photosPending: false,
@@ -75,11 +84,14 @@ export const useCardHydration = (): CardHydration => useContext(Ctx);
 export interface CardDecorations {
   /* One thumbnail per card, via listing_cover_public's server-side DISTINCT ON. */
   covers?: boolean;
-  /* The canonical broker line + its contact pair. */
-  brokers?: boolean;
+  /* The broker line: each card's property and canonical ad (MS7). */
+  brokers?: readonly BrokerSubject[];
   /* Several photos per card for a carousel — the value is the client-side
    * retention cap (perId), which is part of the cache key. Omitted = off. */
   photos?: number;
+  /* The ad count per card (the Browse card's "N inzeráty"), PROPERTY-grain:
+   * the value is the cards' property ids. Omitted = off. */
+  adCounts?: readonly number[];
 }
 
 /* Fetches the decorations for one cohort of listing ids and serves them to
@@ -103,22 +115,25 @@ export function CardHydrationProvider({
   const { covers, isPending: coversPending } = useListingCovers(
     wanted(renders.covers),
   );
-  const { brokers, isPending: brokersPending } = useListingBrokers(
-    wanted(renders.brokers),
+  const { brokers, isPending: brokersPending } = usePropertyBrokers(
+    renders.brokers ?? NO_SUBJECTS,
   );
   const { photos, isPending: photosPending } = useListingPhotos(
     listingIds,
     renders.photos ?? null,
   );
+  const adCounts = usePropertyAdCounts(renders.adCounts ?? NO_IDS);
 
   const value = useMemo<CardHydration>(
     () =>
-      makeHydration(covers, brokers, photos, {
-        coversPending,
-        brokersPending,
-        photosPending,
-      }),
-    [covers, brokers, photos, coversPending, brokersPending, photosPending],
+      makeHydration(
+        covers,
+        brokers,
+        photos,
+        { coversPending, brokersPending, photosPending },
+        adCounts,
+      ),
+    [covers, brokers, photos, coversPending, brokersPending, photosPending, adCounts],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -133,18 +148,20 @@ export function CardHydrationProvider({
  * wrong order and silently makes a surface claim it is loading forever. */
 export function makeHydration(
   covers: CoverByListingId,
-  brokers: BrokerByListingId,
+  brokers: BrokersByPropertyId,
   photos: PhotosByListingId = EMPTY_PHOTOS_MAP,
   pending: {
     coversPending?: boolean;
     brokersPending?: boolean;
     photosPending?: boolean;
   } = {},
+  adCounts: AdCountByPropertyId = EMPTY_AD_COUNTS_MAP,
 ): CardHydration {
   return {
     coverFor: (id) => (id == null ? null : covers.get(id) ?? null),
-    brokerFor: (id) => (id == null ? null : brokers.get(id) ?? null),
+    brokersFor: (id) => brokers.get(id) ?? null,
     photosFor: (id) => (id == null ? NO_PHOTOS : photos.get(id) ?? NO_PHOTOS),
+    adCountFor: (id) => adCounts.get(id) ?? null,
     coversPending: pending.coversPending ?? false,
     brokersPending: pending.brokersPending ?? false,
     photosPending: pending.photosPending ?? false,
@@ -152,6 +169,8 @@ export function makeHydration(
 }
 
 const EMPTY_PHOTOS_MAP: PhotosByListingId = new Map();
+const EMPTY_AD_COUNTS_MAP: AdCountByPropertyId = new Map();
 /* A stable identity, so switching a decoration off doesn't hand its hook a fresh
  * array every render and re-run its memo. */
 const NO_IDS: readonly number[] = [];
+const NO_SUBJECTS: readonly BrokerSubject[] = [];

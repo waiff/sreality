@@ -14,12 +14,15 @@ import CollectionMark from '@/components/CollectionMark';
 import CollectionSaveMenu, {
   COLLECTION_SAVE_LABEL,
 } from '@/components/CollectionSaveMenu';
+import CurationMarks from '@/components/CurationMarks';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
 import DismissButton from '@/components/DismissButton';
+import NoteMark from '@/components/NoteMark';
 import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import { taggedImageUrls, useCardHydration } from '@/lib/hydration';
 import {
@@ -39,6 +42,7 @@ import { portalLabel } from '@/lib/portals';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { propertyPath } from '@/lib/listingUrl';
+import { inzeratu } from '@/lib/mergedAdverts';
 
 /* The card grid is CONTAINER-intrinsic, not viewport-keyed: columns flow to
  * fit the cards COLUMN's own width via `auto-fill`, each at least --card-min
@@ -112,8 +116,8 @@ interface Props {
   onClearFilters: () => void;
   onClearBounds: () => void;
   /* Dedup merge mode: when on, cards show a selection checkbox and a click
-   * toggles selection instead of navigating. selected holds the picked
-   * property_ids. */
+   * toggles selection instead of navigating; the marks stay, read-only (MS16).
+   * selected holds the picked property_ids. */
   mergeMode: boolean;
   selectedPropertyIds: ReadonlySet<number>;
   onToggleSelect: (propertyId: number) => void;
@@ -163,17 +167,6 @@ export default function ListingCards({
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && !isError && rows != null && rows.length === 0;
-
-  /* One shared read for every card's collection-save glyph state (React Query
-   * would dedupe N per-card subscriptions to the same network call anyway,
-   * but hoisting it here makes the gate — and the "one read" contract —
-   * explicit: nothing to show a membership for until there are rows). */
-  const collectionMembersQ = useQuery({
-    queryKey: curationKeys.propertyCollectionMembers,
-    queryFn: fetchPropertyCollectionMemberSet,
-    enabled: rows != null && rows.length > 0,
-    staleTime: 30_000,
-  });
 
   /* The card column is an independently-scrolling fixed-height element
    * (overflow-y-auto below); the infinite sentinel observes it as its root
@@ -250,7 +243,6 @@ export default function ListingCards({
                     onEstimate={onEstimate}
                     pipelineScoped={pipelineScoped}
                     collectionScoped={collectionScoped}
-                    collectionMembers={collectionMembersQ.data}
                   />
                 </li>
               ))}
@@ -277,16 +269,14 @@ export default function ListingCards({
  *
  * Trigger only. The panel, the writes and the cache policy live in the shared
  * menu, so this card glyph and the listing header's button do the same thing —
- * the split mirrors PipelineFunnelButton / PipelineToggle over their one menu. */
+ * the split mirrors PipelineFunnelButton / PipelineToggle over their one menu.
+ * Membership is the one shared member map (one request for the whole grid);
+ * a failed read is a retry, never "in no collection" (MS16). */
 function CollectionSaveButton({
   property_id,
-  collectionMembers,
   cohortScoped,
 }: {
   property_id: number;
-  /* Owned by ListingCards — one shared read for the whole grid, gated on
-   * there being any rows to show it for. */
-  collectionMembers: Map<number, number[]> | undefined;
   cohortScoped: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -294,8 +284,16 @@ function CollectionSaveButton({
   const panelId = useId();
   /* Stable so the popover's positioning effect doesn't re-subscribe each render. */
   const close = useCallback(() => setOpen(false), []);
+  const membersQ = useQuery({
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
+    staleTime: 30_000,
+  });
 
-  const memberIds = new Set(collectionMembers?.get(property_id) ?? []);
+  if (readFailed(membersQ)) {
+    return <ReadFailedMark what="Kolekce" onRetry={() => void membersQ.refetch()} />;
+  }
+  const memberIds = new Set(membersQ.data?.get(property_id) ?? []);
   const inAny = memberIds.size > 0;
 
   return (
@@ -346,7 +344,6 @@ function Card({
   onEstimate,
   pipelineScoped,
   collectionScoped,
-  collectionMembers,
 }: {
   r: CardRow;
   hovered: boolean;
@@ -368,7 +365,6 @@ function Card({
   pipelineScoped: boolean;
   /* The same claim for collection membership — see revalidateCollections. */
   collectionScoped: boolean;
-  collectionMembers: Map<number, number[]> | undefined;
 }) {
   /* The card element itself, for the map-origin scrollIntoView below. Both
    * modes now render the SAME non-interactive wrapper, so this no longer has
@@ -435,8 +431,11 @@ function Card({
      rows the layer holds (the comparables surface consumes those same rows
      un-projected), memoized on the array identity — the cohort map is stable
      across renders, so this recomputes only when this listing's photos change. */
-  const photos = useCardHydration().photosFor(r.listing_id);
+  const hydration = useCardHydration();
+  const photos = hydration.photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
+  /* How many ads the property holds, a decoration like the photos. */
+  const adCount = hydration.adCountFor(r.property_id);
 
   /* `relative` is load-bearing, not decoration: it is what the stretched
    * link's / selection label's `::after` measures itself against. */
@@ -497,6 +496,14 @@ function Card({
             )}
           </div>
         )}
+        {mergeMode && (
+          /* The marks a merge will carry, read-only (MS16), beside the checkbox:
+             over the stretched label, so hovering one shows its title instead of
+             ticking the card. */
+          <div className="absolute top-1 left-8 z-[var(--z-card-action)]">
+            <CurationMarks property_id={r.property_id} />
+          </div>
+        )}
         {!mergeMode && (
           <div className="absolute top-1 left-1 z-[var(--z-card-action)] flex items-center gap-1">
             <PipelineFunnelButton
@@ -505,14 +512,15 @@ function Card({
             />
             <CollectionSaveButton
               property_id={r.property_id}
-              collectionMembers={collectionMembers}
               cohortScoped={collectionScoped}
             />
             <DismissButton property_id={r.property_id} />
+            <NoteMark property_id={r.property_id} />
           </div>
         )}
-        {/* Metadata margin: two file-tab badges down the right edge of
-          * the photo — the lifespan run, then the source portal. Status
+        {/* Metadata margin: file-tab badges down the right edge of the
+          * photo — the lifespan run, the source portal, then the number of
+          * ads the property holds when it holds more than one. Status
           * is carried by the card surface, not a pill. Borders-only,
           * paper-3/85 + backdrop-blur over the photo. */}
         <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
@@ -541,6 +549,17 @@ function Card({
               <span className="opacity-60 mr-1">portál</span>
               {portalLabel(r.source)}
             </CardBadge>
+          )}
+          {adCount != null && adCount >= 2 && (
+            /* Inset by the next-photo chevron (24px at right-1, z above the
+               badges): on a card narrower than ~215px its vertical band reaches
+               this third row and, on hover, would cover the badge's end. */
+            <span className="flex mr-7">
+              <CardBadge title={`Nemovitost spojuje ${adCount} ${inzeratu(adCount)} (počítají se i neaktivní)`}>
+                {adCount}
+                <span className="opacity-60 ml-1">{inzeratu(adCount)}</span>
+              </CardBadge>
+            </span>
           )}
         </div>
       </ImageCarousel>

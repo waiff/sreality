@@ -258,8 +258,8 @@ allowlisted with a reason) + `tests/api/test_account_scope_census.py` (no nullab
 **Browse read model** (migrations 275–278, 283; PRs #705/#707/#711/#714/#724): a
 `properties_public`-style view is fed from `browse_projection` (the column contract,
 defined once) into `browse_list` — an **UNLOGGED
-table**, blue-green rebuilt every 5 minutes by a `SECURITY DEFINER` pg_cron function
-(`rebuild_browse_list()`, `pg_try_advisory_lock` guards overlapping runs, `ANALYZE`
+table**, blue-green rebuilt every 15 minutes by a `SECURITY DEFINER` pg_cron function
+(`rebuild_browse_list()`, `pg_try_advisory_xact_lock` guards overlapping runs, `ANALYZE`
 *before* the swap is mandatory or the planner uses stale stats on the fresh table).
 `properties_map_mv` stays a real `MATERIALIZED VIEW` (30-min cadence) fed from the same
 projection. (The publication-gate predicate is **gone** from the projection as of migration
@@ -269,13 +269,20 @@ nothing.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entir
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
-**A property row is its canonical advert's** (migration 561): `properties.repr_listing_ref_id` =
-rank 1 of `property_canonical_listings(property_id)` (active, trust, last seen, id), written by
-the one rollup; every read model joins place/floor/description/broker through it, and
-`properties_public.listing_id` is it (`repr_since`: when it last changed; alerts count only its
-later price steps). `browse_projection` (and so `browse_list` /
-`properties_map_mv`) no longer projects `all_sources` / `active_sources`; the two never-written
-`properties` columns wait for W8's destructive drop.
+**Appending a column to `browse_projection`** (migration 584's recipe; append LAST, each body verbatim from its
+latest definer): take both rebuild advisory locks (`statement_timeout` > the 1800 s cron cap); in ONE transaction
+`alter table browse_list add column` FIRST (the positional `sync_browse_list` insert and `browse_list_visible()`'s
+`l.*` must never see it narrower than the view), the view, then bridge `properties_map_visible()` with
+`null::<type> as <col>` ONLY while the matview lacks the column (EXECUTE + `-- ci-allow-dynamic:`; a static bridge
+breaks re-runs); then, `lock_timeout 0` under the held re-entrant keys, force the map rebuild + restore its source, then the list's.
+
+**A property row is its canonical advert's** (migrations 561, 588): `properties.repr_listing_ref_id`
+= rank 1 of `property_canonical_listings(property_id)` (active, map point, earliest first seen among
+active / latest last seen among inactive, trust, id), written by the one rollup; every read model
+joins place/floor/description/broker through it, and `properties_public.listing_id` is it
+(`repr_since`: when it last changed; alerts count only its later price steps; the rollup clears
+`city_proximity_computed_at` with it). The rollup also writes `all_sources` / `active_sources` (sorted
+portal lists) and the nine `newest_ad_at_<portal>` dates (MS19); no read model projects them before W5.
 
 **Three functions depend on `browse_projection`'s row type** (migration 537:
 `browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on
