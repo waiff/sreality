@@ -286,8 +286,8 @@ describe('<ListingCards> photo hydration', () => {
 
 /* The Cover dropdown: which tagged photo every card opens on. */
 describe('<ListingCards> the cover photo', () => {
-  const tagged = (id: number, clip_logical_tag: string | null) =>
-    ({ ...photo(id), clip_logical_tag, clip_confidence: 0.9 }) as unknown as ImagePublic;
+  const tagged = (id: number, clip_fine_tag: string | null, tag_head_scores: Record<string, number> | null = null) =>
+    ({ ...photo(id), clip_fine_tag, clip_confidence: 0.9, tag_head_scores }) as unknown as ImagePublic;
   const kitchenThird = () =>
     vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
       new Map([[111, [tagged(1, 'exterior_facade'), tagged(2, 'hallway'), tagged(3, 'kitchen'), tagged(4, 'bedroom')]]]),
@@ -307,13 +307,25 @@ describe('<ListingCards> the cover photo', () => {
     expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/1.jpg');
   });
 
+  it('lets the trained head overrule CLIP where it scored the photos', async () => {
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [
+        tagged(1, 'exterior_facade', { '25': 0.02 }),
+        tagged(2, 'kitchen', { '25': 0.1 }),
+        tagged(3, 'hallway', { '25': 0.91 }),
+      ]]]),
+    );
+    renderGrid({ coverTag: 'kitchen' });
+    expect(await screen.findByText(counterIs('3 / 3'))).toBeInTheDocument();
+  });
+
   it('reports the operator\'s pick from the dropdown beside Sort', async () => {
     const onCoverTag = vi.fn();
     renderGrid({ onCoverTag });
     fireEvent.change(await screen.findByRole('combobox', { name: /Cover/ }), {
-      target: { value: 'exterior_facade' },
+      target: { value: 'garage' },
     });
-    expect(onCoverTag).toHaveBeenCalledWith('exterior_facade');
+    expect(onCoverTag).toHaveBeenCalledWith('garage');
     expect(screen.getByRole('option', { name: 'Fasáda' })).toBeInTheDocument();
   });
 });
