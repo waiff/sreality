@@ -120,3 +120,53 @@ _Avoid_: carry log, curation ledger, snapshot
 **Watchdog**:
 A saved filter that alerts an account when a property newly matches it or drops its price.
 _Avoid_: alert (for the saved filter), subscription, notification
+
+**Broker contact record**:
+A broker's email and phone that one account captured from one ad's portal page after showing
+interest in that ad. It belongs to that account and stays tied to the ad, not the property.
+_Avoid_: lead, contact (alone), broker contact (alone), revealed contact
+
+### AI work
+
+**Assistant**:
+A user's own AI chat account, such as Claude or ChatGPT, acting for that user.
+_Avoid_: chatbot, bot, AI platform
+
+**Workflow**:
+A named piece of AI-assisted work a user starts to get a result, such as an area takeoff, a yield
+valuation or a rent estimation.
+_Avoid_: job, automation, task
+
+**Skill**:
+The instructions an AI follows to carry out a workflow, whether it runs in a user's assistant or
+inside the platform.
+_Avoid_: prompt, agent profile, recipe
+
+**Run**:
+One execution of a workflow, with its inputs and its result. A run usually concerns one property.
+_Avoid_: job, execution, session
+
+**Area takeoff**:
+The workflow that measures a property's rentable floor areas from its plans.
+_Avoid_: offtake, area offtake
+
+### Where users meet the platform
+
+**Extension**:
+The platform's Chrome extension, which shows a property's data and actions on portal pages.
+_Avoid_: plugin, add-on
+
+**Plugin**:
+The package a user installs into their assistant to connect it to the platform: the skills plus the
+connection to the platform's tools.
+_Avoid_: connector, extension, integration
+
+### A property's working files
+
+**Workbook**:
+The Google Sheets file that holds a user's working figures for one property.
+_Avoid_: spreadsheet, sheet, model
+
+**Tab**:
+One sheet inside a workbook, holding one kind of information.
+_Avoid_: sheet, worksheet

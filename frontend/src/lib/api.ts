@@ -2798,11 +2798,9 @@ export const archivePipelineStage = (
     { method: 'DELETE', jwt: true },
   );
 
-/* Manual rental estimates (Phase U-ME).
- *
- * Reads can also come from the manual_rental_estimates_public Supabase
- * view via the anon key; the API endpoint is included here for
- * symmetry and direct API callers. Writes always go through the API. */
+/* Manual rental estimates (Phase U-ME): shared reference data every account
+ * reads; the writes are admin-only (require_admin), so they carry the user's
+ * JWT. */
 
 export const listManualEstimates = (
   sreality_id: number,
@@ -2817,7 +2815,7 @@ export const createManualEstimate = (
 ): Promise<ManualRentalEstimate> =>
   request<ManualRentalEstimate>(
     `/listings/${sreality_id}/manual_estimates`,
-    { method: 'POST', json: body },
+    { method: 'POST', json: body, jwt: true },
   );
 
 export const updateManualEstimate = (
@@ -2826,7 +2824,7 @@ export const updateManualEstimate = (
 ): Promise<ManualRentalEstimate> =>
   request<ManualRentalEstimate>(
     `/manual_estimates/${estimate_id}`,
-    { method: 'PATCH', json: body },
+    { method: 'PATCH', json: body, jwt: true },
   );
 
 export const deleteManualEstimate = (
@@ -2834,6 +2832,7 @@ export const deleteManualEstimate = (
 ): Promise<{ deleted: true }> =>
   request<{ deleted: true }>(`/manual_estimates/${estimate_id}`, {
     method: 'DELETE',
+    jwt: true,
   });
 
 /* ----- Watchdog notifications (Phase U2.7) ------------------------------- */

@@ -8,7 +8,9 @@ and the `skills_history` trigger preserves every prior version.
 
 Validation in `update_skill` rejects:
 - tool names outside the global registry (`AGENT_TOOL_NAMES`),
-- preferred_model missing one of the registered provider names,
+- an empty preferred_model, or one naming a provider outside the
+  registry (a subset is fine: a provider the skill does not name is
+  one the agent cannot run that skill on — the run fails),
 - limits outside sane bounds.
 
 The validation is deliberately narrow — we want operators to be
@@ -38,7 +40,7 @@ class SkillValidationError(ValueError):
 AGENT_TOOL_NAMES: set[str] = set()
 
 # Set in api/main.py once providers are constructed. Skill
-# validation rejects preferred_model maps missing any of these.
+# validation rejects preferred_model keys outside this set.
 PROVIDER_NAMES: set[str] = set()
 
 
@@ -219,11 +221,6 @@ def _validate_preferred_model(value: Any) -> dict[str, str]:
                 f"registered providers: {sorted(PROVIDER_NAMES)}"
             )
         out[k] = v
-    if PROVIDER_NAMES and not set(out.keys()) >= PROVIDER_NAMES:
-        missing = PROVIDER_NAMES - set(out.keys())
-        raise SkillValidationError(
-            f"preferred_model is missing entries for {sorted(missing)}"
-        )
     return out
 
 
