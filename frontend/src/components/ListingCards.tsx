@@ -25,7 +25,7 @@ import PriceDelta from '@/components/PriceDelta';
 import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import { taggedImageUrls, useCardHydration } from '@/lib/hydration';
-import { COVER_TAGS, coverIndex, imageTagLabel, type CoverTag } from '@/lib/imageTags';
+import { COVER_OPTIONS, coverIndex, type CoverTag } from '@/lib/imageTags';
 import {
   curationKeys,
   fetchPropertyCollectionMemberSet,
@@ -81,7 +81,7 @@ interface Props {
    * and untouched. Shared identically by the Split and Cards (map-collapsed)
    * layouts, since both render this one grid — see ImageSizeToggle. */
   imageLarge: boolean;
-  /* Which tagged photo every card opens on — see COVER_TAGS. A per-browser
+  /* Which tagged photo every card opens on — see COVER_OPTIONS. A per-browser
    * display preference beside the sort, not part of the shareable view. */
   coverTag: CoverTag;
   onCoverTag: (next: CoverTag) => void;
@@ -868,28 +868,20 @@ function CoverDropdown({
       <select
         value={coverTag}
         onChange={(e) => {
-          const picked = COVER_TAGS.find((t) => t === e.target.value);
-          if (picked) onChange(picked);
+          const picked = COVER_OPTIONS.find((o) => o.key === e.target.value);
+          if (picked) onChange(picked.key);
         }}
         title="Which photo each card opens on. An ad without that photo shows its own first photo."
         className="px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] transition-colors"
       >
-        {COVER_TAGS.map((t) => (
-          <option key={t} value={t}>
-            {coverLabel(t)}
+        {COVER_OPTIONS.map((o) => (
+          <option key={o.key} value={o.key}>
+            {o.label}
           </option>
         ))}
       </select>
     </label>
   );
-}
-
-/* Sentence-case for a menu ("kuchyně" → "Kuchyně"); the photo badge keeps the
- * lowercase label it has always drawn. */
-function coverLabel(t: CoverTag): string {
-  if (t === 'default') return 'Default';
-  const label = imageTagLabel(t) ?? t;
-  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function SkeletonGrid() {
