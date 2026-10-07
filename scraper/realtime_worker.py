@@ -2088,6 +2088,12 @@ def _autodedup_outcome(
             # E926: operator `same` closures the invariants dissolved — rulings the lane
             # re-reads every pass and cannot honour (their records: `cluster_conflicts`).
             must_link_dissolved=int(counts.get("must_link_dissolved") or 0),
+            # The plan's silent outcomes (2026-10-07): groups already on one property and
+            # the standing refusals it files only on change, by reason — without them a
+            # pass that merges nothing reads as "nothing to do".
+            reconcile_settled=int(merged.get("already_one_property") or 0),
+            reconcile_skipped_by_reason={
+                str(k): int(v) for k, v in (merged.get("skipped_by_reason") or {}).items()},
         )
         if reconciled.get("reason"):
             last["reconcile_reason"] = str(reconciled["reason"])[:AUTODEDUP_REASON_CHARS]
