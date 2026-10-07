@@ -54,4 +54,11 @@ export const hydrationKeys = {
    * surface asked first silently truncate the other's carousel. */
   photos: (ids: readonly number[], perId: number) =>
     [HYDRATION_NAMESPACE, 'photos', idsKey(ids), perId] as const,
+  /* PROPERTY-grain like propertyBrokers: how many ads each card's property
+   * holds. A merge or a split changes the count, so `adCountsAll` is the one
+   * hydration root lib/mergedAdverts' refreshAfterSplit re-reads; every other
+   * decoration stays cached through it. */
+  adCounts: (propertyIds: readonly number[]) =>
+    [HYDRATION_NAMESPACE, 'ad-counts', idsKey(propertyIds)] as const,
+  adCountsAll: [HYDRATION_NAMESPACE, 'ad-counts'] as const,
 };

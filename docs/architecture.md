@@ -2457,7 +2457,10 @@ renumber.** Navigate by area:
     `['pipeline','members']` (`PIPELINE_REVALIDATE`) and the stage editor re-reads stages + board, so a
     nested decoration key would refetch every thumbnail and broker on the board on every drag, making
     the split slower than the chain it replaced (`lib/hydration/hydration.test.ts` pins the
-    disjointness from every write sweep — pipeline, Browse, autodedup, dismissals). (2) **Decorations
+    disjointness from every write sweep — pipeline, Browse, autodedup, dismissals). One decoration is
+    re-read on purpose: the Browse card's ad count (`hydrationKeys.adCounts`, property-grain, because
+    `browse_projection` carries no `source_count`) changes with a merge or a split, so
+    `refreshAfterSplit` names its root, `adCountsAll`, and nothing wider. (2) **Decorations
     reach `CardFace` by context, not props**, because it renders twice — in-column and inside the
     `DragOverlay` — and props would let those two mount points drift. (3) **Enrichment isolation is
     now structural**: a failed broker read cannot affect the board because it is not on the board's

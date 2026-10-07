@@ -25,6 +25,7 @@ import { revalidateCollections } from '@/lib/collectionCache';
 import { czPlural } from '@/lib/format';
 import { revalidatePipeline } from '@/lib/pipelineCache';
 import { autodedupKeys } from '@/lib/autodedupKeys';
+import { hydrationKeys } from '@/lib/hydration/keys';
 import { dismissToast, pushToast } from '@/lib/toast';
 
 export const mergedAdvertsKeys = {
@@ -268,7 +269,8 @@ export function splitPlan(
  * page is keyed on the property, so a plain invalidation re-reads the property
  * (a separated canonical advert hands the header to the next one) and its advert
  * list; `curation` re-reads notes, tags and their counts, which both move;
- * `mergedAdvertsKeys.all` drops both previews. */
+ * `mergedAdvertsKeys.all` drops both previews; `adCountsAll` re-counts the
+ * Browse cards' ads, a decoration no Browse sweep reaches. */
 export function refreshAfterSplit(qc: QueryClient): void {
   for (const key of [
     ['property'],
@@ -276,6 +278,7 @@ export function refreshAfterSplit(qc: QueryClient): void {
     ['snapshots'],
     ['curation'],
     mergedAdvertsKeys.all,
+    hydrationKeys.adCountsAll,
     autodedupKeys.proposedSplits,
     autodedupKeys.categorySplits,
   ]) {
