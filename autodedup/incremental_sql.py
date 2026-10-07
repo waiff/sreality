@@ -326,6 +326,15 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
 # arrives is already claimed by the straggler sweep (the last N rows of `listings`, anti-joined
 # on `rt_fp`), so this feed exists for the long tail — an old listing re-geocoded into the
 # scope — which is measured in days rather than in minutes.
+#
+# One walk reads ONE PAGE of the block, in listing-id order after the block's page cursor, so a
+# block larger than a page (Praha: 157,188 rows) is read whole over several walks instead of
+# being cut to its oldest page. The plan stays index-served (`EXPLAIN (ANALYZE, BUFFERS)`, live,
+# 2026-10-07): a town of a few thousand rows is the `(obec_kod, granularity)` bitmap with the
+# cursor as a filter; Praha, 16% of the table, is an ordered walk of `listing_location_pkey`
+# filtered on the obec — 33,792 buffers (2,523 read) and 1.4 s for its first page, 37,219
+# (2,087 read) and 2.7 s for its sixth — and the forced bitmap is no cheaper (33,848 buffers,
+# 10,828 read, 3.3 s), because Praha's rows sit on almost every heap page whatever the page.
 RT_SCOPE_BLOCK_SQL = """
 select ll.listing_id  as listing_id,
        ll.resolved_at as resolved_at
@@ -333,13 +342,14 @@ select ll.listing_id  as listing_id,
  where ll.obec_kod = %(obec)s::bigint
    and (%(cast_obce)s::bigint is null
         or ll.cast_obce_kod = %(cast_obce)s::bigint)
+   and ll.listing_id > %(after_id)s::bigint
  order by ll.listing_id
  limit %(limit)s
 """
 
-# The snapshot write. One block is replaced whole: what the scan found is upserted, and what it
-# no longer finds is pruned — a listing the geocoder moved OUT leaves the snapshot here and is
-# retired by the drift sweep there, which is the other direction and keeps its own rail.
+# The snapshot write. One page is replaced whole: what the scan found is upserted, and what its
+# id range no longer holds is pruned — a listing the geocoder moved OUT leaves the snapshot here
+# and is retired by the drift sweep there, which is the other direction and keeps its own rail.
 # `resolved_at` travels as TEXT and is cast per element: a block whose rows all carry a NULL
 # `resolved_at` would otherwise hand psycopg a list with nothing to infer a type from, and
 # Postgres has no cast from `text[]` to `timestamptz[]`.
@@ -355,10 +365,16 @@ on conflict (generation, block_key, listing_id) do update set
     refreshed_at = now()
 """
 
+# A page proves the block's membership for ITS id range only — after the cursor, up to its last
+# row, or to the end of the block when the page ran short — so the prune is bounded to that
+# range: a row the cycle has not read yet is never pruned, and a full cycle prunes every range
+# exactly once.
 RT_SCOPE_IDS_PRUNE_SQL = """
 delete from autodedup.rt_scope_ids s
  where s.generation = %(generation)s::text
    and s.block_key = %(block_key)s::text
+   and s.listing_id > %(after_id)s::bigint
+   and (%(page_end)s::bigint is null or s.listing_id <= %(page_end)s::bigint)
    and not (s.listing_id = any(%(listing_ids)s::bigint[]))
 """
 
@@ -1294,11 +1310,17 @@ select count(*)::bigint from gone
 # Which blocks this generation has EVER walked, with no 24-hour window on it. The cadence's own
 # state query is windowed (a block last walked two days ago has to read as due), but the
 # bootstrap phase ends on "every block has been walked once", which is a question about all of
-# history and cannot be asked of a rolling day.
+# history and cannot be asked of a rolling day. A block read a page a walk counts once its FIRST
+# cycle has reached the block's end: its page cursor (`incremental_lane.CURSOR_PAGE`) holds the
+# number of completed cycles, and a block with no cursor row was read whole by its first walk.
 RT_SCOPE_SCAN_SEEN_SQL = """
 select distinct s.block_key
   from autodedup.rt_scope_scan s
  where s.generation = %(generation)s::text
+   and not exists (select 1
+                     from autodedup.scan_cursor c
+                    where c.name = 'rt_scope_page:' || s.block_key
+                      and coalesce(c.last_snapshot_id, 0) = 0)
 """
 
 # How many in-scope listings this generation has not fingerprinted yet — the bootstrap phase's
