@@ -245,8 +245,8 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     "images_public",
 ]
 
-# The 20 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
-# 536) scope per account.
+# The 21 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
+# 536, property_note_attachments 592) scope per account.
 _TENANT_TABLES: list[str] = [
     "collections",
     "tags",
@@ -268,6 +268,7 @@ _TENANT_TABLES: list[str] = [
     "property_pipeline_events",
     "entitlements",
     "property_dismissals",
+    "property_note_attachments",
 ]
 
 # Amendment A6 (Phase 0): the broker-directory PII surfaces stay dark to BOTH

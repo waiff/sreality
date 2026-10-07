@@ -37,6 +37,7 @@ import {
   listTags,
   removePropertyFromCollection,
   updatePropertyNote,
+  uploadNoteAttachment,
 } from '@/lib/api';
 import { revalidateCollections } from '@/lib/collectionCache';
 import {
@@ -52,6 +53,16 @@ import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 import { PencilIcon, TrashIcon } from '@/components/icons';
 import { SectionLabel } from '@/components/section';
+import { NOTE_ATTACHMENT_MAX_FILES, sortAttachments } from '@/lib/noteAttachments';
+import {
+  AttachButton,
+  DropHint,
+  FileProblems,
+  NoteAttachmentList,
+  StagedFiles,
+  useFileDrop,
+  useStrayFileDropGuard,
+} from './NoteAttachments';
 
 export default function CurationBlock({
   property_id,
@@ -532,6 +543,10 @@ function NotesRow({
   const qc = useQueryClient();
   const [body, setBody] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // Files waiting for the note to be saved, and what a drop or an upload could not take.
+  const [staged, setStaged] = useState<File[]>([]);
+  const [problems, setProblems] = useState<string[]>([]);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const notesLabelId = useId();
 
   const notesQ = useQuery({
@@ -540,27 +555,60 @@ function NotesRow({
     staleTime: 30_000,
   });
 
+  const refreshNotes = () =>
+    qc.invalidateQueries({ queryKey: curationKeys.propertyNotes(property_id) });
+
   const create = useMutation({
-    mutationFn: (text: string) =>
-      createPropertyNote(property_id, text, sreality_id ?? undefined, listing_id),
-    onSuccess: () => {
+    /* The note first, then its files one by one; a file that fails leaves the note saved and
+     * is reported by name (drop it onto the note to try again). */
+    mutationFn: async ({ text, files }: { text: string; files: File[] }) => {
+      const note = await createPropertyNote(property_id, text, sreality_id ?? undefined, listing_id);
+      const failed: string[] = [];
+      for (const [i, file] of files.entries()) {
+        setProgress({ done: i, total: files.length });
+        try {
+          await uploadNoteAttachment(property_id, note.id, file);
+        } catch (err) {
+          failed.push(`${file.name}: ${(err as Error).message || 'upload failed'}`);
+        }
+      }
+      return failed;
+    },
+    onSuccess: (failed) => {
       setBody('');
+      setStaged([]);
       setError(null);
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyNotes(property_id),
-      });
+      setProblems(failed);
+      refreshNotes();
       qc.invalidateQueries({ queryKey: curationKeys.noteCounts });
     },
     onError: (err: ApiError | Error) =>
       setError(err.message || 'Failed to save note'),
+    onSettled: () => setProgress(null),
   });
+
+  const stage = (files: File[]) => {
+    const fresh = files.filter(
+      (f) => !staged.some((s) => s.name === f.name && s.size === f.size && s.lastModified === f.lastModified),
+    );
+    const { ok, problems: refused } = sortAttachments(fresh, NOTE_ATTACHMENT_MAX_FILES - staged.length);
+    setStaged((prev) => [...prev, ...ok]);
+    setProblems(refused);
+  };
+  const composerDrop = useFileDrop(stage);
+  useStrayFileDropGuard();
 
   const notes = notesQ.data?.data ?? [];
   const failed = readFailed(notesQ);
   const trimmed = body.trim();
+  const canSave = (trimmed.length > 0 || staged.length > 0) && !create.isPending;
 
   return (
-    <details className="group" open={failed || notes.length > 0}>
+    <details
+      className="group"
+      open={failed || notes.length > 0 || staged.length > 0 || problems.length > 0 || composerDrop.over}
+      {...composerDrop.handlers}
+    >
       <summary className="cursor-pointer list-none flex items-baseline justify-between gap-4">
         <SectionLabel>
           <span id={notesLabelId}>Notes</span>
@@ -579,35 +627,62 @@ function NotesRow({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (trimmed.length === 0 || create.isPending) return;
-          create.mutate(trimmed);
+          if (!canSave) return;
+          // A files-only note still needs a body (1-4000 chars); its file names say what it holds.
+          const text = trimmed || `Attached: ${staged.map((f) => f.name).join(', ')}`.slice(0, 4000);
+          create.mutate({ text, files: staged });
         }}
-        className="mt-3"
+        className="relative mt-3"
       >
         <textarea
           aria-labelledby={notesLabelId}
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="Add a note…"
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files);
+            if (files.length === 0) return;
+            e.preventDefault();
+            stage(files);
+          }}
+          placeholder="Add a note… (drop or paste files to attach)"
           rows={2}
           maxLength={4000}
           className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] resize-y"
         />
+        <StagedFiles
+          files={staged}
+          onRemove={(file) => setStaged((prev) => prev.filter((f) => f !== file))}
+          disabled={create.isPending}
+        />
         <div className="mt-2 flex items-center justify-between gap-3">
-          <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-            {body.length} / 4000
-          </p>
+          <div className="flex items-center gap-3">
+            <AttachButton
+              onFiles={stage}
+              label="Attach files"
+              showText
+              disabled={create.isPending || staged.length >= NOTE_ATTACHMENT_MAX_FILES}
+            />
+            <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+              {body.length} / 4000
+            </p>
+          </div>
           <button
             type="submit"
-            disabled={trimmed.length === 0 || create.isPending}
+            disabled={!canSave}
             className="px-3 py-1 text-[0.78rem] rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {create.isPending ? 'Saving…' : 'Save note'}
+            {create.isPending
+              ? progress
+                ? `Uploading ${progress.done + 1} / ${progress.total}…`
+                : 'Saving…'
+              : 'Save note'}
           </button>
         </div>
         {error && (
           <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
         )}
+        <FileProblems problems={problems} onDismiss={() => setProblems([])} />
+        {composerDrop.over && <DropHint label="Drop files to attach to a new note" />}
       </form>
 
       {failed ? (
@@ -623,22 +698,16 @@ function NotesRow({
           {notes.map((n) => (
             <li key={n.id}>
               <NoteRow
+                property_id={property_id}
                 note={n}
-                onSave={(text) =>
-                  updatePropertyNote(property_id, n.id, text).then(() => {
-                    qc.invalidateQueries({
-                      queryKey: curationKeys.propertyNotes(property_id),
-                    });
-                  })
-                }
+                onSave={(text) => updatePropertyNote(property_id, n.id, text).then(refreshNotes)}
                 onDelete={() =>
                   deletePropertyNote(property_id, n.id).then(() => {
-                    qc.invalidateQueries({
-                      queryKey: curationKeys.propertyNotes(property_id),
-                    });
+                    refreshNotes();
                     qc.invalidateQueries({ queryKey: curationKeys.noteCounts });
                   })
                 }
+                onFilesChanged={refreshNotes}
               />
             </li>
           ))}
@@ -649,154 +718,213 @@ function NotesRow({
 }
 
 function NoteRow({
+  property_id,
   note,
   onSave,
   onDelete,
+  onFilesChanged,
 }: {
+  property_id: number;
   note: Note;
   onSave: (body: string) => Promise<unknown>;
   onDelete: () => Promise<unknown>;
+  onFilesChanged: () => Promise<unknown>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note.body);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<File[]>([]);
+  const [fileProblems, setFileProblems] = useState<string[]>([]);
+
+  const attachments = note.attachments ?? [];
+  /* Dropped or picked files go straight onto this note, one by one; the list re-reads once
+   * they are all in. */
+  const attach = async (files: File[]) => {
+    const { ok, problems } = sortAttachments(
+      files,
+      NOTE_ATTACHMENT_MAX_FILES - attachments.length - uploading.length,
+    );
+    setFileProblems(problems);
+    if (ok.length === 0) return;
+    setUploading((prev) => [...prev, ...ok]);
+    const failed: string[] = [];
+    for (const file of ok) {
+      try {
+        await uploadNoteAttachment(property_id, note.id, file);
+      } catch (err) {
+        failed.push(`${file.name}: ${(err as Error).message || 'upload failed'}`);
+      }
+    }
+    await onFilesChanged();
+    setUploading((prev) => prev.filter((f) => !ok.includes(f)));
+    if (failed.length > 0) setFileProblems((prev) => [...prev, ...failed]);
+  };
+  const drop = useFileDrop((files) => void attach(files));
 
   const trimmed = draft.trim();
-
-  if (editing) {
-    return (
-      <div className="border-l-2 border-[var(--color-copper)]/40 pl-3">
-        <textarea
-          aria-label="Edit note"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={2}
-          maxLength={4000}
-          autoFocus
-          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] resize-y"
-        />
-        <div className="mt-1.5 flex items-center justify-between gap-3">
-          <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-            {draft.length} / 4000
-          </p>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => {
-                setEditing(false);
-                setDraft(note.body);
-                setError(null);
-              }}
-              disabled={busy}
-              className="px-2 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (trimmed.length === 0 || trimmed === note.body) {
-                  setEditing(false);
-                  setDraft(note.body);
-                  return;
-                }
-                setBusy(true);
-                setError(null);
-                onSave(trimmed)
-                  .then(() => setEditing(false))
-                  .catch((err: ApiError | Error) =>
-                    setError(err.message || 'Failed to save note'))
-                  .finally(() => setBusy(false));
-              }}
-              disabled={busy || trimmed.length === 0}
-              className="px-3 py-1 text-[0.75rem] rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-        </div>
-        {error && (
-          <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
-        )}
-      </div>
-    );
-  }
+  const files = (
+    <>
+      <NoteAttachmentList
+        propertyId={property_id}
+        noteId={note.id}
+        attachments={attachments}
+        uploading={uploading}
+        onRemoved={onFilesChanged}
+      />
+      <FileProblems problems={fileProblems} onDismiss={() => setFileProblems([])} />
+    </>
+  );
 
   return (
-    <div className="group border-l-2 border-[var(--color-copper)]/40 pl-3">
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-sm text-[var(--color-ink)] whitespace-pre-wrap break-words">
-          {note.body}
-        </p>
-        <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-          <button
-            type="button"
-            onClick={() => {
-              setDraft(note.body);
-              setEditing(true);
-            }}
+    <div
+      className="group relative border-l-2 border-[var(--color-copper)]/40 pl-3"
+      aria-label={`Note from ${fmtAbsolute(note.created_at)}`}
+      role="group"
+      {...drop.handlers}
+    >
+      {editing ? (
+        <>
+          <textarea
             aria-label="Edit note"
-            title="Edit note"
-            className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] transition-colors"
-          >
-            <PencilIcon className="h-[11px] w-[11px]" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirmingDelete(true)}
-            aria-label="Delete note"
-            title="Delete note"
-            className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] hover:bg-[var(--color-paper-2)] transition-colors"
-          >
-            <TrashIcon className="h-[11px] w-[11px]" />
-          </button>
-        </div>
-      </div>
-      {confirmingDelete ? (
-        <div className="mt-1.5 flex items-center gap-2">
-          <span className="text-[0.7rem] text-[var(--color-brick)]">Delete this note?</span>
-          <button
-            type="button"
-            onClick={() => {
-              setBusy(true);
-              onDelete().catch((err: ApiError | Error) => {
-                setError(err.message || 'Failed to delete note');
-                setBusy(false);
-                setConfirmingDelete(false);
-              });
-            }}
-            disabled={busy}
-            className="px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] hover:bg-[var(--color-brick)]/15 disabled:opacity-50 transition-colors"
-          >
-            {busy ? 'Deleting…' : 'Delete'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirmingDelete(false)}
-            disabled={busy}
-            className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
-          >
-            Cancel
-          </button>
-        </div>
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={2}
+            maxLength={4000}
+            autoFocus
+            className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] resize-y"
+          />
+          <div className="mt-1.5 flex items-center justify-between gap-3">
+            <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+              {draft.length} / 4000
+            </p>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditing(false);
+                  setDraft(note.body);
+                  setError(null);
+                }}
+                disabled={busy}
+                className="px-2 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (trimmed.length === 0 || trimmed === note.body) {
+                    setEditing(false);
+                    setDraft(note.body);
+                    return;
+                  }
+                  setBusy(true);
+                  setError(null);
+                  onSave(trimmed)
+                    .then(() => setEditing(false))
+                    .catch((err: ApiError | Error) =>
+                      setError(err.message || 'Failed to save note'))
+                    .finally(() => setBusy(false));
+                }}
+                disabled={busy || trimmed.length === 0}
+                className="px-3 py-1 text-[0.75rem] rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+          {files}
+          {error && (
+            <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
+          )}
+        </>
       ) : (
-        <p
-          className="mt-1 text-[0.7rem] tracking-wide text-[var(--color-ink-4)] cursor-help"
-          title={
-            note.updated_at
-              ? `Written ${fmtAbsolute(note.created_at)} · edited ${fmtAbsolute(note.updated_at)}`
-              : fmtAbsolute(note.created_at)
-          }
-        >
-          {fmtRelative(note.created_at)}
-          {note.updated_at && ' (edited)'}
-        </p>
+        <>
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-sm text-[var(--color-ink)] whitespace-pre-wrap break-words">
+              {note.body}
+            </p>
+            <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <AttachButton
+                onFiles={(picked) => void attach(picked)}
+                label="Attach files to this note"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft(note.body);
+                  setEditing(true);
+                }}
+                aria-label="Edit note"
+                title="Edit note"
+                className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] transition-colors"
+              >
+                <PencilIcon className="h-[11px] w-[11px]" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                aria-label="Delete note"
+                title="Delete note"
+                className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] hover:bg-[var(--color-paper-2)] transition-colors"
+              >
+                <TrashIcon className="h-[11px] w-[11px]" />
+              </button>
+            </div>
+          </div>
+          {files}
+          {confirmingDelete ? (
+            <div className="mt-1.5 flex items-center gap-2">
+              <span className="text-[0.7rem] text-[var(--color-brick)]">
+                {attachments.length > 0
+                  ? `Delete this note and its ${attachments.length === 1 ? 'file' : `${attachments.length} files`}?`
+                  : 'Delete this note?'}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setBusy(true);
+                  onDelete().catch((err: ApiError | Error) => {
+                    setError(err.message || 'Failed to delete note');
+                    setBusy(false);
+                    setConfirmingDelete(false);
+                  });
+                }}
+                disabled={busy}
+                className="px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] hover:bg-[var(--color-brick)]/15 disabled:opacity-50 transition-colors"
+              >
+                {busy ? 'Deleting…' : 'Delete'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={busy}
+                className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <p
+              className="mt-1 text-[0.7rem] tracking-wide text-[var(--color-ink-4)] cursor-help"
+              title={
+                note.updated_at
+                  ? `Written ${fmtAbsolute(note.created_at)} · edited ${fmtAbsolute(note.updated_at)}`
+                  : fmtAbsolute(note.created_at)
+              }
+            >
+              {fmtRelative(note.created_at)}
+              {note.updated_at && ' (edited)'}
+            </p>
+          )}
+          {error && !confirmingDelete && (
+            <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
+          )}
+        </>
       )}
-      {error && !confirmingDelete && (
-        <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
-      )}
+      {drop.over && <DropHint label="Drop to attach to this note" />}
     </div>
   );
 }

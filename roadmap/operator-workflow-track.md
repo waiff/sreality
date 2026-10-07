@@ -7,6 +7,19 @@ map, or scraper tracks. Operator-scoped (single shared identity, no
 per-user accounts — matches today's bearer-token model) *(superseded:
 per-user Supabase Auth is live — CLAUDE.md § out of scope)*.
 
+### Phase U-NOTE-FILES: Attachments on notes (done, 2026-10-07)
+- **Done:** files on a property's notes. Drop, paste or pick them into the Notes composer
+  (staged until the note is saved) or drop them straight onto a saved note. Images show as
+  thumbnails that open full size, other files download, and removal asks first. The
+  `property_note_attachments` table is note-grain (migration 592), so the files follow the
+  note through merges and a split's note copy takes them. The bytes live in R2 under
+  `custom-attachments/note/` and are served by the API, with an extension allowlist that
+  admits no active types.
+- **Next (unscheduled):**
+  - The Chrome-extension panel lists a note's text only, not its files.
+  - Nothing deletes R2 objects; a sweep for objects no row names would have to spare the
+    ones a split's copy shares.
+
 ### Rule #18: an executed no-orphan merge test (done, 2026-10-01)
 - **Done:** `tests/test_property_carriers_live.py` (PR 0 #1664, extended by the
   `PROPERTY_CARRIERS` PR) merges and detaches through the public writers, one test per

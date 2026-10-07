@@ -1913,7 +1913,8 @@ renumber.** Navigate by area:
     (`property_carriers.curation_plan` → `route_curation`, rule 15: a note with its ad, the rest
     to the property its oldest standing carry row names when that property gets adverts back,
     folds re-created while their twin stands, the spent rows stamped `undone_at`; a split's
-    acting user picks per item, copies allowed, other accounts' items follow the rule unseen;
+    acting user picks per item, copies allowed (a note's copy takes its attachments: new rows on
+    the new note, the same stored bytes), other accounts' items follow the rule unseen;
     the brake's dry run counts what its undo would route, `curation_preview`, by the same plan,
     bar an item an origin active again already holds, which stays uncounted). **That
     invariant has a second half, on the WRITE side: a caller-supplied `property_id` is resolved to
@@ -1993,7 +1994,17 @@ renumber.** Navigate by area:
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
     NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
     lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
-    extension does not yet expose. **Every property-grain operator write (curation here, the
+    extension does not yet expose, and a note's files the one part of a note (it shows the text).
+    **A note carries files** (migration 592, `property_note_attachments`): NOTE-grain (`note_id`,
+    no property column), so they ride the note through every merge with no carrier of their own,
+    and go when it is deleted. Dropped, pasted or picked in `CurationBlock` (the composer stages
+    them until the note is saved; a saved note takes a drop directly), sent one per request to
+    `POST /properties/{id}/notes/{note_id}/attachments` (tenant connection; the account is
+    trigger-derived from the note, 292-shape), stored in R2 under the private
+    `custom-attachments/note/` prefix and served back through the API — the bucket sends no CORS
+    header, so the SPA cannot read R2 itself. An allowlist by extension (`api/note_attachments.py`,
+    mirrored in `frontend/src/lib/noteAttachments.ts`) admits nothing active: the bytes return as
+    same-origin blob URLs. R2 objects are never deleted (a split's note copy shares them). **Every property-grain operator write (curation here, the
     pipeline in rule #22) carries exactly ONE account, resolved once at the route edge; reads take
     none and are scoped by RLS. The doctrine and its standing gates are stated once — rule #22's
     tenancy note below.**

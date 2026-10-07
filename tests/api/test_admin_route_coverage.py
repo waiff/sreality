@@ -205,6 +205,9 @@ _RLS_ONLY_ALLOWLIST: dict[str, str] = {
     "POST /properties/{property_id}/tags": (
         "account trigger-derived from the parent `tags` row (migration 292)"
     ),
+    "POST /properties/{property_id}/notes/{note_id}/attachments": (
+        "account trigger-derived from the parent `property_notes` row (migration 592)"
+    ),
     # Curation + notifications: reads, and UPDATE/DELETE of a row that already exists.
     # An INSERT must NAME its owner (WITH CHECK can validate the account a row claims,
     # never choose one); an UPDATE/DELETE by id is scoped by the SAME policy's USING
@@ -221,6 +224,12 @@ _RLS_ONLY_ALLOWLIST: dict[str, str] = {
     "GET /properties/{property_id}/notes": "RLS-only read (migration 290 on `property_notes`)",
     "PATCH /properties/{property_id}/notes/{note_id}": "UPDATE by id — migration 290 USING clause",
     "DELETE /properties/{property_id}/notes/{note_id}": "DELETE by id — migration 290 USING clause",
+    "GET /properties/{property_id}/notes/{note_id}/attachments/{attachment_id}": (
+        "RLS-only read (migration 592 on `property_note_attachments`)"
+    ),
+    "DELETE /properties/{property_id}/notes/{note_id}/attachments/{attachment_id}": (
+        "DELETE by id on a child-grain table — migration 592 USING clause"
+    ),
     "GET /tags": "RLS-only read (migration 290 policy on `tags`)",
     "PATCH /tags/{tag_id}": "UPDATE by id — migration 290 USING clause",
     "DELETE /tags/{tag_id}": "DELETE by id — migration 290 USING clause",

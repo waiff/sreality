@@ -5,7 +5,7 @@
  * The list/membership reads are mocked so no network call fires.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -20,6 +20,9 @@ vi.mock('@/lib/api', async (orig) => ({
   listPropertyNotes: vi.fn(),
   createPropertyNote: vi.fn(),
   deletePropertyNote: vi.fn(),
+  uploadNoteAttachment: vi.fn(),
+  fetchNoteAttachmentBlob: vi.fn(),
+  deleteNoteAttachment: vi.fn(),
 }));
 
 vi.mock('@/lib/queries', async (orig) => ({
@@ -28,7 +31,16 @@ vi.mock('@/lib/queries', async (orig) => ({
   fetchPropertyTagIds: vi.fn(),
 }));
 
-import { createPropertyNote, deletePropertyNote, listCollections, listPropertyNotes, listTags } from '@/lib/api';
+import {
+  createPropertyNote,
+  deleteNoteAttachment,
+  deletePropertyNote,
+  fetchNoteAttachmentBlob,
+  listCollections,
+  listPropertyNotes,
+  listTags,
+  uploadNoteAttachment,
+} from '@/lib/api';
 import { curationKeys, fetchPropertyCollectionMemberSet, fetchPropertyTagIds } from '@/lib/queries';
 import CurationBlock from './CurationBlock';
 
@@ -191,4 +203,115 @@ describe('<CurationBlock> failed reads', () => {
     fireEvent.click(within(collections).getByRole('button', { name: 'Zkusit znovu' }));
     expect(await screen.findByRole('button', { name: /Šortlist/ })).toHaveAttribute('aria-pressed', 'true');
   });
+});
+
+/* Files on notes (migration 592): dropped or picked into the composer they wait for the note;
+ * dropped onto a saved note they go onto that note; a refused file is named, never sent. */
+describe('<CurationBlock> note attachments', () => {
+  const pdf = () => new File(['%PDF'], 'plan.pdf', { type: 'application/pdf' });
+  const dropOn = (el: HTMLElement, files: File[]) => {
+    const dataTransfer = { files, types: ['Files'], dropEffect: 'none' };
+    fireEvent.dragEnter(el, { dataTransfer });
+    fireEvent.dragOver(el, { dataTransfer });
+    fireEvent.drop(el, { dataTransfer });
+  };
+  const savedNote = () => screen.findByRole('group', { name: /^Note from/ });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    URL.createObjectURL = vi.fn(() => 'blob:x');
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  it('stages a file dropped on the Notes section and uploads it once the note is saved', async () => {
+    const user = userEvent.setup();
+    mockReads();
+    vi.mocked(createPropertyNote).mockResolvedValue({ ...NOTE, id: 12 } as never);
+    vi.mocked(uploadNoteAttachment).mockResolvedValue({} as never);
+    renderWithReads();
+    const box = await screen.findByRole('textbox', { name: 'Notes' });
+
+    const file = pdf();
+    dropOn(box, [file]);
+    expect(within(screen.getByRole('list', { name: 'Files to attach' })).getByText('plan.pdf'))
+      .toBeInTheDocument();
+    expect(uploadNoteAttachment).not.toHaveBeenCalled();
+
+    await user.type(box, 'Půdorys od makléře.');
+    await user.click(screen.getByRole('button', { name: 'Save note' }));
+    await waitFor(() => expect(uploadNoteAttachment).toHaveBeenCalledWith(42, 12, file));
+    expect(createPropertyNote).toHaveBeenCalledWith(42, 'Půdorys od makléře.', 900, 900);
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Files to attach' })).toBeNull());
+  });
+
+  it('saves a files-only note under its file names', async () => {
+    const user = userEvent.setup();
+    mockReads();
+    vi.mocked(createPropertyNote).mockResolvedValue({ ...NOTE, id: 12 } as never);
+    vi.mocked(uploadNoteAttachment).mockResolvedValue({} as never);
+    renderWithReads();
+    await screen.findByRole('textbox', { name: 'Notes' });
+
+    await user.upload(screen.getAllByTestId('attach-input')[0], pdf());
+    await user.click(screen.getByRole('button', { name: 'Save note' }));
+    await waitFor(() => expect(createPropertyNote).toHaveBeenCalledWith(
+      42, 'Attached: plan.pdf', 900, 900));
+  });
+
+  it('puts a file dropped on a saved note onto that note, not into the composer', async () => {
+    mockReads();
+    vi.mocked(uploadNoteAttachment).mockResolvedValue({} as never);
+    const { invalidate } = renderWithReads();
+    const file = pdf();
+
+    dropOn(await savedNote(), [file]);
+    await waitFor(() => expect(uploadNoteAttachment).toHaveBeenCalledWith(42, NOTE.id, file));
+    expect(createPropertyNote).not.toHaveBeenCalled();
+    expect(screen.queryByRole('list', { name: 'Files to attach' })).toBeNull();
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({
+      queryKey: curationKeys.propertyNotes(42) }));
+  });
+
+  it('names a refused file and never sends it', async () => {
+    mockReads();
+    renderWithReads();
+    dropOn(await screen.findByRole('textbox', { name: 'Notes' }),
+      [new File(['<svg/>'], 'drawing.svg', { type: 'image/svg+xml' })]);
+    expect(await screen.findByText('drawing.svg: this file type cannot be attached'))
+      .toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Files to attach' })).toBeNull();
+    expect(uploadNoteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('shows a saved note’s image as a thumbnail, downloads the rest, and asks before removing',
+    async () => {
+      const user = userEvent.setup();
+      mockReads();
+      const at = '2026-05-02T00:00:00+00:00';
+      vi.mocked(listPropertyNotes).mockResolvedValue({ data: [{ ...NOTE, attachments: [
+        { id: 1, note_id: 11, filename: 'foto.png', mime_type: 'image/png', byte_size: 2048,
+          created_at: at },
+        { id: 2, note_id: 11, filename: 'plan.pdf', mime_type: 'application/pdf',
+          byte_size: 4096, created_at: at },
+      ] }] } as never);
+      vi.mocked(fetchNoteAttachmentBlob).mockResolvedValue(new Blob(['x']));
+      vi.mocked(deleteNoteAttachment).mockResolvedValue({ deleted: true } as never);
+      const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+      renderWithReads();
+
+      const files = await screen.findByRole('list', { name: 'Attachments' });
+      expect(await within(files).findByRole('img', { name: 'foto.png' })).toBeInTheDocument();
+      expect(fetchNoteAttachmentBlob).toHaveBeenCalledWith(42, 11, 1);
+
+      await user.click(within(files).getByRole('button', { name: 'Download plan.pdf' }));
+      await waitFor(() => expect(fetchNoteAttachmentBlob).toHaveBeenCalledWith(42, 11, 2));
+      await waitFor(() => expect(click).toHaveBeenCalled());
+
+      await user.click(within(files).getByRole('button', { name: 'Remove plan.pdf' }));
+      expect(deleteNoteAttachment).not.toHaveBeenCalled();
+      expect(screen.getByText('Remove plan.pdf?')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Remove' }));
+      await waitFor(() => expect(deleteNoteAttachment).toHaveBeenCalledWith(42, 11, 2));
+      click.mockRestore();
+    });
 });

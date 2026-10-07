@@ -884,6 +884,17 @@ export interface Note {
   created_at: string;
   /* Null until the operator edits the note; stamped on every PATCH. */
   updated_at: string | null;
+  /* Its files, oldest first (migration 592). Only the list read carries them. */
+  attachments?: NoteAttachment[];
+}
+
+export interface NoteAttachment {
+  id: number;
+  note_id: number;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  created_at: string;
 }
 
 

@@ -408,6 +408,9 @@ class _RouteCur:
     def fetchall(self) -> list[tuple]:
         return self.rows
 
+    def fetchone(self) -> tuple:
+        return (900 + len(self.ran),)
+
 
 def _plan(rows: list[tuple], movers: dict[int, int | None], **kw: Any) -> list[carriers.Route]:
     return carriers.curation_plan(_RouteCur(rows), left=L, movers=movers, **kw)
@@ -500,8 +503,9 @@ def test_the_conflict_pass_never_lands_a_copy_or_a_fold_on_a_twin_and_no_dismiss
 
 
 def test_the_writes_run_in_order_and_spend_only_what_moved():
-    """Moves, copies, re-creations, the carry stamp, then the lift on `left` and every landing;
-    a route whose anchor did not move routes and spends nothing; counts as the dry run's. A move
+    """Moves, copies (a note's with its attachments), re-creations, the carry stamp, then the lift
+    on `left` and every landing; a route whose anchor did not move routes and spends nothing;
+    counts as the dry run's. A move
     that changes no row (its account holds the item where it would land: an origin active again)
     is neither counted nor spends its carry rows."""
     Route = carriers.Route
@@ -519,16 +523,18 @@ def test_the_writes_run_in_order_and_spend_only_what_moved():
     ran = [(f"{s.split()[0]} {s.split()[1 if s.startswith('UPDATE') else 2]}", p.get("to"))
            for s, p in cur.ran]
     assert ran == [("UPDATE property_notes", R1), ("UPDATE property_pipeline", R1),
-                   ("INSERT property_notes", L), ("INSERT collection_properties", R1),
+                   ("INSERT property_notes", L), ("INSERT property_note_attachments", None),
+                   ("INSERT collection_properties", R1),
                    ("UPDATE property_merge_carries", None), ("UPDATE property_dismissals", None),
                    ("UPDATE property_dismissals", None)]
-    assert cur.ran[4][1] == {"ids": [5, 7, 11, 12]}, "what rides an ad that did not move: nothing"
-    assert [p for _s, p in cur.ran[5:]] == [{"s": L}, {"s": R1}]
+    assert cur.ran[3][1] == {"copy": 903, "key": 1}, "the note copy takes its attachments"
+    assert cur.ran[5][1] == {"ids": [5, 7, 11, 12]}, "what rides an ad that did not move: nothing"
+    assert [p for _s, p in cur.ran[6:]] == [{"s": L}, {"s": R1}]
     assert counts == {"note_moves": 1, "carry_rows": 2}
     held = _RouteCur(held={("property_pipeline", None, ME)})
     assert carriers.route_curation(held, routes, left=L, landed={2: R1}) == {
         "note_moves": 1, "carry_rows": 1}
-    assert held.ran[4][1] == {"ids": [7, 11, 12]}, "the card that did not move keeps its row"
+    assert held.ran[5][1] == {"ids": [7, 11, 12]}, "the card that did not move keeps its row"
 
 
 @pytest.mark.usefixtures("ledger_carriers")
