@@ -117,6 +117,12 @@ _HANDROLLED_RESOLVER_ALLOWLIST: dict[str, str] = {
         "291's three-arm policy, so an unresolvable account narrows to `[SYSTEM]` rather "
         "than failing — it never widens, and it never returns empty"
     ),
+    "api/manual_estimates.py::create_manual_estimate": (
+        "an admin-only (require_admin) SERVICE-ROLE write to shared reference data: "
+        "migration 290 makes `manual_rental_estimates.account_id` PROVENANCE only "
+        "(nullable, ON DELETE SET NULL, reads are platform-wide), so an admin with no "
+        "membership records NULL rather than being refused"
+    ),
 }
 
 

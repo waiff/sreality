@@ -636,7 +636,12 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
     the `database` skill's `references/tenancy.md`, named exception. SPA `getTracePayload` /
     `listEstimationFeedback` / `submitEstimationFeedback` send `jwt: true`. Census:
     `tests/api/test_admin_route_coverage.py`;
-    behaviour: `tests/api/test_estimation_child_routes_tenancy.py`. **Still owed, same shape:**
+    behaviour: `tests/api/test_estimation_child_routes_tenancy.py`. **DONE 2026-10-04 — the
+    manual-estimate writes:** `POST /listings/{id}/manual_estimates`, `PATCH` + `DELETE
+    /manual_estimates/{id}` take `require_admin` (migration 290: every account reads, only
+    platform admins write) and stamp the admin into `updated_by` (+ `account_id` on insert); the
+    SPA sends `jwt: true` and shows the controls only to admins; the `GET` read is unchanged.
+    Behaviour: `tests/api/test_manual_estimates.py`. **Still owed, same shape:**
     `/filter-presets*` (`api/routes/filter_presets.py` → `api/filter_presets.py` `list_presets`
     selects every row; `filter_presets` is account-scoped with RLS since migration 290),
     `/buildings*` (`api/main.py` `get_buildings` → `list_building_runs`, no account filter;
