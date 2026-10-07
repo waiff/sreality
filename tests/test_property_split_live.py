@@ -540,3 +540,23 @@ def test_a_contentless_record_of_another_category_never_refuses_a_letter(cur):
         ("A", 0, None), ("B", 2, None)]
     assert out["letters"][1]["joined"] and _where(cur, [flats[2], record])[record] == (
         out["letters"][1]["property_id"])
+
+
+def test_a_note_copy_takes_its_attachments(cur, accounts):
+    """A split's copy of a note is a new note, and its files come with it (migration 592): the
+    same stored bytes, the copy's account; the moved note keeps its own row."""
+    a, _b = accounts
+    (s, r), (s1, r1) = _props(cur, "sreality", "idnes")
+    _recomputed(cur, s, r)
+    note = _note(cur, a, s, s1)
+    key, digest = f"custom-attachments/note/{note}/x.pdf", "a" * 64
+    cur.execute("INSERT INTO property_note_attachments (note_id, storage_key, filename, mime_type, "
+                "byte_size, sha256_hex) VALUES (%s, %s, 'plan.pdf', 'application/pdf', 10, %s)",
+                (note, key, digest))
+    _merge(cur, [s, r])
+    _split(cur, s, {s1: "A", r1: "B"}, a, reason="jiné patro",
+           choices={f"note:{note}": ("B", ("A",))})
+    cur.execute("SELECT n.property_id, n.id = %s, f.storage_key, f.filename, f.account_id "
+                "FROM property_note_attachments f JOIN property_notes n ON n.id = f.note_id "
+                "WHERE f.sha256_hex = %s ORDER BY 1, 2", (note, digest))
+    assert cur.fetchall() == sorted([(r, True, key, "plan.pdf", a), (s, False, key, "plan.pdf", a)])

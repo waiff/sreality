@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import curation
+from api import note_attachments
 from api import dismissals as dismissals_module
 from api import pipeline as pipeline_module
 from api import price_stats as price_stats_module
@@ -1582,6 +1583,49 @@ def delete_property_note(
     conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     return curation.delete_note(conn, property_id, note_id)
+
+
+@app.post("/properties/{property_id}/notes/{note_id}/attachments")
+def post_note_attachment(
+    property_id: int,
+    note_id: int,
+    file: UploadFile = File(...),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> dict[str, Any]:
+    return note_attachments.add_attachment(conn, property_id, note_id, file)
+
+
+@app.get("/properties/{property_id}/notes/{note_id}/attachments/{attachment_id}")
+def get_note_attachment(
+    property_id: int,
+    note_id: int,
+    attachment_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> Response:
+    """The file's bytes, typed as stored (an allowlisted, inactive type) and never sniffed. An
+    attachment id never changes its bytes, so the caller's browser may keep them."""
+    data, mime, filename = note_attachments.read_attachment(
+        conn, property_id, note_id, attachment_id,
+    )
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "Cache-Control": "private, max-age=86400, immutable",
+            "Content-Disposition": note_attachments.content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.delete("/properties/{property_id}/notes/{note_id}/attachments/{attachment_id}")
+def delete_note_attachment(
+    property_id: int,
+    note_id: int,
+    attachment_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> dict[str, Any]:
+    return note_attachments.delete_attachment(conn, property_id, note_id, attachment_id)
 
 
 @app.get("/tags")

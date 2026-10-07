@@ -53,6 +53,7 @@ _TENANT_TABLES = frozenset({
     "estimation_trace_payloads", "estimation_feedback", "building_run_attachments",
     "estimation_runs", "building_runs", "property_pipeline", "pipeline_stages",
     "property_pipeline_events", "entitlements", "property_dismissals",
+    "property_note_attachments",
 })
 
 # Amendment A6: these broker-directory PII surfaces stay dark to browser roles;
