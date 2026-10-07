@@ -37,7 +37,7 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
       gate: the count invariant on production before and after, the two-account live suite)
 - [x] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first",
       the card's portal badge, the broker lookup by property; the per-ad lane deleted in code (PR #1723,
-      +1,937 / −1,552, the operator's ruling on the size owed; migration 590 applied before merge; gate: a
+      +2,067 / −1,575, the operator's ruling on the size owed; migration 590 applied before merge; gate: a
       cycle begun after W2a, the parity samples, the shadow rebuild, the nine page plans; objects wait for W6)
 - [ ] W6 — the one destructive window
 
@@ -46,9 +46,9 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
   for a pair one live property already holds (its call); W4 removed the keep-together statement.
 
 ## Owed after W5
-- Two properties left with no ads (65587, 65660; their ads now sit on 34632 and 2872) are still served:
-  an inactive card showing another property's ad, and with W5 a "2 inzeráty" badge, because the rollup
-  skips a property with no ads. Retiring both is the operator's data repair.
+- Three properties left with no ads (65587, 65660, 302257; their ads now sit on 34632, 2872 and 338214)
+  still show another property's ad. W5's daily recompute resets them to "no ads", which takes them out
+  of Browse and the map: the first full sweep after the deploy does it, no manual write.
 
 ## Later (cut from scope, see PROGRAM.md §9)
 - The estimation subject lookup (MS20), with its own design.

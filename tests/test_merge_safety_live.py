@@ -750,6 +750,29 @@ def test_a_canonical_change_clears_the_city_figure_stamp(cur):
     assert city("repr_since - interval '1 minute'") == (takeover, False)
 
 
+def test_a_property_reset_to_no_ads_takes_its_next_ad_as_a_handover(cur):
+    """The sweep resets a property whose ads all moved away (no handle, a count of 0); the ad it
+    gains next is a handover all the same: `repr_since` is stamped and the city stamp clears."""
+    from scripts.recompute_property_stats import _RECONCILE_CHILDLESS_SQL
+
+    pid, other = _property(cur), _property(cur)
+    moved = _advert(cur, pid, source="sreality")
+    _recompute(cur, pid)
+    cur.execute("UPDATE properties SET city_proximity_computed_at = now() WHERE id = %s", (pid,))
+    cur.execute("UPDATE listings SET property_id = %s WHERE id = %s", (other, moved))
+    cur.execute(_RECONCILE_CHILDLESS_SQL)
+
+    def stamps() -> tuple[Any, ...]:
+        cur.execute("SELECT repr_listing_ref_id, source_count, repr_since > '-infinity', "
+                    "city_proximity_computed_at IS NOT NULL FROM properties WHERE id = %s", (pid,))
+        return cur.fetchone()
+
+    assert stamps() == (None, 0, False, True)
+    gained = _advert(cur, pid, source="idnes")
+    _recompute(cur, pid)
+    assert stamps() == (gained, 1, True, False)
+
+
 # --- rule 15's gate reads the set's ads (operator, 2026-10-06; hand-over addendum 14) -------
 
 
