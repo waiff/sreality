@@ -165,6 +165,10 @@ export interface ImagePublic {
   /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint —
    * a display value for image-audit surfaces. NULL until hashed. */
   phash: number | null;
+  /* The ACTIVE DINOv3 tag model's per-head scores, {"<tag_taxonomy.id>": 0..1}
+   * (migration 591). Only fetchImagesForListingIds selects it (the Browse card
+   * cover); NULL when the active model has not scored the photo. */
+  tag_head_scores?: Record<string, number> | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by
