@@ -235,6 +235,14 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     # containing that point out. It never returns a cell list, a bbox, our `error` text
     # or `pages`, so it cannot be walked to enumerate which towns are being worked.
     "sold_coverage",
+    # images_public (migration 591) reads image_tag_scores + tag_head_models and IS
+    # readable by `authenticated`, deliberately and without the admin gate: every
+    # signed-in Browse user's card cover is chosen by the active tag model's scores
+    # (operator ruling 2026-10-07). It publishes only a photo's per-head scores and,
+    # implicitly, which model is active — market facts about a photo, the same class
+    # as the CLIP tag columns this view has carried since migration 236. It never
+    # exposes a label, a labeller, model artifacts or metrics.
+    "images_public",
 ]
 
 # The 20 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
