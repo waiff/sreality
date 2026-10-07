@@ -50,4 +50,25 @@ describe('<ImageCarousel>', () => {
     render(<ImageCarousel images={[]} />);
     expect(screen.getByText('no image')).toBeInTheDocument();
   });
+
+  it('opens on the frame the caller picks as its cover', () => {
+    render(<ImageCarousel images={frames('1.jpg', '2.jpg', '3.jpg')} startIndex={2} />);
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('3.jpg');
+    expect(screen.getByText((_t, el) => el?.children.length === 0 && el.textContent?.trim() === '3 / 3')).toBeInTheDocument();
+  });
+
+  it('follows a changed cover even after the operator paged', () => {
+    const { rerender } = render(<ImageCarousel images={frames('1.jpg', '2.jpg', '3.jpg')} startIndex={0} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Next photo' }));
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('2.jpg');
+    rerender(<ImageCarousel images={frames('1.jpg', '2.jpg', '3.jpg')} startIndex={2} />);
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('3.jpg');
+  });
+
+  it('keeps the operator\'s page while the cover stays the same', () => {
+    const { rerender } = render(<ImageCarousel images={frames('1.jpg', '2.jpg', '3.jpg')} startIndex={1} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Next photo' }));
+    rerender(<ImageCarousel images={frames('1.jpg', '2.jpg', '3.jpg')} startIndex={1} />);
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('3.jpg');
+  });
 });

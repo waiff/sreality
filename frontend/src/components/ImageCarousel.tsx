@@ -21,6 +21,10 @@ interface Props {
   /* Render-ready images (url + CLIP tag + confidence). The bottom-left tag
    * badge is read from the current image; callers without tags pass null. */
   images: TaggedImageUrl[];
+  /* The frame it opens on (a Browse card's chosen cover). Followed until the
+   * operator pages, since the photos arrive after the card paints; a NEW value
+   * takes the frame back from wherever they paged to. Default 0. */
+  startIndex?: number;
   /* Tailwind aspect-ratio class for the frame. Default matches Browse cards. */
   aspect?: string;
   /* Extra classes on the aspect container. */
@@ -53,6 +57,7 @@ interface Props {
 
 export default function ImageCarousel({
   images,
+  startIndex = 0,
   aspect = 'aspect-[5/4]',
   className = '',
   imgClassName = '',
@@ -63,7 +68,10 @@ export default function ImageCarousel({
   fallback,
   children,
 }: Props) {
-  const [index, setIndex] = useState(0);
+  /* Where the operator paged to, remembered against the startIndex it paged
+   * FROM — so a changed startIndex wins without an effect to reset it. */
+  const [paged, setPaged] = useState<{ from: number; to: number } | null>(null);
+  const index = paged != null && paged.from === startIndex ? paged.to : startIndex;
   /* The broken frame is tracked BY URL in state, never as an inline style on the
    * <img>. React re-renders `src` and leaves an imperatively-set
    * `visibility:hidden` exactly where it was, so one unloadable frame used to
@@ -76,7 +84,7 @@ export default function ImageCarousel({
 
   const step = (delta: number) => () => {
     if (images.length === 0) return;
-    setIndex((safeIndex + delta + images.length) % images.length);
+    setPaged({ from: startIndex, to: (safeIndex + delta + images.length) % images.length });
   };
 
   /* --z-card-action is the rung a Browse card reserves for its controls
