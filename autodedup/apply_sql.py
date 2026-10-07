@@ -333,6 +333,13 @@ select h.member_ids, h.outcome, h.error, h.at
                  where a.generation = %(generation)s::text
                    and not a.dry_run
                    and a.member_ids && %(listing_ids)s::bigint[]
+                   -- Since this generation's last seed only (a batch generation has no seed
+                   -- key and reads its whole ledger): a standing refusal is filed once per
+                   -- seed, so "no row since the seed" means "never planned", not "silent".
+                   and a.applied_at >= coalesce(
+                         (select s.updated_at from autodedup.settings s
+                           where s.key = 'rt_seed_version:' || %(generation)s::text),
+                         '-infinity'::timestamptz)
                  group by a.member_ids, a.run_id) e) h
  where h.rn <= %(depth)s::integer
  order by h.member_ids, h.rn
