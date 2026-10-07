@@ -11,7 +11,8 @@
  *
  * Membership and the stage list are two shared queries (pipelineKeys.members /
  * .stages) that React Query dedupes across every button on screen — a grid of
- * 60 cards issues two reads, not 120.
+ * 60 cards issues two reads, not 120. A failed membership read is a retry,
+ * never the "add" verb (MS16): it would claim a card the board may hold is absent.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -19,6 +20,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import PipelineMark from '@/components/PipelineMark';
 import PipelineStageMenu from '@/components/pipeline/PipelineStageMenu';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { fetchPipelineMembers, fetchPipelineStages, pipelineKeys } from '@/lib/queries';
 import { stageAccent, stageBadge } from '@/lib/pipelineStage';
 import { usePipelineCard } from '@/lib/usePipelineCard';
@@ -72,6 +74,11 @@ export default function PipelineFunnelButton({
     if (!inPipeline) setMenuOpen(false);
   }, [inPipeline]);
 
+  if (readFailed(membersQ)) {
+    return (
+      <ReadFailedMark what="Pipeline" onRetry={() => void membersQ.refetch()} variant={variant} />
+    );
+  }
   const label = inPipeline
     ? `V pipeline (${member.stage_label}) — změnit fázi`
     : 'Přidat do pipeline';

@@ -4,7 +4,7 @@ The worker's `autodedup` lane decides, groups AND merges in one pass under one l
 (`autodedup.rt_lease`): after the pass's transaction commits, `run` takes the groups it
 re-clustered plus a slice swept past the `rt_reconcile` cursor and hands them to THE apply
 path — `apply.plan_groups` (every refusal E903 names: operator negatives, categories, the scope,
-carry-along, spans-groups, refused-before, restored-elsewhere) and `apply.apply_group`
+carry-along, spans-groups, refused-before) and `apply.apply_group`
 (`recheck_group` over locked rows, `merge_property_set(source='autodedup')` and the ledger row
 in one transaction). Nothing here decides a refusal of its own; the reconcile is the batch
 apply's brain run by the lane.
@@ -16,7 +16,7 @@ What it adds is WHICH groups and WHEN:
     reported (`ruled_different_after_merge`), never undone — the reconcile NEVER splits
     (Decision 9): a grouping the stream no longer supports is a proposal;
   * a skipped or refused row is filed only when a member set's outcome CHANGES — at plan time
-    and at apply time alike (an asset-link conflict surfaces only at the merge) — so a group
+    and at apply time alike — so a group
     waiting on the same rule files one row, not one a minute;
   * a group that failed `QUARANTINE_AFTER` passes running on an error nothing names is
     QUARANTINED (reported, not attempted) until `QUARANTINE_RETRY_H` after its last failure; an

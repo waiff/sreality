@@ -23,7 +23,8 @@ maxima, remax, mmreality, ceskereality).
     poznámku**). Writes go through the same bearer-gated `POST /properties/{id}/notes`
     the SPA uses, recording the viewed advert's `sreality_id` as the note's
     `origin_listing_id` ("written while viewing this advert"); the panel fetches
-    existing notes lazily via `GET /properties/{id}/notes` on open.
+    existing notes lazily via `GET /properties/{id}/notes` on open, and a read that
+    fails every try says so with **Zkusit znovu**, never as "no notes" (MS16).
   - The **pipeline control** is property-grain (the deal pipeline, rule #22),
     the same as the SPA's listing-detail control. Out of pipeline → a
     **"Přidat do pipeline"** button that inserts the property at the entry stage.

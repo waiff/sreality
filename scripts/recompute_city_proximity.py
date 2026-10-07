@@ -6,10 +6,13 @@ precompute the city-proximity columns Browse / Watchdog filter on, so those
 filters are plain indexed-column predicates instead of a per-request spatial
 RPC (no anon 3s statement-timeout).
 
-Incremental by default (only properties whose `city_proximity_computed_at` is
-NULL — i.e. new ones). Pass --full to rebuild every row, which is what you want
-after a population load (scripts/load_obec_population) or a city-index upload,
-since those shift the precomputed maxes. Requires SUPABASE_DB_URL.
+Incremental by default: only properties whose `city_proximity_computed_at` is
+NULL — new ones, and ones whose canonical ad changed since their figures were
+computed (the property rollup clears the stamp, MS11). Either way only from the
+canonical ad's map point: a property whose canonical ad has none is skipped and
+keeps its figures. Pass --full to rebuild every row, which is what you want after
+a population load (scripts/load_obec_population) or a city-index upload, since
+those shift the precomputed maxes. Requires SUPABASE_DB_URL.
 """
 
 from __future__ import annotations

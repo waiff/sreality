@@ -19,6 +19,7 @@ import { propertyPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import { Field } from '@/components/controls';
+import ErrorBanner from '@/components/ErrorBanner';
 import {
   fmtAbsolute,
   fmtArea,
@@ -69,9 +70,7 @@ export default function CollectionDetail() {
     return (
       <Page>
         <Crumb />
-        <div className="mt-8 text-sm text-[var(--color-brick)]">
-          Failed to load: {q.error.message}
-        </div>
+        <ErrorBanner title="Failed to load:" message={q.error.message} onRetry={() => void q.refetch()} />
       </Page>
     );
   }

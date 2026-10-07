@@ -1,5 +1,5 @@
 /* The single source of truth for "which Browse read surfaces must refresh after
- * a property-identity-changing mutation (merge / unmerge / link)".
+ * a property-identity-changing mutation (merge / unmerge)".
  *
  * Every Browse surface reads the browse_list read model (cards, table, the
  * header/tab count, the no-price count, stats) or the map matview, so a merge
@@ -16,7 +16,7 @@ import type { QueryClient } from '@tanstack/react-query';
 import { browseKeys } from '@/lib/browseKeys';
 
 /** Invalidate every Browse read surface, by prefix. Call after any merge /
- * unmerge / asset-link (or a write whose cohort IS the Browse filter) settles,
+ * unmerge (or a write whose cohort IS the Browse filter) settles,
  * so cards, table, map, stats and both counts refetch the post-write state. */
 export function invalidateBrowseQueries(queryClient: QueryClient): void {
   for (const queryKey of browseKeys.all) {

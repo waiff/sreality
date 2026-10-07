@@ -41,16 +41,28 @@ SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
 
 # Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
-# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The ONE
-# sanctioned cross-type is dum <-> komercni (a building listed as a house on one portal and
-# commercial on another is the same real-world property) — irrespective of sub-type. Lives
+# so the merge's `CategoryClash` gate hard-rejects a category_main mismatch. The sanctioned
+# cross-types, irrespective of sub-type, are four PAIRS: dum ↔ komercni (a building listed as a
+# house on one portal and commercial on another), pozemek ↔ dum and pozemek ↔ komercni (a plot
+# with a house on it listed as land on one portal; operator, 2026-10-04: "Pozemky can merge with
+# houses or komerční"), and byt ↔ komercni (a studio listed as a flat on one portal and as a
+# commercial unit on another; operator, 2026-10-06: "some komerční and byty need to be joined
+# together"). It is a set of pairs, not an equivalence: byt ↔ komercni and komercni ↔ dum do not
+# make byt ↔ dum, so a flat still never merges with a house or with land, and an ostatni merges
+# with no other category. Every reader compares two categories at a time, never a class. Lives
 # here (pure, no heavy imports) so property_identity can share it without an import cycle.
-_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({frozenset({"dum", "komercni"})})
+_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({
+    frozenset({"dum", "komercni"}),
+    frozenset({"pozemek", "dum"}),
+    frozenset({"pozemek", "komercni"}),
+    frozenset({"byt", "komercni"}),
+})
 
 
 def category_main_compatible(a_cat: str | None, b_cat: str | None) -> bool:
-    """True if two category_main values may be the same property. Equal (or either NULL =
-    unknown) is compatible; the only allowed cross-type is dum <-> komercni."""
+    """True if two category_main values may be one property: equal, either NULL (unknown), or one
+    of the four pairs dum–komercni, dum–pozemek, komercni–pozemek and byt–komercni. A set of
+    pairs, not an equivalence: byt–komercni and komercni–dum do not make byt–dum."""
     if a_cat is None or b_cat is None or a_cat == b_cat:
         return True
     return frozenset({a_cat, b_cat}) in _CROSS_TYPE_OK

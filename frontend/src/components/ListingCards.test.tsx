@@ -29,12 +29,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import ListingCards from './ListingCards';
+import ListingTable from './ListingTable';
 import { CardHydrationProvider } from '@/lib/hydration';
 import { expectNoNestedInteractive } from '@/test/a11y';
 import * as api from '@/lib/api';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
-import type { CardRow } from '@/lib/queries';
+import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
 
 vi.mock('@/lib/queries', async (importOriginal) => {
@@ -48,6 +49,9 @@ vi.mock('@/lib/queries', async (importOriginal) => {
        reach the network, so every role assertion below would depend on it. */
     fetchPipelineMembers: vi.fn(async () => new Map()),
     fetchPipelineStages: vi.fn(async () => []),
+    /* The dismiss control and the note mark (MS16), the same way. */
+    fetchIsDismissed: vi.fn(async () => false),
+    fetchNoteCounts: vi.fn(async () => new Map()),
   };
 });
 vi.mock('@/lib/brokers', async (importOriginal) => ({
@@ -183,6 +187,9 @@ beforeEach(() => {
   vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(new Map());
   vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map());
   vi.mocked(queries.fetchPipelineStages).mockResolvedValue([]);
+  vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
+  vi.mocked(queries.fetchIsDismissed).mockResolvedValue(false);
+  vi.mocked(queries.fetchNoteCounts).mockResolvedValue(new Map());
   vi.mocked(api.listCollections).mockResolvedValue({ data: [], total: 0 });
   vi.mocked(api.addPipelineCard).mockResolvedValue({
     property_id: 42,
@@ -479,6 +486,68 @@ describe('<ListingCards> collection popover keyboard entry', () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Uložit do kolekce' })).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+});
+
+/* MS16: a merge hides nothing it will touch — merge mode keeps every mark,
+ * read-only, beside the checkbox, and drops the verbs that would change them. */
+describe('<ListingCards> merge mode keeps the marks, read-only', () => {
+  beforeEach(() => {
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map([[42, {
+      property_id: 42, stage_id: 1, stage_label: 'Prověřit', stage_color: 'copper',
+      stage_code: '1', stage_position: 1, is_terminal: true,
+    }]]));
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[42, [7]]]));
+    vi.mocked(queries.fetchIsDismissed).mockResolvedValue(true);
+    vi.mocked(queries.fetchNoteCounts).mockResolvedValue(new Map([[42, 3]]));
+  });
+
+  it('shows the stage, collection, dismissal and note marks and none of the verbs', async () => {
+    const { container } = renderGrid({ merge: { selected: false } });
+    for (const mark of ['V pipeline: Prověřit', 'V kolekci', 'Skryto', 'Poznámky: 3']) {
+      expect(await screen.findByText(mark)).toBeInTheDocument();
+    }
+    for (const verb of ['Přidat do pipeline', 'Uložit do kolekce', 'Skrýt nemovitost']) {
+      expect(screen.queryByRole('button', { name: verb })).toBeNull();
+    }
+    expectNoNestedInteractive(container);
+  });
+
+  it('shows the note count beside the verbs outside merge mode', async () => {
+    renderGrid();
+    expect(await screen.findByTitle('Poznámky: 3')).toHaveTextContent('3');
+  });
+
+  it('turns a failed collection read into a retry, never "in no collection"', async () => {
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderGrid();
+    fireEvent.click(await screen.findByRole('button', { name: /Kolekce se nepodařilo načíst/ }));
+    expect(await screen.findByRole('button', { name: 'Uložit do kolekce' })).toBeInTheDocument();
+  });
+
+  it('puts the note mark on every table row too', async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <ListingTable
+            rows={[ROW as unknown as TableRow]}
+            total={1}
+            sort={{ field: 'last_seen_at', dir: 'desc' } as never}
+            isLoading={false}
+            isFetchingNextPage={false}
+            hasNextPage={false}
+            onReachEnd={() => {}}
+            hasFilters={false}
+            hoveredIds={new Set()}
+            onHover={() => {}}
+            onSort={() => {}}
+            onClearFilters={() => {}}
+            pipelineScoped={false}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByTitle('Poznámky: 3')).toHaveTextContent('3');
   });
 });
 

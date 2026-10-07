@@ -74,6 +74,13 @@ def test_enum_constraints_match_enum_values() -> None:
         )
 
 
+def test_every_ingesting_portal_is_a_portal_option() -> None:
+    """The portal filter (and so the rollup's per-portal dates) covers every ingesting portal."""
+    from scraper.portal_factory import PORTAL_CLASSES
+
+    assert {o.value for o in fr.PORTAL_OPTIONS} == set(PORTAL_CLASSES)
+
+
 def test_price_change_count_columns_match_window_enum() -> None:
     """The window→precomputed-column map and the `price_change_window_days`
     enum are the single source for the same set of windows — they must agree,

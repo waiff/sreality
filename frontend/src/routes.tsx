@@ -49,6 +49,7 @@ const AutodedupGroups = lazyChunk(() => import('./pages/AutodedupGroups'));
 const AutodedupResidual = lazyChunk(() => import('./pages/AutodedupResidual'));
 const AutodedupPair = lazyChunk(() => import('./pages/AutodedupPair'));
 const AutodedupProposedSplits = lazyChunk(() => import('./pages/AutodedupProposedSplits'));
+const AutodedupCategorySplits = lazyChunk(() => import('./pages/AutodedupCategorySplits'));
 const AutodedupRulings = lazyChunk(() => import('./pages/AutodedupRulings'));
 const AutodedupJudge = lazyChunk(() => import('./pages/AutodedupJudge'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
@@ -132,6 +133,7 @@ export const routes: RouteObject[] = [
       { path: ROUTES.autodedupResidual.childPath, element: <AdminPage><AutodedupResidual /></AdminPage>, handle: { title: 'AUTODEDUP · Residual' } },
       { path: ROUTES.autodedupPair.childPath, element: <AdminPage><AutodedupPair /></AdminPage>, handle: { title: 'AUTODEDUP · Pair' } },
       { path: ROUTES.autodedupProposedSplits.childPath, element: <AdminPage><AutodedupProposedSplits /></AdminPage>, handle: { title: 'AUTODEDUP · Návrhy rozdělení' } },
+      { path: ROUTES.autodedupCategorySplits.childPath, element: <AdminPage><AutodedupCategorySplits /></AdminPage>, handle: { title: 'AUTODEDUP · Rozdělení podle kategorií' } },
       { path: ROUTES.autodedupRulings.childPath, element: <AdminPage><AutodedupRulings /></AdminPage>, handle: { title: 'AUTODEDUP · Rozhodnutí' } },
       { path: ROUTES.autodedupJudge.childPath, element: <AdminPage><AutodedupJudge /></AdminPage>, handle: { title: 'AUTODEDUP · Soudce' } },
       { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },

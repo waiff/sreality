@@ -6,7 +6,7 @@ import {
   PIPELINE_BOARD_COLS,
   type PipelineBoardRow,
 } from './pipelineBoardModel';
-import { fetchBrokerListingIds, type ListingBroker } from './brokers';
+import { fetchBrokerListingIds } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
@@ -40,10 +40,8 @@ import type {
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
-  PipelineCardBroker,
   PortalHealth,
   PropertySource,
-  PropertyStatusEventPublic,
   Ppm2Box,
   ReferenceRent,
   ScrapeRun,
@@ -1560,6 +1558,9 @@ export const fetchAdvertProperty = async (
   return data ?? null;
 };
 
+const PROPERTY_SOURCE_COLS =
+  'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at';
+
 /* Every advert of one property, oldest first — the merged-adverts section's rows. */
 export const fetchPropertySources = async (
   propertyId: number,
@@ -1568,9 +1569,7 @@ export const fetchPropertySources = async (
   const { data } = await pgRead<PropertySource[] | null>(
     supabase
       .from('property_sources_public')
-      .select(
-        'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
-      )
+      .select(PROPERTY_SOURCE_COLS)
       .eq('property_id', propertyId)
       .order('first_seen_at', { ascending: true }),
     { signal },
@@ -1578,43 +1577,28 @@ export const fetchPropertySources = async (
   return data ?? [];
 };
 
-/* Price snapshots of the given adverts (the property page reads its canonical
- * advert's). Keyed on the surrogate `listing_id` (listing_snapshots_public.
- * listing_id, migration 343), NOT sreality_id — a post-Gate-2 non-sreality
- * advert has a NULL sreality_id, and the chart would silently go empty. */
+/* Price snapshots of the given adverts: the property page reads every advert's,
+ * one chart line each (MS9). Keyed on the surrogate `listing_id`
+ * (listing_snapshots_public.listing_id, migration 343), NOT sreality_id — a
+ * post-Gate-2 non-sreality advert has a NULL sreality_id, and the chart would
+ * silently go empty. Exhaustive, so a long history never loses its newest rows. */
 export const fetchSnapshotsForListings = async (
   ids: number[],
   { signal }: PgReadOptions = {},
 ): Promise<ListingSnapshotPublic[]> => {
   if (ids.length === 0) return [];
-  const { data } = await pgRead<ListingSnapshotPublic[] | null>(
-    supabase
-      .from('listing_snapshots_public')
-      .select('id,sreality_id,listing_id,scraped_at,price_czk,description')
-      .in('listing_id', ids)
-      .order('scraped_at', { ascending: true }),
-    { signal },
-  );
-  return data ?? [];
-};
-
-/* Property-grain activity log driving the price-history chart's inactive-
- * period gaps (migration 392's property_status_events, trigger-populated from
- * the SAME is_active aggregate Browse/badges already trust — see
- * priceHistory.buildActiveWindows). */
-export const fetchPropertyStatusEvents = async (
-  propertyId: number,
-  { signal }: PgReadOptions = {},
-): Promise<PropertyStatusEventPublic[]> => {
-  const { data } = await pgRead<PropertyStatusEventPublic[] | null>(
-    supabase
-      .from('property_status_events_public')
-      .select('property_id,is_active,event_at')
-      .eq('property_id', propertyId)
-      .order('event_at', { ascending: true }),
-    { signal },
-  );
-  return data ?? [];
+  return fetchAllRows<ListingSnapshotPublic>({
+    relation: 'listing_snapshots_public',
+    build: () =>
+      supabase
+        .from('listing_snapshots_public')
+        .select('id,listing_id,scraped_at,price_czk', { count: 'exact' })
+        .in('listing_id', ids),
+    orderBy: [{ column: 'scraped_at' }, { column: 'id' }],
+    key: ['id'],
+    expectMax: 50_000,
+    signal,
+  });
 };
 
 export const fetchFreshnessChecksByListing = async (
@@ -1784,28 +1768,28 @@ export const fetchListingCovers = async (
   return out;
 };
 
-/* Per-side portal chips. Batched over the properties on screen (≤100), keyed
- * on property_id. property_sources_public
- * is one row per (child listing) of a property — post-merge a property spans
- * several portals, which is exactly what the chips show. */
+/* Each board card's ads, for its broker line (MS7): one batched read over the
+ * cards' properties, keyed on property_id, each property's ads oldest first —
+ * the order the property page lists them in. */
 export const fetchPropertySourcesByPropertyIds = async (
   ids: ReadonlyArray<number>,
   { signal }: PgReadOptions = {},
 ): Promise<Map<number, PropertySource[]>> => {
   if (ids.length === 0) return new Map();
-  const { data } = await pgRead<PropertySource[] | null>(
-    supabase
-      .from('property_sources_public')
-      .select(
-        'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
-      )
-      .in('property_id', ids as number[])
-      .order('is_active', { ascending: false })
-      .order('first_seen_at', { ascending: true }),
-    { signal },
-  );
+  const rows = await fetchAllRows<PropertySource>({
+    relation: 'property_sources_public',
+    build: () =>
+      supabase
+        .from('property_sources_public')
+        .select(PROPERTY_SOURCE_COLS, { count: 'exact' })
+        .in('property_id', ids as number[]),
+    orderBy: [{ column: 'property_id' }, { column: 'first_seen_at' }, { column: 'id' }],
+    key: ['id'],
+    expectMax: 50_000,
+    signal,
+  });
   const out = new Map<number, PropertySource[]>();
-  for (const row of data ?? []) {
+  for (const row of rows) {
     const arr = out.get(row.property_id);
     if (arr) arr.push(row);
     else out.set(row.property_id, [row]);
@@ -2421,8 +2405,8 @@ export const fetchPropertyTagIds = async (
  * pipelineKeys records below). One property's ids are
  * `members.get(property_id) ?? []`. fetchAllRows REJECTS past expectMax rather
  * than resolving a truncated map, so an outgrown map can never read as a
- * smaller one — though consumers still render a REJECTED read as "no
- * membership", a fail-open that predates W1. */
+ * smaller one. A REJECTED read is never "no membership": it says so and offers
+ * a retry (MS16); the board's collection filter alone also fails open (rule #22). */
 export const fetchPropertyCollectionMemberSet = async (
   { signal }: PgReadOptions = {},
 ): Promise<Map<number, number[]>> => {
@@ -2444,6 +2428,27 @@ export const fetchPropertyCollectionMemberSet = async (
     else map.set(r.property_id, [r.collection_id]);
   }
   return map;
+};
+
+/* How many notes the caller's account holds on each property (MS16): the note
+ * mark on every Browse row, from ONE whole-set read rather than one per row.
+ * property_notes_public is security_invoker over the account-scoped RLS
+ * (migrations 290, 393), so the set is the caller's own notes and nothing else. */
+export const fetchNoteCounts = async (
+  { signal }: PgReadOptions = {},
+): Promise<Map<number, number>> => {
+  const rows = await fetchAllRows<{ id: number; property_id: number }>({
+    relation: 'property_notes_public',
+    build: () =>
+      supabase.from('property_notes_public').select('id, property_id', { count: 'exact' }),
+    orderBy: [{ column: 'id' }],
+    key: ['id'],
+    expectMax: 100_000,
+    signal,
+  });
+  const counts = new Map<number, number>();
+  for (const r of rows) counts.set(r.property_id, (counts.get(r.property_id) ?? 0) + 1);
+  return counts;
 };
 
 export const watchdogKeys = {
@@ -2475,6 +2480,7 @@ export const curationKeys = {
   propertyCollectionMembers: ['curation', 'property-collection-members'] as const,
   propertyNotes: (property_id: number) =>
     ['curation', 'property-notes', property_id] as const,
+  noteCounts: ['curation', 'note-counts'] as const,
   manualEstimates: (sreality_id: number) =>
     ['curation', 'manual-estimates', sreality_id] as const,
 };
@@ -2653,34 +2659,6 @@ export const fetchPipelineBoard = async (
   });
   return composePipelineCards(rows);
 };
-
-/* Project ONE batched broker read onto a card's broker block (W6).
- *
- * There used to be a second argument — the contact row from a chained
- * /brokers?ids= call. Migration 419 put primary_email / primary_phone on
- * listing_broker_public, so identity and contact arrive together and the second
- * round trip is gone; a card can no longer be in the split state where it knows
- * the broker's name but not whether he is reachable.
- *
- * `has_email`/`has_phone` arrive INSTEAD of the values for a non-admin caller and
- * are absent for an admin — so derive the flag from whichever the API sent, and
- * the card can then say "contact exists, admin only" rather than showing nothing.
- * A card with no resolved broker (private bazos seller, or a failed enrichment
- * read) stays null. */
-export const pipelineCardBroker = (
-  lb: ListingBroker | undefined,
-): PipelineCardBroker | null =>
-  lb
-    ? {
-        broker_id: lb.broker_id,
-        display_name: lb.broker_display_name,
-        firm_label: lb.broker_firm_label,
-        email: lb.primary_email ?? null,
-        phone: lb.primary_phone ?? null,
-        has_email: lb.has_email ?? Boolean(lb.primary_email),
-        has_phone: lb.has_phone ?? Boolean(lb.primary_phone),
-      }
-    : null;
 
 /* ---- LLM cost dashboard (/costs) -------------------------------------- */
 

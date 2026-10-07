@@ -31,11 +31,29 @@ class _StreamResp:
 def _patch_get(monkeypatch, captured: list, resp: _StreamResp) -> None:
     import scraper.image_storage as image_storage
 
-    def _get(url, timeout=15.0, stream=False):
-        captured.append(url)
-        return resp
+    class _Session:
+        def get(self, url, timeout=15.0, stream=False):
+            captured.append(url)
+            return resp
 
-    monkeypatch.setattr(image_storage.requests, "get", _get)
+    monkeypatch.setattr(image_storage, "_session", lambda: _Session())
+
+
+def test_the_image_session_wears_the_crawlers_browser_identity():
+    """iDNES serves galleries through its own site's redirector, whose WAF throttled
+    and then blocked python-requests' bare identity (429 → 403, 2026-10-05): the
+    fetch carries portal_base's desktop-Chrome UA, its client hints and an <img>
+    Accept, through one session per process."""
+    import scraper.image_storage as image_storage
+
+    image_storage._SESSION = None
+    headers = image_storage._session().headers
+    assert headers["User-Agent"].startswith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    assert "Chrome/" in headers["User-Agent"]
+    assert headers["Accept"].startswith("image/avif,image/webp")
+    assert headers["sec-ch-ua-mobile"] == "?0"
+    assert image_storage._session() is image_storage._session()
+    image_storage._SESSION = None
 
 
 def test_image_key_pads_sequence():
@@ -258,3 +276,68 @@ def test_download_image_leaves_non_sreality_url_untouched(monkeypatch):
     bazos = "https://www.bazos.cz/img/1/123/456.jpg"
     assert image_storage.download_image(bazos) == b"bazosbytes"
     assert captured == [bazos]  # no transform appended
+
+
+class _Hop:
+    """A non-streaming first hop through the proxy."""
+
+    def __init__(self, status, headers=None, content=b""):
+        self.status_code = status
+        self.headers = headers or {}
+        self.content = content
+        self.is_redirect = status in (301, 302, 303, 307, 308) and "Location" in self.headers
+
+    def raise_for_status(self):
+        import requests
+
+        if self.status_code >= 400:
+            resp = requests.Response()
+            resp.status_code = self.status_code
+            raise requests.HTTPError(response=resp)
+
+
+def _patch_session(monkeypatch, calls: list, hop: _Hop, resp: _StreamResp):
+    import scraper.image_storage as image_storage
+
+    class _Session:
+        def get(self, url, timeout=15.0, stream=False, allow_redirects=True, proxies=None):
+            calls.append((url, allow_redirects, proxies))
+            return hop if proxies else resp
+
+    monkeypatch.setattr(image_storage, "_session", lambda: _Session())
+
+
+def test_a_proxied_redirector_is_resolved_through_the_proxy_and_the_file_fetched_directly(monkeypatch):
+    """iDNES links fresh photos through its own site (`/file/thumbnail/{id}`, a 301 to the
+    static CDN) and that site blocks our datacenter address: the one hop goes through the
+    portal's residential proxy, the bytes come straight from the CDN."""
+    import scraper.image_storage as image_storage
+
+    calls: list = []
+    static = "https://sta-reality2.1gr.cz/sta/compile/thumbs/d/8/9/abc.jpg"
+    _patch_session(monkeypatch, calls, _Hop(301, {"Location": static}), _StreamResp(b"jpegbytes"))
+    proxies = {"http": "http://proxy.example", "https": "http://proxy.example"}
+    url = "https://reality.idnes.cz/file/thumbnail/6ac5?profile=front_detail_article_big_fit"
+    assert image_storage.download_image(url, proxies=proxies) == b"jpegbytes"
+    assert calls == [(url, False, proxies), (static, True, None)]
+
+
+def test_a_proxied_site_that_serves_the_bytes_itself_is_read_through_the_proxy(monkeypatch):
+    import scraper.image_storage as image_storage
+
+    calls: list = []
+    _patch_session(monkeypatch, calls, _Hop(200, {"Content-Type": "image/jpeg"}, b"raw"), _StreamResp(b""))
+    assert image_storage.download_image("https://www.portal.cz/img/1.jpg", proxies={"https": "http://p"}) == b"raw"
+    assert len(calls) == 1
+
+
+def test_a_proxied_hop_raises_its_status_like_any_fetch(monkeypatch):
+    import pytest
+    import requests
+
+    import scraper.image_storage as image_storage
+
+    calls: list = []
+    _patch_session(monkeypatch, calls, _Hop(403), _StreamResp(b""))
+    with pytest.raises(requests.HTTPError):
+        image_storage.download_image("https://www.portal.cz/img/1.jpg", proxies={"https": "http://p"})

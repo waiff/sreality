@@ -206,7 +206,7 @@ function fmtCzk(n: number | null): string {
   return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
 }
 
-function failureKind(detail: string): FailureKind {
+export function failureKind(detail: string): FailureKind {
   if (detail === NOT_SIGNED_IN_DETAIL) return 'signed_out';
   if (detail === EXTENSION_RELOADED_DETAIL) return 'reload';
   if (detail === API_NOT_CONFIGURED_DETAIL) return 'fatal';

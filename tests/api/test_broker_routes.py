@@ -182,39 +182,6 @@ def test_dossier_is_whole_for_an_admin(admin_client, monkeypatch):
     assert data["contacts"][1]["value"] == "+420 111 222 333"
 
 
-def test_by_listing_404_when_unattributed(client, monkeypatch):
-    monkeypatch.setattr(broker_routes.brokers, "listing_broker",
-                        lambda conn, sid=None, *, listing_id=None: None)
-    assert client.get("/brokers/by-listing/123").status_code == 404
-
-
-def test_by_listing_surrogate_wins_over_the_path_sreality_id(client, monkeypatch):
-    captured = {}
-    def fake(conn, sreality_id=None, *, listing_id=None):
-        captured.update(sreality_id=sreality_id, listing_id=listing_id)
-        return {"data": {"broker_id": 4}, "metadata": {}}
-    monkeypatch.setattr(broker_routes.brokers, "listing_broker", fake)
-    assert client.get("/brokers/by-listing/123", params={"listing_id": 88}).status_code == 200
-    assert captured == {"sreality_id": 123, "listing_id": 88}
-
-
-def test_by_listing_accepts_a_surrogate_only_query(client, monkeypatch):
-    captured = {}
-    def fake(conn, sreality_id=None, *, listing_id=None):
-        captured.update(sreality_id=sreality_id, listing_id=listing_id)
-        return {"data": {"broker_id": 4}, "metadata": {}}
-    monkeypatch.setattr(broker_routes.brokers, "listing_broker", fake)
-    assert client.get("/brokers/by-listing", params={"listing_id": 88}).status_code == 200
-    assert captured == {"sreality_id": None, "listing_id": 88}
-
-
-def test_by_listing_422_without_any_id(client, monkeypatch):
-    def boom(conn, sreality_id=None, *, listing_id=None):
-        raise ValueError("a sreality_id or listing_id is required")
-    monkeypatch.setattr(broker_routes.brokers, "listing_broker", boom)
-    assert client.get("/brokers/by-listing").status_code == 422
-
-
 def test_by_listings_batch(client, monkeypatch):
     captured = {}
     monkeypatch.setattr(broker_routes.brokers, "listing_brokers",
@@ -267,17 +234,17 @@ def test_by_listings_gives_an_admin_the_values(admin_client, monkeypatch):
     assert row["primary_phone"] == "+420 111 222 333"
 
 
-def test_by_listing_flags_a_broker_with_neither_channel(client, monkeypatch):
+def test_by_listings_flags_a_broker_with_neither_channel(client, monkeypatch):
     """has_email=False is a real answer ("this broker is unreachable"), not the
-    absence of one — the vizitka draws an em-dash from it, and since W6 that is the
-    only way an empty channel can be rendered at all."""
+    absence of one — the property page's broker list draws an em-dash from it, and
+    since W6 that is the only way an empty channel can be rendered at all."""
     monkeypatch.setattr(
-        broker_routes.brokers, "listing_broker",
-        lambda conn, sid=None, *, listing_id=None: {
-            "data": {**_ATTRIBUTION_WITH_CONTACT,
-                     "primary_email": None, "primary_phone": None},
+        broker_routes.brokers, "listing_brokers",
+        lambda conn, ids: {
+            "data": [{**_ATTRIBUTION_WITH_CONTACT,
+                      "primary_email": None, "primary_phone": None}],
             "metadata": {}})
-    row = client.get("/brokers/by-listing", params={"listing_id": 7}).json()["data"]
+    row = client.post("/brokers/by-listings", json={"listing_ids": [7]}).json()["data"][0]
     assert row["has_email"] is False and row["has_phone"] is False
     assert "primary_email" not in row
 
@@ -435,8 +402,6 @@ _NON_ADMIN_CALLS = [
     ("GET", "/brokers/search", "/brokers/search?q=a", None),
     ("GET", "/brokers/geo-options", "/brokers/geo-options", None),
     ("GET", "/brokers/firm-options", "/brokers/firm-options", None),
-    ("GET", "/brokers/by-listing", "/brokers/by-listing?listing_id=1", None),
-    ("GET", "/brokers/by-listing/{sreality_id}", "/brokers/by-listing/1", None),
     ("POST", "/brokers/by-listings", "/brokers/by-listings", {"listing_ids": [1]}),
     ("GET", "/brokers/{broker_id}", "/brokers/1", None),
     ("GET", "/brokers/{broker_id}/listings", "/brokers/1/listings", None),
@@ -444,8 +409,7 @@ _NON_ADMIN_CALLS = [
 ]
 
 _TOOLKIT_READS = ("brokers_by_ids", "leaderboard", "search", "geo_options", "firm_options",
-                  "listing_broker", "listing_brokers", "get_broker", "broker_listings",
-                  "broker_listing_ids")
+                  "listing_brokers", "get_broker", "broker_listings", "broker_listing_ids")
 
 
 def _stub_every_toolkit_read(monkeypatch) -> None:

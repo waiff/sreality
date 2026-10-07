@@ -1187,17 +1187,20 @@ def test_late_binding_is_not_fuzzy():
         assert banned not in sql, f"late binding must not use {banned}"
 
 
-# --- one property, one voice (migrations 424 + 561) --------------------------------------
+# --- one property, one voice (migrations 561 + 588) --------------------------------------
 
-MIGRATION_561 = Path(__file__).resolve().parent.parent / "migrations" / "561_one_property_view.sql"
+MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
+MIGRATION_561 = MIGRATIONS / "561_one_property_view.sql"
+MIGRATION_588 = MIGRATIONS / "588_canonical_order_and_portal_dates.sql"
 ADVERT_FIELDS = (
     "repr_listing_id", "repr_listing_ref_id", "category_main", "category_type",
     "category_sub_cb", "subtype", "disposition", "area_m2", "current_price_czk", "condition",
     "building_condition_level", "apartment_condition_level", "furnished", "source",
 )
+AMENITIES = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
 PHYSICAL_FACTS = (
-    "has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar", "usable_area",
-    "estate_area", "garden_area", "parking_lots", "building_type", "ownership", "energy_rating",
+    "usable_area", "estate_area", "garden_area", "parking_lots", "building_type", "ownership",
+    "energy_rating",
 )
 
 
@@ -1215,15 +1218,21 @@ def _rhs(set_clause: str, column: str) -> str:
     return m[1].strip().rstrip(",")
 
 
+def _child_agg(sql: str) -> str:
+    return " ".join(sql.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0].split())
+
+
 def test_the_one_order_is_spelled_once_in_the_function():
-    """Decision 18: active first, then portal trust, then the most recently seen, then the id
-    (the tie-break: 1,840 properties were tied at the top). The rollup reads the rank and
-    orders nothing of its own: the trust-first second ordering and the area fallback are gone."""
+    """MS5: active first, then a map point, then the earliest first sighting among active
+    adverts / the latest last sighting among inactive ones, then portal trust, then the id.
+    The rollup reads the rank and orders nothing of its own."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    body = " ".join(MIGRATION_561.read_text().split())
-    assert ("order by l.is_active desc, public.source_trust_rank(l.source), "
-            "l.last_seen_at desc nulls last, l.id))::integer") in body
+    body = " ".join(MIGRATION_588.read_text().split())
+    assert ("order by l.is_active desc, (ll.geom is not null) desc, "
+            "case when l.is_active then l.first_seen_at end, "
+            "case when not l.is_active then l.last_seen_at end desc, "
+            "public.source_trust_rank(l.source), l.id))::integer") in body
     sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
     assert "CROSS JOIN LATERAL property_canonical_listings(b.id) o" in sql
     for gone in ("source_trust_rank", "src_rank", "DISTINCT ON", "best_area", "golden", "coalesce(c."):
@@ -1231,15 +1240,16 @@ def test_the_one_order_is_spelled_once_in_the_function():
 
 
 def test_every_advert_field_comes_from_the_canonical_advert():
-    """Price and area from one row (the per-m2 pair, migration 424) and condition with both
-    derived levels from that same row (rule 14): the canonical advert, never a mix."""
+    """Price and area from one row and condition with both derived levels from that same row
+    (rule 14): the canonical advert, never a mix. The two write-only columns are not written
+    (W6 drops them)."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
     for column in ADVERT_FIELDS:
         assert _rhs(setc, column).startswith("c."), f"{column} must be the canonical advert's"
-    assert _rhs(setc, "price_per_m2_source_listing_id") == (
-        "price_per_m2_source_id(c.price_czk, c.area_m2, c.id)")
+    for gone in ("price_per_m2_source", "distinct_site_count"):
+        assert gone not in _RECOMPUTE_BATCH_SQL
 
 
 def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():
@@ -1248,37 +1258,85 @@ def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
-    rollup = _RECOMPUTE_BATCH_SQL.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0]
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
     for column in PHYSICAL_FACTS:
         assert _rhs(setc, column) == f"r.{column}"
         assert re.search(
             rf"\(array_agg\(k\.{column} ORDER BY k\.canonical_rank\) "
             rf"FILTER \(WHERE k\.{column} IS NOT NULL\)\)\[1\] AS {column}", rollup,
         ), f"{column} must be the first non-empty value in the canonical order"
-    assert "bool_or(k.is_active)" in rollup, "a property is live while ANY advert is"
+    assert "bool_or(k.is_active) AS is_active" in rollup, "a property is live while ANY advert is"
 
 
-def test_the_price_history_is_the_canonical_adverts_own():
-    """A step never spans two adverts (migration 559) and no other advert's steps are summed
-    in: the counts, the max drop and the headline delta all read the canonical advert."""
+def test_the_six_amenities_are_a_union_over_every_advert():
+    """MS6: yes when any advert says yes, active or not; no order decides an amenity."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
+    for column in AMENITIES:
+        assert _rhs(setc, column) == f"r.{column}"
+        assert f"bool_or(k.{column}) AS {column}," in rollup
+        assert f"array_agg(k.{column}" not in rollup
+
+
+def test_one_newest_ad_date_per_offered_portal_and_the_two_portal_lists():
+    """MS19: a dated column per `PORTAL_OPTIONS` code, each added by a migration; two sorted lists."""
+    import re
+
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    codes = [o.value for o in PORTAL_OPTIONS]
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert re.findall(r"^\s*newest_ad_at_(\w+) = r\.newest_ad_at_\1,$", setc, re.M) == codes
+    assert len(re.findall(r"newest_ad_at_\w+ =", setc)) == len(codes)
+    rollup = _child_agg(_RECOMPUTE_BATCH_SQL)
+    migrations = " ".join(
+        " ".join(path.read_text(encoding="utf-8").split()) for path in MIGRATIONS.glob("*.sql"))
+    for code in codes:
+        assert (f"max(k.first_seen_at) FILTER (WHERE k.source = '{code}') "
+                f"AS newest_ad_at_{code},") in rollup
+        assert f"add column if not exists newest_ad_at_{code} timestamptz" in migrations, code
+    assert "array_agg(DISTINCT k.source ORDER BY k.source) AS all_sources," in rollup
+    assert ("coalesce(array_agg(DISTINCT k.source ORDER BY k.source) FILTER (WHERE k.is_active), "
+            "ARRAY[]::text[]) AS active_sources,") in rollup
+    for column in ("all_sources", "active_sources"):
+        assert _rhs(setc, column) == f"r.{column}"
+
+
+def test_the_price_history_is_the_canonical_adverts_lineage():
+    """MS10: the canonical advert's same-portal predecessors' steps plus one handover per link."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
-    assert "FROM canon c JOIN listing_price_steps ps ON ps.listing_id = c.id" in sql
-    assert "FROM canon c JOIN listing_snapshots s ON s.listing_id = c.id" in sql
+    assert sql.startswith("WITH batch AS (")
+    assert "lineage AS ( WITH RECURSIVE link AS (" in sql
+    assert ("WHERE l.property_id = k.pid AND l.source = k.source "
+            "AND l.last_seen_at < k.first_seen_at AND l.first_seen_at < k.first_seen_at "
+            "ORDER BY l.last_seen_at DESC, l.id DESC LIMIT 1") in sql
+    assert "FROM lineage g JOIN listing_price_steps ps ON ps.listing_id = g.id" in sql
+    assert "FROM lineage g JOIN listing_snapshots s ON s.listing_id = g.id" in sql
+    assert "FROM steps ps GROUP BY ps.pid" in sql
+    assert "LEFT JOIN lineage_span cs ON cs.pid = r.pid" in sql
     assert "ps.property_id" not in sql
 
 
 def test_the_canonical_handover_is_stamped_for_the_price_alerts():
     """`repr_since` moves only when the canonical advert changes from one advert to another,
-    and both alert producers count only steps after it (migration 561)."""
+    and both alert producers count only steps after it (migration 561). The city figures follow
+    the canonical advert: their stamp clears with it, or when it predates `repr_since`."""
     import inspect
 
     from api import notifications as nf
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    assert _rhs(_set_clause(_RECOMPUTE_BATCH_SQL), "repr_since") == (
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "repr_since") == (
         "CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END")
+    assert _rhs(setc, "city_proximity_computed_at") == (
+        "CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since "
+        "THEN NULL ELSE p.city_proximity_computed_at END")
     assert ("add column if not exists repr_since timestamptz not null default '-infinity'"
             in " ".join(MIGRATION_561.read_text().split()))
     assert "ps.scraped_at > p.repr_since" in inspect.getsource(nf._recent_price_drops)
@@ -1286,15 +1344,17 @@ def test_the_canonical_handover_is_stamped_for_the_price_alerts():
     assert "p.repr_since" in nf._MONITORED_CTE
 
 
-def test_every_recompute_variant_writes_the_stamp():
+def test_every_recompute_variant_carries_the_whole_statement():
     """The one/scoped variants are derived from the batch SQL by narrowing the
-    batch CTE; if that ever becomes a copy, they must not lose the measure."""
+    batch CTE; if that ever becomes a copy, they must not lose a rule."""
     import scripts.recompute_property_stats as rps
 
     for sql in (rps._RECOMPUTE_BATCH_SQL, rps._RECOMPUTE_ONE_SQL,
                 rps._RECOMPUTE_SCOPED_SQL):
-        assert "price_per_m2_source_listing_id" in sql
-        assert "property_canonical_listings" in sql
+        for rule in ("property_canonical_listings", "lineage AS (", "city_proximity_computed_at",
+                     "newest_ad_at_", "active_sources"):
+            assert rule in sql
+        assert "price_per_m2_source_id" not in sql
 
 
 def test_a_property_is_born_one_way():

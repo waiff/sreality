@@ -440,7 +440,7 @@ def _fetch_card(
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT pp.property_id, pp.stage_id, ps.key, ps.label, pp.board_position, "
-        "       pp.note, pp.entered_stage_at, pp.added_at, ps.code, ps.color "
+        "       pp.entered_stage_at, pp.added_at, ps.code, ps.color "
         "FROM property_pipeline pp JOIN pipeline_stages ps ON ps.id = pp.stage_id "
         "WHERE pp.property_id = %s AND pp.account_id = %s"
     )
@@ -455,14 +455,13 @@ def _fetch_card(
         "stage_key":        row[2],
         "stage_label":      row[3],
         "board_position":   float(row[4]) if row[4] is not None else None,
-        "note":             row[5],
-        "entered_stage_at": _iso(row[6]),
-        "added_at":         _iso(row[7]),
+        "entered_stage_at": _iso(row[5]),
+        "added_at":         _iso(row[6]),
         # Badge + colour ride along so a surface that only holds the card (the
         # Chrome extension panel) can render the same funnel the SPA does
         # without a second round trip for the stage list.
-        "stage_code":       row[8],
-        "stage_color":      row[9],
+        "stage_code":       row[7],
+        "stage_color":      row[8],
     }
 
 

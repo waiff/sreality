@@ -197,6 +197,9 @@ def cluster_invariants_ok(
     (area, disposition, floor) are read across closures only, because the operator has ruled
     two adverts of one closure one property — with no ruling that is every pair, today's rule
     exactly. The relation must be bound to the same closures by the caller.
+
+    E938: the category limb reads every PAIR of the group's categories. Rule #15 is a set of
+    pairs, not an equivalence: a komerční may join a byt and a dům, the byt and the dům never.
     """
     cfg = settings or Settings()
     if len(members) > cfg.max_cluster_size:

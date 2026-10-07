@@ -248,6 +248,8 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "reconcile_refused": 0, "reconcile_failed": 0, "reconcile_waiting": 0,
         "reconcile_skipped_at_apply": 0, "reconcile_quarantined": 0, "reconcile_deferred": 0,
         "must_link_dissolved": 0,
+        # the plan's silent outcomes (2026-10-07): settled groups and standing refusals by reason
+        "reconcile_settled": 0, "reconcile_skipped_by_reason": {},
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):

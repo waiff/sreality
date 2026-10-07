@@ -257,9 +257,8 @@ name: "AUTODEDUP: engine lane"
 #
 #   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges and
 #             writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json. Per
-#             group it names the survivor (the one asset-linked property if exactly one is
-#             linked; else the property with the most listings, a tie going to the oldest
-#             first_seen_at, then the lowest id) and the properties that would retire into it,
+#             group it names the survivor (the oldest first_seen_at, then the lowest id) and the
+#             properties that would retire into it,
 #             or records why the group is refused. Every check reads EVERY listing the merge
 #             would put on the survivor, not only the members: a member with no property yet,
 #             a property not active, an operator negative (a pair verdict or must-not-link
@@ -267,13 +266,13 @@ name: "AUTODEDUP: engine lane"
 #             types or incompatible categories (the chokepoint's own helper), a listing
 #             outside the scope (inside = LOCATED in a scope block by its live listing_location
 #             obec_kod / cast_obce_kod, never the engine's block key; out-of-scope groups are
-#             counted per reason in the summary), two properties the operator asset-linked
-#             (asset_linked_units), a property the engine split across two groups, a property
+#             counted per reason in the summary), a property the engine split across two groups,
+#             a property
 #             carrying a listing no group holds (unless this engine already merged it there
-#             with a member), a chokepoint refusal on an earlier run, listings of an engine
-#             merge the operator took apart, or a property this engine merged once that is
-#             active again. Group size is capped by the engine alone, when it builds the
-#             group. A group already on one property that an operator negative covers is
+#             with a member), or a chokepoint refusal on an earlier run. An undo of an engine
+#             merge, by anyone, refuses nothing: the operator's rulings are the bans (E934).
+#             Group size is capped by the engine alone, when it builds the group. A group
+#             already on one property that an operator negative covers is
 #             REPORTED (ruled_different_after_merge, with the unapply args when the engine
 #             made that merge), never acted on. The real-time generation (`rt`) may be
 #             PLANNED by a dry run (G3's prediction of the lane's first reconcile) and is never
@@ -335,8 +334,8 @@ name: "AUTODEDUP: engine lane"
 #             the merge to undo first; a group taken apart outside the engine (its survivor
 #             merged on by another merge, or nothing of it left to move back) is skipped
 #             naming nothing - the dry run reports each group as the live run would treat it;
-#             a group the operator already undid is noted as undone by someone else, and its
-#             listings stay apart in every later generation's merges.
+#             a group the operator already undid is noted as undone by someone else - a
+#             record, not a ban: only the operator's rulings keep ads apart (E934).
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database

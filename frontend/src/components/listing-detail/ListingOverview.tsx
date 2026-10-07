@@ -22,8 +22,16 @@ import { Hairline, SectionLabel } from '@/components/section';
 const DetailMap = lazyChunk(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazyChunk(() => import('@/components/listing-detail/Gallery'));
 
+/* A labelled, display-only price line beside the headline price (the property
+ * page's lowest active price, MS8). */
+export interface PriceNote {
+  text: string;
+  title: string;
+}
+
 export function ListingOverview({
   listing,
+  priceNote,
   images = [],
   imagesLoading = false,
   showStatus = true,
@@ -32,6 +40,9 @@ export function ListingOverview({
   estimatesSlot,
 }: {
   listing: ListingPublic;
+  /* Rendered under the headline price, or in its place when the listing states
+   * none. Estimation Detail leaves it empty. */
+  priceNote?: PriceNote;
   images?: ImagePublic[];
   imagesLoading?: boolean;
   showStatus?: boolean;
@@ -53,7 +64,12 @@ export function ListingOverview({
 }) {
   return (
     <>
-      <Header listing={listing} showStatus={showStatus} mapFooter={mapFooter} />
+      <Header
+        listing={listing}
+        priceNote={priceNote}
+        showStatus={showStatus}
+        mapFooter={mapFooter}
+      />
       <DescriptionBlock listing={listing} />
       {curationSlot && (
         <>
@@ -78,10 +94,12 @@ export function ListingOverview({
 
 function Header({
   listing,
+  priceNote,
   showStatus,
   mapFooter,
 }: {
   listing: ListingPublic;
+  priceNote?: PriceNote;
   showStatus: boolean;
   mapFooter?: React.ReactNode;
 }) {
@@ -137,12 +155,18 @@ function Header({
             hasPrice ? 'text-[2.6rem]' : 'text-[1.6rem] text-[var(--color-ink-3)]',
           ].join(' ')}
           style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+          title={!hasPrice && priceNote ? priceNote.title : undefined}
         >
-          {price}
+          {!hasPrice && priceNote ? priceNote.text : price}
           <span className="text-base font-sans font-normal text-[var(--color-ink-3)] tracking-wide">
             {unit}
           </span>
         </h1>
+        {hasPrice && priceNote && (
+          <p className="mt-1 text-sm tabular-nums text-[var(--color-ink-2)]" title={priceNote.title}>
+            {priceNote.text}
+          </p>
+        )}
         <p className="mt-2 text-sm text-[var(--color-ink-2)]">
           {listing.display_label ?? '—'}
         </p>

@@ -35,9 +35,11 @@ import {
  * years of history costs no more than one with weeks. */
 const HOVER_SAMPLES = 400;
 
-// Palette mirrors the civic-archive tokens; primary track = copper.
+// Palette mirrors the civic-archive tokens; primary track = copper. Past four
+// tracks the colours repeat dashed, so no two of the first eight look alike.
 const PALETTE = ['--color-copper', '--color-brick', '--color-sage', '--color-ink-2'];
 const TOKEN_KEYS = ['--color-ink-3', '--color-rule', '--color-paper-2', ...PALETTE];
+const dashOf = (i: number): string | undefined => (i >= PALETTE.length ? '5 3' : undefined);
 
 interface DotProps {
   cx?: number;
@@ -45,20 +47,10 @@ interface DotProps {
   payload?: Record<string, unknown>;
 }
 
-export default function PriceLineChart({
-  series,
-  activeWindows,
-}: {
-  series: PriceSeries[];
-  // Property-level "had >=1 active listing" windows (lib/priceHistory.
-  // buildActiveWindows) — outside them every track gaps, regardless of that
-  // track's own [start, endT]. Optional so a caller with no status-events
-  // data yet (e.g. mid-load) draws the pre-existing unconstrained line.
-  activeWindows?: [number, number][];
-}) {
+export default function PriceLineChart({ series }: { series: PriceSeries[] }) {
   const colors = useTokenColors(TOKEN_KEYS);
 
-  const data = buildChartRows(series, activeWindows, HOVER_SAMPLES);
+  const data = buildChartRows(series, HOVER_SAMPLES);
   const times = data.map((row) => row.t as number);
   const prices = series.flatMap((s) => s.points.map((p) => p.price));
   const domain: [number, number] = [times[0] ?? 0, times[times.length - 1] ?? 0];
@@ -75,10 +67,11 @@ export default function PriceLineChart({
   const axis = colors['--color-ink-3'] || '#7a7d86';
   const grid = colors['--color-rule'] || 'rgba(26,28,34,0.08)';
   const paper = colors['--color-paper-2'] || '#fbf9f3';
+  const strokeOf = (i: number): string => colors[PALETTE[i % PALETTE.length]] || '#3c6e63';
 
   return (
-    <div className="h-[230px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
+    <div className="w-full">
+      <ResponsiveContainer width="100%" height={230}>
         <LineChart data={data} margin={{ top: 8, right: 14, bottom: 0, left: 0 }}>
           <CartesianGrid stroke={grid} vertical={false} />
           <XAxis
@@ -146,7 +139,7 @@ export default function PriceLineChart({
             }
           />
           {series.map((s, i) => {
-            const stroke = colors[PALETTE[i % PALETTE.length]] || '#3c6e63';
+            const stroke = strokeOf(i);
             // A dot means "observed here". Rows carry every track's timestamps
             // plus the live extension to now, so dotting all of them would
             // invent observations this URL never had.
@@ -176,18 +169,31 @@ export default function PriceLineChart({
                 name={s.label}
                 stroke={stroke}
                 strokeWidth={1.6}
+                strokeDasharray={dashOf(i)}
                 dot={renderDot}
                 activeDot={{ r: 4 }}
-                // NOT connectNulls: a null run is a deliberate gap (the
-                // property had zero active listings for that stretch, or this
-                // track sits outside its own [start, endT]) — bridging it
-                // would redraw exactly the mismatch this prop exists to fix.
+                // NOT connectNulls: a null run is a deliberate gap (this
+                // track's advert was not on the market then) — bridging it
+                // would draw an advert as live when it was not.
                 isAnimationActive={false}
               />
             );
           })}
         </LineChart>
       </ResponsiveContainer>
+      {/* The key (MS9): which line is which advert, without hovering. */}
+      {series.length > 1 && (
+        <ul aria-label="Linie grafu" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-[var(--color-ink-3)]">
+          {series.map((s, i) => (
+            <li key={s.id} className="flex items-center gap-1.5">
+              <svg width="16" height="6" aria-hidden="true">
+                <line x1="0" y1="3" x2="16" y2="3" stroke={strokeOf(i)} strokeWidth="2" strokeDasharray={dashOf(i)} />
+              </svg>
+              {s.label}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

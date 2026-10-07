@@ -104,26 +104,6 @@ def test_leaderboard_sends_null_not_empty_array_when_no_subtype_is_selected() ->
     assert out["metadata"]["filters_used"]["subtypes"] == []
 
 
-def test_listing_broker_prefers_the_surrogate_id() -> None:
-    conn = _Conn([{"broker_id": 4, "listing_id": 88}])
-    out = brokers.listing_broker(conn, 123, listing_id=88)
-    sql, params = conn.cur.seen[0]
-    assert "WHERE listing_id = %s" in sql and params == (88,)
-    assert out is not None and out["metadata"]["tool"] == "listing_broker"
-
-
-def test_listing_broker_falls_back_to_sreality_id() -> None:
-    conn = _Conn([{"broker_id": 4}])
-    brokers.listing_broker(conn, 123)
-    sql, params = conn.cur.seen[0]
-    assert "WHERE sreality_id = %s" in sql and params == (123,)
-
-
-def test_listing_broker_without_any_id_raises() -> None:
-    with pytest.raises(ValueError):
-        brokers.listing_broker(_Conn())
-
-
 def test_listing_brokers_dedupes_and_skips_the_query_when_empty() -> None:
     conn = _Conn([{"listing_id": 7}])
     out = brokers.listing_brokers(conn, [9, 7, 9])

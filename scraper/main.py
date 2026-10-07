@@ -113,6 +113,117 @@ SUSPICIOUS_STOP_WINDOW = 100
 # or blocking us and bail. Confirmed `listing_taken_down` outcomes do
 # NOT count — those are expected on backfill.
 SUSPICIOUS_STOP_THRESHOLD = 0.30
+# A portal that throttles our image fetches (429, or the 403 its WAF follows a burst
+# with) is answering about OUR rate, not about the image: such a failure burns no
+# `download_attempts` (five of them within twenty minutes gave 10k iDNES photos up for
+# good on 2026-10-05) and parks the HOST, not the row — a cool-down that outlives the
+# run (module state, so the worker's minute-by-minute lane cannot re-hammer a host
+# every run), doubling per consecutive trip from 15 min to 2 h, or `Retry-After` when
+# the portal names a longer wait. A stored image resets the host's trip count.
+THROTTLE_STATUSES: frozenset[int] = frozenset({429, 403})
+THROTTLE_COOLDOWN_S = 15 * 60
+THROTTLE_COOLDOWN_MAX_S = 2 * 60 * 60
+# Minimum spacing between two fetches to ONE host (the per-host semaphore bounds
+# concurrency, not rate): 5 requests/s per host is far under any CDN's bar and
+# under what tripped iDNES's site (8 parallel, ~8/s to its redirector).
+HOST_MIN_INTERVAL_S = 0.2
+_host_cooldown_until: dict[str, float] = {}
+_host_trips: dict[str, int] = {}
+_host_next_at: dict[str, float] = {}
+_host_state_lock = threading.Lock()
+
+
+def image_proxies() -> dict[str, dict[str, str]]:
+    """Proxy settings per hostname for photo links that sit on a portal's OWN site:
+    every client class that declares `USE_PROXY` (its seam, rule 21) and whose
+    `PROXY_ENV` is set contributes its `BASE_URL` host. No portal is named here."""
+    import importlib
+
+    from scraper import portal_factory
+
+    out: dict[str, dict[str, str]] = {}
+    for source, (mod_name, _cls_name) in portal_factory.CLIENT_CLASSES.items():
+        try:
+            cls = portal_factory.build_client_class(source)
+        except Exception:  # noqa: BLE001 - a portal that fails to import never blocks the drain
+            continue
+        if not getattr(cls, "USE_PROXY", False):
+            continue
+        proxy = os.environ.get(getattr(cls, "PROXY_ENV", "SCRAPER_PROXY_URL"))
+        base = getattr(importlib.import_module(mod_name), "BASE_URL", None)
+        if not proxy or not base:
+            continue
+        host = _image_host(base)
+        if host:
+            out[host] = {"http": proxy, "https": proxy}
+    return out
+
+
+def _throttle_status(error: Exception) -> int | None:
+    """The HTTP status when `error` is the portal throttling us, else None."""
+    resp = getattr(error, "response", None)
+    status = getattr(resp, "status_code", None)
+    return int(status) if status in THROTTLE_STATUSES else None
+
+
+def _retry_after_s(error: Exception) -> float | None:
+    resp = getattr(error, "response", None)
+    headers = getattr(resp, "headers", None) or {}
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def host_cooling(host: str, now: float | None = None) -> bool:
+    now = time.monotonic() if now is None else now
+    with _host_state_lock:
+        until = _host_cooldown_until.get(host)
+        if until is None:
+            return False
+        if until <= now:
+            del _host_cooldown_until[host]
+            return False
+        return True
+
+
+def trip_host(host: str, error: Exception, now: float | None = None) -> float:
+    """Open `host`'s cool-down after a throttle; returns its length in seconds.
+
+    One window counts once: the throttles of the images already in flight when the
+    first one lands (a whole batch, 69 on 2026-10-06) must not each double the wait,
+    so a host that is already cooling keeps its window and its trip count."""
+    now = time.monotonic() if now is None else now
+    with _host_state_lock:
+        until = _host_cooldown_until.get(host)
+        if until is not None and until > now:
+            return until - now
+        trips = _host_trips.get(host, 0) + 1
+        _host_trips[host] = trips
+        wait = min(THROTTLE_COOLDOWN_S * (2 ** (trips - 1)), THROTTLE_COOLDOWN_MAX_S)
+        named = _retry_after_s(error)
+        if named is not None and named > wait:
+            wait = min(named, THROTTLE_COOLDOWN_MAX_S)
+        _host_cooldown_until[host] = now + wait
+        return wait
+
+
+def host_recovered(host: str) -> None:
+    with _host_state_lock:
+        _host_trips.pop(host, None)
+
+
+def _pace_host(host: str) -> None:
+    """Sleep so that two fetches to `host` are at least HOST_MIN_INTERVAL_S apart."""
+    if HOST_MIN_INTERVAL_S <= 0 or not host:
+        return
+    with _host_state_lock:
+        now = time.monotonic()
+        at = max(now, _host_next_at.get(host, 0.0))
+        _host_next_at[host] = at + HOST_MIN_INTERVAL_S
+    if at > now:
+        time.sleep(at - now)
 
 # All sreality category pairs we collect, as (category_main_cb,
 # category_type_cb), grouped by category_main: rent, sale, auction, share.
@@ -1728,9 +1839,14 @@ def _run_image_downloads(
     from scraper.sreality_client import SrealityClient
 
     r2 = image_storage.R2Client.from_env(max_pool_connections=workers)
+    proxied_hosts = image_proxies()
+    if proxied_hosts:
+        LOG.info("IMAGES proxied hosts: %s", ",".join(sorted(proxied_hosts)))
     counts = {
         "downloaded": 0, "errors": 0, "attempted": 0,
         "taken_down": 0, "source_unavailable": 0, "not_an_image": 0,
+        # The portal throttled us (429/403): the row stays pending, no attempt burned.
+        "throttled": 0,
         # Stored, but the inline hash failed: the rows the hourly backstop exists for.
         "phash_missed": 0,
     }
@@ -1834,6 +1950,9 @@ def _run_image_downloads(
                 host = _image_host(url)
                 if host in quarantined:
                     continue
+                if host_cooling(host):
+                    quarantined.add(host)
+                    continue
                 cat_lookup[image_id] = (cm, ct)
                 sid_by_image[image_id] = sid
                 host_by_image[image_id] = host
@@ -1860,6 +1979,7 @@ def _run_image_downloads(
                     pool.submit(
                         _fetch_one_image, lid, seq, url, r2,
                         _semaphore_for(host_by_image[image_id]),
+                        proxied_hosts.get(host_by_image[image_id]),
                     ): image_id
                     for image_id, lid, seq, url, _cm, _ct in filtered_pending
                 }
@@ -1880,8 +2000,23 @@ def _run_image_downloads(
                         if phash is None:
                             counts["phash_missed"] += 1
                         host_windows[host].append("ok")
+                        host_recovered(host)
                         cat_key = cat_lookup.get(image_id, (None, None))
                         by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
+                    elif (status := _throttle_status(error)) is not None:
+                        # The portal is answering about our rate: no attempt is
+                        # burned, the row stays pending, the HOST cools down across
+                        # runs and is skipped for the rest of this one.
+                        db.mark_image_throttled(conn, image_id, error=str(error))
+                        counts["throttled"] += 1
+                        wait = trip_host(host, error)
+                        if host not in quarantined:
+                            quarantined.add(host)
+                            LOG.warning(
+                                "IMAGES THROTTLED host=%s status=%d — cooling down "
+                                "%.0f s; rows stay pending, no attempt counted",
+                                host, status, wait,
+                            )
                     else:
                         kind = _classify_image_failure(
                             conn, freshness_client, sid, error,
@@ -1955,17 +2090,18 @@ def _run_image_downloads(
 
     LOG.info(
         "IMAGES done downloaded=%d errors=%d taken_down=%d "
-        "source_unavailable=%d not_an_image=%d quarantined=%d attempted=%d "
+        "source_unavailable=%d not_an_image=%d throttled=%d quarantined=%d attempted=%d "
         "phash_missed=%d",
         counts["downloaded"], counts["errors"],
         counts["taken_down"], counts["source_unavailable"],
-        counts["not_an_image"], len(quarantined), counts["attempted"],
+        counts["not_an_image"], counts["throttled"], len(quarantined), counts["attempted"],
         counts["phash_missed"],
     )
     return {
         "images_stored": counts["downloaded"],
         "images_phash_missed": counts["phash_missed"],
         "by_category": by_cat,
+        "throttled": counts["throttled"],
         "stopped_suspicious": stopped_suspicious,
     }
 
@@ -2129,6 +2265,7 @@ def _fetch_one_image(
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
+    proxies: dict[str, str] | None = None,
 ) -> tuple[str, int | None, str, tuple[int, int] | None, Exception | None]:
     """Worker: download from the portal CDN, validate, upload to R2.
     Returns (key, phash, rendition, dimensions, error).
@@ -2152,9 +2289,11 @@ def _fetch_one_image(
     try:
         if semaphore is not None:
             with semaphore:
-                data = image_storage.download_image(url)
+                _pace_host(_image_host(url))
+                data = image_storage.download_image(url, proxies=proxies)
         else:
-            data = image_storage.download_image(url)
+            _pace_host(_image_host(url))
+            data = image_storage.download_image(url, proxies=proxies)
         content_type = media.is_image_bytes(data)
         if content_type is None:
             raise image_storage.NotAnImageError(
