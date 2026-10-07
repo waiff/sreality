@@ -994,7 +994,7 @@ class Settings:
     # price path (Dolní Věstonice: 5,844 Kč/m² x 834 m² = 4,873,896).
     d43_price_per_m2_path: bool = False
     d43_price_per_m2_tol: float = 0.001
-    # E286: across the sanctioned dům<->komerční cross the subtype codes differ BECAUSE the
+    # E286: across a cross-type pair rule #15 sanctions the subtype codes differ BECAUSE the
     # categories do; they are not counted as attribute contradictions.
     attr_cross_type_subtype_skip: bool = False
     # E287: a plot COLUMN that its own body contradicts (`Celková plocha pozemku činí 3 205 m²`

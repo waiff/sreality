@@ -4,7 +4,9 @@ Hermetic — overrides get_db_conn so no real DB is hit, and patches the
 persistence helpers in api.manual_estimates with in-memory dicts.
 Pydantic validation tests run through the route layer; the underlying
 CHECK constraints are covered by an integration test against a real
-Postgres (out of scope here).
+Postgres (out of scope here). The writes require an admin JWT (shared
+reference data, migration 290); the gate itself is exercised un-overridden
+in the auth tests at the bottom.
 """
 
 from __future__ import annotations
@@ -15,16 +17,31 @@ import pytest
 
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
+jwt = pytest.importorskip("jwt")  # PyJWT (api extra)
 
 from api import dependencies as deps
 from api import main as api_main
 from api import manual_estimates as me
+from api import schemas as s
+from api import tenant_pool
+
+_JWT_SECRET = "test-hs256-secret"
+_ADMIN_CLAIMS = {"sub": "op-uuid", "email": "op@example.com",
+                 "app_metadata": {"is_admin": True}}
+
+
+def _jwt(is_admin: bool) -> str:
+    return jwt.encode(
+        {"aud": "authenticated", "sub": "u", "app_metadata": {"is_admin": is_admin}},
+        _JWT_SECRET, algorithm="HS256",
+    )
 
 
 @pytest.fixture()
 def client():
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.require_token] = lambda: None
+    api_main.app.dependency_overrides[deps.require_admin] = lambda: _ADMIN_CLAIMS
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -45,7 +62,7 @@ def store(monkeypatch):
         items.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
         return {"data": items}
 
-    def fake_create(conn, sid, body):
+    def fake_create(conn, sid, body, claims):
         rid = state["next_id"]
         state["next_id"] += 1
         state["by_listing_ts"] += 1
@@ -63,7 +80,7 @@ def store(monkeypatch):
         state["rows"][rid] = row
         return _to_row(row)
 
-    def fake_update(conn, rid, body):
+    def fake_update(conn, rid, body, claims):
         if rid not in state["rows"]:
             from fastapi import HTTPException
             raise HTTPException(404, "manual estimate not found")
@@ -265,3 +282,121 @@ def test_tools_endpoint_delegates_to_toolkit(client, store, monkeypatch) -> None
     assert body["data"] == {"estimates": []}
     assert body["metadata"]["tool"] == "get_manual_rental_estimates"
     assert captured["sid"] == 12345
+
+
+# --- admin gate --------------------------------------------------------------
+
+
+@pytest.fixture()
+def gated_client(client, store, monkeypatch):
+    """The real require_admin gate (no override), HS256 verification, a set API_TOKEN."""
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    monkeypatch.setenv("API_TOKEN", "secret-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
+    store["rows"][1] = {
+        "id": 1, "sreality_id": 12345, "rent_czk": 30000, "author": "op",
+        "source_kind": "broker", "notes": None,
+        "created_at": "2026-05-13T12:00:00+00:00",
+        "updated_at": "2026-05-13T12:00:00+00:00",
+    }
+    store["next_id"] = 2
+    return client
+
+
+_CREATE = {"rent_czk": 30000, "author": "petr", "source_kind": "broker"}
+
+
+def _writes(c, headers):
+    return [
+        c.post("/listings/12345/manual_estimates", json=_CREATE, headers=headers),
+        c.patch("/manual_estimates/1", json={"rent_czk": 31000}, headers=headers),
+        c.delete("/manual_estimates/1", headers=headers),
+    ]
+
+
+def test_writes_refuse_static_token(gated_client, store) -> None:
+    for r in _writes(gated_client, {"Authorization": "Bearer secret-xyz"}):
+        assert r.status_code == 401, r.text
+    assert set(store["rows"]) == {1}
+
+
+def test_writes_refuse_no_credential(gated_client, store) -> None:
+    for r in _writes(gated_client, {}):
+        assert r.status_code == 401, r.text
+
+
+def test_writes_refuse_non_admin_jwt(gated_client, store) -> None:
+    for r in _writes(gated_client, {"Authorization": f"Bearer {_jwt(False)}"}):
+        assert r.status_code == 403, r.text
+    assert store["rows"][1]["rent_czk"] == 30000
+
+
+def test_writes_accept_admin_jwt(gated_client, store) -> None:
+    rs = _writes(gated_client, {"Authorization": f"Bearer {_jwt(True)}"})
+    assert [r.status_code for r in rs] == [200, 200, 200], [r.text for r in rs]
+    assert 1 not in store["rows"] and 2 in store["rows"]
+
+
+def test_read_stays_on_static_token(gated_client, store) -> None:
+    api_main.app.dependency_overrides.pop(deps.require_token, None)
+    r = gated_client.get(
+        "/listings/12345/manual_estimates",
+        headers={"Authorization": "Bearer secret-xyz"},
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["data"]) == 1
+
+
+# --- identity stamping --------------------------------------------------------
+
+
+class _Cur:
+    def __init__(self, log: list) -> None:
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a) -> None:
+        return None
+
+    def execute(self, sql, params=None) -> None:
+        self.log.append((sql, params))
+
+    def fetchone(self):
+        return (1, 12345, 7, 30000, "petr", "broker", None,
+                "2026-05-13T12:00:00+00:00", "2026-05-13T12:00:00+00:00")
+
+
+class _Conn:
+    def __init__(self) -> None:
+        self.log: list = []
+
+    def cursor(self):
+        return _Cur(self.log)
+
+    def transaction(self):
+        return _Cur(self.log)
+
+
+def test_create_stamps_admin_identity_and_account(monkeypatch) -> None:
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: "acct-1")
+    conn = _Conn()
+    me.create_manual_estimate(
+        conn, 12345, s.CreateManualEstimateIn(**_CREATE), _ADMIN_CLAIMS,
+    )
+    sql, params = conn.log[-1]
+    assert "updated_by, account_id" in sql
+    assert params[-2:] == ("op@example.com", "acct-1")
+
+
+def test_update_stamps_admin_identity_not_body(monkeypatch) -> None:
+    conn = _Conn()
+    body = s.UpdateManualEstimateIn.model_validate(
+        {"rent_czk": 31000, "updated_by": "someone-else"},
+    )
+    me.update_manual_estimate(conn, 1, body, {"sub": "op-uuid"})
+    _sql, params = conn.log[-1]
+    assert "someone-else" not in params
+    assert params[-2:] == ["op-uuid", 1]

@@ -402,7 +402,8 @@ MEMBER_TEXT_COLUMNS: tuple[str, ...] = ("listing_id", "title", "description")
 # THE DIALOG ONLY, never the queue. `GROUP_MEMBERS_SQL` runs for every member of every card on
 # a 20-group page; `listings.description` is a TOASTed column and `raw_json` a whole payload, so
 # selecting either there would detoast hundreds of adverts to render a photo strip nobody has
-# opened yet. This statement runs once, over the members of the ONE cluster being opened.
+# opened yet. This statement runs once, over the members of the ONE cluster being opened -- or
+# over the ads of the properties one category-review link names (E937), whose question is the text.
 #
 # The title is not a column: each portal parser files it in `raw_json` under its own key
 # (`title` for the six HTML portals, `advert_name` for sreality's v1 API; `name` is the generic
@@ -1556,25 +1557,6 @@ WHERE listing_lo = %(listing_lo)s::bigint
   AND source = 'operator'
 """
 
-# Every must-not-link row among these adverts, whatever its source: what the operator's split
-# (E919) finds before it writes, so it and its undo can leave each veto they did not state as
-# they found it.
-MUST_NOT_LINK_PAIRS_SQL = """
-SELECT listing_lo, listing_hi, source, reason
-FROM autodedup.must_not_link
-WHERE listing_lo = ANY(%(ids)s::bigint[]) AND listing_hi = ANY(%(ids)s::bigint[])
-"""
-
-# One row put back exactly as that read found it, source included: a `guard`/`model`/`llm` veto
-# an interim operator ruling rewrote (`MUST_NOT_LINK_UPSERT_SQL`) or retracted is the machine's
-# again. Only `toolkit.property_identity.restore_must_not_link` runs it.
-MUST_NOT_LINK_RESTORE_SQL = """
-INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason)
-VALUES (%(listing_lo)s::bigint, %(listing_hi)s::bigint, %(source)s::text, %(reason)s::text)
-ON CONFLICT (listing_lo, listing_hi)
-DO UPDATE SET source = excluded.source, reason = excluded.reason
-"""
-
 # Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`
 # answers the same question with three lateral joins and a gallery, which a write does not need.
 # Just the ids of ONE generation's group — the membership a whole-cluster ruling fans out over
@@ -1767,6 +1749,33 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
   JOIN public.listings l ON l.property_id = pr.id
   LEFT JOIN grouped g ON g.listing_id = l.id
  ORDER BY l.property_id, l.id
+"""
+
+# ------------------------------------------------------------ the category review (E937)
+
+CATEGORY_SPLIT_ADVERT_COLUMNS: tuple[str, ...] = (
+    "property_id",
+    "canonical_listing_id",
+    "listing_id",
+    "source",
+    "is_active",
+    "category_type",
+    "category_main",
+    "price_czk",
+    "area_m2",
+    "disposition",
+)
+
+# Every ad of the named LIVE properties with what `autodedup/category_splits.py` reads: the deal
+# type and category rule 15's gate compares, and three of the four facts a contentless record
+# lacks (the fourth, the description, is read with the title through `MEMBER_TEXT_SQL`).
+CATEGORY_SPLIT_ADVERTS_SQL = """
+SELECT pr.id, pr.repr_listing_ref_id, l.id, l.source, l.is_active,
+       l.category_type, l.category_main, l.price_czk, l.area_m2, l.disposition
+  FROM public.properties pr
+  JOIN public.listings l ON l.property_id = pr.id
+ WHERE pr.id = any(%(ids)s::bigint[]) AND pr.status = 'active'
+ ORDER BY pr.id, l.id
 """
 
 # ------------------------------------------------------------------- the rulings page (E920)

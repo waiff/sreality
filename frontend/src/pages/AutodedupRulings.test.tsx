@@ -1,11 +1,12 @@
 /* The rulings page (E920): every ruling beside the engine's view, filters in the
  * URL, and corrections that are NEW rulings — Flip / Withdraw post
  * `POST /autodedup/verdict` with `supersedes` (a 409 says someone ruled since),
- * never a delete; the split / merge a disagreeing property needs is the existing
- * route (the split: the operator's split statement, E919), behind a second click. */
+ * never a delete; the split a disagreeing property needs is a link to the
+ * property page's split dialog (MS18), the merge the existing route behind a
+ * second click that says how many "Různé" rulings it takes back (MS12). */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -14,13 +15,14 @@ import AutodedupRulings, {
   corrections,
   sanitizeRulingFilters,
 } from './AutodedupRulings';
+import ToastViewport from '@/components/ToastViewport';
 import * as api from '@/lib/api';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   getAutodedupRulings: vi.fn(),
   postAutodedupVerdict: vi.fn(),
-  fetchPropertyOrigins: vi.fn(),
+  getMergePreview: vi.fn(),
   splitProperty: vi.fn(),
   mergePropertySet: vi.fn(),
 }));
@@ -41,39 +43,6 @@ const history = (id: number, verdict: api.AutodedupVerdictValue): api.AutodedupV
   note: null,
   decided_by: 'operator@example.com',
   decided_at: AT,
-});
-
-const origins = (ids: number[]) => ({
-  property_id: 100,
-  adverts: ids.map((listing_id) => ({
-    listing_id,
-    origin_property_id: null,
-    merge_source: null,
-    merged_at: null,
-    detach_outcome: 'split_native',
-    splittable: true,
-  })),
-});
-
-const splitDone = (listing: number, to: number): api.SplitResult => ({
-  call_id: 'c',
-  property_id: 100,
-  record_kept_by: 'A',
-  units: [
-    { unit: 'A', role: 'kept', listing_ids: [11, 13], property_id: 100, moved: [], merge_group_id: null },
-    {
-      unit: 'B',
-      role: 'separated',
-      listing_ids: [listing],
-      property_id: to,
-      moved: [{ listing_id: listing, outcome: 'detached', from: 100, to }],
-      merge_group_id: null,
-    },
-  ],
-  moved: 1,
-  rulings: { written: 2, same: 0, different: 2, must_not_link_written: 2, must_not_link_retracted: 0 },
-  reversed_pairs: [],
-  undo: null,
 });
 
 function pairRow(over: Partial<api.RulingPairRow> = {}): api.RulingPairRow {
@@ -346,7 +315,7 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
     );
   });
 
-  it('offers the split a negative on one property needs, naming how many adverts stay', async () => {
+  it('links the split a negative on one property needs to its dialog, the two adverts apart', async () => {
     vi.mocked(api.getAutodedupRulings).mockResolvedValue(
       page([
         pairRow({
@@ -358,83 +327,90 @@ describe('<AutodedupRulings> corrections are new rulings', () => {
         }),
       ]) as never,
     );
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12, 13]));
-    vi.mocked(api.splitProperty).mockResolvedValue(splitDone(12, 300));
     setup();
     const card = await screen.findByTestId('ruling-11-12');
-    fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #12' }));
-    expect(within(card).getByText(/Nemovitost má 3 inzeráty/)).toBeInTheDocument();
-    fireEvent.change(within(card).getByLabelText('Důvod rozdělení (nepovinné)'), {
-      target: { value: 'jiné patro' },
-    });
-    fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
-    // one advert leaving: every advert shown, the one leaving, the rest not ruled
-    await waitFor(() =>
-      expect(api.splitProperty).toHaveBeenCalledWith(100, {
-        adverts: [11, 12, 13],
-        separate: [[12]],
-        keep_together: false,
-        reason: 'jiné patro',
-      }),
-    );
-    expect(api.fetchPropertyOrigins).toHaveBeenCalledWith(100);
-    expect(await within(card).findByText(/oddělen → nemovitost #300/)).toBeInTheDocument();
-    expect(api.postAutodedupVerdict).not.toHaveBeenCalled();
-  });
-
-  it('never splits a property that changed since the count it named', async () => {
-    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
-      page([
-        pairRow({ verdict: 'different', together_now: true, property_hi: 100, adverts_on_property: 3 }),
-      ]) as never,
-    );
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12, 13, 14]));
-    setup();
-    const card = await screen.findByTestId('ruling-11-12');
-    fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #11' }));
-    fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
-    expect(await within(card).findByRole('alert')).toHaveTextContent(
-      'Nemovitost se mezitím změnila',
-    );
+    expect(
+      within(card).getByRole('link', { name: 'Rozdělit na stránce nemovitosti #100' }),
+    ).toHaveAttribute('href', '/property/100?letters=11%3AA%2C12%3AB');
+    expect(within(card).queryByRole('button', { name: /Rozdělit/ })).toBeNull();
     expect(api.splitProperty).not.toHaveBeenCalled();
   });
 
-  it('says why an advert cannot leave when the split refuses it', async () => {
-    vi.mocked(api.getAutodedupRulings).mockResolvedValue(
-      page([pairRow({ verdict: 'different', together_now: true, property_hi: 100 })]) as never,
-    );
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([11, 12]));
-    vi.mocked(api.splitProperty).mockRejectedValue(
-      new api.ApiError('an advert cannot leave the property', 409, {
-        detail: {
-          code: 'cannot_move',
-          message: 'an advert cannot leave the property',
-          ids: [{ listing_id: 12, outcome: 'on_origin' }],
-        },
-      }),
-    );
-    setup();
-    const card = await screen.findByTestId('ruling-11-12');
-    fireEvent.click(within(card).getByRole('button', { name: 'Rozdělit: oddělit #12' }));
-    fireEvent.click(within(card).getByRole('button', { name: 'Ano, rozdělit' }));
-    expect(await within(card).findByRole('alert')).toHaveTextContent(
-      'Nelze oddělit: inzerát už je v nemovitosti, ze které přišel.',
-    );
-  });
-
-  it('offers the merge a same on two properties needs', async () => {
+  it('offers the merge a same on two properties needs, behind its confirm, and toasts the receipt', async () => {
     vi.mocked(api.mergePropertySet).mockResolvedValue({
       merge_group_id: 'g',
       survivor_id: 100,
       retired_ids: [200],
       listings_moved: 1,
       pairs_ruled_same: 1,
+      rulings_taken_back: 1,
+      carried: { notes: 1, pipeline: null, collections: [], tags: [] },
+      hidden_for_you: false,
+    });
+    vi.mocked(api.getMergePreview).mockResolvedValue({ property_ids: [100, 200], rulings_taken_back: 1 });
+    setup();
+    render(<ToastViewport />);
+    const card = await screen.findByTestId('ruling-11-12');
+    fireEvent.click(within(card).getByRole('button', { name: 'Sloučit #100 a #200' }));
+    expect(api.mergePropertySet).not.toHaveBeenCalled();
+    // the confirm says how many "Různé" rulings the merge takes back (MS12)
+    const count = await within(card).findByText('Vezme zpět 1 rozhodnutí „Různé“.');
+    expect(count.closest('p')).toHaveTextContent(
+      'Sloučit nemovitosti #100 a #200 do starší z nich? Vezme zpět 1 rozhodnutí „Různé“.',
+    );
+    expect(api.getMergePreview).toHaveBeenCalledWith([100, 200]);
+    fireEvent.click(within(card).getByRole('button', { name: 'Ano, sloučit' }));
+    await waitFor(() => expect(api.mergePropertySet).toHaveBeenCalledWith([100, 200]));
+    const receipt =
+      'Sloučeno do nemovitosti #100. Přesunuto: 1 poznámka. Zrušená rozhodnutí „Různé“: 1.';
+    expect(await screen.findByText(receipt)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Otevřít #100' }));
+    expect(screen.queryByText(receipt)).not.toBeInTheDocument();
+  });
+
+  it('holds the merge until the count is read: Enter on the focused button waits', async () => {
+    let answer: (p: api.MergePreview) => void = () => {};
+    vi.mocked(api.getMergePreview).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    vi.mocked(api.mergePropertySet).mockResolvedValue({
+      merge_group_id: 'g', survivor_id: 100, retired_ids: [200], listings_moved: 1,
+      pairs_ruled_same: 1, rulings_taken_back: 2, carried: null, hidden_for_you: null,
     });
     setup();
     const card = await screen.findByTestId('ruling-11-12');
     fireEvent.click(within(card).getByRole('button', { name: 'Sloučit #100 a #200' }));
-    fireEvent.click(within(card).getByRole('button', { name: 'Ano, sloučit' }));
+    expect(
+      await within(card).findByText('Zjišťuji, kolik rozhodnutí „Různé“ sloučení vezme zpět…'),
+    ).toBeInTheDocument();
+    const yes = within(card).getByRole('button', { name: 'Ano, sloučit' });
+    expect(yes).toHaveFocus();
+    expect(yes).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(yes);
+    expect(api.mergePropertySet).not.toHaveBeenCalled();
+    await act(async () => answer({ property_ids: [100, 200], rulings_taken_back: 2 }));
+    expect(await within(card).findByText('Vezme zpět 2 rozhodnutí „Různé“.')).toBeInTheDocument();
+    expect(yes).toHaveAttribute('aria-disabled', 'false');
+    fireEvent.click(yes);
     await waitFor(() => expect(api.mergePropertySet).toHaveBeenCalledWith([100, 200]));
+  });
+
+  it('says when the count before a merge cannot be read, and offers a retry', async () => {
+    vi.mocked(api.getMergePreview)
+      .mockRejectedValueOnce(new Error('HTTP 500'))
+      .mockResolvedValue({ property_ids: [100, 200], rulings_taken_back: 0 });
+    setup();
+    const card = await screen.findByTestId('ruling-11-12');
+    fireEvent.click(within(card).getByRole('button', { name: 'Sloučit #100 a #200' }));
+    fireEvent.click(
+      await within(card).findByRole('button', { name: 'Zkusit znovu' }),
+    );
+    await waitFor(() =>
+      expect(
+        within(card).queryByText(/Kolik rozhodnutí „Různé“ sloučení vezme zpět/),
+      ).toBeNull(),
+    );
+    expect(
+      within(card).getByText('Sloučit nemovitosti #100 a #200 do starší z nich?'),
+    ).toBeInTheDocument();
   });
 });
 

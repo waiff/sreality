@@ -16,7 +16,7 @@ it (`api/`). They do not apply to the scraper.
 
 1. **Tools return facts, not opinions.** No "recommended price", no "this looks like a good
    deal." Tools return data + provenance. Reasoning happens at the agent layer.
-2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `asset_identity` / `property_identity` / `location_quality` still omit `data_freshness`):
+2. **Standard envelope on every tool's return value** (hand-built per module, no shared constructor; `property_identity` / `location_quality` still omit `data_freshness`):
    ```python
    {
      "data": ...,
@@ -95,8 +95,8 @@ it (`api/`). They do not apply to the scraper.
    override. Every mutating `/broker-review/*` route binds `require_admin`'s claims and threads
    `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by` /
    `lifted_by`.
-   **The AUTODEDUP ruling store is written** (mig 528, same `decided_by` idiom) by `POST /autodedup/verdict` (+ `/split`, `/candidate-split`) and, via `toolkit.property_identity.record_rulings`, by `POST /properties/merge` (`merge_property_set`: the oldest record survives, every property-anchored operator-state row follows through `PROPERTY_CARRIERS` (a collapsed dispatch's `channel_sends` move to its kept twin first), two linked units refuse the engine, `CategoryClash` refuses rule 15, ONE `properties_changed` (rollup, Browse row, broker queue) ends it; "same" on the ticked cards' canonical adverts) and `POST /properties/{id}/split` (ONE `detach_listings` over its movers + `merge_property_set` per joined unit; "different" movers vs stayers, never between two movers). An engine merge / `unapply` (ONE `detach_listings` per group) rules nothing. Each appends
-   on change (migration 574); a negative PAIR verdict upserts `autodedup.must_not_link` and reversing it DELETEs that row; cluster verdicts add none; only `/autodedup/*` answers an un-migrated store with a 503. Engine SPLITS are propose-only (decision 9): `GET /autodedup/proposed-splits` (`generation`, keyset `after`/`limit`) and `/proposed-splits/{property_id}` read `autodedup/proposed_splits.py` → `{property_id, canonical_listing_id, proposed, groups: [{cluster_key, adverts: [{listing_id, source, is_active, origin_property_id}]}], unseen, splits: [{listing_lo, listing_hi, reason_source, reason, ruling}], ruled}`; the batch split is the split statement (`POST /properties/{id}/split`), no write route of its own.
+   **The AUTODEDUP ruling store is written** (mig 528, same `decided_by` idiom) by `POST /autodedup/verdict` (+ `/split`, `/candidate-split`) and, via `toolkit.property_identity.record_rulings`, by `POST /properties/merge` (`merge_property_set`: the oldest record survives, every property-anchored operator-state row follows through `PROPERTY_CARRIERS` (a collapsed dispatch's `channel_sends` move to its kept twin first) and each curation row moved or folded is written to the carry record (`property_merge_carries`), `CategoryClash` refuses rule 15 over the set's ads (a Czech 409), ONE `properties_changed` (rollup, Browse row, broker queue) ends it; "same" on the ticked cards' canonical adverts and every negative pair or set across its members (MS12; `GET /properties/merge` counts it before the click); the route answers the acting account's moved items and `hidden_for_you`) and `POST /properties/{id}/split` (MS18, by letters, `expect` = its `GET` preview's `plan`, a preview the click's `choices` can be read into: ONE `detach_listings` (births in `new`, the acting account's routed items in `curation`) + `merge_property_set` per joined letter, which rules as the merge it is; the split's own rulings "different", across letters only). An engine merge / `unapply` (ONE `detach_listings` per group, routing curation by its carry rows) rules nothing. Each appends
+   on change (migration 574); a negative PAIR verdict upserts `autodedup.must_not_link` and reversing it DELETEs that row; cluster verdicts add none; only `/autodedup/*` answers an un-migrated store with a 503. Engine SPLITS are propose-only (decision 9): `GET /autodedup/proposed-splits` (`generation`, keyset `after`/`limit`) and `/proposed-splits/{property_id}` read `autodedup/proposed_splits.py` → `{property_id, canonical_listing_id, proposed, groups: [{cluster_key, adverts: [{listing_id, source, is_active, origin_property_id}]}], unseen, splits: [{listing_lo, listing_hi, reason_source, reason, ruling}], ruled}`; each card links to the property page's split dialog (`?letters=`), no write route of its own.
 6. **Spatial queries measure in metres, so they cast.** A listing's point is
    `listing_location.geom`, a `geometry(Point,4326)`: always
    `ST_DWithin(ll.geom::geography, target, radius_m)`. Never compute distance in Python.
@@ -111,15 +111,15 @@ it (`api/`). They do not apply to the scraper.
    on the theory that the private Railway URL was the perimeter, but that URL ships
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
-   of the token: `/admin/*`, `/properties/merge*`, `/properties/assets/*`, `/labeling/*`,
+   of the token: `/admin/*`, `/properties/merge*`, `/labeling/*`,
    `/outreach/*`, `/broker-review/*`, `/autodedup/*`, `/new-dedup/*`,
-   `/skill-refinements/*`, `/location/*`, and dataset-write/dispatch routes on
-   price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
+   `/skill-refinements/*`, `/location/*`, dataset-write/dispatch routes on price-stats, and the manual-estimate writes (shared
+   reference data, mig 290; stamp the admin into `updated_by`, + `account_id` on insert) use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
    `/pipeline/*`, `/collections`, `/tags`, `/estimations` create/detail/scenario/trace payload/feedback (its refiner admin-only), notes,
    `/listings/lookup` (**RLS-ONLY**: it takes no account argument and its SQL carries no account predicate — `current_account_ids()` must stay the ONE membership definition, the same one the SPA reads; a second, explicitly-bound one is what broke the extension 2026-07-23→09-11), and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
    identity without the admin claim (`GET /estimations{,/latest-by-listing}` take `account_scope`);
    most other routes are still `require_token`-only (a shared secret, no identity — buildings,
-   manual estimates, filter-presets, estimation preview). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
+   the manual-estimate read, filter-presets, estimation preview). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
    broker E2E review): the leaderboard returned up to 2000 brokers' unmasked email +
    phone behind the bundle-extractable token. Every `/brokers/*` envelope now runs
    through `toolkit.brokers.apply_pii_policy`, which swaps any contact column for
@@ -159,8 +159,8 @@ it (`api/`). They do not apply to the scraper.
    behind these routes needs no route change. `GET /brokers?ids=` itself stays, for the agent
    and other non-SPA consumers; and
    the client treats 404 as an answer only when the body carries this module's own
-   `broker not found` / `listing has no attributed broker` detail — any other 404 (edge,
-   stale base URL, renamed route) must surface as an error, not as "no broker".
+   `broker not found` detail — any other 404 (edge, stale base URL, renamed route) must
+   surface as an error, not as "no broker". One per-ad read: `POST /brokers/by-listings`.
    **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
    `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
    `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed
@@ -185,7 +185,8 @@ it (`api/`). They do not apply to the scraper.
    pruner.
 10. **Agent skills live in the `skills` table; the on-disk `skills/<name>/SKILL.md` file is
     the canonical seed.** Each skill is a bundle of (system prompt + allowed tool whitelist +
-    per-provider preferred model + loop limits). Migration 029's seed `INSERT` is the importer
+    per-provider preferred model + loop limits; `preferred_model` names any non-empty subset of the
+    registered providers, a run on an unnamed one fails). Migration 029's seed `INSERT` is the importer
     of the markdown file's content; at runtime the DB row is the source of truth. Operators
     edit via `/settings` (UI) or `PUT /admin/skills/{name}` (API). Every update writes a
     `skills_history` row via trigger — same pattern as `app_settings_history` (migration 020).

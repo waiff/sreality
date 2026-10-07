@@ -1,9 +1,8 @@
 /* Operator-recorded manual rental estimates for one listing.
  *
- * Reads + writes go through the bearer-gated FastAPI service; the same
- * data is also exposed read-only via manual_rental_estimates_public
- * (migration 046) for the SPA's anon-key path, but for consistency with
- * the rest of the curation surface we hit the API for both directions.
+ * Shared reference data (migration 290): every signed-in user sees the
+ * estimates; only an admin session gets the add / edit / delete controls,
+ * mirroring the API's require_admin gate on the writes.
  */
 
 import { useState } from 'react';
@@ -19,6 +18,7 @@ import {
   listManualEstimates,
   updateManualEstimate,
 } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { curationKeys } from '@/lib/queries';
 import { fmtAbsolute, fmtCzk, fmtRelative } from '@/lib/format';
 import {
@@ -38,6 +38,7 @@ export default function ManualEstimatesBlock({
   sreality_id: number;
 }) {
   const qc = useQueryClient();
+  const { isAdmin } = useAuth();
   const [showForm, setShowForm] = useState(false);
 
   const listQ = useQuery({
@@ -62,16 +63,18 @@ export default function ManualEstimatesBlock({
             ({estimates.length})
           </span>
         </SectionLabel>
-        <button
-          type="button"
-          onClick={() => setShowForm((v) => !v)}
-          className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
-        >
-          {showForm ? 'Cancel' : '+ Add estimate'}
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowForm((v) => !v)}
+            className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+          >
+            {showForm ? 'Cancel' : '+ Add estimate'}
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {isAdmin && showForm && (
         <div className="mt-3">
           <EstimateForm
             sreality_id={sreality_id}
@@ -102,6 +105,7 @@ export default function ManualEstimatesBlock({
               <EstimateRow
                 sreality_id={sreality_id}
                 estimate={e}
+                canEdit={isAdmin}
                 onChange={invalidate}
               />
             </li>
@@ -115,10 +119,12 @@ export default function ManualEstimatesBlock({
 function EstimateRow({
   sreality_id,
   estimate,
+  canEdit,
   onChange,
 }: {
   sreality_id: number;
   estimate: ManualRentalEstimate;
+  canEdit: boolean;
   onChange: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -128,7 +134,7 @@ function EstimateRow({
     onSuccess: onChange,
   });
 
-  if (editing) {
+  if (canEdit && editing) {
     return (
       <EstimateForm
         sreality_id={sreality_id}
@@ -154,30 +160,32 @@ function EstimateRow({
           </span>
           <SourceChip kind={estimate.source_kind} />
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (
-                typeof window !== 'undefined' &&
-                window.confirm('Delete this manual estimate?')
-              ) {
-                del.mutate();
-              }
-            }}
-            disabled={del.isPending}
-            className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-brick)] transition-colors disabled:opacity-50"
-          >
-            {del.isPending ? 'Deleting…' : 'Delete'}
-          </button>
-        </div>
+        {canEdit && (
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (
+                  typeof window !== 'undefined' &&
+                  window.confirm('Delete this manual estimate?')
+                ) {
+                  del.mutate();
+                }
+              }}
+              disabled={del.isPending}
+              className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-brick)] transition-colors disabled:opacity-50"
+            >
+              {del.isPending ? 'Deleting…' : 'Delete'}
+            </button>
+          </div>
+        )}
       </div>
       <p className="mt-0.5 text-[0.78rem] text-[var(--color-ink-3)]">
         <span className="text-[var(--color-ink-2)]">{estimate.author}</span>

@@ -35,7 +35,9 @@ from autodedup.blocking import (
 from autodedup.d43 import ClusterRelation
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
 from autodedup.fingerprint import Fingerprint, build_fingerprint
-from autodedup.incremental import Keyer, guard_row, retrieve
+from autodedup.incremental import (Keyer, Limits, PairRow, PassResult, _recluster, _Working,
+                                  guard_row, retrieve)
+from autodedup.incremental_store import CohortFacts, MemoryStore
 from autodedup.indistinguishable import CLUSTER, GATE, PROMOTE, distinguishing_facts
 from autodedup.settings import Settings
 from tests.autodedup.test_incremental import (
@@ -378,6 +380,34 @@ def test_E303_needs_the_certificate_the_house_number_two_portals_and_five_percen
         "price": 4_200_000.0, "price_history": []}}).ok(*PRAZSKA)
 
 
+def _prazska_groups(cfg: Settings, certificate: str | None = "K-C") -> list[list[int]]:
+    """The lane's own re-cluster over the two Pražská adverts and their one stored edge."""
+    listings = {i: trial(i) for i in PRAZSKA}
+    images = {i: [Image(listing_id=i, image_id=i * 10, seq=0, phash=7_000, pop=1)]
+              for i in listings}
+    facts = CohortFacts(Dataset(meta=Meta(), listings=listings, images_by_listing=images))
+    store = MemoryStore()
+    store.upsert_pairs([PairRow(
+        lo=PRAZSKA[0], hi=PRAZSKA[1], probes=["attr_area"], from_lo=True, from_hi=True,
+        zone="merge", score=1.0, families=["ATTR", "IMG", "LOC", "TXT"],
+        certificate=certificate, veto=None,
+        reason=f"certificate:{certificate}" if certificate else "model", evidence={},
+        context={}, fp_lo="a", fp_hi="b")])
+    _recluster(store, facts, cfg, _Working(facts, cfg), set(PRAZSKA), Limits(),
+               PassResult(generation="rt", calibration_digest="x"))
+    return sorted(map(sorted, store.clusters.values()))
+
+
+def test_E303_reaches_the_lanes_recluster_through_the_stored_certificate() -> None:
+    """The excuse reads the pair's certificate and `_recluster` handed the relation none, so
+    the dial switched on still refused Pražská 930/47 in every lane (rt, 10-07)."""
+    w31 = Settings.from_json(SETTINGS / "w31.json")
+    on = Settings.from_dict({**w31.to_dict(), "d43_cluster_price_kc_house_number": True})
+    assert _prazska_groups(w31) == [], "the control: w31's price limb holds the two apart"
+    assert _prazska_groups(on) == [sorted(PRAZSKA)]
+    assert _prazska_groups(on, certificate=None) == [], "a model edge earns no K-C excuse"
+
+
 def test_E303_is_pair_grain_and_off_in_w30() -> None:
     assert not S15.d43_cluster_price_kc_house_number
     # realitymix 18223015 files no house number: the excuse never reaches its pair
@@ -685,7 +715,11 @@ MNL = ART / "data/autodedup-labels-35609425873/must_not_link.jsonl"
 def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
     """The stored S14 run was the cohort pass; `harness run` is the lane's pass (SW1). E929
     took the room tag out of every refusal, so a stored row whose tag sat at or above the
-    0.90 floor (or was unknown) decides identically, and every row that moved had it below."""
+    0.90 floor (or was unknown) decides identically, and every row that moved had it below.
+    E935 lets land meet a house or a commercial ad, and E938 a flat a commercial ad, so the
+    only rows S14 never stored are such pairs, which its rule vetoed before scoring; the
+    fan-out cap (E17) gives them slots, so a row S14 stored and this run did not is a reject
+    they displaced (four flat pairs on this pack), never a merge or a band."""
     from autodedup.dataset import load
     from autodedup.harness import load_must_not_link, named_model, read_pairs, run
 
@@ -698,7 +732,10 @@ def test_w29_replays_every_row_the_room_tag_cannot_move(tmp_path: Path) -> None:
                                                  r["veto"], round(r["score"], 9)) for r in rows}
     stored = read_pairs(S14_TRIAL_RUN)
     now, then = decided(read_pairs(tmp_path)), decided(stored)
-    assert now.keys() == then.keys()
+    cross = [{"pozemek", "dum"}, {"pozemek", "komercni"}, {"byt", "komercni"}]
+    assert all(then[key][0] == "reject" for key in then.keys() - now.keys())
+    assert all({ds.listings[lo].category_main, ds.listings[hi].category_main} in cross
+               for lo, hi in now.keys() - then.keys())
     tag = {(r["lo"], r["hi"]): r["feats"].get("tag_room_clip_min2") for r in stored}
     below = {key for key, slot in tag.items() if slot and slot[1] and slot[0] < 0.90}
-    assert {key for key in now if now[key] != then[key]} <= below
+    assert {key for key in then.keys() & now.keys() if now[key] != then[key]} <= below

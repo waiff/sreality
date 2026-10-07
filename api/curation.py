@@ -307,12 +307,14 @@ _NOTE_PROJECTION = "id, property_id, body, origin_listing_id, created_at, update
 def list_notes(
     conn: "psycopg.Connection", property_id: int,
 ) -> dict[str, Any]:
+    """The property's notes, newest first; a merged-away id reads its survivor's, as writes do."""
     sql = (
         f"SELECT {_NOTE_PROJECTION} FROM property_notes "
         "WHERE property_id = %s ORDER BY created_at DESC, id DESC"
     )
+    pid = resolve_active_property_id(conn, property_id) or property_id
     with conn.cursor() as cur:
-        cur.execute(sql, (property_id,))
+        cur.execute(sql, (pid,))
         rows = cur.fetchall()
     return {"data": [_to_note(r) for r in rows]}
 

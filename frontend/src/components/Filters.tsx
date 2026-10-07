@@ -22,6 +22,7 @@ import {
   fetchNoPriceCount,
 } from '@/lib/queries';
 import { listCollections } from '@/lib/api';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { browseKeys } from '@/lib/browseKeys';
 import { FilterForm } from '@/components/FilterForm';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
@@ -186,8 +187,9 @@ function IncludeNoPriceToggle({
 }
 
 /* Collection scope (rule #18). The registry's `int_list` fallback is a box you
- * type ids into, so the sidebar picks from the ONE collections list instead. */
-function CollectionsPicker({
+ * type ids into, so the sidebar picks from the ONE collections list instead. A
+ * failed read is a retry, never "No collections yet" (MS16). */
+export function CollectionsPicker({
   value,
   onChange,
 }: {
@@ -205,6 +207,10 @@ function CollectionsPicker({
     return (
       <p className="text-[0.75rem] text-[var(--color-ink-4)]">Loading…</p>
     );
+  }
+
+  if (readFailed(q)) {
+    return <ReadFailedMark what="Kolekce" variant="header" onRetry={() => void q.refetch()} />;
   }
 
   if (collections.length === 0) {

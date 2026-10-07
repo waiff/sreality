@@ -142,6 +142,8 @@ def test_cache_miss_fetches_images_and_calls_vision(monkeypatch):
     call = llm.calls[0]
     assert call["called_for"] == "compare_listing_images"
     assert call["tools"][0]["name"] == "record_image_comparison"
+    # Called outside an estimation run: the llm_calls row is unattributed.
+    assert call["estimation_run_id"] is None
 
     # Message content: text + 2 images for A, text + 1 image for B, then prompt.
     content = call["messages"][0]["content"]
@@ -156,6 +158,31 @@ def test_cache_miss_fetches_images_and_calls_vision(monkeypatch):
     assert res["data"]["cache_hit"] is False
     assert res["data"]["n_images_a"] == 2
     assert res["data"]["n_images_b"] == 1
+
+
+def test_cache_miss_bills_the_vision_call_to_the_estimation_run(monkeypatch):
+    _patch_r2_configured(monkeypatch, True)
+    monkeypatch.setattr(
+        ic.image_storage.R2Client, "from_env",
+        classmethod(lambda cls: _FakeR2()),
+    )
+    plan = [
+        ("fetchall", [(10, 100), (20, 200)]),
+        ("fetchone", None),
+        ("fetchall", [("10/0000.jpg",)]),
+        ("fetchall", [("20/0000.jpg",)]),
+        ("execute_write", None),
+        ("fetchone", (_NOW,)),
+    ]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response(_example_comparison())])
+
+    ic.compare_listing_images(
+        conn, llm, sreality_id_a=10, sreality_id_b=20,  # type: ignore[arg-type]
+        estimation_run_id=77,
+    )
+
+    assert llm.calls[0]["estimation_run_id"] == 77
 
 
 def test_no_images_raises(monkeypatch):

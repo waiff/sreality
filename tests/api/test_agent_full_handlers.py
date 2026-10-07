@@ -191,8 +191,9 @@ def test_axis_handler_uses_defaults_when_args_missing(monkeypatch):
 def test_summarize_listing_forwards_id(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, llm_client, *, sreality_id):
+    def fake(conn, llm_client, *, sreality_id, estimation_run_id):
         captured["sreality_id"] = sreality_id
+        captured["estimation_run_id"] = estimation_run_id
         return {
             "data": {
                 "sreality_id": sreality_id,
@@ -209,8 +210,10 @@ def test_summarize_listing_forwards_id(monkeypatch):
 
     monkeypatch.setattr(agent_mod, "summarize_listing", fake)
     state = _state()
+    state.estimation_run_id = 42
     out = agent_mod._handle_summarize_listing({"sreality_id": 999}, state)
-    assert captured == {"sreality_id": 999}
+    # The nested LLM call is billed to the run, so the cost cap sees it.
+    assert captured == {"sreality_id": 999, "estimation_run_id": 42}
     assert out["data"]["summary"]["headline"].startswith("Bright")
 
 
@@ -232,8 +235,11 @@ def test_compare_images_requires_both_ids_in_cohort(monkeypatch):
 def test_compare_images_dispatches_when_pair_in_cohort(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, llm_client, *, sreality_id_a, sreality_id_b, n_images):
-        captured.update(a=sreality_id_a, b=sreality_id_b, n_images=n_images)
+    def fake(conn, llm_client, *, sreality_id_a, sreality_id_b, n_images, estimation_run_id):
+        captured.update(
+            a=sreality_id_a, b=sreality_id_b, n_images=n_images,
+            estimation_run_id=estimation_run_id,
+        )
         return {
             "data": {
                 "sreality_id_a": sreality_id_a,
@@ -246,11 +252,12 @@ def test_compare_images_dispatches_when_pair_in_cohort(monkeypatch):
 
     monkeypatch.setattr(agent_mod, "compare_listing_images", fake)
     state = _state(last_cohort=[{"sreality_id": 100}, {"sreality_id": 101}])
+    state.estimation_run_id = 42
     out = agent_mod._handle_compare_listing_images(
         {"sreality_id_a": 100, "sreality_id_b": 101, "n_images": 4},
         state,
     )
-    assert captured == {"a": 100, "b": 101, "n_images": 4}
+    assert captured == {"a": 100, "b": 101, "n_images": 4, "estimation_run_id": 42}
     assert out["data"]["comparison"]["overall_similarity"] == "moderate"
 
 
@@ -416,7 +423,7 @@ def test_listing_velocity_handler_forwards_listing_id(monkeypatch):
 def test_summarize_handler_forwards_listing_id(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, llm_client, *, sreality_id=None, listing_id=None):
+    def fake(conn, llm_client, *, sreality_id=None, listing_id=None, estimation_run_id=None):
         captured.update(sreality_id=sreality_id, listing_id=listing_id)
         return {"data": {}, "metadata": {}}
 
@@ -428,7 +435,7 @@ def test_summarize_handler_forwards_listing_id(monkeypatch):
 def test_handler_listing_id_wins_when_both_supplied(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, llm_client, *, sreality_id=None, listing_id=None):
+    def fake(conn, llm_client, *, sreality_id=None, listing_id=None, estimation_run_id=None):
         captured.update(sreality_id=sreality_id, listing_id=listing_id)
         return {"data": {}, "metadata": {}}
 
@@ -447,8 +454,11 @@ def test_handler_neither_id_raises_value_error():
 def test_compare_images_handler_dispatches_by_listing_id(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, llm_client, *, listing_id_a, listing_id_b, n_images):
-        captured.update(a=listing_id_a, b=listing_id_b, n_images=n_images)
+    def fake(conn, llm_client, *, listing_id_a, listing_id_b, n_images, estimation_run_id):
+        captured.update(
+            a=listing_id_a, b=listing_id_b, n_images=n_images,
+            estimation_run_id=estimation_run_id,
+        )
         return {"data": {"cache_hit": False}, "metadata": {}}
 
     monkeypatch.setattr(agent_mod, "compare_listing_images", fake)
@@ -456,10 +466,11 @@ def test_compare_images_handler_dispatches_by_listing_id(monkeypatch):
         {"listing_id": 100, "sreality_id": 11},
         {"listing_id": 200, "sreality_id": 22},
     ])
+    state.estimation_run_id = 42
     agent_mod._handle_compare_listing_images(
         {"listing_id_a": 100, "listing_id_b": 200, "n_images": 4}, state,
     )
-    assert captured == {"a": 100, "b": 200, "n_images": 4}
+    assert captured == {"a": 100, "b": 200, "n_images": 4, "estimation_run_id": 42}
 
 
 def test_compare_images_listing_id_cohort_gate(monkeypatch):

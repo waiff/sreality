@@ -128,35 +128,29 @@ select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_at, v.id
             and v.cluster_key = any(%(cluster_keys)s::bigint[])))
 """
 
-# The engine's own history that can refuse a group: a live merge of one of these properties
-# (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group's
-# MEMBER SET in this generation (a real-time generation's keys move with its groups, A9).
-# `undone_by` tells the two restorers apart: only `unapply`'s own stamp is the engine's undo.
+# The engine's own history that can refuse a group: a chokepoint refusal of its MEMBER SET in
+# this generation (E41; a real-time generation's keys move with its groups, A9). An undo of an
+# engine merge, by anyone, refuses nothing: the operator's rulings are the bans (E934).
 LEDGER_HISTORY_SQL = """
-select a.generation, a.cluster_key, a.retired_property_id, a.outcome,
-       a.undone_at is not null as undone, a.undone_by, a.member_ids
+select a.member_ids
   from autodedup.applied_merges a
  where not a.dry_run
-   and ((a.outcome = 'refused'
-         and a.generation = %(generation)s::text
-         and a.member_ids && %(listing_ids)s::bigint[])
-        or (a.outcome = 'applied'
-            and a.retired_property_id = any(%(property_ids)s::bigint[])))
+   and a.outcome = 'refused'
+   and a.generation = %(generation)s::text
+   and a.member_ids && %(listing_ids)s::bigint[]
 """
 
-# Every engine merge whose group named one of these listings, undone or not. A LIVE one is the
-# only thing that lets a merge carry a listing its own group does not hold (E903
-# `carries_ungrouped_listings`) and names the engine merge behind a group the operator ruled
-# different after it merged. One the engine did NOT undo itself whose members no longer share
-# a property was taken apart by someone else: its separated listings are the operator's
-# negative, keyed on LISTINGS, so it survives any later re-merge of the properties (E905).
+# Every LIVE engine merge whose group named one of these listings: the only thing that lets a
+# merge carry a listing its own group does not hold (E903 `carries_ungrouped_listings`), and
+# what names the engine merge behind a group the operator ruled different after it merged.
 ENGINE_MERGES_SQL = """
 select distinct on (a.merge_group_id)
        a.generation, a.cluster_key, a.merge_group_id::text, a.survivor_property_id,
-       a.member_ids, a.undone_at is not null as undone, a.undone_by
+       a.member_ids
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome = 'applied'
+   and a.undone_at is null
    and a.member_ids && %(listing_ids)s::bigint[]
  order by a.merge_group_id, a.id
 """
@@ -245,6 +239,18 @@ update autodedup.applied_merges
    and undone_at is null
 """
 
+LEDGER_CLOSE_PAIRS_SQL = """
+update autodedup.applied_merges
+   set undone_at = now(),
+       undone_by = %(undone_by)s::text,
+       undo_result = %(undo_result)s::jsonb
+ where survivor_property_id = %(survivor_property_id)s::bigint
+   and retired_property_id = any(%(retired_property_ids)s::bigint[])
+   and not dry_run
+   and outcome = 'applied'
+   and undone_at is null
+"""
+
 # ------------------------------------------------------------------ A9: the lane's reconcile
 #
 # The real-time lane reconciles the groups a pass re-clustered plus a slice swept past its own
@@ -327,6 +333,13 @@ select h.member_ids, h.outcome, h.error, h.at
                  where a.generation = %(generation)s::text
                    and not a.dry_run
                    and a.member_ids && %(listing_ids)s::bigint[]
+                   -- Since this generation's last seed only (a batch generation has no seed
+                   -- key and reads its whole ledger): a standing refusal is filed once per
+                   -- seed, so "no row since the seed" means "never planned", not "silent".
+                   and a.applied_at >= coalesce(
+                         (select s.updated_at from autodedup.settings s
+                           where s.key = 'rt_seed_version:' || %(generation)s::text),
+                         '-infinity'::timestamptz)
                  group by a.member_ids, a.run_id) e) h
  where h.rn <= %(depth)s::integer
  order by h.member_ids, h.rn

@@ -26,14 +26,15 @@ export const fmtShortDate = (iso: string | null | undefined): string => {
   return czShortDate.format(d);
 };
 
+/* The Czech noun for a count: 1 `one`, 2–4 `few`, 0 and 5+ `many`
+ * (1 inzerát · 2 inzeráty · 5 inzerátů). */
+export const czPlural = (n: number, one: string, few: string, many: string): string =>
+  n === 1 ? one : n >= 2 && n <= 4 ? few : many;
+
 /* Czech-plural day count: 1 den, 2-4 dny, 5+ dní. Negative or null -> "—". */
 export const fmtTomDays = (n: number | null | undefined): string => {
   if (n == null || n < 0) return '—';
-  const noun =
-    n === 1 ? 'den' :
-    n >= 2 && n <= 4 ? 'dny' :
-    'dní';
-  return `${czNumber.format(n)}${NBSP}${noun}`;
+  return `${czNumber.format(n)}${NBSP}${czPlural(n, 'den', 'dny', 'dní')}`;
 };
 
 export const fmtCount = (n: number | null | undefined): string =>

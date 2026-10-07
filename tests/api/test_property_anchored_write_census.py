@@ -25,11 +25,9 @@ writes one of the merge-carried tables below must first call
 `toolkit.property_identity.resolve_active_property_id(s)` — or carry an allowlist
 entry saying what makes a raw id correct there.
 
-WHY A CENSUS AND NOT A BAN. Resolution is genuinely wrong in two places, and the
-reasons are the product: the merge route itself CREATES survivors (resolving would
-ask it to merge a property into itself), and `properties.asset_id` is a column on
-the property row — the merge carries it onto the survivor, but a link or an unlink
-that followed the pointer would mutate a different row than the caller named.
+WHY A CENSUS AND NOT A BAN. Resolution is genuinely wrong in one place, and the
+reason is the product: the merge route itself CREATES survivors (resolving would
+ask it to merge a property into itself).
 
 TWO HALVES, ONE MEANING: the add and remove halves of one affordance must resolve
 alike. `<PipelineMark>` (rule #22) and the collection/tag toggles are single
@@ -49,8 +47,9 @@ THE NAMED BLIND SPOTS — real, and listed so nobody has to rediscover them:
     below.
   * TOOLKIT AND SCRAPER WRITES. Only `api/` is scanned. `toolkit/` writes these
     tables too (the merge reconcilers themselves), and must not resolve.
-  * READS. A read keyed on a stale id shows an empty list rather than corrupting
-    state; out of scope here, and deliberately so.
+  * READS. The note list resolves like the note writes (pinned in
+    tests/api/test_curation.py); any other read keyed on a stale id shows an empty
+    list rather than corrupting state, and is out of scope here.
 A rail that documents its own edges cannot manufacture confidence.
 """
 
@@ -68,10 +67,9 @@ _ID_PARAMS = frozenset({"property_id", "property_ids"})
 
 # Tables whose rows are keyed on `property_id` AND carried onto the survivor at
 # merge — every table a carrier in `toolkit/property_carriers.py::PROPERTY_CARRIERS`
-# keeps true (`properties.asset_id` is a column on the property row itself, see WHY A
-# CENSUS above). A row in any of them is reachable only under the survivor's id once a
+# keeps true. A row in any of them is reachable only under the survivor's id once a
 # merge has happened.
-_CARRIED_TABLES = tuple(sorted({t for t, _c in carried_columns() if t != "properties"}))
+_CARRIED_TABLES = tuple(sorted({t for t, _c in carried_columns()}))
 
 _WRITE = re.compile(
     r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:public\.)?(" + "|".join(_CARRIED_TABLES) + r")\b",

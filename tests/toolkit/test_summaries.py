@@ -125,9 +125,29 @@ def test_cache_miss_calls_llm_then_writes():
     assert call["called_for"] == "summarize_listing"
     assert call["tools"][0]["name"] == "record_listing_summary"
     assert call["model"] == "claude-sonnet-4-5"
+    # Called outside an estimation run: the llm_calls row is unattributed.
+    assert call["estimation_run_id"] is None
     assert conn.transactions_opened == 1
     assert res["data"]["cache_hit"] is False
     assert res["data"]["summary"] == summary
+
+
+def test_cache_miss_bills_the_call_to_the_estimation_run():
+    plan = [
+        ("fetchone", (42, _NOW, {"text": "Krásný byt"})),
+        ("fetchone", None),
+        ("fetchone", _listing_row()),
+        ("execute_write", None),
+    ]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response(_example_summary())])
+
+    summaries.summarize_listing(
+        conn, llm,  # type: ignore[arg-type]
+        sreality_id=123, estimation_run_id=77,
+    )
+
+    assert llm.calls[0]["estimation_run_id"] == 77
 
 
 def test_force_refresh_skips_cache_lookup():

@@ -23,6 +23,9 @@ OP = "operator@example.com"
 
 
 def test_every_price_step_reader_reads_the_one_view_and_none_keeps_a_window():
+    """The rollup's one window orders the lineage's links (MS10), never an advert's snapshots."""
+    import re
+
     from api import notifications as nf
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
@@ -34,6 +37,8 @@ def test_every_price_step_reader_reads_the_one_view_and_none_keeps_a_window():
     for name, source in readers.items():
         assert "listing_price_steps" in source, f"the {name} must read the one step view"
         assert "lag(" not in source, f"the {name} keeps its own price-step window"
+    windows = re.findall(r"\w+\([^()]*\)\s+over\s*\([^)]*\)", _RECOMPUTE_BATCH_SQL, re.I)
+    assert windows == ["lead(m.last_price) OVER (PARTITION BY m.pid ORDER BY m.hop)"]
 
 
 def test_the_step_view_compares_an_advert_only_with_its_own_previous_price():

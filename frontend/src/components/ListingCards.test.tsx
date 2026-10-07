@@ -29,12 +29,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import ListingCards from './ListingCards';
+import ListingTable from './ListingTable';
 import { CardHydrationProvider } from '@/lib/hydration';
 import { expectNoNestedInteractive } from '@/test/a11y';
 import * as api from '@/lib/api';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
-import type { CardRow } from '@/lib/queries';
+import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
 
 vi.mock('@/lib/queries', async (importOriginal) => {
@@ -43,11 +44,16 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     ...actual,
     fetchImagesForListingIds: vi.fn(async () => new Map()),
     fetchListingCovers: vi.fn(async () => new Map()),
+    /* The ad-count badge's read (via the hydration layer). */
+    fetchPropertySourcesByPropertyIds: vi.fn(async () => new Map()),
     fetchPropertyCollectionMemberSet: vi.fn(async () => new Map()),
     /* The card's pipeline funnel reads these two shared queries. Unmocked they
        reach the network, so every role assertion below would depend on it. */
     fetchPipelineMembers: vi.fn(async () => new Map()),
     fetchPipelineStages: vi.fn(async () => []),
+    /* The dismiss control and the note mark (MS16), the same way. */
+    fetchIsDismissed: vi.fn(async () => false),
+    fetchNoteCounts: vi.fn(async () => new Map()),
   };
 });
 vi.mock('@/lib/brokers', async (importOriginal) => ({
@@ -183,6 +189,9 @@ beforeEach(() => {
   vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(new Map());
   vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map());
   vi.mocked(queries.fetchPipelineStages).mockResolvedValue([]);
+  vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
+  vi.mocked(queries.fetchIsDismissed).mockResolvedValue(false);
+  vi.mocked(queries.fetchNoteCounts).mockResolvedValue(new Map());
   vi.mocked(api.listCollections).mockResolvedValue({ data: [], total: 0 });
   vi.mocked(api.addPipelineCard).mockResolvedValue({
     property_id: 42,
@@ -267,6 +276,122 @@ describe('<ListingCards> photo hydration', () => {
     expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
     expect(queries.fetchListingCovers).not.toHaveBeenCalled();
     expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
+  });
+});
+
+/* How many ads the card's property holds: a decoration like the photos, since
+ * browse_projection carries no `source_count`. Two ads or more only — most
+ * properties are one ad, and a badge on each would be noise. */
+describe('<ListingCards> the ad-count badge', () => {
+  const SECOND = { ...ROW, property_id: 43, listing_id: 112, sreality_id: 901 } as CardRow;
+  const BADGE = /^Nemovitost spojuje/;
+
+  /* Each property's ads, as the read answers them: N rows per property id. */
+  const adsPerProperty = (counts: Record<number, number>) =>
+    vi.mocked(queries.fetchPropertySourcesByPropertyIds).mockResolvedValue(
+      new Map(
+        Object.entries(counts).map(([id, n]) => [
+          Number(id),
+          Array.from({ length: n }, (_, i) => ({ id: i + 1, property_id: Number(id) })),
+        ]),
+      ) as never,
+    );
+
+  /* Its own harness: the badge needs `adCounts` in the provider, which
+     renderGrid leaves off on purpose (the last test below). */
+  function renderCards(rows: CardRow[]) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <CardHydrationProvider
+            listingIds={rows.map((r) => r.listing_id)}
+            renders={{ photos: 50, adCounts: rows.map((r) => r.property_id) }}
+          >
+            <ListingCards
+              rows={rows}
+              total={rows.length}
+              sort={{ field: 'last_seen_at', dir: 'desc' } as never}
+              imageLarge={false}
+              isLoading={false}
+              isFetchingNextPage={false}
+              hasNextPage={false}
+              onReachEnd={() => {}}
+              restorationKey="test"
+              hasFilters={false}
+              hasBounds={false}
+              hoveredIds={new Set()}
+              onHover={() => {}}
+              onSort={() => {}}
+              onClearFilters={() => {}}
+              onClearBounds={() => {}}
+              mergeMode={false}
+              selectedPropertyIds={new Set()}
+              onToggleSelect={() => {}}
+              pipelineScoped={false}
+              collectionScoped={false}
+              estimates={undefined}
+              estimatingIds={new Set()}
+              onEstimate={() => {}}
+            />
+          </CardHydrationProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.mocked(queries.fetchPropertySourcesByPropertyIds).mockReset();
+    adsPerProperty({});
+  });
+
+  it('labels a property of three ads "3 inzeráty", the sentence in its title', async () => {
+    adsPerProperty({ 42: 3 });
+    renderCards([ROW]);
+
+    const badge = await screen.findByTitle('Nemovitost spojuje 3 inzeráty (počítají se i neaktivní)');
+    expect(badge).toHaveTextContent(/^3\s*inzeráty$/);
+  });
+
+  it('says "inzerátů" from five ads on', async () => {
+    adsPerProperty({ 42: 5 });
+    renderCards([ROW]);
+
+    const badge = await screen.findByTitle('Nemovitost spojuje 5 inzerátů (počítají se i neaktivní)');
+    expect(badge).toHaveTextContent(/^5\s*inzerátů$/);
+  });
+
+  /* Both sides of the threshold: one ad draws nothing, two ads draw the badge.
+     The second card's badge also proves the counts have landed before the
+     absence on the first is asserted. */
+  it('draws nothing for a property of one ad, "2 inzeráty" for two', async () => {
+    adsPerProperty({ 42: 1, 43: 2 });
+    renderCards([ROW, SECOND]);
+
+    expect(await screen.findByTitle(BADGE)).toHaveTextContent(/^2\s*inzeráty$/);
+    expect(screen.getAllByTitle(BADGE)).toHaveLength(1);
+  });
+
+  it('reads the counts once for the grid, keyed on the property ids', async () => {
+    adsPerProperty({ 42: 2, 43: 2 });
+    renderCards([ROW, SECOND]);
+
+    expect(await screen.findAllByTitle(BADGE)).toHaveLength(2);
+    expect(queries.fetchPropertySourcesByPropertyIds).toHaveBeenCalledTimes(1);
+    expect(queries.fetchPropertySourcesByPropertyIds).toHaveBeenCalledWith(
+      [42, 43],
+      expect.anything(),
+    );
+  });
+
+  /* Opt-in like every decoration: a provider that renders photos alone (the
+     grid harness above) must not pay for the counts. */
+  it('is not read by a surface that does not ask for it', async () => {
+    renderGrid();
+
+    expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
+    expect(queries.fetchPropertySourcesByPropertyIds).not.toHaveBeenCalled();
+    expect(screen.queryByTitle(BADGE)).toBeNull();
   });
 });
 
@@ -479,6 +604,68 @@ describe('<ListingCards> collection popover keyboard entry', () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Uložit do kolekce' })).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+});
+
+/* MS16: a merge hides nothing it will touch — merge mode keeps every mark,
+ * read-only, beside the checkbox, and drops the verbs that would change them. */
+describe('<ListingCards> merge mode keeps the marks, read-only', () => {
+  beforeEach(() => {
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(new Map([[42, {
+      property_id: 42, stage_id: 1, stage_label: 'Prověřit', stage_color: 'copper',
+      stage_code: '1', stage_position: 1, is_terminal: true,
+    }]]));
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[42, [7]]]));
+    vi.mocked(queries.fetchIsDismissed).mockResolvedValue(true);
+    vi.mocked(queries.fetchNoteCounts).mockResolvedValue(new Map([[42, 3]]));
+  });
+
+  it('shows the stage, collection, dismissal and note marks and none of the verbs', async () => {
+    const { container } = renderGrid({ merge: { selected: false } });
+    for (const mark of ['V pipeline: Prověřit', 'V kolekci', 'Skryto', 'Poznámky: 3']) {
+      expect(await screen.findByText(mark)).toBeInTheDocument();
+    }
+    for (const verb of ['Přidat do pipeline', 'Uložit do kolekce', 'Skrýt nemovitost']) {
+      expect(screen.queryByRole('button', { name: verb })).toBeNull();
+    }
+    expectNoNestedInteractive(container);
+  });
+
+  it('shows the note count beside the verbs outside merge mode', async () => {
+    renderGrid();
+    expect(await screen.findByTitle('Poznámky: 3')).toHaveTextContent('3');
+  });
+
+  it('turns a failed collection read into a retry, never "in no collection"', async () => {
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockRejectedValueOnce(new Error('HTTP 500'));
+    renderGrid();
+    fireEvent.click(await screen.findByRole('button', { name: /Kolekce se nepodařilo načíst/ }));
+    expect(await screen.findByRole('button', { name: 'Uložit do kolekce' })).toBeInTheDocument();
+  });
+
+  it('puts the note mark on every table row too', async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <ListingTable
+            rows={[ROW as unknown as TableRow]}
+            total={1}
+            sort={{ field: 'last_seen_at', dir: 'desc' } as never}
+            isLoading={false}
+            isFetchingNextPage={false}
+            hasNextPage={false}
+            onReachEnd={() => {}}
+            hasFilters={false}
+            hoveredIds={new Set()}
+            onHover={() => {}}
+            onSort={() => {}}
+            onClearFilters={() => {}}
+            pipelineScoped={false}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByTitle('Poznámky: 3')).toHaveTextContent('3');
   });
 });
 
