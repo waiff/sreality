@@ -533,6 +533,68 @@ def test_cost_cap_stops_loop(monkeypatch, provider_name):
     assert len(prov.calls) == 1
 
 
+def _run_with_nested_summary_call(monkeypatch, provider_name, *, run_id):
+    """Turn 1 asks for summarize_listing, whose own LLM call costs > $1."""
+    _patch_toolkit(monkeypatch)
+    conn = _FakeConn(app_settings={})
+    model = {"anthropic": "claude-sonnet-4-5", "gemini": "gemini-2.5-pro"}[provider_name]
+    nested = Completion(
+        text_blocks=["summary"], tool_calls=[], stop_reason="end_turn",
+        usage=Usage(input_tokens=200_000, output_tokens=100_000), model=model,
+    )
+    completions = [
+        _completion_with_tool("summarize_listing", {"sreality_id": 100}),
+        nested,
+        _completion_with_tool("find_comparables_relaxed", {"radius_m": 1000}),
+    ]
+    prov = _ScriptedProvider(
+        provider_name, completions,
+        prices={
+            "claude-sonnet-4-5": ModelPrice(3.0, 15.0),
+            "gemini-2.5-pro": ModelPrice(1.25, 10.0),
+        },
+    )
+    client = LLMClient(conn, providers={provider_name: prov})
+
+    def fake_summarize(conn, llm_client, *, sreality_id, estimation_run_id):
+        llm_client.call(
+            called_for="summarize_listing",
+            messages=[{"role": "user", "content": "x"}],
+            model=model,
+            estimation_run_id=estimation_run_id,
+        )
+        return {"data": {"sreality_id": sreality_id, "summary": {}}, "metadata": {}}
+
+    monkeypatch.setattr(agent_mod, "summarize_listing", fake_summarize)
+    skill = _make_skill(max_cost_usd=1.0)
+    skill.allowed_tools.append("summarize_listing")
+    result = agent_mod.run_agent_estimation(
+        conn, sreality_client=None, llm_client=client,
+        target=_target(), filters=_filters(),
+        purchase_price_czk=None,
+        skill=skill,
+        provider=provider_name,
+        recorder=TraceRecorder(), estimation_run_id=run_id,
+    )
+    return result, prov, conn
+
+
+@pytest.mark.parametrize("provider_name", ["anthropic", "gemini"])
+def test_a_tools_nested_llm_call_is_billed_to_the_run_and_stops_it_at_the_cap(
+    monkeypatch, provider_name,
+):
+    result, prov, conn = _run_with_nested_summary_call(
+        monkeypatch, provider_name, run_id=11,
+    )
+
+    nested_rows = [r for r in conn.llm_calls_rows if r["params"][0] == "summarize_listing"]
+    assert len(nested_rows) == 1
+    assert nested_rows[0]["params"][9] == 11
+    assert result.metadata["stop_reason"] == "max_cost"
+    # Agent turn + the tool's own call; the cap stops the loop before turn 2.
+    assert len(prov.calls) == 2
+
+
 # ---------------------------------------------------------------------------
 # TraceRecorder.reasoning() step shape
 # ---------------------------------------------------------------------------
