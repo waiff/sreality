@@ -18,7 +18,7 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-from toolkit import _listing_id_clause, _now_iso
+from toolkit import _now_iso
 
 _VALID_METRICS = {
     "active_property_count", "property_count", "listing_count", "active_listing_count",
@@ -362,27 +362,9 @@ def broker_listing_ids(conn: Any, broker_id: int, *, limit: int = 50_000) -> dic
     return envelope
 
 
-def listing_broker(conn: Any, sreality_id: int | None = None, *,
-                   listing_id: int | None = None) -> dict[str, Any] | None:
-    """The broker behind one listing (listing_broker_public), or None if unattributed.
-
-    Addressable by EITHER id, surrogate wins (`_listing_id_clause`): sreality_id is
-    NULL on the eight non-sreality portals, so a sreality-keyed lookup silently
-    found nothing for most of the corpus.
-    """
-    id_clause, id_val = _listing_id_clause(sreality_id, listing_id, lid_col="listing_id")
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT * FROM listing_broker_public WHERE {id_clause}", (id_val,))
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return _envelope("listing_broker", row,
-                     {"sreality_id": sreality_id, "listing_id": listing_id}, 1, None)
-
-
 def listing_brokers(conn: Any, listing_ids: list[int]) -> dict[str, Any]:
     """The brokers behind many listings in one round-trip, keyed on the surrogate
-    listing_id — the board/table hydration path that would otherwise be an N+1."""
+    listing_id: the property page's broker list and the pipeline board's broker line."""
     ids = _bounded(listing_ids)
     rows: list[dict[str, Any]] = []
     if ids:

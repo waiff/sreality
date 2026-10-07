@@ -1,9 +1,9 @@
-"""The property-grain per-m2 measure must have ONE row behind it (migration 424).
+"""The property-grain per-m2 measure must have ONE advert behind it (migrations 424, 561, 588).
 
-`properties.current_price_czk` is the representative child's price. Before W3
-`properties.area_m2` was picked independently, in source-trust order, across ALL
-children — so a merged property's per-m2 could divide one portal's price by
-another portal's area. Only executed SQL can show that the rollup now keeps the
+`properties.current_price_czk` and `properties.area_m2` are both the canonical advert's
+(`repr_listing_ref_id`). Before W3 `properties.area_m2` was picked independently, in
+source-trust order, across ALL children — so a merged property's per-m2 could divide one
+portal's price by another portal's area. Only executed SQL can show that the rollup keeps the
 pair together: the fake connections in tests/test_recompute_property_stats.py
 assert control flow, and PREPARE only proves the statement compiles.
 
@@ -113,9 +113,9 @@ def _skew_property_ids_past(cur: Any, listing_id: int) -> None:
     )
 
 
-def _stamp_of_child(cur: Any, listing_id: int) -> Any:
+def _property_of_child(cur: Any, listing_id: int) -> Any:
     cur.execute(
-        "SELECT p.id, p.price_per_m2_source_listing_id FROM properties p "
+        "SELECT p.id, p.repr_listing_ref_id, p.current_price_czk FROM properties p "
         "JOIN listings l ON l.property_id = p.id WHERE l.id = %s",
         (listing_id,),
     )
@@ -124,8 +124,7 @@ def _stamp_of_child(cur: Any, listing_id: int) -> Any:
 
 def _rollup(cur: Any, pid: int) -> tuple[Any, ...]:
     cur.execute(
-        "SELECT current_price_czk, area_m2, usable_area, "
-        "       price_per_m2_source_listing_id, repr_listing_ref_id, is_active "
+        "SELECT current_price_czk, area_m2, usable_area, repr_listing_ref_id, is_active "
         "FROM properties WHERE id = %s",
         (pid,),
     )
@@ -160,13 +159,13 @@ def _divergent_pair(cur: Any) -> tuple[int, int, int]:
 def test_denominator_comes_from_the_child_that_supplied_the_price(cur):
     pid, _stale, live = _divergent_pair(cur)
     _recompute(cur, pid)
-    price, area, _usable, basis, repr_ref, _active = _rollup(cur, pid)
+    price, area, _usable, repr_ref, _active = _rollup(cur, pid)
 
     assert (price, area) == (5_000_000, 78.0), (
         "price and area must be the active child's; the 1200 m2 belongs to the "
         "delisted sibling and divides into a per-m2 that describes neither listing"
     )
-    assert basis == live == repr_ref, "the measure must name the one row it came from"
+    assert repr_ref == live, "the measure must name the one row it came from"
 
 
 def test_a_siblings_usable_area_survives_a_repr_child_that_has_none(cur):
@@ -183,53 +182,24 @@ def test_a_siblings_usable_area_survives_a_repr_child_that_has_none(cur):
     )
     _add_child(cur, pid, source="idnes", price=4_900_000, area=None, usable=72.0)
     _recompute(cur, pid)
-    _price, area, usable, basis, repr_ref, _active = _rollup(cur, pid)
+    _price, area, usable, repr_ref, _active = _rollup(cur, pid)
 
     assert repr_ref == repr_child
     assert (area, usable) == (78.0, 72.0), "no property may lose a usable_area it had"
-    assert basis == repr_child, "the measure itself is unaffected: one row backs it"
 
 
 def test_the_area_is_the_canonical_adverts_with_no_fallback(cur):
     """Migration 561 deleted the area fallback: a canonical advert with no area leaves the
-    property without one (and without a per-m2 basis) rather than borrowing a sibling's,
-    while a physical fact still takes the first non-empty value in the same order."""
+    property without one (so without a per-m2) rather than borrowing a sibling's, while a
+    physical fact still takes the first non-empty value in the same order."""
     pid = _new_property(cur)
     priced = _add_child(cur, pid, source="sreality", price=5_000_000, area=None)
     _add_child(cur, pid, source="idnes", price=4_900_000, area=None, usable=90.0)
     _add_child(cur, pid, source="mmreality", price=4_800_000, area=70.0)
     _recompute(cur, pid)
-    price, area, usable, basis, repr_ref, _active = _rollup(cur, pid)
+    price, area, usable, repr_ref, _active = _rollup(cur, pid)
 
-    assert (repr_ref, price, area, usable, basis) == (priced, 5_000_000, None, 90.0, None)
-
-
-def test_stamp_never_names_a_row_other_than_the_priced_child(cur):
-    """The invariant migration 424 documents, over the shapes below — a stamped
-    measure always names the same row repr_listing_ref_id does."""
-    pids = [_divergent_pair(cur)[0]]
-
-    plain = _new_property(cur)
-    _add_child(cur, plain, source="sreality", price=4_000_000, area=60.0)
-    pids.append(plain)
-
-    for pid in pids:
-        _recompute(cur, pid)
-    cur.execute(
-        "SELECT count(*) FROM properties WHERE id = ANY(%s) "
-        "AND price_per_m2_source_listing_id IS NOT NULL "
-        "AND price_per_m2_source_listing_id IS DISTINCT FROM repr_listing_ref_id",
-        (pids,),
-    )
-    assert cur.fetchone()[0] == 0
-
-
-def test_zero_area_is_not_a_valid_basis(cur):
-    """The measure's validity bound lives in price_per_m2_source_id, not in callers."""
-    pid = _new_property(cur)
-    _add_child(cur, pid, source="sreality", price=5_000_000, area=0.0)
-    _recompute(cur, pid)
-    assert _rollup(cur, pid)[3] is None
+    assert (repr_ref, price, area, usable) == (priced, 5_000_000, None, 90.0)
 
 
 def test_property_with_no_area_at_all_is_still_recomputed(cur):
@@ -239,15 +209,15 @@ def test_property_with_no_area_at_all_is_still_recomputed(cur):
     _add_child(cur, pid, source="bazos", price=None, area=None, active=False)
     cur.execute("UPDATE properties SET is_active = true WHERE id = %s", (pid,))
     _recompute(cur, pid)
-    _price, area, usable, basis, _repr, active = _rollup(cur, pid)
-    assert (area, usable, basis) == (None, None, None)
+    _price, area, usable, _repr, active = _rollup(cur, pid)
+    assert (area, usable) == (None, None)
     assert active is False, "the row must still have been updated"
 
 
-def test_a_changed_rewrite_dirty_marks_and_the_drain_restamps(cur):
+def test_a_changed_rewrite_dirty_marks_and_the_drain_recomputes(cur):
     """A brand-new listing lands bare and the straggler attach births its singleton; after that
     a content change reaches the property through dirty_properties (rule 20) and the drain's
-    recompute — not an inline rollup at the write — keeps the basis true."""
+    recompute — not an inline rollup at the write — keeps the property's price true."""
     from scraper import listing_write
     from scraper.scraped_listing import ScrapedListing
     from scripts.recompute_property_stats import _attach_stragglers, _drain_dirty
@@ -266,23 +236,22 @@ def test_a_changed_rewrite_dirty_marks_and_the_drain_restamps(cur):
     lid = _write(2_500_000)
     _skew_property_ids_past(cur, lid)
     _attach_stragglers(cur.connection)
-    pid, _first = _stamp_of_child(cur, lid)
-    cur.execute(
-        "UPDATE properties SET price_per_m2_source_listing_id = NULL WHERE id = %s", (pid,))
+    pid, _repr, _price = _property_of_child(cur, lid)
     cur.execute("DELETE FROM dirty_properties")
 
     assert _write(2_400_000) == lid
     cur.execute("SELECT count(*) FROM dirty_properties WHERE property_id = %s", (pid,))
     assert cur.fetchone()[0] == 1
+    assert _property_of_child(cur, lid) == (pid, lid, 2_500_000), "the write rolled up inline"
     _drain_dirty(cur.connection, 2000, cutoff)
 
-    assert _stamp_of_child(cur, lid) == (pid, lid), (
-        "the rollup must stamp the CHILD's listings.id; stamping l.property_id "
+    assert _property_of_child(cur, lid) == (pid, lid, 2_400_000), (
+        "the rollup must name the CHILD's listings.id; naming l.property_id "
         "instead type-checks, passes a substring assertion, and is wrong"
     )
 
 
-def test_straggler_attach_stamps_the_basis(cur):
+def test_straggler_attach_names_the_canonical_advert_at_birth(cur):
     """The sweep's attach path adopts every property_id-NULL listing and recomputes it at
     birth, so the row never waits a full sweep unlabelled."""
     from scripts.recompute_property_stats import _attach_stragglers
@@ -291,15 +260,16 @@ def test_straggler_attach_stamps_the_basis(cur):
     _skew_property_ids_past(cur, lid)
     _attach_stragglers(cur.connection)
 
-    pid, stamp = _stamp_of_child(cur, lid)
-    assert stamp == lid != pid
+    pid, repr_ref, price = _property_of_child(cur, lid)
+    assert repr_ref == lid != pid
+    assert price == 7_100_000
 
 
 def test_source_trust_rank_is_not_reordered_around_a_parser_bug(cur):
-    """mmreality outranking five portals is what lets a listing-grain area defect
-    reach a merged property. Re-ranking it would also silently change survivorship
-    for the ~30 other fields that share this order (rule 21) — W3 fixes the grain,
-    W1 fixes the parser, and the ranks stay put."""
+    """The ranks are the canonical order's tie-break key (migration 588). Re-ranking a
+    portal to route around one of its parser bugs would silently change which advert
+    speaks for every tied property (rule 21) — the parser gets fixed, and the ranks
+    stay put."""
     # WITH ORDINALITY + ORDER BY: unnest() row order is not guaranteed, so a bare
     # SELECT would be asserting on an ordering Postgres never promised.
     cur.execute(

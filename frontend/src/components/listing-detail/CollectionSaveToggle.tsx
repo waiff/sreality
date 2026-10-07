@@ -20,6 +20,7 @@ import CollectionMark from '@/components/CollectionMark';
 import CollectionSaveMenu, {
   COLLECTION_SAVE_LABEL,
 } from '@/components/CollectionSaveMenu';
+import ReadFailedMark, { readFailed } from '@/components/ReadFailedMark';
 import { curationKeys, fetchPropertyCollectionMemberSet } from '@/lib/queries';
 
 export default function CollectionSaveToggle({
@@ -49,6 +50,12 @@ export default function CollectionSaveToggle({
         className="inline-flex h-[1.9rem] w-36 animate-pulse rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]"
         aria-hidden
       />
+    );
+  }
+  /* A failed read is not "in no collection" (MS16): say so and read again. */
+  if (readFailed(membershipQ)) {
+    return (
+      <ReadFailedMark what="Kolekce" onRetry={() => void membershipQ.refetch()} variant="header" />
     );
   }
 

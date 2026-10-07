@@ -39,10 +39,18 @@ def test_block_key_prefixes_the_grain_so_codes_cannot_collide() -> None:
     assert block_key_of(None, None) == ""
 
 
-def test_cat_group_folds_the_one_sanctioned_cross_type() -> None:
+def test_cat_group_folds_the_dum_komercni_cross_type() -> None:
     assert cat_group_of("dum") == cat_group_of("komercni") == "dum_komercni"
     assert cat_group_of("byt") == "byt"
     assert cat_group_of(None) is None
+
+
+def test_land_and_a_flat_keep_their_own_blocking_groups() -> None:
+    """E935 sanctions pozemek <-> dům / komerční, and E938 byt <-> komerční, at the guards, not
+    in blocking: land's and a flat's probe keys, price deciles and census cells stay where they
+    are, and a flat never shares a token with a house."""
+    assert cat_group_of("pozemek") == "pozemek"
+    assert cat_group_of("byt") == "byt" != cat_group_of("komercni")
 
 
 def test_area_band_is_the_log_band_and_neighbours_cover_the_tolerance() -> None:

@@ -253,14 +253,14 @@ interface Envelope<T> {
 
 const JWT = true;
 
-/* The two `detail` strings the /brokers routes send when 404 is an ANSWER
- * ("nothing is attributed here"), from api/routes/brokers.py. Status alone is
+/* The `detail` string the /brokers routes send when 404 is an ANSWER ("no such
+ * broker"), from api/routes/brokers.py. Status alone is
  * not enough: Railway's edge answers an unrouted domain with 404, a stale
  * VITE_API_BASE_URL 404s every path, and FastAPI 404s a renamed route with a
  * generic "Not Found" — swallowing any of those would put the whole corpus back
  * in the silent "Makléř nenalezen." dark state this module was repointed to end.
  * An unrecognised 404 therefore propagates and the page shows a real error. */
-const ANSWERED_404 = /broker not found|listing has no attributed broker/;
+const ANSWERED_404 = /broker not found/;
 
 const isAnsweredNotFound = (err: unknown): boolean =>
   err instanceof ApiError && err.status === 404 && ANSWERED_404.test(err.message);
@@ -344,32 +344,12 @@ export async function searchBrokerFirms(
   return r.data ?? [];
 }
 
-// Keyed on the surrogate `listing_id` (migration 343), NOT sreality_id — a
-// post-Gate-2 non-sreality listing has a NULL sreality_id, so a sreality-keyed
-// lookup would silently find nothing. An unattributed listing is a 404, which is
-// an answer ("no broker resolved"), not a failure.
-export async function fetchListingBroker(
-  listingId: number,
-): Promise<ListingBroker | null> {
-  try {
-    const r = await apiGet<Envelope<ListingBroker>>(
-      '/brokers/by-listing',
-      { listing_id: listingId },
-      undefined,
-      JWT,
-    );
-    return r.data ?? null;
-  } catch (err) {
-    if (isAnsweredNotFound(err)) return null;
-    throw err;
-  }
-}
-
-// Batched canonical-broker lookup for many listings at once (the pipeline board
-// hydrates N cards in one round-trip — no N+1). Keyed on the surrogate
-// `listing_id`, same NULL-safety reason as fetchListingBroker above. Since W6
-// (migration 419) the row carries the contact pair too, so this is the ONLY read
-// behind a card's whole broker line.
+// The ONE per-ad broker read: every ad of a property page, every ad of every
+// card on the pipeline board, each in one round trip, no N+1. Keyed on the
+// surrogate `listing_id` (migration 343), NOT sreality_id: a non-sreality ad has a
+// NULL sreality_id and a sreality-keyed lookup would silently find nothing. Since
+// W6 (migration 419) the row carries the contact pair too. An unattributed ad is
+// simply absent from the map.
 export async function fetchListingBrokersByIds(
   listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
@@ -393,13 +373,46 @@ export async function fetchListingBrokersByIds(
   return out;
 }
 
+/* MS7: a property's brokers are a list, and nothing stores it. The brokers of
+ * its active ads, one entry per person, the canonical ad's first, then the
+ * ads in the order given; with no active ad, the brokers of all its ads, marked
+ * `fromInactive`. An unattributed ad adds nothing. The property page and the
+ * pipeline board both read a property's brokers through this, and nothing else. */
+export interface PropertyBrokers {
+  brokers: ListingBroker[];
+  fromInactive: boolean;
+}
+
+export function propertyBrokers(
+  ads: ReadonlyArray<{ id: number; is_active: boolean }>,
+  byListing: ReadonlyMap<number, ListingBroker>,
+  canonicalId: number | null,
+): PropertyBrokers {
+  const active = ads.filter((a) => a.is_active);
+  const fromInactive = active.length === 0;
+  const pool = fromInactive ? ads : active;
+  const ordered = [
+    ...pool.filter((a) => a.id === canonicalId),
+    ...pool.filter((a) => a.id !== canonicalId),
+  ];
+  const seen = new Set<number>();
+  const brokers: ListingBroker[] = [];
+  for (const ad of ordered) {
+    const b = byListing.get(ad.id);
+    if (b == null || seen.has(b.broker_id)) continue;
+    seen.add(b.broker_id);
+    brokers.push(b);
+  }
+  return { brokers, fromInactive };
+}
+
 /* `fetchBrokersByIds` (GET /brokers?ids=) is DELETED — W6, migration 419.
  *
  * It existed for exactly one job: chase the broker_ids that fetchListingBrokersByIds
  * had just returned and fetch their contact pair. Now listing_broker_public carries
- * primary_email / primary_phone itself, so both former callers — the pipeline board's
- * hydration hook and the listing page's vizitka — read the contact off the row they
- * already have. Re-adding a by-broker_id contact fetcher would recreate the
+ * primary_email / primary_phone itself, so both former callers — the pipeline board
+ * and the property page — read the contact off the row they already have. Re-adding
+ * a by-broker_id contact fetcher would recreate the
  * serialized second round trip this wave removed; the route itself stays for
  * non-SPA consumers (the agent, ClickUp). */
 

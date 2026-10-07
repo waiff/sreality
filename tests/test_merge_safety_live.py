@@ -1,16 +1,20 @@
-"""Merge safety, executed (migrations 559, 560 and 561): a price step never spans two adverts, a
-merge writes no status row and a detach restores the absorbed property's own state, merging
-then detaching every advert a merge moved gives back every original property, a native advert
-splits off to a record born the one way, the operator's merge and detach land as rulings the
-apply adapter reads, the one-time copy rules only what the operator judged, and a merged
-property speaks with ONE canonical advert everywhere (decisions 13 and 18). Runs in CI's
-migrations job (`TEST_DATABASE_URL`); every test rolls back.
+"""Merge safety, executed (migrations 559, 560, 561 and 588): a price step never spans two adverts,
+a merge writes no status row and a detach restores the absorbed property's own state, merging
+then detaching every advert a merge moved gives back every original property, an advert named in
+`new` is born a record the one way, the operator's merge and split land as rulings the apply
+adapter reads, an operator merge takes back every "different" between what it joins (MS12), the
+one-time copy rules only what the operator judged, and a merged property speaks with ONE
+canonical advert everywhere (decisions 13 and 18), chosen and built by the merge sprint's rules
+(docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19), and rule 15's merge gate reads the
+set's ads (hand-over addendum 14). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test
+rolls back.
 """
 
 from __future__ import annotations
 
 import itertools
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +77,24 @@ def _recompute(cur: Any, pid: int) -> None:
     from scripts.recompute_property_stats import _RECOMPUTE_ONE_SQL
 
     cur.execute(_RECOMPUTE_ONE_SQL, {"pid": pid})
+
+
+def _seen(cur: Any, listing_id: int, first_days_ago: float, last_days_ago: float = 0) -> None:
+    """Both seen dates, which the insert leaves at the test transaction's one now()."""
+    cur.execute(
+        "UPDATE listings SET first_seen_at = now() - make_interval(secs => %s), "
+        "last_seen_at = now() - make_interval(secs => %s) WHERE id = %s",
+        (first_days_ago * 86400, last_days_ago * 86400, listing_id))
+
+
+def _located(cur: Any, *listing_ids: int) -> None:
+    """A map point per advert (`listing_location.geom`, the canonical order's second key)."""
+    for lid in listing_ids:
+        cur.execute(
+            "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
+            "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
+            "  registry_version) VALUES (%s, ST_SetSRID(ST_MakePoint(17.91, 49.01), 4326), "
+            "  'exact', 'building', 5, 'cz', 'test', '\\x00'::bytea, 'test')", (lid,))
 
 
 def test_a_step_never_spans_two_adverts(cur):
@@ -176,16 +198,13 @@ def test_a_detach_gives_a_property_ending_on_inactive_its_active_state_back(cur)
 def test_merging_then_detaching_every_advert_restores_every_original_property(cur):
     """W3's gate, executed: three set merges, one built on another, then a detach of every
     advert a merge moved; every original property_id is back, every property active, no ledger
-    row live, and the asset link the merges carried 4 -> 3 -> 0 is back on 4 alone."""
+    row live."""
     props = [_property(cur) for _ in range(6)]
     adverts = [_advert(cur, pid, source=src, price=5_000_000)
                for pid, src in zip(props, ("sreality", "idnes", "remax", "bazos", "maxima",
                                            "realitymix"))]
     for pid in props:
         _recompute(cur, pid)
-    cur.execute("INSERT INTO assets DEFAULT VALUES RETURNING id")
-    asset = int(cur.fetchone()[0])
-    cur.execute("UPDATE properties SET asset_id = %s WHERE id = %s", (asset, props[4]))
     original = _placed(cur, adverts)
     _merge(cur, props[:3])
     _merge(cur, props[3:5], source="autodedup")
@@ -201,34 +220,40 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     cur.execute("SELECT count(*) FROM property_merge_events "
                 "WHERE listing_ref_id = ANY(%s) AND undone_at IS NULL", (adverts,))
     assert cur.fetchone()[0] == 0
-    cur.execute("SELECT id, asset_id FROM properties WHERE id = ANY(%s) AND asset_id IS NOT NULL",
-                (props,))
-    assert cur.fetchall() == [(props[4], asset)]
 
 
-def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_to_it(cur):
-    """A property grouped at ingest (no ledger row moved either advert): the split births the
-    advert a record through the one birth path, writes ONE closed ledger row the constraints
-    accept, and rules it different from the advert that stays; merged back, a detach returns it
-    to the record it was born on."""
-    pid = _property(cur)
+def test_an_advert_named_new_is_born_a_record_and_a_merge_back_is_undone_to_it(cur):
+    """`new` births the advert a record through the one birth path and writes ONE closed ledger
+    row the constraints accept: a native advert's (`ingest_grouping`), and a merged one's, its
+    own ledger row closed first (`split_new`); no ruling. Merged back, a detach returns the
+    native one to the record it was born on."""
+    pid, other = _property(cur), _property(cur)
     stay, leave = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    merged = _advert(cur, other, source="remax")
     _recompute(cur, pid)
-    assert _detach(cur, leave, source="autodedup")["outcome"] == "propose_only"
+    _recompute(cur, other)
+    _merge(cur, [pid, other], source="autodedup")
 
-    out = _detach(cur, leave, reason="jiné patro")
+    out = _detach(cur, leave, new=[leave])
     born = out["restored_property_id"]
-    assert (out["outcome"], out["left_property_id"]) == ("split_native", pid)
+    assert (out["outcome"], out["left_property_id"], out["rulings_written"]) == (
+        "split_native", pid, 0)
     assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
     cur.execute("SELECT repr_listing_ref_id, status, is_active FROM properties WHERE id = %s",
                 (born,))
     assert cur.fetchone() == (leave, "active", True)
     cur.execute(
         "SELECT survivor_property_id, retired_property_id, prev_property_id, source, undone_by, "
-        "undone_at IS NOT NULL FROM property_merge_events WHERE listing_ref_id = %s", (leave,))
-    assert cur.fetchall() == [(pid, born, born, "operator", OP, True)]
-    assert _rulings(cur, [stay, leave]) == [(*_pair(stay, leave), "different")]
+        "undone_at IS NOT NULL, reason FROM property_merge_events WHERE listing_ref_id = %s",
+        (leave,))
+    assert cur.fetchall() == [(pid, born, born, "operator", OP, True, "ingest_grouping")]
+    assert _rulings(cur, [stay, leave]) == []
     assert _detach(cur, leave)["outcome"] == "not_merged"
+    apart = _detach(cur, merged, new=[merged])
+    assert apart["outcome"] == "split_new" and apart["restored_property_id"] not in (pid, other)
+    cur.execute("SELECT reason, undone_at IS NOT NULL FROM property_merge_events "
+                "WHERE listing_ref_id = %s ORDER BY id", (merged,))
+    assert cur.fetchall() == [("manual_subset", True), ("split_new", True)]
 
     assert _merge(cur, [pid, born], source="autodedup")["survivor_id"] == pid
     back = _detach(cur, leave)
@@ -269,12 +294,13 @@ def _vetoes(cur: Any, ids: list[int]) -> list[tuple[int, int]]:
     return [(int(lo), int(hi)) for lo, hi in cur.fetchall()]
 
 
-def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_against_the_rest(
-        cur):
+def test_the_operator_merge_rules_the_cards_and_the_split_rules_the_letters_apart(cur):
     """s2 sits on the survivor beside its card s1 (the removed engine put it there) and the
-    operator vetoed s2 = a1 earlier: the merge of the two cards rules s1 = a1 only and leaves
-    that veto standing; detaching a1 rules it different from both adverts that stay."""
+    operator vetoed s2 = a1 earlier with no ruling behind it: the merge of the two cards rules
+    s1 = a1 and leaves that bare veto standing (MS12 reads rulings); splitting a1 off by letters
+    rules it different from both adverts that stay, and the adapter reads both."""
     from autodedup import ui_sql as usql
+    from toolkit.property_split import split_preview, split_property
 
     survivor, absorbed = _property(cur), _property(cur)
     s1 = _advert(cur, survivor, source="sreality", price=5_000_000)
@@ -287,19 +313,23 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
                 {"listing_lo": veto[0], "listing_hi": veto[1], "reason": "earlier"})
 
     merged = _merge(cur, [survivor, absorbed])
-    assert merged["pairs_ruled_same"] == 1
+    assert (merged["pairs_ruled_same"], merged["rulings_taken_back"]) == (1, 0)
     assert _rulings(cur, ids) == [(*card, "same")]
     assert _vetoes(cur, ids) == [veto], "a merge of two cards retracted a veto on a third advert"
 
-    detached = _detach(cur, a1, reason="jiné patro")
-    assert detached["rulings_written"] == 2
+    letters = {s1: "A", s2: "A", a1: "B"}
+    plan = split_preview(cur.connection, survivor, letters=letters, account=None)["plan"]
+    out = split_property(cur.connection, survivor, letters=letters, decided_by=OP, account=None,
+                         reason="jiné patro", expect=plan)
+    assert out["rulings"] == {"different": 2, "same": 0, "taken_back": 0}
+    assert _placed(cur, [s1, s2, a1]) == {s1: survivor, s2: survivor, a1: absorbed}
     assert _rulings(cur, ids) == sorted([(*card, "different"), (*veto, "different")])
     assert _vetoes(cur, ids) == sorted([card, veto])
 
     # The adapter's negative read ITSELF (autodedup/apply_sql.py PAIR_VERDICTS_SQL): any
     # decider, the newest ruling per pair, a negative verdict, both sides in the candidate set.
-    # The earlier veto on (s2, a1) was written down as its `different` before the detach's
-    # word (E920), so that pair has two negative rows and is read once, as its newest.
+    # The earlier veto on (s2, a1) was written down as its `different` before the split's word
+    # (E920), so that pair has two negative rows and is read once, as its newest.
     from autodedup import apply_sql
 
     cur.execute(apply_sql.PAIR_VERDICTS_SQL,
@@ -308,7 +338,71 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
     cur.execute("SELECT verdict, note, decided_by FROM autodedup.verdicts WHERE kind = 'pair' "
                 "AND listing_lo = %s AND listing_hi = %s ORDER BY decided_at, id", veto)
     assert cur.fetchall()[0] == ("different", "earlier", "operator"), (
-        "the bare veto's word is kept in the history before the detach's ruling")
+        "the bare veto's word is kept in the history before the split's ruling")
+
+
+def _set_ruling(cur: Any, key: int, members: list[int], verdict: str) -> None:
+    from autodedup import ui_sql as usql
+
+    cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+        "cluster_key": key, "generation": "g-ms12", "member_ids": sorted(members),
+        "verdict": verdict, "note": "skupina", "reasons": [], "decided_by": OP})
+
+
+def test_an_operator_merge_takes_back_every_different_between_what_it_joins(cur):
+    """MS12: S = {s1, s2}, R = {r1}. The cross pair s2 x r1, ruled "different" with its
+    operator must-not-link, is ruled "same" under the merge's note and the veto retracted; the
+    "different" inside S (s1 x s2) is not between what the merge joins and stands; a negative set
+    spanning S and R gets a cluster "same", one inside S does not, nor one whose newest word is
+    "same" already, nor one that reaches an ad outside the merge; the count is the preview's,
+    and an engine merge writes none of it."""
+    from autodedup import ui_sql as usql
+    from toolkit.property_identity import merge_preview, record_ruling
+
+    survivor, absorbed = _property(cur), _property(cur)
+    s1 = _advert(cur, survivor, source="sreality")
+    s2 = _advert(cur, survivor, source="remax")
+    r1 = _advert(cur, absorbed, source="idnes")
+    _recompute(cur, survivor)
+    _recompute(cur, absorbed)
+    for lo, hi in (_pair(s2, r1), _pair(s1, s2)):
+        record_ruling(cur.connection, lo, hi, verdict="different", decided_by=OP, note="jiné")
+    _set_ruling(cur, 9_000_001, [s2, r1], "different")
+    _set_ruling(cur, 9_000_002, [s1, s2], "different")
+    _set_ruling(cur, 9_000_003, [s1, r1], "different")
+    _set_ruling(cur, 9_000_003, [s1, r1], "same")         # its newest word: nothing to take back
+    outside = _advert(cur, _property(cur), source="bazos")
+    _set_ruling(cur, 9_000_004, [s1, r1, outside], "different")   # not wholly in the merge
+    assert merge_preview(cur.connection, [absorbed, survivor]) == {
+        "property_ids": sorted([survivor, absorbed]), "rulings_taken_back": 2}
+
+    merged = _merge(cur, [survivor, absorbed])
+    note = f"operator merge {merged['merge_group_id']}"
+    assert merged["rulings_taken_back"] == 2
+    cur.execute("SELECT DISTINCT ON (listing_lo, listing_hi) listing_lo, listing_hi, verdict, "
+                "note FROM autodedup.verdicts WHERE kind = 'pair' AND listing_lo = ANY(%(ids)s) "
+                "AND listing_hi = ANY(%(ids)s) ORDER BY listing_lo, listing_hi, decided_at DESC, "
+                "id DESC", {"ids": [s1, s2, r1]})
+    words = {(int(lo), int(hi)): (v, n) for lo, hi, v, n in cur.fetchall()}
+    assert words[_pair(s2, r1)] == ("same", note) and words[_pair(s1, s2)][0] == "different"
+    assert _vetoes(cur, [s1, s2, r1]) == [_pair(s1, s2)]
+    cur.execute("SELECT DISTINCT ON (cluster_key) cluster_key, verdict, note FROM "
+                "autodedup.verdicts WHERE kind = 'cluster' AND cluster_key = ANY(%s) "
+                "ORDER BY cluster_key, decided_at DESC, id DESC",
+                ([9_000_001, 9_000_002, 9_000_003, 9_000_004],))
+    assert cur.fetchall() == [(9_000_001, "same", note), (9_000_002, "different", "skupina"),
+                              (9_000_003, "same", "skupina"),
+                              (9_000_004, "different", "skupina")]
+    cur.execute(usql.CLUSTER_VERDICTS_SQL, {"cluster_key": 9_000_001})
+    assert [r[-1] for r in cur.fetchall()][0] == sorted([s2, r1]), "its own member set"
+
+    engine, other = _property(cur), _property(cur)
+    e1, o1 = _advert(cur, engine, source="sreality"), _advert(cur, other, source="idnes")
+    _recompute(cur, engine)
+    _recompute(cur, other)
+    record_ruling(cur.connection, *_pair(e1, o1), verdict="different", decided_by=OP, note="x")
+    assert _merge(cur, [engine, other], source="autodedup")["rulings_taken_back"] == 0
+    assert _rulings(cur, [e1, o1]) == [(*_pair(e1, o1), "different")]
 
 
 def _as_at_560(cur: Any) -> None:
@@ -437,12 +531,7 @@ def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(c
     canon, twin = _advert(cur, two_portal, source="sreality"), _advert(cur, two_portal, source="bazos")
     alone = _advert(cur, single, source="remax")
     ids = {subject, sibling, canon, twin, alone}
-    for lid in ids:
-        cur.execute(
-            "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
-            "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
-            "  registry_version) VALUES (%s, ST_SetSRID(ST_MakePoint(17.91, 49.01), 4326), "
-            "  'exact', 'building', 5, 'cz', 'test', '\\x00'::bytea, 'test')", (lid,))
+    _located(cur, *ids)
     for pid in (subject_p, two_portal, single):
         _recompute(cur, pid)
     sql, params = build_query(
@@ -450,3 +539,248 @@ def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(c
         ComparableFilters(radius_m=500, category_main="byt", category_type="prodej"))
     cur.execute(sql, params)
     assert {int(r[0]) for r in cur.fetchall()} & ids == {canon, alone}
+
+
+# --- the merge sprint's rollup (migration 588) ------------------------------------------
+
+
+def _ranked(cur: Any, pid: int) -> list[int]:
+    cur.execute("SELECT listing_id FROM property_canonical_listings(%s) ORDER BY canonical_rank",
+                (pid,))
+    return [int(r[0]) for r in cur.fetchall()]
+
+
+def _recomputed_canonical(cur: Any, pid: int) -> int:
+    _recompute(cur, pid)
+    cur.execute("SELECT repr_listing_ref_id FROM properties WHERE id = %s", (pid,))
+    return int(cur.fetchone()[0])
+
+
+def test_an_active_advert_speaks_by_its_map_point_then_its_first_sighting(cur):
+    """MS5, active adverts: a map point, then the earliest first sighting, then trust; ended last."""
+    pid = _property(cur)
+    unlocated, later = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    earliest = _advert(cur, pid, source="bazos")
+    ended = _advert(cur, pid, source="sreality", active=False)
+    _located(cur, later, earliest, ended)
+    for lid, first, last in ((unlocated, 30, 0), (later, 10, 0), (earliest, 20, 0), (ended, 60, 40)):
+        _seen(cur, lid, first, last)
+    assert _ranked(cur, pid) == [earliest, later, unlocated, ended]
+    assert _recomputed_canonical(cur, pid) == earliest
+
+
+def test_with_no_active_advert_the_latest_ended_advert_with_a_map_point_speaks(cur):
+    """MS5, every advert ended: a map point, then the latest last sighting; not first seen or trust."""
+    pid = _property(cur)
+    recent = _advert(cur, pid, source="idnes", active=False)
+    older = _advert(cur, pid, source="sreality", active=False)
+    unlocated = _advert(cur, pid, source="bazos", active=False)
+    _located(cur, recent, older)
+    for lid, first, last in ((recent, 40, 2), (older, 20, 10), (unlocated, 15, 1)):
+        _seen(cur, lid, first, last)
+    assert _ranked(cur, pid) == [recent, older, unlocated]
+    assert _recomputed_canonical(cur, pid) == recent
+
+
+def test_a_live_adverts_sighting_never_moves_the_canonical_advert(cur):
+    """561's moving key is gone: two live adverts first seen together keep their order (trust,
+    then id) when the other is seen again, and `repr_since` is not restamped."""
+    pid = _property(cur)
+    canon, other = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    _located(cur, canon, other)
+    for lid in (canon, other):
+        _seen(cur, lid, 10, 1)
+
+    def speaker() -> tuple[Any, ...]:
+        _recompute(cur, pid)
+        cur.execute("SELECT repr_listing_ref_id, repr_since::text FROM properties WHERE id = %s",
+                    (pid,))
+        return cur.fetchone()
+
+    before = speaker()
+    _seen(cur, other, 10, 0)
+    assert speaker() == before and before[0] == canon
+
+
+@pytest.mark.parametrize(("canonical", "ended", "union"), [
+    (False, True, True), (True, False, True), (None, True, True),
+    (False, None, False), (False, False, False), (None, None, None)])
+def test_the_six_amenities_are_a_union(cur, canonical, ended, union):
+    """MS6: yes if any advert (an ended one too) says yes, no if one says no, else unknown."""
+    amenities = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
+    pid = _property(cur)
+    canon = _advert(cur, pid, source="sreality")
+    other = _advert(cur, pid, source="idnes", active=False)
+    for lid, value in ((canon, canonical), (other, ended)):
+        cur.execute("UPDATE listings SET " + ", ".join(f"{c} = %s" for c in amenities)
+                    + " WHERE id = %s", (*[value] * len(amenities), lid))
+    assert _recomputed_canonical(cur, pid) == canon
+    cur.execute(f"SELECT {', '.join(amenities)} FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (union,) * len(amenities)
+
+
+def test_the_portal_lists_and_newest_ad_dates_follow_every_advert(cur):
+    """MS19: both portal lists and each portal's newest-advert date follow a merge and a detach."""
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    p, q = _property(cur), _property(cur)
+    old_idnes = _advert(cur, p, source="idnes")
+    new_idnes = _advert(cur, p, source="idnes", active=False)
+    sreality, bazos = _advert(cur, p, source="sreality"), _advert(cur, q, source="bazos")
+    for lid, first, last in ((old_idnes, 20, 0), (new_idnes, 5, 2), (sreality, 10, 0), (bazos, 3, 0)):
+        _seen(cur, lid, first, last)
+    for pid in (p, q):
+        _recompute(cur, pid)
+    cur.execute("SELECT id, first_seen_at FROM listings WHERE id = ANY(%s)",
+                ([new_idnes, sreality, bazos],))
+    first = {int(lid): at for lid, at in cur.fetchall()}
+    dates = {"idnes": first[new_idnes], "sreality": first[sreality]}
+
+    def portals() -> tuple[Any, ...]:
+        cur.execute("SELECT all_sources, active_sources, "
+                    + ", ".join(f"newest_ad_at_{o.value}" for o in PORTAL_OPTIONS)
+                    + " FROM properties WHERE id = %s", (p,))
+        row = cur.fetchone()
+        return row[0], row[1], {o.value: d for o, d in zip(PORTAL_OPTIONS, row[2:]) if d}
+
+    assert portals() == (["idnes", "sreality"], ["idnes", "sreality"], dates)
+    _merge(cur, [p, q])
+    assert portals() == (["bazos", "idnes", "sreality"], ["bazos", "idnes", "sreality"],
+                         {**dates, "bazos": first[bazos]})
+    assert _detach(cur, bazos)["outcome"] == "detached"
+    cur.execute("UPDATE listings SET is_active = false WHERE property_id = %s", (p,))
+    _recompute(cur, p)
+    assert portals() == (["idnes", "sreality"], [], dates)
+
+
+def test_a_same_portal_relist_counts_its_predecessors_steps_and_one_handover(cur):
+    """MS10: a predecessor's own cut plus one handover step count; alerts quote the canonical's own."""
+    from api.notifications import _recent_price_drops
+
+    pid = _property(cur)
+    before = _advert(cur, pid, source="sreality", price=5_200_000, active=False)
+    relist = _advert(cur, pid, source="sreality", price=4_900_000)
+    _seen(cur, before, 40, 10)
+    _seen(cur, relist, 5)
+    _snapshot(cur, before, 5_300_000, 30 * 24)
+    _snapshot(cur, before, 5_200_000, 20 * 24)
+    _snapshot(cur, relist, 5_000_000, 4 * 24)
+    cut = _snapshot(cur, relist, 4_900_000, 24)
+    assert _recomputed_canonical(cur, pid) == relist
+    cur.execute(
+        "SELECT price_drop_count, price_rise_count, price_change_count, price_change_count_30d, "
+        "       round(max_price_drop_pct, 2), round(total_price_change_pct, 2) "
+        "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (3, 0, 3, 3, Decimal("3.85"), Decimal("-7.55"))
+    drops = [d for d in _recent_price_drops(cur.connection, window_days=40) if d[0] == pid]
+    assert drops == [(pid, cut, 4_900_000, 5_000_000)]
+
+
+@pytest.mark.parametrize(("chain", "figures"), [
+    pytest.param([(60, 40, [(5_500_000, 50)]), (30, 10, [(5_300_000, 25), (5_200_000, 15)]),
+                  (5, 0, [(5_000_000, 4)])], (3, 3, 3, 3, Decimal("-9.09")), id="three-adverts"),
+    pytest.param([(40, 10, [(5_300_000, 30), (5_200_000, 20)]),
+                  (5, 0, [(5_200_000, 4), (5_000_000, 1)])], (2, 2, 2, 2, Decimal("-5.66")),
+                 id="same-price-relist"),
+    pytest.param([(40, 10, [(5_300_000, 30)]), (5, 0, [(5_000_000, 4)])],
+                 (1, 1, 1, 1, Decimal("-5.66")), id="one-priced-snapshot-each"),
+    pytest.param([(100, 60, [(5_300_000, 80)]), (50, 0, [(5_000_000, 45), (4_900_000, 1)])],
+                 (2, 2, 1, 2, Decimal("-7.55")), id="handover-before-the-30-days"),
+    pytest.param([(40, 5, [(5_300_000, 30)]), (5, 0, [(5_000_000, 4), (4_900_000, 1)])],
+                 (1, 1, 1, 1, Decimal("-2.00")), id="ended-as-the-next-began"),
+])
+def test_the_lineage_walks_every_predecessor_and_dates_each_handover(cur, chain, figures):
+    """MS10 on one portal, oldest advert first as (first seen, last seen, [(price, at)]) in days
+    ago, the last one live: every predecessor counts, a handover is a step only when the price
+    moves, dated at the newer advert's first price, and the total runs from the oldest priced
+    advert; one that ended the instant the next began ran beside it. Figures: drops, changes,
+    30- and 90-day changes, total."""
+    pid = _property(cur)
+    for i, (first, last, prices) in enumerate(chain):
+        lid = _advert(cur, pid, source="sreality", price=prices[-1][0], active=i == len(chain) - 1)
+        _seen(cur, lid, first, last)
+        for price, days in prices:
+            _snapshot(cur, lid, price, days * 24)
+    assert _recomputed_canonical(cur, pid) == lid
+    cur.execute("SELECT price_drop_count, price_change_count, price_change_count_30d, "
+                "price_change_count_90d, round(total_price_change_pct, 2) "
+                "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == figures
+
+
+def test_adverts_that_ran_at_the_same_time_never_form_a_step(cur):
+    """A same-portal advert that overlapped the canonical one, or another portal's, adds no step."""
+    pid = _property(cur)
+    canon = _advert(cur, pid, source="sreality", price=4_900_000)
+    overlapping = _advert(cur, pid, source="sreality", price=5_500_000, active=False)
+    other_portal = _advert(cur, pid, source="idnes", price=5_800_000, active=False)
+    for lid, first, last in ((canon, 5, 0), (overlapping, 20, 3), (other_portal, 30, 10)):
+        _seen(cur, lid, first, last)
+    for lid, older, newer, at in ((canon, 5_000_000, 4_900_000, 4),
+                                  (overlapping, 5_600_000, 5_500_000, 15),
+                                  (other_portal, 6_000_000, 5_800_000, 25)):
+        _snapshot(cur, lid, older, at * 24)
+        _snapshot(cur, lid, newer, (at - 3) * 24)
+    assert _recomputed_canonical(cur, pid) == canon
+    cur.execute("SELECT price_drop_count, price_change_count, round(max_price_drop_pct, 2), "
+                "round(total_price_change_pct, 2) FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (1, 1, Decimal("2.00"), Decimal("-2.00"))
+
+
+def test_a_canonical_change_clears_the_city_figure_stamp(cur):
+    """The city stamp survives a kept canonical advert, clears on a takeover and when older than it."""
+    pid = _property(cur)
+    first = _advert(cur, pid, source="sreality")
+    _recompute(cur, pid)
+
+    def city(stamp_sql: str | None = None) -> tuple[int, bool]:
+        if stamp_sql:
+            cur.execute(f"UPDATE properties SET city_proximity_computed_at = {stamp_sql} "
+                        "WHERE id = %s", (pid,))
+        _recompute(cur, pid)
+        cur.execute("SELECT repr_listing_ref_id, city_proximity_computed_at IS NOT NULL "
+                    "FROM properties WHERE id = %s", (pid,))
+        return cur.fetchone()
+
+    assert city("now() - interval '1 hour'") == (first, True)
+    takeover = _advert(cur, pid, source="idnes")
+    _located(cur, takeover)
+    assert city() == (takeover, False)
+    assert city("now()") == (takeover, True)
+    assert city("repr_since - interval '1 minute'") == (takeover, False)
+
+
+# --- rule 15's gate reads the set's ads (operator, 2026-10-06; hand-over addendum 14) -------
+
+
+def _filed(cur: Any, pid: int, main: str, price: int | None, area: int | None,
+           disposition: str | None, description: str | None) -> int:
+    cur.execute(
+        "INSERT INTO listings (source, source_id_native, raw_json, category_main, category_type, "
+        "price_czk, area_m2, disposition, description, property_id) "
+        "VALUES ('bazos', %s, '{}'::jsonb, %s, 'prodej', %s, %s, %s, %s, %s) RETURNING id",
+        (f"ms-{uuid.uuid4()}", main, price, area, disposition, description, pid))
+    return int(cur.fetchone()[0])
+
+
+def test_the_gate_reads_each_members_categories_over_its_contentful_ads(cur):
+    """`_SET_ADS_SQL`: one row per member and category, with its lowest ad; an ad counts exactly
+    when `autodedup.category_splits.contentless` does not call it contentless, so each of the
+    four facts alone counts and none, or a blank description, does not."""
+    from autodedup.category_splits import contentless
+    from toolkit.property_identity import _SET_ADS_SQL
+
+    mixed = _property(cur)
+    flat, _flat2, house = (_filed(cur, mixed, main, 1, 1, None, None)
+                           for main in ("byt", "byt", "dum"))
+    facts = {_property(cur): f for f in (
+        (5_000_000, None, None, None), (None, 70, None, None), (None, None, "2+kk", None),
+        (None, None, None, "Chata u lesa"), (None, None, None, None), (None, None, None, " \n\t "))}
+    for pid, f in facts.items():
+        _filed(cur, pid, "byt", *f)
+    cur.execute(_SET_ADS_SQL, {"ids": [mixed, *facts]})
+    rows = cur.fetchall()
+    assert [r for r in rows if r[0] == mixed] == [(mixed, "prodej", "byt", flat),
+                                                (mixed, "prodej", "dum", house)]
+    assert {r[0] for r in rows} - {mixed} == {pid for pid, f in facts.items() if not contentless(*f)}
+    assert len(rows) == 6

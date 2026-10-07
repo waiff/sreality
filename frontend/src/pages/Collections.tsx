@@ -15,6 +15,7 @@ import {
 import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
 import { Field } from '@/components/controls';
+import ErrorBanner from '@/components/ErrorBanner';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 import type { Collection } from '@/lib/types';
 
@@ -43,9 +44,11 @@ export default function Collections() {
         {listQ.isLoading && !listQ.data ? (
           <div className="text-sm text-[var(--color-ink-3)]">Loading…</div>
         ) : listQ.error ? (
-          <div className="text-sm text-[var(--color-brick)]">
-            Failed to load: {listQ.error.message}
-          </div>
+          <ErrorBanner
+            title="Failed to load:"
+            message={listQ.error.message}
+            onRetry={() => void listQ.refetch()}
+          />
         ) : items.length === 0 ? (
           <EmptyState />
         ) : (

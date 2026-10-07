@@ -1,61 +1,69 @@
-"""The operator's split statement (E919): one property's adverts as the operator partitions them,
-made true in ONE transaction and ruled.
+"""The operator's split by letters (MS18): every ad of a property gets a letter, and ads with the
+same letter are one property afterwards. One letter keeps the property, its number and page, by
+the rule (`property_identity.letter_landings`); every other letter leaves, back to the property it
+came from while that is still merged into this one, else to a new property, and a letter landing
+on two or more properties is joined into the oldest.
 
-`split_property` takes every advert the operator was shown and the units to separate; the rest is
-the kept unit. It moves adverts ONLY through rule 15's chokepoint (ONE `detach_listings` call,
-then `merge_property_set` to join a unit that landed on two records) and rules ONLY through
-`record_rulings` (each pair through `record_ruling`, the one pair writer, which APPENDS to the
-rulings ledger, migration 574 / E920): `different` + an operator must-not-link across units,
-`same` inside each separated unit, and `same` inside the kept unit when `keep_together`; a
-machine veto on a pair it rules `same` stays the machine's (`restore_must_not_link`). A refusal
-is a `SplitRefused` and nothing is written. The response carries the body of its own undo:
-`undo_split` re-joins the adverts and appends each pair's previous word again and puts back its
-must-not-link row.
+`split_preview` reads, changing nothing, where each letter and each of the acting account's items
+would land (with the user's picks, what the click would then skip), the rulings it would write and
+take back, and `plan`, a digest of all of it but labels, picks and other accounts. `split_property`
+makes it true in ONE transaction only while that digest still holds, moving ads ONLY through rule
+15's chokepoint (ONE `detach_listings` call with its births and its curation routes, then
+`merge_property_set` per letter to join) and ruling ONLY through `record_rulings`: "different"
+between ads with different letters; inside a letter only what its join rules, as the merge it is
+(MS12: "same" over the landings' canonical ads and every "different" between them). A refusal is a
+`SplitRefused` (`{code, message, ids}`, in Czech) and nothing is written. No undo: one merge takes
+a split back (MS12).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import string
 import uuid
-from collections import Counter
-from typing import Any, Iterable, Mapping
+from datetime import datetime, timezone
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
+from uuid import UUID
 
 import psycopg
 from psycopg import errors as pg_errors
 
 from autodedup import ui_sql as usql
+from toolkit import property_carriers as carriers
+from toolkit.property_carriers import Route
 from toolkit.property_identity import (
-    MOVED,
+    CategoryClash,
+    Landings,
     MergeError,
+    ad_categories,
+    adverts_on,
     detach_listings,
-    detach_outcomes,
-    listing_origins,
+    first_clash,
+    letter_landings,
     listing_places,
     lock_properties,
     merge_property_set,
-    must_not_link_rows,
+    negative_sets,
     record_rulings,
     resolve_active_property_id,
-    resolve_active_property_ids,
-    restore_must_not_link,
 )
 
 Pair = tuple[int, int]
-Veto = tuple[str, str | None]
+Slot = tuple[str, int]  # where an ad lands before the joins: ('kept' | 'origin' | 'new', id)
 
-# A letter per unit, as the Groups page's split names them; past 26 it is a rejection, not a split.
 UNIT_LETTERS = string.ascii_uppercase
 MAX_ADVERTS = 100
-MAX_SEPARATED = len(UNIT_LETTERS) - 1
 REASON_MAX = 500
-# `autodedup.must_not_link.source`'s CHECK (migration 528); every one but `operator` is a machine's.
-VETO_SOURCES = frozenset({"guard", "model", "llm", "operator"})
 # The lane's per-group bounds (E911): a split never waits long behind the reconcile.
 _TIMEOUTS = ("SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'")
-_ADVERTS_ON_SQL = """
-SELECT id, property_id FROM listings WHERE property_id = ANY(%(ids)s::bigint[]) ORDER BY id
-"""
+_READ_ONLY = "SET TRANSACTION READ ONLY"
 _BUSY = (pg_errors.LockNotAvailable, pg_errors.DeadlockDetected, pg_errors.QueryCanceled)
+STALE = "Nemovitost se mezitím změnila; nic se nezapsalo."
+_KINDS = {"property_notes": "note", "property_pipeline": "pipeline",
+          "collection_properties": "collection", "property_tags": "tag",
+          "property_dismissals": "dismissal"}
+_EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 
 
 class SplitRefused(MergeError):
@@ -118,143 +126,322 @@ def _bound(conn: psycopg.Connection) -> None:
             cur.execute(sql)
 
 
-def _adverts_on(conn: psycopg.Connection, property_ids: Iterable[int]) -> dict[int, list[int]]:
-    ids = sorted({int(p) for p in property_ids})
-    out: dict[int, list[int]] = {pid: [] for pid in ids}
-    with conn.cursor() as cur:
-        cur.execute(_ADVERTS_ON_SQL, {"ids": ids})
-        for lid, pid in cur.fetchall():
-            out.setdefault(int(pid), []).append(int(lid))
-    return {pid: sorted(lids) for pid, lids in out.items()}
+def _statement_letters(letters: Mapping[Any, Any]) -> dict[int, str]:
+    """Every ad of the property with its letter, or a 400."""
+    if not 1 <= len(letters) <= MAX_ADVERTS:
+        raise _invalid(f"Rozdělení jmenuje 1 až {MAX_ADVERTS} inzerátů.")
+    named: dict[int, str] = {}
+    for ad, letter in letters.items():
+        lid = int(ad)
+        if lid in named:
+            raise _invalid("Inzerát je uveden dvakrát.", [lid])
+        if not isinstance(letter, str) or len(letter) != 1 or letter not in UNIT_LETTERS:
+            raise _invalid("Písmeno musí být A–Z.", [lid])
+        named[lid] = letter
+    if len(set(named.values())) < 2:
+        raise _invalid("Všechny inzeráty mají stejné písmeno, není co rozdělit.")
+    return named
 
 
-def _statement_units(adverts: list[int], separate: list[list[int]]) -> list[list[int]]:
-    """[U0 (the kept unit), U1..Uk (the separated ones)], or a 400."""
-    if not 1 <= len(adverts) <= MAX_ADVERTS:
-        raise _invalid(f"adverts names 1 to {MAX_ADVERTS} adverts")
-    named = Counter(int(a) for a in adverts)
-    if twice := sorted(a for a, n in named.items() if n > 1):
-        raise _invalid("an advert is named twice", twice)
-    if len(separate) > MAX_SEPARATED:
-        raise _invalid(f"a split names at most {len(UNIT_LETTERS)} units")
-    shown, seen, units = set(named), set(), []
-    for group in separate:
-        if not group:
-            raise _invalid("a separated group cannot be empty")
-        if len(group) > MAX_ADVERTS:
-            raise _invalid(f"a separated group names at most {MAX_ADVERTS} adverts")
-        ids = Counter(int(i) for i in group)
-        if stray := sorted(set(ids) - shown):
-            raise _invalid("a separated advert is not among the adverts shown", stray)
-        if twice := sorted(i for i, n in ids.items() if n > 1 or i in seen):
-            raise _invalid("an advert is in two separated groups", twice)
-        seen |= set(ids)
-        units.append(sorted(ids))
-    kept = sorted(shown - seen)
-    if not kept:
-        raise _invalid("one unit must stay: every advert is separated")
-    return [kept, *units]
+def parse_choices(raw: str) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """`{"pipeline": {"to": "B", "copies": ["C"]}}` (the preview's query, the click's own shape) as
+    each item's letter and copies."""
+    try:
+        return {str(item): (str(c["to"]), tuple(str(x) for x in c.get("copies") or ()))
+                for item, c in json.loads(raw).items()}
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise _invalid("Volby se nepodařilo přečíst.") from exc
 
 
-def _targets(letter: Mapping[int, str], keep_together: bool) -> dict[Pair, str]:
-    """The verdict each pair of named adverts ends on; the kept unit's own pairs only when
-    `keep_together` (without it the statement says nothing about them)."""
-    named, out = sorted(letter), {}
-    for i, lo in enumerate(named):
-        for hi in named[i + 1:]:
-            if letter[lo] != letter[hi]:
-                out[(lo, hi)] = "different"
-            elif letter[lo] != UNIT_LETTERS[0] or keep_together:
-                out[(lo, hi)] = "same"
+def parse_letters(raw: str) -> dict[int, str]:
+    """`94020:A,140903:A,94492:B` (the preview's query and the pages' links) as letters."""
+    out: dict[int, str] = {}
+    for token in (t.strip() for t in raw.split(",")):
+        ad, _, letter = token.partition(":")
+        if not (ad.isascii() and ad.isdigit()):
+            raise _invalid("Písmena se zadávají jako inzerát:písmeno, například 94020:A.")
+        if int(ad) in out:
+            raise _invalid("Inzerát je uveden dvakrát.", [int(ad)])
+        out[int(ad)] = letter
+    return _statement_letters(out)
+
+
+def _statement_reason(reason: str | None) -> str | None:
+    reason = (reason or "").strip() or None
+    if reason is not None and len(reason) > REASON_MAX:
+        raise _invalid(f"Důvod má nejvýš {REASON_MAX} znaků.")
+    return reason
+
+
+def _statement_choices(
+    choices: Mapping[str, tuple[str, Iterable[str]]], letters: Iterable[str],
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Each item's letter and its copies' letters, among the letters in use, or a 400."""
+    in_use = set(letters)
+    out: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for item, (to, copies) in choices.items():
+        copies = tuple(dict.fromkeys(copies))
+        if to not in in_use or not set(copies) <= in_use:
+            raise _invalid("Volba míří na písmeno, které žádný inzerát nemá.", [item])
+        if to in copies:
+            raise _invalid("Kopie nemůže jít do písmene, které položku dostane.", [item])
+        out[str(item)] = (to, copies)
     return out
 
 
-def _guard(
-    conn: psycopg.Connection, record: int, on_record: list[int], places: Mapping[int, int | None],
-    letter: Mapping[int, str],
-) -> None:
-    """The operator's view is current: every advert on the record was shown, and a shown one
-    elsewhere sits on a property holding only shown adverts of ONE unit (a re-send finding what
-    it moved before); anything else is a 409 `stale`."""
-    if unseen := [lid for lid in on_record if lid not in letter]:
-        raise SplitRefused(409, "stale", f"property {record} holds adverts the statement did not "
-                           f"name: {', '.join(map(str, unseen))}", unseen)
-    away = {pid for lid, pid in places.items() if pid != record}
-    if None in away:
-        stray = sorted(lid for lid, pid in places.items() if pid is None)
-        raise SplitRefused(409, "stale", "an advert has no property", stray)
-    for pid, lids in _adverts_on(conn, away).items():
-        if any(lid not in letter for lid in lids) or len({letter[lid] for lid in lids}) > 1:
-            raise SplitRefused(409, "stale", f"property {pid} holds adverts of another unit or "
-                               "adverts the statement did not name", lids)
+def _record(conn: psycopg.Connection, property_id: int) -> int:
+    record = resolve_active_property_id(conn, int(property_id))
+    if record is None:
+        raise SplitRefused(404, "not_found", f"Nemovitost #{property_id} neexistuje.",
+                           [property_id])
+    return record
 
 
-def _keeper(units: list[list[int]], own: set[int], keep_together: bool) -> int:
-    """The unit that keeps the record: the kept unit while it holds one of its own adverts (or
-    none does), else — an own advert never leaves the last — the unit holding most of them."""
-    counts = [len(own.intersection(u)) for u in units]
-    if counts[0] or not any(counts):
-        return 0
-    if not keep_together:
-        raise SplitRefused(409, "cannot_move", "the property's own adverts would all leave",
-                           [{"listing_id": lid, "outcome": "last_native"} for lid in sorted(own)])
-    return max(range(len(units)), key=lambda i: (counts[i], -i))
+def _check_ads(conn: psycopg.Connection, record: int, letters: Mapping[int, str]) -> None:
+    """The letters name every ad on the property and no other: an unknown ad is a 404, an ad
+    that arrived or left since the dialog read them a 409 `stale`."""
+    places = listing_places(conn, sorted(letters))
+    if missing := sorted(lid for lid in letters if lid not in places):
+        raise SplitRefused(404, "not_found", f"Inzerát #{missing[0]} neexistuje.", missing)
+    if moved := sorted(set(adverts_on(conn, [record])[record]) ^ set(letters)):
+        raise SplitRefused(409, "stale", STALE, moved)
 
 
-def _landings(
-    conn: psycopg.Connection, letter: Mapping[int, str], movers: list[int],
-    origins: Mapping[int, tuple[int, str, Any]],
-) -> None:
-    """Each unit leaves as a record of its OWN: no two units' adverts go home to one property,
-    and a property one goes home to holds only named adverts of that unit; else nothing moves."""
-    home: dict[int, set[str]] = {}
-    for lid in movers:
-        if lid in origins:
-            home.setdefault(int(origins[lid][0]), set()).add(letter[lid])
-    if not home:
-        return
-    if shared := sorted(lid for lid in movers
-                        if lid in origins and len(home[int(origins[lid][0])]) > 1):
-        raise SplitRefused(409, "cannot_move", "adverts of different units came from one "
-                           f"property and would go back to it together: {', '.join(map(str, shared))}",
-                           [{"listing_id": lid, "outcome": "shared_origin"} for lid in shared])
-    for pid, lids in _adverts_on(conn, home).items():
-        if drag := [lid for lid in lids if lid not in letter]:
-            raise SplitRefused(409, "join_would_drag", f"property {pid}, where a separated advert "
-                               "goes back, holds adverts the statement did not name: "
-                               f"{', '.join(map(str, drag))}", drag)
-        if other := [lid for lid in lids if letter[lid] not in home[pid]]:
-            back = sorted(lid for lid in movers if lid in origins and int(origins[lid][0]) == pid)
-            raise SplitRefused(409, "cannot_move", f"property {pid}, where a separated advert goes "
-                               f"back, holds another unit's adverts: {', '.join(map(str, other))}",
-                               [{"listing_id": lid, "outcome": "shared_origin"} for lid in back])
+class _Plan(NamedTuple):
+    """Everything the preview shows and the write makes true, read under one snapshot."""
+
+    record: int
+    letters: dict[int, str]
+    account: UUID | None
+    landings: Landings
+    slots: dict[int, Slot]  # each ad, where it lands before the joins
+    kept: dict[str, Slot]  # each letter, the landing its join keeps (its only one if no join)
+    joins: dict[str, int]  # each joined letter, how many properties it lands on
+    refused: dict[str, dict[str, Any]]  # a letter whose join rule 15 refuses
+    inside: list[dict[str, Any]]  # standing "different" rulings inside a letter
+    different: int  # pairs across letters, each ruled "different"
+    taken_back: int  # what the joins take back (MS12)
+    routes: list[Route]  # every account's curation, preselected
+
+    @property
+    def movers(self) -> dict[int, int | None]:
+        return {ad: self.landings.origin.get(ad) for ad, letter in self.letters.items()
+                if letter != self.landings.staying}
+
+    def anchor(self, letter: str) -> int | None:
+        """The ad whose landing the letter's join keeps; None for the letter that stays."""
+        if letter == self.landings.staying:
+            return None
+        return min(ad for ad, s in self.slots.items()
+                   if self.letters[ad] == letter and s == self.kept[letter])
+
+    def letter_of(self, anchor: int | None) -> str:
+        return self.landings.staying if anchor is None else self.letters[anchor]
+
+    def lands(self, letter: str) -> tuple[str, int | None]:
+        kind, at = self.kept[letter]
+        return kind, (None if kind == "new" else at)
+
+    def mine(self, routes: Iterable[Route] | None = None) -> list[Route]:
+        """The acting account's routes (the preselection's unless given); none without one."""
+        return [r for r in (self.routes if routes is None else routes)
+                if self.account is not None and r.account_id == self.account]
 
 
-def _join(
-    conn: psycopg.Connection, record: int, units: list[list[int]], landed: set[int],
-    decided_by: str,
-) -> dict[int, dict[str, Any]]:
-    """Each unit left on two or more records becomes one, by the one merge; only across the
-    record and what this call's detaches landed on, never dragging an advert of another unit."""
-    places = listing_places(conn, [lid for unit in units for lid in unit])
-    joined: dict[int, dict[str, Any]] = {}
-    for index, unit in enumerate(units):
-        props = sorted({int(places[lid]) for lid in unit if places.get(lid) is not None})
+def _slot_order(slot: Slot) -> tuple[bool, int]:
+    """A landing's place among a letter's: existing properties by id, then the newborns in birth
+    order (`detach_listings` births them in ascending ad order)."""
+    return slot[0] == "new", slot[1]
+
+
+def _keeps(slots: Mapping[Slot, list[int]], first_seen: Mapping[int, datetime | None]) -> Slot:
+    """The landing a letter's join keeps: decision 17 over each landing's first seen date as the
+    recompute will date it (its ads' earliest), unknown last, then `_slot_order`."""
+    def dated(slot: Slot) -> datetime | None:
+        dates = [d for d in (first_seen.get(ad) for ad in slots[slot]) if d is not None]
+        return min(dates) if dates else None
+    return min(slots, key=lambda s: (dated(s) is None, dated(s) or _EARLIEST, *_slot_order(s)))
+
+
+def _plan(conn: psycopg.Connection, record: int, letters: Mapping[int, str],
+          account: UUID | None) -> _Plan:
+    """The split as it stands now, read only (`split_preview` and, under the lock,
+    `split_property`)."""
+    land = letter_landings(conn, record, letters)
+    slots: dict[int, Slot] = {}
+    for ad, letter in letters.items():
+        if letter == land.staying:
+            slots[ad] = ("kept", record)
+        else:
+            slots[ad] = ("origin", land.origin[ad]) if ad in land.origin else ("new", ad)
+    facts = ad_categories(conn, letters)
+    by_letter: dict[str, dict[Slot, list[int]]] = {}
+    for ad in sorted(letters):
+        by_letter.setdefault(letters[ad], {}).setdefault(slots[ad], []).append(ad)
+    first_seen = {ad: f[2] for ad, f in facts.items()}
+    kept = {letter: _keeps(at, first_seen) for letter, at in by_letter.items()}
+    joins = {letter: len(at) for letter, at in by_letter.items() if len(at) > 1}
+    refused: dict[str, dict[str, Any]] = {}
+    for letter in joins:
+        rows, seen = [], set()
+        for slot in sorted(by_letter[letter], key=_slot_order):
+            for ad in by_letter[letter][slot]:
+                kind, main, _first, empty = facts.get(ad, (None, None, None, True))
+                if not empty and (slot, kind, main) not in seen:
+                    seen.add((slot, kind, main))
+                    rows.append((slot, (kind, main), ad))
+        if found := first_clash(rows):
+            (field, a, b), _members, ads = found
+            refused[letter] = {"code": "refused", "field": field, "a": a, "b": b,
+                               "ids": list(ads)}
+    stored = newest_pair_rulings(conn, letters)
+    sets = negative_sets(conn, letters)
+    inside: list[dict[str, Any]] = []
+    taken_back = 0
+    for letter in sorted(by_letter):
+        pairs = sorted(p for p, v in stored.items() if v["verdict"] in usql.NEGATIVE_VERDICTS
+                       and letters[p[0]] == letters[p[1]] == letter)
+        own_sets = [ids for _key, _gen, ids in sets if all(letters[i] == letter for i in ids)]
+        for taken in (True, False):
+            p = [x for x in pairs if (slots[x[0]] != slots[x[1]]) == taken]
+            s = [x for x in own_sets if (len({slots[i] for i in x}) >= 2) == taken]
+            if p or s:
+                inside.append({"letter": letter, "pairs": [list(x) for x in p], "sets": len(s),
+                               "taken_back": taken})
+                taken_back += (len(p) + len(s)) if taken else 0
+    sizes = [sum(len(ads) for ads in at.values()) for at in by_letter.values()]
+    different = (len(letters) * (len(letters) - 1) - sum(n * (n - 1) for n in sizes)) // 2
+    movers = {ad: land.origin.get(ad) for ad, letter in letters.items() if letter != land.staying}
+    with conn.cursor() as cur:
+        routes = carriers.curation_plan(cur, left=record, movers=movers, account=account)
+    return _Plan(record, dict(letters), account, land, slots, kept, joins, refused, inside,
+                 different, taken_back, list(routes))
+
+
+def _items(plan: _Plan, chosen: Sequence[Route] | None = None) -> list[dict[str, Any]]:
+    """The acting account's items as the preselection routes them: where each goes and why. With
+    `chosen` (the plan the user's picks make), what the click would then skip: a fold not
+    re-created and each copy, with why (`skipped`)."""
+    picked = plan.mine(chosen) if chosen is not None else []
+    folds = {r.item: r.skipped for r in picked if r.action == "recreate"}
+    out = []
+    for r in plan.mine():
+        why = ("fold" if r.action == "recreate" else "came_from" if r.origin is not None
+               else "ad" if r.table == "property_notes" and r.anchor is not None else "stays")
+        entry: dict[str, Any] = {"item": r.item, "kind": _KINDS[r.table], "label": r.label,
+                                 "letter": plan.letter_of(r.anchor), "why": why}
+        if r.origin is not None:
+            entry["from_property_id"] = r.origin
+        if r.action == "recreate":
+            entry["skipped"] = folds.get(r.item, r.skipped)
+        if copies := [{"letter": plan.letter_of(c.anchor), "skipped": c.skipped}
+                      for c in picked if c.action == "copy" and c.item == r.item]:
+            entry["copies"] = copies
+        out.append(entry)
+    return out
+
+
+def _digest(plan: _Plan, items: list[dict[str, Any]]) -> str:
+    """The plan the user saw, but labels, picks and other accounts (so another account's change
+    neither refuses the click nor leaks, and a pick never makes it stale)."""
+    canon = {
+        "letters": sorted([ad, letter] for ad, letter in plan.letters.items()),
+        "staying": plan.landings.staying,
+        "landings": sorted([letter, *plan.lands(letter), plan.joins.get(letter, 0)]
+                           for letter in plan.kept),
+        "items": sorted([i["item"], i["letter"], bool(i.get("skipped"))] for i in items),
+        "rulings": [plan.different, plan.taken_back],
+    }
+    blob = json.dumps(canon, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _letters_out(plan: _Plan) -> list[dict[str, Any]]:
+    out = []
+    for letter in sorted(plan.kept):
+        lands, at = plan.lands(letter)
+        out.append({"letter": letter,
+                    "listing_ids": sorted(ad for ad, x in plan.letters.items() if x == letter),
+                    "lands": lands, "property_id": at, "joins": plan.joins.get(letter, 0),
+                    "refused": plan.refused.get(letter)})
+    return out
+
+
+def split_preview(
+    conn: psycopg.Connection, property_id: int, *, letters: Mapping[int, str],
+    account: UUID | None, choices: Mapping[str, tuple[str, Iterable[str]]] | None = None,
+) -> dict[str, Any]:
+    """Where these letters would take each ad and each of `account`'s items (with `choices`, what
+    the click would then skip), what would be ruled and taken back, and `plan` (the digest the
+    write checks, over the preselection); in a read-only transaction that takes no lock and is
+    rolled back."""
+    named = _statement_letters(letters)
+    picks = _statement_choices(choices or {}, named.values())
+    try:
+        with conn.transaction(force_rollback=True):
+            with conn.cursor() as cur:
+                cur.execute(_READ_ONLY)
+            _bound(conn)
+            record = _record(conn, property_id)
+            _check_ads(conn, record, named)
+            plan = _plan(conn, record, named, account)
+            routes = _chosen(conn, plan, picks)
+    except _BUSY as exc:
+        raise SplitRefused(409, "busy", "Nemovitost se právě mění, zkuste to za chvíli.",
+                           [property_id]) from exc
+    return {
+        "property_id": plan.record,
+        "letters": _letters_out(plan),
+        "curation": _items(plan, routes if picks else None),
+        "rulings": {"different": plan.different, "taken_back": plan.taken_back,
+                    "inside": plan.inside},
+        "plan": _digest(plan, _items(plan)),
+    }
+
+
+def _anchors(
+    plan: _Plan, choices: Mapping[str, tuple[str, tuple[str, ...]]],
+) -> dict[str, tuple[int | None, tuple[int | None, ...]]]:
+    """Each chosen letter as the ad whose landing that letter's join keeps (an unchanged letter
+    keeps its preselected anchor), for the acting account's own items only."""
+    mine = {r.item: r for r in plan.mine() if r.action == "move"}
+    out: dict[str, tuple[int | None, tuple[int | None, ...]]] = {}
+    for item, (to, copies) in choices.items():
+        if (r := mine.get(item)) is None:
+            raise _invalid("Volba patří položce, kterou náhled neukázal.", [item])
+        anchor = r.anchor if to == plan.letter_of(r.anchor) else plan.anchor(to)
+        out[item] = (anchor, tuple(plan.anchor(c) for c in copies))
+    return out
+
+
+def _chosen(conn: psycopg.Connection, plan: _Plan,
+            picks: Mapping[str, tuple[str, tuple[str, ...]]]) -> list[Route]:
+    """The routes the acting account's picks make (the preselection when none)."""
+    if not picks:
+        return plan.routes
+    with conn.cursor() as cur:
+        return carriers.curation_plan(cur, left=plan.record, movers=plan.movers,
+                                      choices=_anchors(plan, picks), account=plan.account)
+
+
+def _join(conn: psycopg.Connection, plan: _Plan, decided_by: str) -> dict[str, dict[str, Any]]:
+    """Each letter that landed on two or more properties becomes one, by the one merge (MS12
+    takes back the "different" rulings between them); rule 15's refusal propagates."""
+    places = listing_places(conn, sorted(plan.movers))
+    joined: dict[str, dict[str, Any]] = {}
+    for letter in sorted(plan.joins):
+        props = sorted({int(places[ad]) for ad, x in plan.letters.items()
+                        if x == letter and places.get(ad) is not None})
         if len(props) < 2:
             continue
-        if outside := [p for p in props if p != record and p not in landed]:
-            raise SplitRefused(409, "stale", "a unit sits on a property this split did not "
-                               f"produce: {', '.join(map(str, outside))}", outside)
-        held = _adverts_on(conn, props)
-        if drag := sorted(lid for p in props for lid in held.get(p, []) if lid not in unit):
-            raise SplitRefused(409, "join_would_drag", "joining the unit would take adverts "
-                               f"the statement did not name: {', '.join(map(str, drag))}", drag)
         try:
-            joined[index] = merge_property_set(
+            joined[letter] = merge_property_set(
                 conn, props, source="operator", reason="operator_split", decided_by=decided_by,
             )["data"]
+        except CategoryClash:
+            raise
         except MergeError as exc:
-            raise SplitRefused(409, "refused", str(exc), props) from exc
+            raise SplitRefused(409, "stale", STALE, props) from exc
     return joined
 
 
@@ -262,235 +449,83 @@ def split_property(
     conn: psycopg.Connection,
     property_id: int,
     *,
-    adverts: list[int],
-    separate: list[list[int]],
-    keep_together: bool,
+    letters: Mapping[int, str],
     decided_by: str,
+    account: UUID | None,
+    choices: Mapping[str, tuple[str, Iterable[str]]] | None = None,
     reason: str | None = None,
-    confirm_retract: bool = False,
+    expect: str = "",
 ) -> dict[str, Any]:
-    """The statement: `separate`'s units leave the property (each one record), the rest stay
-    (one property, ruled so when `keep_together`); all or nothing."""
-    units = _statement_units(adverts, separate)
-    if len(units) == 1 and not keep_together:
-        raise _invalid("nothing to separate and nothing to confirm")
-    reason = (reason or "").strip() or None
-    if reason is not None and len(reason) > REASON_MAX:
-        raise _invalid(f"a reason is at most {REASON_MAX} characters")
-    letter = {lid: UNIT_LETTERS[i] for i, unit in enumerate(units) for lid in unit}
-    named = sorted(letter)
-    targets = _targets(letter, keep_together)
+    """The split, all or nothing, while its plan is still `expect` (the preview's digest):
+    `choices` move the acting account's own items to a letter and copy them to others (the rest
+    follow the preselection), one `detach_listings`, the joins, then "different" across letters.
+    Answers one receipt: where each letter and each of `account`'s items landed."""
+    named = _statement_letters(letters)
+    why = _statement_reason(reason)
+    picks = _statement_choices(choices or {}, named.values())
+    if not expect:
+        raise _invalid("Chybí náhled rozdělení.")
     call_id = str(uuid.uuid4())
-    note = f"operator split {call_id} · {split_summary(letter)}" + (f" · {reason}" if reason else "")
+    note = f"operator split {call_id} · {split_summary(named)}" + (f" · {why}" if why else "")
     try:
         with conn.transaction():
             _bound(conn)
-            record = resolve_active_property_id(conn, int(property_id))
-            if record is None:
-                raise SplitRefused(404, "not_found", f"property {property_id} not found")
-            places = listing_places(conn, named)
-            if missing := [lid for lid in named if lid not in places]:
-                raise SplitRefused(404, "not_found", "no such advert", missing)
-            on_record = _adverts_on(conn, [record])[record]
-            _guard(conn, record, on_record, places, letter)
-
-            own = set(on_record) - set(listing_origins(conn, on_record))
-            keeper = _keeper(units, own, keep_together)
-            movers = [lid for lid in on_record if letter[lid] != UNIT_LETTERS[keeper]]
-            outcomes = detach_outcomes(conn, movers)
-            if stuck := [{"listing_id": lid, "outcome": outcomes.get(lid)} for lid in movers
-                         if outcomes.get(lid) not in MOVED]:
-                raise SplitRefused(409, "cannot_move", "an advert cannot leave the property",
-                                   stuck)
-
-            stored = newest_pair_rulings(conn, named)
-            taken_back = reversed_pairs({p: v["verdict"] for p, v in stored.items()},
-                                        [p for p, t in targets.items() if t == "same"])
-            if taken_back and not confirm_retract:
-                raise SplitRefused(409, "reverses_rulings", reversal_message(taken_back),
-                                   [list(p) for p in taken_back])
-
-            origins = listing_origins(conn, movers)
-            lock_properties(conn, [record, *(origins[m][0] for m in movers if m in origins)])
-            if _adverts_on(conn, [record])[record] != on_record:
-                raise SplitRefused(409, "stale", f"property {record} changed while splitting")
-            _landings(conn, letter, movers, origins)
-            vetoes = must_not_link_rows(conn, named)
-            out = detach_listings(conn, movers, decided_by=decided_by, reason=reason,
-                                  source="operator")["data"]["adverts"]
-            if stuck := [{"listing_id": a["listing_id"], "outcome": a["outcome"]}
-                         for a in out if a["outcome"] not in MOVED]:
-                raise SplitRefused(409, "cannot_move", "an advert cannot leave the property", stuck)
-            moves = [{"listing_id": a["listing_id"], "outcome": a["outcome"], "from": record,
-                      "to": a["restored_property_id"]} for a in out]
-            joined = _join(conn, record, units, {int(m["to"]) for m in moves}, decided_by)
-            final = listing_places(conn, named)
-
-            write = targets if moves else {
-                p: t for p, t in targets.items() if (stored.get(p) or {}).get("verdict") != t}
-            same = {p for p, t in write.items() if t == "same"}
-            different = {p for p, t in write.items() if t == "different"}
-            record_rulings(conn, same, verdict="same", decided_by=decided_by, note=note)
-            record_rulings(conn, different, verdict="different", decided_by=decided_by, note=note)
-            # `same` leaves a machine veto standing; no detach in this call rules a pair inside one
-            # unit (`_rule_detached`), so this writes nothing today — kept until F1 deletes it with
-            # the rail's proof (tests/test_property_split.py, the machine-veto test).
-            restore_must_not_link(conn, {p: v for p, v in vetoes.items()
-                                         if v[0] != "operator" and targets.get(p) == "same"})
+            record = _record(conn, property_id)
+            _check_ads(conn, record, named)
+            lock_properties(conn, [record, *letter_landings(conn, record, named).origin.values()])
+            _check_ads(conn, record, named)
+            plan = _plan(conn, record, named, account)
+            if _digest(plan, _items(plan)) != expect:
+                raise SplitRefused(409, "stale", STALE)
+            movers = plan.movers
+            routes = _chosen(conn, plan, picks)
+            out = detach_listings(conn, sorted(movers), decided_by=decided_by, source="operator",
+                                  new=plan.landings.new, curation=routes)["data"]["adverts"]
+            if stuck := [a["listing_id"] for a in out if not a["detached"] or (
+                    a["listing_id"] in plan.landings.origin
+                    and a["restored_property_id"] != plan.landings.origin[a["listing_id"]])]:
+                raise SplitRefused(409, "stale", STALE, stuck)
+            joined = _join(conn, plan, decided_by)
+            cross = {(lo, hi) for lo in named for hi in named if lo < hi and named[lo] != named[hi]}
+            record_rulings(conn, cross, verdict="different", decided_by=decided_by, note=note)
+            final = listing_places(conn, sorted(named))
     except _BUSY as exc:
-        raise SplitRefused(409, "busy", "the property is being changed right now; try again",
+        raise SplitRefused(409, "busy", "Nemovitost se právě mění, zkuste to za chvíli.",
                            [property_id]) from exc
-
-    undo = None
-    if moves or write:
-        undo = {
-            "call_id": call_id,
-            "placements": {lid: final[lid] for lid in on_record} if moves else {},
-            "rulings": [{"listing_lo": lo, "listing_hi": hi,
-                         **_previous_word(stored.get((lo, hi)), vetoes.get((lo, hi))),
-                         "must_not_link": _veto_body(vetoes.get((lo, hi)))}
-                        for lo, hi in sorted(write)],
-        }
+    # after the joins every letter's ads sit on one property
+    at = {letter: int(final[min(ad for ad, x in named.items() if x == letter)])
+          for letter in plan.kept}
     return {
-        "call_id": call_id,
         "property_id": record,
-        "record_kept_by": UNIT_LETTERS[keeper],
-        "units": [
-            {"unit": UNIT_LETTERS[i], "role": "kept" if i == 0 else "separated",
-             "listing_ids": unit, "property_id": final[unit[0]],
-             "moved": [m for m in moves if letter[m["listing_id"]] == UNIT_LETTERS[i]],
-             "merge_group_id": joined[i]["merge_group_id"] if i in joined else None}
-            for i, unit in enumerate(units)
-        ],
-        "moved": len(moves),
-        "rulings": {"written": len(write), "same": len(same), "different": len(different),
-                    "must_not_link_written": len(different),
-                    "must_not_link_retracted": len(same)},
-        "reversed_pairs": [list(p) for p in taken_back],
-        "undo": undo,
+        "call_id": call_id,
+        "letters": [{**{k: v for k, v in x.items() if k in ("letter", "listing_ids", "lands")},
+                     "property_id": at[x["letter"]],
+                     "joined": joined[x["letter"]]["merge_group_id"] if x["letter"] in joined
+                     else None} for x in _letters_out(plan)],
+        "curation": _receipt_items(plan, routes, at),
+        "rulings": {"different": len(cross),
+                    "same": sum(j["pairs_ruled_same"] for j in joined.values()),
+                    "taken_back": sum(j["rulings_taken_back"] for j in joined.values())},
     }
 
 
-def _previous_word(ruling: Mapping[str, Any] | None, veto: Veto | None) -> dict[str, Any]:
-    """What the pair said before the split, as its undo appends it again: its newest ruling, else
-    a bare operator veto as the `different` it is (`record_ruling` writes it down so, E920), else
-    nothing (the undo's `unsure`)."""
-    if ruling is not None:
-        return {"verdict": ruling["verdict"], "note": ruling["note"],
-                "reasons": list(ruling["reasons"] or [])}
-    if veto is not None and veto[0] == "operator":
-        return {"verdict": "different", "note": veto[1], "reasons": []}
-    return {"verdict": None, "note": None, "reasons": []}
+def _receipt_items(plan: _Plan, routes: list[Route],
+                   at: Mapping[str, int]) -> list[dict[str, Any]]:
+    """What became of each of the acting account's items: its letter and property, and where
+    its copies went (a fold re-created is one of them); a fold or a copy not made says why
+    (`skipped`)."""
+    def skip(r: Route) -> dict[str, str]:
+        return {"skipped": r.skipped} if r.skipped else {}
 
-
-def _veto_body(veto: Veto | None) -> dict[str, Any] | None:
-    return {"source": veto[0], "reason": veto[1]} if veto else None
-
-
-def _claimed_vetoes(rulings: list[Mapping[str, Any]], pairs: list[Pair]) -> dict[Pair, Veto]:
-    """The must-not-link row each pair had before the split, as its undo body carries it."""
-    out: dict[Pair, Veto] = {}
-    for r, p in zip(rulings, pairs):
-        veto = r.get("must_not_link")
-        if veto is None:
+    mine = plan.mine(routes)
+    out = []
+    for r in mine:
+        if r.action == "copy":
             continue
-        if not isinstance(veto, Mapping) or veto.get("source") not in VETO_SOURCES:
-            raise _invalid("not a must-not-link row", list(p))
-        reason = veto.get("reason")
-        out[p] = (str(veto["source"]), None if reason is None else str(reason))
+        letter = plan.letter_of(r.anchor)
+        copies = [{"letter": plan.letter_of(c.anchor), "property_id": at[plan.letter_of(c.anchor)],
+                   **skip(c)} for c in mine if c.action == "copy" and c.item == r.item]
+        out.append({"item": r.item, "kind": _KINDS[r.table], "label": r.label, "letter": letter,
+                    "property_id": at[letter], "copies": copies,
+                    **({"why": "fold"} if r.action == "recreate" else {}), **skip(r)})
     return out
-
-
-def undo_split(
-    conn: psycopg.Connection,
-    property_id: int,
-    *,
-    call_id: str,
-    placements: Mapping[int, int],
-    rulings: list[Mapping[str, Any]],
-    decided_by: str,
-) -> dict[str, Any]:
-    """Take back one split from the body its response issued: while nothing moved or was ruled
-    again since, its adverts become one property again (the oldest record, decision 17) and
-    each pair it ruled gets the word it had before appended again as its newest (`unsure` where
-    there was none; the ledger keeps the split's own rows) and the must-not-link row it had
-    before, a machine's included."""
-    try:
-        call = str(uuid.UUID(str(call_id)))
-    except ValueError as exc:
-        raise _invalid("call_id is not a split's id") from exc
-    pairs: list[Pair] = []
-    seen: set[Pair] = set()
-    for r in rulings:
-        lo, hi = int(r["listing_lo"]), int(r["listing_hi"])
-        if lo >= hi or (lo, hi) in seen:
-            raise _invalid("a ruling names a pair twice or out of order", [lo, hi])
-        if r.get("verdict") is not None and r["verdict"] not in usql.VERDICT_VALUES:
-            raise _invalid(f"not a pair verdict: {r['verdict']}")
-        pairs.append((lo, hi))
-        seen.add((lo, hi))
-    claimed = _claimed_vetoes(rulings, pairs)
-    ruled = {lid for p in pairs for lid in p}
-    place = {int(lid): int(pid) for lid, pid in placements.items()}
-    if not pairs or (stray := sorted(set(place) - ruled)):
-        raise _invalid("an undo restores the pairs its split ruled", stray if pairs else [])
-    prefix = f"operator split {call}"
-    props: list[int] = []
-    try:
-        with conn.transaction():
-            _bound(conn)
-            record = resolve_active_property_id(conn, int(property_id))
-            if record is None:
-                raise SplitRefused(404, "not_found", f"property {property_id} not found")
-            now = listing_places(conn, sorted(place))
-            want = resolve_active_property_ids(conn, sorted(set(place.values())))
-            if moved := sorted(lid for lid, pid in place.items()
-                               if now.get(lid) is None or now.get(lid) != want.get(pid)):
-                raise SplitRefused(409, "stale", "moved again since the split", moved)
-            stored = newest_pair_rulings(conn, ruled)
-            if again := [list(p) for p in pairs
-                         if not str((stored.get(p) or {}).get("note") or "").startswith(prefix)]:
-                raise SplitRefused(409, "stale", "ruled again since the split", again)
-            # A machine row goes back only over the split's own operator row (or onto itself).
-            vetoes = must_not_link_rows(conn, ruled)
-            if forged := [list(p) for p, v in claimed.items() if v[0] != "operator"
-                          and vetoes.get(p) != v and not _split_row(vetoes.get(p), prefix)]:
-                raise SplitRefused(409, "stale", "a must-not-link changed since the split", forged)
-            props = sorted({int(now[lid]) for lid in place if now.get(lid) is not None})
-            joined = None
-            if len(props) > 1:
-                lock_properties(conn, props)
-                held = _adverts_on(conn, props)
-                if drag := sorted(lid for p in props for lid in held.get(p, []) if lid not in place):
-                    raise SplitRefused(409, "join_would_drag", "the adverts now share a property "
-                                       "with adverts the split did not move", drag)
-                try:
-                    joined = merge_property_set(conn, props, source="operator",
-                                                reason="operator_split_undo",
-                                                decided_by=decided_by)["data"]
-                except MergeError as exc:
-                    raise SplitRefused(409, "refused", str(exc), props) from exc
-            words: dict[tuple[str, str | None, tuple[str, ...]], set[Pair]] = {}
-            for r, p in zip(rulings, pairs):
-                key = ((r["verdict"], r.get("note"), tuple(r.get("reasons") or []))
-                       if r.get("verdict") else ("unsure", f"operator split-undo {call}", ()))
-                words.setdefault(key, set()).add(p)
-            for (verdict, note, reasons), ps in sorted(words.items(), key=lambda kv: min(kv[1])):
-                record_rulings(conn, ps, verdict=verdict, decided_by=decided_by, note=note,
-                               reasons=list(reasons))
-            restore_must_not_link(conn, claimed)
-    except _BUSY as exc:
-        raise SplitRefused(409, "busy", "the property is being changed right now; try again",
-                           props) from exc
-    return {
-        "call_id": call,
-        "undone": True,
-        "property_id": joined["survivor_id"] if joined else (props[0] if props else record),
-        "merge_group_id": joined["merge_group_id"] if joined else None,
-        "rulings": {"restored": len(pairs)},
-    }
-
-
-def _split_row(veto: Veto | None, prefix: str) -> bool:
-    """The operator row this split's `different` wrote (its note is the row's reason)."""
-    return veto is not None and veto[0] == "operator" and str(veto[1] or "").startswith(prefix)

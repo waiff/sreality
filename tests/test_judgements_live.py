@@ -372,10 +372,14 @@ def _rows_read(cur: Any, sql: str, params: dict[str, Any]) -> int:
     return total
 
 
+def _grouped_sql() -> str:
+    """The generation-wide definition: the proposed splits' own `grouped` CTE."""
+    return usql.PROPOSED_SPLIT_ADVERTS_SQL.split(", touched AS (", 1)[0]
+
+
 def _engine_reference(cur: Any, ids: list[int]) -> dict[int, int | None]:
-    """The generation-wide definition (the proposed splits' own CTE), read for these adverts."""
-    grouped = usql.PROPOSED_SPLIT_ADVERTS_SQL.split(", touched AS (", 1)[0]
-    cur.execute(grouped + " SELECT g.listing_id, g.cluster_key FROM grouped g"
+    """The generation-wide definition, read for these adverts."""
+    cur.execute(_grouped_sql() + " SELECT g.listing_id, g.cluster_key FROM grouped g"
                 " WHERE g.listing_id = ANY(%(ids)s)", {"generation": BIG, "ids": ids})
     return dict(cur.fetchall())
 
@@ -445,6 +449,7 @@ def test_the_engine_view_reads_the_generation_for_the_judged_adverts_only(cur):
                       {**_BASE, **_NO_CURSOR, "generation": BIG, "limit": 26})
     counts = _rows_read(cur, usql.JUDGEMENTS_FACETS_SQL, {**_BASE, "generation": BIG})
     assert page <= 10 * len(ids) + 26 and counts <= 10 * len(ids), (page, counts)
-    whole = _rows_read(cur, usql.PROPOSED_SPLIT_ADVERTS_SQL,
-                       {"generation": BIG, "property_id": None})
+    # Counted on the definition alone. Joined to `listings`, where no synthetic advert has a row,
+    # an executor that meets the empty side first never reads the generation at all.
+    whole = _rows_read(cur, _grouped_sql() + " SELECT count(*) FROM grouped", {"generation": BIG})
     assert whole >= BIG_PAIRS + BIG_FPS + BIG_MEMBERS, whole
