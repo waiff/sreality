@@ -537,6 +537,14 @@ describe('Browse select-lists carry the measure with its published basis', () =>
       expect(c, `${lane}: category_type`).toContain('category_type');
     }
   });
+
+  /* Not the measure, but the same failure shape: the card's "N inzeráty" badge
+   * reads `source_count` off the row (migration 590), and every component test
+   * feeds the row directly, so dropping the column here would delete the badge
+   * from Browse with all of them green. */
+  it('selects the ad count the card badge reads', () => {
+    expect(cols(BROWSE_SELECT_COLUMNS.cards)).toContain('source_count');
+  });
 });
 
 /* The "~NaN" Browse header (2026-09-25). The count asks the dismissal-aware

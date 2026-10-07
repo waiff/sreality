@@ -285,7 +285,7 @@ active / latest last seen among inactive, trust, id), written by the one rollup;
 joins place/floor/description/broker through it, and `properties_public.listing_id` is it
 (`repr_since`: when it last changed; alerts count only its later price steps; the rollup clears
 `city_proximity_computed_at` with it). The rollup also writes `all_sources` / `active_sources` (sorted
-portal lists) and the nine `newest_ad_at_<portal>` dates (MS19), projected since 590 (one partial index per portal on `browse_list`).
+portal lists) and the nine `newest_ad_at_<portal>` dates (MS19), projected since 590 together with `source_count` (one partial index per portal on `browse_list`).
 
 **Three functions depend on `browse_projection`'s row type** (migration 537:
 `browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on

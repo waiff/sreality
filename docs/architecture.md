@@ -1746,7 +1746,9 @@ renumber.** Navigate by area:
     migrations lane, `queries.test.ts`). The named exception: estimation cohorts keep each
     ad's own portal (`LISTINGS_GRAIN`, `l.source = ANY`) until the estimation subject is a
     property (MS20, PROGRAM.md §9). The badge on a Browse card lists the portals with an
-    active ad, or every portal marked inactive.
+    active ad, or every portal marked inactive. A second badge, "N inzeráty", reads
+    `source_count` off the card's `browse_list` row (every ad, active or not: the rollup's
+    count, projected since 590), from two ads up.
     **One portal orders by its own newest ad (Q49 b).** With exactly one portal P selected,
     "Newest first" / "Oldest first" order by `newest_ad_at_<P>` (when the property's newest ad
     on P was first seen, active or not; nine `properties` columns written by the rollup since
@@ -2484,10 +2486,7 @@ renumber.** Navigate by area:
     `['pipeline','members']` (`PIPELINE_REVALIDATE`) and the stage editor re-reads stages + board, so a
     nested decoration key would refetch every thumbnail and broker on the board on every drag, making
     the split slower than the chain it replaced (`lib/hydration/hydration.test.ts` pins the
-    disjointness from every write sweep — pipeline, Browse, autodedup, dismissals). One decoration is
-    re-read on purpose: the Browse card's ad count (`hydrationKeys.adCounts`, property-grain, because
-    `browse_projection` carries no `source_count`) changes with a merge or a split, so
-    `refreshAfterSplit` names its root, `adCountsAll`, and nothing wider. (2) **Decorations
+    disjointness from every write sweep — pipeline, Browse, autodedup, dismissals). (2) **Decorations
     reach `CardFace` by context, not props**, because it renders twice — in-column and inside the
     `DragOverlay` — and props would let those two mount points drift. (3) **Enrichment isolation is
     now structural**: a failed broker read cannot affect the board because it is not on the board's

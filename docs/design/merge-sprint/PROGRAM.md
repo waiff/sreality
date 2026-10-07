@@ -38,17 +38,17 @@ Every wave is tested against this sentence. Work that does not serve it is cut (
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path
 beside an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines** when
-approved; as built so far (W0–W5, 2026-10-07) **+11,641 / −9,006**; **−3 tables, +1**; about
+approved; as built so far (W0–W5, 2026-10-07) **+11,720 / −9,344**; **−3 tables, +1**; about
 **1.5 GB** dropped from the database, 1.15 GB of it two indexes nothing has ever used, while the
 Browse read models grow by roughly 0.2 GB (the two portal lists, the nine per-portal dates and their
-indexes). Not counted: migration 590's 1,255 lines, which restate views and the two aggregate RPCs
+indexes). Not counted: migration 590's 1,261 lines, which restate views and the two aggregate RPCs
 whole. Our own condition grades stay for now (Q48, §9). Every wave removes more than it adds except
 W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the migration, live
 tests and the plan's gate text), W2b (+1,866 / −990 as built: MS16's honesty on
 every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed"),
 W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4), W4 (+4,854 / −4,280 as
 built: its code about even, its tests and the reviews' cases larger, §4; the operator's ruling owed)
-and W5 (+1,858 / −1,214 as built: code −179 net, tests +921 net, §4; the operator's ruling owed).
+and W5 (+1,937 / −1,552 as built: code −249 net, tests +728 net, §4; the operator's ruling owed).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -286,7 +286,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | **W2b** | Property page, pipeline board and Browse rows: broker list, lowest price line, chart of every ad, everything in MS16 but the merge-list routes (W3) | no | — | +1,866 / −990 (built, #1720) |
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; the category gate reads ads (MS13 note); split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED"; its additive migration 589 (`property_merge_carries`) applied before merge | +1,524 / −941 (built, #1721; planned +330 / −655): code −20 net, tests +475 net (MS14's invariant and fold snapshots on every live merge, the came-from cases, the ad-grain gate and the receipt, all new since the plan), docs +64, migration 589's 64 lines |
 | **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview and its digest, curation routing per letter with copies (the brake routes by the same plan), a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties (counted before the click), the brake's dry run counting note moves; the review pages link to the dialog; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together" (the category review's "Ponechat"), "Přesto rozdělit", writing "same" inside a letter (a letter's join still rules as the merge it is; recorded rulings stay) and the split undo | yes | W3 | +4,854 / −4,280 (built, #1722; planned +1,550 / −2,100): code +48 net, tests +429 net (the split's hermetic and live suites rewritten, the gate's two-account suite and MS12 new, then the two reviews' cases: every fold's twin, no account, the digest's counts and landings, the brake onto an origin active again, the preview with the user's picks, the count held before a merge), docs +97; no migration |
-| **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +1,858 / −1,214 (built, #1723; planned +290 / −870; the operator's ruling owed): code −179 net (the per-ad lane, the grain notice, the map's capped pill and `discovery_seq`'s threading out), tests +921 net (one fixture through the database, the RPCs, the Watchdog, the broker lookup and the SPA; migration 590's offline rail and its receipt; the tenth-portal rail; the page's one-portal wiring), docs −113 net, CI +15 (the fixture's push path); migration 590 (1,255 lines, 515 of them the two RPC bodies restated whole) not counted |
+| **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each; `source_count` with them, so the card's "N inzeráty" badge from #1725 reads its row, not a request of its own), broker lookup; the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +1,937 / −1,552 against main with #1725 (built, #1723; planned +290 / −870; the operator's ruling owed): code −249 net (the per-ad lane, the grain notice, the map's capped pill, `discovery_seq`'s threading and #1725's ad-count read out), tests +728 net (one fixture through the database, the RPCs, the Watchdog, the broker lookup and the SPA; migration 590's offline rail and its receipt; the tenth-portal rail; the page's one-portal wiring), docs −109 net, CI +15 (the fixture's push path); migration 590 (1,261 lines, 515 of them the two RPC bodies restated whole) not counted |
 | **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live; a day the operator names | database |
 
 **Order.** Before the dedup session's review closes (2026-10-06 13:45 UTC): W0 (merged) and W2b.

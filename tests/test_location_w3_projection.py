@@ -580,10 +580,10 @@ def test_w4c_carries_no_transaction_and_one_alter_per_hot_table() -> None:
 # re-creates, and what it appends LAST. browse_projection is a rename-aside (the matview
 # follows the old view by OID), properties_public a DROP + CREATE, the board re-created
 # verbatim because it reads properties_public.
-_W5_PORTAL_COLUMNS = ["all_sources", "active_sources",
-                      *(f"newest_ad_at_{o.value}" for o in PORTAL_OPTIONS)]
+_W5_PROJECTION_TAIL = ["all_sources", "active_sources", "source_count",
+                       *(f"newest_ad_at_{o.value}" for o in PORTAL_OPTIONS)]
 _W5_SHAPE: dict[str, tuple[set[str], list[str]]] = {
-    "browse_projection": ({"asset_id"}, _W5_PORTAL_COLUMNS),
+    "browse_projection": ({"asset_id"}, _W5_PROJECTION_TAIL),
     "properties_public": ({"asset_id", "distinct_site_count", "published_at"},
                           ["all_sources", "active_sources"]),
     "pipeline_board_public": (set(), []),

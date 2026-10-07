@@ -1307,9 +1307,10 @@ def test_one_newest_ad_date_per_offered_portal_and_the_two_portal_lists():
 
 def test_a_tenth_portal_is_offered_only_with_its_read_model_lines():
     """MS19 (migration 590): a PORTAL_OPTIONS code is a portal Browse can order by only when
-    the latest browse_projection projects its date (after the two lists, in PORTAL_OPTIONS
-    order) and the latest rebuild_browse_list builds and renames its partial index. With the
-    properties column above, a tenth portal needs all three before it can be offered."""
+    the latest browse_projection projects its date (after the two lists and the ad count, in
+    PORTAL_OPTIONS order) and the latest rebuild_browse_list builds and renames its partial
+    index. With the properties column above, a tenth portal needs all three before it can be
+    offered."""
     from tests.migration_defs import latest_definition
     from tests.test_browse_read_path_guardrail import _latest_migration_defining
     from tests.test_location_w3_projection import _columns, _sql
@@ -1317,8 +1318,8 @@ def test_a_tenth_portal_is_offered_only_with_its_read_model_lines():
 
     codes = [o.value for o in PORTAL_OPTIONS]
     view = _latest_migration_defining("browse_projection").name
-    assert _columns(_sql(view), "browse_projection")[-(len(codes) + 2):] == [
-        "all_sources", "active_sources", *(f"newest_ad_at_{c}" for c in codes)]
+    assert _columns(_sql(view), "browse_projection")[-(len(codes) + 3):] == [
+        "all_sources", "active_sources", "source_count", *(f"newest_ad_at_{c}" for c in codes)]
     rebuild = " ".join(latest_definition("rebuild_browse_list").read_text(encoding="utf-8").split())
     for c in codes:
         assert (f"create index browse_list_next_newest_ad_at_{c}_idx on browse_list_next "

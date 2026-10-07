@@ -3,11 +3,12 @@
 --
 -- 1. browse_projection (-> browse_list, properties_map_mv): `asset_id` leaves (W6 drops
 --    properties.asset_id and re-checks that no view names it); the two portal lists (MS21: kept and
---    reused; coalesced, never NULL, because `not.ov` drops a NULL row) and the nine
---    `newest_ad_at_<portal>` dates (migration 588; the rollup writes them since W2a) are appended
---    LAST, in toolkit.filter_registry.PORTAL_OPTIONS order. rebuild_browse_list() (522's body,
---    read live) gains one partial index per portal from nine static lines: the one-portal
---    "Newest first" / "Oldest first" page (MS19, Q49 b) and the one-portal count.
+--    reused; coalesced, never NULL, because `not.ov` drops a NULL row), `source_count` (the Browse
+--    card's "N inzeráty": every ad, active or not) and the nine `newest_ad_at_<portal>` dates
+--    (migration 588; the rollup writes them since W2a) are appended LAST, the dates in
+--    toolkit.filter_registry.PORTAL_OPTIONS order. rebuild_browse_list() (522's body, read live)
+--    gains one partial index per portal from nine static lines: the one-portal "Newest first" /
+--    "Oldest first" page (MS19, Q49 b) and the one-portal count.
 -- 2. properties_public: `asset_id`, `distinct_site_count` (written by nothing since W2a) and
 --    `published_at` (the dedup session's column, dropped by it after W6) leave; the two portal lists
 --    are appended (the Watchdog's portal rule). Removing a column is DROP + CREATE, so
@@ -28,15 +29,15 @@
 --      daily sweep holds the maintenance lease; a bounded parity sample of the stored lists/dates.
 --   1. Both rebuild advisory locks, queued (lock_timeout 0, 1900 s budget); then fail fast (5 s).
 --   2. TX1 (one DO block, so ONE transaction, guarded so a re-run skips it): browse_list FIRST
---      (sync_browse_list's lock order) loses asset_id and gains the 11 columns in the projection's
+--      (sync_browse_list's lock order) loses asset_id and gains the 12 columns in the projection's
 --      order (the positional sync_browse_list insert never sees two shapes); the old projection is
 --      RENAMED aside (properties_map_mv and its source follow it by OID and keep serving), the new
 --      one created; browse_list_visible() is re-pointed; properties_map_visible() becomes a static
 --      BRIDGE that names its columns, valid over the old matview and the new one; properties_public
 --      and the board.
 --   2b. rebuild_browse_list() replaced after TX1 (the comment there says why).
---   3. The list, rebuilt (forced: this session holds the key): fills the lists and dates, builds
---      the nine indexes.
+--   3. The list, rebuilt (forced: this session holds the key): fills the lists, the count and the
+--      dates, builds the nine indexes.
 --   4. TX2: the map rebuilt the same way, its source restored to 561's body, the legacy view
 --      dropped (nothing depends on it once the old matview is gone), and both RPCs switched to the
 --      portal rule in the same commit, after the two relations they read carry the columns.
@@ -85,7 +86,7 @@ begin
     raise exception '590 refused: browse_list_visible() is not 537/561''s body';
   end if;
   if (select md5(prosrc) from pg_proc where oid = to_regprocedure('public.properties_map_visible()'))
-     not in ('87ac5ed4f4c1eaaef58a06c9a4e42071', '10a10060661a638be3be812c401af55c') then
+     not in ('87ac5ed4f4c1eaaef58a06c9a4e42071', '37a49e149d762fa038bd9fdd2e74dd07') then
     raise exception '590 refused: properties_map_visible() is neither 561''s body nor this file''s bridge';
   end if;
   select string_agg(md5(p.prosrc), ',') into v_stats from pg_proc p
@@ -207,11 +208,12 @@ begin
 
   -- The disposable cache FIRST, in sync_browse_list's own lock order (the table, then the view;
   -- 584's reason b), so a patch in flight cannot deadlock this transaction. At commit its columns
-  -- equal the new projection's, so that positional insert stays aligned; the 11 are NULL until step 3.
+  -- equal the new projection's, so that positional insert stays aligned; the 12 are NULL until step 3.
   alter table public.browse_list
     drop column if exists asset_id,
     add column if not exists all_sources text[],
     add column if not exists active_sources text[],
+    add column if not exists source_count integer,
     add column if not exists newest_ad_at_sreality timestamptz,
     add column if not exists newest_ad_at_bazos timestamptz,
     add column if not exists newest_ad_at_idnes timestamptz,
@@ -227,8 +229,9 @@ begin
   alter view public.browse_projection rename to browse_projection_legacy;
   revoke all on public.browse_projection_legacy from anon, authenticated;
 
-  -- 584's body (the live one): asset_id out; the two portal lists and nine dates appended LAST,
-  -- in PORTAL_OPTIONS order (tests/test_recompute_property_stats.py pins the codes).
+  -- 584's body (the live one): asset_id out; the two portal lists, the ad count and nine dates
+  -- appended LAST, the dates in PORTAL_OPTIONS order (tests/test_recompute_property_stats.py pins
+  -- the codes).
   create view browse_projection as
   select
       p.id as property_id,
@@ -302,6 +305,7 @@ begin
       ll.ulice_kod as ulice_id,
       coalesce(p.all_sources, '{}'::text[]) as all_sources,
       coalesce(p.active_sources, '{}'::text[]) as active_sources,
+      p.source_count,
       p.newest_ad_at_sreality,
       p.newest_ad_at_bazos,
       p.newest_ad_at_idnes,
@@ -342,7 +346,7 @@ $fn$;
 
   -- The map's source, as a BRIDGE until step 4: it names its columns, so it is valid over the old
   -- matview (which still has asset_id) and over the new one (should a pg_cron tick rebuild it after
-  -- a crash between the steps), returning the 11 new columns as NULL meanwhile.
+  -- a crash between the steps), returning the 12 new columns as NULL meanwhile.
   drop function public.properties_map_visible();
   create function public.properties_map_visible()
   returns setof public.browse_projection
@@ -363,7 +367,7 @@ $fn$;
          m.price_change_count_365d, m.total_price_change_pct, m.listing_id, m.source_id_native,
          m.price_per_m2_basis, m.display_label, m.cast_obce_id, m.uncertainty_radius_m,
          m.granularity_rank, m.plot_area_m2, m.ulice_id,
-         null::text[], null::text[],
+         null::text[], null::text[], null::integer,
          null::timestamptz, null::timestamptz, null::timestamptz, null::timestamptz, null::timestamptz,
          null::timestamptz, null::timestamptz, null::timestamptz, null::timestamptz
     from public.properties_map_mv m
@@ -598,8 +602,9 @@ grant execute on function public.rebuild_browse_list() to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 3. The list, rebuilt by the function pg_cron runs (this session holds its re-entrant key, so it
---    RUNS rather than skips): the lists and dates filled, the nine indexes built. lock_timeout 0
---    (522 section 4: a lock timeout would throw away a finished rebuild at its final rename).
+--    RUNS rather than skips): the lists, the count and the dates filled, the nine indexes built.
+--    lock_timeout 0 (522 section 4: a lock timeout would throw away a finished rebuild at its final
+--    rename).
 -- ---------------------------------------------------------------------------
 set lock_timeout = 0;
 set statement_timeout = '3600s';
@@ -1222,6 +1227,7 @@ begin
   select count(*),
          count(*) filter (where b.all_sources is distinct from coalesce(p.all_sources, '{}'::text[])
                              or b.active_sources is distinct from coalesce(p.active_sources, '{}'::text[])
+                             or b.source_count is distinct from p.source_count
                              or (b.newest_ad_at_sreality, b.newest_ad_at_bazos, b.newest_ad_at_idnes,
                                  b.newest_ad_at_maxima, b.newest_ad_at_ceskereality,
                                  b.newest_ad_at_bezrealitky, b.newest_ad_at_mmreality,

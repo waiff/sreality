@@ -26,6 +26,8 @@ NAME = "590_read_model_portal_rule.sql"
 SQL = (MIGRATIONS / NAME).read_text(encoding="utf-8")
 CODE = re.sub(r"--[^\n]*", "", SQL)
 PORTALS = [o.value for o in PORTAL_OPTIONS]
+# browse_projection's appended tail: the two portal lists, the ad count, one date per portal.
+TAIL = 3 + len(PORTALS)
 
 
 def _md5(text: str) -> str:
@@ -145,7 +147,7 @@ def test_tx1_is_one_guarded_block_holding_every_shape() -> None:
 
 def test_the_cache_table_takes_the_projections_shape_first_in_the_same_transaction() -> None:
     """`sync_browse_list` inserts by POSITION and locks the table before the view: browse_list
-    loses asset_id and gains the eleven exactly as the projection appends them, BEFORE the
+    loses asset_id and gains the twelve exactly as the projection appends them, BEFORE the
     projection is touched, or a patch in flight deadlocks TX1."""
     tx1 = _block("tx1")
     found = re.search(r"alter table public\.browse_list\s+(.*?);", tx1, re.S)
@@ -154,19 +156,20 @@ def test_the_cache_table_takes_the_projections_shape_first_in_the_same_transacti
     clauses = [" ".join(c.split()) for c in alter.split(",")]
     assert clauses[0] == "drop column if exists asset_id"
     added = [re.fullmatch(r"add column if not exists (\w+) (\S+)", c).groups() for c in clauses[1:]]
-    appended = _columns(_view_sql(NAME), "browse_projection")[-11:]
+    appended = _columns(_view_sql(NAME), "browse_projection")[-TAIL:]
     assert [name for name, _ in added] == appended
-    assert [kind for _, kind in added] == ["text[]"] * 2 + ["timestamptz"] * len(PORTALS)
+    assert [kind for _, kind in added] == ["text[]"] * 2 + ["integer"] + ["timestamptz"] * len(PORTALS)
 
 
 def test_the_bridge_names_the_new_shape_and_yields_to_561s_body() -> None:
     """Valid over the old matview AND a new one (a crash between TX1 and TX2); written as
     `create function` so the `create or replace` finders resolve TX2's restored body."""
     bridge = re.findall(r"\$fn\$(.*?)\$fn\$", SQL, re.S)[1]
-    survivors = [c for c in _columns(_view_sql(NAME), "browse_projection")[:-11]]
+    survivors = [c for c in _columns(_view_sql(NAME), "browse_projection")[:-TAIL]]
     named = re.findall(r"\bm\.([a-z0-9_]+)", bridge.split("from public.properties_map_mv")[0])
     assert named == survivors
-    assert bridge.count("null::text[]") == 2 and bridge.count("null::timestamptz") == len(PORTALS)
+    nulls = re.findall(r"null::(\w+(?:\[\])?)", bridge)
+    assert nulls == ["text[]"] * 2 + ["integer"] + ["timestamptz"] * len(PORTALS)
     final = _sql_body(SQL[SQL.index("begin;"):], "properties_map_visible")
     assert final == _sql_body(_read("561_one_property_view.sql"), "properties_map_visible")
 
@@ -316,6 +319,7 @@ def test_the_post_conditions_check_what_landed() -> None:
         "perform * from public.properties_map_visible() limit 1;",
         "perform * from public.pipeline_board_public limit 1;",
         "select last_succeeded_at into started from public.derived_artifacts where name = 'browse_list';",
+        "or b.source_count is distinct from p.source_count",
         "p.stats_computed_at < started - interval '15 minutes'",
     ):
         assert frag in post, frag

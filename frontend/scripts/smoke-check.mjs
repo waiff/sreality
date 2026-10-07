@@ -141,10 +141,6 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    read of property_notes_public), /pipeline +1 (the broker
  *                    line reads the cards' ads before their brokers, MS7).
  *                    Both stay under their ceilings; neither moves.
- *   2026-10-07 card ad count — /browse +1: each card's "N inzeráty" badge is a
- *                    hydration decoration, one property_sources_public read per
- *                    24-card page (browse_projection has no source_count).
- *                    Stays under its ceiling; nothing moves.
  * Still ahead: W9b appends columns to listings_public for the listing-detail
  * chain; W7a moves Browse + comparables onto the shared hydration layer.
  *

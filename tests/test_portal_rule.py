@@ -205,7 +205,7 @@ def test_the_rebuild_builds_one_partial_index_per_portal(conn) -> None:
 @live
 def test_the_projection_and_both_read_models_have_one_shape(conn) -> None:
     """`sync_browse_list` inserts by POSITION, and both sources return the projection's
-    row type: three relations, one column list, the eleven appended last."""
+    row type: three relations, one column list, the twelve appended last."""
     shapes = {}
     with conn.cursor() as cur:
         for rel in ("browse_projection", "browse_list", "properties_map_mv"):
@@ -217,5 +217,5 @@ def test_the_projection_and_both_read_models_have_one_shape(conn) -> None:
     assert shapes["browse_list"] == shapes["browse_projection"] == shapes["properties_map_mv"]
     names = [n for n, _ in shapes["browse_projection"]]
     assert "asset_id" not in names
-    assert names[-11:] == ["all_sources", "active_sources",
+    assert names[-12:] == ["all_sources", "active_sources", "source_count",
                            *(f"newest_ad_at_{p}" for p in _PORTALS)]

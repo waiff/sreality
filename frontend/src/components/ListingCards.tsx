@@ -446,11 +446,8 @@ function Card({
      rows the layer holds (the comparables surface consumes those same rows
      un-projected), memoized on the array identity — the cohort map is stable
      across renders, so this recomputes only when this listing's photos change. */
-  const hydration = useCardHydration();
-  const photos = hydration.photosFor(r.listing_id);
+  const photos = useCardHydration().photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
-  /* How many ads the property holds, a decoration like the photos. */
-  const adCount = hydration.adCountFor(r.property_id);
 
   /* `relative` is load-bearing, not decoration: it is what the stretched
    * link's / selection label's `::after` measures itself against. */
@@ -534,8 +531,8 @@ function Card({
           </div>
         )}
         {/* Metadata margin: file-tab badges down the right edge of the
-          * photo — the lifespan run, the source portal, then the number of
-          * ads the property holds when it holds more than one. Status
+          * photo — the lifespan run, the portals, then the number of ads
+          * the property holds when it holds more than one. Status
           * is carried by the card surface, not a pill. Borders-only,
           * paper-3/85 + backdrop-blur over the photo. */}
         <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
@@ -577,14 +574,14 @@ function Card({
               {badgePortals.map((p) => portalLabel(p)).join(' · ')}
             </CardBadge>
           )}
-          {adCount != null && adCount >= 2 && (
+          {r.source_count >= 2 && (
             /* Inset by the next-photo chevron (24px at right-1, z above the
                badges): on a card narrower than ~215px its vertical band reaches
                this third row and, on hover, would cover the badge's end. */
             <span className="flex mr-7">
-              <CardBadge title={`Nemovitost spojuje ${adCount} ${inzeratu(adCount)} (počítají se i neaktivní)`}>
-                {adCount}
-                <span className="opacity-60 ml-1">{inzeratu(adCount)}</span>
+              <CardBadge title={`Nemovitost spojuje ${r.source_count} ${inzeratu(r.source_count)} (počítají se i neaktivní)`}>
+                {r.source_count}
+                <span className="opacity-60 ml-1">{inzeratu(r.source_count)}</span>
               </CardBadge>
             </span>
           )}

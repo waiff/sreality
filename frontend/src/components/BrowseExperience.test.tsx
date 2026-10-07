@@ -1,8 +1,8 @@
 /* One portal's "Newest first" (MS19) as the Browse page wires it: the header names the
  * order and each card shows its date on that portal beside its own first seen. Which
  * filters turn it on is queries.test.ts's (orderPortal); these pin the wiring from the
- * view to the header and to the cards. The reads are stubbed and the map is collapsed
- * (tests never render a live map). */
+ * view to the header and to the cards. Also the card's "N inzeráty" badge, from the same
+ * read. The reads are stubbed and the map is collapsed (tests never render a live map). */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -56,6 +56,7 @@ const ROW = {
   price_change_count: null,
   all_sources: ['idnes', 'sreality'],
   active_sources: ['idnes', 'sreality'],
+  source_count: 2,
   newest_ad_at_idnes: IDNES_DAY,
 } as unknown as CardRow;
 
@@ -106,5 +107,20 @@ describe('<BrowseExperience> one portal\'s "Newest first"', () => {
     renderBrowse(['idnes', 'sreality']);
     expect(await lifespan()).not.toContain('iDNES');
     expect(screen.queryByText(/^(newest|oldest) on /)).toBeNull();
+  });
+});
+
+/* The badge reads the property's ad count off the cards read (`source_count`,
+ * migration 590): the page wires no second read for it. */
+describe('<BrowseExperience> the cards\' ad counts', () => {
+  it('draws "3 inzeráty" from the cards read', async () => {
+    vi.mocked(queries.fetchListingsForCards).mockResolvedValue({
+      rows: [{ ...ROW, source_count: 3 } as CardRow],
+      nextCursor: null,
+    });
+    renderBrowse([]);
+
+    const badge = await screen.findByTitle(/^Nemovitost spojuje 3 inzeráty/);
+    expect(badge).toHaveTextContent(/^3\s*inzeráty$/);
   });
 });

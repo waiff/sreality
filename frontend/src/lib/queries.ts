@@ -167,7 +167,9 @@ const CARD_COLS =
    * existed only as filter inputs, never as anything displayed. */
   'mf_gross_yield_pct,total_price_change_pct,price_change_count,' +
   /* The portal badge (MS19, migration 590): the portals with an active ad, else every portal. */
-  'all_sources,active_sources';
+  'all_sources,active_sources,' +
+  /* The ad-count badge (migration 590): how many ads the property holds, active or not. */
+  'source_count';
 
 /* The three Browse select-lists, grouped for one purpose: a test can assert
  * that the measure's published LABEL travels with the measure on every lane.
@@ -1109,6 +1111,9 @@ export interface CardRow {
    * projection coalesces them). The portal badge reads them. */
   all_sources: string[];
   active_sources: string[];
+  /* How many ads the property holds, active or not (migration 590, the
+   * recompute's count): the card's "N inzeráty" badge, drawn from two. */
+  source_count: number;
   /* One portal's order column (effectiveSort), selected by withKeysetColumns
    * only while that order is on: the card shows it beside its first seen. */
   [orderColumn: `newest_ad_at_${string}`]: string | null | undefined;
