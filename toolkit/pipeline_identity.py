@@ -24,9 +24,9 @@ from typing import Any
 import psycopg
 
 # A carry row stands while its own `undone_at` is empty and its merge step stands: a ledger row of
-# that merge retiring its from-property is not undone. Until W4 a split stamps only the ledger, so
-# the second half keeps a split-off origin out. Both came-from lookups (here and the dismissal
-# carrier's) read this one definition.
+# that merge retiring its from-property is not undone, which keeps out an origin a split already
+# gave back. Both came-from lookups (here and the dismissal carrier's) and the routing read this
+# one definition.
 STANDING_CARRY = (
     "c.undone_at IS NULL AND EXISTS (SELECT 1 FROM property_merge_events e "
     "  WHERE e.merge_group_id = c.merge_group_id "

@@ -1,15 +1,22 @@
 /* MS16: a merge hides nothing it will touch. The merge bar names every ticked
- * property with its marks, the note mark counts the caller's notes, and a failed
- * read is a retry, never an absent mark. */
+ * property with its marks and how many "Různé" rulings the merge would take back
+ * (MS12), the note mark counts the caller's notes, and a failed read is a retry,
+ * never an absent mark or a count of none. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { MergeModeBar } from './BrowseExperience';
 import { MergeSelection } from './CurationMarks';
 import NoteMark from './NoteMark';
+import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
+
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
+  getMergePreview: vi.fn(),
+}));
 
 vi.mock('@/lib/queries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/queries')>()),
@@ -36,6 +43,7 @@ beforeEach(() => {
   vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map([[43, [7]]]));
   vi.mocked(queries.fetchIsDismissed).mockImplementation(async (id) => id === 43);
   vi.mocked(queries.fetchNoteCounts).mockResolvedValue(new Map([[42, 2]]));
+  vi.mocked(api.getMergePreview).mockResolvedValue({ property_ids: [42, 43], rulings_taken_back: 0 });
 });
 
 const mergeBar = (ids: number[]) => (
@@ -59,6 +67,47 @@ describe('<MergeSelection> in the merge bar', () => {
     expect(await within(second).findByText('V kolekci')).toBeInTheDocument();
     expect(await within(second).findByText('Skryto')).toBeInTheDocument();
     expect(within(list).queryByRole('button')).toBeNull();
+  });
+
+  it('says how many "Různé" rulings the merge would take back, once two are ticked', async () => {
+    vi.mocked(api.getMergePreview).mockResolvedValue({ property_ids: [42, 43], rulings_taken_back: 3 });
+    renderWith(mergeBar([42]));
+    expect(api.getMergePreview).not.toHaveBeenCalled();
+    renderWith(mergeBar([43, 42]));
+    expect(await screen.findByText('Vezme zpět 3 rozhodnutí „Různé“.')).toBeInTheDocument();
+    expect(api.getMergePreview).toHaveBeenCalledWith([42, 43]);
+  });
+
+  it('says nothing of rulings when the merge takes none back', async () => {
+    renderWith(mergeBar([42, 43]));
+    await waitFor(() => expect(api.getMergePreview).toHaveBeenCalled());
+    expect(screen.queryByText(/Vezme zpět/)).toBeNull();
+  });
+
+  it('holds the merge until the count is read', async () => {
+    let answer: (p: api.MergePreview) => void = () => {};
+    vi.mocked(api.getMergePreview).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    renderWith(mergeBar([42, 43]));
+    expect(
+      await screen.findByText('Zjišťuji, kolik rozhodnutí „Různé“ sloučení vezme zpět…'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Merge 2' })).toBeDisabled();
+    await act(async () => answer({ property_ids: [42, 43], rulings_taken_back: 1 }));
+    expect(await screen.findByText('Vezme zpět 1 rozhodnutí „Různé“.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Merge 2' })).toBeEnabled();
+  });
+
+  it('a count it could not read is said, with a retry, never shown as none', async () => {
+    vi.mocked(api.getMergePreview)
+      .mockRejectedValueOnce(new Error('HTTP 500'))
+      .mockResolvedValue({ property_ids: [42, 43], rulings_taken_back: 2 });
+    renderWith(mergeBar([42, 43]));
+    expect(
+      await screen.findByText(/Kolik rozhodnutí „Různé“ sloučení vezme zpět, se nepodařilo zjistit./),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Merge 2' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Zkusit znovu' }));
+    expect(await screen.findByText('Vezme zpět 2 rozhodnutí „Různé“.')).toBeInTheDocument();
   });
 
   it('turns a failed read into a retry instead of dropping the mark', async () => {

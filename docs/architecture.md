@@ -1382,8 +1382,13 @@ renumber.** Navigate by area:
     order (`toolkit/property_carriers.py`: collections, tags, notes,
     dispatches, the pipeline, dismissals — rules 18, 22), one carry record row per curation row
     a carrier moved or folded (`property_merge_carries`, migration 589), and the soft-retire
-    (`merged_away`). Then an operator merge rules the ticked cards "same" (counting the
-    "different" rulings that takes back, `rulings_taken_back`), and
+    (`merged_away`). An operator merge is also a "same" ruling (MS12, `merge_rulings`, read
+    before the steps): the canonical pairs plus every pair across two members whose newest
+    ruling is negative go through `record_rulings` under the note `operator merge <group>` (a
+    negative inside one member is not between what it joins and stays), each negative set
+    ruling spanning two members gets its cluster `same`, and `rulings_taken_back` counts what it
+    took back (`merge_preview`, `GET /properties/merge`, reads the same count before the click);
+    an engine merge rules nothing. Then
     `properties_changed` (`scripts/recompute_property_stats.py`, the dirty drain's own
     after-step: the scoped rollup, the Browse row, the broker queue) runs ONCE over the survivor
     and the retired, so `brokers.property_count` follows on the broker drain's cadence, not at
@@ -1393,26 +1398,39 @@ renumber.** Navigate by area:
     to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
     property if merged away INTO that merge's survivor (else the advert stays:
     `origin_moved_on`, read under the lock), and stamping its ledger rows
-    `undone_at`/`undone_by` (never deleted). No carrier runs on a detach: curation, the pipeline
-    card, dispatches and dismissals stay on the property left until the split routes them by
-    the carry record (merge sprint W4). Then, for the operator, the rulings ONCE
-    (`_rule_detached`: each moved advert `different` from every advert still on the property it
-    left after ALL moves, never from another that moved in the call), then `properties_changed`
+    `undone_at`/`undone_by` (never deleted). No carrier runs on a detach; it ROUTES the curation
+    its adverts take (MS17, MS18): `property_carriers.curation_plan` reads every account's items
+    on the property left BEFORE any advert moves (the carry rows it reads are the ones the steps
+    then stamp; a live test pins the order) and `route_curation` writes them after. A note goes
+    with the advert it was written on while that advert is on the property; any other item goes
+    back to the property its oldest standing carry row names when the detach gives that property
+    adverts back (with `merge_group_id`, only that merge's own carry rows), else it stays; a fold
+    is re-created where it came from while its twin stands (else skipped, `gone`); a copy or a
+    re-created fold never lands where its account then holds the item (`held`), nor a dismissal
+    where its live card lands (`card`); then the spent carry rows are stamped `undone_at` and
+    the live-deal lift runs on every property touched. A move onto an item its account already
+    holds there (an origin active again, on the brake's path) changes nothing: the item stays,
+    uncounted, its carry row unspent — the payload counts what the writes changed, the brake's
+    dry run what the plan routes. The split hands
+    in its own plan (`curation=`, with the acting user's choices and copies). A detach writes
+    no ruling (`rulings_written` stays 0: the split writes its own), then `properties_changed`
     ONCE over every property left and reached. The engine's undo calls it ONCE per group
     (below). An unknown advert refuses the whole set before
     anything moves; an empty set is a no-op. An advert NO standing merge moved (an ingest-time grouping, ~15.9k `native_multi` properties)
-    is, while ANOTHER such own advert stays, a BIRTH through the one birth path (`split_native`,
-    the operator's only: any other source answers `propose_only`, decision 9): the property
-    locked first and the plan re-read under the lock, then the advert unlinked and born by
+    is, while ANOTHER such own advert stays, a BIRTH through the one birth path (`_born`,
+    `split_native`; a group-scoped detach never births), and so is every advert the caller
+    names in `new` (the split's adverts that cannot go home: `split_new` when a merge had
+    brought it, its live ledger rows closed first): the property locked first and the advert's
+    place re-read under the lock, then the advert unlinked and born by
     `scraper.db.create_singleton_properties` (both brought current by the call's one after-step);
-    ONE ledger row records it in the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
-    property left, `retired` = `prev` = the new record) written already undone by the split (no
-    migration) — so the new record IS the advert's origin, and a later merge of the two
-    (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
-    property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
-    detach, `unapply`'s included, can leave an active property with no advert. No carrier
-    runs on a native split: operator state and the pipeline card stay on the
-    property left (rules 18, 22).
+    ONE ledger row records it in the existing shape — the grouping as the merge it amounts to (`survivor` = the
+    property left, `retired` = `prev` = the new record, `reason` 'ingest_grouping' or
+    'split_new') written already undone (no migration) — so the new record IS the advert's
+    origin, and a later merge of the two (operator or engine, `merge_property_set` as ever)
+    comes apart by the same detach. A property's LAST own advert stays (`last_native`): the
+    merged ones go home instead, so no detach, `unapply`'s included, can leave an active
+    property with no advert. A birth routes curation like any detach: a note written on the
+    advert goes with it (rules 18, 22).
     Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
     undo covers both kinds. A group comes apart as
     one `detach_listings` call scoped to it (`merge_group_id=`: only while that merge is the newest to
@@ -1456,27 +1474,36 @@ renumber.** Navigate by area:
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge; every card keeps its pipeline, collection, dismissal and note marks,
     read-only, and the bar lists each ticked property with its marks, MS16) posts to
-    `POST /properties/merge`; **`POST /properties/{id}/split`**
-    (E919, `toolkit.property_split.split_property`) is the operator's ONE split statement:
-    `{adverts, separate: [[...], ...], keep_together, reason?, confirm_retract?}` — `adverts` is
-    every advert the operator was shown (a newcomer the lane merged in since is a 409 `stale`,
-    never ruled), each `separate` unit leaves as a record of its OWN (its adverts detached, then
-    joined by the one merge when they landed apart; two units that would go home to one origin,
-    or an origin already holding another unit's or an unnamed advert, is a 409 before any write),
-    the rest stays, ruled one property when `keep_together`; ONE transaction (5 s lock / 25 s
-    statement, the lane's bounds), composing ONE `detach_listings` call over its movers (a
-    refusal names every advert that cannot leave) + `merge_property_set` per joined unit +
-    `record_rulings` (+ `restore_must_not_link`, so a guard/model/llm veto on a pair it rules
-    `same` stays the machine's; no detach in the call rules a pair inside one unit, so it writes
-    nothing today — follow-up F1 deletes it) and writing no statement of its own: M movers and
-    J joined units cost 1 + J `properties_changed`, not M + J. Its refusals
-    (`{code, message, ids}`: 400 `invalid`, 404, 409 `stale` / `reverses_rulings` /
-    `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing; its response names
-    where each unit sits (`units[].property_id`), which unit keeps the record (`record_kept_by`:
-    the one holding the property's own advert, rules 18/22) and carries the body of its own undo
-    (`{undo}` posted back: the adverts re-joined, each pair's previous newest word appended
-    again, a bare operator veto as its `different`, `unsure` where there was none, and each
-    pair's previous must-not-link row, a machine's included). A re-send changes nothing. `GET
+    `POST /properties/merge`; **`POST /properties/{id}/split`** (MS18,
+    `toolkit.property_split.split_property`) is the operator's ONE split, by letters:
+    `{letters, choices?, reason?, expect}`. `letters` names every advert of the property with a
+    letter A–Z (a newcomer the lane merged in since is a 409 `stale`); one letter keeps the
+    property, its number and page, by the rule (`property_identity.letter_landings`: the letter
+    holding most of its own adverts, the earliest on a tie, the canonical advert's letter when
+    none holds one); every other letter leaves, back to the property it came from while that is
+    still merged into this one (two letters from one origin: the one holding more of its
+    adverts, the earliest on a tie), else to a new property (`new`), and a letter landing on two
+    or more properties is joined into the oldest (`survivor_of` over each landing as the
+    recompute will date it). `GET /properties/{id}/split?letters=…` is its preview, in a
+    rolled-back read-only transaction that takes no lock: where each letter lands (and rule 15's
+    Czech refusal of a letter's join), the acting account's items and where each goes and why
+    (`curation`; with `&choices=`, the click's own choices as JSON, also each fold and copy the
+    click would then not make, and why), the rulings it writes and takes back, and `plan`, a
+    sha256 over all of it but labels, choices and other accounts, which the click sends back as
+    `expect` (anything else is a 409 `stale`, so another account's concurrent note neither
+    refuses the click nor leaks).
+    `choices` route the acting account's own items (`note:<id>`, `pipeline`,
+    `collection:<id>`, `tag:<id>`, `dismissal`) to a letter, with copies to others; an item left
+    out follows the preselection, and other accounts' items always do, unseen (Q33). ONE
+    transaction (5 s lock / 25 s statement, the lane's bounds) composes ONE `detach_listings`
+    call (its births in `new`, its curation plan in `curation`) + `merge_property_set` per joined
+    letter + `record_rulings` and writes no statement of its own: M movers and J joined letters
+    cost 1 + J `properties_changed`, not M + J. Its refusals (`{code, message, ids}` in Czech: 400
+    `invalid`, 404 `not_found`, 409 `stale` / `refused` (rule 15, `LETTER_ENDING`, naming the two
+    ads) / `busy`) write nothing; its answer is one receipt (where each letter landed, the acting
+    account's items and copies, a fold or a copy not made with why, the rulings: `different`,
+    and the `same` and taken-back counts of its joins). It has no undo: one merge takes a split
+    back (MS12). `GET
     /properties/{id}/origins` names each advert's origin (`api/property_merge.py`). The merge
     route answers with its receipt (MS15): the acting account's MOVED items from the carry
     record (notes counted, the stage, collections and tags by name) and `hidden_for_you`
@@ -1485,16 +1512,17 @@ renumber.** Navigate by area:
     Browse merges through `lib/useMergeProperties` (the receipt toast, the refresh, no
     `onError`, so a refusal is the app MutationCache's one toast). **Every operator merge and split is a ruling (decision 8)**
     (`toolkit.property_identity.record_rulings`, same transaction, only for `source='operator'`:
-    an engine merge or `unapply` never is): the merge rules every cross pair of the ticked
+    an engine merge or `unapply` never is): the merge rules `same` every cross pair of the ticked
     properties' CANONICAL adverts (`repr_listing_ref_id` — never a child the removed engine or
-    ingest grouped there) `same`; the split rules every pair across units `different` (+ an
-    operator must-not-link), every pair inside a separated unit `same`, and (keep_together)
-    every pair of the kept unit `same` — the rest of a proposal confirmed, which stops it — with
-    the optional `reason` (max 500) and the call id in the note; taking back a standing negative
-    (the pair's newest ruling, whoever took it) asks first (E52, `reversed_pairs` over
-    `newest_pair_rulings`, the helpers the Groups page's split and the candidate split share) —
-    every word appended through `record_ruling` into the review pages' store (`autodedup.verdicts` + operator
-    `must_not_link`, `decided_by` = the admin's email).
+    ingest grouped there) and every pair across two members whose newest ruling is negative
+    (MS12, above); the split rules every pair across letters `different` (+ an operator
+    must-not-link) and inside a letter only what its join rules as the merge it is (`same` over
+    the landings' canonical adverts and every "different" between them, which the preview and
+    the receipt name; a "different" inside one landing stands), with the optional `reason` (max
+    500) and the call id in the note — every word appended through `record_ruling` into the
+    review pages' store (`autodedup.verdicts` + operator `must_not_link`, `decided_by` = the
+    admin's email). E52 (`reversed_pairs` over `newest_pair_rulings`) stays for the Groups
+    page's split and the candidate split.
     **Migration 560** copied the operator's live pre-ruling merges (362 groups) into `same`
     rulings — pairs that sat on different properties of a group (a side is an advert's origin)
     and share one now — `decided_by='operator'`, dated at the merge, never over an existing
@@ -1505,9 +1533,10 @@ renumber.** Navigate by area:
     seeds the autodedup lane's next pass (the `rt_rulings` cursor), so a withdrawn `same`
     releases its group within a minute. `/autodedup/rulings` lists every ruling (typed, Browse merge, implied by a confirmed
     group, bare veto; group grain too) beside the engine's view and where the adverts sit now,
-    and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale), its split
-    button through `POST /properties/{id}/split`; the property page and the proposed-splits page
-    link to it for an admin. `/autodedup/judge` (`GET /autodedup/judgements`) lists every pair
+    and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale); a standing
+    "Různé" on one property links to its split dialog with the two adverts on two letters, and a
+    `same` on two properties merges behind a confirm that says how many "Různé" rulings the merge
+    takes back (MS12; the confirm, like Browse's merge bar, waits for that count to be read); the property page and the proposed-splits page link to it for an admin. `/autodedup/judge` (`GET /autodedup/judgements`) lists every pair
     the LLM judge marked and every sealed-sample pair, blind by default, for the operator to rule
     — the judge's marks train models only (PROGRAM.md E922). Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
@@ -1525,12 +1554,16 @@ renumber.** Navigate by area:
     portal link collapsed, description / full gallery / broker expanded). For an admin
     session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
     a split returns it to, and the source and date of the merge that took it from there), and
-    every row carries a unit letter (the Groups page's `UnitSelect`, all A); two letters open one
-    **Rozdělit nemovitost** panel that posts ONE `POST /properties/{id}/split` over every advert
-    the page shows — each letter group but the one keeping the record (most own adverts, else
-    the header's; `lib/mergedAdverts.splitPlan`) a `separate` unit, `keep_together: false`, the
-    optional `reason` on the rulings — toasts a link per unit that left, then re-reads the
-    property page (keyed on the property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
+    every row carries a unit letter (the Groups page's `UnitSelect`, all A, or the letters a
+    review page's link brought, `?letters=`); two letters open the ONE split dialog
+    (`components/autodedup/SplitPanel.tsx`, MS18) over every advert the page shows: the server's
+    preview in words (`SplitPlanLines`), the acting account's items ("Vaše položky": a letter per
+    item, "+ kopie do {L}", folds read-only; each pick re-reads the preview with it, so a fold or
+    copy the click would not make says why), an optional reason and one **Rozdělit
+    nemovitost**, offered once the preview of the picks is read; the answer is one receipt toast
+    (`pushSplitReceipt`, the merge receipt's slot), then the page re-reads (keyed on the
+    property) and Browse refreshes (`lib/mergedAdverts.refreshAfterSplit`); a `stale` refusal,
+    of the preview or of the click, re-reads the page's adverts and the preview.
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP one lane (W5; live — interval 60 since migration 572, scope = the three trial blocks since migration 570).** The engine's ONE production path is the
@@ -1590,7 +1623,7 @@ renumber.** Navigate by area:
     rows before it merges; the live `rt` generation may be planned by a dry run but is never
     applied here (the lane reconciles it, above), and a live run holds the lane's lease
     `autodedup.rt_lease` (one writer). Only the operator's rulings keep ads apart (E934): his
-    split statement rules `different` + a must-not-link across its units, and an engine merge
+    split rules `different` + a must-not-link across its letters, and an engine merge
     taken apart outside the engine bans nothing by itself, so a split-off property may receive
     engine merges again; an `unapply` that finds the merge already partly taken apart records
     its undo as theirs (`undone_by = 'external'`), and a merge that records a (survivor,
@@ -1618,29 +1651,15 @@ renumber.** Navigate by area:
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
     the operator's ruling (`ruled` once every pair has one that is not `unsure`); each advert
-    carries its `detach_outcome` (what `detach_outcomes` answers now) and `splittable` (that
-    moves it: back to its origin, or a native advert to a new record); `GET
-    /properties/{id}/origins` carries both for the property page, whose rows that would not move
-    say why (and link where a retired origin went). Its page is `/autodedup/proposed-splits`
-    (AUTODEDUP menu, "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a
-    card per proposal with each group's adverts side by side (`MemberGrid`; the adverts the
-    engine never saw as groups of their own), the reason and ruling per pair, an **Oddělit**
-    tick per advert (none on one nothing would move: `on_origin` / `moved_since` /
-    `origin_moved_on`) and **Oddělit skupinu** per group, and a plan line. The ticks start at
-    the proposal — every group a pair states apart from the kept group (the one holding the
-    property's own adverts, else the canonical advert's; a `not compared` pair states nothing)
-    has its movable adverts ticked, a group of two or more whole. The ticked adverts of one
-    group leave together, of different groups apart, the unticked rest is confirmed one
-    property; nothing ticked is "confirm as one", all ticked cannot be armed. Selected cards run
-    as ONE `POST /properties/{id}/split` each (`keep_together: true`), behind a two-step
-    "Provést vybrané" with one optional shared reason; the outcome per card links the property
-    each unit sits on now, offers **Vrátit** (the server's undo body) and, for a card that would
-    take back the operator's own "různé" (409 `reverses_rulings`), **Přesto uložit**
-    (`confirm_retract`). Group size is the engine's own cap alone. A group already on one
-    property that the operator has since ruled different is reported, never acted on. It reads
-    nothing from `property_merge_events`. Undo restores listings and pipeline cards;
-    collections, tags, notes, dispatches and dismissals stay on the property left
-    (rule #18). **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
+    still carries `detach_outcome` / `splittable`, which no page reads since the merge sprint's W4. Its page,
+    `/autodedup/proposed-splits` (AUTODEDUP menu, "Návrhy rozdělení",
+    `frontend/src/pages/AutodedupProposedSplits.tsx`), is a list: a card per proposal with each
+    group's adverts side by side (`MemberGrid`; the adverts the engine never saw as groups of
+    their own), the reason and ruling per pair, the property's links, and **Rozdělit na stránce
+    nemovitosti**, a link to the property page's split dialog with the engine's groups as
+    letters (group n → the n-th letter); the page itself sends nothing. Group size is the
+    engine's own cap alone. A group already on one property that the operator has since ruled
+    different is reported, never acted on. It reads nothing from `property_merge_events`. **The category review (PROGRAM.md E937):** `GET /autodedup/category-splits
     ?properties=…` (`autodedup/category_splits.py`, read-only, 1 to 100 ids) puts each named live
     property's ads into SIDES, every two ads of a side passed by `category_clash` (rule 15's one
     gate; the ads walked in one fixed order, each joining the first side it clashes with no member
@@ -1650,12 +1669,12 @@ renumber.** Navigate by area:
     `/autodedup/category-splits` opens from a link that names the properties (no menu entry, no
     stored list), reads them ten per request and shows each side's ads with photos and their
     scrubbed text, each ad with a letter (the property page's select, one letter per side to
-    start, since a side can bundle two flats; riders take none); per card, behind a second click,
-    **Rozdělit podle písmen** (the property page's `splitPlan`: every letter but the one holding
-    most own ads leaves as one property, `keep_together: false`; offered only while every ad of
-    every leaving letter can move) or **Ponechat jako jednu nemovitost** (`separate: []`,
-    `keep_together: true`), both through `POST /properties/{id}/split`; a property no longer
-    mixed, or every pair across confirmed `same`, is a done row.
+    start, since a side can bundle two flats; riders take none); per card **Rozdělit podle
+    písmen** links to the property page's split dialog with every ad lettered (the property
+    page's `splitPlan`; the riders take the letter that stays). Its former "Ponechat" (a
+    keep-together statement) is gone with the statement (merge sprint W4): the properties it kept stay
+    confirmed by their rulings. A property no longer mixed, or every pair across confirmed
+    `same`, is a done row.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
@@ -1882,12 +1901,18 @@ renumber.** Navigate by area:
     is folded, everything else moves; a card or dismissal folded on the survivor names the
     property its newest standing carry row brought it from, else the survivor (standing: its own
     `undone_at` empty and a ledger row of its merge step not undone, one definition,
-    `pipeline_identity.STANDING_CARRY`, since until W4 a split stamps only the ledger); alert
+    `pipeline_identity.STANDING_CARRY`, so an origin a split already gave back is out); alert
     events get none. Each account's count of notes, cards, collection entries, tags and dismissals is the
-    same after a merge but one fewer per folded card, entry or tag (MS14's invariant, asserted on
-    every merge of the live suite). The merge route reads the acting account's moved rows back
-    as its receipt; the brake's dry run counts the rows its undo would route back
-    (`curation_preview`). **That
+    same after a merge but one fewer per folded card, entry or tag, and after a split the same
+    plus each copy and re-created fold, less each fold of a letter's join (MS14's invariant,
+    asserted on every merge and split of the live suites). The merge route reads the acting
+    account's moved rows back as its receipt; a detach ROUTES curation back along this record
+    (`property_carriers.curation_plan` → `route_curation`, rule 15: a note with its ad, the rest
+    to the property its oldest standing carry row names when that property gets adverts back,
+    folds re-created while their twin stands, the spent rows stamped `undone_at`; a split's
+    acting user picks per item, copies allowed, other accounts' items follow the rule unseen;
+    the brake's dry run counts what its undo would route, `curation_preview`, by the same plan,
+    bar an item an origin active again already holds, which stays uncounted). **That
     invariant has a second half, on the WRITE side: a caller-supplied `property_id` is resolved to
     the active survivor (`toolkit.property_identity.resolve_active_property_id`) before EVERY
     property-anchored write — the remove and edit halves included, not just the INSERT.** 426fa575
@@ -1906,11 +1931,12 @@ renumber.** Navigate by area:
     new property-anchored operator-state table = one `CurationTable(...)` line, or one adapter when
     its collision must not DELETE (history, like dismissals) or it is single-valued (like the
     pipeline); the write census's `_CARRIED_TABLES` derives from the carried columns, so there is
-    no second list to keep. A detach runs no carrier: state stays on the property left and the
-    reactivated or new side starts clean until the split routes curation back by the carry
-    record (merge sprint W4) — nothing is destroyed.
-    Notes carry `origin_listing_id` as display provenance only ("written while viewing this
-    advert"), never as a grouping key. Writes flow through the FastAPI service (property-grain
+    no second list to keep. A detach runs no carrier: it routes each item to where the carry
+    record and its advert say (above) — nothing is destroyed, a copy or a re-created fold never
+    lands where its account already holds that item, and nothing is copied for another account.
+    Notes carry `origin_listing_id` / `origin_listing_ref_id` ("written while viewing this
+    advert"): never a grouping key, but the split's routing key — a note goes with the advert
+    it was written on while that advert is on the property. Writes flow through the FastAPI service (property-grain
     routes `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
     browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
@@ -2330,8 +2356,11 @@ renumber.** Navigate by area:
     the same terminality the higher `position` wins (tie → later `updated_at`) — and the losing
     card is deleted and folded into the carry record with its snapshot (rule #18), from the
     property it came from. A merge writes no `property_pipeline_events` row any more (the 15
-    historic `merge_absorb` rows stay, history); a detach moves no card (the split routes it by
-    the carry record, merge sprint W4). Writes go through the JWT-gated API (`tenant_conn`; `POST/DELETE /pipeline/cards` to
+    historic `merge_absorb` rows stay, history); a detach routes a card by the carry record
+    (rule 18: back where it came from, a folded one re-created while its twin stands; a split
+    may copy the acting user's card as a second, independent card, last in its column, its
+    stage kept and its dates now), and where a letter's join merges two landings MS13 settles
+    the two cards as any merge does. Writes go through the JWT-gated API (`tenant_conn`; `POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<PipelineMark>`

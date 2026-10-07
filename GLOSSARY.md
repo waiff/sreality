@@ -64,6 +64,11 @@ _Avoid_: dedup (for the act), link, join, group (verb), unify, absorb
 Taking one or more ads out of a property, into another property or into a new one.
 _Avoid_: unmerge, detach, undo, separate
 
+**Letter**:
+In a split, the mark the user gives each ad; ads with the same letter are one property afterwards;
+one letter keeps the property's number and page.
+_Avoid_: unit, part, side, group
+
 **Survivor**:
 The property that keeps its identity: after a merge, the one that remains; after a split, the one
 that keeps its number and its page.

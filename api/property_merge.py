@@ -5,41 +5,40 @@ ORDERED: collapse this explicit set of properties, or state how one property's a
 Nothing in this module decides *whether* two properties are the same.
 
 The one merge and the one undo live in `toolkit.property_identity` (`merge_property_set` /
-`detach_listings` — the survivor rule, operator state, pipeline
-reconcile, browse sync, the `property_merge_events` ledger and, for the operator, the
-rulings of decision 8); the operator's split statement composes them in
-`toolkit.property_split` (E919). This module is
+`detach_listings` — the survivor rule, the carry record and the curation routing, browse sync,
+the `property_merge_events` ledger and, for the operator's merge, the rulings of MS12); the
+operator's split by letters composes them in `toolkit.property_split` (MS18). This module is
 the HTTP + read layer over them. Mounted under `/properties/*`, admin-gated.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Any
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from api import tenant_pool
 from api.category_clash_text import LETTER_ENDING, MERGE_ENDING, clash_sentence
 from toolkit.property_identity import (
-    MOVED,
     CategoryClash,
     MergeError,
-    detach_outcomes,
+    adverts_on,
     listing_origins,
+    merge_preview,
     merge_property_set,
     resolve_active_property_id,
 )
 from toolkit.property_split import (
-    MAX_ADVERTS,
-    MAX_SEPARATED,
-    REASON_MAX,
+    STALE,
     SplitRefused,
+    parse_choices,
+    parse_letters,
+    split_preview,
     split_property,
-    undo_split,
 )
 
 router = APIRouter(prefix="/properties", tags=["properties"])
@@ -49,42 +48,24 @@ class PropertySetAction(BaseModel):
     property_ids: list[int]
 
 
-class SplitUndoVeto(BaseModel):
-    """The must-not-link row a pair had before the split."""
+class SplitChoice(BaseModel):
+    """One of the acting account's items: the letter that gets it, and copies for others."""
 
-    source: Literal["guard", "model", "llm", "operator"]
-    reason: str | None = None
-
-
-class SplitUndoRuling(BaseModel):
-    listing_lo: int
-    listing_hi: int
-    verdict: str | None = None
-    note: str | None = None
-    reasons: list[str] = Field(default_factory=list)
-    must_not_link: SplitUndoVeto | None = None
-
-
-class SplitUndo(BaseModel):
-    """The undo a split's response issued, posted back verbatim."""
-
-    call_id: str
-    placements: dict[int, int] = Field(default_factory=dict, max_length=MAX_ADVERTS)
-    rulings: list[SplitUndoRuling] = Field(
-        default_factory=list, max_length=MAX_ADVERTS * (MAX_ADVERTS - 1) // 2)
+    to: str
+    copies: list[str] = Field(default_factory=list)
 
 
 class SplitAction(BaseModel):
-    """A statement (`adverts` shown, `separate` units, `keep_together`) or, alone, an `undo`."""
+    """The split by letters (MS18): every ad of the property with its letter, the acting
+    account's choices per item (an item left out follows the preselection), an optional reason
+    and the preview's `plan` the click was made on. Their limits (1 to 100 ads, letters A–Z, a
+    reason of at most 500 characters) are `toolkit.property_split`'s, refused in Czech."""
 
-    adverts: list[int] | None = Field(default=None, max_length=MAX_ADVERTS)
-    separate: list[Annotated[list[int], Field(max_length=MAX_ADVERTS)]] = Field(
-        default_factory=list, max_length=MAX_SEPARATED)
-    keep_together: bool | None = None
-    # The operator's optional free-text reason (decision 8), kept on every ruling's note.
-    reason: str | None = Field(default=None, max_length=REASON_MAX)
-    confirm_retract: bool = False
-    undo: SplitUndo | None = None
+    letters: dict[int, str]
+    choices: dict[str, SplitChoice] = Field(default_factory=dict)
+    # The operator's optional free-text reason, kept on every ruling's note.
+    reason: str | None = None
+    expect: str = ""
 
 
 def _decider(claims: dict) -> str:
@@ -175,6 +156,56 @@ def post_merge_property_set(
         return {**merged, "carried": None, "hidden_for_you": None}
 
 
+@router.get("/merge")
+def get_merge_preview(
+    properties: str = Query(..., max_length=2000),
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """How many "different" rulings a merge of these properties (`?properties=12,34`) would
+    take back (MS12), before the click; reads only."""
+    try:
+        ids = sorted({int(p) for p in properties.split(",") if p.strip()})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="properties is a comma-separated id list") from exc
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="need at least two properties")
+    return merge_preview(conn, ids)
+
+
+def _refused(refusal: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A letter's join that rule 15 refuses, in E925's Czech sentence."""
+    if refusal is None:
+        return None
+    return {"code": "refused", "ids": refusal["ids"],
+            "message": clash_sentence(refusal["field"], refusal["a"], refusal["b"],
+                                      ending=LETTER_ENDING)}
+
+
+@router.get("/{property_id}/split")
+def get_split_plan(
+    property_id: int,
+    letters: str = Query(..., max_length=4000),
+    choices: str | None = Query(None, max_length=8000),
+    conn: Any = Depends(deps.get_db_conn),
+    claims: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """The split's preview (`?letters=94020:A,94492:B`, every ad; `?choices=` the click's own
+    choices as JSON): where each letter and each of the acting account's items would land, what
+    the click would skip, the rulings it would write and take back, and `plan`, the digest the
+    click sends back; reads only. A refusal is `{code, message, ids}`."""
+    # the acting account's own items only (MS18); an admin with no membership has none
+    account = tenant_pool.resolve_account_id(conn, claims) if claims.get("sub") else None
+    try:
+        preview = split_preview(conn, property_id, letters=parse_letters(letters),
+                                account=account,
+                                choices=parse_choices(choices) if choices else None)
+    except SplitRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    return {**preview, "letters": [{**x, "refused": _refused(x["refused"])}
+                                   for x in preview["letters"]]}
+
+
 @router.post("/{property_id}/split")
 def post_split(
     property_id: int,
@@ -182,42 +213,30 @@ def post_split(
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """The operator's partition of one property's adverts, made true in one transaction (E919):
-    each `separate` unit leaves as one record (back where it came from, or new), the rest stay,
-    ruled one property when `keep_together`; `different` + a must-not-link across units. The
-    property page's row split is `separate: [[id]], keep_together: false`. `{undo}` alone takes
-    back the split whose response issued it. A refusal is `{code, message, ids}`; nothing is
-    written."""
+    """The split by letters (MS18), made true in one transaction while its preview's `plan` still
+    holds: each letter but the one that keeps the property leaves (back where it came from, or
+    new), a letter on two properties is joined, the acting account's items go where its choices
+    say (with copies), everyone else's follow the preselection; "different" across letters. The
+    answer is one receipt. A refusal is `{code, message, ids}` in Czech; nothing is written."""
     decided_by = _decider(claims)
+    account = tenant_pool.resolve_account_id(conn, claims) if claims.get("sub") else None
     try:
-        if body.undo is not None:
-            if body.model_fields_set - {"undo"}:
-                raise HTTPException(status_code=400, detail={
-                    "code": "invalid", "message": "an undo is sent alone", "ids": []})
-            return undo_split(
-                conn, property_id, call_id=body.undo.call_id, placements=body.undo.placements,
-                rulings=[r.model_dump() for r in body.undo.rulings], decided_by=decided_by,
-            )
-        if body.adverts is None or body.keep_together is None:
-            raise HTTPException(status_code=400, detail={
-                "code": "invalid", "message": "a statement names adverts and keep_together",
-                "ids": []})
         return split_property(
-            conn, property_id, adverts=body.adverts, separate=body.separate,
-            keep_together=body.keep_together, decided_by=decided_by, reason=body.reason,
-            confirm_retract=body.confirm_retract,
+            conn, property_id, letters=body.letters, decided_by=decided_by, account=account,
+            choices={item: (c.to, tuple(c.copies)) for item, c in body.choices.items()},
+            reason=body.reason, expect=body.expect,
         )
     except SplitRefused as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
     except CategoryClash as exc:
         # a leaving letter that mixes categories rule 15 never joins (E925's sentence)
         raise HTTPException(status_code=409, detail={
-            "code": "refused", "ids": [],
+            "code": "refused", "ids": list(exc.ads or ()),
             "message": clash_sentence(exc.field, exc.a, exc.b, ending=LETTER_ENDING),
         }) from exc
     except MergeError as exc:
         raise HTTPException(status_code=409, detail={
-            "code": "refused", "message": str(exc), "ids": []}) from exc
+            "code": "stale", "message": STALE, "ids": []}) from exc
 
 
 @router.get("/{property_id}/origins")
@@ -226,19 +245,15 @@ def get_origins(
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """Each advert's origin (where a split returns it) and the source and time of the merge
-    that took it from there, all null when no standing merge moved it; what a detach would
-    answer now (`detach_outcomes`), and `splittable` = that moves it."""
+    """Each advert's origin (where a split returns it while it is still merged here) and the
+    source and time of the merge that took it from there, all null when no standing merge moved
+    it (the property's own advert)."""
     survivor = resolve_active_property_id(conn, property_id)
     if survivor is None:
         raise HTTPException(status_code=404, detail=f"property {property_id} not found")
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM listings WHERE property_id = %s", (survivor,))
-        ids = sorted(int(r[0]) for r in cur.fetchall())
-    origins, outcomes = listing_origins(conn, ids), detach_outcomes(conn, ids)
+    ids = adverts_on(conn, [survivor])[survivor]
+    origins = listing_origins(conn, ids)
     return {"property_id": survivor, "adverts": [
-        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at",
-                  "detach_outcome", "splittable"),
-                 (lid, *origins.get(lid, (None, None, None)), outcomes.get(lid),
-                  outcomes.get(lid) in MOVED)))
+        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at"),
+                 (lid, *origins.get(lid, (None, None, None)))))
         for lid in ids]}

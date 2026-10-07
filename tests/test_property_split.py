@@ -1,10 +1,11 @@
-"""The operator's split statement, `toolkit.property_split` (E919), and `POST /properties/{id}/split`.
+"""The split by letters (MS18), `toolkit.property_split`, and `GET`/`POST /properties/{id}/split`.
 
 Over tests/_property_ledger.py's stateful fake, so every move replays through the real
-`detach_listings` / `merge_property_set` and every ruling lands in a verdict store that reads back.
-The screenshot case: property 10 holds its own advert s=1, b=2 merged from 20 and i=3 merged from
-30; the operator separates b and confirms s + i as one. Executed on Postgres:
-tests/test_property_split_live.py.
+`detach_listings` / `merge_property_set` and every ruling lands in a verdict store that reads back;
+the curation plan is canned per test (`_plans`) and what reaches the router is recorded
+(`db.routed`). The screenshot case: property 10 holds its own advert s=1, b=2 merged from 20 and
+i=3 merged from 30; the operator gives b the letter B. Executed on Postgres, with two accounts'
+curation routed: tests/test_property_split_live.py.
 """
 
 from __future__ import annotations
@@ -19,12 +20,15 @@ import pytest
 import toolkit.property_identity as pi
 import toolkit.property_split as ps
 from tests._property_ledger import OP, T0, _Ledger, ledger_carriers  # noqa: F401 — the fixture
+from toolkit import property_carriers as carriers
+from toolkit.property_carriers import Route
 from toolkit.property_identity import merge_property_set
-from toolkit.property_split import SplitRefused, split_property, undo_split
+from toolkit.property_split import SplitRefused, split_preview, split_property
 
 pytestmark = pytest.mark.usefixtures("ledger_carriers")
 
 OTHER = "someone.else@example.com"
+ME, THEM = uuid.UUID(int=1), uuid.UUID(int=2)
 
 
 def _screenshot(**kw: Any) -> _Ledger:
@@ -34,15 +38,23 @@ def _screenshot(**kw: Any) -> _Ledger:
     return db
 
 
-def _split(db: _Ledger, separate: list[list[int]], *, adverts: list[int] | None = None,
-           keep_together: bool = True, pid: int = 10, **kw: Any) -> dict[str, Any]:
-    return split_property(db, pid, adverts=adverts or sorted(db.listings), separate=separate,
-                          keep_together=keep_together, decided_by=OP, **kw)
+def _preview(db: _Ledger, letters: dict[int, str], *, pid: int = 10,
+             account: uuid.UUID | None = ME) -> dict[str, Any]:
+    return split_preview(db, pid, letters=letters, account=account)
+
+
+def _split(db: _Ledger, letters: dict[int, str], *, pid: int = 10,
+           account: uuid.UUID | None = ME, expect: str | None = None,
+           **kw: Any) -> dict[str, Any]:
+    if expect is None:
+        expect = _preview(db, letters, pid=pid, account=account)["plan"]
+    return split_property(db, pid, letters=letters, decided_by=OP, account=account,
+                          expect=expect, **kw)
 
 
 def _state(db: _Ledger) -> tuple:
     return (dict(db.listings), dict(db.props), [dict(e) for e in db.events],
-            [dict(r) for r in db.verdicts], dict(db.mnl), list(db.carried))
+            [dict(r) for r in db.verdicts], dict(db.mnl), list(db.carried), list(db.routed))
 
 
 def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:
@@ -51,156 +63,395 @@ def _refused(fn: Any, *args: Any, **kw: Any) -> SplitRefused:
     return exc.value
 
 
-def test_the_screenshot_case_one_advert_leaves_and_the_rest_are_confirmed_one():
+def test_the_screenshot_case_b_goes_home_and_only_different_is_written_across_letters():
     db = _screenshot()
-    out = _split(db, [[2]], reason="jiná dispozice")
+    preview = _preview(db, {1: "A", 2: "B", 3: "A"})
+    assert preview["letters"] == [
+        {"letter": "A", "listing_ids": [1, 3], "lands": "kept", "property_id": 10, "joins": 0,
+         "refused": None},
+        {"letter": "B", "listing_ids": [2], "lands": "origin", "property_id": 20, "joins": 0,
+         "refused": None}]
+    assert preview["rulings"] == {"different": 2, "taken_back": 0, "inside": []}
+    assert db.listings == {1: 10, 2: 10, 3: 10}, "the preview changes nothing"
+    out = _split(db, {1: "A", 2: "B", 3: "A"}, reason=" jiná dispozice ")
     assert db.listings == {1: 10, 2: 20, 3: 10} and db.props[20] == "active"
     note = f"operator split {out['call_id']} · A: 1,3 | B: 2 · jiná dispozice"
     assert (db.word(1, 2), db.word(2, 3), db.word(1, 3)) == (
-        ("different", note), ("different", note), ("same", note))
+        ("different", note), ("different", note), None)
     assert set(db.mnl) == {(1, 2), (2, 3)} and {v[0] for v in db.mnl.values()} == {"operator"}
-    assert out["record_kept_by"] == "A" and out["property_id"] == 10 and out["moved"] == 1
-    kept, separated = out["units"]
-    assert kept == {"unit": "A", "role": "kept", "listing_ids": [1, 3], "property_id": 10,
-                    "moved": [], "merge_group_id": None}
-    assert separated == {"unit": "B", "role": "separated", "listing_ids": [2], "property_id": 20,
-                         "moved": [{"listing_id": 2, "outcome": "detached", "from": 10, "to": 20}],
-                         "merge_group_id": None}
-    assert out["rulings"] == {"written": 3, "same": 1, "different": 2,
-                              "must_not_link_written": 2, "must_not_link_retracted": 1}
-    assert out["undo"] == {"call_id": out["call_id"], "placements": {1: 10, 2: 20, 3: 10},
-                           "rulings": [{"listing_lo": lo, "listing_hi": hi, "verdict": None,
-                                        "note": None, "reasons": [], "must_not_link": None}
-                                       for lo, hi in ((1, 2), (1, 3), (2, 3))]}
+    assert out == {"property_id": 10, "call_id": out["call_id"], "curation": [],
+                   "letters": [
+                       {"letter": "A", "listing_ids": [1, 3], "lands": "kept",
+                        "property_id": 10, "joined": None},
+                       {"letter": "B", "listing_ids": [2], "lands": "origin",
+                        "property_id": 20, "joined": None}],
+                   "rulings": {"different": 2, "same": 0, "taken_back": 0}}
 
 
-def test_the_rulings_are_appended_to_the_ledger_through_the_one_pair_writer():
-    """E920: every word is a new row by `record_ruling`'s own statement; another decider's newest
-    negative is the pair's ruling, so confirming over it asks first (E52) and it stays in the
-    history, and the undo appends it again as the newest word."""
+def test_the_rulings_are_appended_through_the_one_pair_writer_and_nothing_inside_a_letter():
+    """E920: every word is a new row by `record_ruling`'s own statement; a split rules only
+    "different", only across letters, and leaves another decider's word inside a letter."""
     db = _screenshot()
     db.rule(1, 3, "different", by=OTHER, note="their veto")
-    asked = _refused(_split, db, [[2]])
-    assert (asked.code, asked.ids) == ("reverses_rulings", [[1, 3]])
-    out = _split(db, [[2]], confirm_retract=True)
+    preview = _preview(db, {1: "A", 2: "B", 3: "A"})
+    assert preview["rulings"]["inside"] == [
+        {"letter": "A", "pairs": [[1, 3]], "sets": 0, "taken_back": False}]
+    out = _split(db, {1: "A", 2: "B", 3: "A"})
     note = f"operator split {out['call_id']} · A: 1,3 | B: 2"
-    assert db.history(1, 3) == [("different", "their veto", OTHER), ("same", note, OP)]
+    assert db.history(1, 3) == [("different", "their veto", OTHER)]
     appended = " ".join(pi.usql.VERDICT_PAIR_APPEND_SQL.split())
-    assert {(p["listing_lo"], p["listing_hi"], p["note"]) for s, p in db.log
-            if s == appended and p["note"] == note} == {(1, 2, note), (1, 3, note), (2, 3, note)}
+    assert {(p["listing_lo"], p["listing_hi"], p["verdict"]) for s, p in db.log
+            if s == appended} == {(1, 2, "different"), (2, 3, "different")}
+    assert {p["note"] for s, p in db.log if s == appended} == {note}
     assert not any("UPSERT" in s or "ON CONFLICT (kind" in s for s, _p in db.log)
-    assert out["undo"]["rulings"][1] == {
-        "listing_lo": 1, "listing_hi": 3, "verdict": "different", "note": "their veto",
-        "reasons": [], "must_not_link": {"source": "operator", "reason": "their veto"}}
-    undo = out["undo"]
-    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-               rulings=undo["rulings"], decided_by=OP)
-    assert db.word(1, 3) == ("different", "their veto") and db.history(1, 3)[0][2] == OTHER
-    assert db.mnl[(1, 3)] == ("operator", "their veto")
 
 
-def test_a_bare_veto_the_split_confirms_comes_back_as_the_different_it_was():
-    """E920: an operator must-not-link with no ruling behind it is the operator's `different`;
-    `record_ruling` writes it down before the split's `same`, and the undo appends it again."""
+def test_a_letter_of_native_adverts_leaves_as_one_new_record_the_oldest_of_its_births():
+    """Five own adverts: A = {1, 2, 3} keeps 10 (most own adverts); B's two are each born a
+    record and joined by the one merge into the oldest (decision 17; the first born on a tie).
+    The join is a merge, so it rules its two canonical ads "same" (MS12) and the receipt says so."""
+    db = _Ledger({1: 10, 2: 10, 3: 10, 4: 10, 5: 10})
+    letters = {1: "A", 2: "A", 3: "A", 4: "B", 5: "B"}
+    (a, b) = _preview(db, letters)["letters"]
+    assert (a["lands"], b["lands"], b["property_id"], b["joins"]) == ("kept", "new", None, 2)
+    out = _split(db, letters)
+    born = out["letters"][1]["property_id"]
+    assert born not in (None, 10) and db.listings == {1: 10, 2: 10, 3: 10, 4: born, 5: born}
+    assert out["letters"][1]["joined"] is not None
+    assert sorted(p for p, st in db.props.items() if st == "merged_away") == [born + 1]
+    assert {e["reason"] for e in db.events if e.get("reason")} == {"ingest_grouping"}
+    assert db.word(4, 5)[0] == "same" and {db.word(lo, hi)[0] for lo in (1, 2, 3)
+                                            for hi in (4, 5)} == {"different"}
+    assert out["rulings"] == {"different": 6, "same": 1, "taken_back": 0}
+
+
+def test_the_join_keeps_the_landing_its_ads_date_oldest():
+    """What the recompute will date each landing (its ads' earliest first seen), decision 17
+    over it, unknown last; a tie goes to an existing property, then to the first born."""
+    old, new = T0 - timedelta(days=3), T0
+    at = {("origin", 30): [3], ("new", 2): [2], ("new", 4): [4]}
+    assert ps._keeps(at, {2: new, 3: new, 4: old}) == ("new", 4)
+    assert ps._keeps(at, {2: new, 3: new, 4: new}) == ("origin", 30)
+    assert ps._keeps({("new", 2): [2], ("new", 4): [4]}, {2: None, 4: new}) == ("new", 4)
+    assert ps._keeps({("new", 2): [2], ("new", 4): [4]}, {}) == ("new", 2)
+
+
+def test_three_letters_land_apart():
     db = _screenshot()
-    db.mnl[(1, 3)] = ("operator", "jiné patro")
-    out = _split(db, [[2]])
-    assert db.history(1, 3)[0] == ("different", "jiné patro", "operator")
-    assert db.word(1, 3)[0] == "same" and (1, 3) not in db.mnl
-    undo = out["undo"]
-    assert undo["rulings"][1]["verdict"] == "different"
-    assert undo["rulings"][1]["note"] == "jiné patro"
-    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-               rulings=undo["rulings"], decided_by=OP)
-    assert db.word(1, 3) == ("different", "jiné patro")
-    assert db.mnl[(1, 3)] == ("operator", "jiné patro")
-    assert db.word(1, 2)[0] == db.word(2, 3)[0] == "unsure"
-
-
-def test_a_whole_group_leaves_together_as_one_record_the_oldest():
-    """Three own adverts (grouped at ingest): 2 and 3 are one unit. Each is born a record, the
-    two records are joined by the one merge, and (2, 3) ends `same`, the only word it ever got:
-    the set detach rules each mover against the advert that stays, never against the other."""
-    db = _Ledger({1: 10, 2: 10, 3: 10})
-    out = _split(db, [[2, 3]])
-    born = out["units"][1]["property_id"]
-    assert born not in (None, 10) and db.listings == {1: 10, 2: born, 3: born}
-    assert [m["outcome"] for m in out["units"][1]["moved"]] == ["split_native", "split_native"]
-    assert out["units"][1]["merge_group_id"] is not None
-    assert sorted(p for p, s in db.props.items() if s == "merged_away") == [born + 1]
-    assert [v for v, _note, _by in db.history(2, 3)] == ["same"] and (2, 3) not in db.mnl
-    assert db.word(1, 2)[0] == db.word(1, 3)[0] == "different"
-    assert set(db.mnl) == {(1, 2), (1, 3)}
-
-
-def test_two_groups_leave_apart_from_each_other():
-    db = _screenshot()
-    out = _split(db, [[2], [3]])
+    out = _split(db, {1: "A", 2: "B", 3: "C"})
     assert db.listings == {1: 10, 2: 20, 3: 30}
-    assert [u["property_id"] for u in out["units"]] == [10, 20, 30]
+    assert [(x["letter"], x["property_id"], x["lands"]) for x in out["letters"]] == [
+        ("A", 10, "kept"), ("B", 20, "origin"), ("C", 30, "origin")]
     assert {db.word(*p)[0] for p in ((1, 2), (1, 3), (2, 3))} == {"different"}
-    assert out["rulings"]["same"] == 0 and set(db.mnl) == {(1, 2), (1, 3), (2, 3)}
+    assert out["rulings"] == {"different": 3, "same": 0, "taken_back": 0}
 
 
-def test_confirm_as_one_moves_nothing_and_rules_every_pair_same():
+def test_the_staying_letter_is_the_rules():
+    """Most own adverts; the earliest letter on a tie; the canonical advert's letter when no
+    letter holds one of the property's own adverts."""
     db = _screenshot()
-    db.rule(1, 2, "different", by=OTHER)
-    events, listings = [dict(e) for e in db.events], dict(db.listings)
-    out = _split(db, [], confirm_retract=True)
-    assert out["reversed_pairs"] == [[1, 2]], "the newest word, whoever took it (E920)"
-    assert db.events == events and db.listings == listings and out["moved"] == 0
-    assert {db.word(*p)[0] for p in ((1, 2), (1, 3), (2, 3))} == {"same"}
-    assert db.mnl == {}, "the operator's must-not-link is retracted"
-    assert out["undo"]["placements"] == {} and len(out["undo"]["rulings"]) == 3
-    assert not any(s.startswith("UPDATE") for s, _p in db.log)
+    out = _split(db, {1: "B", 2: "A", 3: "A"})
+    assert out["letters"][1] == {"letter": "B", "listing_ids": [1], "lands": "kept",
+                                 "property_id": 10, "joined": None}
+    joined = out["letters"][0]
+    assert (joined["lands"], joined["property_id"]) == ("origin", 20) and joined["joined"]
+    assert db.listings == {1: 10, 2: 20, 3: 20} and db.props[30] == "merged_away"
+    db = _Ledger({1: 10, 2: 10})
+    out = _split(db, {1: "B", 2: "A"})
+    assert out["letters"][0]["lands"] == "kept" and db.listings[2] == 10 and db.listings[1] != 10
+    db = _Ledger({1: 20, 2: 30}, props={10: "active"}, canonical={10: 2},
+                 first_seen={10: T0 - timedelta(days=9)})
+    merge_property_set(db, [10, 20, 30], source="autodedup", reason="r")
+    assert pi.letter_landings(db, 10, {1: "A", 2: "B"}).staying == "B"
 
 
-def test_a_resend_changes_nothing_and_offers_no_undo():
-    db = _screenshot()
-    _split(db, [[2]])
-    before = _state(db)
-    again = _split(db, [[2]])
-    assert (again["moved"], again["rulings"]["written"], again["undo"]) == (0, 0, None)
-    assert _state(db) == before
-    assert [u["property_id"] for u in again["units"]] == [10, 20]
-    confirm = _split(db, [], adverts=[1, 3])
-    assert confirm["rulings"]["written"] == 0 and _state(db) == before
+def test_two_letters_from_one_origin_the_one_holding_more_of_its_adverts_gets_it():
+    """P = {2, 3, 4} was merged into 10 beside its own 1. B holds two of P's adverts and goes
+    home to 20; C's one is born a new record, its ledger row closed (`split_new`)."""
+    db = _Ledger({1: 10, 2: 20, 3: 20, 4: 20})
+    merge_property_set(db, [10, 20], source="autodedup", reason="r")
+    land = pi.letter_landings(db, 10, {1: "A", 2: "C", 3: "B", 4: "B"})
+    assert land == pi.Landings("A", {3: 20, 4: 20}, frozenset({2}))
+    out = _split(db, {1: "A", 2: "C", 3: "B", 4: "B"})
+    assert db.listings[3] == db.listings[4] == 20 and db.listings[2] not in (10, 20)
+    assert out["letters"][2]["lands"] == "new"
+    assert [e["reason"] for e in db.events if e.get("reason")] == ["split_new"]
+    assert all(e["undone_by"] for e in db.events if e["listing"] == 2)
+    # a tie goes to the earliest letter
+    db = _Ledger({1: 10, 2: 20, 3: 20})
+    merge_property_set(db, [10, 20], source="autodedup", reason="r")
+    assert pi.letter_landings(db, 10, {1: "A", 2: "C", 3: "B"}) == pi.Landings(
+        "A", {3: 20}, frozenset({2}))
+
+
+def test_an_advert_whose_origin_is_active_again_goes_to_a_new_property():
+    """20 got 3 back from a detach: it is not merged into 10 any more, so 2, which came from it,
+    is born a new record rather than joining an advert nobody lettered."""
+    db = _Ledger({1: 10, 2: 20, 3: 20})
+    merge_property_set(db, [10, 20], source="autodedup", reason="r")
+    pi.detach_listings(db, [3], decided_by=OP)
+    assert pi.letter_landings(db, 10, {1: "A", 2: "B"}) == pi.Landings("A", {}, frozenset({2}))
+    _split(db, {1: "A", 2: "B"})
+    assert db.listings[3] == 20 and db.listings[2] not in (10, 20)
+    assert [e["reason"] for e in db.events if e.get("reason")] == ["split_new"]
 
 
 def test_a_newcomer_on_the_property_or_an_advert_elsewhere_is_stale_and_writes_nothing():
     db = _screenshot()
+    expect = _preview(db, {1: "A", 2: "B", 3: "A"})["plan"]
     db.listings[4] = 10                     # the lane merged 4 in after the page loaded
     before = _state(db)
-    stale = _refused(_split, db, [[2]], adverts=[1, 2, 3])
-    assert (stale.status, stale.code, stale.ids) == (409, "stale", [4])
+    stale = _refused(_split, db, {1: "A", 2: "B", 3: "A"}, expect=expect)
+    assert (stale.status, stale.code, stale.ids, stale.message) == (
+        409, "stale", [4], "Nemovitost se mezitím změnila; nic se nezapsalo.")
     assert _state(db) == before
-    # a named advert on a property holding an advert nobody named: no back-door merge
     db = _screenshot()
     db.listings.update({3: 70, 7: 70})
     db.props[70] = "active"
-    assert _refused(_split, db, [], adverts=[1, 2, 3]).code == "stale"
+    assert _refused(_split, db, {1: "A", 2: "B", 3: "A"}, expect="x").code == "stale"
     # the newcomer lands between the unlocked read and the lock: the locked re-read decides
     db = _screenshot()
+    expect = _preview(db, {1: "A", 2: "B", 3: "A"})["plan"]
     dispatch = db.dispatch
     db.dispatch = lambda s, p: (db.listings.update({4: 10}) if "FOR UPDATE" in s
                                 else None) or dispatch(s, p)
     before = _state(db)
-    assert _refused(_split, db, [[2]], adverts=[1, 2, 3]).code == "stale"
+    assert _refused(_split, db, {1: "A", 2: "B", 3: "A"}, expect=expect).code == "stale"
     assert _state(db) == before and not db.sql("UPDATE listings"), "refused under the lock"
 
 
-def test_confirming_over_my_own_veto_asks_first_and_names_the_pairs():
+def _plans(monkeypatch: pytest.MonkeyPatch, rows: list[Route]) -> list[dict[str, Any]]:
+    """`curation_plan` answering `rows` (a list a test may change), with each call's
+    arguments recorded; the preselection and the choices are the real plan's (tested live)."""
+    calls: list[dict[str, Any]] = []
+
+    def plan(cur: Any, **kw: Any) -> list[Route]:
+        calls.append(kw)
+        out = list(rows)
+        for item, (anchor, copies) in (kw.get("choices") or {}).items():
+            out = [r._replace(anchor=anchor) if r.item == item else r for r in out]
+            out += [Route(r.table, r.key, r.account_id, "copy", c, None, r.stage_id, (),
+                          r.item, r.label) for r in rows if r.item == item for c in copies]
+        return out
+
+    monkeypatch.setattr(carriers, "curation_plan", plan)
+    return calls
+
+
+def _note(account: uuid.UUID, nid: int, anchor: int | None) -> Route:
+    return Route("property_notes", nid, account, "move", anchor, None, None, (), f"note:{nid}",
+                 f"poznámka {nid}")
+
+
+def test_the_plan_is_what_the_click_wrote_or_nothing(monkeypatch):
+    """The digest covers the acting account's items: its new note makes the click stale;
+    another account's does not (and is never shown)."""
+    rows = [_note(ME, 11, 2), _note(THEM, 12, 3)]
+    _plans(monkeypatch, rows)
     db = _screenshot()
-    db.rule(1, 3, "different", note="earlier")
+    preview = _preview(db, {1: "A", 2: "B", 3: "A"})
+    assert preview["curation"] == [{"item": "note:11", "kind": "note", "label": "poznámka 11",
+                                    "letter": "B", "why": "ad"}]
+    rows.append(_note(THEM, 13, 1))
+    assert _preview(db, {1: "A", 2: "B", 3: "A"})["plan"] == preview["plan"]
+    rows.append(_note(ME, 14, 1))
     before = _state(db)
-    asked = _refused(_split, db, [[2]])
-    assert (asked.status, asked.code, asked.ids) == (409, "reverses_rulings", [[1, 3]])
-    assert "1-3" in asked.message and _state(db) == before
-    out = _split(db, [[2]], confirm_retract=True)
-    assert out["reversed_pairs"] == [[1, 3]] and db.word(1, 3)[0] == "same"
-    assert out["undo"]["rulings"][1] == {
-        "listing_lo": 1, "listing_hi": 3, "verdict": "different", "note": "earlier", "reasons": [],
-        "must_not_link": {"source": "operator", "reason": "earlier"}}
+    stale = _refused(_split, db, {1: "A", 2: "B", 3: "A"}, expect=preview["plan"])
+    assert (stale.code, _state(db)) == ("stale", before)
+    assert _split(db, {1: "A", 2: "B", 3: "A"})["curation"][0]["item"] == "note:11"
+
+
+def test_a_plan_read_for_other_letters_is_stale():
+    """The digest covers the letters: the same ads lettered otherwise are another plan, though
+    nothing else about it (its counts, the letter that stays) changed."""
+    db = _screenshot()
+    expect = _preview(db, {1: "A", 2: "B", 3: "A"})["plan"]
+    before = _state(db)
+    stale = _refused(_split, db, {1: "A", 2: "B", 3: "B"}, expect=expect)
+    assert (stale.code, _state(db)) == ("stale", before)
+    # the same shape (A stays, B born twice and joined, four pairs ruled) over other ads
+    db = _Ledger({1: 10, 2: 10, 3: 10, 4: 10})
+    shown = _preview(db, {1: "A", 2: "A", 3: "B", 4: "B"})
+    other = _preview(db, {1: "A", 2: "B", 3: "A", 4: "B"})
+    assert {k: v for k, v in shown.items() if k not in ("letters", "plan")} == {
+        k: v for k, v in other.items() if k not in ("letters", "plan")}
+    assert _refused(_split, db, {1: "A", 2: "B", 3: "A", 4: "B"},
+                    expect=shown["plan"]).code == "stale"
+
+
+def test_a_plan_whose_landing_alone_changed_is_stale():
+    """The digest covers where each letter lands: 20 active again since the preview sends B to a
+    new property instead, with the same ads, letters, items and ruling counts, so the click on
+    the old plan is refused."""
+    db = _screenshot()
+    letters = {1: "A", 2: "B", 3: "A"}
+    shown = _preview(db, letters)
+    db.props[20] = "active"
+    db.into.pop(20, None)
+    again = _preview(db, letters)
+    assert (again["letters"][1]["lands"], shown["letters"][1]["lands"]) == ("new", "origin")
+    assert {k: again[k] for k in ("curation", "rulings")} == {
+        k: shown[k] for k in ("curation", "rulings")}
+    before = _state(db)
+    assert _refused(_split, db, letters, expect=shown["plan"]).code == "stale"
+    assert _state(db) == before
+
+
+def _picked_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`curation_plan` as the real one answers my card going home to 20 with a copy picked for
+    the staying letter: the copy lands where the fold of my own card would be re-made, which the
+    conflict pass then skips ('held'); without picks, the fold is re-made."""
+    card = Route("property_pipeline", None, ME, "move", 2, 20, 4, (5,), "pipeline", "lp 3")
+    fold = Route("property_pipeline", None, ME, "recreate", None, 10, 3, (13,), "fold:13",
+                 "lp 2")
+
+    def plan(cur: Any, **kw: Any) -> list[Route]:
+        if not kw.get("choices"):
+            return [card, fold]
+        return [card, card._replace(action="copy", anchor=None, carry_ids=()),
+                fold._replace(skipped="held", carry_ids=())]
+
+    monkeypatch.setattr(carriers, "curation_plan", plan)
+
+
+def test_the_preview_with_the_picks_says_what_the_click_would_skip_and_keeps_its_plan(
+        monkeypatch):
+    """Picks change what the preview says of the acting account's items (a copy, and the fold it
+    takes the place of), never `plan`: the digest is the preselection's, so the click made on
+    the picked preview holds; the receipt names the fold that was not re-made, and why."""
+    _picked_plan(monkeypatch)
+    db = _screenshot()
+    letters = {1: "A", 2: "B", 3: "A"}
+    plain = _preview(db, letters)
+    picked = split_preview(db, 10, letters=letters, account=ME,
+                           choices={"pipeline": ("B", ("A",))})
+    assert picked["plan"] == plain["plan"]
+    shown = [(i["item"], i["letter"], i.get("skipped"), i.get("copies"))
+             for i in plain["curation"]]
+    assert shown == [("pipeline", "B", None, None), ("fold:13", "A", None, None)]
+    assert [(i["item"], i["letter"], i.get("skipped"), i.get("copies"))
+            for i in picked["curation"]] == [
+        ("pipeline", "B", None, [{"letter": "A", "skipped": None}]),
+        ("fold:13", "A", "held", None)]
+    out = _split(db, letters, expect=picked["plan"], choices={"pipeline": ("B", ("A",))})
+    assert [(c["item"], c.get("skipped"), c["copies"]) for c in out["curation"]] == [
+        ("pipeline", None, [{"letter": "A", "property_id": 10}]), ("fold:13", "held", [])]
+
+
+def test_the_preview_route_reads_the_picks_as_the_click_sends_them(client, monkeypatch):
+    from api import dependencies as deps
+    from api import main as api_main
+    from api import property_merge as pm
+
+    http, _db = client
+    _picked_plan(monkeypatch)
+    api_main.app.dependency_overrides[deps.require_admin] = lambda: {
+        "is_admin": True, "email": OP, "sub": "me"}
+    monkeypatch.setattr(pm.tenant_pool, "resolve_account_id", lambda conn, claims: ME)
+    params = {"letters": "1:A,2:B,3:A"}
+    plain = http.get("/properties/10/split", params=params).json()
+    picked = http.get("/properties/10/split", params={
+        **params, "choices": '{"pipeline": {"to": "B", "copies": ["A"]}}'}).json()
+    assert picked["plan"] == plain["plan"] and picked["curation"][1]["skipped"] == "held"
+    for raw, message in (("nope", "Volby se nepodařilo přečíst."),
+                         ('{"pipeline": "B"}', "Volby se nepodařilo přečíst."),
+                         ('{"note:9": {"to": "A"}}', "Volba patří položce, kterou náhled neukázal."),
+                         ('{"pipeline": {"to": "Z"}}',
+                          "Volba míří na písmeno, které žádný inzerát nemá.")):
+        refused = http.get("/properties/10/split", params={**params, "choices": raw})
+        assert (refused.status_code, refused.json()["detail"]["message"]) == (400, message)
+
+
+def test_choices_move_and_copy_the_acting_accounts_items_only(monkeypatch):
+    """A letter becomes the ad whose landing its join keeps; the staying letter stays (None);
+    an unchanged letter keeps the preselected anchor; the receipt names only my items."""
+    calls = _plans(monkeypatch, [_note(ME, 11, 2), _note(THEM, 12, 2)])
+    db = _screenshot()
+    out = _split(db, {1: "A", 2: "B", 3: "C"},
+                 choices={"note:11": ("A", ("C",))})
+    assert calls[-1]["choices"] == {"note:11": (None, (3,))}
+    assert calls[-1]["account"] == ME and calls[-1]["movers"] == {2: 20, 3: 30}
+    (left, routes, landed) = db.routed[0]
+    assert left == 10 and landed == {2: 20, 3: 30}
+    assert [(r.item, r.action, r.anchor, r.account_id) for r in routes] == [
+        ("note:11", "move", None, ME), ("note:12", "move", 2, THEM), ("note:11", "copy", 3, ME)]
+    assert out["curation"] == [{"item": "note:11", "kind": "note", "label": "poznámka 11",
+                                "letter": "A", "property_id": 10,
+                                "copies": [{"letter": "C", "property_id": 30}]}]
+    out = _split(_screenshot(), {1: "A", 2: "B", 3: "A"}, choices={"note:11": ("B", ())})
+    assert calls[-1]["choices"] == {"note:11": (2, ())}
+
+
+def test_the_statement_and_its_choices_are_validated_before_anything_is_written(monkeypatch):
+    _plans(monkeypatch, [_note(ME, 11, 2)])
+    db = _screenshot()
+    for letters, why in (
+        ({}, "Rozdělení jmenuje 1 až 100 inzerátů."),
+        (dict.fromkeys(range(1, 102), "A"), "Rozdělení jmenuje 1 až 100 inzerátů."),
+        ({1: "a", 2: "B"}, "Písmeno musí být A–Z."),
+        ({1: "AB", 2: "B"}, "Písmeno musí být A–Z."),
+        ({1: "A", 2: "A", 3: "A"}, "Všechny inzeráty mají stejné písmeno, není co rozdělit."),
+    ):
+        refused = _refused(_split, db, letters, expect="x")
+        assert (refused.status, refused.code, refused.message) == (400, "invalid", why)
+    letters = {1: "A", 2: "B", 3: "A"}
+    for kw, why in (
+        ({"reason": "x" * 501}, "Důvod má nejvýš 500 znaků."),
+        ({"expect": ""}, "Chybí náhled rozdělení."),
+        ({"choices": {"note:11": ("A", ("A",))}},
+         "Kopie nemůže jít do písmene, které položku dostane."),
+        ({"choices": {"note:11": ("Z", ())}}, "Volba míří na písmeno, které žádný inzerát nemá."),
+        ({"choices": {"note:99": ("A", ())}}, "Volba patří položce, kterou náhled neukázal."),
+    ):
+        kw = {"expect": _preview(db, letters)["plan"], **kw}
+        refused = _refused(split_property, db, 10, letters=letters, decided_by=OP, account=ME,
+                           **kw)
+        assert (refused.status, refused.code, refused.message) == (400, "invalid", why)
+    assert db.listings == {1: 10, 2: 10, 3: 10} and db.verdicts == []
+    assert _refused(_preview, db, {1: "A", 2: "B", 3: "A"}, pid=404).message == (
+        "Nemovitost #404 neexistuje.")
+    assert _refused(_preview, db, {1: "A", 2: "B", 3: "A", 99: "B"}).message == (
+        "Inzerát #99 neexistuje.")
+    assert ps.parse_letters("1:A, 2:B,3:A") == letters
+    assert _refused(ps.parse_letters, "1:A,1:B").message == "Inzerát je uveden dvakrát."
+    assert _refused(ps.parse_letters, "x:A,2:B").code == "invalid"
+
+
+def test_a_letter_whose_join_rule_15_refuses_is_named_in_the_preview_and_raises_on_the_click():
+    """2 and 3 are born apart (11, 12), and the merge joining them refuses a sale and a rental:
+    the preview names the letter, and the click's `CategoryClash` reaches the route, which says
+    it in Czech (the route test below). Nothing moves."""
+    db = _Ledger({1: 10, 2: 10, 3: 10, 4: 10}, ad_cats={3: ("pronajem", "byt")})
+    letters = {1: "A", 4: "A", 2: "B", 3: "B"}
+    (_a, b) = _preview(db, letters)["letters"]
+    assert b["refused"] == {"code": "refused", "field": "category_type", "a": "prodej",
+                            "b": "pronajem", "ids": [2, 3]}
+    before = _state(db)
+    with pytest.raises(pi.CategoryClash) as clash:
+        _split(db, letters)
+    assert (clash.value.field, clash.value.properties, clash.value.ads) == (
+        "category_type", (11, 12), (2, 3))
+    assert _state(db) == before
+    # a contentless record never counts, in the preview as at the gate: nothing refused
+    db = _Ledger({1: 10, 2: 10, 3: 10, 4: 10}, ad_cats={3: ("pronajem", "byt")}, contentless={3})
+    assert _preview(db, letters)["letters"][1]["refused"] is None
+    assert _split(db, letters)["letters"][1]["joined"] is not None
+
+
+def test_a_letters_join_takes_back_the_different_rulings_between_its_landings():
+    """MS12 inside a split: C lands on 20 and 30 and is joined; the "different" between its two
+    adverts is taken back (the preview says so), a negative inside A stands."""
+    db = _Ledger({1: 10, 4: 10, 2: 20, 3: 30}, canonical={20: 2, 30: 3})
+    merge_property_set(db, [10, 20, 30], source="autodedup", reason="r")
+    db.rule(2, 3, "different")
+    db.rule(1, 4, "different")
+    preview = _preview(db, {1: "A", 4: "A", 2: "C", 3: "C"})
+    assert preview["rulings"] == {"different": 4, "taken_back": 1, "inside": [
+        {"letter": "A", "pairs": [[1, 4]], "sets": 0, "taken_back": False},
+        {"letter": "C", "pairs": [[2, 3]], "sets": 0, "taken_back": True}]}
+    out = _split(db, {1: "A", 4: "A", 2: "C", 3: "C"})
+    assert out["rulings"] == {"different": 4, "same": 1, "taken_back": 1}
+    assert db.word(2, 3)[0] == "same" and db.word(1, 4)[0] == "different"
 
 
 def test_the_e52_helper_is_the_one_both_verdict_split_routes_call():
@@ -215,8 +466,9 @@ def test_the_e52_helper_is_the_one_both_verdict_split_routes_call():
                              [(1, 2), (1, 3), (2, 3)]) == [(1, 2)]
 
 
-def test_an_advert_that_cannot_move_refuses_and_rolls_back_every_detach_before_it():
+def test_a_mover_that_does_not_move_under_the_lock_is_stale_and_rolls_back_every_move():
     db = _screenshot()
+    expect = _preview(db, {1: "A", 2: "B", 3: "C"})["plan"]
     dispatch = db.dispatch
 
     def refuse_three(s: str, p: Any) -> list[tuple]:
@@ -227,229 +479,17 @@ def test_an_advert_that_cannot_move_refuses_and_rolls_back_every_detach_before_i
 
     db.dispatch = refuse_three
     before = _state(db)
-    stuck = _refused(_split, db, [[2], [3]])
-    assert (stuck.code, stuck.ids) == ("cannot_move", [{"listing_id": 3, "outcome": "moved_since"}])
+    stuck = _refused(_split, db, {1: "A", 2: "B", 3: "C"}, expect=expect)
+    assert (stuck.code, stuck.ids) == ("stale", [3])
     db.dispatch = dispatch
-    assert _state(db) == before, "the detach of 2 rolled back with the rest"
-    # planned so before any lock: an origin a later merge retired elsewhere
-    db = _Ledger({1: 10, 31: 30, 32: 30, 9: 5}, first_seen={5: T0 - timedelta(days=9)})
-    merge_property_set(db, [10, 30], source="operator", reason="r", decided_by=OP)
-    pi.detach_listings(db, [31], decided_by=OP)
-    merge_property_set(db, [5, 30], source="autodedup", reason="r")
-    assert _refused(_split, db, [[32]], adverts=[1, 32]).ids == [
-        {"listing_id": 32, "outcome": "origin_moved_on"}]
-
-
-def test_the_unit_holding_the_own_advert_keeps_the_record_when_the_kept_unit_holds_none():
-    db = _screenshot()
-    out = _split(db, [[1]])
-    assert out["record_kept_by"] == "B" and db.listings[1] == 10
-    assert db.listings[2] == db.listings[3] == out["units"][0]["property_id"] == 20
-    assert out["units"][0]["merge_group_id"] is not None and db.props[30] == "merged_away"
-    assert db.word(2, 3)[0] == "same" and db.word(1, 2)[0] == db.word(1, 3)[0] == "different"
-    # without keep_together the property's own advert cannot leave its last
-    db = _screenshot()
-    refused = _refused(_split, db, [[1]], keep_together=False)
-    assert (refused.code, refused.ids) == ("cannot_move", [{"listing_id": 1,
-                                                             "outcome": "last_native"}])
-
-
-def test_a_join_the_one_merge_refuses_raises_its_category_clash_and_nothing_moves():
-    """2 and 3 are born apart (11, 12), and the merge joining them refuses a sale and a rental:
-    its `CategoryClash` reaches the route, which says it in Czech (the route test below)."""
-    db = _Ledger({1: 10, 2: 10, 3: 10}, cats={12: ("pronajem", "byt")})
-    before = _state(db)
-    with pytest.raises(pi.CategoryClash) as clash:
-        _split(db, [[2, 3]])
-    assert (clash.value.field, clash.value.properties, clash.value.ads) == (
-        "category_type", (11, 12), (2, 3))
-    assert _state(db) == before
-
-
-def test_a_join_that_would_drag_an_advert_nobody_named_is_refused():
-    db = _Ledger({1: 10, 2: 20, 4: 20, 3: 30})
-    merge_property_set(db, [10, 20, 30], source="autodedup", reason="r")
-    pi.detach_listings(db, [4], decided_by=OP)         # 20 is back, holding 4
-    before = _state(db)
-    dragged = _refused(_split, db, [[2, 3]], adverts=[1, 2, 3])
-    assert (dragged.code, dragged.ids) == ("join_would_drag", [4]) and _state(db) == before
-
-
-def test_two_units_that_came_from_one_property_are_refused_not_sent_home_together():
-    """Review finding 1: a legacy ingest-grouped P={2,3} merged into 10; [[2],[3]] would put both
-    back on 20 while ruling them `different` with an operator must-not-link."""
-    db = _Ledger({1: 10, 2: 20, 3: 20})
-    merge_property_set(db, [10, 20], source="autodedup", reason="r")
-    db.log.clear()
-    before = _state(db)
-    refused = _refused(_split, db, [[2], [3]])
-    assert (refused.status, refused.code) == (409, "cannot_move")
-    assert refused.ids == [{"listing_id": 2, "outcome": "shared_origin"},
-                           {"listing_id": 3, "outcome": "shared_origin"}]
-    assert _state(db) == before and not db.sql("UPDATE listings")
-    # the keeper swap: the kept unit [2] and the separated [3] both go home to 20
-    assert _refused(_split, db, [[1], [3]]).ids == [
-        {"listing_id": 2, "outcome": "shared_origin"}, {"listing_id": 3, "outcome": "shared_origin"}]
-    assert _state(db) == before
-    # both in ONE unit is one record, as stated
-    out = _split(db, [[2, 3]])
-    assert db.listings == {1: 10, 2: 20, 3: 20} and out["units"][1]["merge_group_id"] is None
-    assert db.word(2, 3)[0] == "same" and (2, 3) not in db.mnl
-
-
-def test_an_origin_holding_another_units_or_an_unnamed_advert_is_refused():
-    db = _Ledger({1: 10, 2: 20, 3: 20})
-    merge_property_set(db, [10, 20], source="autodedup", reason="r")
-    pi.detach_listings(db, [3], decided_by=OTHER)       # 20 is back, holding 3
-    before = _state(db)
-    # 3 stays in the kept unit; OTHER's detach ruled (1, 3) `different`, the newest word (E52)
-    refused = _refused(_split, db, [[2]], adverts=[1, 2, 3], confirm_retract=True)
-    assert (refused.code, refused.ids) == ("cannot_move", [{"listing_id": 2,
-                                                             "outcome": "shared_origin"}])
-    assert _state(db) == before
-    # review finding 4: a unit of ONE advert going home to an advert nobody named
-    dragged = _refused(_split, db, [[2]], adverts=[1, 2])
-    assert (dragged.code, dragged.ids) == ("join_would_drag", [3]) and _state(db) == before
-    # named and in the same unit, it is that unit's record
-    out = _split(db, [[2, 3]], adverts=[1, 2, 3], confirm_retract=True)
-    assert db.listings == {1: 10, 2: 20, 3: 20} and out["units"][1]["property_id"] == 20
-    assert out["reversed_pairs"] == [[2, 3]]
-
-
-def _restored(db: _Ledger) -> list[Any]:
-    """Every must-not-link row `restore_must_not_link` wrote back."""
-    return db.sql(" ".join(pi.usql.MUST_NOT_LINK_RESTORE_SQL.split()))
-
-
-def _interim(db: _Ledger, lo: int, hi: int) -> list[tuple]:
-    """A detach's own `different` on a pair: never one inside a unit (`_rule_detached`)."""
-    return [row for row in db.history(lo, hi)
-            if row[0] == "different" and str(row[1]).startswith("operator detach from")]
-
-
-def test_a_machine_veto_survives_the_split_and_its_undo():
-    """Review finding 2: `different` rewrites a guard row as the operator's, and the undo's
-    `unsure` used to delete it; `same` (a group leaving together, the keeper swap) keeps it.
-    No detach in a split rules a pair inside one unit, so the split's `restore_must_not_link`
-    writes nothing (F1 deletes it on this proof)."""
-    db = _Ledger({1: 10, 2: 20})
-    merge_property_set(db, [10, 20], source="autodedup", reason="r")
-    db.mnl[(1, 2)] = ("guard", "floor 3 vs 7")
-    out = _split(db, [[2]])
-    assert _restored(db) == []
-    assert db.mnl[(1, 2)][0] == "operator"
-    assert out["undo"]["rulings"][0]["must_not_link"] == {"source": "guard",
-                                                          "reason": "floor 3 vs 7"}
-    undo = out["undo"]
-    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-               rulings=undo["rulings"], decided_by=OP)
-    assert db.mnl == {(1, 2): ("guard", "floor 3 vs 7")} and db.word(1, 2)[0] == "unsure"
-    # a group leaving together: its interim `different` is not the last word on the veto
-    db = _screenshot()
-    db.mnl[(2, 3)] = ("model", "m")
-    _split(db, [[2, 3]])
-    assert _restored(db) == [] and _interim(db, 2, 3) == []
-    assert db.word(2, 3)[0] == "same" and db.mnl[(2, 3)] == ("model", "m")
-    # the keeper swap: the kept unit's adverts go home one by one, then are ruled `same`
-    db = _screenshot()
-    db.mnl[(2, 3)] = ("llm", "l")
-    out = _split(db, [[1]])
-    assert _restored(db) == [] and _interim(db, 2, 3) == []
-    assert out["record_kept_by"] == "B" and db.word(2, 3)[0] == "same"
-    assert db.mnl[(2, 3)] == ("llm", "l")
-    undo = out["undo"]
-    undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-               rulings=undo["rulings"], decided_by=OP)
-    assert db.mnl == {(2, 3): ("llm", "l")}
-
-
-def test_an_undo_body_cannot_forge_a_machine_veto():
-    db = _screenshot()
-    undo = _split(db, [[2]])["undo"]
-    forged = [dict(r) for r in undo["rulings"]]
-    forged[1]["must_not_link"] = {"source": "guard", "reason": "forged"}     # (1, 3): ruled same
-    before = _state(db)
-    kw = {"call_id": undo["call_id"], "placements": undo["placements"], "decided_by": OP}
-    refused = _refused(undo_split, db, 10, rulings=forged, **kw)
-    assert (refused.code, refused.ids) == ("stale", [[1, 3]]) and _state(db) == before
-    forged[1]["must_not_link"] = {"source": "robot", "reason": None}
-    assert _refused(undo_split, db, 10, rulings=forged, **kw).status == 400
-    # over the split's own operator row it is the pair's previous row, put back
-    forged = [dict(r) for r in undo["rulings"]]
-    forged[0]["must_not_link"] = {"source": "guard", "reason": "g"}        # (1, 2): ruled different
-    undo_split(db, 10, rulings=forged, **kw)
-    assert db.mnl == {(1, 2): ("guard", "g")}
-
-
-def test_the_undo_rejoins_the_adverts_and_restores_every_pairs_previous_word():
-    db = _screenshot()
-    db.rule(1, 2, "different", note="old", reasons=["plocha"])
-    out = _split(db, [[2]])
-    undo = out["undo"]
-    done = undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-                      rulings=undo["rulings"], decided_by=OP)
-    assert set(db.listings.values()) == {10} and db.props[20] == "merged_away"
-    assert done["property_id"] == 10 and done["undone"] and done["merge_group_id"]
-    assert db.newest(1, 2)["reasons"] == ["plocha"] and db.word(1, 2) == ("different", "old")
-    assert [v for v, _n, _by in db.history(1, 2)][0] == "different", "the ledger keeps every row"
-    undone = f"operator split-undo {undo['call_id']}"
-    assert db.word(1, 3) == db.word(2, 3) == ("unsure", undone)
-    assert set(db.mnl) == {(1, 2)}, "unsure retracts; the restored negative vetoes again"
-    assert db.mnl[(1, 2)] == ("operator", "old")
-    # the undo's own words do not carry the split's prefix, so the same body is refused again
-    before = _state(db)
-    replay = _refused(undo_split, db, 10, call_id=undo["call_id"], placements=undo["placements"],
-                      rulings=undo["rulings"], decided_by=OP)
-    assert (replay.code, replay.ids) == ("stale", [[1, 2], [1, 3], [2, 3]])
-    assert _state(db) == before
-
-
-def test_the_undo_refuses_what_was_ruled_or_moved_again_and_follows_decision_17():
-    db = _screenshot()
-    undo = _split(db, [[2]])["undo"]
-    db.rule(1, 3, "different", note="later")
-    kw = {"call_id": undo["call_id"], "placements": undo["placements"],
-          "rulings": undo["rulings"], "decided_by": OP}
-    assert _refused(undo_split, db, 10, **kw).code == "stale"
-    db = _screenshot()
-    undo = _split(db, [[2]])["undo"]
-    db.listings[2] = 30
-    assert _refused(undo_split, db, 10, **{**kw, "call_id": undo["call_id"],
-                                           "rulings": undo["rulings"]}).code == "stale"
-    # the separated advert's record is the oldest: the re-join keeps it
-    db = _screenshot(first_seen={20: T0 - timedelta(days=5)})
-    undo = _split(db, [[2]])["undo"]
-    done = undo_split(db, 10, call_id=undo["call_id"], placements=undo["placements"],
-                      rulings=undo["rulings"], decided_by=OP)
-    assert done["property_id"] == 20 and set(db.listings.values()) == {20}
-    assert db.props[10] == "merged_away"
-    # a forged call id matches nothing
-    assert _refused(undo_split, db, 20, **{**kw, "call_id": "operator"}).status == 400
-
-
-def test_the_statement_is_validated_before_anything_is_read():
-    db = _screenshot()
-    for separate, adverts, why in (
-        ([[1, 2, 3]], [1, 2, 3], "one unit must stay"),
-        ([[2], [2]], [1, 2, 3], "two separated groups"),
-        ([[]], [1, 2, 3], "cannot be empty"),
-        ([[9]], [1, 2, 3], "not among the adverts"),
-        ([], [1, 1, 2], "named twice"),
-        ([[i] for i in range(2, 28)], list(range(1, 28)), "at most 26 units"),
-        ([[2] * 50_000], [1, 2, 3], "a separated group names at most 100"),
-        ([[2] * 100], [1, 2, 3], "two separated groups"),
-        ([list(range(1, 103))], list(range(1, 103)), "adverts names 1 to 100"),
-    ):
-        refused = _refused(_split, db, separate, adverts=adverts)
-        assert (refused.status, refused.code) == (400, "invalid") and why in refused.message
-    assert _refused(_split, db, [], keep_together=False).status == 400
-    assert db.log == []
+    assert _state(db) == before, "the move of 2 rolled back with the rest"
 
 
 def test_a_lock_timeout_or_deadlock_is_busy():
     import psycopg
 
     db = _screenshot()
+    expect = _preview(db, {1: "A", 2: "B", 3: "A"})["plan"]
     dispatch = db.dispatch
 
     def locked(s: str, p: Any) -> list[tuple]:
@@ -459,43 +499,49 @@ def test_a_lock_timeout_or_deadlock_is_busy():
 
     db.dispatch = locked
     before = _state(db)
-    assert _refused(_split, db, [[2]]).code == "busy" and _state(db) == before
+    busy = _refused(_split, db, {1: "A", 2: "B", 3: "A"}, expect=expect)
+    assert (busy.code, busy.message) == ("busy", "Nemovitost se právě mění, zkuste to za chvíli.")
+    assert _state(db) == before
 
 
-def test_the_statement_writes_only_through_the_chokepoint():
+def test_the_split_writes_only_through_the_chokepoint_and_the_preview_writes_nothing():
     """Rule 15: the split moves adverts through `detach_listings` / `merge_property_set` and rules
-    through `record_rulings`, and holds no write statement of its own."""
+    through `record_rulings`, and holds no write statement of its own; the preview runs in a
+    read-only transaction that is rolled back."""
     src = inspect.getsource(ps)
     for statement in ("UPDATE listings", "UPDATE properties", "INSERT INTO property_merge_events",
                       "INSERT INTO autodedup", "DELETE FROM", "INSERT INTO properties",
                       "SELECT id, property_id FROM listings WHERE id"):
         assert statement not in src, statement
-    for writer in ("detach_listings(", "merge_property_set(", "record_rulings(",
-                   "restore_must_not_link("):
+    for writer in ("detach_listings(", "merge_property_set(", "record_rulings("):
         assert writer in inspect.getsource(ps.split_property) + inspect.getsource(ps._join)
-    assert ps.listing_places is pi.listing_places and not hasattr(ps, "_PLACES_SQL")
     assert src.count("detach_listings(") == 1, "the split detaches its movers as ONE set"
+    for gone in ("undo_split", "keep_together", "restore_must_not_link", "detach_outcomes"):
+        assert gone not in src, gone
+    db = _screenshot()
+    _preview(db, {1: "A", 2: "B", 3: "A"})
+    assert db.log[0] == (ps._READ_ONLY, None) and db.log[-1] == ("rollback", None)
+    assert not any(s.startswith(("UPDATE", "INSERT", "DELETE")) for s, _p in db.log)
 
 
-@pytest.mark.parametrize(("listings", "separate", "joins"), [
-    ({1: 10, 2: 20, 3: 30}, [[2], [3]], 0),     # two merged adverts go home apart
-    ({1: 10, 2: 10, 3: 10}, [[2], [3]], 0),     # two native adverts, each born a record
-    ({1: 10, 2: 10, 3: 10}, [[2, 3]], 1),       # born apart, then joined as one unit
-    ({1: 10, 2: 10, 3: 10, 4: 10, 5: 10}, [[2, 3], [4, 5]], 2),
+@pytest.mark.parametrize(("listings", "letters", "joins"), [
+    ({1: 10, 2: 20, 3: 30}, {1: "A", 2: "B", 3: "C"}, 0),     # two merged adverts go home apart
+    ({1: 10, 2: 10, 3: 10, 4: 10}, {1: "A", 2: "A", 3: "B", 4: "C"}, 0),   # each born apart
+    ({1: 10, 2: 10, 3: 10, 4: 10}, {1: "A", 2: "A", 3: "B", 4: "B"}, 1),   # born, then joined
+    (dict.fromkeys(range(1, 7), 10), dict(zip(range(1, 7), "AABBCC")), 2),
 ])
-def test_a_split_brings_derived_state_current_once_per_writer_call(listings, separate, joins):
-    """M movers and J joined units: ONE `properties_changed` for the set detach (over the record
-    and every property reached), then one per join — 1 + J, not M + J."""
+def test_a_split_brings_derived_state_current_once_per_writer_call(listings, letters, joins):
+    """M movers and J joined letters: ONE `properties_changed` for the set detach (over the
+    record and every property reached), then one per join — 1 + J, not M + J."""
     db = _Ledger(listings)
     if len(set(listings.values())) > 1:
         merge_property_set(db, sorted(set(listings.values())), source="autodedup", reason="r")
+    expect = _preview(db, letters)["plan"]
     for seen in (db.changed, db.browse, db.broker):
         seen.clear()
-    out = _split(db, separate)
-    reached = sorted({10, *(m["to"] for u in out["units"] for m in u["moved"])})
-    assert out["moved"] == sum(map(len, separate)) and len(db.changed) == 1 + joins
-    assert db.changed[0] == reached
-    assert db.changed == db.browse == db.broker
+    _split(db, letters, expect=expect)
+    assert len(db.changed) == 1 + joins and db.changed == db.browse == db.broker
+    assert 10 in db.changed[0] and len(db.routed) == 1
 
 
 def test_one_pair_verdict_vocabulary():
@@ -506,21 +552,9 @@ def test_one_pair_verdict_vocabulary():
     assert set(usql.VERDICT_VALUES) == {"same", "unsure", *usql.NEGATIVE_VERDICTS}
     with pytest.raises(ValueError):
         pi.record_rulings(_Ledger({1: 10}), {(1, 2)}, verdict="maybe", decided_by=OP, note=None)
-    assert _refused(undo_split, _screenshot(), 10, call_id=str(uuid.uuid4()), placements={},
-                    rulings=[{"listing_lo": 1, "listing_hi": 2, "verdict": "maybe"}],
-                    decided_by=OP).status == 400
 
 
-def test_the_property_page_row_split_writes_exactly_the_detach_rulings():
-    db = _screenshot()
-    out = _split(db, [[2]], keep_together=False)
-    assert db.listings == {1: 10, 2: 20, 3: 10}
-    assert db.word(1, 2)[0] == db.word(2, 3)[0] == "different" and db.word(1, 3) is None
-    assert out["rulings"] == {"written": 2, "same": 0, "different": 2,
-                              "must_not_link_written": 2, "must_not_link_retracted": 0}
-
-
-# --- the route -------------------------------------------------------------------------------
+# --- the routes ------------------------------------------------------------------------------
 
 
 fastapi = pytest.importorskip("fastapi")
@@ -541,22 +575,23 @@ def client():
     api_main.app.dependency_overrides.clear()
 
 
-def test_the_route_states_the_split_and_posts_its_undo_back(client):
+def test_the_routes_preview_then_split_by_letters(client):
     http, db = client
+    preview = http.get("/properties/10/split", params={"letters": "1:A,2:B,3:A"})
+    assert preview.status_code == 200 and db.listings == {1: 10, 2: 10, 3: 10}
+    body = preview.json()
+    assert [(x["letter"], x["lands"], x["property_id"]) for x in body["letters"]] == [
+        ("A", "kept", 10), ("B", "origin", 20)]
     res = http.post("/properties/10/split", json={
-        "adverts": [1, 2, 3], "separate": [[2]], "keep_together": True, "reason": " jiné patro "})
-    assert res.status_code == 200
-    body = res.json()
-    assert [(u["unit"], u["property_id"]) for u in body["units"]] == [("A", 10), ("B", 20)]
-    assert body["undo"]["placements"] == {"1": 10, "2": 20, "3": 10}
-    assert db.word(1, 3)[1].endswith("· jiné patro")
-    # a stale property id follows merged_into; the re-send moves nothing
+        "letters": {"1": "A", "2": "B", "3": "A"}, "reason": " jiné patro ",
+        "expect": body["plan"]})
+    assert res.status_code == 200 and db.listings == {1: 10, 2: 20, 3: 10}
+    assert res.json()["rulings"] == {"different": 2, "same": 0, "taken_back": 0}
+    assert db.word(1, 2)[1].endswith("· jiné patro")
+    # the property changed since: the same click is stale, in Czech
     again = http.post("/properties/10/split", json={
-        "adverts": [1, 2, 3], "separate": [[2]], "keep_together": True})
-    assert again.status_code == 200 and again.json()["moved"] == 0
-    undone = http.post("/properties/10/split", json={"undo": body["undo"]})
-    assert undone.status_code == 200 and undone.json()["property_id"] == 10
-    assert set(db.listings.values()) == {10}
+        "letters": {"1": "A", "2": "B", "3": "A"}, "expect": body["plan"]})
+    assert again.status_code == 409 and again.json()["detail"]["code"] == "stale"
 
 
 def test_the_route_vocabulary_is_the_stores(client):
@@ -566,60 +601,62 @@ def test_the_route_vocabulary_is_the_stores(client):
     assert routes.VERDICT_VALUES is usql.VERDICT_VALUES
 
 
-def test_the_route_answers_refusals_with_code_message_and_ids(client):
+def test_the_routes_answer_refusals_with_code_message_and_ids(client):
     from api import dependencies as deps
     from api import main as api_main
 
     http, db = client
-    db.rule(1, 3, "different")
-    res = http.post("/properties/10/split", json={
-        "adverts": [1, 2, 3], "separate": [[2]], "keep_together": True})
-    assert res.status_code == 409
-    assert res.json()["detail"] == {"code": "reverses_rulings", "message": res.json()["detail"][
-        "message"], "ids": [[1, 3]]}
-    body = {"adverts": [1, 2, 3], "separate": [[2]], "keep_together": True}
-    assert http.post("/properties/404/split", json=body).status_code == 404
-    assert http.post("/properties/10/split", json={**body, "adverts": [1, 2, 3, 99],
-                                                   "separate": [[99]]}).status_code == 404
-    assert http.post("/properties/10/split", json={**body, "reason": "x" * 501}).status_code == 422
-    assert http.post("/properties/10/split", json={"adverts": [1, 2, 3]}).status_code == 400
-    assert http.post("/properties/10/split", json={**body, "separate": [[1, 2, 3]]}).status_code == 400
+    body = {"letters": {"1": "A", "2": "B", "3": "A"}, "expect": "x"}
+    assert http.post("/properties/404/split", json=body).json()["detail"] == {
+        "code": "not_found", "message": "Nemovitost #404 neexistuje.", "ids": [404]}
     assert http.post("/properties/10/split", json={
-        "adverts": [1, 2, 3], "undo": {"call_id": "x", "placements": {}, "rulings": []}}
-    ).status_code == 400
-    assert http.post("/properties/10/detach", json={"listing_id": 2}).status_code in (404, 405)
-    for bounded in ({"adverts": list(range(1, 102))}, {"separate": [[2]] * 26},
-                    {"separate": [[2] * 101]}):
-        assert http.post("/properties/10/split", json={**body, **bounded}).status_code == 422
-    assert http.post("/properties/10/split", json={"undo": {
-        "call_id": "x", "placements": {}, "rulings": [
-            {"listing_lo": 1, "listing_hi": 2, "must_not_link": {"source": "robot"}}]}}
-    ).status_code == 422
+        **body, "letters": {"1": "A", "2": "B", "3": "A", "99": "B"}}).status_code == 404
+    assert http.post("/properties/10/split", json=body).json()["detail"]["code"] == "stale"
+    # the statement's limits are the toolkit's, answered in Czech, never pydantic's English 422
+    for over, message in (
+        ({"reason": "x" * 501}, "Důvod má nejvýš 500 znaků."),
+        ({"letters": {"1": "a", "2": "B"}}, "Písmeno musí být A–Z."),
+        ({"letters": {str(i): "A" for i in range(101)}}, "Rozdělení jmenuje 1 až 100 inzerátů."),
+        ({"letters": {}}, "Rozdělení jmenuje 1 až 100 inzerátů."),
+        ({"choices": {"note:1": {"to": "b"}}}, "Volba míří na písmeno, které žádný inzerát nemá."),
+    ):
+        refused = http.post("/properties/10/split", json={**body, **over})
+        assert (refused.status_code, refused.json()["detail"]) == (
+            400, {"code": "invalid", "message": message, "ids": refused.json()["detail"]["ids"]})
+    assert http.post("/properties/10/split", json={
+        "letters": {"1": "A", "2": "B", "3": "A"}}).json()["detail"]["message"] == (
+        "Chybí náhled rozdělení.")
+    gone = http.post("/properties/10/split", json={"adverts": [1, 2, 3], "separate": [[2]],
+                                                    "keep_together": True})
+    assert gone.status_code == 422, "the old statement is gone"
+    assert http.get("/properties/10/split", params={"letters": "1:A,2:A,3:A"}).json()[
+        "detail"]["message"] == "Všechny inzeráty mají stejné písmeno, není co rozdělit."
     api_main.app.dependency_overrides[deps.require_admin] = lambda: {"is_admin": True}
     assert http.post("/properties/10/split", json=body).status_code == 403
     assert db.listings == {1: 10, 2: 10, 3: 10}
 
 
 def test_a_leaving_letter_that_mixes_categories_is_refused_in_czech(client):
-    """The join of a unit that landed on two records goes through the merge chokepoint, whose
-    rule-15 gate over their ads raises `CategoryClash`; the route prints E925's Czech sentence
-    (the pair page's words, the Browse labels) and tells the operator what to do, never the
-    chokepoint's English. Nothing moves."""
+    """The join of a letter that landed on two records goes through the merge chokepoint, whose
+    rule-15 gate over their ads raises `CategoryClash`; the routes print E925's Czech sentence
+    (the pair page's words, the Browse labels) naming its two ads, never the chokepoint's
+    English. Nothing moves."""
     from api.category_clash_text import LETTER_ENDING, SAME_ENDING, clash_sentence
 
     http, db = client
     db.ad_cats[3] = ("prodej", "ostatni")  # re-filed since the merge
-    res = http.post("/properties/10/split", json={
-        "adverts": [1, 2, 3], "separate": [[2, 3]], "keep_together": False})
-    assert res.status_code == 409 and db.listings == {1: 10, 2: 10, 3: 10}
-    detail = res.json()["detail"]
-    assert (detail["code"], detail["ids"]) == ("refused", [])
-    assert detail["message"] == (
+    sentence = (
         "Inzerát v kategorii Byty a inzerát v kategorii Ostatní systém nikdy nespojí do jedné "
         "nemovitosti (výjimkou jsou jen dvojice dům – komerční objekt, dům – pozemek, komerční "
         "objekt – pozemek a byt – komerční objekt), proto nemohou mít stejné písmeno. Dejte jim "
         "různá písmena.")
-    assert "mismatch" not in detail["message"]
+    preview = http.get("/properties/10/split", params={"letters": "1:A,2:B,3:B"}).json()
+    assert preview["letters"][1]["refused"] == {"code": "refused", "ids": [2, 3],
+                                                "message": sentence}
+    res = http.post("/properties/10/split", json={
+        "letters": {"1": "A", "2": "B", "3": "B"}, "expect": preview["plan"]})
+    assert res.status_code == 409 and db.listings == {1: 10, 2: 10, 3: 10}
+    assert res.json()["detail"] == {"code": "refused", "ids": [2, 3], "message": sentence}
     # one sentence, two endings: the pair page's refusal differs only in its ending
     assert clash_sentence("category_main", "byt", "ostatni", ending=SAME_ENDING).endswith(
         "proto je nelze označit jako stejné.")

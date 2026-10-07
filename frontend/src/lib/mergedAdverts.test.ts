@@ -1,22 +1,24 @@
-/* lib/mergedAdverts — the words for a merge's origin, why an advert cannot move
- * and where a split left a unit, the property page's letters as ONE split
- * statement, the one receipt after a merge, and the read-your-writes refresh
- * after a split or a merge. */
+/* lib/mergedAdverts — the words for a merge's origin, the property page's
+ * letters as the split's statement and as a link, the one receipt slot after a
+ * merge or a split, and the read-your-writes refresh after either. */
 
 import { describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
-import type { MergeResult, SplitUnit } from './api';
+import type { MergeResult, SplitResult } from './api';
 import {
+  choicesParam,
   inzeratu,
+  lettersParam,
   mergeOriginLabel,
   mergeReceiptText,
+  parseLetters,
   pushMergeReceipt,
+  pushSplitReceipt,
   refreshAfterSplit,
+  splitPath,
   splitPlan,
-  stateStays,
-  unitLanding,
-  unmovedReason,
+  splitReceiptText,
 } from './mergedAdverts';
 import * as toast from './toast';
 
@@ -110,26 +112,6 @@ describe('mergeOriginLabel', () => {
   });
 });
 
-describe('unmovedReason', () => {
-  it('says why an advert cannot move; an unknown outcome is shown raw', () => {
-    expect(unmovedReason('moved_since')).toBe('inzerát se mezitím přesunul jinam');
-    expect(unmovedReason('origin_moved_on')).toMatch(/byla mezitím sloučena jinam/);
-    expect(unmovedReason('last_native')).toMatch(/poslední vlastní inzerát nemovitosti/);
-    expect(unmovedReason('shared_origin')).toBe(
-      'přišel ze stejné nemovitosti jako inzerát s jiným písmenem a vrátily by se do ní spolu',
-    );
-    expect(unmovedReason('moved_on')).toBe('moved_on');
-  });
-});
-
-describe('stateStays', () => {
-  it('names the property the operator’s state stays with', () => {
-    expect(stateStays(42)).toBe(
-      'Poznámky, štítky, kolekce a zařazení v pipeline zůstanou u nemovitosti #42.',
-    );
-  });
-});
-
 describe('splitPlan', () => {
   const ADS = [101, 202, 303, 404];
   const own = (...ids: number[]) => new Set(ids);
@@ -138,44 +120,43 @@ describe('splitPlan', () => {
     const plan = splitPlan(ADS, {}, own(101), 101);
     expect(plan.kept).toEqual({ letter: 'A', listingIds: ADS });
     expect(plan.leaving).toEqual([]);
-    expect(plan.statement).toEqual({ adverts: ADS, separate: [], keep_together: false });
+    expect(plan.letters).toEqual({ 101: 'A', 202: 'A', 303: 'A', 404: 'A' });
   });
 
   it('two flats: the twins leave as ONE unit, the own advert’s group stays', () => {
     const plan = splitPlan(ADS, { 303: 'B', 404: 'B' }, own(101), 101);
-    expect(plan.statement).toEqual({ adverts: ADS, separate: [[303, 404]], keep_together: false });
+    expect(plan.letters).toEqual({ 101: 'A', 202: 'A', 303: 'B', 404: 'B' });
     expect(plan.kept).toEqual({ letter: 'A', listingIds: [101, 202] });
     expect(plan.leaving).toEqual([{ letter: 'B', listingIds: [303, 404] }]);
   });
 
-  it('one unit per leaving letter, in letter order, ids ascending; the adverts as shown', () => {
+  it('one group per leaving letter, in letter order, ids ascending; every advert named', () => {
     const shown = [101, 404, 202, 303];
     const plan = splitPlan(shown, { 404: 'C', 202: 'B', 303: 'C' }, own(101), 101);
-    expect(plan.statement).toEqual({
-      adverts: [101, 404, 202, 303],
-      separate: [[202], [303, 404]],
-      keep_together: false,
-    });
-    expect(plan.leaving.map((g) => g.letter)).toEqual(['B', 'C']);
+    expect(plan.letters).toEqual({ 101: 'A', 202: 'B', 303: 'C', 404: 'C' });
+    expect(plan.leaving).toEqual([
+      { letter: 'B', listingIds: [202] },
+      { letter: 'C', listingIds: [303, 404] },
+    ]);
   });
 
   it('the letters do not decide who stays: the own advert’s group does, whatever its letter', () => {
     const plan = splitPlan(ADS, { 101: 'B' }, own(101), 101);
     expect(plan.kept).toEqual({ letter: 'B', listingIds: [101] });
-    expect(plan.statement.separate).toEqual([[202, 303, 404]]);
+    expect(plan.leaving).toEqual([{ letter: 'A', listingIds: [202, 303, 404] }]);
   });
 
   it('the group with more own adverts stays, even under a later letter', () => {
     const plan = splitPlan(ADS, { 303: 'B', 404: 'B' }, own(101, 303, 404), 101);
     expect(plan.kept.letter).toBe('B');
-    expect(plan.statement.separate).toEqual([[101, 202]]);
+    expect(plan.leaving).toEqual([{ letter: 'A', listingIds: [101, 202] }]);
   });
 
   it('a tie in own adverts keeps the earliest of the tied letters', () => {
     // A holds none; B and C one each.
     const plan = splitPlan(ADS, { 101: 'B', 303: 'C' }, own(101, 303), 101);
     expect(plan.kept).toEqual({ letter: 'B', listingIds: [101] });
-    expect(plan.statement.separate).toEqual([[202, 404], [303]]);
+    expect(plan.leaving.map((g) => g.letter)).toEqual(['A', 'C']);
   });
 
   it('no own advert: the canonical advert’s group stays; an unshown canonical, the earliest letter', () => {
@@ -186,26 +167,90 @@ describe('splitPlan', () => {
   });
 });
 
-describe('unitLanding', () => {
-  const unit = (over: Partial<SplitUnit>): SplitUnit => ({
-    unit: 'B',
-    role: 'separated',
-    listing_ids: [2],
-    property_id: 20,
-    moved: [],
-    merge_group_id: null,
-    ...over,
+describe('lettersParam / parseLetters / splitPath', () => {
+  it('writes the letters ids ascending and reads back only `id:A–Z` parts', () => {
+    expect(lettersParam({ 303: 'B', 101: 'A', 202: 'A' })).toBe('101:A,202:A,303:B');
+    expect(parseLetters('101:A, 202:B,303:b,x:C,404,505:AB')).toEqual({ 101: 'A', 202: 'B' });
+    expect(parseLetters(null)).toEqual({});
   });
-  it('names where a split left the unit', () => {
-    expect(unitLanding(unit({ property_id: 10 }), 10)).toBe('zůstává #10');
-    expect(unitLanding(unit({ moved: [{ listing_id: 2, outcome: 'detached', from: 10, to: 20 }] }), 10)).toBe(
-      'vráceno do #20',
+
+  it('links the property page with the letters, the one place a review page sends a split', () => {
+    expect(splitPath(42, { 202: 'B', 101: 'A' })).toBe('/property/42?letters=101%3AA%2C202%3AB');
+  });
+});
+
+const split = (over: Partial<SplitResult> = {}): SplitResult => ({
+  property_id: 42,
+  call_id: 'c',
+  letters: [
+    { letter: 'A', listing_ids: [1], property_id: 42, lands: 'kept', joined: null },
+    { letter: 'B', listing_ids: [2], property_id: 43, lands: 'origin', joined: null },
+    { letter: 'C', listing_ids: [3, 4], property_id: 90, lands: 'new', joined: 'g' },
+  ],
+  curation: [
+    { item: 'note:1', kind: 'note', label: 'Sousedi', letter: 'B', property_id: 43, copies: [] },
+    {
+      item: 'pipeline', kind: 'pipeline', label: 'Prohlídka', letter: 'B', property_id: 43,
+      copies: [{ letter: 'C', property_id: 90 }],
+    },
+    { item: 'tag:7', kind: 'tag', label: 'výhled', letter: 'A', property_id: 42, copies: [] },
+    { item: 'fold:9', kind: 'collection', label: 'Brno', letter: 'C', property_id: 90, copies: [], why: 'fold' },
+  ],
+  rulings: { different: 5, same: 1, taken_back: 1 },
+  ...over,
+});
+
+describe('splitReceiptText / pushSplitReceipt', () => {
+  it('says where each letter landed, what of mine went where and was copied, and the rulings', () => {
+    expect(splitReceiptText(split())).toBe(
+      'Rozděleno: A zůstává v #42; B → #43; C → nová #90. ' +
+        'Do B: poznámka „Sousedi“, zařazení v pipeline (Prohlídka). Do C: kolekce „Brno“. ' +
+        'Kopie do C: zařazení v pipeline (Prohlídka). „Různé“ zapsáno u 5 dvojic. ' +
+        '„Stejné“ zapsáno u 1 dvojice (sloučení písmene C). Zrušená rozhodnutí „Různé“: 1.',
     );
     expect(
-      unitLanding(unit({ property_id: 90, moved: [{ listing_id: 2, outcome: 'split_native', from: 10, to: 90 }] }), 10),
-    ).toBe('nová nemovitost #90');
-    expect(unitLanding(unit({ merge_group_id: 'g' }), 10)).toBe('sloučeno do #20');
-    expect(unitLanding(unit({}), 10)).toBe('už v #20');
+      splitReceiptText(split({ curation: [], rulings: { different: 1, same: 0, taken_back: 0 } })),
+    ).toBe('Rozděleno: A zůstává v #42; B → #43; C → nová #90. „Různé“ zapsáno u 1 dvojice.');
+  });
+
+  it('names a fold not re-made and a copy not made apart from what went where', () => {
+    const text = splitReceiptText(
+      split({
+        curation: [
+          {
+            item: 'dismissal', kind: 'dismissal', label: null, letter: 'B', property_id: 43,
+            copies: [{ letter: 'C', property_id: 90, skipped: 'card' }],
+          },
+          { item: 'fold:9', kind: 'collection', label: 'Brno', letter: 'C', property_id: 90, copies: [], why: 'fold', skipped: 'gone' },
+        ],
+        rulings: { different: 5, same: 0, taken_back: 0 },
+      }),
+    );
+    expect(text).toBe(
+      'Rozděleno: A zůstává v #42; B → #43; C → nová #90. Do B: skrytí z vašeho Browse. ' +
+        'Neobnoveno: kolekce „Brno“. Kopie nevytvořena: skrytí z vašeho Browse (do C). ' +
+        '„Různé“ zapsáno u 5 dvojic.',
+    );
+  });
+
+  it('writes the picks for the preview in one order, nothing for none', () => {
+    expect(choicesParam({})).toBe('');
+    expect(
+      choicesParam({ pipeline: { to: 'B', copies: ['A'] }, 'note:11': { to: 'C', copies: [] } }),
+    ).toBe('{"note:11":{"to":"C","copies":[]},"pipeline":{"to":"B","copies":["A"]}}');
+  });
+
+  it('shares the merge receipt’s one slot and opens the first letter that left', () => {
+    const open = vi.fn();
+    pushMergeReceipt(merged({ survivor_id: 7 }), open);
+    pushSplitReceipt(split(), open);
+    const [merge, splitToast] = vi.mocked(toast.pushToast).mock.results.slice(-2).map((r) => r.value);
+    expect(toast.dismissToast).toHaveBeenCalledWith(merge);
+    const [kind, , ttl, action] = vi.mocked(toast.pushToast).mock.calls.at(-1)!;
+    expect([kind, ttl, action?.label]).toEqual(['ok', 0, 'Otevřít #43']);
+    action?.onClick();
+    expect(open).toHaveBeenCalledWith(43);
+    expect(toast.dismissToast).toHaveBeenLastCalledWith(splitToast);
   });
 });
 

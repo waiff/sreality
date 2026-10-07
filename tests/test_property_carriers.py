@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from tests import sql_corpus
+from tests._property_ledger import ledger_carriers  # noqa: F401 — the fixture
 from toolkit import pipeline_identity
 from toolkit import property_carriers as carriers
 from toolkit.property_carriers import (
@@ -369,3 +370,193 @@ def test_every_carrier_statement_is_in_the_prepare_corpus():
     corpus = {_n(i.sql) for i in sql_corpus.discover(resolve_imports=True)}
     missing = [_n(s)[:100] for s in CARRIER_SQL if _n(s) not in corpus]
     assert not missing, missing
+
+
+# --- routing (MS17, MS18): the plan over canned rows, the writes through a strict cursor -----
+
+L, R1, R2 = 10, 20, 30
+ME, THEM = "acc-me", "acc-them"
+
+
+def _row(kind: str, table: str, key: Any, acc: Any, item: str, *, ad: int | None = None,
+         origin: int | None = None, ids: tuple[int, ...] = (), twin: bool | None = None,
+         to: int | None = None, live: bool | None = None, stage: int | None = None) -> tuple:
+    """One `_ROUTES_SQL` row: kind, table, key, account, item, label, stage, live, the note's ad
+    on `left`, the fold's to-property, the came-from property, the carry ids, the fold's twin."""
+    return (kind, table, key, acc, item, item, stage, live, ad, to, origin, list(ids), twin)
+
+
+class _RouteCur:
+    """Answers the routing read with canned rows; refuses any statement outside `ROUTE_SQL` and
+    the dismissal lift, and any named param not supplied. A write changes one row, but a write
+    whose (table, key, account) `held` names, which changes none."""
+
+    def __init__(self, rows: list[tuple] = (), held: set[tuple] = frozenset()) -> None:
+        self.rows, self.ran, self.held, self.rowcount = list(rows), [], held, 0
+        self.known = {_n(s) for s in (*carriers.ROUTE_SQL,
+                                      carriers._DISMISSAL_LIFT_LIVE_DEAL_SQL)}
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = _n(sql)
+        assert s in self.known, f"routing ran SQL it does not declare: {s[:120]}"
+        assert set(_NAMED.findall(s)) <= set(params or {}), s[:120]
+        self.ran.append((s, params))
+        table = s.split()[1 if s.startswith("UPDATE") else 2]
+        key = (table, (params or {}).get("key"), (params or {}).get("account"))
+        self.rowcount = 0 if key in self.held else 1
+
+    def fetchall(self) -> list[tuple]:
+        return self.rows
+
+
+def _plan(rows: list[tuple], movers: dict[int, int | None], **kw: Any) -> list[carriers.Route]:
+    return carriers.curation_plan(_RouteCur(rows), left=L, movers=movers, **kw)
+
+
+def _where(routes: list[carriers.Route]) -> dict[str, tuple]:
+    return {r.item: (r.action, r.anchor, r.carry_ids, r.skipped) for r in routes}
+
+
+def test_the_preselection_routes_notes_with_their_ad_and_the_rest_along_the_carry_record():
+    """2 goes home to 20 (its anchor: the lowest ad going there), 3 is born new, 1 stays. A note
+    follows its ad on `left` (consuming its carry rows only when it leaves); an item goes back
+    where its oldest standing carry row says when that property gets ads back, else stays."""
+    rows = [_row("move", "property_notes", 1, ME, "note:1", ad=2, ids=(7,)),
+            _row("move", "property_notes", 2, ME, "note:2", ad=1, ids=(8,)),
+            _row("move", "property_notes", 3, ME, "note:3", origin=R1, ids=(9,)),
+            _row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5, 6),
+                 live=True, stage=4),
+            _row("move", "collection_properties", 50, ME, "collection:50", origin=R2, ids=(4,)),
+            _row("move", "property_tags", 60, THEM, "tag:60")]
+    assert _where(_plan(rows, {2: R1, 4: R1, 3: None})) == {
+        "note:1": ("move", 2, (7,), None), "note:2": ("move", 1, (), None),
+        "note:3": ("move", 2, (9,), None), "pipeline": ("move", 2, (5, 6), None),
+        "collection:50": ("move", None, (), None), "tag:60": ("move", None, (), None)}
+
+
+def test_folds_are_recreated_where_they_came_from_only_while_their_twin_is_on_left():
+    """A fold from 20 (which gets ads back) is re-created there while its twin stands on `left`;
+    with the twin gone it is not ('gone'), but its carry row is spent. A fold of `left`'s own item
+    is re-created on `left` once the item it folded into leaves ('held' while it stays); a fold
+    from a property that gets nothing back is not routed."""
+    rows = [_row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("fold", "collection_properties", 50, ME, "fold:11", origin=R1, ids=(11,),
+                 twin=True, to=L),
+            _row("fold", "property_tags", 60, ME, "fold:12", origin=R1, ids=(12,), twin=False,
+                 to=L),
+            _row("fold", "property_pipeline", None, ME, "fold:13", origin=L, ids=(13,),
+                 twin=True, to=L, live=True, stage=3),
+            _row("fold", "property_tags", 61, ME, "fold:14", origin=R2, ids=(14,), twin=True,
+                 to=L)]
+    assert _where(_plan(rows, {2: R1})) == {
+        "pipeline": ("move", 2, (5,), None), "fold:11": ("recreate", 2, (11,), None),
+        "fold:12": ("recreate", 2, (12,), "gone"), "fold:13": ("recreate", None, (13,), None)}
+    # the card it folded into stays: the account still holds a card on `left`, nothing re-made
+    stays = [rows[0][:10] + (None, [], None), rows[3]]
+    assert _where(_plan(stays, {2: R1}))["fold:13"] == ("recreate", None, (), "held")
+
+
+def test_choices_override_only_the_acting_accounts_items_and_add_copies():
+    rows = [_row("move", "property_notes", 1, ME, "note:1", ad=2),
+            _row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("move", "property_pipeline", None, THEM, "pipeline", origin=R1, ids=(6,),
+                 live=False, stage=9),
+            _row("move", "collection_properties", 50, ME, "collection:50", ids=(4,))]
+    plan = _plan(rows, {2: R1, 3: None}, account=ME,
+                 choices={"note:1": (None, (3,)), "pipeline": (3, ()),
+                          "collection:50": (None, ())})
+    assert [(r.item, r.account_id, r.action, r.anchor, r.carry_ids) for r in plan] == [
+        ("note:1", ME, "move", None, ()), ("pipeline", ME, "move", 3, (5,)),
+        ("pipeline", THEM, "move", 2, (6,)), ("collection:50", ME, "move", None, ()),
+        ("note:1", ME, "copy", 3, ())]
+    # overriding the preselection spends the carry rows even when the item stays
+    plan = _plan(rows, {2: R1, 3: None}, account=ME, choices={"pipeline": (None, ())})
+    assert _where([r for r in plan if r.account_id == ME])["pipeline"] == (
+        "move", None, (5,), None)
+    assert _plan(rows, {2: R1}, account=None, choices={"pipeline": (None, ())})[1].anchor == 2
+
+
+def test_the_conflict_pass_never_lands_a_copy_or_a_fold_on_a_twin_and_no_dismissal_on_a_deal():
+    rows = [_row("move", "property_pipeline", None, ME, "pipeline", origin=R1, ids=(5,),
+                 live=True, stage=4),
+            _row("move", "collection_properties", 50, ME, "collection:50", origin=R1, ids=(4,)),
+            _row("move", "property_dismissals", 70, THEM, "dismissal"),
+            _row("fold", "property_pipeline", None, ME, "fold:13", origin=R1, ids=(13,),
+                 twin=True, to=L, live=False, stage=3),
+            _row("fold", "property_dismissals", 71, ME, "fold:14", origin=R1, ids=(14,),
+                 twin=True, to=L)]
+    plan = _plan(rows, {2: R1, 3: None}, account=ME,
+                 choices={"collection:50": (2, (None, 3))})
+    assert _where(plan) == {
+        "pipeline": ("move", 2, (5,), None),
+        "collection:50": ("copy", 3, (), None),
+        "dismissal": ("move", None, (), None),
+        "fold:13": ("recreate", 2, (13,), "held"),   # 20 gets my card back: no second one
+        "fold:14": ("recreate", 2, (14,), "card")}   # nor a dismissal where my live deal lands
+    copies = [(r.anchor, r.skipped) for r in plan if r.action == "copy"]
+    assert copies == [(None, None), (3, None)], "a copy to the property left, once its source went"
+
+
+def test_the_writes_run_in_order_and_spend_only_what_moved():
+    """Moves, copies, re-creations, the carry stamp, then the lift on `left` and every landing;
+    a route whose anchor did not move routes and spends nothing; counts as the dry run's. A move
+    that changes no row (its account holds the item where it would land: an origin active again)
+    is neither counted nor spends its carry rows."""
+    Route = carriers.Route
+    routes = [Route("property_notes", 1, ME, "move", 2, None, None, (7,), "note:1", None),
+              Route("property_pipeline", None, ME, "move", 2, R1, 4, (5,), "pipeline", None),
+              Route("property_tags", 60, ME, "move", 4, R2, None, (8,), "tag:60", None),
+              Route("property_notes", 1, ME, "copy", None, None, None, (), "note:1", None),
+              Route("collection_properties", 50, ME, "recreate", 2, R1, None, (11,), "fold:11",
+                    None),
+              Route("property_tags", 61, ME, "recreate", 2, R1, None, (12,), "fold:12", None,
+                    skipped="gone"),
+              Route("property_tags", 63, ME, "recreate", 4, R2, None, (13,), "fold:13", None)]
+    cur = _RouteCur()
+    counts = carriers.route_curation(cur, routes, left=L, landed={2: R1})
+    ran = [(f"{s.split()[0]} {s.split()[1 if s.startswith('UPDATE') else 2]}", p.get("to"))
+           for s, p in cur.ran]
+    assert ran == [("UPDATE property_notes", R1), ("UPDATE property_pipeline", R1),
+                   ("INSERT property_notes", L), ("INSERT collection_properties", R1),
+                   ("UPDATE property_merge_carries", None), ("UPDATE property_dismissals", None),
+                   ("UPDATE property_dismissals", None)]
+    assert cur.ran[4][1] == {"ids": [5, 7, 11, 12]}, "what rides an ad that did not move: nothing"
+    assert [p for _s, p in cur.ran[5:]] == [{"s": L}, {"s": R1}]
+    assert counts == {"note_moves": 1, "carry_rows": 2}
+    held = _RouteCur(held={("property_pipeline", None, ME)})
+    assert carriers.route_curation(held, routes, left=L, landed={2: R1}) == {
+        "note_moves": 1, "carry_rows": 1}
+    assert held.ran[4][1] == {"ids": [7, 11, 12]}, "the card that did not move keeps its row"
+
+
+@pytest.mark.usefixtures("ledger_carriers")
+def test_the_dry_run_counts_the_live_plan_per_property_left(monkeypatch):
+    """`curation_preview` plans exactly what the undo would: the group-scoped movers on the
+    property they sit on, the routing read along that merge's carry rows only."""
+    import toolkit.property_identity as pi
+    from tests._property_ledger import _Ledger
+
+    db = _Ledger({1: 10, 2: 20, 3: 20})
+    group = pi.merge_property_set(db, [10, 20], source="autodedup", reason="r")["data"][
+        "merge_group_id"]
+    seen: list[dict[str, Any]] = []
+    Route = carriers.Route
+    canned = [Route("property_notes", 1, ME, "move", 2, None, None, (), "note:1", None),
+              Route("property_pipeline", None, ME, "move", 3, R1, 4, (5,), "pipeline", None),
+              Route("property_tags", 61, ME, "recreate", 2, R1, None, (12,), "fold:12", None),
+              Route("property_tags", 62, ME, "move", None, None, None, (), "tag:62", None)]
+    monkeypatch.setattr(carriers, "curation_plan",
+                        lambda cur, **kw: seen.append(kw) or canned)
+    assert carriers.curation_preview(db, group, [3, 2, 1]) == {"carry_rows": 2, "note_moves": 1}
+    assert seen == [{"left": 10, "movers": {2: 20, 3: 20}, "group": group}]
+
+
+def test_every_routing_statement_is_in_the_prepare_corpus_and_none_deletes():
+    corpus = {_n(i.sql) for i in sql_corpus.discover(resolve_imports=True)}
+    assert not [_n(s)[:100] for s in carriers.ROUTE_SQL if _n(s) not in corpus]
+    assert not [s for s in carriers.ROUTE_SQL if re.search(r"\bDELETE\b", s, re.I)]
+    assert set(carriers._MOVE_SQL) == set(carriers._INSERT_SQL) == {
+        "property_notes", "property_pipeline", "collection_properties", "property_tags",
+        "property_dismissals"}

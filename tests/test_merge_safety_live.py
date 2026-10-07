@@ -1,12 +1,13 @@
 """Merge safety, executed (migrations 559, 560, 561 and 588): a price step never spans two adverts,
 a merge writes no status row and a detach restores the absorbed property's own state, merging
-then detaching every advert a merge moved gives back every original property, a native advert
-splits off to a record born the one way, the operator's merge and detach land as rulings the
-apply adapter reads, the one-time copy rules only what the operator judged, and a merged
-property speaks with ONE canonical advert everywhere (decisions 13 and 18), chosen and built by
-the merge sprint's rules (docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19), and rule 15's
-merge gate reads the set's ads (hand-over addendum 14). Runs in CI's migrations job
-(`TEST_DATABASE_URL`); every test rolls back.
+then detaching every advert a merge moved gives back every original property, an advert named in
+`new` is born a record the one way, the operator's merge and split land as rulings the apply
+adapter reads, an operator merge takes back every "different" between what it joins (MS12), the
+one-time copy rules only what the operator judged, and a merged property speaks with ONE
+canonical advert everywhere (decisions 13 and 18), chosen and built by the merge sprint's rules
+(docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19), and rule 15's merge gate reads the
+set's ads (hand-over addendum 14). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test
+rolls back.
 """
 
 from __future__ import annotations
@@ -221,29 +222,38 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     assert cur.fetchone()[0] == 0
 
 
-def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_to_it(cur):
-    """A property grouped at ingest (no ledger row moved either advert): the split births the
-    advert a record through the one birth path, writes ONE closed ledger row the constraints
-    accept, and rules it different from the advert that stays; merged back, a detach returns it
-    to the record it was born on."""
-    pid = _property(cur)
+def test_an_advert_named_new_is_born_a_record_and_a_merge_back_is_undone_to_it(cur):
+    """`new` births the advert a record through the one birth path and writes ONE closed ledger
+    row the constraints accept: a native advert's (`ingest_grouping`), and a merged one's, its
+    own ledger row closed first (`split_new`); no ruling. Merged back, a detach returns the
+    native one to the record it was born on."""
+    pid, other = _property(cur), _property(cur)
     stay, leave = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    merged = _advert(cur, other, source="remax")
     _recompute(cur, pid)
-    assert _detach(cur, leave, source="autodedup")["outcome"] == "propose_only"
+    _recompute(cur, other)
+    _merge(cur, [pid, other], source="autodedup")
 
-    out = _detach(cur, leave, reason="jiné patro")
+    out = _detach(cur, leave, new=[leave])
     born = out["restored_property_id"]
-    assert (out["outcome"], out["left_property_id"]) == ("split_native", pid)
+    assert (out["outcome"], out["left_property_id"], out["rulings_written"]) == (
+        "split_native", pid, 0)
     assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
     cur.execute("SELECT repr_listing_ref_id, status, is_active FROM properties WHERE id = %s",
                 (born,))
     assert cur.fetchone() == (leave, "active", True)
     cur.execute(
         "SELECT survivor_property_id, retired_property_id, prev_property_id, source, undone_by, "
-        "undone_at IS NOT NULL FROM property_merge_events WHERE listing_ref_id = %s", (leave,))
-    assert cur.fetchall() == [(pid, born, born, "operator", OP, True)]
-    assert _rulings(cur, [stay, leave]) == [(*_pair(stay, leave), "different")]
+        "undone_at IS NOT NULL, reason FROM property_merge_events WHERE listing_ref_id = %s",
+        (leave,))
+    assert cur.fetchall() == [(pid, born, born, "operator", OP, True, "ingest_grouping")]
+    assert _rulings(cur, [stay, leave]) == []
     assert _detach(cur, leave)["outcome"] == "not_merged"
+    apart = _detach(cur, merged, new=[merged])
+    assert apart["outcome"] == "split_new" and apart["restored_property_id"] not in (pid, other)
+    cur.execute("SELECT reason, undone_at IS NOT NULL FROM property_merge_events "
+                "WHERE listing_ref_id = %s ORDER BY id", (merged,))
+    assert cur.fetchall() == [("manual_subset", True), ("split_new", True)]
 
     assert _merge(cur, [pid, born], source="autodedup")["survivor_id"] == pid
     back = _detach(cur, leave)
@@ -284,12 +294,13 @@ def _vetoes(cur: Any, ids: list[int]) -> list[tuple[int, int]]:
     return [(int(lo), int(hi)) for lo, hi in cur.fetchall()]
 
 
-def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_against_the_rest(
-        cur):
+def test_the_operator_merge_rules_the_cards_and_the_split_rules_the_letters_apart(cur):
     """s2 sits on the survivor beside its card s1 (the removed engine put it there) and the
-    operator vetoed s2 = a1 earlier: the merge of the two cards rules s1 = a1 only and leaves
-    that veto standing; detaching a1 rules it different from both adverts that stay."""
+    operator vetoed s2 = a1 earlier with no ruling behind it: the merge of the two cards rules
+    s1 = a1 and leaves that bare veto standing (MS12 reads rulings); splitting a1 off by letters
+    rules it different from both adverts that stay, and the adapter reads both."""
     from autodedup import ui_sql as usql
+    from toolkit.property_split import split_preview, split_property
 
     survivor, absorbed = _property(cur), _property(cur)
     s1 = _advert(cur, survivor, source="sreality", price=5_000_000)
@@ -302,19 +313,23 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
                 {"listing_lo": veto[0], "listing_hi": veto[1], "reason": "earlier"})
 
     merged = _merge(cur, [survivor, absorbed])
-    assert merged["pairs_ruled_same"] == 1
+    assert (merged["pairs_ruled_same"], merged["rulings_taken_back"]) == (1, 0)
     assert _rulings(cur, ids) == [(*card, "same")]
     assert _vetoes(cur, ids) == [veto], "a merge of two cards retracted a veto on a third advert"
 
-    detached = _detach(cur, a1, reason="jiné patro")
-    assert detached["rulings_written"] == 2
+    letters = {s1: "A", s2: "A", a1: "B"}
+    plan = split_preview(cur.connection, survivor, letters=letters, account=None)["plan"]
+    out = split_property(cur.connection, survivor, letters=letters, decided_by=OP, account=None,
+                         reason="jiné patro", expect=plan)
+    assert out["rulings"] == {"different": 2, "same": 0, "taken_back": 0}
+    assert _placed(cur, [s1, s2, a1]) == {s1: survivor, s2: survivor, a1: absorbed}
     assert _rulings(cur, ids) == sorted([(*card, "different"), (*veto, "different")])
     assert _vetoes(cur, ids) == sorted([card, veto])
 
     # The adapter's negative read ITSELF (autodedup/apply_sql.py PAIR_VERDICTS_SQL): any
     # decider, the newest ruling per pair, a negative verdict, both sides in the candidate set.
-    # The earlier veto on (s2, a1) was written down as its `different` before the detach's
-    # word (E920), so that pair has two negative rows and is read once, as its newest.
+    # The earlier veto on (s2, a1) was written down as its `different` before the split's word
+    # (E920), so that pair has two negative rows and is read once, as its newest.
     from autodedup import apply_sql
 
     cur.execute(apply_sql.PAIR_VERDICTS_SQL,
@@ -323,7 +338,71 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
     cur.execute("SELECT verdict, note, decided_by FROM autodedup.verdicts WHERE kind = 'pair' "
                 "AND listing_lo = %s AND listing_hi = %s ORDER BY decided_at, id", veto)
     assert cur.fetchall()[0] == ("different", "earlier", "operator"), (
-        "the bare veto's word is kept in the history before the detach's ruling")
+        "the bare veto's word is kept in the history before the split's ruling")
+
+
+def _set_ruling(cur: Any, key: int, members: list[int], verdict: str) -> None:
+    from autodedup import ui_sql as usql
+
+    cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+        "cluster_key": key, "generation": "g-ms12", "member_ids": sorted(members),
+        "verdict": verdict, "note": "skupina", "reasons": [], "decided_by": OP})
+
+
+def test_an_operator_merge_takes_back_every_different_between_what_it_joins(cur):
+    """MS12: S = {s1, s2}, R = {r1}. The cross pair s2 x r1, ruled "different" with its
+    operator must-not-link, is ruled "same" under the merge's note and the veto retracted; the
+    "different" inside S (s1 x s2) is not between what the merge joins and stands; a negative set
+    spanning S and R gets a cluster "same", one inside S does not, nor one whose newest word is
+    "same" already, nor one that reaches an ad outside the merge; the count is the preview's,
+    and an engine merge writes none of it."""
+    from autodedup import ui_sql as usql
+    from toolkit.property_identity import merge_preview, record_ruling
+
+    survivor, absorbed = _property(cur), _property(cur)
+    s1 = _advert(cur, survivor, source="sreality")
+    s2 = _advert(cur, survivor, source="remax")
+    r1 = _advert(cur, absorbed, source="idnes")
+    _recompute(cur, survivor)
+    _recompute(cur, absorbed)
+    for lo, hi in (_pair(s2, r1), _pair(s1, s2)):
+        record_ruling(cur.connection, lo, hi, verdict="different", decided_by=OP, note="jiné")
+    _set_ruling(cur, 9_000_001, [s2, r1], "different")
+    _set_ruling(cur, 9_000_002, [s1, s2], "different")
+    _set_ruling(cur, 9_000_003, [s1, r1], "different")
+    _set_ruling(cur, 9_000_003, [s1, r1], "same")         # its newest word: nothing to take back
+    outside = _advert(cur, _property(cur), source="bazos")
+    _set_ruling(cur, 9_000_004, [s1, r1, outside], "different")   # not wholly in the merge
+    assert merge_preview(cur.connection, [absorbed, survivor]) == {
+        "property_ids": sorted([survivor, absorbed]), "rulings_taken_back": 2}
+
+    merged = _merge(cur, [survivor, absorbed])
+    note = f"operator merge {merged['merge_group_id']}"
+    assert merged["rulings_taken_back"] == 2
+    cur.execute("SELECT DISTINCT ON (listing_lo, listing_hi) listing_lo, listing_hi, verdict, "
+                "note FROM autodedup.verdicts WHERE kind = 'pair' AND listing_lo = ANY(%(ids)s) "
+                "AND listing_hi = ANY(%(ids)s) ORDER BY listing_lo, listing_hi, decided_at DESC, "
+                "id DESC", {"ids": [s1, s2, r1]})
+    words = {(int(lo), int(hi)): (v, n) for lo, hi, v, n in cur.fetchall()}
+    assert words[_pair(s2, r1)] == ("same", note) and words[_pair(s1, s2)][0] == "different"
+    assert _vetoes(cur, [s1, s2, r1]) == [_pair(s1, s2)]
+    cur.execute("SELECT DISTINCT ON (cluster_key) cluster_key, verdict, note FROM "
+                "autodedup.verdicts WHERE kind = 'cluster' AND cluster_key = ANY(%s) "
+                "ORDER BY cluster_key, decided_at DESC, id DESC",
+                ([9_000_001, 9_000_002, 9_000_003, 9_000_004],))
+    assert cur.fetchall() == [(9_000_001, "same", note), (9_000_002, "different", "skupina"),
+                              (9_000_003, "same", "skupina"),
+                              (9_000_004, "different", "skupina")]
+    cur.execute(usql.CLUSTER_VERDICTS_SQL, {"cluster_key": 9_000_001})
+    assert [r[-1] for r in cur.fetchall()][0] == sorted([s2, r1]), "its own member set"
+
+    engine, other = _property(cur), _property(cur)
+    e1, o1 = _advert(cur, engine, source="sreality"), _advert(cur, other, source="idnes")
+    _recompute(cur, engine)
+    _recompute(cur, other)
+    record_ruling(cur.connection, *_pair(e1, o1), verdict="different", decided_by=OP, note="x")
+    assert _merge(cur, [engine, other], source="autodedup")["rulings_taken_back"] == 0
+    assert _rulings(cur, [e1, o1]) == [(*_pair(e1, o1), "different")]
 
 
 def _as_at_560(cur: Any) -> None:

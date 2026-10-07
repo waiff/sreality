@@ -77,7 +77,7 @@ import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
 import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
-import { mergedAdvertsKeys, propertyKeys } from '@/lib/mergedAdverts';
+import { mergedAdvertsKeys, parseLetters, propertyKeys } from '@/lib/mergedAdverts';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -102,6 +102,9 @@ export default function PropertyDetail() {
   const [params] = useSearchParams();
   const propertyId = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
   const advertParam = Number(params.get('advert')) || null;
+  // A review page's link to the split: the letters it proposes (MS18).
+  const lettersParam = params.get('letters');
+  const initialLetters = useMemo(() => parseLetters(lettersParam), [lettersParam]);
 
   const propertyQ = useQuery<PropertyPublic | null, Error>({
     queryKey: propertyKeys.row(propertyId),
@@ -299,6 +302,7 @@ export default function PropertyDetail() {
             sources={sources}
             // The header already IS the canonical advert; any other opens its row.
             openAdvertId={advertParam !== property.id ? advertParam : null}
+            initialLetters={initialLetters}
           />
         </>
       )}

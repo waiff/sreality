@@ -1557,25 +1557,6 @@ WHERE listing_lo = %(listing_lo)s::bigint
   AND source = 'operator'
 """
 
-# Every must-not-link row among these adverts, whatever its source: what the operator's split
-# (E919) finds before it writes, so it and its undo can leave each veto they did not state as
-# they found it.
-MUST_NOT_LINK_PAIRS_SQL = """
-SELECT listing_lo, listing_hi, source, reason
-FROM autodedup.must_not_link
-WHERE listing_lo = ANY(%(ids)s::bigint[]) AND listing_hi = ANY(%(ids)s::bigint[])
-"""
-
-# One row put back exactly as that read found it, source included: a `guard`/`model`/`llm` veto
-# an interim operator ruling rewrote (`MUST_NOT_LINK_UPSERT_SQL`) or retracted is the machine's
-# again. Only `toolkit.property_identity.restore_must_not_link` runs it.
-MUST_NOT_LINK_RESTORE_SQL = """
-INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason)
-VALUES (%(listing_lo)s::bigint, %(listing_hi)s::bigint, %(source)s::text, %(reason)s::text)
-ON CONFLICT (listing_lo, listing_hi)
-DO UPDATE SET source = excluded.source, reason = excluded.reason
-"""
-
 # Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`
 # answers the same question with three lateral joins and a gallery, which a write does not need.
 # Just the ids of ONE generation's group — the membership a whole-cluster ruling fans out over

@@ -31,9 +31,16 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
 - [x] W3 — carry record, the count invariant, one merge toast, the category gate over the set's ads
       (PR #1721, +1,525 / −942, migration 589 applied before merge; gate: the carry write's p95, no new
       failed engine merge in the 24 hours after W3 and W4 are live, the count invariant)
-- [ ] W4 — one split dialog by letters (grown from PR #1699), curation routing per letter with copies
+- [x] W4 — one split dialog by letters (grown from PR #1699), curation routing per letter with copies,
+      an operator merge taking back every "different" it joins (MS12), the brake routing by the carry
+      record; the review pages link to the dialog (PR #1722, +4,854 / −4,280, no migration;
+      gate: the count invariant on production before and after, the two-account live suite)
 - [ ] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first"
 - [ ] W6 — the one destructive window
+
+## Owed after W4
+- The category review's "Ponechat", once the AUTODEDUP session's verdict route lets a "same" through
+  for a pair one live property already holds (its call); W4 removed the keep-together statement.
 
 ## Later (cut from scope, see PROGRAM.md §9)
 - The estimation subject lookup (MS20), with its own design.
