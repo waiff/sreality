@@ -38,7 +38,6 @@ export function ListingOverview({
   mapFooter,
   curationSlot,
   estimatesSlot,
-  photosAction,
 }: {
   listing: ListingPublic;
   /* Rendered under the headline price, or in its place when the listing states
@@ -62,9 +61,6 @@ export function ListingOverview({
    * the prime slot the location map used to occupy (the map lives in the
    * header now). The slot brings its own leading hairline. */
   estimatesSlot?: React.ReactNode;
-  /* Rendered in the Photos header, above the grid, when there are photos —
-   * the property page's "download all" button. Estimation Detail leaves it empty. */
-  photosAction?: React.ReactNode;
 }) {
   return (
     <>
@@ -87,7 +83,6 @@ export function ListingOverview({
         images={images}
         isActive={listing.is_active}
         loading={imagesLoading}
-        action={photosAction}
       />
     </>
   );
@@ -256,12 +251,10 @@ function GalleryBlock({
   images,
   isActive,
   loading,
-  action,
 }: {
   images: ImagePublic[];
   isActive: boolean;
   loading: boolean;
-  action?: React.ReactNode;
 }) {
   if (loading && images.length === 0) {
     return (
@@ -288,14 +281,11 @@ function GalleryBlock({
   }
   return (
     <div>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-baseline justify-between">
         <SectionLabel>Photos</SectionLabel>
-        <div className="flex items-center gap-3">
-          {action}
-          <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
-            {images.length}
-          </p>
-        </div>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
+          {images.length}
+        </p>
       </div>
       <div className="mt-3">
         <Suspense fallback={null}>

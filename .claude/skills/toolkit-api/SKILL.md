@@ -388,8 +388,8 @@ Image storage (Cloudflare R2, S3-compatible):
 - **TWO runtimes need these, set them on BOTH:** (1) the **scraper** (GitHub Actions secrets)
   to *download* image bytes — optional there, a missing var just logs a skip and exits zero;
   (2) the **FastAPI service** (Railway env vars) to *serve* them, since `GET /images/{key}`
-  presigns R2 (the frontend's image path since PR #255) and `GET /listings/{id}/photos.zip`
-  (JWT) zips them server-side — the bucket sends no CORS header. If the **API** lacks them,
+  presigns R2 (the frontend's image path since PR #255) and `GET /properties/{id}/download.zip`
+  (JWT) zips them with a PDF of the ad — the bucket sends no CORS header. If the **API** lacks them,
   every listing photo 503s and the UI looks imageless though the DB reports the bytes "stored"
   — the API logs a boot WARNING and `GET /health` reports `image_storage: "unconfigured"`.
 - `IMAGE_PRESIGN_ANCHOR_SECONDS` (optional, API service, default `86400`) — the width of the
