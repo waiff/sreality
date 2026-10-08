@@ -10,7 +10,7 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
 
 ## State (2026-10-08)
 - **W1b–W5 are live** (W5: migration 590 applied, PR #1723 merged 2026-10-08 03:43 UTC). **W6 is built**
-  (PR pending): migration 593 drops what PROGRAM.md §6 lists. It is applied only on the day the operator
+  (PR #1732): migration 593 drops what PROGRAM.md §6 lists. It is applied only on the day the operator
   names, after the R2 backup is read back and with the engine braked, in the order of
   `docs/design/merge-sprint/W6_RUNBOOK.md`; the PR merges right after, still braked.
 - **Plan approved (PR #1693, merged 2026-10-06).** Decisions come from a four-round design interview; the
@@ -43,7 +43,7 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
       the card's portal badge, the broker lookup by property; the per-ad lane deleted in code (PR #1723,
       +2,067 / −1,575, the operator's ruling on the size owed; migration 590 applied before merge; gate: a
       cycle begun after W2a, the parity samples, the shadow rebuild, the nine page plans; objects wait for W6)
-- [ ] W6 — the one destructive window: built (migration 593 + `W6_RUNBOOK.md`, PR pending, +778 / −286
+- [ ] W6 — the one destructive window: built (migration 593 + `W6_RUNBOOK.md`, PR #1732, +778 / −286
       without the migration, the operator's ruling on the size owed; 1.66 GB and 3 tables out of the
       database); the apply waits for the operator's day
 
