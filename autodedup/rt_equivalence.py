@@ -245,7 +245,7 @@ def scope_listings(conn: Any, generation: str,
         if obec is None:
             continue
         for row in _rows(conn, RT_SCOPE_BLOCK_SQL, {
-                "obec": obec, "cast_obce": cast_obce, "limit": 1_000_000}):
+                "obec": obec, "cast_obce": cast_obce, "after_id": 0, "limit": 1_000_000}):
             ids.add(int(row[0]))
             _keep_latest(resolved, int(row[0]), row[1])
     return ids, resolved, "listing_location"

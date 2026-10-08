@@ -26,6 +26,7 @@ from autodedup.incremental_lane import (
     CURSOR_EVIDENCE,
     CURSOR_FLIPPED,
     CURSOR_NEW,
+    CURSOR_PAGE,
     CURSOR_SCOPE,
     MAX_SCHEMA_MB,
     SCOPE_SETTING,
@@ -327,9 +328,12 @@ def test_a_refused_pass_advances_no_cursor_even_across_an_empty_window() -> None
     work.commit([])  # E75: the pair budget refused this claim
     # The evidence sweep's pointer is a ROUND-ROBIN position over a read-only probe, not a
     # watermark over work: it handed nothing over, so nothing it could have skipped was
-    # skipped, and a short slice wraps it to 0. Every real watermark is where it was.
-    assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50},
-                          CURSOR_EVIDENCE: {"last_listing_id": 0}}
+    # skipped, and a short slice wraps it to 0. Every real watermark is where it was. A block's
+    # page cursor is not a watermark over work: it is the membership snapshot's own position,
+    # written with the snapshot and rolled back with it when the pass's transaction is.
+    assert {name: row for name, row in db.cursors.items()
+            if not name.startswith(CURSOR_PAGE)} == {CURSOR_NEW: {"last_listing_id": 50},
+                                                     CURSOR_EVIDENCE: {"last_listing_id": 0}}
 
 
 # --------------------------------------------------------------- leaving the scope

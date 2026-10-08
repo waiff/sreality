@@ -220,6 +220,10 @@ CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
 CURSOR_EVIDENCE: str = "rt_evidence"
+# One row per scope block, `rt_scope_page:<block key>` (`RT_SCOPE_SCAN_SEEN_SQL` spells the
+# prefix too): the listing id the block's next walk starts after (0 = a new cycle) and, in
+# `last_snapshot_id`, how many cycles have read the block to its end.
+CURSOR_PAGE: str = "rt_scope_page:"
 # G4 (E920): the previous pass's start, so a ruling changed since then seeds its listings. Read
 # back less RULINGS_OVERLAP_S: a ruling whose transaction began before that start and committed
 # after that pass read is still seen (a few passes re-seed it, which re-clusters to the same).
@@ -268,11 +272,11 @@ FEED_WINDOW: int = 1000
 # One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
 # Under the trial scope (4,969 listings) one slice covers the whole store every pass.
 DRIFT_SLICE: int = 20000
-# How many rows one REFRESH of a scope block may snapshot (W9e/R3). The trial scope's largest
-# block is Praha-Vysočany at 1,439 rows; the cap exists so a mis-typed obec code cannot pull a
-# whole city into `rt_scope_ids`, and it does not reduce the scan's cost — the `limit` is
-# applied after the bitmap heap scan, which is precisely why a smaller `enter_slice` was never
-# the answer to what that scan costs.
+# How many rows one WALK of a scope block reads: its PAGE (W9e/R3). A larger block — Praha is
+# 157,188 rows, 8 pages — is read over several walks in listing-id order from its page cursor
+# (`CURSOR_PAGE`), and every walk is one scan for the cadence and the daily cap. A page does not
+# make a walk cheaper: a Praha page costs about one whole-block read (`RT_SCOPE_BLOCK_SQL`), so a
+# cycle is ~8 of them, and the cadence, not the page, is what bounds the day.
 ENTER_SLICE: int = 20000
 # --- the evidence sweep (E92) ---------------------------------------------------------------
 #
@@ -1358,9 +1362,15 @@ class SqlWork:
         costs in latency it costs only on the TAIL: an entrant that arrived recently is already
         the straggler sweep's.
 
+        A walk reads one PAGE of its block (`enter_slice` rows after the block's page cursor) and
+        prunes only that page's id range; a short page is the block's end, so the cursor wraps
+        and the cycle counts. The cadence is per walk, so a block of eight pages is read whole
+        every eight intervals.
+
         Returns the block pointer the cursor should carry, so ties (nothing scanned yet) rotate
         instead of always naming the same block."""
         blocks = self.enter_blocks
+        self.enter_scan = {}
         self.statements += 1
         _exec(self.conn, RT_SCOPE_IDS_PRUNE_BLOCKS_SQL, {
             "generation": self.generation, "block_keys": [block.key for block in blocks]})
@@ -1368,6 +1378,8 @@ class SqlWork:
                  for row in self._query(RT_SCOPE_SCAN_STATE_SQL, {
                      "generation": self.generation, "hours": 24})}
         start = int(pointer) % len(blocks)
+        # In THE BOOTSTRAP PHASE (below) a block not yet read to its end is due whatever its age.
+        seen = self._walked_ever() if self.bootstrap else set()
         due: list[tuple[float, int, int]] = []
         for offset in range(len(blocks)):
             index = (start + offset) % len(blocks)
@@ -1375,7 +1387,7 @@ class SqlWork:
             age, _scans = state.get(block.key, (None, 0))
             interval = float(self.enter_interval_hours.get(
                 block.grain, ENTER_INTERVAL_HOURS.get(block.grain, 6.0))) * 3600.0
-            if age is None:
+            if age is None or (self.bootstrap and block.key not in seen):
                 due.append((float("inf"), offset, index))
             elif float(age) >= interval:
                 due.append((float(age), offset, index))
@@ -1389,11 +1401,13 @@ class SqlWork:
         # in the same pass — the cadence is ignored, the cap is not — and a block already
         # walked once falls back to the cadence immediately, because re-walking Vysočany is
         # 231 MB of cold heap reads and the phase is about listing it, not about refreshing it.
-        seen = self._walked_ever() if self.bootstrap else set()
+        # "Walked" is "read to its end once": a block still inside its first cycle of pages is
+        # paged on every pass of the phase, not once an interval.
         order = [index for _age, _offset, index in
                  sorted(due, key=lambda row: (-row[0], row[1]))]
         wanted = ([index for index in order if blocks[index].key not in seen]
                   if self.bootstrap else []) or order[:1]
+        pages = self._pages()
         walked: list[dict[str, Any]] = []
         last = start
         for index in wanted:
@@ -1403,11 +1417,17 @@ class SqlWork:
                                    "cap": self.max_enter_scans_per_day, "blocks": walked}
                 return last if walked else start
             block = blocks[index]
+            # A block with no scan row starts at page one whatever its cursor row says: the
+            # cursor is keyed on the name alone, the scan ledger on the generation.
+            after_id, cycles = pages.get(block.key, (0, 0)) if block.key in state else (0, 0)
             started = time.time()
             rows = self._query(RT_SCOPE_BLOCK_SQL, {
-                "obec": block.obec, "cast_obce": block.cast_obce, "limit": self.enter_slice})
+                "obec": block.obec, "cast_obce": block.cast_obce, "after_id": after_id,
+                "limit": self.enter_slice})
             elapsed_ms = (time.time() - started) * 1000.0
             listing_ids = [int(row[0]) for row in rows]
+            # A full page ends at its last row; a short one is the block's end.
+            end = listing_ids[-1] if len(listing_ids) >= self.enter_slice else None
             params = {"generation": self.generation, "block_key": block.key,
                       "listing_ids": listing_ids}
             if listing_ids:
@@ -1415,21 +1435,49 @@ class SqlWork:
                 _exec(self.conn, RT_SCOPE_IDS_WRITE_SQL,
                       {**params, "resolved": [_iso(row[1]) for row in rows]})
             self.statements += 1
-            _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL, params)
+            _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL,
+                  {**params, "after_id": after_id, "page_end": end})
             self.statements += 1
             _exec(self.conn, RT_SCOPE_SCAN_WRITE_SQL, {
                 "generation": self.generation, "block_key": block.key,
                 "rows_found": len(listing_ids), "elapsed_ms": round(elapsed_ms, 3)})
+            self.statements += 1
+            _exec(self.conn, RT_CURSOR_WRITE_SQL, {
+                "name": CURSOR_PAGE + block.key, "last_listing_id": end or 0,
+                "last_snapshot_id": cycles if end else cycles + 1, "watermark": None})
             scans_24h += 1
-            walked.append({"block": block.key, "rows": len(listing_ids),
-                           "elapsed_ms": round(elapsed_ms, 3)})
+            walked.append({"block": block.key, "rows": len(listing_ids), "after_id": after_id,
+                           "cycle_end": end is None, "elapsed_ms": round(elapsed_ms, 3)})
             last = (index + 1) % len(blocks)
         self.enter_scan = {**walked[-1], "scans_24h": scans_24h,
                            "cap": self.max_enter_scans_per_day, "blocks": walked}
         return last
 
+    def _pages(self) -> dict[str, tuple[int, int]]:
+        """Each block's page cursor: the listing id its next walk starts after, and the cycles
+        that have read it to its end. A block with no row starts at page one."""
+        names = {CURSOR_PAGE + block.key: block.key for block in self.enter_blocks}
+        return {names[str(row[0])]: (int(row[1] or 0), int(row[2] or 0))
+                for row in self._query(RT_CURSOR_READ_SQL, {"names": sorted(names)})}
+
+    def read_whole(self) -> list[str]:
+        """The seed's walk: page every block to its end, under the same rolling-day cap, and
+        return the blocks the cap left unread. The calibration is cut over the snapshot, and a
+        cut over a big block's first page is a cut over its OLDEST rows."""
+        pages: list[dict[str, Any]] = []
+        unread = [block.key for block in self.enter_blocks]
+        while unread:
+            self.refresh_scope_ids(0)
+            pages += self.enter_scan.get("blocks", [])
+            unread = sorted({block.key for block in self.enter_blocks} - self._walked_ever())
+            if "skipped" in self.enter_scan or not self.enter_scan.get("blocks"):
+                break
+        self.enter_scan = {**self.enter_scan, "blocks": pages, "unread": unread}
+        return unread
+
     def _walked_ever(self) -> set[str]:
-        """The scope blocks this generation HAS a scan row for, ever (E98).
+        """The scope blocks this generation has READ TO THEIR END at least once, ever (E98): a
+        scan row, and no page cursor still inside its first cycle.
 
         Not the cadence's own state query: that one is windowed to a rolling day, so a block
         walked two days ago reads the same as a block never walked, and "every block has been
@@ -2331,11 +2379,17 @@ def run_rt_seed(
         with _transaction(conn):
             if fresh:
                 reset = reset_generation(conn, generation, holder=holder)
-            # The scope's blocks, walked once now: the cut is taken over what they hold, and
-            # the build phase starts with every block already listed.
-            work = SqlWork(conn, scope, generation, parents=parents, bootstrap=True)
-            if work.enter_blocks:
-                work.refresh_scope_ids(0)
+            # The scope's blocks, read to their ends now: the cut is taken over what they hold,
+            # and the build phase starts with every block already listed.
+            work = SqlWork(conn, scope, generation, parents=parents, bootstrap=True,
+                           enter_slice=ENTER_SLICE,
+                           max_enter_scans_per_day=MAX_ENTER_SCANS_PER_DAY)
+            unread = work.read_whole() if work.enter_blocks else []
+            if unread:
+                raise SystemExit(
+                    f"rt_seed refused: the daily cap of {work.max_enter_scans_per_day} walks "
+                    f"left {', '.join(unread)} unread to its end — a calibration cut over part "
+                    "of a block is a biased one. Nothing was written.")
             try:
                 cut = cut_calibration(conn, settings, model.version, generation)
             except CalibrationRefusal as exc:

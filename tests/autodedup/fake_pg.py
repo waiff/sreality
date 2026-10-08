@@ -785,7 +785,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         obec, cast_obce = p["obec"], p.get("cast_obce")
         found = sorted(
             listing_id for listing_id, place in db.locations.items()
-            if place.get("obec_kod") == obec
+            if place.get("obec_kod") == obec and listing_id > int(p["after_id"])
             and (cast_obce is None or place.get("cast_obce_kod") == cast_obce))
         return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
     if sql == S.RT_SCOPE_IDS_WRITE_SQL:
@@ -798,9 +798,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 "refreshed_at": db.now}
         return []
     if sql == S.RT_SCOPE_IDS_PRUNE_SQL:
+        # Only the page's own id range: after the cursor, up to its end (None = the block's).
         keep = set(int(i) for i in p["listing_ids"])
+        low, high = int(p["after_id"]), p["page_end"]
         db.scope_ids = {key: row for key, row in db.scope_ids.items()
                         if not (key[0] == gen and key[1] == str(p["block_key"])
+                                and low < key[2] and (high is None or key[2] <= int(high))
                                 and key[2] not in keep)}
         return []
     if sql == S.RT_SCOPE_IDS_DELETE_SQL:
@@ -836,8 +839,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(block, (db.now - last).total_seconds(), scans)
                 for block, (last, scans) in sorted(out.items())]
     if sql == S.RT_SCOPE_SCAN_SEEN_SQL:
+        # Walked, and not inside its first cycle of pages (a page cursor with no cycle yet).
+        def _first_cycle(block: str) -> bool:
+            row = db.cursors.get("rt_scope_page:" + block)
+            return row is not None and not row.get("last_snapshot_id")
         return sorted({(row["block_key"],) for row in db.scope_scans
-                       if row["generation"] == gen})
+                       if row["generation"] == gen and not _first_cycle(row["block_key"])})
     if sql == S.RT_SCOPE_BACKLOG_SQL:
         return [(sum(1 for (g, _block, listing_id) in db.scope_ids
                      if g == gen and (gen, listing_id) not in db.rt_fp),)]
