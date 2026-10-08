@@ -393,7 +393,11 @@ interface KindRow {
 
 const KINDS = JSON.parse(
   readFileSync(join(process.cwd(), '..', 'tests', 'fixtures', 'filter_sql_kinds.json'), 'utf-8'),
-) as { kinds: Record<string, KindRow>; browse_hand_coded_kinds: Array<string | null> };
+) as {
+  kinds: Record<string, KindRow>;
+  browse_hand_coded_kinds: Array<string | null>;
+  property_grain_clauses: string[];
+};
 
 const samplesFor = (f: FilterDef): Array<{ input: unknown; value: unknown; single: boolean }> => {
   if (f.ui_control === 'tristate') return [{ input: 'yes', value: true, single: true }];
@@ -412,13 +416,19 @@ const samplesFor = (f: FilterDef): Array<{ input: unknown; value: unknown; singl
 };
 
 describe('sql_kind agreement', () => {
+  /* ...and the filters a property-grain relation spells in its own shape whatever their
+   * kind (MS19's portal rule: the Watchdog's PROPERTIES_GRAIN.clauses, pytest-pinned to
+   * the same list, and applyPortalRule here). */
   it('the hand-coded browse set is exactly the kinds Browse does not auto-dispatch', () => {
     for (const f of FILTER_REGISTRY.filters) {
       if (!f.agendas.includes('browse') || f.pg_column == null) continue;
       expect(
         HAND_CODED_BROWSE_FILTERS.has(f.id),
         `${f.id} (sql_kind=${f.sql_kind})`,
-      ).toBe(KINDS.browse_hand_coded_kinds.includes(f.sql_kind));
+      ).toBe(
+        KINDS.browse_hand_coded_kinds.includes(f.sql_kind)
+        || KINDS.property_grain_clauses.includes(f.id),
+      );
     }
   });
 

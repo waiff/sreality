@@ -1,5 +1,6 @@
 import { ApiError, apiGet, apiPost } from './api';
 import type { DistrictChip } from './filters';
+import type { ListingStatus } from './filters';
 
 // 420731404040 -> +420 731 404 040 (display only; storage stays digit-normalized).
 export function prettyPhone(p: string): string {
@@ -245,7 +246,7 @@ export function chipsToGeoArrays(chips: DistrictChip[]): {
 }
 
 /* The standard toolkit envelope. `pii_masked` is stamped on every /brokers
- * response, masked or not. `capped` is stamped only by broker_listing_ids. */
+ * response, masked or not. `capped` is stamped only by broker_property_ids. */
 interface Envelope<T> {
   data: T;
   metadata?: { pii_masked?: boolean; capped?: boolean };
@@ -452,24 +453,42 @@ export async function fetchBrokerListings(
   return r.data ?? [];
 }
 
-/* A broker's mappable listing ids only — the allowlist behind Browse's
- * brokerId prefilter (lib/queries.ts resolveBrokerPrefilter). Deliberately a
- * separate route from fetchBrokerListings above: that one is a 500/2000-row
- * PAGE for the Inventory table; this one is COMPLETE up to a much larger
- * server-side cap (toolkit.brokers.broker_listing_ids), because a truncated
- * allowlist would silently under-plot the map rather than visibly truncate a
- * table. `capped` is only ever true for the couple of foreign syndication
- * accounts running an order of magnitude more listings than any real broker;
- * logged rather than surfaced in the UI, since it essentially never happens. */
-export async function fetchBrokerListingIds(brokerId: number): Promise<number[]> {
-  const r = await apiGet<Envelope<number[]>>(
-    `/brokers/${brokerId}/listing-ids`,
-    undefined,
+/* A broker's properties under the portal rule (MS19): the allowlist behind
+ * Browse's brokerId prefilter (lib/queries.ts resolveBrokerPrefilter). The
+ * server judges portal and status over the broker's OWN ads
+ * (toolkit.brokers.broker_property_ids), so "broker + portal" means one ad
+ * satisfies both. Complete up to a large server-side cap, because a truncated
+ * allowlist would silently under-plot the map; `capped` is logged, since it
+ * essentially never happens.
+ *
+ * Memoised per (broker, status, portals) for a minute: the list, the count, the
+ * map and Stats each resolve the prefilter, and share ONE lookup per view. A
+ * failed lookup is dropped from the memo, so the next read retries. */
+const BROKER_PROPERTY_IDS_TTL_MS = 60_000;
+const brokerPropertyIdsMemo = new Map<string, { at: number; ids: Promise<number[]> }>();
+
+export function fetchBrokerPropertyIds(
+  brokerId: number,
+  status: ListingStatus,
+  portals: readonly string[],
+): Promise<number[]> {
+  const key = `${brokerId}|${status}|${[...portals].sort().join(',')}`;
+  const hit = brokerPropertyIdsMemo.get(key);
+  if (hit && Date.now() - hit.at < BROKER_PROPERTY_IDS_TTL_MS) return hit.ids;
+  const ids = apiGet<Envelope<number[]>>(
+    `/brokers/${brokerId}/property-ids`,
+    { status, portal: [...portals] },
     undefined,
     JWT,
-  );
-  if (r.metadata?.capped) {
-    console.warn(`broker ${brokerId}: listing-ids capped — the explore map shows a subset`);
-  }
-  return r.data ?? [];
+  ).then((r) => {
+    if (r.metadata?.capped) {
+      console.warn(`broker ${brokerId}: property-ids capped — the explore map shows a subset`);
+    }
+    return r.data ?? [];
+  });
+  brokerPropertyIdsMemo.set(key, { at: Date.now(), ids });
+  ids.catch(() => {
+    if (brokerPropertyIdsMemo.get(key)?.ids === ids) brokerPropertyIdsMemo.delete(key);
+  });
+  return ids;
 }

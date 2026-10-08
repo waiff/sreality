@@ -6,11 +6,12 @@ import {
   PIPELINE_BOARD_COLS,
   type PipelineBoardRow,
 } from './pipelineBoardModel';
-import { fetchBrokerListingIds } from './brokers';
+import { fetchBrokerPropertyIds } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
   type ListingFilters,
+  type ListingStatus,
   type MapBounds,
   type PipelineScope,
   buildingMaterialToValues,
@@ -110,11 +111,11 @@ export const CARD_PAGE_SIZE = 24;
  * synthetic id. `sreality_id` stays selected for the legacy fallback (and as a
  * sort field) but is NULLABLE post-Gate-2, so it must never be a key/feature id.
  * The map has no keyset tiebreaker column, so it carries `property_id` explicitly
- * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
+ * (Table/Cards get it from withKeysetColumns) for the final null-safe
  * `?property=` detail-link fallback. */
 /* `price_per_m2` is the SERVER measure (migration 425) and `price_per_m2_basis`
- * is the SERVER label for it — both published on properties_map_mv and on the
- * portal-mirror relation, so the pin reads the basis rather than re-deriving it.
+ * is the SERVER label for it — both published on properties_map_mv, so the pin
+ * reads the basis rather than re-deriving it.
  * Reading it PER FEATURE is not a convenience: Browse never forces a sale/rent
  * choice (rule 22 — `deal=any` is a first-class cohort), so one map can hold a
  * sale pin and a rent pin at once, and a map-wide unit would be wrong on one of
@@ -135,10 +136,6 @@ export const CARD_PAGE_SIZE = 24;
  * and `granularity_rank` is the INT form of the rung (migration 380), because
  * granularity is compared by rank and never by enum text. */
 const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,area_m2,display_label,uncertainty_radius_m,granularity_rank,last_seen_at,is_active';
-/* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
- * it used to come free because the tiebreak was ALWAYS property_id, but the
- * portal-mirror lane tiebreaks on listing_id, which would have left
- * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,display_label,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   /* The Kč/m² cell reads the SERVER measure (migration 425), not price/area:
@@ -168,7 +165,11 @@ const CARD_COLS =
   /* The two price-history columns back <PriceDelta>. Both were already on
    * browse_list (migrations 276/343/363) and simply never selected — they
    * existed only as filter inputs, never as anything displayed. */
-  'mf_gross_yield_pct,total_price_change_pct,price_change_count';
+  'mf_gross_yield_pct,total_price_change_pct,price_change_count,' +
+  /* The portal badge (MS19, migration 590): the portals with an active ad, else every portal. */
+  'all_sources,active_sources,' +
+  /* The ad-count badge (migration 590): how many ads the property holds, active or not. */
+  'source_count';
 
 /* The three Browse select-lists, grouped for one purpose: a test can assert
  * that the measure's published LABEL travels with the measure on every lane.
@@ -186,9 +187,9 @@ export type SortField =
   | 'first_seen_at' | 'last_seen_at' | 'is_active'
   | 'estate_area' | 'usable_area' | 'parking_lots'
   | 'mf_gross_yield_pct'
-  /* Portal-mirror only, never user-selectable and never in a URL — derived by
-   * portalMirrorSort() below. See the PORTAL MIRROR block. */
-  | 'portal_sort_key';
+  /* One portal's "Newest first" (MS19), never user-selectable and never in a URL —
+   * derived by effectiveSort() below. */
+  | `newest_ad_at_${string}`;
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -232,57 +233,50 @@ export const sortToParam = (s: SortSpec): string =>
   `${s.direction === 'desc' ? '-' : ''}${s.field}`;
 
 /* -------------------------------------------------------------------------- */
-/* PORTAL MIRROR — filter to exactly one portal and Browse mirrors that        */
-/* portal's own page (docs/design/portal-order-fidelity.md, migrations 368-370)*/
+/* THE PORTAL RULE (MS19, migration 590): portal and broker filters select    */
+/* ADS; rows are always properties.                                           */
 /* -------------------------------------------------------------------------- */
-/* The default Browse read models are PROPERTY-grain (rule #15): one row per
- * real-world property, its displayed fields assembled from whichever child
- * listing wins a trust rank. That is the right model for the market-wide view
- * and the wrong one for "show me portal X's page", in two ways that are both
- * measured, not theoretical (live, 2026-08-04):
+/* A property matches portal set P when any of its ads is on P, active or not
+ * (`all_sources`); the status switch is judged on those ads: active = an active
+ * ad on P (`active_sources`), inactive = ads on P and none of them active. With
+ * no portal the status is the property's own. One rule in four renderings,
+ * pinned to each other by tests/fixtures/portal_rule.json: this one (list,
+ * cards, count, map points), `public.portal_status_matches` (Stats, map cells,
+ * the broker lookup) and the Watchdog's compiled clause.
  *
- *   - MISSING ROWS. The portal filter constrains `properties.source`, i.e. the
- *     REPRESENTATIVE child's portal — so a property whose repr is sreality is
- *     invisible under `portal = idnes` even when it has a perfectly good active
- *     idnes listing. That hides 23,429 of the 109,034 properties with an active
- *     idnes listing (21%); 19% for ceskereality and realitymix, 10% for bazos.
- *   - WRONG FIELDS. Even for a row that IS shown, `area_m2` / `district` /
- *     `street` / `condition` / `ownership` come from golden-record CTEs that
- *     rank source trust ABOVE activity, so a card under "portal = bazos" can
- *     display area and location lifted from a DELISTED sreality sibling
- *     (root cause 3 in the design doc).
- *
- * With exactly one portal selected, every cohort surface switches to the
- * listing-grain `listing_feed_public` (migrations 369 + 370) instead. That view
- * carries the SAME filter columns and the SAME publication gate as
- * browse_projection, so nothing about the filter engine changes — only which
- * relation it reads. Two portals or none keeps today's deduped property view,
- * which is exactly what dedup exists for.
- *
- * Deliberately NOT changed: the Stats tab. It is a property-grain RPC
- * (browse_stats_properties); mirroring it needs a listing-grain twin, tracked
- * as a follow-up in the design doc rather than half-done here. */
-export const portalMirrorSource = (f: ListingFilters): string | null =>
-  f.portals.length === 1 ? f.portals[0] : null;
+ * A broker filter moves the rule onto the broker's own ads: the server judges
+ * portal and status over them (fetchBrokerPropertyIds), so one ad satisfies
+ * both and the property-level rule steps aside here. */
+export const adScope = (f: ListingFilters): { portals: string[]; status: ListingStatus } =>
+  f.brokerId != null ? { portals: [], status: 'any' } : { portals: f.portals, status: f.status };
 
-export const isPortalMirror = (f: ListingFilters): boolean =>
-  portalMirrorSource(f) != null;
+interface PortalRuleBuilder {
+  eq(c: string, v: unknown): PortalRuleBuilder;
+  overlaps(c: string, v: readonly string[]): PortalRuleBuilder;
+  not(c: string, op: string, v: unknown): PortalRuleBuilder;
+}
 
-/* A broker scope (rule #22-style prefilter, "Explore this broker's listings")
- * has the SAME grain problem as the single-portal case above: a merged
- * `properties` row can have listings from two different brokers, with no
- * tiebreak column and no reconciliation in the merge chokepoint (rule #15),
- * so a property-grain view can't safely represent "only this broker's
- * listings" either. Its own named condition — not folded into
- * isPortalMirror — so a future change to one can't silently change the
- * other's meaning. */
-export const isBrokerScoped = (f: ListingFilters): boolean => f.brokerId != null;
+export const applyPortalRule = <T>(q: T, f: ListingFilters): T => {
+  const { portals, status } = adScope(f);
+  let r = q as unknown as PortalRuleBuilder;
+  if (portals.length === 0) {
+    if (status === 'active') r = r.eq('is_active', true);
+    else if (status === 'inactive') r = r.eq('is_active', false);
+  } else if (status === 'active') {
+    r = r.overlaps('active_sources', portals);
+  } else {
+    r = r.overlaps('all_sources', portals);
+    if (status === 'inactive') r = r.not('active_sources', 'ov', `{${portals.join(',')}}`);
+  }
+  /* Redundant by the stored invariant (listed <=> dated): narrows nothing, lets the
+   * portal's partial index serve every sort AND the count, so list, cards and count
+   * keep ONE filter chain. */
+  if (f.portals.length === 1) r = r.not(`newest_ad_at_${f.portals[0]}`, 'is', null);
+  return r as unknown as T;
+};
 
-const isListingGrain = (f: ListingFilters): boolean => isPortalMirror(f) || isBrokerScoped(f);
-
-/* Relation names, in one place so a fetcher cannot read one grain and count
+/* Relation names, in one place so a fetcher cannot read one relation and count
  * another. */
-const PORTAL_FEED_RELATION = 'listing_feed_public';
 const BROWSE_LIST_RELATION = 'browse_list';
 const MAP_RELATION = 'properties_map_mv';
 
@@ -292,7 +286,6 @@ const MAP_RELATION = 'properties_map_mv';
 const HIDING_DISMISSED: Record<string, string> = {
   [BROWSE_LIST_RELATION]: 'browse_list_visible',
   [MAP_RELATION]: 'properties_map_visible',
-  [PORTAL_FEED_RELATION]: 'listing_feed_visible',
 };
 
 interface CountOption {
@@ -318,32 +311,25 @@ const readSource = (
         .select(columns) as unknown as ReturnType<typeof selectFrom>);
 
 const listSource = (f: ListingFilters, columns: string, opts?: CountOption) =>
-  readSource(isListingGrain(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION, f, columns, opts);
+  readSource(BROWSE_LIST_RELATION, f, columns, opts);
 
 const mapSource = (f: ListingFilters, columns: string) =>
-  readSource(isListingGrain(f) ? PORTAL_FEED_RELATION : MAP_RELATION, f, columns);
+  readSource(MAP_RELATION, f, columns);
 
-/* Keyset tiebreak — REQUIRED to differ per grain, not a stylistic choice.
- * `property_id` is not unique on the listing-grain feed: 7,951 properties hold
- * more than one active listing on a single portal (18,521 rows, live
- * 2026-08-04). A keyset cursor anchored on a non-unique column skips or
- * repeats rows at page boundaries, and the same value used as a React row key
- * would collapse those rows out of the list entirely. `listing_id` (the
- * surrogate `listings.id`) is unique and never null on both read models. */
-export const keysetTiebreak = (f: ListingFilters): string =>
-  isListingGrain(f) ? 'listing_id' : 'property_id';
+/* One portal's "Newest first" (MS19, Q49 b): with exactly one portal P selected,
+ * "Newest first" and "Oldest first" order properties by when their newest ad on
+ * P was first seen (`newest_ad_at_<P>`, migration 588, one partial index per
+ * portal on browse_list since 590), so a property advertised on P again rises
+ * to the top. No portal, several, or any other sort: unchanged; a broker filter
+ * changes neither rule. Only the order changes — every filter keeps its meaning
+ * and rows keep the property's own dates. Never in SORTABLE_FIELDS or a URL. */
+export const orderPortal = (f: ListingFilters, sort: SortSpec): string | null =>
+  f.portals.length === 1 && sort.field === 'first_seen_at' ? f.portals[0] : null;
 
-/* "Newest first" means something different once we are mirroring a portal: not
- * "newest in OUR archive" (first_seen_at, stamped at batched detail-drain write
- * time and therefore scrambled — root cause 2) but "newest on THAT portal".
- * `portal_sort_key` (migration 370) is the single fixed-width column encoding
- * `portal_date desc nulls last, discovery_seq desc nulls last`, verified
- * order-identical to that pair. Every other sort field the UI offers exists on
- * the feed with listing-grain semantics and is passed through untouched. */
-export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec =>
-  isPortalMirror(f) && sort.field === 'first_seen_at'
-    ? { field: 'portal_sort_key', direction: sort.direction }
-    : sort;
+export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec => {
+  const p = orderPortal(f, sort);
+  return p ? { field: `newest_ad_at_${p}`, direction: sort.direction } : sort;
+};
 
 /* The location chips compile to ONE code predicate, defined once in
  * `lib/districtCodes.ts` and re-exported here so every existing import site
@@ -367,7 +353,7 @@ export {
  * tristates, single-value enums, multi-value IN lists) are dispatched
  * automatically by `applyRegistryFilters` from registryQueryBuilder.ts.
  * What stays hand-coded here is the small set of irregular shapes:
- * the `status` multi-enum → boolean column predicate, the
+ * the portal rule (`status` + `portals`, applyPortalRule), the
  * days-ago → ISO timestamp translation, the 1-enum → IN-over-many
  * `building_material` expansion, the multi-chip district predicate
  * (districtsFilterClause), and the bbox spatial predicates that aren't
@@ -399,8 +385,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     in:  (c: string, v: readonly unknown[]) => typeof r;
     or:  (q: string) => typeof r;
   };
-  if (f.status === 'active') r = r.eq('is_active', true);
-  else if (f.status === 'inactive') r = r.eq('is_active', false);
+  r = applyPortalRule(r, f);
   /* Days-ago ranges. min = most recent allowed (so last_seen >= now()
    * minus min); max = oldest allowed (so last_seen <= now() minus max).
    * Wait — that's inverted. min_days = 3 means "seen at least 3 days
@@ -543,14 +528,6 @@ export interface MapResult {
    * W6b exists to fix — so they are reported. Always 0 in point mode and
    * whenever a bbox is set (the extent is then the bbox itself). */
   offGrid: number;
-  /* The read reached the ceiling, so the cohort is larger than what is plotted.
-   * It CANNOT distinguish "exactly MAP_CAP matches" from "more than MAP_CAP" --
-   * PostgREST clamps at the same number, so a 50,001st row is unobservable from
-   * here. The pill therefore states truncation from `cohortTotal > total`, which
-   * IS decidable, and uses this only to explain WHY.
-   * ONLY REACHABLE on the two lanes that still read points unbounded: the
-   * portal mirror and `?map=legacy`. The cluster lane cannot truncate. */
-  capped: boolean;
 }
 
 /* The two curated-set prefilters share ONE shape: read the membership rows
@@ -733,16 +710,15 @@ async function resolvePipelinePrefilter(
 /* Broker scope prefilter ("Explore this broker's listings"). Broker data is
  * architecturally dark to the anon path this whole file otherwise reads —
  * migration 299 revoked every broker relation from anon AND authenticated —
- * so this is the one prefilter resolved over the bearer-gated /brokers/*
- * API (fetchBrokerListingIds, real Supabase JWT) instead of PostgREST. A
- * resolution failure (e.g. no session) throws and surfaces as a normal query
- * error like any other prefilter failing — it must never silently degrade to
- * "no constraint" (the fail-open filter trap). Listing-grain by construction
- * (see isBrokerScoped above), so this is a listing_id allowlist, not a
- * property_id one. */
+ * so this is the one prefilter resolved over the JWT-gated /brokers/*
+ * API (fetchBrokerPropertyIds) instead of PostgREST. A resolution failure
+ * (e.g. no session) throws and surfaces as a normal query error like any other
+ * prefilter failing — it must never silently degrade to "no constraint" (the
+ * fail-open filter trap). The server applies the portal rule over the broker's
+ * own ads (adScope), so this is a property_id allowlist like the others. */
 async function resolveBrokerPrefilter(f: ListingFilters): Promise<number[] | null> {
   if (f.brokerId == null) return null;
-  return fetchBrokerListingIds(f.brokerId);
+  return fetchBrokerPropertyIds(f.brokerId, f.status, f.portals);
 }
 
 /* Intersect two prefilter id sets (null = "no constraint"). Used so a
@@ -764,8 +740,7 @@ const intersectPrefilters = (
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 export interface BrowsePrefilters {
   obecIds: number[] | null;       // market growth (price-stats datasets)
-  propertyIds: number[] | null;   // tags ∩ with-estimates ∩ pipeline ∩ collections (property grain)
-  brokerListingIds: number[] | null;  // broker scope (listing grain) — see resolveBrokerPrefilter
+  propertyIds: number[] | null;   // tags ∩ with-estimates ∩ pipeline ∩ collections ∩ broker
   empty: boolean;
 }
 
@@ -774,8 +749,7 @@ async function resolveBrowsePrefilters(
   signal?: AbortSignal,
 ): Promise<BrowsePrefilters> {
   const [
-    tagProps, cityObec, growthObec, estimateProps, pipelineProps, collectionProps,
-    brokerListingIds,
+    tagProps, cityObec, growthObec, estimateProps, pipelineProps, collectionProps, brokerProps,
   ] = await Promise.all([
     resolveTagPrefilter(f, signal),
     resolveCityQualityObecPrefilter(f, signal),
@@ -786,9 +760,8 @@ async function resolveBrowsePrefilters(
     resolveBrokerPrefilter(f),
   ]);
   // The property-grain allowlists intersect into the one .in('property_id', …)
-  // applyPrefilters emits. City-quality is representative-listing grain, keyed
-  // on the surrogate listing_id (.in('listing_id', …)) — null-safe past Gate-2.
-  const propertyIds = [estimateProps, pipelineProps, collectionProps].reduce(
+  // applyPrefilters emits.
+  const propertyIds = [estimateProps, pipelineProps, collectionProps, brokerProps].reduce(
     intersectPrefilters,
     tagProps,
   );
@@ -797,22 +770,17 @@ async function resolveBrowsePrefilters(
   const obecIds = intersectPrefilters(cityObec, growthObec);
   const empty =
     (obecIds != null && obecIds.length === 0)
-    || (propertyIds != null && propertyIds.length === 0)
-    || (brokerListingIds != null && brokerListingIds.length === 0);
-  return { obecIds, propertyIds, brokerListingIds, empty };
+    || (propertyIds != null && propertyIds.length === 0);
+  return { obecIds, propertyIds, empty };
 }
 
-/* Exported for queries.test.ts — pins that the broker allowlist filters on the
- * surrogate `listing_id` (migration 351), not the nullable `sreality_id`
- * (passing a sreality_id into an `IN listing_id` predicate would silently read a
- * DIFFERENT listing, the id-spaces overlap by ~435). */
+/* Exported for queries.test.ts. */
 export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
   let r = q as unknown as {
     in: (c: string, v: readonly unknown[]) => typeof r;
   };
   if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
   if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
-  if (p.brokerListingIds != null) r = r.in('listing_id', p.brokerListingIds);
   return r as unknown as T;
 };
 
@@ -830,7 +798,7 @@ export const fetchNoPriceCount = async (
 ): Promise<number> => {
   const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return 0;
-  const base = listSource(f, keysetTiebreak(f), { count: 'exact', head: true });
+  const base = listSource(f, 'property_id', { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
   // rows in the rest of the cohort", then restrict to NULL price.
   const noPriceFilters: ListingFilters = {
@@ -869,9 +837,8 @@ interface MapGrid {
   off_grid: number;
 }
 
-/* The per-point read — today's path, unchanged, and still the right one for a
- * cohort that fits. Split out of fetchListingsForMap so the cluster lane and the
- * two point lanes (portal mirror, ?map=legacy) cannot drift in how they filter.
+/* The per-point read, run only once the server has said the cohort fits
+ * (MAP_POINT_BUDGET points), so the `.limit(MAP_CAP)` below never binds.
  *
  * It reads `properties_map_mv` (migration 254), NOT `properties_public`. Shipping
  * up to MAP_CAP points off the live, churned `properties` table was cold-fragile
@@ -881,16 +848,7 @@ interface MapGrid {
  * applyPrefilters are a drop-in (only the source differs). Rebuilt from
  * browse_projection by rebuild_properties_map_mv() (pg_cron, 7,37 past the hour —
  * migration 277); freshness readable off derived_artifacts_public, one row per
- * artifact (migration 440).
- *
- * Single-portal mode reads the listing-grain feed here instead (see the PORTAL
- * MIRROR block). It has no matview twin, so that is a live indexed read of
- * `listings` rather than the cached copy — acceptable because plotting one
- * portal's own listings is the entire point: property-grain pins would silently
- * relocate a listing to a sibling portal's coordinates.
- *
- * The `.limit(MAP_CAP)` here is UNORDERED, and that is the W6b defect — kept only
- * on the lanes above, which is why it is not the general path any more. */
+ * artifact (migration 440). */
 const fetchMapPoints = async (
   f: ListingFilters,
   pre: BrowsePrefilters,
@@ -912,58 +870,20 @@ export const fetchListingsForMap = async (
   // function's body by its first `{`, and a destructuring pattern or a `{}` default would be it.
   const signal = opts?.signal;
   const pre = await resolveBrowsePrefilters(f, signal);
-  if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0, capped: false };
+  if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0 };
 
-  /* W6b. One lane still reads points unbounded, and it is deliberate:
-   *
-   *  - PORTAL MIRROR reads `listing_feed_public`, a live listing-grain view over
-   *    `listings` with no matview twin and no cover index to aggregate against.
-   *    Pointing browse_map_cells at it would need a second copy of the predicate
-   *    inside one function AND would silently swap the mirror's grain. The
-   *    mirror's largest cohort (idnes) exceeds MAP_CAP, so it can still truncate
-   *    — the pill says so, and closing it is FILED, not attempted here.
-   *
-   * The BROKER SCOPE takes the same point lane, for the same reason: it is
-   * listing-grain by construction (isBrokerScoped — a merged property can carry
-   * two brokers' listings with no tiebreak), and browse_map_cells aggregates the
-   * property-grain projection. Its `listing_ids_filter` matches the REPRESENTATIVE
-   * listing, so a property whose repr is another broker's listing would vanish
-   * — the repr lottery this whole scope exists to avoid. A broker's cohort is
-   * far below MAP_CAP (the largest real one is ~1.9k), so the lane's truncation
-   * caveat does not bite here. `isListingGrain`, not two conditions, so the
-   * relation swap and the lane choice can never disagree.
-   *
-   * Everything else asks the server for a bounded answer first. */
-  if (isListingGrain(f)) {
-    const rows = await fetchMapPoints(f, pre, signal);
-    return {
-      rows,
-      cells: null,
-      total: rows.length,
-      offGrid: 0,
-      capped: rows.length >= MAP_CAP,
-    };
-  }
-
-  /* migration 439. Same named parameters as browse_stats_properties (one
-   * builder, so the two cohorts cannot diverge) plus two of its own:
-   *
-   *   listing_ids_filter carries the broker allowlist, the one listing-grain
-   *   `.in()` applyPrefilters still emits (W3 S4 deleted the legacy
-   *   city-quality path, which was the other one). A broker scope never
-   *   actually reaches this lane (it is listing-grain and routed above), so
-   *   this is the contract being kept complete, not the path that plots a
-   *   broker's pins: if a future lane change ever did send one here, it would
-   *   be constrained (repr-grain, degraded) rather than silently widened to the
-   *   whole market. tests/test_browse_map_read_contract.py pins every emitted
-   *   id space. */
+  /* W6b, migration 439: the server answers first, with a bounded grid, or
+   * `clustered: false` when the points fit. Same named parameters as
+   * browse_stats_properties (one builder, so the two cohorts cannot diverge) plus
+   * its own `point_budget`. The broker allowlist travels in `property_ids_filter`
+   * like every other prefilter; tests/test_browse_map_read_contract.py pins every
+   * emitted id space. */
   const { data: grid } = await pgRead<MapGrid>(
     supabase.rpc('browse_map_cells', {
       ...buildBrowseStatsArgs(f, {
         obec_ids_filter: pre.obecIds,
         property_ids_filter: pre.propertyIds,
       }),
-      listing_ids_filter: pre.brokerListingIds,
       point_budget: MAP_POINT_BUDGET,
     }),
     { signal },
@@ -977,7 +897,6 @@ export const fetchListingsForMap = async (
       cells: grid.cells ?? [],
       total: grid.total,
       offGrid: grid.off_grid,
-      capped: false,
     };
   }
 
@@ -994,7 +913,6 @@ export const fetchListingsForMap = async (
      * the cohort are mappable, and the pill's "X of Y mapped" is built on it. */
     total: grid.total,
     offGrid: grid.off_grid,
-    capped: rows.length >= MAP_CAP,
   };
 };
 
@@ -1060,29 +978,20 @@ export const fetchListingsForTable = async (
   if (pre.empty) return { rows: [], nextCursor: null };
   /* browse_list (migration 276): the compact snapshot read model — a STABLE
    * relation under the scroll (the live table mutates last_seen_at every
-   * scrape cycle), rebuilt every 15 min from browse_projection. Single-portal
-   * mode swaps in listing_feed_public; that one IS the live table, so a row
-   * whose last_seen_at is bumped mid-scroll can shift — harmless here because
-   * the mirror's sort key (portal_sort_key) is immutable after first write. */
+   * scrape cycle), rebuilt every 15 min from browse_projection. */
   const s = effectiveSort(f, sort);
-  const tiebreak = keysetTiebreak(f);
-  const base = listSource(f, withKeysetColumns(TABLE_COLS, s, tiebreak));
+  const base = listSource(f, withKeysetColumns(TABLE_COLS, s));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
     s,
     cursor,
-    tiebreak,
   ) as unknown as typeof scoped;
   const { data } = await pgRead<TableRow[] | null>(keyed.limit(TABLE_PAGE_SIZE), { signal });
   const rows = data ?? [];
   return {
     rows,
-    nextCursor: nextCursorFrom(
-      rows as unknown as Record<string, unknown>[],
-      s,
-      tiebreak,
-    ),
+    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], s),
   };
 };
 
@@ -1125,7 +1034,7 @@ export const fetchBrowseCount = async (
       applyFilters(
         listSource(
           mode === 'planned' ? { ...f, showDismissed: true } : f,
-          keysetTiebreak(f),
+          'property_id',
           { count: mode, head: true },
         ),
         f,
@@ -1198,6 +1107,16 @@ export interface CardRow {
    * which <PriceDelta> renders as nothing rather than as "unchanged". */
   total_price_change_pct: number | null;
   price_change_count: number | null;
+  /* Every portal with an ad, and those with an active ad (MS19; never NULL: the
+   * projection coalesces them). The portal badge reads them. */
+  all_sources: string[];
+  active_sources: string[];
+  /* How many ads the property holds, active or not (migration 590, the
+   * recompute's count): the card's "N inzeráty" badge, drawn from two. */
+  source_count: number;
+  /* One portal's order column (effectiveSort), selected by withKeysetColumns
+   * only while that order is on: the card shows it beside its first seen. */
+  [orderColumn: `newest_ad_at_${string}`]: string | null | undefined;
 }
 
 export interface CardsResult {
@@ -1214,22 +1133,16 @@ export const fetchListingsForCards = async (
   const pre = await resolveBrowsePrefilters(f, signal);
   if (pre.empty) return { rows: [], nextCursor: null };
   const s = effectiveSort(f, sort);
-  const tiebreak = keysetTiebreak(f);
-  const base = listSource(f, withKeysetColumns(CARD_COLS, s, tiebreak));
+  const base = listSource(f, withKeysetColumns(CARD_COLS, s));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
     s,
     cursor,
-    tiebreak,
   ) as unknown as typeof scoped;
   const { data } = await pgRead<CardRow[] | null>(keyed.limit(CARD_PAGE_SIZE), { signal });
   const baseRows = data ?? [];
-  const nextCursor = nextCursorFrom(
-    baseRows as unknown as Record<string, unknown>[],
-    s,
-    tiebreak,
-  );
+  const nextCursor = nextCursorFrom(baseRows as unknown as Record<string, unknown>[], s);
   /* W7a: the card photos USED to be awaited right here, before this function
    * would return a single row — so no card painted until every card's carousel
    * had landed. Measured live on 24 real ids, that await is 178 image rows, 178
@@ -1321,6 +1234,7 @@ export const buildBrowseStatsArgs = (
     : null;
 
   const effBbox = effectiveBbox(f);
+  const scope = adScope(f);
 
   return {
     category_main_filter:    f.categoryMain.length ? f.categoryMain : null,
@@ -1366,8 +1280,10 @@ export const buildBrowseStatsArgs = (
     garden_area_min_filter:  f.gardenAreaMin,
     garden_area_max_filter:  f.gardenAreaMax,
     parking_lots_min_filter: f.parkingLotsMin,
-    active_only_filter:      f.status === 'active',
-    inactive_only_filter:    f.status === 'inactive',
+    /* The portal rule (MS19): the RPC judges status on the selected portals' ads
+     * (portal_status_matches); under a broker the server already judged both. */
+    active_only_filter:      scope.status === 'active',
+    inactive_only_filter:    scope.status === 'inactive',
     last_seen_min_days:      f.lastSeenMinDays,
     last_seen_max_days:      f.lastSeenMaxDays,
     first_seen_min_days:     f.firstSeenMinDays,
@@ -1435,8 +1351,7 @@ export const buildBrowseStatsArgs = (
     building_condition_level_max:  f.buildingConditionLevelMax,
     apartment_condition_level_min: f.apartmentConditionLevelMin,
     apartment_condition_level_max: f.apartmentConditionLevelMax,
-    /* Migration 118 — filter the Stats cohort by source portal. */
-    portal_filter:           f.portals.length ? f.portals : null,
+    portal_filter:           scope.portals.length ? scope.portals : null,
     /* Migration 162 — market-growth obec allowlist (price-stats datasets).
      * Migration 378 — generic property-id allowlist; carries the deal-pipeline
      * scope (rule #22) today, and is the seam any future property-grain
@@ -1452,12 +1367,9 @@ export const fetchBrowseStats = async (
 ): Promise<BrowseStats> => {
   /* Stats resolves through the SAME function every other Browse lane calls,
    * rather than naming its prefilters one by one — which left the panel
-   * counting the whole market once per property-grain filter added.
-   *
-   * `brokerId` is CLEARED rather than ignored: Stats has no listing-grain
-   * parameter to carry the allowlist, and resolveBrokerPrefilter throws without
-   * a session, so resolving it would fail the panel over a filter it cannot apply. */
-  const pre = await resolveBrowsePrefilters({ ...f, brokerId: null }, signal);
+   * counting the whole market once per property-grain filter added. The broker
+   * allowlist rides in property_ids_filter like the rest. */
+  const pre = await resolveBrowsePrefilters(f, signal);
   const { data } = await pgRead<BrowseStats>(
     supabase.rpc(
       'browse_stats_properties',

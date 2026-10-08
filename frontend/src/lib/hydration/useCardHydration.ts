@@ -43,7 +43,6 @@ export type BrokersByPropertyId = ReadonlyMap<number, PropertyBrokers>;
  * rows, so narrowing here would just push a second shape onto every consumer.
  * `taggedImageUrls` below is the Browse-card projection. */
 export type PhotosByListingId = ReadonlyMap<number, ImagePublic[]>;
-export type AdCountByPropertyId = ReadonlyMap<number, number>;
 
 /* One cover image per listing, from listing_cover_public (W4) — a server-side
  * DISTINCT ON that returns exactly one row per listing instead of every
@@ -232,40 +231,6 @@ export function photoBuckets(listingIds: readonly number[]): number[][] {
   return out;
 }
 
-/* How many ads each card's property holds: the Browse card's "N inzeráty".
- * browse_projection carries no `source_count`, so the count is a decoration and
- * not a card column. It counts property_sources_public, every ad active or not,
- * so the badge says the number the property page's advert list says. Bucketed
- * like the photos, so appending a page re-reads only the new page. */
-export function usePropertyAdCounts(propertyIds: readonly number[]): AdCountByPropertyId {
-  const buckets = useMemo(() => photoBuckets(propertyIds), [propertyIds]);
-
-  return useQueries({
-    queries: buckets.map((ids) => ({
-      queryKey: hydrationKeys.adCounts(ids),
-      queryFn: async ({ signal }: { signal: AbortSignal }) => {
-        const ads = await fetchPropertySourcesByPropertyIds(ids, { signal });
-        return new Map([...ads].map(([id, rows]) => [id, rows.length])) as AdCountByPropertyId;
-      },
-      placeholderData: keepPreviousData,
-      staleTime: DECORATION_STALE_MS,
-    })),
-    combine: mergeAdCounts,
-  });
-}
-
-/* Module-level, so useQueries re-runs it only when a bucket's result changes. */
-function mergeAdCounts(
-  results: ReadonlyArray<{ data?: AdCountByPropertyId }>,
-): AdCountByPropertyId {
-  if (results.length === 0) return EMPTY_AD_COUNTS;
-  const merged = new Map<number, number>();
-  for (const r of results) {
-    if (r.data) for (const [id, n] of r.data) merged.set(id, n);
-  }
-  return merged;
-}
-
 /* The Browse carousel's projection, in one place instead of inline in the read
  * it used to ride along with. Kept a pure function so the hook can stay lossless
  * (raw ImagePublic rows, which the comparables modal and map both consume) while
@@ -285,5 +250,4 @@ const EMPTY_COVERS: CoverByListingId = new Map();
 const EMPTY_BROKERS: BrokerByListingId = new Map();
 const EMPTY_PROPERTY_BROKERS: BrokersByPropertyId = new Map();
 const EMPTY_PHOTOS: PhotosByListingId = new Map();
-const EMPTY_AD_COUNTS: AdCountByPropertyId = new Map();
 export const NO_PHOTOS: readonly ImagePublic[] = [];

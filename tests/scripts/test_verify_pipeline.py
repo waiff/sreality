@@ -1072,6 +1072,19 @@ def test_notification_dispatches_skips_system_health_rows() -> None:
     assert sql.count("not (t.source_kind = 'system_health')") == 3
 
 
+def test_properties_skips_a_property_reset_to_no_ads() -> None:
+    """The recompute resets a property whose ads all moved away: both ids NULL and a count of 0,
+    which only that reset writes. Counted as an orphan it would read as a writer's gap."""
+    from scripts.recompute_property_stats import _NO_ADS
+    from scripts.verify_pipeline import _parity_carrier_sql
+    from toolkit.listing_identity import R2_CARRIERS_BY_TABLE
+
+    carrier = R2_CARRIERS_BY_TABLE["properties"]
+    assert _NO_ADS["repr_listing_id"] == _NO_ADS["repr_listing_ref_id"] == "NULL"
+    assert carrier["skip"] == f"t.source_count = {_NO_ADS['source_count']}"
+    assert _parity_carrier_sql(carrier).count("not (t.source_count = 0)") == 3
+
+
 def test_carrier_skip_is_applied_by_counting_and_by_updating() -> None:
     """Skip one side but not the other and `remaining` never reaches zero, which
     re-dispatches the self-chaining backfill workflow forever."""

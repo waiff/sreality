@@ -1124,8 +1124,7 @@ class SrealityPortal(portal_runner.PortalDefaults):
             _record_detail_fetch(conn, fr, it.observation_id)
             if fr.kind == "ok":
                 writes.append(listing_write.from_sreality(
-                    fr.raw, fr.row, fr.images or [],
-                    discovery_seq=it.discovery_seq, discovered_at=it.discovered_at))
+                    fr.raw, fr.row, fr.images or [], discovered_at=it.discovered_at))
         return listing_write.tally(listing_write.write_listings(conn, writes))
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:

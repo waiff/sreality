@@ -2983,7 +2983,8 @@
         "migrations/**",
         "pyproject.toml",
         "scripts/ci_db_bootstrap.sql",
-        "tests/fixtures/filter_compile_*.json"
+        "tests/fixtures/filter_compile_*.json",
+        "tests/fixtures/portal_rule.json"
       ],
       "inputs": [],
       "secrets": [],

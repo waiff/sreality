@@ -282,9 +282,9 @@ export interface ListingFilters {
    * comparables / estimation agendas), and NOT settable from the filter
    * sidebar — reachable only via the explore-broker modal's seed or a
    * `?broker=` URL param, the same entry-only treatment `pipeline` gets
-   * before its own dedicated chip. Forces listing-grain (see
-   * queries.ts:isBrokerScoped) because broker data has no property-grain
-   * attribution rule for a merged property with listings from two brokers. */
+   * before its own dedicated chip. A property-id allowlist (MS19): the
+   * properties where one of this broker's ads matches the portal and status
+   * filters, so one ad satisfies both (queries.ts:adScope). */
   brokerId: number | null;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
@@ -439,6 +439,12 @@ const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN
 const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
 const CONDITION_VALUES: ReadonlyArray<string> = (
   filterById('condition_match')?.enum_values ?? []
+).map((o) => String(o.value));
+/* One selected portal names a browse_list column (its newest-ad date, read by the
+ * one-portal order and its conjunct in queries.ts), so a code outside the registry is
+ * dropped like any stale enum value: kept, it would answer HTTP 400 on every Browse read. */
+const PORTAL_VALUES: ReadonlyArray<string> = (
+  filterById('portals')?.enum_values ?? []
 ).map((o) => String(o.value));
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = [
   'byt', 'dum', 'komercni', 'pozemek', 'ostatni',
@@ -624,7 +630,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
     furnished: splitCsv(sp.get('furnished')).filter((v) => FURNISHED_VALUES.includes(v)),
     ownership: splitCsv(sp.get('ownership')).filter((v) => OWNERSHIP_VALUES.includes(v)),
-    portals: splitCsv(sp.get('portal')),
+    portals: splitCsv(sp.get('portal')).filter((v) => PORTAL_VALUES.includes(v)),
     conditionMatch: splitCsv(sp.get('condition')).filter(
       (c) => CONDITION_VALUES.includes(c),
     ),
@@ -1533,10 +1539,11 @@ export function applyRegistryUpdates(
  *
  * Honoured (mapped): category, disposition, district chips, price / price-per-m²
  * / MF-yield / area / usable / estate / garden bounds, building material,
- * tri-state amenities, furnished, ownership, portals, condition_match,
- * parking-lots min, condition-level mins, the price-history mins (distinct-site
- * / price-drop / price-rise count, max price-drop %), and the city-quality
- * predicates (index rules, population min/max, the near-* minimums).
+ * tri-state amenities, furnished, ownership, portals (any of the property's
+ * ads, MS19), condition_match, parking-lots min, condition-level bounds, the
+ * price-history pair (price-change count in a window, total price change %),
+ * and the city-quality predicates (index rules, population min/max, the near-*
+ * minimums).
  * center+radius → lat/lng/radius_m.
  *
  * NOT honoured by the matcher (reported as unsupported when set): listing

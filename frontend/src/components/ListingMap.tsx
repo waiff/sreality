@@ -4,7 +4,6 @@ import { YmPicker, YM_SELECT_CLS } from '@/components/YmPicker';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
-import { MAP_CAP } from '@/lib/queries';
 import type {
   CityIndexDefinition,
   CuratedCity,
@@ -456,7 +455,6 @@ interface Props {
   cohortTotal: number | null;
   /* `cohortTotal` is an approximate (planner-estimate) cohort size — render "~Y". */
   cohortTotalApprox: boolean;
-  capped: boolean;
   isLoading: boolean;
   /* Bounds the URL says the map should be showing. The map applies it
    * once on mount and then ignores future updates — it's the source
@@ -570,7 +568,6 @@ export default function ListingMap({
   total,
   cohortTotal,
   cohortTotalApprox,
-  capped,
   isLoading,
   bounds,
   onBoundsChange,
@@ -1825,29 +1822,10 @@ export default function ListingMap({
                 : cohortTotal != null && cohortTotal > total
                   ? `${total.toLocaleString('cs-CZ')} of ${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')} mapped`
                   : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
-            {capped && (
-              /* Corollary F: a surface that cannot render its whole cohort must say so IN
-               * THE COHORT'S OWN TERMS. The count above is honest about the SIZE of what is
-               * missing and silent about its KIND -- the cap is applied with no ORDER BY, so
-               * the plotted pins are whatever the index scan reached first (in practice the
-               * southernmost matches), not a spread across the cohort. Saying "capped" alone
-               * invites reading the pins as a representative sample. The number comes from
-               * MAP_CAP so the copy cannot drift from the constant it describes. */
-              <span
-                className="ml-2 text-[var(--color-ochre)]"
-                title={
-                  `The ${MAP_CAP.toLocaleString('cs-CZ')}-row cap is applied without an ordering, ` +
-                  'so these pins are an arbitrary slice of the cohort — geographically clustered, ' +
-                  'not a sample of it. Narrow the filters to see a cohort that fits.'
-                }
-              >
-                · capped at {MAP_CAP.toLocaleString('cs-CZ')} — an arbitrary slice, not a sample
-              </span>
-            )}
             {cells != null && (
-              /* Corollary F again, but for the OPPOSITE situation: nothing is
-               * missing here, and the operator must not read grouped bubbles as
-               * the old truncation. Every property in the cohort is counted in
+              /* Corollary F (a surface says what it shows in the cohort's own
+               * terms): nothing is missing here, and the operator must not read
+               * grouped bubbles as the old truncation. Every property in the cohort is counted in
                * exactly one bubble, so this says what changed (grain) rather than
                * apologising for a loss that did not happen. */
               <span

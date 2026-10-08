@@ -39,7 +39,7 @@ import {
 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingTypeLabel } from '@/lib/enums';
-import { portalLabel } from '@/lib/portals';
+import { portalLabel, portalShort } from '@/lib/portals';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { propertyPath } from '@/lib/listingUrl';
@@ -76,6 +76,9 @@ interface Props {
   /* `total` is an approximate (planner-estimate) cohort size — render "~N". */
   totalApprox?: boolean;
   sort: SortSpec;
+  /* The portal whose newest ad orders the cards (queries.ts orderPortal), or
+   * null: a card whose date there differs from its own first seen shows both. */
+  orderPortal?: string | null;
   /* Card image size: "large" doubles the grid's --card-min (and therefore
    * the photo + card width); everything else in the card body is fixed-size
    * and untouched. Shared identically by the Split and Cards (map-collapsed)
@@ -146,6 +149,7 @@ export default function ListingCards({
   total,
   totalApprox = false,
   sort,
+  orderPortal = null,
   imageLarge,
   coverTag,
   onCoverTag,
@@ -252,6 +256,7 @@ export default function ListingCards({
                     onEstimate={onEstimate}
                     pipelineScoped={pipelineScoped}
                     collectionScoped={collectionScoped}
+                    orderPortal={orderPortal}
                   />
                 </li>
               ))}
@@ -354,6 +359,7 @@ function Card({
   onEstimate,
   pipelineScoped,
   collectionScoped,
+  orderPortal,
 }: {
   r: CardRow;
   coverTag: CoverTag;
@@ -376,6 +382,7 @@ function Card({
   pipelineScoped: boolean;
   /* The same claim for collection membership — see revalidateCollections. */
   collectionScoped: boolean;
+  orderPortal: string | null;
 }) {
   /* The card element itself, for the map-origin scrollIntoView below. Both
    * modes now render the SAME non-interactive wrapper, so this no longer has
@@ -434,6 +441,14 @@ function Card({
   const lifespanTitle = inactive
     ? `Neaktivní${days ? ` · bylo na trhu ${days}` : ''} (${fmtShortDate(r.first_seen_at)} – ${fmtShortDate(r.last_seen_at)})`
     : `Aktivní${days ? ` · na trhu ${days}` : ''} (od ${fmtShortDate(r.first_seen_at)})`;
+  /* MS19: under one portal's "Newest first" the card is placed by its newest ad
+   * there; when that day is not its own first seen, both are shown. */
+  const orderedAt = orderPortal ? r[`newest_ad_at_${orderPortal}`] : null;
+  const orderedDay = orderedAt ? fmtShortDate(orderedAt) : null;
+  const orderDate = orderedDay && orderedDay !== fmtShortDate(r.first_seen_at) ? orderedDay : null;
+  /* MS19's badge: the portals with an active ad, or every portal marked inactive. */
+  const activePortals = r.active_sources;
+  const badgePortals = activePortals.length ? activePortals : r.all_sources;
 
   /* W7a: photos come from the shared hydration layer, not off `r`. They used to
      be awaited inside the cards read, so the whole grid waited on 24 cards'
@@ -442,12 +457,9 @@ function Card({
      rows the layer holds (the comparables surface consumes those same rows
      un-projected), memoized on the array identity — the cohort map is stable
      across renders, so this recomputes only when this listing's photos change. */
-  const hydration = useCardHydration();
-  const photos = hydration.photosFor(r.listing_id);
+  const photos = useCardHydration().photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
   const cover = useMemo(() => coverIndex(photos, coverTag), [photos, coverTag]);
-  /* How many ads the property holds, a decoration like the photos. */
-  const adCount = hydration.adCountFor(r.property_id);
 
   /* `relative` is load-bearing, not decoration: it is what the stretched
    * link's / selection label's `::after` measures itself against. */
@@ -537,8 +549,8 @@ function Card({
           </div>
         )}
         {/* Metadata margin: file-tab badges down the right edge of the
-          * photo — the lifespan run, the source portal, then the number of
-          * ads the property holds when it holds more than one. Status
+          * photo — the lifespan run, the portals, then the number of ads
+          * the property holds when it holds more than one. Status
           * is carried by the card surface, not a pill. Borders-only,
           * paper-3/85 + backdrop-blur over the photo. */}
         <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
@@ -561,21 +573,33 @@ function Card({
                 <span className="text-[var(--color-copper)]">{days}</span>
               </>
             )}
+            {orderPortal && orderDate && (
+              <>
+                <span className="opacity-40 mx-1">·</span>
+                {portalShort(orderPortal)}
+                <span className="opacity-60 mx-1">od</span>
+                {orderDate}
+              </>
+            )}
           </CardBadge>
-          {portalLabel(r.source) && (
-            <CardBadge title="Zdrojový portál">
-              <span className="opacity-60 mr-1">portál</span>
-              {portalLabel(r.source)}
+          {badgePortals.length > 0 && (
+            <CardBadge
+              title={activePortals.length
+                ? 'Portály, kde má nemovitost aktivní inzerát'
+                : 'Portály, kde nemovitost inzerovala; žádný inzerát není aktivní'}
+            >
+              <span className="opacity-60 mr-1">{activePortals.length ? 'portál' : 'neaktivní'}</span>
+              {badgePortals.map((p) => portalLabel(p)).join(' · ')}
             </CardBadge>
           )}
-          {adCount != null && adCount >= 2 && (
+          {r.source_count >= 2 && (
             /* Inset by the next-photo chevron (24px at right-1, z above the
                badges): on a card narrower than ~215px its vertical band reaches
                this third row and, on hover, would cover the badge's end. */
             <span className="flex mr-7">
-              <CardBadge title={`Nemovitost spojuje ${adCount} ${inzeratu(adCount)} (počítají se i neaktivní)`}>
-                {adCount}
-                <span className="opacity-60 ml-1">{inzeratu(adCount)}</span>
+              <CardBadge title={`Nemovitost spojuje ${r.source_count} ${inzeratu(r.source_count)} (počítají se i neaktivní)`}>
+                {r.source_count}
+                <span className="opacity-60 ml-1">{inzeratu(r.source_count)}</span>
               </CardBadge>
             </span>
           )}

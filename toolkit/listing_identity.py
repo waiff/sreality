@@ -48,7 +48,10 @@ R2_CARRIERS: list[dict[str, Any]] = [
     # (rows a NOT VALID CHECK would reject on UPDATE). It is applied to COUNTING as
     # well as updating: skip one but not the other and "remaining" never reaches
     # zero, which would make the self-chaining workflow re-dispatch forever.
-    {"table": "properties", "cursor": "id", "cols": [("repr_listing_id", "repr_listing_ref_id")]},
+    # A property the recompute reset to no ads (`source_count` 0, which only that reset writes)
+    # names no advert on purpose: its two NULL ids are no writer's gap.
+    {"table": "properties", "cursor": "id", "cols": [("repr_listing_id", "repr_listing_ref_id")],
+     "skip": "t.source_count = 0"},
     {"table": "property_notes", "cursor": "id",
      "cols": [("origin_listing_id", "origin_listing_ref_id")]},
     {"table": "property_merge_events", "cursor": "id", "cols": [("listing_id", "listing_ref_id")]},

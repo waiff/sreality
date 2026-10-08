@@ -1305,6 +1305,31 @@ def test_one_newest_ad_date_per_offered_portal_and_the_two_portal_lists():
         assert _rhs(setc, column) == f"r.{column}"
 
 
+def test_a_tenth_portal_is_offered_only_with_its_read_model_lines():
+    """MS19 (migration 590): a PORTAL_OPTIONS code is a portal Browse can order by only when
+    the latest browse_projection projects its date (after the two lists and the ad count, in
+    PORTAL_OPTIONS order) and the latest rebuild_browse_list builds and renames its partial
+    index. With the properties column above, a tenth portal needs all three before it can be
+    offered."""
+    from tests.migration_defs import latest_definition
+    from tests.test_browse_read_path_guardrail import _latest_migration_defining
+    from tests.test_location_w3_projection import _columns, _sql
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    codes = [o.value for o in PORTAL_OPTIONS]
+    view = _latest_migration_defining("browse_projection").name
+    assert _columns(_sql(view), "browse_projection")[-(len(codes) + 3):] == [
+        "all_sources", "active_sources", "source_count", *(f"newest_ad_at_{c}" for c in codes)]
+    rebuild = " ".join(latest_definition("rebuild_browse_list").read_text(encoding="utf-8").split())
+    for c in codes:
+        assert (f"create index browse_list_next_newest_ad_at_{c}_idx on browse_list_next "
+                f"(category_main, category_type, newest_ad_at_{c} desc, property_id desc) "
+                f"where newest_ad_at_{c} is not null") in rebuild, c
+        assert (f"alter index browse_list_next_newest_ad_at_{c}_idx rename to "
+                f"browse_list_newest_ad_at_{c}_idx") in rebuild, c
+    assert rebuild.count("browse_list_next_newest_ad_at_") == 2 * len(codes)
+
+
 def test_the_price_history_is_the_canonical_adverts_lineage():
     """MS10: the canonical advert's same-portal predecessors' steps plus one handover per link."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
@@ -1323,9 +1348,11 @@ def test_the_price_history_is_the_canonical_adverts_lineage():
 
 
 def test_the_canonical_handover_is_stamped_for_the_price_alerts():
-    """`repr_since` moves only when the canonical advert changes from one advert to another,
-    and both alert producers count only steps after it (migration 561). The city figures follow
-    the canonical advert: their stamp clears with it, or when it predates `repr_since`."""
+    """`repr_since` moves only when the canonical advert changes from one advert to another, or
+    when a property the sweep reset to no ads (`source_count` 0, which only that reset writes)
+    gains one, and both alert producers count only steps after it (migration 561). The city
+    figures follow the canonical advert: their stamp clears with it, or when it predates
+    `repr_since`."""
     import inspect
 
     from api import notifications as nf
@@ -1333,15 +1360,65 @@ def test_the_canonical_handover_is_stamped_for_the_price_alerts():
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
     assert _rhs(setc, "repr_since") == (
-        "CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END")
+        "CASE WHEN p.repr_listing_ref_id <> c.id OR p.source_count = 0 THEN now() "
+        "ELSE p.repr_since END")
     assert _rhs(setc, "city_proximity_computed_at") == (
-        "CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since "
+        "CASE WHEN p.repr_listing_ref_id <> c.id OR p.source_count = 0 "
+        "OR p.city_proximity_computed_at < p.repr_since "
         "THEN NULL ELSE p.city_proximity_computed_at END")
     assert ("add column if not exists repr_since timestamptz not null default '-infinity'"
             in " ".join(MIGRATION_561.read_text().split()))
     assert "ps.scraped_at > p.repr_since" in inspect.getsource(nf._recent_price_drops)
     assert "st.scraped_at > m.repr_since" in inspect.getsource(nf.match_monitored_collections_once)
     assert "p.repr_since" in nf._MONITORED_CTE
+
+
+def test_a_property_with_no_ads_is_reset_to_no_ads_once():
+    """The batch statement starts from the ads, so the sweep resets a childless property
+    (2026-10-07: 65587, 65660 and 302257 still named ads that other properties held): inactive,
+    neither handle of a canonical ad, no portals, a count of 0, every offered portal's date NULL.
+    Status `active` only (a merge retires its loser), `repr_since` untouched, and only while a
+    column still differs, so the daily sweep never rewrites a row it already reset."""
+    import re
+
+    from scripts.recompute_property_stats import _RECONCILE_CHILDLESS_SQL
+    from toolkit.filter_registry import PORTAL_OPTIONS
+
+    sql = " ".join(_RECONCILE_CHILDLESS_SQL.split())
+    m = re.fullmatch(
+        r"UPDATE properties p SET \((.+?)\) = \((.+?)\) WHERE p\.status = 'active' "
+        r"AND NOT EXISTS \(SELECT 1 FROM listings l WHERE l\.property_id = p\.id\) "
+        r"AND \((.+?)\) IS DISTINCT FROM \((.+?)\)", sql)
+    assert m, sql
+    columns, values, guarded, guard = (g.split(", ") for g in m.groups())
+    assert dict(zip(columns, values, strict=True)) == {
+        "is_active": "false", "repr_listing_ref_id": "NULL", "repr_listing_id": "NULL",
+        "source_count": "0", "all_sources": "ARRAY[]::text[]", "active_sources": "ARRAY[]::text[]",
+        **{f"newest_ad_at_{o.value}": "NULL" for o in PORTAL_OPTIONS}}
+    assert guarded == [f"p.{c}" for c in columns] and guard == values
+    assert "repr_since" not in sql
+
+
+def test_with_no_canonical_ad_a_property_leaves_the_read_models():
+    """Why the reset needs no clause of its own in Browse or the map: the projection's consumer
+    rule (rule 25) reads the location row of the canonical ad, joined on `repr_listing_ref_id`,
+    so a NULL never passes it, and `browse_list` and `properties_map_mv` are its rows."""
+    from tests.test_browse_read_path_guardrail import _latest_migration_defining, _strip_comments
+
+    sql = _strip_comments(_latest_migration_defining("browse_projection").read_text())
+    body = " ".join(sql[sql.lower().index("view browse_projection as"):].split(";", 1)[0].split())
+    assert "left join listing_location ll on ll.listing_id = p.repr_listing_ref_id" in body
+    assert "(ll.geom IS NOT NULL OR ll.country_status = 'foreign')" in body
+
+
+def test_the_reconcile_counts_the_properties_it_reset():
+    """The count the sweep logs (`RECOMPUTE reconciled childless=`): the rows the reset wrote."""
+    from scripts.recompute_property_stats import _RECONCILE_CHILDLESS_SQL, _reconcile_childless
+
+    reset = _FakeConn(script=[(lambda s: s.startswith("UPDATE properties p SET (is_active,"),
+                               [(65587,), (65660,), (302257,)])])
+    assert _reconcile_childless(reset) == 3
+    assert _sqls(reset) == [" ".join(_RECONCILE_CHILDLESS_SQL.split())]
 
 
 def test_every_recompute_variant_carries_the_whole_statement():

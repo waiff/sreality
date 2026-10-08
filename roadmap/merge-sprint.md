@@ -35,12 +35,20 @@ owns *what a merge and a split do*: the property's facts, its curation, and what
       an operator merge taking back every "different" it joins (MS12), the brake routing by the carry
       record; the review pages link to the dialog (PR #1722, +4,854 / −4,280, no migration;
       gate: the count invariant on production before and after, the two-account live suite)
-- [ ] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first"
+- [x] W5 — one read-model rewrite, portal and broker filters at property grain, one-portal "Newest first",
+      the card's portal badge, the broker lookup by property; the per-ad lane deleted in code (PR #1723,
+      +2,067 / −1,575, the operator's ruling on the size owed; migration 590 applied before merge; gate: a
+      cycle begun after W2a, the parity samples, the shadow rebuild, the nine page plans; objects wait for W6)
 - [ ] W6 — the one destructive window
 
 ## Owed after W4
 - The category review's "Ponechat", once the AUTODEDUP session's verdict route lets a "same" through
   for a pair one live property already holds (its call); W4 removed the keep-together statement.
+
+## Owed after W5
+- Three properties left with no ads (65587, 65660, 302257; their ads now sit on 34632, 2872 and 338214)
+  still show another property's ad. W5's daily recompute resets them to "no ads", which takes them out
+  of Browse and the map: the first full sweep after the deploy does it, no manual write.
 
 ## Later (cut from scope, see PROGRAM.md §9)
 - The estimation subject lookup (MS20), with its own design.

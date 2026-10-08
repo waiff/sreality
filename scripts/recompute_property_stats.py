@@ -14,7 +14,8 @@
    (MS10): its own and its same-portal predecessors' `listing_price_steps` plus one handover step
    per link, the total compounded. Lifecycle: any advert active, min/max seen, newest snapshot;
    the portal lists and one newest-advert date per offered portal (MS19). `repr_since` is
-   stamped when the canonical advert changes (the price alerts start there), and
+   stamped when the canonical advert changes, or when a property the full sweep reset to no ads
+   gains one (the price alerts start there), and
    `city_proximity_computed_at` is cleared then and whenever it predates `repr_since`, so the
    hourly city job recomputes the figures from the canonical advert's point (an advert without
    one keeps the earlier figures until it gains one: the job reads only a point).
@@ -228,8 +229,8 @@ _RECOMPUTE_BATCH_SQL = f"""
       first_seen_at       = r.first_seen_at,
       last_seen_at        = r.last_seen_at,
       repr_listing_id     = c.sreality_id,
-      repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
-      city_proximity_computed_at = CASE WHEN p.repr_listing_ref_id <> c.id OR p.city_proximity_computed_at < p.repr_since THEN NULL ELSE p.city_proximity_computed_at END,
+      repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id OR p.source_count = 0 THEN now() ELSE p.repr_since END,
+      city_proximity_computed_at = CASE WHEN p.repr_listing_ref_id <> c.id OR p.source_count = 0 OR p.city_proximity_computed_at < p.repr_since THEN NULL ELSE p.city_proximity_computed_at END,
       repr_listing_ref_id = c.id,
       category_main       = c.category_main,
       category_type       = c.category_type,
@@ -330,17 +331,24 @@ _CLEAR_DIRTY_SWEPT_SQL = (
     "WHERE marked_at <= %(cutoff)s AND property_id >= %(lo)s AND property_id < %(hi)s"
 )
 
-# A merge re-points a retired property's children onto the survivor, leaving the
-# loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
-# property drops out of the UPDATE and keeps stale columns (its portal lists and
-# dates too; nothing serves a merged-away row) -- the merge's retire
-# (`toolkit.property_identity._RETIRE_SQL`) sets the loser is_active=false, but this guards the general case
-# (a partially-failed merge, or any childless active property) so Browse never
-# shows a ghost active dot.
-_RECONCILE_CHILDLESS_SQL = """
-    UPDATE properties p SET is_active = false
-    WHERE p.is_active = true
+# The batch statement starts from the ads, so a property whose ads all moved away keeps its
+# last recompute, canonical ad included. A merge retires its loser (nothing serves a merged-away
+# row); any other childless property is reset to "no ads". Its last advert facts stay for its
+# page; with no canonical ad, the consumer rule (rule 25, read off that ad's location) keeps it
+# out of Browse, the map and the Watchdog. Only a row that still differs is written, so the
+# count is what this run reset. Only this reset writes `source_count` 0: the batch statement
+# reads it to stamp the handover when the property gains an ad again (a NULL handle compares
+# to nothing), and the R2 parity check skips it (both handles NULL on purpose).
+_NO_ADS = {
+    "is_active": "false", "repr_listing_ref_id": "NULL", "repr_listing_id": "NULL",
+    "source_count": "0", "all_sources": "ARRAY[]::text[]", "active_sources": "ARRAY[]::text[]",
+    **{f"newest_ad_at_{o.value}": "NULL" for o in PORTAL_OPTIONS},
+}
+_RECONCILE_CHILDLESS_SQL = f"""
+    UPDATE properties p SET ({', '.join(_NO_ADS)}) = ({', '.join(_NO_ADS.values())})
+    WHERE p.status = 'active'
       AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
+      AND ({', '.join(f'p.{c}' for c in _NO_ADS)}) IS DISTINCT FROM ({', '.join(_NO_ADS.values())})
 """
 
 # Written ONLY when a cycle covered every id (in one run, or across runs through the cursor
@@ -1080,7 +1088,7 @@ def main() -> int:
                 reconciled = step(_reconcile_childless, "sweep.reconcile")
                 if reconciled:
                     LOG.info(
-                        "RECOMPUTE reconciled childless=%d (set is_active=false)",
+                        "RECOMPUTE reconciled childless=%d (reset to no ads)",
                         reconciled,
                     )
 

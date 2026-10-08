@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from toolkit.filter_registry import PORTAL_OPTIONS
+
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
 W3 = "503_location_w3_serving_views.sql"
@@ -34,6 +36,7 @@ W3_S4 = "506_location_w3_s4_deletions.sql"
 W4A = "507_location_w4a_readers.sql"
 W4C = "508_location_w4c_legacy_drops.sql"
 STREET = "584_serve_street_code.sql"
+W5 = "590_read_model_portal_rule.sql"
 
 # What S4 removes from each view it re-creates. `obec` SURVIVES on the two views
 # the pipeline board reads: the board's town sort orders by the TOWN, which is
@@ -569,3 +572,32 @@ def test_w4c_carries_no_transaction_and_one_alter_per_hot_table() -> None:
     assert sum(1 for line in sql.splitlines()
                if line.strip().startswith("drop column if exists")
                ) == 24 + 16  # listings + properties (place_search_text leads, idempotent)
+
+
+# ------------------------------------------------------------------ W5 (590)
+
+# The merge sprint's one read-model rewrite (MS19, MS21): what 590 removes from each view it
+# re-creates, and what it appends LAST. browse_projection is a rename-aside (the matview
+# follows the old view by OID), properties_public a DROP + CREATE, the board re-created
+# verbatim because it reads properties_public.
+_W5_PROJECTION_TAIL = ["all_sources", "active_sources", "source_count",
+                       *(f"newest_ad_at_{o.value}" for o in PORTAL_OPTIONS)]
+_W5_SHAPE: dict[str, tuple[set[str], list[str]]] = {
+    "browse_projection": ({"asset_id"}, _W5_PROJECTION_TAIL),
+    "properties_public": ({"asset_id", "distinct_site_count", "published_at"},
+                          ["all_sources", "active_sources"]),
+    "pipeline_board_public": (set(), []),
+}
+
+
+@pytest.mark.parametrize("view", sorted(_W5_SHAPE))
+def test_w5_drops_then_appends_only(view: str) -> None:
+    """Same three invariants as S4 and W4-c (exact drops, nothing else added, survivors in
+    their relative order), plus the appended columns LAST and in PORTAL_OPTIONS order, so
+    `sync_browse_list`'s positional insert and browse_list's ALTER see one shape."""
+    before = _previous_definition(view, below=W5)
+    old = _columns(_sql(before), view)
+    new = _columns(_sql(W5), view)
+    dropped, appended = _W5_SHAPE[view]
+    assert set(old) - set(new) == dropped, sorted(set(old) - set(new))
+    assert new == [c for c in old if c not in dropped] + appended

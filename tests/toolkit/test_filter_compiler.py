@@ -59,8 +59,6 @@ def test_each_kind_renders_its_template(grain: fc.FilterGrain) -> None:
         ({"category_type": "prodej"}, "l.category_type = %(category_type)s",
          {"category_type": "prodej"}),
         ({"has_lift": False}, "l.has_lift = %(has_lift)s", {"has_lift": False}),
-        ({"portals": ("sreality",)}, "l.source = ANY(%(portals)s)",
-         {"portals": ["sreality"]}),
         ({"min_usable_area": 10}, "l.usable_area >= %(min_usable_area)s",
          {"min_usable_area": 10}),
         ({"building_condition_level_max": 0},
@@ -76,6 +74,24 @@ def test_each_kind_renders_its_template(grain: fc.FilterGrain) -> None:
     ]
     for values, clause, params in cases:
         assert compile_filter_where(values, grain) == ([clause], params), values
+
+
+def test_a_portal_is_the_ads_own_on_listings_and_any_ad_on_properties() -> None:
+    """MS19: the Watchdog matches a property when any of its ads is on a portal (the
+    `any` arm of portal_status_matches); estimation cohorts keep each ad's own (§9)."""
+    values = {"portals": ("sreality", "idnes")}
+    params = {"portals": ["sreality", "idnes"]}
+    assert compile_filter_where(values, LISTINGS_GRAIN) == (
+        ["l.source = ANY(%(portals)s)"], params)
+    assert compile_filter_where(values, PROPERTIES_GRAIN) == (
+        ["l.all_sources && %(portals)s::text[]"], params)
+
+
+def test_the_property_grain_clauses_are_the_shared_table() -> None:
+    """Browse hand-codes the same ids (registryQueryBuilder.test.ts reads this table)."""
+    table = json.loads((_ROOT / "tests" / "fixtures" / "filter_sql_kinds.json").read_text())
+    assert set(PROPERTIES_GRAIN.clauses) == set(table["property_grain_clauses"])
+    assert dict(LISTINGS_GRAIN.clauses) == {}
 
 
 def test_the_rule_23_measures_resolve_per_relation() -> None:
@@ -184,11 +200,12 @@ def test_city_index_rules_is_one_obec_predicate_with_a_jsonb_param() -> None:
 def test_every_filter_on_a_grain_has_exactly_one_implementation(grain: fc.FilterGrain) -> None:
     for f in fr.filters_for_agenda(grain.agenda):
         homes = [
-            fr.sql_kind(f) is not None and f.id not in fc._HOOKS,
+            fr.sql_kind(f) is not None and f.id not in fc._HOOKS and f.id not in grain.clauses,
             f.id in fc._HOOKS,
             f.id in grain.caller_renders,
+            f.id in grain.clauses,
         ]
-        assert sum(homes) == 1, f"{f.id}: {homes} (kind, hook, caller-rendered)"
+        assert sum(homes) == 1, f"{f.id}: {homes} (kind, hook, caller-rendered, clause)"
 
 
 def test_the_hooks_are_exactly_the_irregular_filters_no_adapter_renders() -> None:

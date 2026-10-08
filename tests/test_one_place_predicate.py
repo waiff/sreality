@@ -91,8 +91,10 @@ _W3_S3 = "504_location_w3_one_code_predicate.sql"
 # plus one `hide_dismissed` clause; 547 carried 537's forward verbatim except the
 # two estate-area predicates, which now read the plot MEASURE column; 549 carries
 # 547's forward verbatim except the ownership `__unknown__` array, which gained
-# `jine`. Re-read the chip arms when this moves again.
-_LATEST_RPC_DEFINITION = "549_browse_aggregates_know_ownership_jine.sql"
+# `jine`; 590 carries 549's forward verbatim except the status and portal arms,
+# which became one portal_status_matches() call (MS19). Re-read the chip arms
+# when this moves again.
+_LATEST_RPC_DEFINITION = "590_read_model_portal_rule.sql"
 
 
 def _function_body(func: str) -> str:
@@ -344,7 +346,6 @@ def test_every_spatial_reader_takes_its_point_from_listing_location() -> None:
         "toolkit/velocity.py",
         "toolkit/transit_axis.py",
         "toolkit/neighborhoods.py",
-        "toolkit/brokers.py",
         "api/notifications.py",
         "api/estimation_runs.py",
     )
