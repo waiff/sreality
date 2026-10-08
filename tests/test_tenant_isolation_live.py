@@ -63,16 +63,16 @@ _TENANT_VIEWS: list[str] = [
 # deny-all under invoker rights, so flipping them silently returns zero rows to
 # every caller instead of scoping anything. `listings`/`images` are
 # RLS-enabled-with-zero-policies (fully deny-all); `properties` now carries one
-# permissive authenticated-SELECT policy (Amendment A5, migration 349) but the
-# views still must stay owner-bypass because they JOIN `listings`, which stays
-# deny-all.
+# permissive authenticated-SELECT policy (Amendment A5, migration 349) but a
+# view that JOINs `listings`, which stays deny-all, must stay owner-bypass (the
+# per-ad feed was the other one until W6 dropped it, migration 593).
 #
 # Owner rights does NOT mean unscoped. property_estimates_public reads
 # `estimation_runs`, whose RLS cannot bind inside an owner-rights view, so
 # migration 341 mirrors that read policy as an in-body predicate instead --
 # scoping lives in the view body, not in invoker RLS
 # (test_estimates_view_scopes_per_account).
-_MARKET_VIEWS: list[str] = ["property_estimates_public", "listing_feed_public"]
+_MARKET_VIEWS: list[str] = ["property_estimates_public"]
 
 # Base relations + matviews that hold admin-only operational data. Any view (or
 # function an authenticated caller can EXECUTE) that reads one of these must embed

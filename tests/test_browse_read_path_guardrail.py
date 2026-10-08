@@ -5,16 +5,16 @@ Three invariant families, all deterministic and offline (no database):
 1. NO GATE — the publication gate is GONE (migration 475, NEW DEDUP Wave 0:
    its only stamper was the removed dedup engine). The EFFECTIVE
    (latest-migration) definitions of `properties_public` (live view: detail
-   pages, watchdog matcher), `browse_projection` (migration 276: the ONE
-   projection both Browse read models materialize from) and
-   `listing_feed_public` must not call `publication_gate_enabled()` at all.
+   pages, watchdog matcher) and `browse_projection` (migration 276: the ONE
+   projection both Browse read models materialize from) must not call
+   `publication_gate_enabled()` at all.
 
    Why this is still worth a test rather than a deletion: the function was
    SECURITY DEFINER and the planner cannot inline it, so a bare call in a WHERE
    ran ONCE PER ROW — ~87k times for the byt+pronájem cohort, the PR-#707
    incident. It survived as a scalar subquery `(SELECT publication_gate_enabled())`
    only because that made it an InitPlan. Anything re-introducing a per-row
-   SECURITY DEFINER call into these three definitions repeats that outage, so
+   SECURITY DEFINER call into these definitions repeats that outage, so
    the guard now watches for the whole class returning, not for its wrapping.
 
 2. REBUILD INVARIANTS — the pg_cron rebuild functions (migration 277) must
@@ -134,9 +134,7 @@ def _view_block(view: str) -> tuple[str, str]:
     return "\n".join(out), f"{src.name}:{view}"
 
 
-@pytest.mark.parametrize(
-    "view", ["properties_public", "browse_projection", "listing_feed_public"]
-)
+@pytest.mark.parametrize("view", ["properties_public", "browse_projection"])
 def test_read_path_view_has_no_publication_gate(view: str) -> None:
     sql, label = _view_block(view)
     _assert_no_gate(sql, label)
@@ -221,7 +219,7 @@ def test_a_resolved_but_empty_allowlist_yields_zero_rows(fn: str) -> None:
 # ------------------------------------------------------- the consumer rule --
 
 
-@pytest.mark.parametrize("view", ["browse_projection", "listing_feed_public"])
+@pytest.mark.parametrize("view", ["browse_projection"])
 def test_the_effective_list_definition_carries_the_consumer_rule(view: str) -> None:
     """W5, operator ruling 2026-09-13: a listing reaches a consumer only once
     `listing_location` has an answer for it. `browse_projection` is where Browse, Stats
@@ -229,7 +227,7 @@ def test_the_effective_list_definition_carries_the_consumer_rule(view: str) -> N
     `select * from browse_projection` — so this is the one definition that has to carry
     it, and the EFFECTIVE (highest-numbered) migration is the only one worth asking.
 
-    RED by: a later migration re-creating either view from an older body and dropping
+    RED by: a later migration re-creating the view from an older body and dropping
     the clause on the way — exactly the failure mode `_latest_migration_defining` exists
     for. The character-level pin against the Python constant is
     tests/test_location_w5_serve_resolved.py.
@@ -242,7 +240,7 @@ def test_the_effective_list_definition_carries_the_consumer_rule(view: str) -> N
     straight off `ll`. They select the identical rows (probed on production: 40,000
     properties, 0 disagreements). The EXISTS form costs a second full pass over an
     821k-row table, which is why `browse_projection` — rebuilt whole every 15 minutes —
-    uses the join form and the feed still uses the subquery.
+    uses the join form.
 
     What this rail actually guarantees, in BOTH spellings: the rule is still there, it
     still reads `listing_location`, and it still carries BOTH arms of the answer (a

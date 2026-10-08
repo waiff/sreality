@@ -1,10 +1,11 @@
-"""Merge safety (migration 559): one price-step definition, no status event on a merge, and
-the operator's rulings written with the review pages' own statements.
+"""Merge safety (migration 559): one price-step definition, a retire and a reactivation that
+each set a property's state in one statement, and the operator's rulings written with the
+review pages' own statements.
 
-Hermetic: the SQL text. The executed half — a step never spans two adverts, a merge writes no
-status row, a detach restores the absorbed property's own state, the rulings land in
-`autodedup.verdicts` — runs against the replayed schema in tests/test_merge_safety_live.py;
-the rulings' own cases are tests/test_property_merge_set.py and tests/test_detach_listing.py.
+Hermetic: the SQL text. The executed half — a step never spans two adverts, merging then
+detaching gives back every original property, the rulings land in `autodedup.verdicts` — runs
+against the replayed schema in tests/test_merge_safety_live.py; the rulings' own cases are
+tests/test_property_merge_set.py and tests/test_detach_listing.py.
 """
 
 from __future__ import annotations
@@ -55,33 +56,13 @@ def test_the_step_view_compares_an_advert_only_with_its_own_previous_price():
     assert "security_invoker = true" in sql
 
 
-# --- 2. no status event on a merge -----------------------------------------------------
-
-
-def _trigger_body() -> str:
-    sql = " ".join(MIGRATION.read_text().split())
-    return sql.split("create or replace function log_property_status_event()", 1)[1].split("$$;", 1)[0]
-
-
-def test_the_status_trigger_skips_a_retirement():
-    assert "elsif NEW.status = 'merged_away' then null;" in _trigger_body()
-
-
-def test_an_unmerge_logs_only_where_the_propertys_own_history_disagrees():
-    """A pre-559 absorbed property ends on the merge's false 'inactive': its reactivation must
-    log 'active', or the chart reads it inactive for good. One that still reads its restored
-    state gets nothing."""
-    body = _trigger_body()
-    branch = body.split("elsif OLD.status = 'merged_away' then", 1)[1].split("elsif", 1)[0]
-    assert "where e.property_id = NEW.id order by e.event_at desc, e.id desc limit 1" in branch
-    assert ") is distinct from NEW.is_active then insert into property_status_events" in branch
-    assert "values (NEW.id, NEW.is_active, now())" in branch
+# --- 2. a property's state, set in one statement ---------------------------------------
 
 
 def test_the_merge_retires_and_the_detach_reactivates_in_one_statement_each():
-    """Both halves must touch `status` and `is_active` together, or the trigger sees a
-    plain is_active flip on an active row and logs it. (The status log staying with its own
-    property is tests/test_property_carriers.py; the executed half the live tests.)"""
+    """Both halves set `status` and `is_active` together: a retired property is never left
+    active, and one a detach brings back is active exactly when one of its ads is (the
+    executed half is tests/test_merge_safety_live.py)."""
     retire = " ".join(pi._RETIRE_SQL.split())
     assert "SET status = 'merged_away', merged_into = %s, merged_at = now(), is_active = false" \
         in retire

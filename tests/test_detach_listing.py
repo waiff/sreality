@@ -166,8 +166,8 @@ def test_a_reactivating_detach_runs_no_carrier_and_changes_both_once():
     assert not [s for s, _p in db.log if s.startswith("carrier:")]
     assert db.routed == [(10, (), {2: 20})]
     written = " ".join(s for s, _p in db.log)
-    for table in ("property_status_events", "DELETE FROM properties",
-                  "DELETE FROM property_merge_events", "property_merge_carries"):
+    for table in ("DELETE FROM properties", "DELETE FROM property_merge_events",
+                  "property_merge_carries"):
         assert table not in written, f"a detach touched {table}"
     assert db.changed == db.browse == db.broker == [[10, 20]]
     (reactivate,) = [s for s, _p in db.log if "SET status = 'active'" in s]

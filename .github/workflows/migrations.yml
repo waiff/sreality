@@ -389,7 +389,7 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_property_per_m2_source_live.py -q
 
-      - name: A merge is safe — per-advert price steps, no status event, rulings (migration 559)
+      - name: A merge is safe — per-advert price steps, rulings (migration 559)
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -482,14 +482,14 @@ jobs:
           DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_property_carriers_live.py -q
 
-      # W4's whole claim is that SIX relations publish ONE number. Nothing else
+      # W4's whole claim is that FIVE relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left
       # on the UNROUNDED form compiles, passes the sweep, and silently skips rows
       # at the SPA's keyset page seam (migration 200). This seeds one property and
       # reads its Kc/m2 back through listings_public, properties_public,
-      # browse_projection, listing_feed_public, browse_stats_properties and
-      # pipeline_board_public, requiring byte identity -- plus the EXPLAIN
+      # browse_projection, browse_stats_properties and pipeline_board_public,
+      # requiring byte identity -- plus the EXPLAIN
       # assertions that measure_price_per_m2 still INLINES (a `SET search_path`
       # added to it would turn every predicate into a per-row call) and that
       # browse_list's covering indexes survived the rebuild. Executed against the
@@ -500,13 +500,13 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_price_per_m2.py -q
 
-      # MF reference rent is ONE read-time measure (migration 565), read by the three serving
-      # views with the stored KU (566/567, replayed above). Executed over a seeded rent map:
-      # every status code, the range for a town-level location, the VK clamp, the
-      # adjustments; the views read back (value via KU, via obec, the range); the plan
-      # assertions that the function INLINES into each view (a SET clause or STRICT would
-      # make it one call per Browse row); the portal lane's yield == browse_list's (Q8 b);
-      # and that an estimation hands the property's facts, the KU included, to it.
+      # MF reference rent is ONE read-time measure (migration 565), read by the two serving
+      # views (browse_projection, properties_public) with the stored KU (566/567, replayed
+      # above). Executed over a seeded rent map: every status code, the range for a
+      # town-level location, the VK clamp, the adjustments; the views read back (value via
+      # KU, via obec, the range); the plan assertions that the function INLINES into each
+      # view (a SET clause or STRICT would make it one call per Browse row); and that an
+      # estimation hands the property's facts, the KU included, to it.
       - name: MF reference rent is one inlined measure (migrations 565, 567)
         timeout-minutes: 5
         env:

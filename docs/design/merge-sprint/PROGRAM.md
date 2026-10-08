@@ -38,17 +38,19 @@ Every wave is tested against this sentence. Work that does not serve it is cut (
 
 **Subtraction is the deliverable.** No flags, no settings to turn behaviour off, no second path
 beside an old one. Estimate for code, tests and workflows: about **+3,400 / −5,300 lines** when
-approved; as built so far (W0–W5, 2026-10-07) **+11,850 / −9,367**; **−3 tables, +1**; about
-**1.5 GB** dropped from the database, 1.15 GB of it two indexes nothing has ever used, while the
-Browse read models grow by roughly 0.2 GB (the two portal lists, the nine per-portal dates and their
-indexes). Not counted: migration 590's 1,261 lines, which restate views and the two aggregate RPCs
-whole. Our own condition grades stay for now (Q48, §9). Every wave removes more than it adds except
-W0 (a hotfix: +630 / −150 with its tests and docs), W2a (+756 / −332 as built: the migration, live
-tests and the plan's gate text), W2b (+1,866 / −990 as built: MS16's honesty on
-every surface and its tests; the operator accepted the size on 2026-10-06, "merge when needed"),
-W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4), W4 (+4,854 / −4,280 as
-built: its code about even, its tests and the reviews' cases larger, §4; the operator's ruling owed)
-and W5 (+2,067 / −1,575 as built: code −238 net, tests +816 net, §4; the operator's ruling owed).
+approved; as built (W0–W6, 2026-10-08) **+12,628 / −9,653**; **−3 tables, +1**; **1.66 GB**
+dropped from the database once W6 is applied (measured 2026-10-08), 1.29 GB of it two indexes
+nothing has ever used, while the Browse read models grow by roughly 0.2 GB (the two portal lists,
+the nine per-portal dates and their indexes). Not counted: migrations 590 and 593 (1,261 and 941
+lines), which restate views and RPCs whole. Our own condition grades stay for now (Q48, §9). Every
+wave removes more than it adds except W0 (a hotfix: +630 / −150 with its tests and docs), W2a
+(+756 / −332 as built: the migration, live tests and the plan's gate text), W2b (+1,866 / −990 as
+built: MS16's honesty on every surface and its tests; the operator accepted the size on 2026-10-06,
+"merge when needed"), W3 (+1,524 / −941 as built: its code shrinks while its tests grow, §4), W4
+(+4,854 / −4,280 as built: its code about even, its tests and the reviews' cases larger, §4; the
+operator's ruling owed), W5 (+2,067 / −1,575 as built: code −238 net, tests +816 net, §4; the
+operator's ruling owed) and W6 (+778 / −286 as built: its deletions are in the database, while
+the repository gains the day-of runbook and 593's rails, §4; the operator's ruling owed).
 
 ## 1. Why this program exists (verified 2026-10-02/03)
 
@@ -287,7 +289,7 @@ Items marked *(default)* were not asked; they are engineering defaults the opera
 | **W3** | Carry record and the count invariant; one toast; the brake's dry run counts carry rows; the category gate reads ads (MS13 note); split hooks, the pipeline snapshot and restore, and the merge-list routes deleted | yes | "C2 CLOSED"; its additive migration 589 (`property_merge_carries`) applied before merge | +1,524 / −941 (built, #1721; planned +330 / −655): code −20 net, tests +475 net (MS14's invariant and fold snapshots on every live merge, the came-from cases, the ad-grain gate and the receipt, all new since the plan), docs +64, migration 589's 64 lines |
 | **W4** | One split dialog by letters, grown from the letter split already on the property page (PRs #1699, #1701): the preview and its digest, curation routing per letter with copies (the brake routes by the same plan), a merged ad that cannot go back going to a new property, an operator merge ruling "same" every standing "different" across the merged properties (counted before the click), the brake's dry run counting note moves; the review pages link to the dialog; deleted: the Proposed-splits and Rulings split dialogs (both pages keep their lists), "keep together" (the category review's "Ponechat"), "Přesto rozdělit", writing "same" inside a letter (a letter's join still rules as the merge it is; recorded rulings stay) and the split undo | yes | W3 | +4,854 / −4,280 (built, #1722; planned +1,550 / −2,100): code +48 net, tests +429 net (the split's hermetic and live suites rewritten, the gate's two-account suite and MS12 new, then the two reviews' cases: every fold's twin, no account, the digest's counts and landings, the brake onto an origin active again, the preview with the user's picks, the count held before a merge), docs +97; no migration |
 | **W5** | One read-model rewrite, the one portal rule and the one-portal "Newest first" (the nine dates copied into `browse_list`, one index each; `source_count` with them, so the card's "N inzeráty" badge from #1725 reads its row, not a request of its own), broker lookup; a property left with no ads reset by the daily recompute, so no read model serves it (2026-10-07: 302257, 65587, 65660); the per-ad Browse lane and its writers deleted; old PR #956 closed | read model | W1b, W2a, one full recompute cycle begun after W2a went live | +2,067 / −1,575 against main with #1725 (built, #1723; planned +290 / −870; the operator's ruling owed): code −238 net (the per-ad lane, the grain notice, the map's capped pill, `discovery_seq`'s threading and #1725's ad-count read out), tests +816 net (one fixture through the database, the RPCs, the Watchdog, the broker lookup and the SPA; migration 590's offline rail and its receipt; the tenth-portal rail; the page's one-portal wiring; the reset of a property left with no ads and its next ad's handover), docs −101 net, CI +15 (the fixture's push path); migration 590 (1,261 lines, 515 of them the two RPC bodies restated whole) not counted |
-| **W6** | The destructive window (§6), with its registry and test edits | registry only | W1b–W5 live; a day the operator names | database |
+| **W6** | The destructive window (§6), with its registry and test edits: migration 593, applied on the day the operator names by `W6_RUNBOOK.md` | registry only | W1b–W5 live; a day the operator names | +778 / −286 (built 2026-10-08, PR pending; the operator's ruling owed): code +41 net (the drift check stops probing what a later migration drops), tests +146 net (593's offline rails, section 0's production checks and the guards' arms among them; the pins on dropped objects removed), docs +305 net (`W6_RUNBOOK.md`); migration 593 (941 lines, 317 of them 590's map function) not counted; in the database −1.66 GB, −3 tables |
 
 **Order.** Before the dedup session's review closes (2026-10-06 13:45 UTC): W0 (merged) and W2b.
 After its "C2 CLOSED" line: W1b and W2a back to back; then W3 and W4 back to back; then W5; then W6
@@ -385,7 +387,9 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
   Watchdog does not use them and the feed index's scan count has not moved since W5 went live; the
   pipeline note field is skipped if a single pipeline card holds a note, else
   `property_pipeline_public` and `pipeline_board_public`, which reads it, are first re-created
-  without it.
+  without it. Built 2026-10-08 as migration 593, whose guards refuse what this gate forbids (a
+  dependant view, function, index or wider constraint, an engine not braked or a lease held, a read
+  of the three indexes since W5); `W6_RUNBOOK.md` holds the day's order, checks C1–C10 and their SQL.
 - **Migrations** are numbered 588–599 (600 up are the dedup session's).
 
 ## 6. The destructive window (W6)
@@ -395,9 +399,13 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
 | Status log | the stored on/off-market log, replaced by MS9 | `property_status_events`, its view, trigger and function |
 | Asset links | "same building" links, never used | `assets`, `asset_membership_events`, `properties.asset_id` (W5's 590 already took it out of `browse_projection`, `properties_public` and the `browse_list` cache, re-created views and a rebuilt cache column, no data) |
 | Pipeline note field | a field nothing can write | `property_pipeline.note` |
-| Per-ad Browse lane | the "one portal's own page" machinery, replaced by MS19's one-portal "Newest first" | `listing_feed_visible()`, then `listing_feed_public`; the `listing_ids_filter` parameter of `browse_map_cells` (the function re-created with its grants); `listings_portal_feed_idx` (136 MB, dropped concurrently, outside the transaction); `listing_detail_queue.discovery_seq` with its default and `listings.discovery_seq`, then the sequence `listing_discovery_seq` |
+| Per-ad Browse lane | the "one portal's own page" machinery, replaced by MS19's one-portal "Newest first" | `listing_feed_visible()`, then `listing_feed_public`; the `listing_ids_filter` parameter of `browse_map_cells` (the function re-created with its grants); `listings_portal_feed_idx` (147 MB, dropped concurrently, outside the transaction); `listing_detail_queue.discovery_seq` with its default and `listings.discovery_seq`, then the sequence `listing_discovery_seq` |
 | Write-only columns | no longer written since W2a, read by nothing; W5's one restatement of `properties_public` (590) left `distinct_site_count` out | `properties.price_per_m2_source_listing_id` and its function; `properties.distinct_site_count` |
-| Never-used indexes | built for an old Browse path | `properties_cat_last_seen_keyset_idx`, `properties_last_seen_keyset_idx` (1.15 GB) |
+| Never-used indexes | built for an old Browse path | `properties_cat_last_seen_keyset_idx`, `properties_last_seen_keyset_idx` (1.29 GB) |
+
+**Built as migration 593** (2026-10-08, not applied; the day's order: `W6_RUNBOOK.md`). Measured
+2026-10-08: 1.66 GB in all, the status log 226 MB with its 1.7 M rows. `browse_list_mf(bigint)`, read
+only by the per-ad view, is not in this table and stays unless the operator adds it (§8, item 7).
 
 **Never dropped by this sprint:** any curation table; the pipeline history; `properties.all_sources` /
 `active_sources`; `listings.published_at` and `listings.discovered_at`; the AI summary cache; our
@@ -492,6 +500,15 @@ that session; the two never-used indexes come from migrations 198 and 275.
 6. **Closed (W4).** The three properties that awaited splits (14655, 120548, 687023) were split by
    the operator with the letter split on 2026-10-04 (dedup addendum 6c). Since W4 a split routes
    every account's curation per letter and records only "different", only across letters.
+7. **W6 is built (2026-10-08) and waits for the operator's day** (`W6_RUNBOOK.md`). One ruling rides
+   with it: `browse_list_mf(bigint)` is read only by `listing_feed_public` and is an orphan once the
+   view goes; dropping it is one statement in 593's section 3 and one post-condition *(default:
+   it stays)*. Built with it: the drift check retires an object a later migration drops
+   (`scripts/migration_objects.py`), else `migration_drift` would warn on 567 and 584 until both
+   leave its 25-file window. Once W6 is applied, #1634 (migration 575) drops its two
+   `listing_feed_public` reads and takes a number above 593, and the dedup session's
+   `properties.published_at` drop is unblocked (`properties_gate_cover_idx` INCLUDEs it: its
+   replacement comes first).
 
 ## 9. Cut from scope (reported, not built)
 

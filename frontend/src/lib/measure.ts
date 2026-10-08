@@ -2,15 +2,15 @@
  *
  * NORTH STAR — one measure, one definition, one label. The NUMBER always comes
  * from the server (migration 425's `measure_price_per_m2`, published as
- * `price_per_m2` on all six read relations); nothing here re-derives price/area.
+ * `price_per_m2` on all five read relations); nothing here re-derives price/area.
  * What lives here is the LABEL half: which basis a figure is on, and the Czech
  * unit that basis is spelled with.
  *
  * THE LABEL IS READ FROM THE SERVER TOO, WHEREVER THERE IS A COLUMN TO READ.
  * `measure_price_per_m2_basis(category_main, category_type)` is published as
- * `price_per_m2_basis` on ALL SIX read relations — listings_public,
- * properties_public, listing_feed_public, pipeline_board_public AND the two
- * derived Browse read models, `browse_list` + `properties_map_mv`. Migration
+ * `price_per_m2_basis` on ALL FIVE read relations — listings_public,
+ * properties_public, pipeline_board_public AND the two derived Browse read
+ * models, `browse_list` + `properties_map_mv`. Migration
  * 425 § 9 refuses to commit unless the last two carry it (both rebuilds run
  * inside the migration, and a skipped rebuild raises), and the column was
  * re-verified present on production on 2026-08-25. So every render surface

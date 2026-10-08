@@ -163,7 +163,7 @@ selects ads and rows stay properties, and with one portal "Newest first" orders 
 newest ad (`newest_ad_at_<portal>`). The finding that retired it: inside one enqueue statement
 `discovery_seq` agreed with the portal's own order on only 3.3–20.7 % of pairs (0 % mmreality),
 because a walk numbers the newest ad first, so the "mirror" showed each walk batch oldest-first.
-W6 drops the lane's objects.
+W6 dropped the lane's objects (migration 593).
 
 ### Phase 4 — sreality: separate discovery from completeness, drop the district-split for discovery
 

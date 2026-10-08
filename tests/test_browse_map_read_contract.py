@@ -20,8 +20,8 @@ Three drifts are possible and all three are silent. This file is the net for eac
 
   3. A prefilter id space the RPC does not carry. `applyPrefilters` emits `.in()` on two
      spaces, obec_id and property_id (the broker allowlist among the latter since W5,
-     MS19), and the RPC read has no `.in()` to inherit. `browse_map_cells` still takes
-     `listing_ids_filter`, which no caller has sent since W5; W6 drops the parameter.
+     MS19), and the RPC read has no `.in()` to inherit. `listing_ids_filter`, which no
+     caller sent after W5, left `browse_map_cells` in W6 (migration 593).
 
 Offline; runs in the normal `pytest -q` lane. Nothing here needs a database — the
 behaviour of the shipped SQL is tests/test_browse_map_cells_live.py's subject.
@@ -36,8 +36,8 @@ REPO = Path(__file__).resolve().parents[1]
 QUERIES_TS = REPO / "frontend" / "src" / "lib" / "queries.ts"
 MIGRATIONS = REPO / "migrations"
 
-# The two parameters browse_map_cells has on purpose and browse_stats_properties does not.
-_MAP_ONLY_PARAMS = {"listing_ids_filter", "point_budget"}
+# The one parameter browse_map_cells has on purpose and browse_stats_properties does not.
+_MAP_ONLY_PARAMS = {"point_budget"}
 
 
 def _ts() -> str:
@@ -134,7 +134,7 @@ def test_every_builder_key_is_a_parameter_of_both_rpcs() -> None:
 
 
 def test_the_two_rpcs_take_the_same_cohort_parameters() -> None:
-    """browse_map_cells = browse_stats_properties + listing_ids_filter + point_budget.
+    """browse_map_cells = browse_stats_properties + point_budget.
 
     RED by: adding a cohort parameter to one RPC and not the other. The map and the Stats
     tab would then answer for different cohorts under the same filters, and the only
@@ -143,7 +143,7 @@ def test_the_two_rpcs_take_the_same_cohort_parameters() -> None:
     stats = _sql_params("browse_stats_properties")
     cells = _sql_params("browse_map_cells")
     assert not _MAP_ONLY_PARAMS - cells, (
-        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)} before W6 (Rule 0)."
+        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)}, which only the map takes."
     )
     assert not cells - stats - _MAP_ONLY_PARAMS, (
         f"browse_map_cells takes {sorted(cells - stats - _MAP_ONLY_PARAMS)} and "
@@ -163,8 +163,8 @@ def test_the_map_rpc_carries_both_prefilter_id_spaces() -> None:
     RPC read has no `.in()` to inherit, so each space has to be handed over by name.
 
     RED by: adding an `.in()` to applyPrefilters without a matching argument, or by
-    sending the retired `listing_ids_filter` again (W6 drops the parameter; a bundle
-    that still names it would then fail every map read).
+    sending the retired `listing_ids_filter` again (gone since W6, migration 593: a
+    bundle that names it fails every map read).
     """
     src = _ts()
     at = src.index("export const applyPrefilters")

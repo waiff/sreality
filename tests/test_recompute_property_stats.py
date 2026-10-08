@@ -1242,7 +1242,7 @@ def test_the_one_order_is_spelled_once_in_the_function():
 def test_every_advert_field_comes_from_the_canonical_advert():
     """Price and area from one row and condition with both derived levels from that same row
     (rule 14): the canonical advert, never a mix. The two write-only columns are not written
-    (W6 drops them)."""
+    (W6 dropped them, migration 593)."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)

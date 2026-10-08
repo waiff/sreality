@@ -170,9 +170,6 @@ def _every_surface(cur: Any, pid: int, lid: int) -> dict[str, Any]:
             cur, "SELECT price_per_m2 FROM browse_projection WHERE property_id = %s",
             (pid,),
         ),
-        "listing_feed_public": _one(
-            cur, "SELECT price_per_m2 FROM listing_feed_public WHERE id = %s", (lid,)
-        ),
         "pipeline_board_public": _one(
             cur, "SELECT price_per_m2 FROM pipeline_board_public WHERE property_id = %s",
             (pid,),
@@ -194,10 +191,6 @@ def _bases(cur: Any, pid: int, lid: int) -> dict[str, Any]:
             cur,
             "SELECT price_per_m2_basis FROM browse_projection WHERE property_id = %s",
             (pid,),
-        ),
-        "listing_feed_public": _one(
-            cur, "SELECT price_per_m2_basis FROM listing_feed_public WHERE id = %s",
-            (lid,),
         ),
         "pipeline_board_public": _one(
             cur,
@@ -238,7 +231,7 @@ def test_every_relation_publishes_the_identical_per_m2(cur, price, area, expecte
 
     got = _every_surface(cur, pid, lid)
     assert set(got.values()) == {expected}, (
-        f"the six surfaces disagree about one row's Kc/m2: {got} — a consumer "
+        f"the five surfaces disagree about one row's Kc/m2: {got} — a consumer "
         f"re-derived the formula instead of reading measure_price_per_m2"
     )
     for name, value in got.items():
