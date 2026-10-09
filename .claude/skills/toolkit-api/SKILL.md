@@ -37,10 +37,9 @@ it (`api/`). They do not apply to the scraper.
 5. **No writes from the toolkit, with ten explicit exceptions.** Read-only by default. The
    exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check` that it wraps), so
-     an agent can confirm a comparable is still valid before relying on it. Every call logs
-     to `listing_freshness_checks` and may also write a new `listing_snapshots` row; a gone
-     answer nominates the listing for the drain's page check (`QUEUE_PRIORITY_VERIFY`) and
-     never flips it (rule #3 hysteresis, 2026-10-09).
+     an agent can confirm a comparable is still valid before relying on it. Every call logs to
+     `listing_freshness_checks` and may write a new `listing_snapshots` row; a gone answer nominates
+     a drain page check (`QUEUE_PRIORITY_VERIFY`), never flips (rule #3 hysteresis, 2026-10-09).
    - `find_anchor_amenities`, which writes the OSM-mirror tables `amenities` /
      `amenity_fetches` on a cache miss.
    - `find_comparables_along_axis`, which writes the OSM-mirror tables `transit_lines` /
