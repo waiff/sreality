@@ -504,6 +504,11 @@ AUTODEDUP_REASON_CHARS = 300
 # died (its halved rate, E930): bounded, so a pooler that black-holes connects cannot hold the
 # lane's thread for db.connect's default three attempts at 130 s each.
 AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS = 10
+# The shutdown release's connect (E941): two attempts, so one dropped pooler handshake does not
+# cost the release, 2 s apart rather than db.connect's 10 s, so both fit the 30 s drain.
+# `connect_timeout` bounds each attempt per pooler ADDRESS, so this is the one-address bound.
+AUTODEDUP_RELEASE_CONNECT_ATTEMPTS = 2
+AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS = 2.0
 _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # SHUTDOWN (E941). Railway SIGTERMs the old deployment once the new one is online and, by
 # default, SIGKILLs it 0 s later (docs.railway.com/deployments/reference): no handler ran, a
@@ -512,16 +517,20 @@ _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # the pass FINISH instead would need a drain past its 1,050 s deadline, and the watchdog would
 # end that drain at 300 s anyway: the heartbeat lane stops at SIGTERM like every lane, and the
 # watchdog exits the process once no beat has finished for LIVENESS_BOUND_SECONDS. So the
-# lease is released at once, in three parts:
-#   * `railway.worker.json` `drainingSeconds` 30: the room between SIGTERM and SIGKILL for one
-#     bounded connect (AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS) and one UPDATE;
-#   * the signal handler (`_on_stop_signal`) releases the lease of the pass in flight, by its
-#     holder, on a FRESH connection — the pass's own is mid-transaction on the pass's thread —
-#     from a thread of its own, best effort and never raising (`_autodedup_release_lease`);
-#   * the engine never lets that release put two writers in the store: a pass told `stopping`
-#     takes no lease, its transaction ends with a fence (`rt_lease.hold`) that rolls it back
-#     once its lease is gone, and after the signal it starts no reconcile group and writes no
-#     rate or watermark row.
+# lease is released at once, in four parts:
+#   * `railway.worker.json` `drainingSeconds` 30: the room between SIGTERM and SIGKILL;
+#   * the pass reads the signal as `stopping` at every deadline checkpoint (between steps,
+#     every 256 pair decisions, before every fact slice): it stops there, rolls back on its own
+#     live connection — freeing its row locks at once, not at SIGKILL — and releases its lease
+#     the way every pass ends;
+#   * the backstop for a pass stuck in one statement: the signal handler (`_on_stop_signal`)
+#     releases the lease of the pass in flight, by its holder, on a FRESH connection (the
+#     pass's own is mid-transaction on the pass's thread) from a thread of its own, best effort
+#     and never raising (`_autodedup_release_lease`);
+#   * the engine never lets that early release put two writers in the store: a pass told
+#     `stopping` takes no lease, and every transaction the lane writes in — the pass's, each
+#     reconcile group's, the re-cut's — ends with a fence (`rt_lease.hold`) that rolls it back
+#     once its lease is gone.
 # The holder of the pass in flight, set around the engine call (one pass at a time).
 _AUTODEDUP_HOLDER: str | None = None
 # Set once by the signal; the engine reads it as `stopping`.
@@ -2205,7 +2214,9 @@ def _autodedup_release_lease(holder: str) -> bool:
     try:
         from autodedup import rt_lease
 
-        conn = db.connect(attempts=1, connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS)
+        conn = db.connect(attempts=AUTODEDUP_RELEASE_CONNECT_ATTEMPTS,
+                          retry_delay=AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS,
+                          connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS)
         try:
             rt_lease.release(conn, holder)
         finally:

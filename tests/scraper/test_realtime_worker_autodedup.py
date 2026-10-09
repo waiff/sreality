@@ -611,7 +611,11 @@ def test_the_drain_window_fits_the_release_and_ends_before_the_watchdog() -> Non
     the signal like every lane."""
     deploy = json.loads(RAILWAY_WORKER.read_text(encoding="utf-8"))["deploy"]
     draining = deploy["drainingSeconds"]
-    assert rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS * 2 <= draining
+    attempts = rw.AUTODEDUP_RELEASE_CONNECT_ATTEMPTS
+    worst = (attempts * rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS
+             + (attempts - 1) * rw.AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS)
+    assert attempts >= 2, "one dropped handshake must not cost the release"
+    assert worst < draining, "both attempts fit the drain (on one pooler address)"
     assert draining < rw.LIVENESS_BOUND_SECONDS
     assert deploy["startCommand"] == "python -m scraper.realtime_worker"
 
@@ -633,7 +637,8 @@ def test_a_shutdown_releases_the_lease_of_the_pass_in_flight_on_a_fresh_connecti
     thread.join(5)
 
     assert rt_lease.current(world)["live"] is False
-    assert connects == [{"attempts": 1,
+    assert connects == [{"attempts": rw.AUTODEDUP_RELEASE_CONNECT_ATTEMPTS,
+                         "retry_delay": rw.AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS,
                          "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
     assert other.closed and rw._AUTODEDUP_STOPPING.is_set()
     assert rw._autodedup_release_on_stop() is None, "a second signal starts nothing"
@@ -694,7 +699,7 @@ def test_a_deploy_mid_pass_frees_the_lease_and_the_pass_commits_nothing(
     cursors = {k: dict(v) for k, v in world.cursors.items()}
     other = world.other_session()
     monkeypatch.setattr(rw.db, "connect",
-                        lambda *a, **k: other if k.get("attempts") == 1 else world)
+                        lambda *a, **k: other if k.get("attempts") else world)
     _settings(monkeypatch)
     original = incremental_lane.run_pass_bounded
     released: list[str] = []
@@ -717,3 +722,35 @@ def test_a_deploy_mid_pass_frees_the_lease_and_the_pass_commits_nothing(
     assert rt_lease.current(world)["live"] is False
     assert rt_lease.take(world, "next-worker:1:2", 2_400), "the next worker need not wait"
     assert released and released[0] != "None" and rw._AUTODEDUP_HOLDER is None
+
+
+def test_a_deploy_while_the_pass_decides_stops_it_at_its_next_checkpoint(
+        world, tmp_path, monkeypatch) -> None:
+    """END TO END: the signal lands during the pass's first fact read. The pass stops at the
+    next checkpoint and rolls back on its own connection, releasing its lease itself; the
+    signal's own release on a fresh connection is the backstop and changes nothing more."""
+    from autodedup import rt_lease
+
+    seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    other = world.other_session()
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: other if k.get("attempts") else world)
+    _settings(monkeypatch)
+    original = incremental_lane.SqlFacts.facts
+    threads: list = []
+
+    def sigterm_during_the_first_read(self, *args: Any, **kwargs: Any) -> Any:
+        if not threads:
+            threads.append(rw._autodedup_release_on_stop())
+            threads[0].join(5)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(incremental_lane.SqlFacts, "facts", sigterm_during_the_first_read)
+
+    last = rw._autodedup_sync()
+
+    assert (last["ran"], last["errors"], last["aborted"]) == (True, 1, "stopping")
+    assert last["reconcile"] == "pass_stopping"
+    assert world.cursors == cursors and not world.rt_fp
+    assert rt_lease.current(world)["live"] is False
+    assert rt_lease.take(world, "next-worker:1:2", 2_400), "the next worker need not wait"

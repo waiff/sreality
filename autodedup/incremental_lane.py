@@ -89,6 +89,7 @@ from autodedup.incremental import (
     Limits,
     PairRow,
     PassDeadline,
+    PassStopped,
     SET_CAP,
     WorkItem,
     _in_time,
@@ -948,14 +949,17 @@ class SqlFacts:
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
                  population: Mapping[int, int] | None = None,
-                 deadline: float | None = None) -> None:
+                 deadline: float | None = None,
+                 stopping: Callable[[], bool] | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
         # The pass's own deadline (a `time.perf_counter()` instant, E913), read between the
         # FACT_CHUNK slices of every read (E931): a slow read is four statement sets of up to
         # STATEMENT_TIMEOUT_MS a slice, and the pass reads its clock nowhere else until the
-        # step after. The cut bounds its own reads (`_cut_bound`) and leaves this unset.
+        # step after. The cut bounds its own reads (`_cut_bound`) and leaves this unset. The
+        # worker's shutdown is read at the same place (E941: `PassStopped`).
         self.deadline = deadline
+        self.stopping = stopping
         # A population handed in INSTEAD of the table, for the one caller that is about to
         # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
         # builds the fingerprints it is cut from on exactly those counts. The pass never
@@ -985,7 +989,7 @@ class SqlFacts:
         it the read stops at a slice boundary and raises `PassDeadline` for the pass's
         transaction to roll back, as the pass's own between-step checks do."""
         for start in range(0, len(ids), FACT_CHUNK):
-            _in_time(self.deadline)
+            _in_time(self.deadline, self.stopping)
             yield list(ids[start:start + FACT_CHUNK])
 
     def _dicts_over(self, sql: str, ids: Sequence[int], **params: Any) -> list[dict[str, Any]]:
@@ -2217,7 +2221,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
-        facts = SqlFacts(conn, deadline=deadline)
+        facts = SqlFacts(conn, deadline=deadline, stopping=stopping)
         work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
                        pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
         result = None
@@ -2241,7 +2245,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     store, facts, work, settings, model, calibration, limits=PASS_LIMITS,
                     generation=generation, now=pass_now,
                     hold=EvidenceHold(pass_now, EVIDENCE_HORIZON_HOURS * 3600.0),
-                    deadline=deadline)
+                    deadline=deadline, stopping=stopping)
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
@@ -2263,6 +2267,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
         except _Refused:
             stopped = result.aborted if result is not None else "refused"
+        except PassStopped:
+            # E941: the worker is shutting down — the pass stopped at a checkpoint and rolled
+            # back on its own live connection, so its row locks are free now, not at SIGKILL.
+            stopped = STOPPING
         except PassDeadline:
             stopped = "deadline"
         except RetireRefusal as exc:

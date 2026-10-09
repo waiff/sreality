@@ -1572,12 +1572,21 @@ def test_a_shutdown_after_the_commit_starts_no_merge(tmp_path, monkeypatch) -> N
     from autodedup.incremental_lane import run_incremental
     from tests.autodedup import lane_world
 
+    from autodedup import rt_lease
+
     world = lane_world.world()
     lane_world.seed_lane(world, tmp_path)
     world.settings[bootstrap_key()] = False
     monkeypatch.setattr(reconcile, "run", lambda *a, **k: pytest.fail("no merge after SIGTERM"))
+    flag = {"stopping": False}
+    original_hold = rt_lease.hold
 
-    out = run_incremental(lambda: world, stopping=_calls(False, False, True))
+    def hold_then_signal(conn, holder) -> None:
+        original_hold(conn, holder)
+        flag["stopping"] = True              # the signal lands as the pass commits
+
+    monkeypatch.setattr(rt_lease, "hold", hold_then_signal)
+    out = run_incremental(lambda: world, stopping=lambda: flag["stopping"])
 
     assert out["aborted"] == "" and out["reconcile"] == {"skipped": "stopping"}
     assert world.rt_fp, "the pass itself committed: the signal came after it"
@@ -1743,3 +1752,64 @@ def test_a_reconcile_that_lost_the_lease_ends_the_passs_writes(tmp_path, monkeyp
     assert out["reconcile"]["stopped"] == "lease_lost"
     assert not world.settings_by[pass_rate_key("rt")].endswith(":rate")
     assert STORAGE_WATERMARK not in world.settings
+
+
+# ------------------------------------- E941: the pass itself reads the signal at its checkpoints
+
+
+def test_the_fact_read_stops_at_a_slice_boundary_once_the_worker_is_stopping(monkeypatch) -> None:
+    from autodedup import incremental_lane
+    from autodedup.incremental import PassStopped
+    from autodedup.incremental_lane import SqlFacts
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    ids = sorted(int(listing_id) for listing_id in world.listings)
+    monkeypatch.setattr(incremental_lane, "FACT_CHUNK", 2)
+    flag = {"stopping": False}
+    facts = SqlFacts(world, deadline=10 ** 12, stopping=lambda: flag["stopping"])
+    whole = facts.facts(ids)
+    assert len(whole) == len(ids), "not stopping: the whole read"
+
+    flag["stopping"] = True
+    stopped = SqlFacts(world, deadline=10 ** 12, stopping=lambda: flag["stopping"])
+    with pytest.raises(PassStopped):
+        stopped.facts(ids)
+    assert stopped.statements == 0, "stopped before its first slice"
+
+
+def test_a_signal_mid_pass_rolls_it_back_on_its_own_connection(tmp_path, monkeypatch) -> None:
+    """The doomed pass stops at its next checkpoint, rolls back on its OWN live connection —
+    its row locks free at once, not at SIGKILL 30 s later, where the next worker's first pass
+    would wait them out and halve its rate again — and releases its lease the way every pass
+    ends."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    rolled_back = world.rolled_back
+    releases = world.statements.count(RT_LEASE_RELEASE_SQL)
+    flag = {"stopping": False}
+    original = incremental_lane.SqlFacts.facts
+
+    def signal_during_the_first_read(self, *args, **kwargs):
+        flag["stopping"] = True                       # SIGTERM, while the pass decides
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(incremental_lane.SqlFacts, "facts", signal_during_the_first_read)
+
+    out = run_incremental(lambda: world, holder="worker:1:1",
+                          stopping=lambda: flag["stopping"])
+
+    assert out["aborted"] == "stopping" and out["reconcile"] == {"skipped": "pass_stopping"}
+    assert world.rolled_back == rolled_back + 1
+    assert world.cursors == cursors and not world.rt_fp and not world.pairs
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("worker:1:1", False), "released by the pass itself"
+    assert world.statements.count(RT_LEASE_RELEASE_SQL) == releases + 1
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert world.settings_by[pass_rate_key("rt")].endswith(":halved_ahead"), "nothing after"
