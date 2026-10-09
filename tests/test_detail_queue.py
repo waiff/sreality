@@ -466,12 +466,12 @@ def test_every_gone_flip_clears_the_failure_ledger(flip_rows, exists_rows):
     assert clear[1] == ("sreality", "12345")
 
 
-def test_touch_listings_enqueues_reactivated_properties():
+def test_touch_listings_by_id_enqueues_reactivated_properties():
     conn = _FakeConn([
         (lambda s: "WITH react AS" in s, []),
         (lambda s: "SET last_seen_at = now(), is_active = true" in s, [(1,), (2,)]),
     ])
-    db.touch_listings(conn, [1, 2])
+    db.touch_listings_by_id(conn, [1, 2])
     react = _find(conn.executed, "WITH react AS")
     assert react is not None
     # only listings currently inactive are captured for re-activation dirtying

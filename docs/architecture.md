@@ -876,8 +876,8 @@ renumber.** Navigate by area:
    via the Supabase MCP. See "Database access" for the full flow and the
    additive-vs-destructive policy.
 2. **Snapshots on content change only.** A fetched payload reaches `listings` ONLY via
-   `scraper/listing_write.py` `write_listings` — every portal's detail drain, sreality's
-   `--detail-only` and `_run_full` fallback, the URL parser and the freshness re-check —
+   `scraper/listing_write.py` `write_listings` — every portal's detail drain, the URL
+   parser and the freshness re-check —
    which appends a `listing_snapshots` row iff its content hash differs from the listing's
    latest snapshot under THE one order (`scraped_at DESC, id DESC`), stamped
    `statement_timestamp()` late in its transaction (a brand-new row always gets one). The two
@@ -1016,9 +1016,9 @@ renumber.** Navigate by area:
    true for every row (the whole scope nominated). So the runner drops NULL ids from the seen
    set (`VERIFY dropped N NULL id(s)`, a parser bug to file) and an emptied set takes the
    saw-nothing branch, and the bind site raises on an empty array so any other caller fails
-   closed (`VERIFY failed`). **One flip writer.** Every flip — the drain on all nine portals,
-   and the legacy `main._handle_gone` until C2-2 deletes it (`freshness._record_gone` nominates
-   at `QUEUE_PRIORITY_VERIFY` since 2026-10-09 instead of flipping) — goes through
+   closed (`VERIFY failed`). **One flip writer.** Every flip — the drain on all nine portals
+   (`freshness._record_gone` nominates at `QUEUE_PRIORITY_VERIFY` since 2026-10-09 instead of
+   flipping; the legacy `main._handle_gone` went with C2-2) — goes through
    `db.mark_listing_inactive(conn, source, native_id)`: keyed on the natural key (migration
    091's UNIQUE `(source, source_id_native)`), guarded `AND is_active = true` so `inactive_at`
    is stamped once per inactive spell (cleared on reactivation; the delisting-latency health
@@ -2197,9 +2197,9 @@ renumber.** Navigate by area:
     anti-join). The index-walk uses the transaction pooler; sreality's drain uses the session
     pooler (`connect_session()`) for prepared statements. The drain inserts with `property_id`
     NULL and `recompute_property_stats`'s straggler-attach births the singleton (rule #15:
-    there is no spatial matcher; grouping is out-of-band). `scrape.yml`'s combined
-    `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
-    back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
+    there is no spatial matcher; grouping is out-of-band). The combined `scrape.yml` /
+    `_run_full` revert fallback was deleted in C2-2 (2026-10). The queue is the needs-detail
+    signal; `listing_fetch_failures` stays
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
     `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
     migration 108), so this same split is how every portal scrapes — sreality is just one
@@ -2258,7 +2258,7 @@ renumber.** Navigate by area:
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `listing_write.write_listings` (a content
     change, or a revival, or a write under an inactive property), `mark_listing_inactive`
-    (delisting: the drain, the legacy `_handle_gone` and freshness), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
+    (delisting: the drain and freshness), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is

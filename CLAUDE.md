@@ -261,7 +261,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 - **Locally:** one-time `pip install -e ".[dev,api,geo]"`, then `pytest -q` (or `pytest tests/path -q`).
   Interpreter is `python3`. `scripts/test-summary.sh` runs quiet pytest + prints only failures. Mirrors CI.
 - **CI:** every push runs `.github/workflows/test.yml` (`gh run watch`, or `scripts/logs.sh <run-id> [pattern]` for pre-filtered logs).
-- No-DB end-to-end: `--dry-run`. Single listing: `--detail-only <id>`. Small live run: `--limit 10`.
+- Scraper smoke: `python -m scraper.sreality_main --index-only --dry-run --max-seconds 60` writes nothing; `--drain-only --max-detail 10` is a small live run (other `scraper.<portal>_main`s alike).
 ## Secrets
 
 Never commit secrets (`.env` is gitignored). API keys are **backend-only** — never `VITE_*`-prefix a backend

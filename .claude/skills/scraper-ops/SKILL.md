@@ -129,9 +129,9 @@ Heal via `reparse.yml` (`--source <portal> --fields area_m2,estate_area,usable_a
 
 The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scraping: Sreality
 index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail drain", cron
-`*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
-the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
-cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cadence-split**
+`*/15`). The combined `scrape.yml` fallback (`scraper.main`'s `_run_full`) was deleted in C2-2
+(2026-10); an ad-hoc combined sreality run is `python -m scraper.sreality_main` with neither
+phase flag (walk, then drain), locally. The bazos crawl is **cadence-split**
 like sreality (bazos walks 22 nationwide scopes (migration 488), ~1500 index pages — a combined run starves the
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 nominate unseen + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
@@ -161,10 +161,9 @@ queue has work). idnes's `supports_complete_walk` was parked (migration 453) —
 2026-09-07, it gates no delisting; the walk is sliced into the 14 kraje + abroad, each slice's outcome
 in `portal_index_slices` (454); `coverage_gate.yml` (cron `15 3,9,15,21`) re-earns the flag from it.
 **Parked flags, the slice ledger and the gate: `references/coverage-and-delisting.md`.**
-There is no combined bazos/idnes fallback workflow anymore — sreality's
-`scrape.yml` is the only retained combined fallback (its `_run_full` is the instant revert for
-the split); for the other portals an ad-hoc combined run is `python -m scraper.<portal>_main`
-locally. The properties track adds
+There is no combined fallback workflow for a split portal anymore (sreality's `scrape.yml`
+went in C2-2); an ad-hoc combined run of any portal is `python -m scraper.<portal>_main`
+with neither `--index-only` nor `--drain-only`, run locally. The properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20) and
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
@@ -249,7 +248,7 @@ from the slow "download each ad" write:
   liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
   no per-listing loop.
 - **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
-  (`--max-detail-refetches`, the workflow passes 12000), fetches details on a rate-limited pool, and writes
+  (`--max-detail`, default the per-portal `max_detail_per_run`), fetches details on a rate-limited pool, and writes
   each ~100-item flush through **`listing_write.write_listings`** on all nine portals (set-based, ONE transaction:
   upsert, images/videos, failure clear, snapshot-on-change, dirty marks). sreality uses the **session pooler**
   (`connect_session()`, prepared statements), the crawlers `connect()`. New listings land `property_id` NULL and become
@@ -279,7 +278,7 @@ batch) polls + persists; one workflow, mode chosen by `github.event.schedule`. T
 synchronous `condition_scores.yml` is a **dispatch-only fallback** — don't schedule both,
 they select the same pending listings and the sync scorer doesn't skip in-flight batch rows.
 The scoring model is `app_settings.llm_condition_model` (Haiku today), so batch+Haiku ≈ 25%
-of the original Sonnet-sync cost. Both scrape workflows still pass `--no-condition-scoring`.
+of the original Sonnet-sync cost. The scrape has no scoring phase (its runner left `scraper.main` in C2-2).
 Scoring is **kraj-scoped and reuse-first** (migration 174):
 the selector targets only listings whose resolved kraj (`listing_location.kraj_kod`) is in
 `app_settings.condition_scoring_enabled_region_ids` (operator-edited via the Settings page
@@ -288,7 +287,7 @@ the selector targets only listings whose resolved kraj (`listing_location.kraj_k
 (`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
 so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.
 
-**Images** stay decoupled across four workflows (both halves of the scrape split pass `--no-image-downloads`; the drain only
+**Images** stay decoupled across four workflows (the scrape split has no image phase; the drain only
 records image-URL rows — bytes land in R2 via these jobs). sreality comes through their `SQUARE_1800_JPG` template
 (`res,1800,1800,1|shr,,20|jpg,80`: whole frame, ≤1800px), an exact-template allowlist, so a stored legacy chain is NORMALISED
 onto it (only `rot` survives) and every row is stamped `rendition` + `stored_width`/`stored_height` (mig 496): **phash/CLIP
@@ -489,10 +488,6 @@ RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDE
 - `IMAGES STOP suspicious ...` when the transient-failure circuit-breaker trips (exits 75; the next cron tick retries)
 - `IMAGES done downloaded=... errors=... taken_down=... source_unavailable=... attempted=... phash_missed=...` (`phash_missed` =
   stored but inline-unhashed, 0 in steady state; its cause is one `IMAGE phash_inline_failed` WARNING per kind per run)
-
-The dispatch-only `scrape.yml` fallback additionally emits the legacy coupled-path lines
-(`PLAN cap=N deferred=M`, `DETAIL starting refetch=N workers=W`, `DETAIL progress=N/M ...`,
-`DETAIL id=... new|updated|unchanged`, `IMAGE id=... inserted=N`).
 
 A run ending with `errors > 0` is not necessarily a failure (single-listing fetch errors are
 tolerated). A run that did not emit a `RUN done` line is a real failure — check the GitHub
