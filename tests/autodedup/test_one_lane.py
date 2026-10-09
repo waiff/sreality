@@ -1553,10 +1553,11 @@ def test_a_shutdown_after_the_commit_starts_no_merge(tmp_path, monkeypatch) -> N
 
     assert out["aborted"] == "" and out["reconcile"] == {"skipped": "stopping"}
     assert world.rt_fp, "the pass itself committed: the signal came after it"
-    from autodedup.incremental_lane import pass_rate_key
+    from autodedup.incremental_lane import STORAGE_WATERMARK, pass_rate_key
 
     assert world.settings_by[pass_rate_key("rt")].endswith(":halved_ahead"), (
         "no rate written after the signal: the next holder's row is not this pass's")
+    assert STORAGE_WATERMARK not in world.settings, "nor the storage watermark"
 
 
 def test_a_shutdown_mid_reconcile_stops_it_before_its_next_group(tmp_path, monkeypatch) -> None:

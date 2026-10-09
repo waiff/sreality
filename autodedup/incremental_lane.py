@@ -362,10 +362,10 @@ MAX_RETIRE_FRACTION: float = 0.05
 # double it. `rt_scope = all` is gated by `CORPUS_PROJECTION_MB` (17,000) through
 # `guard_agrees`, and this budget stays far below it, so raising it never enables the corpus.
 #
-# 1,200 MB since E941 (2026-10-09; 800 since E916, 400 before that), sized for the scope the
-# operator widens to this week: the trial blocks plus Praha-Nusle, Praha-Libeň and six towns
-# (Beroun, Pardubice, Hradec Králové, Jihlava, Humpolec, Havlíčkův Brod), ~38,000 located
-# adverts against 7,295 today. Measured and recorded (2026-10-09, read-only):
+# 1,200 MB since E941 (2026-10-09; 800 since E916, 400 before that), sized for the S1 scope
+# the operator widened on 2026-10-09: the trial blocks plus Praha-Nusle, Praha-Libeň and six
+# towns (Beroun, Pardubice, Hradec Králové, Jihlava, Humpolec, Havlíčkův Brod), ~38,000
+# located adverts against 7,295 in the store. Measured and recorded (2026-10-09, read-only):
 #   * the schema reads 464.3 MB; generation `rt` holds ~129 MB of it (`generation_bytes`, the
 #     share a fresh reset frees: 25,609 pairs, 135,551 fp_key rows, 7,298 rt_fp);
 #   * the walk and the cut add ~60 MB at that scope (the snapshot and the pHash population,
@@ -2283,7 +2283,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc)
             leased = False
             raise
-        if stopped:
+        if stopped and not shutting_down():
             # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
         summary: dict[str, Any] = (result.to_json() if result is not None
