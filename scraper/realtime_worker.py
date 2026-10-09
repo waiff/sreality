@@ -509,6 +509,9 @@ AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS = 10
 # `connect_timeout` bounds each attempt per pooler ADDRESS, so this is the one-address bound.
 AUTODEDUP_RELEASE_CONNECT_ATTEMPTS = 2
 AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS = 2.0
+# The cancel of a statement the pass is already running (up to 120 s), sent first: it must not
+# eat the drain the release needs after it.
+AUTODEDUP_CANCEL_TIMEOUT_SECONDS = 5.0
 _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # SHUTDOWN (E941). Railway SIGTERMs the old deployment once the new one is online and, by
 # default, SIGKILLs it 0 s later (docs.railway.com/deployments/reference): no handler ran, a
@@ -523,16 +526,19 @@ _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 #     every 256 pair decisions, before every fact slice): it stops there, rolls back on its own
 #     live connection — freeing its row locks at once, not at SIGKILL — and releases its lease
 #     the way every pass ends;
-#   * the backstop for a pass stuck in one statement: the signal handler (`_on_stop_signal`)
-#     releases the lease of the pass in flight, by its holder, on a FRESH connection (the
-#     pass's own is mid-transaction on the pass's thread) from a thread of its own, best effort
-#     and never raising (`_autodedup_release_lease`);
+#   * the backstop for a pass stuck in one statement: the signal handler (`_on_stop_signal`),
+#     from a thread of its own, cancels the statement the pass is running (`cancel_safe`; the
+#     pass then rolls back and releases as on any raise) and releases the lease of the pass in
+#     flight, by its holder, on a FRESH connection (the pass's own is mid-transaction on the
+#     pass's thread), best effort and never raising (`_autodedup_release_lease`);
 #   * the engine never lets that early release put two writers in the store: a pass told
 #     `stopping` takes no lease, and every transaction the lane writes in — the pass's, each
 #     reconcile group's, the re-cut's — ends with a fence (`rt_lease.hold`) that rolls it back
 #     once its lease is gone.
-# The holder of the pass in flight, set around the engine call (one pass at a time).
+# The holder of the pass in flight and its connection, set around the engine call (one pass
+# at a time): the signal cancels a statement already running on it, then releases by holder.
 _AUTODEDUP_HOLDER: str | None = None
+_AUTODEDUP_CONN: Any = None
 # Set once by the signal; the engine reads it as `stopping`.
 _AUTODEDUP_STOPPING = threading.Event()
 # log-once-per-process guard: the autodedup store is absent.
@@ -2162,7 +2168,7 @@ def _autodedup_sync() -> dict[str, Any]:
     refusal is caught HERE and recorded as an error, never re-raised. Any other exception is
     the signal, and _lane_loop records the failed pass.
     """
-    global _AUTODEDUP_STORE_WARNED, _AUTODEDUP_HOLDER
+    global _AUTODEDUP_STORE_WARNED, _AUTODEDUP_HOLDER, _AUTODEDUP_CONN
 
     started = time.monotonic()
     if not _AUTODEDUP_PASS_LOCK.try_enter():
@@ -2184,7 +2190,7 @@ def _autodedup_sync() -> dict[str, Any]:
             _AUTODEDUP_STORE_WARNED = False
             # Named HERE so the shutdown signal can release exactly this pass's lease (E941).
             holder = incremental_lane.pass_holder()
-            _AUTODEDUP_HOLDER = holder
+            _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = holder, conn
             try:
                 summary = incremental_lane.run_incremental(
                     lambda: conn,
@@ -2195,7 +2201,7 @@ def _autodedup_sync() -> dict[str, Any]:
             except SystemExit as exc:
                 return _autodedup_outcome(started, refused=str(exc))
             finally:
-                _AUTODEDUP_HOLDER = None
+                _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = None, None
             return _autodedup_outcome(started, summary=summary)
         finally:
             # run_incremental closes the connection it was handed; a second close is a
@@ -2206,11 +2212,17 @@ def _autodedup_sync() -> dict[str, Any]:
         _AUTODEDUP_PASS_LOCK.release()
 
 
-def _autodedup_release_lease(holder: str) -> bool:
+def _autodedup_release_lease(holder: str, pass_conn: Any = None) -> bool:
     """End `holder`'s `autodedup.rt_lease` row on a FRESH, bounded connection (E941). Best
     effort and never raises: it runs on the shutdown path, where a raise helps nobody and the
     lease still ends by its TTL. The statement is keyed by holder, so a row another writer has
-    taken since is never ended by it. Returns whether the release ran."""
+    taken since is never ended by it. First, the statement the pass may be running on
+    `pass_conn` is cancelled (`cancel_safe`, made for another thread): the pass then raises
+    QueryCanceled, rolls back and releases on its own connection instead of holding its row
+    locks to SIGKILL. Returns whether the release ran."""
+    if pass_conn is not None:
+        with contextlib.suppress(Exception):
+            pass_conn.cancel_safe(timeout=AUTODEDUP_CANCEL_TIMEOUT_SECONDS)
     try:
         from autodedup import rt_lease
 
@@ -2233,18 +2245,19 @@ def _autodedup_release_lease(holder: str) -> bool:
 
 def _autodedup_release_on_stop() -> threading.Thread | None:
     """The autodedup half of the shutdown signal (E941): mark the lane stopping, THEN read the
-    holder of the pass in flight and release its lease from a thread of its own — never on the
-    event loop, which a connect would block. In that order, a pass that took its lease after
-    the holder was read sees `stopping` and gives the lease back itself. Non-daemon, so the
-    interpreter's exit waits for the one bounded connect; never raises."""
+    holder of the pass in flight (and its connection) and, from a thread of its own — never on
+    the event loop, which a connect would block — cancel its running statement and release its
+    lease. In that order, a pass that took its lease after the holder was read sees `stopping`
+    and gives the lease back itself. Non-daemon, so the interpreter's exit waits for the
+    bounded cancel and connect; never raises."""
     try:
         if _AUTODEDUP_STOPPING.is_set():
             return None
         _AUTODEDUP_STOPPING.set()
-        holder = _AUTODEDUP_HOLDER
+        holder, pass_conn = _AUTODEDUP_HOLDER, _AUTODEDUP_CONN
         if holder is None:
             return None
-        thread = threading.Thread(target=_autodedup_release_lease, args=(holder,),
+        thread = threading.Thread(target=_autodedup_release_lease, args=(holder, pass_conn),
                                   name="rt-autodedup-release")
         thread.start()
         return thread

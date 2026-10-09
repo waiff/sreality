@@ -52,6 +52,7 @@ def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
     monkeypatch.setattr(rw, "_AUTODEDUP_HOLDER", None)
+    monkeypatch.setattr(rw, "_AUTODEDUP_CONN", None)
     monkeypatch.setattr(rw, "_AUTODEDUP_STOPPING", threading.Event())
 
 
@@ -244,7 +245,7 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
     assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping"} and seen["conn"] is conn
     assert isinstance(seen["kwargs"]["holder"], str) and seen["kwargs"]["holder"]
     assert seen["kwargs"]["stopping"] == rw._AUTODEDUP_STOPPING.is_set
-    assert rw._AUTODEDUP_HOLDER is None, "cleared once the pass is over"
+    assert rw._AUTODEDUP_HOLDER is None and rw._AUTODEDUP_CONN is None, "cleared after"
     seen["kwargs"]["fresh_conn"]()
     assert connects == [{}, {"attempts": 1,
                              "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
@@ -612,10 +613,11 @@ def test_the_drain_window_fits_the_release_and_ends_before_the_watchdog() -> Non
     deploy = json.loads(RAILWAY_WORKER.read_text(encoding="utf-8"))["deploy"]
     draining = deploy["drainingSeconds"]
     attempts = rw.AUTODEDUP_RELEASE_CONNECT_ATTEMPTS
-    worst = (attempts * rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS
+    worst = (rw.AUTODEDUP_CANCEL_TIMEOUT_SECONDS
+             + attempts * rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS
              + (attempts - 1) * rw.AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS)
     assert attempts >= 2, "one dropped handshake must not cost the release"
-    assert worst < draining, "both attempts fit the drain (on one pooler address)"
+    assert worst < draining, "the cancel and both attempts fit the drain (one address)"
     assert draining < rw.LIVENESS_BOUND_SECONDS
     assert deploy["startCommand"] == "python -m scraper.realtime_worker"
 
@@ -759,3 +761,113 @@ def test_a_deploy_while_the_pass_decides_stops_it_at_its_next_checkpoint(
     assert world.cursors == cursors and not world.rt_fp
     assert rt_lease.current(world)["live"] is False
     assert rt_lease.take(world, "next-worker:1:2", 2_400), "the next worker need not wait"
+
+
+class _PassConn:
+    """The pass's connection as the signal thread sees it: `cancel_safe` is all it calls."""
+
+    def __init__(self, order: list[str], fails: bool = False) -> None:
+        self.order, self.fails, self.timeouts = order, fails, []
+
+    def cancel_safe(self, *, timeout: float) -> None:
+        self.order.append("cancel")
+        self.timeouts.append(timeout)
+        if self.fails:
+            raise RuntimeError("CancellationTimeout")
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_signal_cancels_the_running_statement_then_releases(monkeypatch, fails) -> None:
+    """A statement already running (up to 120 s) is cancelled inside the drain — first, bounded
+    — and the release follows whatever the cancel did: it never stops the release."""
+    from autodedup import rt_lease
+    from datetime import timedelta
+
+    world = FakePg()
+    world.lease[LANE_NAME] = {"holder": "host:1:1", "expires_at": world.now + timedelta(hours=1)}
+    order: list[str] = []
+    pass_conn = _PassConn(order, fails=fails)
+    monkeypatch.setattr(rw, "_AUTODEDUP_HOLDER", "host:1:1")
+    monkeypatch.setattr(rw, "_AUTODEDUP_CONN", pass_conn)
+    monkeypatch.setattr(rw.db, "connect",
+                        lambda *a, **k: order.append("connect") or world.other_session())
+
+    thread = rw._autodedup_release_on_stop()
+    thread.join(5)
+
+    assert order == ["cancel", "connect"]
+    assert pass_conn.timeouts == [rw.AUTODEDUP_CANCEL_TIMEOUT_SECONDS]
+    assert rt_lease.current(world)["live"] is False
+
+
+class _CancellableSession:
+    """The pass's session over the shared world: SIGTERM lands while `target` runs, the signal
+    thread's `cancel_safe` cancels it, and the statement raises as Postgres would."""
+
+    def __init__(self, world: FakePg, target: str) -> None:
+        self.world, self.target, self.cancelled, self.signalled = world, target, False, False
+
+    def cursor(self) -> Any:
+        return _CancellableCursor(self)
+
+    def transaction(self) -> Any:
+        return self.world.transaction()
+
+    def cancel_safe(self, *, timeout: float) -> None:
+        self.cancelled = True
+
+    def close(self) -> None:
+        return None
+
+
+class _CancellableCursor:
+    def __init__(self, session: _CancellableSession) -> None:
+        self.session, self.inner = session, session.world.cursor()
+
+    def __enter__(self) -> "_CancellableCursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import psycopg
+
+        if sql == self.session.target and not self.session.signalled:
+            self.session.signalled = True
+            rw._autodedup_release_on_stop().join(5)        # SIGTERM mid-statement
+            if self.session.cancelled:
+                raise psycopg.errors.QueryCanceled("canceling statement due to user request")
+        self.inner.execute(sql, params)
+        self.description = getattr(self.inner, "description", None)
+
+    def executemany(self, sql: str, seq: Any) -> None:
+        self.inner.executemany(sql, seq)
+
+    def fetchall(self) -> list[tuple]:
+        return self.inner.fetchall()
+
+
+def test_a_statement_running_at_the_signal_is_cancelled_and_the_pass_rolls_back(
+        world, tmp_path, monkeypatch) -> None:
+    """END TO END: the cancel aborts the statement in flight; the pass takes the raise path
+    (E930's halving skipped: the worker is stopping), rolls back and releases its lease."""
+    import psycopg
+    from autodedup import rt_lease
+    from autodedup.export_sql import COHORT_LISTINGS_SQL
+
+    seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    session = _CancellableSession(world, COHORT_LISTINGS_SQL)
+    monkeypatch.setattr(rw.db, "connect",
+                        lambda *a, **k: world.other_session() if k.get("attempts") else session)
+    _settings(monkeypatch)
+
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        rw._autodedup_sync()
+
+    assert session.signalled and session.cancelled
+    assert world.cursors == cursors and not world.rt_fp
+    assert rt_lease.current(world)["live"] is False
+    rate = incremental_lane.pass_rate_key(incremental_lane.GENERATION)
+    assert world.settings_by[rate].endswith(":halved_ahead"), "no halving after the signal"
