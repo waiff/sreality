@@ -2537,8 +2537,9 @@ async def _amain() -> int:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         # Railway sends SIGTERM on redeploy and SIGKILL `drainingSeconds` later: no lane starts
-        # another pass, one in flight finishes if the drain lets it, and the autodedup lease
-        # is released at once (E941; why, at `_AUTODEDUP_HOLDER`).
+        # another pass, one in flight finishes if the drain lets it — the autodedup pass stops
+        # at its next checkpoint and rolls back instead — and the autodedup lease is released
+        # at once (E941; why, at `_AUTODEDUP_HOLDER`).
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _on_stop_signal, stop_event)
     loop.set_default_executor(ThreadPoolExecutor(max_workers=LANE_EXECUTOR_THREADS))
