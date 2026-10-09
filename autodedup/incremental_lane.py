@@ -32,6 +32,7 @@ lane calls no provider; `spent_usd` is reported as a measured 0, not as a foreca
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import sys
@@ -239,6 +240,9 @@ SCOPE_SETTING: str = "rt_scope"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
 # The reconcile's skip over a generation no seed of this design built.
 SEED_MISMATCH: str = "seed_version"
+# E941: a pass that sees the worker shutting down, and one whose lease ended under it.
+STOPPING: str = "stopping"
+LEASE_LOST: str = "lease_lost"
 STORAGE_WATERMARK: str = "rt_storage_last"
 # THE ONE CLAIM BOUND (E75): how many listings a pass may claim before the time budget cuts it.
 PASS_LIMITS: Limits = Limits(max_listings=500, max_component=400)
@@ -2062,6 +2066,18 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def pass_holder() -> str:
+    """The name a pass takes the lease under: host, process, second. The worker makes it
+    before the pass so its SIGTERM path can release exactly that row (E941)."""
+    return f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
+
+
+def _pass_clock(stopping: Callable[[], bool]) -> Callable[[], float]:
+    """The reconcile's clock (E941): the real one, and +inf once the worker is shutting down,
+    so the reconcile stops before its next group as it does when the pass's time is spent."""
+    return lambda: math.inf if stopping() else time.perf_counter()
+
+
 def peak_rss_mb() -> float | None:
     """The process's peak resident memory in MiB, read at the end of a pass (E941):
     `getrusage(RUSAGE_SELF).ru_maxrss`, which Linux reports in KiB (macOS in bytes). It is a
@@ -2115,7 +2131,9 @@ def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: st
 
 def run_incremental(conn_factory: Callable[[], Any], *,
                     deadline_s: float | None = None,
-                    fresh_conn: Callable[[], Any] | None = None) -> dict[str, Any]:
+                    fresh_conn: Callable[[], Any] | None = None,
+                    holder: str | None = None,
+                    stopping: Callable[[], bool] | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
@@ -2129,12 +2147,21 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     pass) or was refused puts the previous rate back. A pass past its deadline rolls back and
     keeps the halving (E913); so does a pass that RAISED, which writes it again through
     `fresh_conn` — a factory for a NEW connection, since its own may be dead — or on its own
-    connection when the caller gives none (E930)."""
+    connection when the caller gives none (E930).
+
+    `holder` names the lease the pass takes (`pass_holder()` when the caller names none) and
+    `stopping` says the caller is shutting down (E941): the worker's SIGTERM path releases
+    THAT holder's lease on a fresh connection at once, so a pass that sees `stopping` takes no
+    lease, gives back one it just took, skips the reconcile (or stops it before its next group)
+    and the re-cut, and writes no rate or watermark row; and the pass's transaction ends with
+    `rt_lease.hold` — a pass whose lease was released under it rolls back instead of committing
+    beside the next holder."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
     generation = GENERATION
-    holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
+    holder = holder or pass_holder()
+    shutting_down: Callable[[], bool] = stopping or (lambda: False)
     conn = conn_factory()
     leased = False
     original: BaseException | None = None
@@ -2163,11 +2190,21 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
+        if shutting_down():
+            return {"skipped": STOPPING, "reason": "the worker is shutting down",
+                    "spent_usd": 0.0}
         if not take_lease(conn, holder):
             return {"skipped": "leased",
                     "reason": f"another writer holds autodedup.rt_lease: {rt_lease.describe(conn)}",
                     "spent_usd": 0.0}
         leased = True
+        if shutting_down():
+            # The shutdown began while the lease was being taken: its release may have run
+            # before the take, so nothing else would end this one before the process does.
+            release_lease(conn, holder)
+            leased = False
+            return {"skipped": STOPPING, "reason": "the worker is shutting down",
+                    "spent_usd": 0.0}
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(f"no calibration for generation {generation!r} — seed it")
@@ -2211,6 +2248,17 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     _exec(conn, RT_SETTING_WRITE_SQL, {
                         "key": bootstrap_setting_key(generation), "value": json.dumps(False),
                         "updated_by": f"{LANE_NAME}:bootstrap_done"})
+                # E941, the fence: the last statement before the commit. A lease released
+                # under the pass (the worker's shutdown) ends it here, rolled back.
+                rt_lease.hold(conn, holder)
+        except rt_lease.LeaseLost as exc:
+            # The transaction rolled back: nothing written, no cursor moved. Someone else may
+            # hold the lease by now, so the pass writes nothing more — no rate (the half
+            # written ahead stands), no watermark, no release of a row that is not its own.
+            leased = False
+            return {"counts": {}, "aborted": LEASE_LOST, "reason": str(exc)[:300],
+                    "reconcile": {"skipped": f"pass_{LEASE_LOST}"}, "generation": generation,
+                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
         except _Refused:
             stopped = result.aborted if result is not None else "refused"
         except PassDeadline:
@@ -2247,6 +2295,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         # its groups are not the ones this build would draw).
         if stopped:
             summary["reconcile"] = {"skipped": f"pass_{stopped}"}
+        elif shutting_down():
+            # E941: the shutdown may have released the lease already; merges wait for the
+            # next worker's pass, which re-plans them.
+            summary["reconcile"] = {"skipped": STOPPING}
         elif not seed_current(control, generation):
             summary["reconcile"] = {
                 "skipped": SEED_MISMATCH,
@@ -2261,14 +2313,16 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             summary["reconcile"] = reconcile.run(
                 conn, generation, result.cluster_keys if result is not None else [],
                 run_id=f"{reconcile.RUN_PREFIX}{holder}", deadline=deadline,
-                blocks=[block.key for block in work.enter_blocks])
+                blocks=[block.key for block in work.enter_blocks],
+                clock=_pass_clock(shutting_down))
             # What the reconcile cost inside the pass, so G2's rate is read with it in (B3).
             summary["reconcile"]["seconds"] = round(time.perf_counter() - reconcile_started, 3)
         elapsed = time.perf_counter() - started
-        if not stopped and result is not None:
+        if not stopped and result is not None and not shutting_down():
             # The pass committed: its measurement replaces the half written ahead, blended
             # with the rate it started from; a pass that claimed too little to measure itself
             # (an idle one) puts that rate back, since nothing about it said to slow down.
+            # Not once the worker is shutting down: the next holder's rows are not its own.
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
                                      work.claim_bound)
             if measured is not None:
@@ -2291,7 +2345,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         # A10: the population has drifted — re-cut the calibration, atomically, inside what
         # is left of the pass's own time (every statement bounded by it); a cut that runs out
         # rolls back and the next pass re-tries it.
-        if (not stopped and coverage is not None and coverage < COVERAGE_FLOOR
+        if (not stopped and not shutting_down() and coverage is not None
+                and coverage < COVERAGE_FLOOR
                 and facts.images_with_phash >= RECUT_MIN_IMAGES
                 and (age_h is None or age_h >= RECUT_MIN_AGE_H)
                 and deadline - time.perf_counter() >= RECUT_RESERVE_S):
@@ -2336,7 +2391,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "pass_growth_mb": round(
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
         }
-        record_storage(conn, generation, after_bytes)
+        if not shutting_down():
+            record_storage(conn, generation, after_bytes)
         summary["peak_rss_mb"] = peak_rss_mb()
         return summary
     except BaseException as exc:

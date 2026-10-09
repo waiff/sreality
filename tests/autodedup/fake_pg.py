@@ -83,6 +83,9 @@ class FakePg:
         # pooler that is the only place it survives.
         self.statements_in_tx: list[str] = []
         self.in_transaction = False
+        # What the open transaction rolls back to: `other_session` writes into it what a
+        # second session commits while that transaction is open.
+        self.tx_state: dict[str, Any] | None = None
         # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3).
         self.admin_parents: dict[int, int] = {}
         # The scope's membership snapshot and the two ledgers W9e rails the lane with: the
@@ -111,6 +114,12 @@ class FakePg:
 
     def close(self) -> None:
         return None
+
+    def other_session(self) -> "_OtherSession":
+        """A SECOND session on this database (E941: the worker's shutdown releases the lease
+        on a fresh connection while the pass's transaction is open). What it writes to the
+        lease row commits on its own, so a rollback of this session's transaction keeps it."""
+        return _OtherSession(self)
 
     def snapshot(self) -> dict[str, Any]:
         """Everything a rollback has to put back."""
@@ -165,10 +174,12 @@ class _Tx:
         self.conn.transactions += 1
         self.conn.in_transaction = True
         self.state = self.conn.snapshot()
+        self.conn.tx_state = self.state
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         self.conn.in_transaction = False
+        self.conn.tx_state = None
         if exc_type is not None and self.state is not None:
             self.conn.restore(self.state)
             self.conn.rolled_back += 1
@@ -201,6 +212,34 @@ class _Cursor:
         # psycopg exposes the column names, and the fact source reads rows as dicts through
         # them. Every export statement aliases every column, so the SELECT list IS the names.
         self.description = [(name,) for name in _aliases(sql)]
+
+
+class _OtherSession:
+    def __init__(self, db: FakePg) -> None:
+        self.db = db
+        self.closed = False
+
+    def cursor(self) -> "_OtherCursor":
+        return _OtherCursor(self.db)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _OtherCursor(_Cursor):
+    """A statement of the second session: never part of the first one's transaction, and a
+    lease row it writes is committed — copied into what that transaction would restore."""
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+        in_transaction = self.conn.in_transaction
+        self.conn.in_transaction = False
+        try:
+            super().execute(sql, params)
+        finally:
+            self.conn.in_transaction = in_transaction
+        if self.conn.tx_state is not None and sql in (S.RT_LEASE_RELEASE_SQL,
+                                                      S.RT_LEASE_TAKE_SQL):
+            self.conn.tx_state["lease"] = {k: dict(v) for k, v in self.conn.lease.items()}
 
 
 def _aliases(sql: str) -> list[str]:
@@ -276,6 +315,10 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         held = db.lease.get(p["name"])
         return ([(held["holder"], held.get("taken_at"), held["expires_at"],
                   held["expires_at"] > db.now)] if held else [])
+    if sql == S.RT_LEASE_HOLD_SQL:
+        held = db.lease.get(p["name"])
+        return ([(held["holder"],)] if held and held["holder"] == p["holder"]
+                and held["expires_at"] > db.now else [])
 
     # ---------------------------------------------------------------- postings
     if sql == S.RT_LOOKUP_MANY_SQL:

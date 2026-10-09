@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from autodedup.incremental_sql import (
+    RT_LEASE_HOLD_SQL,
     RT_LEASE_READ_SQL,
     RT_LEASE_RELEASE_SQL,
     RT_LEASE_TAKE_SQL,
@@ -40,6 +41,21 @@ def take(conn: Any, holder: str, ttl: int) -> bool:
 def release(conn: Any, holder: str) -> None:
     with conn.cursor() as cur:
         cur.execute(RT_LEASE_RELEASE_SQL, {"name": NAME, "holder": holder})
+
+
+class LeaseLost(Exception):
+    """The holder's lease ended while its run still ran — released by the worker's shutdown
+    (E941) or by a `release_lease=` dispatch that took the holder for dead."""
+
+
+def hold(conn: Any, holder: str) -> None:
+    """Inside the caller's transaction, as its last statement before the commit: lock this
+    holder's live lease row until the transaction ends, or raise `LeaseLost` so it rolls back
+    (E941). A run whose lease was released under it then never commits beside the next holder,
+    and a release that arrives after this statement waits for the commit."""
+    if not _rows(conn, RT_LEASE_HOLD_SQL, {"name": NAME, "holder": holder}):
+        raise LeaseLost(f"autodedup.rt_lease is no longer held by {holder!r}: "
+                        f"{describe(conn)}")
 
 
 def current(conn: Any) -> dict[str, Any] | None:

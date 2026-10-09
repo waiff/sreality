@@ -6,6 +6,7 @@
   },
   "deploy": {
     "startCommand": "python -m scraper.realtime_worker",
-    "restartPolicyType": "ALWAYS"
+    "restartPolicyType": "ALWAYS",
+    "drainingSeconds": 30
   }
 }

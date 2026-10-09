@@ -1402,3 +1402,186 @@ def test_a_raise_on_a_live_connection_releases_the_lease_the_existing_way(
     assert RT_LEASE_RELEASE_SQL not in fresh.issued
     assert world.statements.count(RT_LEASE_RELEASE_SQL) == releases_before + 1, "once"
     assert not any("rt_lease" in note for note in getattr(raised.value, "__notes__", []))
+
+
+# ------------------------------------------------------------- E941: the worker's shutdown
+#
+# Railway SIGTERMs the worker at every deploy and, by default, SIGKILLs it at once: a pass in
+# flight died holding the lease, and the next worker skipped "leased" for 40 minutes. The
+# worker now releases that lease at the signal, on a fresh connection, while the pass may
+# still be running — so the engine must make sure a released lease never puts two writers in
+# the store: the pass takes no lease while stopping, gives back one it took as the signal came,
+# and its transaction ends with a fence that rolls it back once its lease is gone.
+
+
+def _calls(*answers: bool):
+    """A `stopping` that answers each call in turn, then the last answer for ever."""
+    seq = list(answers)
+
+    def stopping() -> bool:
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return stopping
+
+
+def test_a_stopping_worker_takes_no_lease_and_writes_nothing(tmp_path) -> None:
+    from autodedup import rt_lease
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    transactions = world.transactions
+
+    out = run_incremental(lambda: world, stopping=lambda: True)
+
+    assert out["skipped"] == "stopping"
+    assert rt_lease.current(world)["holder"].startswith("rt_seed:"), "no lease taken"
+    assert world.transactions == transactions
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S, "nothing halved"
+
+
+def test_a_shutdown_during_the_take_gives_the_lease_back(tmp_path) -> None:
+    """The signal read no holder yet, or released before this take: nothing else would end
+    the lease before the process does, so the pass that sees `stopping` right after the take
+    releases it itself, before any transaction."""
+    from autodedup import rt_lease
+    from autodedup.incremental_lane import run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    transactions = world.transactions
+
+    out = run_incremental(lambda: world, holder="worker:1:1", stopping=_calls(False, True))
+
+    assert out["skipped"] == "stopping"
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("worker:1:1", False), "taken, then given back"
+    assert world.transactions == transactions
+
+
+def test_a_pass_whose_lease_was_released_under_it_rolls_back_at_its_fence(
+        tmp_path, monkeypatch) -> None:
+    """The shutdown's release commits on its own connection while the pass decides. The pass's
+    transaction then ends with the fence, finds no live lease for its holder, and rolls back:
+    no cursor moves, nothing is stored, and the pass writes nothing after — the next holder's
+    rows are not its own."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental_lane import (LEASE_LOST, PASS_RATE_PER_S, pass_rate_key,
+                                            run_incremental)
+    from autodedup.incremental_sql import RT_LEASE_HOLD_SQL, RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    original = incremental_lane.run_pass_bounded
+
+    def released_mid_pass(*args, **kwargs):
+        result = original(*args, **kwargs)
+        rt_lease.release(world.other_session(), "worker:1:1")   # the SIGTERM path
+        return result
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", released_mid_pass)
+    releases = world.statements.count(RT_LEASE_RELEASE_SQL)
+
+    out = run_incremental(lambda: world, holder="worker:1:1", stopping=lambda: False)
+
+    assert out["aborted"] == LEASE_LOST and out["reconcile"] == {"skipped": "pass_lease_lost"}
+    assert "worker:1:1" in out["reason"]
+    assert RT_LEASE_HOLD_SQL in world.statements_in_tx
+    assert world.cursors == cursors and not world.rt_fp and not world.pairs
+    assert rt_lease.current(world)["live"] is False, "the release stood"
+    assert world.statements.count(RT_LEASE_RELEASE_SQL) == releases + 1, "only the signal's"
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0, "the half stands"
+    assert out["peak_rss_mb"] is None or out["peak_rss_mb"] > 0
+
+
+def test_a_lease_another_writer_took_is_never_committed_beside(tmp_path, monkeypatch) -> None:
+    """The same fence when the next worker has already taken the released lease: the pass
+    rolls back, and the row stays the next worker's."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental_lane import LEASE_LOST, run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    original = incremental_lane.run_pass_bounded
+
+    def taken_mid_pass(*args, **kwargs):
+        result = original(*args, **kwargs)
+        other = world.other_session()
+        rt_lease.release(other, "worker:1:1")
+        assert rt_lease.take(other, "next-worker:1:2", 2_400)
+        return result
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", taken_mid_pass)
+    out = run_incremental(lambda: world, holder="worker:1:1")
+
+    assert out["aborted"] == LEASE_LOST and not world.rt_fp
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("next-worker:1:2", True)
+
+
+def test_a_live_lease_passes_the_fence_and_the_pass_commits(tmp_path) -> None:
+    from autodedup.incremental_lane import run_incremental
+    from autodedup.incremental_sql import RT_LEASE_HOLD_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    out = run_incremental(lambda: world, holder="worker:1:1", stopping=lambda: False)
+
+    assert out["aborted"] == "" and world.rt_fp, "decided and committed"
+    assert RT_LEASE_HOLD_SQL in world.statements_in_tx
+
+
+def test_a_shutdown_after_the_commit_starts_no_merge(tmp_path, monkeypatch) -> None:
+    """Out of the build, the reconcile would merge under a lease the signal may have released
+    already: it is skipped once the signal came (the re-cut's condition reads it too)."""
+    from autodedup.incremental import bootstrap_key
+    from autodedup.incremental_lane import run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    world.settings[bootstrap_key()] = False
+    monkeypatch.setattr(reconcile, "run", lambda *a, **k: pytest.fail("no merge after SIGTERM"))
+
+    out = run_incremental(lambda: world, stopping=_calls(False, False, True))
+
+    assert out["aborted"] == "" and out["reconcile"] == {"skipped": "stopping"}
+    assert world.rt_fp, "the pass itself committed: the signal came after it"
+    from autodedup.incremental_lane import pass_rate_key
+
+    assert world.settings_by[pass_rate_key("rt")].endswith(":halved_ahead"), (
+        "no rate written after the signal: the next holder's row is not this pass's")
+
+
+def test_a_shutdown_mid_reconcile_stops_it_before_its_next_group(tmp_path, monkeypatch) -> None:
+    """The reconcile checks its clock before every group; the pass hands it one that reads
+    +inf once the signal came, so it stops the way a spent deadline stops it."""
+    import math
+
+    from autodedup.incremental import bootstrap_key
+    from autodedup.incremental_lane import run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    world.settings[bootstrap_key()] = False
+    flag = {"stopping": False}
+    seen: dict = {}
+
+    def reconcile_run(*_args, **kwargs):
+        clock = kwargs["clock"]
+        seen["before"] = clock()
+        flag["stopping"] = True
+        seen["after"] = clock()
+        return {"counts": {"groups": 0}, "stopped": "the pass's time is spent"}
+
+    monkeypatch.setattr(reconcile, "run", reconcile_run)
+    run_incremental(lambda: world, stopping=lambda: flag["stopping"])
+
+    assert math.isfinite(seen["before"]) and math.isinf(seen["after"])

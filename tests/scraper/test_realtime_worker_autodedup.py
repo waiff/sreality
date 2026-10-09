@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,8 @@ def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", rw._PassLock("autodedup"))
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
+    monkeypatch.setattr(rw, "_AUTODEDUP_HOLDER", None)
+    monkeypatch.setattr(rw, "_AUTODEDUP_STOPPING", threading.Event())
 
 
 @pytest.fixture()
@@ -224,9 +228,11 @@ def test_the_engines_deadline_sits_inside_every_bound_around_it() -> None:
 def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """No switch, no wrapper: the pass runs under the scope and scorer its generation was
-    seeded with, and under the engine's own deadline (E913, E914). The one thing handed in
-    beside the connection is a factory for a FRESH, bounded connect (E930): the halving a
-    RAISED pass writes may not have a live connection of its own."""
+    seeded with, and under the engine's own deadline (E913, E914). Handed in beside the
+    connection: a factory for a FRESH, bounded connect (E930: the halving a RAISED pass writes
+    may not have a live connection of its own), and E941's two — the holder the pass takes its
+    lease under, named by the worker so its shutdown can release that row, and the shutdown
+    itself as `stopping`."""
     conn = _Conn()
     connects: list[dict[str, Any]] = []
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
@@ -235,7 +241,10 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
 
     last = rw._autodedup_sync()
 
-    assert set(seen["kwargs"]) == {"fresh_conn"} and seen["conn"] is conn
+    assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping"} and seen["conn"] is conn
+    assert isinstance(seen["kwargs"]["holder"], str) and seen["kwargs"]["holder"]
+    assert seen["kwargs"]["stopping"] == rw._AUTODEDUP_STOPPING.is_set
+    assert rw._AUTODEDUP_HOLDER is None, "cleared once the pass is over"
     seen["kwargs"]["fresh_conn"]()
     assert connects == [{}, {"attempts": 1,
                              "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
@@ -577,3 +586,134 @@ def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(
     summary["counts"] = {**summary["counts"], "must_link_dissolved": 2}
     _stub_engine(monkeypatch, summary)
     assert rw._autodedup_sync()["must_link_dissolved"] == 2
+
+
+# ------------------------------------------------- E941: a deploy releases the lease at once
+
+
+RAILWAY_WORKER = Path(__file__).resolve().parents[2] / "railway.worker.json"
+
+
+def test_the_shutdown_signal_is_the_one_path_that_releases(monkeypatch) -> None:
+    """SIGTERM and SIGINT set the loop's stop event, as before, and start the release."""
+    src = inspect.getsource(rw._amain)
+    assert "loop.add_signal_handler(sig, _on_stop_signal, stop_event)" in src
+    assert "signal.SIGTERM, signal.SIGINT" in src
+    stop = asyncio.Event()
+    rw._on_stop_signal(stop)
+    assert stop.is_set() and rw._AUTODEDUP_STOPPING.is_set()
+
+
+def test_the_drain_window_fits_the_release_and_ends_before_the_watchdog() -> None:
+    """Railway's default is 0 s between SIGTERM and SIGKILL, so no handler would run. The
+    window holds the release's one bounded connect and statement, and stays under the
+    watchdog's liveness bound, which a drain must never reach: the heartbeat lane stops at
+    the signal like every lane."""
+    deploy = json.loads(RAILWAY_WORKER.read_text(encoding="utf-8"))["deploy"]
+    draining = deploy["drainingSeconds"]
+    assert rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS * 2 <= draining
+    assert draining < rw.LIVENESS_BOUND_SECONDS
+    assert deploy["startCommand"] == "python -m scraper.realtime_worker"
+
+
+def test_a_shutdown_releases_the_lease_of_the_pass_in_flight_on_a_fresh_connection(
+        monkeypatch) -> None:
+    from autodedup import rt_lease
+    from datetime import timedelta
+
+    world = FakePg()
+    world.lease[LANE_NAME] = {"holder": "host:1:1", "expires_at": world.now + timedelta(hours=1)}
+    connects: list[dict[str, Any]] = []
+    other = world.other_session()
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or other)
+    monkeypatch.setattr(rw, "_AUTODEDUP_HOLDER", "host:1:1")
+
+    thread = rw._autodedup_release_on_stop()
+    assert thread is not None and not thread.daemon, "the exit waits for the one connect"
+    thread.join(5)
+
+    assert rt_lease.current(world)["live"] is False
+    assert connects == [{"attempts": 1,
+                         "connect_timeout": rw.AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS}]
+    assert other.closed and rw._AUTODEDUP_STOPPING.is_set()
+    assert rw._autodedup_release_on_stop() is None, "a second signal starts nothing"
+    assert len(connects) == 1
+
+
+def test_a_release_keyed_by_holder_never_ends_another_writers_lease(monkeypatch) -> None:
+    from autodedup import rt_lease
+    from datetime import timedelta
+
+    world = FakePg()
+    world.lease[LANE_NAME] = {"holder": "rt_seed:gh:7:7",
+                              "expires_at": world.now + timedelta(hours=1)}
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: world.other_session())
+
+    assert rw._autodedup_release_lease("host:1:1") is True
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("rt_seed:gh:7:7", True)
+
+
+def test_a_shutdown_with_no_pass_in_flight_opens_no_connection(monkeypatch) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail("nothing to release"))
+    assert rw._autodedup_release_on_stop() is None
+    assert rw._AUTODEDUP_STOPPING.is_set()
+
+
+def test_the_shutdown_release_never_raises(monkeypatch, caplog) -> None:
+    """Best effort on a path where a raise helps nobody: the lease then ends by its TTL."""
+
+    def refused(*_a: Any, **_k: Any) -> Any:
+        raise ConnectionError("pooler down")
+
+    monkeypatch.setattr(rw.db, "connect", refused)
+    with caplog.at_level(logging.WARNING, logger="scraper.realtime_worker"):
+        assert rw._autodedup_release_lease("host:1:1") is False
+
+    class _Broken(_Conn):
+        def cursor(self) -> Any:
+            raise RuntimeError("server closed the connection")
+
+    broken = _Broken()
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: broken)
+    assert rw._autodedup_release_lease("host:1:1") is False
+    assert broken.closed
+    assert sum("could not release autodedup.rt_lease" in r.getMessage()
+               for r in caplog.records) >= 1
+
+
+def test_a_deploy_mid_pass_frees_the_lease_and_the_pass_commits_nothing(
+        world, tmp_path, monkeypatch) -> None:
+    """END TO END through the engine: the signal arrives while the pass decides. Its lease is
+    released at once on a fresh connection, so the next worker's pass need not wait for the
+    TTL; the pass reaches its fence, finds the lease gone and rolls back; the heartbeat says
+    so; and the next worker can take the lease."""
+    from autodedup import rt_lease
+
+    seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    other = world.other_session()
+    monkeypatch.setattr(rw.db, "connect",
+                        lambda *a, **k: other if k.get("attempts") == 1 else world)
+    _settings(monkeypatch)
+    original = incremental_lane.run_pass_bounded
+    released: list[str] = []
+
+    def sigterm_mid_pass(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        released.append(str(rw._AUTODEDUP_HOLDER))
+        thread = rw._autodedup_release_on_stop()
+        assert thread is not None
+        thread.join(5)
+        return result
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", sigterm_mid_pass)
+
+    last = rw._autodedup_sync()
+
+    assert (last["ran"], last["errors"], last["aborted"]) == (True, 1, "lease_lost")
+    assert last["reconcile"] == "pass_lease_lost" and last["claimed"] == 0
+    assert world.cursors == cursors and not world.rt_fp and not world.pairs
+    assert rt_lease.current(world)["live"] is False
+    assert rt_lease.take(world, "next-worker:1:2", 2_400), "the next worker need not wait"
+    assert released and released[0] != "None" and rw._AUTODEDUP_HOLDER is None
