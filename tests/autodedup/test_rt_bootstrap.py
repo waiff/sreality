@@ -353,20 +353,30 @@ def test_a_fresh_seeds_second_check_keeps_the_resets_projection(tmp_path) -> Non
     build = out["storage_build"]
     assert build["schema_mb"] == MAX_SCHEMA_MB + 40
     assert build["replaced_mb"] == out["storage"]["replaced_mb"] == 100.0
+    # Carried as BYTES, not as the receipt's two-decimal MB.
+    assert build["replaced_bytes"] == out["storage"]["replaced_bytes"] == 100 * _MB
     assert build["projected_mb"] == round(MAX_SCHEMA_MB - 60 + build["build_mb"], 2)
     assert S.RT_GENERATION_BYTES_SQL in db.statements
     assert db.statements.count(S.RT_GENERATION_BYTES_SQL) == 1, "measured once, before the reset"
 
 
-def test_the_budget_is_sized_for_the_widened_scope() -> None:
-    """E941: ~38,000 adverts in scope (the trial, Nusle, Libeň and six towns) project ~840 MB
-    at the seed on the schema of 2026-10-09 — over E916's 800 — and the whole corpus stays a
-    separate decision."""
+def test_the_budget_holds_the_widened_scope_with_three_months_to_spare() -> None:
+    """E941, the arithmetic the constants' comments state, on the reads of 2026-10-09: the
+    build costs what the live store measures an advert, and the widened scope (the trial,
+    Nusle, Libeň and six towns) fits the budget at the seed — with the fresh reset's space
+    reused and without it — and leaves about three months of its arrivals. The whole corpus
+    stays a separate decision."""
     from autodedup.incremental_scope import CORPUS_PROJECTION_MB
 
-    projected = 464.3 + 60 - 129 + 38_000 * BUILD_BYTES_PER_LISTING / _MB
-    assert 800 < projected < MAX_SCHEMA_MB == 1200
-    assert BUILD_BYTES_PER_LISTING == 12 * 1024
+    schema, rt_held, rt_adverts, walk_and_cut = 464.3, 129.2, 7_298, 60.0   # MB, adverts
+    adverts, arriving_a_month = 38_000, 0.20                               # S1 widened; E79
+    measured = rt_held * _MB / rt_adverts                    # bytes an advert in the live store
+    assert abs(BUILD_BYTES_PER_LISTING - measured) / measured < 0.02
+    build = adverts * BUILD_BYTES_PER_LISTING / _MB
+    projected = schema + walk_and_cut - rt_held + build      # the second check, fresh seed
+    a_month = adverts * arriving_a_month * BUILD_BYTES_PER_LISTING / _MB
+    assert schema + walk_and_cut + build < MAX_SCHEMA_MB, "fits even with nothing reused"
+    assert MAX_SCHEMA_MB - projected >= 3 * a_month, "about three months of arrivals"
     assert MAX_SCHEMA_MB < CORPUS_PROJECTION_MB
 
 
