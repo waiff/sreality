@@ -23,10 +23,10 @@ What stays sreality-specific lives behind the Portal seams, unchanged:
   (db.mark_listing_inactive, which also clears the failure row), and
   listing_fetch_failures bookkeeping behind record_failure.
 
-scraper.main keeps the legacy CLI (scrape.yml's instant-revert fallback) and
-the image-download phase used by images.yml / images_fresh.yml — neither moves
-here. Cadence split (rule #19): index_walk.yml runs `--index-only` every 15
-min; detail_drain.yml runs `--drain-only` with a --max-seconds budget. Omitting
+scraper.main keeps the image-download phase used by images.yml /
+images_fresh.yml — it does not move here. Cadence split (rule #19):
+index_walk.yml runs `--index-only` every 15 min; detail_drain.yml runs
+`--drain-only` with a --max-seconds budget. Omitting
 both flags runs both phases (dispatch-only combined fallback). Records an
 'index' / a 'detail' scrape_runs row tagged source='sreality', with per-chunk
 counter bumps + non-destructive finalize — exactly what Health liveness and the

@@ -295,7 +295,8 @@ overlay that can be heatmap-color-coded by any chosen index.
   `--limit`-set guard in `scraper/main.py:main`. Concurrency-group
   drops overlapping runs rather than queueing them.
   _(Superseded by Scraper-track Phase 1.6: this job now does a complete
-  walk every tick and runs `mark_inactive` itself.)_
+  walk every tick and runs `mark_inactive` itself. `scrape.yml` and the
+  `--limit` path were deleted in C2-2, 2026-10.)_
 - **Watchdog feed polling decoupled from estimation polling.**
   `frontend/src/pages/Watchdog.tsx` switches from an unconditional
   5-second `refetchInterval` to a two-tier callback: 30 s for the

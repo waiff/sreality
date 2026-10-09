@@ -101,7 +101,7 @@ class SrealityClient(BasePortalClient):
         locality_district_id: int | None = None,
     ) -> None:
         # A shared RateLimiter (when set) paces fetches across worker threads;
-        # serial callers (freshness, --detail-only) pass none and keep the
+        # serial callers (freshness) pass none and keep the
         # per-instance detail_delay_s self-throttle in get_detail.
         super().__init__(
             limiter=limiter,

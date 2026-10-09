@@ -18,7 +18,7 @@ toolkit/            pure-function analytical tools over the schema
 api/                FastAPI service exposing the toolkit (deployed to Railway)
 frontend/           Vite + React + TS database-browser UI (deployed to Railway as a second service; see frontend/README.md)
 tests/              pytest suite
-.github/workflows/  test.yml (per-push), scrape.yml (daily cron), frontend-build.yml (typecheck + bundle-size guardrail)
+.github/workflows/  test.yml (per-push), index_walk.yml + detail_drain.yml (the sreality scrape), frontend-build.yml (typecheck + bundle-size guardrail)
 ```
 
 ## Scope
@@ -44,7 +44,7 @@ tests/              pytest suite
 
 - [x] Schema applied (migrations 001–014)
 - [x] Scraper code (index walk, detail fetch, parse, upsert, snapshot-on-change)
-- [x] CI workflows (`test.yml` per push, `scrape.yml` daily at 22:00 UTC, frontend build)
+- [x] CI workflows (`test.yml` per push, the sreality scrape — `index_walk.yml` + `detail_drain.yml` — every 15 min, frontend build)
 - [x] Image mirroring to Cloudflare R2 with parallel uploads
 - [x] Failure tracking (`listing_fetch_failures`) with priority retry and give-up threshold
 - [x] Conservative/aggressive run modes
