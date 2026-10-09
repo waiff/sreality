@@ -1187,6 +1187,34 @@ def test_a_pass_that_cannot_measure_itself_puts_the_rate_back(tmp_path) -> None:
     assert conn.settings[key] == 0.3 and conn.settings_by[key].endswith(":restored")
 
 
+def test_a_committed_pass_puts_the_rate_back_before_its_reconcile(tmp_path,
+                                                                   monkeypatch) -> None:
+    """The reconcile plans outside the pass's statement guards; a raise there (a timeout at
+    100 % CPU) came after the pass committed, so it must not leave the half standing — eight
+    such passes would take the claim to one advert."""
+    from autodedup.incremental import bootstrap_key
+    from autodedup.incremental_lane import pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    conn.settings[bootstrap_key()] = False
+    key = pass_rate_key("rt")
+    conn.settings[key] = 0.3
+    seen: dict = {}
+
+    def reconcile_raises(*_a, **_k):
+        seen["rate"] = (conn.settings[key], conn.settings_by[key])
+        raise RuntimeError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(reconcile, "run", reconcile_raises)
+    with pytest.raises(RuntimeError, match="statement timeout"):
+        run_incremental(lambda: conn)
+
+    assert seen["rate"][0] == 0.3 and seen["rate"][1].endswith(":restored"), "back before it"
+    assert conn.settings[key] == 0.3
+
+
 def test_a_pass_that_measured_itself_overwrites_the_half(tmp_path) -> None:
     from autodedup.incremental_lane import pass_rate_key, run_incremental
     from tests.autodedup import lane_world

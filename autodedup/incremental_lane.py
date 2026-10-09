@@ -336,9 +336,9 @@ BOOTSTRAP_MIN_CLAIM: int = 1
 # `rt_pass_rate_per_s:<generation>`, and the next pass claims at most `budget x rate`. The
 # budget is half the deadline, so a pass may run twice as slow as its measured rate before the
 # deadline stops it. The default rate is the one measurement taken before any was recorded — a
-# conservative start the second pass corrects. The row is halved BEFORE every pass and
-# rewritten after it (E941: measured, or put back when the pass could not measure itself), so a
-# pass the system kills mid-way has already halved the next claim.
+# conservative start the second pass corrects. The row is halved BEFORE every pass, put back as
+# soon as the pass commits and then overwritten by its measurement (E941), so a pass the system
+# kills mid-way has already halved the next claim.
 PASS_BUDGET_S: float = PASS_DEADLINE_S / 2
 PASS_RATE_PER_S: float = 0.1
 # A rate is only recorded when the pass actually claimed enough for the quotient to mean
@@ -2143,9 +2143,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
     is re-cut. The rate is halved BEFORE the pass (E941), in a write of its own that commits
     before the pass's transaction opens, so a pass the system kills — a deploy, a restart, the
-    kernel's OOM killer — has already slowed the next claim; a pass that measured itself
-    overwrites it with the measurement, and one that claimed too little to measure (an idle
-    pass) or was refused puts the previous rate back. A pass past its deadline rolls back and
+    kernel's OOM killer — has already slowed the next claim; a pass that committed puts the
+    previous rate back before its reconcile and overwrites it with its measurement after it
+    (an idle pass, too small to measure, leaves the previous rate), and a refused one puts the
+    previous rate back too. A pass past its deadline rolls back and
     keeps the halving (E913); so does a pass that RAISED, which writes it again through
     `fresh_conn` — a factory for a NEW connection, since its own may be dead — or on its own
     connection when the caller gives none (E930).
@@ -2287,6 +2288,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         if stopped and not shutting_down():
             # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
+        if not stopped and result is not None and not shutting_down():
+            # E941: the pass committed, so its claim did not kill it — the half written ahead
+            # goes back NOW, before the reconcile, whose planning runs outside the pass's
+            # statement guards: a raise there would otherwise leave the half standing, and
+            # eight such passes take the claim to one advert. The measurement below, once the
+            # reconcile has run, still overwrites it.
+            _write_rate(conn, generation, rate_per_s, "restored")
         summary: dict[str, Any] = (result.to_json() if result is not None
                                    else {"counts": {}, "aborted": stopped})
         summary["aborted"] = stopped
@@ -2330,16 +2338,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             return not lost and not shutting_down()
 
         if not stopped and result is not None and owns_the_lane():
-            # The pass committed: its measurement replaces the half written ahead, blended
-            # with the rate it started from; a pass that claimed too little to measure itself
-            # (an idle one) puts that rate back, since nothing about it said to slow down.
-            # Not once the lane is not its own: the next holder's rows are not its to write.
+            # The pass's measurement, reconcile included, blended with the rate it started
+            # from, replaces the rate put back above; a pass that claimed too little to measure
+            # itself (an idle one) leaves that rate. Not once the lane is not its own: the next
+            # holder's rows are not its to write.
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
                                      work.claim_bound)
             if measured is not None:
                 _write_rate(conn, generation, measured, "rate")
-            else:
-                _write_rate(conn, generation, rate_per_s, "restored")
         coverage = (None if not facts.images_with_phash else round(
             1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6))
         summary["population"] = {
