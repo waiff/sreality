@@ -1975,11 +1975,14 @@ class CalibrationRefusal(Exception):
     """The scope holds nothing the cut could be taken over."""
 
 
-def _cut_bound(conn: Any, deadline: float | None) -> None:
+def _cut_bound(conn: Any, deadline: float | None,
+               stopping: Callable[[], bool] | None = None) -> None:
     """The cut's statement timeout: the export's own (CUT_STATEMENT_TIMEOUT_MS) at a seed, and
     never past the pass's deadline inside a pass (review A5/B6) — the pHash aggregate is a
     sequential scan of `public.images`, and an unbounded one could outlive the worker's stall
-    warning. Past the deadline the cut stops between chunks and its transaction rolls back."""
+    warning. Past the deadline the cut stops between chunks and its transaction rolls back; so
+    it does once the worker is `stopping` (E941: `PassStopped`)."""
+    _in_time(None, stopping)
     if deadline is None:
         timeout_ms = CUT_STATEMENT_TIMEOUT_MS
     else:
@@ -1992,7 +1995,8 @@ def _cut_bound(conn: Any, deadline: float | None) -> None:
 
 def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
                     generation: str = GENERATION, *, chunk: int = CUT_CHUNK,
-                    deadline: float | None = None) -> dict[str, Any]:
+                    deadline: float | None = None,
+                    stopping: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Cut the generation's calibration from the database, over what its scope snapshot holds.
 
     Only the cohort statistics are cut (E70's price deciles, exploded keys, token and attribute
@@ -2014,18 +2018,18 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     hashes: set[int] = set()
     for start in range(0, len(ids), chunk):
         if deadline is not None:
-            _cut_bound(conn, deadline)
+            _cut_bound(conn, deadline, stopping)
         hashes |= {int(row[0]) for row in _rows(conn, RT_CUT_HASHES_SQL,
                                                 {"ids": ids[start:start + chunk]})}
-    _cut_bound(conn, deadline)
+    _cut_bound(conn, deadline, stopping)
     population = ({int(row[0]): int(row[1]) for row in _rows(
         conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
-    facts = SqlFacts(conn, population=population)
+    facts = SqlFacts(conn, population=population, stopping=stopping)
     listings: dict[int, Listing] = {}
     fps: dict[int, Any] = {}
     for start in range(0, len(ids), chunk):
         if deadline is not None:
-            _cut_bound(conn, deadline)
+            _cut_bound(conn, deadline, stopping)
         # Fingerprints read no CLIP vector, so the cut skips the read that would move ~2 kB per
         # photograph for nothing.
         for listing_id, (listing, images) in facts.facts(ids[start:start + chunk],
@@ -2302,6 +2306,12 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                          halve=not shutting_down())
             leased = False
             raise
+        if stopped == STOPPING:
+            # E941: rolled back for the shutdown — return at once, so the `finally` releases
+            # the lease on the pass's own connection with no reads in between.
+            return {"counts": {}, "aborted": STOPPING,
+                    "reconcile": {"skipped": f"pass_{STOPPING}"}, "generation": generation,
+                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
         if stopped and not shutting_down():
             # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
@@ -2387,7 +2397,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             try:
                 with _transaction(conn):
                     summary["recut"] = cut_calibration(conn, settings, model.version,
-                                                       generation, deadline=deadline)
+                                                       generation, deadline=deadline,
+                                                       stopping=stopping)
                     rt_lease.hold(conn, holder)       # E941: the re-cut is a write too
             except Exception as exc:  # noqa: BLE001 — best effort: the pass already committed
                 summary["recut"] = {"skipped": f"{type(exc).__name__}: {exc}"[:300]}
@@ -2426,6 +2437,9 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "pass_growth_mb": round(
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
         }
+        # A re-cut its fence stopped means the same as a reconcile it stopped (E941).
+        lost = lost or str((summary.get("recut") or {}).get("skipped", "")).startswith(
+            "LeaseLost")
         if owns_the_lane():
             record_storage(conn, generation, after_bytes)
         summary["peak_rss_mb"] = peak_rss_mb()
