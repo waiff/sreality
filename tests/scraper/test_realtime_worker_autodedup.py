@@ -645,8 +645,12 @@ def test_a_shutdown_releases_the_lease_of_the_pass_in_flight_on_a_fresh_connecti
     assert len(connects) == 1
 
 
-def test_a_release_keyed_by_holder_never_ends_another_writers_lease(monkeypatch) -> None:
+def test_the_shutdown_release_never_ends_another_writers_lease(monkeypatch) -> None:
+    """A seed or dispatch may hold the row by the time the signal's release runs. The fake
+    reads the holder predicate from RT_LEASE_RELEASE_SQL itself, so dropping `and holder =`
+    from the statement fails this test: the seed's live row would be ended."""
     from autodedup import rt_lease
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
     from datetime import timedelta
 
     world = FakePg()
@@ -655,6 +659,7 @@ def test_a_release_keyed_by_holder_never_ends_another_writers_lease(monkeypatch)
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: world.other_session())
 
     assert rw._autodedup_release_lease("host:1:1") is True
+    assert RT_LEASE_RELEASE_SQL in world.statements, "the release ran"
     row = rt_lease.current(world)
     assert (row["holder"], row["live"]) == ("rt_seed:gh:7:7", True)
 

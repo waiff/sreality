@@ -242,6 +242,12 @@ class _OtherCursor(_Cursor):
             self.conn.tx_state["lease"] = {k: dict(v) for k, v in self.conn.lease.items()}
 
 
+def _names_holder(sql: str) -> bool:
+    """Whether a lease statement's WHERE keys the row by `holder = %(holder)s`."""
+    where = sql.lower().split("where", 1)[-1]
+    return re.search(r"\bholder\s*=\s*%\(holder\)s", where) is not None
+
+
 def _aliases(sql: str) -> list[str]:
     return re.findall(r"\bAS\s+(\w+)", sql, re.I)
 
@@ -307,8 +313,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                                "expires_at": db.now + timedelta(seconds=int(p["ttl"]))}
         return [(p["holder"],)]
     if sql == S.RT_LEASE_RELEASE_SQL:
+        # The holder predicate is READ from the statement, never assumed (E941): a release that
+        # stopped naming its holder would end another writer's lease here as it would in
+        # Postgres, and the tests that pin "never another writer's row" would see it.
         held = db.lease.get(p["name"])
-        if held and held["holder"] == p["holder"]:
+        if held and (held["holder"] == p["holder"] or not _names_holder(sql)):
             held["expires_at"] = db.now
         return []
     if sql == S.RT_LEASE_READ_SQL:
@@ -316,8 +325,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return ([(held["holder"], held.get("taken_at"), held["expires_at"],
                   held["expires_at"] > db.now)] if held else [])
     if sql == S.RT_LEASE_HOLD_SQL:
+        # The fake has one clock, so `now()` against `clock_timestamp()` is the live test's to
+        # pin (tests/test_rt_lease_fence_live.py); the holder predicate is read from the text.
         held = db.lease.get(p["name"])
-        return ([(held["holder"],)] if held and held["holder"] == p["holder"]
+        return ([(held["holder"],)] if held and (held["holder"] == p["holder"]
+                                                 or not _names_holder(sql))
                 and held["expires_at"] > db.now else [])
 
     # ---------------------------------------------------------------- postings

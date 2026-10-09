@@ -7,6 +7,7 @@ reconcile (A9, E911) and the in-DB calibration (A10, E912) have their own sectio
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -1598,10 +1599,9 @@ def test_a_shutdown_after_the_commit_starts_no_merge(tmp_path, monkeypatch) -> N
 
 
 def test_a_shutdown_mid_reconcile_stops_it_before_its_next_group(tmp_path, monkeypatch) -> None:
-    """The reconcile checks its clock before every group; the pass hands it one that reads
-    +inf once the signal came, so it stops the way a spent deadline stops it."""
-    import math
-
+    """The REAL reconcile loop under the clock the pass hands it: the reconcile checks that
+    clock before every group, and it reads +inf once the signal came — so the group in flight
+    finishes, and the next is never attempted, as when the pass's time is spent."""
     from autodedup.incremental import bootstrap_key
     from autodedup.incremental_lane import run_incremental
     from tests.autodedup import lane_world
@@ -1610,19 +1610,34 @@ def test_a_shutdown_mid_reconcile_stops_it_before_its_next_group(tmp_path, monke
     lane_world.seed_lane(world, tmp_path)
     world.settings[bootstrap_key()] = False
     flag = {"stopping": False}
-    seen: dict = {}
-
-    def reconcile_run(*_args, **kwargs):
-        clock = kwargs["clock"]
-        seen["before"] = clock()
-        flag["stopping"] = True
-        seen["after"] = clock()
-        return {"counts": {"groups": 0}, "stopped": "the pass's time is spent"}
-
-    monkeypatch.setattr(reconcile, "run", reconcile_run)
+    handed: dict = {}
+    monkeypatch.setattr(reconcile, "run", lambda *a, **k: handed.update(k) or {
+        "counts": {"groups": 0}})
     run_incremental(lambda: world, stopping=lambda: flag["stopping"])
+    clock = handed["clock"]
+    monkeypatch.undo()
 
-    assert math.isfinite(seen["before"]) and math.isinf(seen["after"])
+    db = LaneDb()
+    db.live_scope()
+    for key in (10, 20, 30):
+        _pair_group(db, key, [key, key + 1], [key * 100, key * 100 + 1], gen=RT)
+        _read(db, key, key + 1)
+    calls: list = []
+    base = db.merge(calls)
+
+    def merge_then_signal(conn, ids, **kwargs):
+        out = base(conn, ids, **kwargs)
+        flag["stopping"] = True                    # SIGTERM while the first group merges
+        return out
+
+    out = reconcile.run(db, RT, [], run_id="rt:test", deadline=time.perf_counter() + 600,
+                        blocks=[BLOCK], merge=merge_then_signal, clock=clock,
+                        now=lambda: db.now)
+
+    assert len(calls) == 1, "one group merged, the next never attempted"
+    assert out["counts"]["applied"] == 1 and out["counts"]["not_attempted"] == 2
+    assert out["stopped"] == "the pass's time is spent"
+    assert db.listings[11]["property_id"] == 1000 and db.listings[21]["property_id"] == 2001
 
 
 # --------------------------------------------- E941: every writer is fenced, not only the pass
@@ -1813,3 +1828,16 @@ def test_a_signal_mid_pass_rolls_it_back_on_its_own_connection(tmp_path, monkeyp
     assert world.statements.count(RT_LEASE_RELEASE_SQL) == releases + 1
     assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
     assert world.settings_by[pass_rate_key("rt")].endswith(":halved_ahead"), "nothing after"
+
+
+def test_the_fence_reads_the_clock_and_locks_its_row() -> None:
+    """Offline half of tests/test_rt_lease_fence_live.py: `now()` is the transaction's START,
+    which a release written mid-transaction is later than — only the clock sees it — and the
+    row lock is what makes a release after the fence wait for the commit."""
+    from autodedup.incremental_sql import RT_LEASE_HOLD_SQL, RT_LEASE_RELEASE_SQL
+
+    hold = " ".join(RT_LEASE_HOLD_SQL.lower().split())
+    assert "expires_at > clock_timestamp()" in hold and "now()" not in hold
+    assert hold.endswith("for update")
+    assert "holder = %(holder)s::text" in hold
+    assert "holder = %(holder)s::text" in " ".join(RT_LEASE_RELEASE_SQL.lower().split())
