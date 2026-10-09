@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from autodedup.incremental_lane import (
+    BUILD_BYTES_PER_LISTING,
     CURSOR_ENTER,
     CURSOR_NEW,
     LANE_NAME,
@@ -266,6 +267,96 @@ def test_the_projection_subtracts_exactly_the_tables_the_reset_empties() -> None
     # `cluster_conflicts` carries its generation in `detail`, read as the reset reads it.
     assert "detail ->> 'generation' = %(generation)s::text" in S.RT_GENERATION_BYTES_SQL
     assert "detail ->> 'generation' = %(generation)s::text" in S.RT_FRESH_CLUSTER_CONFLICTS_SQL
+
+
+# ------------------------------------- the seed's second check: what it writes (E941)
+#
+# The first check reads the schema before the seed has written a row. The walk then writes the
+# scope's snapshot, the cut the pHash population of every photograph in it, and the build ~12 kB
+# for every listing the walk put in scope: a scope widened from 7k to 38k adverts was budgeted on
+# none of that.
+
+
+def test_the_seed_refuses_when_its_build_would_cross_the_budget(tmp_path) -> None:
+    """Under budget as it stands, over it once the build is counted: refused inside the seed's
+    transaction, so nothing the walk or the cut wrote survives, and the lease goes back."""
+    db = _with_public(FakePg())
+    in_scope = len(db.listings)
+    build_mb = in_scope * BUILD_BYTES_PER_LISTING / _MB
+    db.schema_bytes = int((MAX_SCHEMA_MB - build_mb / 2) * _MB)
+    with pytest.raises(SystemExit, match=f"build of the {in_scope:,} listings in scope") as raised:
+        run_rt_seed(lambda: db, dict(SCORER), tmp_path)
+
+    assert f"{MAX_SCHEMA_MB:.0f} MB MAX_SCHEMA_MB budget" in str(raised.value)
+    assert "rolls back" in str(raised.value)
+    assert db.rolled_back == 1
+    assert not db.scope_ids and not db.scope_scans, "the walk rolled back"
+    assert not db.phash_pop, "the cut's pHash population rolled back"
+    assert not db.calibration and not db.cursors
+    assert scope_setting_key(GEN) not in db.settings
+    assert db.lease[LANE_NAME]["expires_at"] <= db.now, "the lease went back"
+    assert S.RT_SCHEMA_SIZE_SQL in db.statements_in_tx, "re-read inside the transaction"
+
+
+def test_the_second_check_reads_the_schema_the_walk_and_the_cut_left(tmp_path,
+                                                                     monkeypatch) -> None:
+    """The schema AS IT NOW STANDS: what the snapshot and the pHash population added counts,
+    so a seed the first check let through is refused by what it wrote itself."""
+    from autodedup import incremental_lane
+
+    db = _with_public(FakePg())
+    db.schema_bytes = int((MAX_SCHEMA_MB - 5) * _MB)
+    original = incremental_lane.cut_calibration
+
+    def cut_that_writes(conn: FakePg, *args: Any, **kwargs: Any) -> Any:
+        conn.schema_bytes += 10 * _MB          # the population of a widened scope's photographs
+        return original(conn, *args, **kwargs)
+
+    monkeypatch.setattr(incremental_lane, "cut_calibration", cut_that_writes)
+    with pytest.raises(SystemExit, match="after the seed's walk and cut"):
+        run_rt_seed(lambda: db, dict(SCORER), tmp_path)
+    assert not db.calibration
+
+
+def test_a_seed_under_budget_reports_its_build_projection(tmp_path) -> None:
+    db = _with_public(FakePg())
+    db.schema_bytes = 300 * _MB
+    out = run_rt_seed(lambda: db, dict(SCORER), tmp_path)
+
+    build = out["storage_build"]
+    in_scope = out["calibration"]["scope_listings"]
+    assert build["build_listings"] == in_scope == len(db.listings)
+    assert build["build_mb"] == round(in_scope * BUILD_BYTES_PER_LISTING / _MB, 2)
+    assert build["projected_mb"] == round(300 + in_scope * BUILD_BYTES_PER_LISTING / _MB, 2)
+    assert "replaced_mb" not in build, "a seed that deletes nothing subtracts nothing"
+    assert out["storage"]["schema_mb"] == 300.0 and "projected_mb" not in out["storage"]
+
+
+def test_a_fresh_seeds_second_check_keeps_the_resets_projection(tmp_path) -> None:
+    """E916 holds through the second check: the reset's DELETE shrank no file and the
+    generation's share now reads as nothing, so the first check's `replaced_mb` is carried in
+    — a fresh seed is still never refused by the generation it replaces."""
+    db = _over_budget(_with_public(_populated(FakePg())), over_mb=40, generation_mb=100)
+    out = run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
+
+    build = out["storage_build"]
+    assert build["schema_mb"] == MAX_SCHEMA_MB + 40
+    assert build["replaced_mb"] == out["storage"]["replaced_mb"] == 100.0
+    assert build["projected_mb"] == round(MAX_SCHEMA_MB - 60 + build["build_mb"], 2)
+    assert S.RT_GENERATION_BYTES_SQL in db.statements
+    assert db.statements.count(S.RT_GENERATION_BYTES_SQL) == 1, "measured once, before the reset"
+
+
+def test_the_budget_is_sized_for_the_widened_scope() -> None:
+    """E941: ~38,000 adverts in scope (the trial, Nusle, Libeň and six towns) project ~840 MB
+    at the seed on the schema of 2026-10-09 — over E916's 800 — and the whole corpus stays a
+    separate decision."""
+    from autodedup.incremental_scope import CORPUS_PROJECTION_MB
+
+    projected = 464.3 + 60 - 129 + 38_000 * BUILD_BYTES_PER_LISTING / _MB
+    assert 800 < projected < MAX_SCHEMA_MB == 1200
+    assert BUILD_BYTES_PER_LISTING == 12 * 1024
+    assert MAX_SCHEMA_MB < CORPUS_PROJECTION_MB
 
 
 # ------------------------------------------------- a seed and a pass never overlap (the lease)

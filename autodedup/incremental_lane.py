@@ -350,22 +350,31 @@ MAX_RETIRE_FRACTION: float = 0.05
 # double it. `rt_scope = all` is gated by `CORPUS_PROJECTION_MB` (17,000) through
 # `guard_agrees`, and this budget stays far below it, so raising it never enables the corpus.
 #
-# 800 MB since E916 (was 400, set when the schema was ~148 MB). Measured and recorded:
-#   * the schema reads 442.9 MB (2026-09-26); `rt_storage_last` = 403,996,672 B = 385.3 MB is
-#     the WHOLE schema at the last pass (`record_storage` writes `schema_bytes`), not rt's own;
-#   * rt's live rows, last full trial build (W9m artefacts: 4,985 rt_fp, 87,624 fp_key, 13,759
-#     pairs) at the measured 2,869 B a pair and 236.8 B an index row: ~59 MB, ~12 kB a listing
-#     — the per-listing cost CORPUS_PROJECTION_MB is built on (~11-12 kB); arrivals add ~12 MB
-#     a month (E79's 20 %/month on 4,985 listings);
-#   * one batch generation: ~40 MB on the trial cohort (score_sql, measured 2026-09-20).
-# The trial's working set is rt twice over (a fresh rebuild writes before VACUUM frees what the
-# reset deleted) plus five batch generations (`keep_generations=4` and the one written before
-# its prune): 2 x 59 + 5 x 40 = ~320 MB. Today's 442.9 MB is above that because a DELETE never
-# shrinks a file: pruned and re-scored generations leave space Postgres reuses but does not
-# return, so the size is a high-water mark. 800 MB holds that mark plus the whole working set
-# written once more with none of it reused (442.9 + 320 = ~763 MB) and is still under double
-# today's schema (886 MB).
-MAX_SCHEMA_MB: float = 800.0
+# 1,200 MB since E941 (2026-10-09; 800 since E916, 400 before that), sized for the scope the
+# operator widens to this week: the trial blocks plus Praha-Nusle, Praha-Libeň and six towns
+# (Beroun, Pardubice, Hradec Králové, Jihlava, Humpolec, Havlíčkův Brod), ~38,000 located
+# adverts against 7,295 today. Measured and recorded (2026-10-09, read-only):
+#   * the schema reads 464.3 MB; generation `rt` holds ~129 MB of it (`generation_bytes`, the
+#     share a fresh reset frees: 25,609 pairs, 135,551 fp_key rows, 7,298 rt_fp);
+#   * the walk and the cut add ~60 MB at that scope (the snapshot and the pHash population,
+#     scaled from today's 2.2 MB and 9.4 MB for 7,295 adverts);
+#   * the build writes BUILD_BYTES_PER_LISTING an advert, ~445 MB for 38,000.
+# So the seed's second check (E941) projects 464 + 60 - 129 + 445 = ~840 MB (~970 MB were none
+# of the reset's space reused), and 1,200 leaves ~230-360 MB: about three months of the widened
+# scope's arrivals (~90 MB a month at E916's ~20 %/month), not a second widening. The whole town
+# is E946's (5,000 MB, once the operator has read the database's disk, D907).
+# 800 rested on E916's measurements, which still stand: rt's live rows at the last full trial
+# build (W9m artefacts: 4,985 rt_fp, 87,624 fp_key, 13,759 pairs) at 2,869 B a pair and 236.8 B
+# an index row were ~59 MB, ~12 kB a listing — the per-listing cost CORPUS_PROJECTION_MB is
+# built on; one batch generation is ~40 MB on the trial cohort; and a DELETE never shrinks a
+# file, so the schema's size is a high-water mark that pruned generations leave behind.
+MAX_SCHEMA_MB: float = 1200.0
+# What the build writes for ONE in-scope advert (its rt_fp row, its fp_key rows and its share
+# of the stored pairs): E916's ~12 kB, the projection the seed's second storage check adds per
+# listing in scope (E941). The live trial store reads 12-14 kB an advert by row cost
+# (2026-10-09: 25,609 pairs and 135,551 index rows over 7,298 adverts); the headroom above
+# holds the difference at 38,000.
+BUILD_BYTES_PER_LISTING: int = 12 * 1024
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
@@ -1711,7 +1720,8 @@ def generation_bytes(conn: Any, generation: str) -> dict[str, dict[str, int]]:
 
 def storage_guard(conn: Any, generation: str, scope: Scope,
                   max_schema_mb: float = MAX_SCHEMA_MB, *,
-                  replacing: bool = False) -> dict[str, Any]:
+                  replacing: bool = False, replaced_bytes: int | None = None,
+                  build_listings: int | None = None) -> dict[str, Any]:
     """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
     budget (E79) — non-zero, cursor unmoved, nothing written, never a warning in a log line.
     It also holds the second half of the whole-corpus gate: `all` is a scope only when the
@@ -1722,7 +1732,13 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
     (`generation_bytes`) — because the seed deletes exactly those rows before it writes one.
     A fresh seed can therefore never be refused by the generation it is about to drop, and is
     still refused when what REMAINS is over budget. A pass and a non-fresh seed check the
-    schema as it stands."""
+    schema as it stands.
+
+    `build_listings` is the seed's SECOND check (E941), inside its transaction after the walk
+    and the cut: the schema as it now stands — the snapshot and the pHash population the seed
+    just wrote included — plus what the build will write, `BUILD_BYTES_PER_LISTING` for every
+    listing in scope. A fresh seed hands in the first check's `replaced_bytes`: its reset's
+    DELETE shrank no file, and the generation's share of each table now reads as nothing."""
     bytes_now = schema_bytes(conn)
     mb = bytes_now / 1_048_576.0
     previous = lane_settings(conn, [STORAGE_WATERMARK]).get(STORAGE_WATERMARK) or {}
@@ -1736,16 +1752,37 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
         "scope": scope.as_json(),
     }
     checked_mb = mb
+    replaced: int | None = None
     if replacing:
         held = generation_bytes(conn, generation)
         replaced = sum(table["generation_bytes"] for table in held.values())
-        checked_mb = max(bytes_now - replaced, 0) / 1_048_576.0
-        report["replaced_mb"] = round(replaced / 1_048_576.0, 2)
-        report["projected_mb"] = round(checked_mb, 2)
         report["replaced_by_table_mb"] = {
             name: round(table["generation_bytes"] / 1_048_576.0, 3)
             for name, table in sorted(held.items())}
+    elif replaced_bytes is not None:
+        replaced = max(int(replaced_bytes), 0)
+    if replaced is not None:
+        checked_mb = max(bytes_now - replaced, 0) / 1_048_576.0
+        report["replaced_mb"] = round(replaced / 1_048_576.0, 2)
+    if build_listings is not None:
+        build = max(int(build_listings), 0) * BUILD_BYTES_PER_LISTING
+        checked_mb += build / 1_048_576.0
+        report["build_listings"] = max(int(build_listings), 0)
+        report["build_mb"] = round(build / 1_048_576.0, 2)
+    if replaced is not None or build_listings is not None:
+        report["projected_mb"] = round(checked_mb, 2)
     if checked_mb > float(max_schema_mb):
+        if build_listings is not None:
+            freed = (f", less the {report['replaced_mb']:.1f} MB of generation {generation!r} "
+                     "its reset deleted" if replaced is not None else "")
+            raise StorageRefusal(
+                f"after the seed's walk and cut, schema autodedup is {mb:.1f} MB{freed}; the "
+                f"build of the {report['build_listings']:,} listings in scope adds "
+                f"~{report['build_mb']:.1f} MB ({BUILD_BYTES_PER_LISTING // 1024} kB a "
+                f"listing), so the projected {checked_mb:.1f} MB is over the "
+                f"{float(max_schema_mb):.0f} MB MAX_SCHEMA_MB budget — refusing: the seed's "
+                "transaction rolls back and nothing was written. Narrow rt_scope, prune a "
+                "batch generation (score keep_generations=<n>) or raise the constant.")
         if replacing:
             raise StorageRefusal(
                 f"schema autodedup is {mb:.1f} MB and {report['replaced_mb']:.1f} MB of it is "
@@ -2280,8 +2317,10 @@ def run_rt_seed(
       3. release a named stale lease, if asked;
       4. take the lease (refuse while a pass holds it);
       5. ONE transaction: the reset (fresh only), the block walk, the calibration cut, the
-         cursors and the control rows. A refusal inside it rolls every row back, the reset's
-         included."""
+         SECOND storage check (E941: the schema as it now stands, less what a fresh reset
+         freed, plus `BUILD_BYTES_PER_LISTING` for every listing in scope — what the build
+         writes), the cursors and the control rows. A refusal inside it rolls every row back,
+         the reset's included."""
     unknown = sorted(set(args) - RT_SEED_ARGS)
     if unknown:
         raise SystemExit(f"unknown arg(s) {', '.join(unknown)}; allowed: "
@@ -2340,6 +2379,17 @@ def run_rt_seed(
                 cut = cut_calibration(conn, settings, model.version, generation)
             except CalibrationRefusal as exc:
                 raise SystemExit(f"{scope.label()!r}: {exc}") from exc
+            # E941: the first check saw the schema before this seed wrote a row. The walk and
+            # the cut have now written the snapshot and the pHash population, and the build
+            # will write ~12 kB for every listing they put in scope: refuse here, inside the
+            # transaction, so the reset, the walk and the cut roll back with the refusal.
+            try:
+                build_storage = storage_guard(
+                    conn, generation, scope, build_listings=int(cut["scope_listings"]),
+                    replaced_bytes=(int(round(float(storage["replaced_mb"]) * 1_048_576))
+                                    if fresh else None))
+            except StorageRefusal as exc:
+                raise SystemExit(str(exc)) from exc
             seeded = _rows(conn, RT_SEED_CURSORS_SQL)[0]
             _exec(conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_NEW, "last_listing_id": int(seeded[0]),
@@ -2384,6 +2434,7 @@ def run_rt_seed(
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,
+            "storage_build": build_storage,
             "lease_released": released,
             "spent_usd": 0.0,
         }
