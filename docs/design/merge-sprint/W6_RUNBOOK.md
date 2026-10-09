@@ -277,8 +277,10 @@ TARGETS="property_status_events assets asset_membership_events properties:id,ass
     - #1655 rebases.
     - #1634 removes its `listing_feed_public` reads (its 575 pre- and post-conditions) and takes a number above 593.
     Then mark W6 applied in PROGRAM.md §4, §5 and §6 and in `roadmap/merge-sprint.md`.
-19. **The sampler goes.** The reader hunt's per-minute job and its table (2026-10-08) are not part of the
-    schema: `select cron.unschedule('w6-feed-watch'); drop table if exists public.w6_feed_watch;`.
+19. **The sampler's table goes.** The reader hunt's per-minute job (2026-10-08/09) was unscheduled on
+    2026-10-09 once it had confirmed the reader; its unlogged table (41 MB) is not part of the schema:
+    `drop table if exists public.w6_feed_watch;`, then `select count(*) from cron.job where jobname = 'w6-feed-watch'`
+    must be 0.
 
 **If it stops halfway.** Every section is its own transaction (the concurrent index drops are their own
 statements), so a stop leaves a consistent partial state that nothing reads. Re-dispatch step 10 later.
