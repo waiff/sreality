@@ -2232,7 +2232,10 @@ renumber.** Navigate by area:
     to `delist_flip_refusals` (the row now means "deferred") and is alarmed by
     `verify_pipeline`'s `delist_flip_refused` — an Actions log expires, and a signal nothing can
     query is a signal nobody receives. There is no latch: the next walk re-nominates what was
-    deferred, so a real backlog drains in a few walks.
+    deferred, so a real backlog drains in a few walks. Its sibling `false_delist_share`
+    (2026-10-09) watches the hysteresis itself: per portal, the share of `flipped` ledger rows
+    (7 d) whose ad is active again — a revival after a confirmed verdict is a flip that was
+    wrong; warn ≥5%, fail ≥20%, under 50 flips unscored, no scored portal = unmeasured.
     **The threshold is 10% with a 2,000-row category floor, and it is MEASURED (migration 452).**
     Across 60 days and 11,763 flipping sweeps the per-sweep share of a category is p95 = 1.8%,
     p99 = 3.4%, and then the tail jumps straight to 86% — routine churn and genuine incidents are

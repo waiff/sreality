@@ -15,8 +15,10 @@ Independent of the analytical, UI, and map tracks.
   `gone_confirmed`; the drain records the first verdict (`detail_queue_completions` `gone`) and
   flips on a second unrefuted one the dwell later (`flipped`, migration 594). Deleted: sreality's
   HTML not-found body scan, `freshness._record_gone`'s own flip (nominates at VERIFY instead).
-- **Next:** `verify_pipeline` `false_delist_share` (the `flipped`-rows-active-again share per
-  portal); C2-2 (below) deletes the last legacy flip caller; one-off heal — re-verify the rows a
+- **Done (same day):** `verify_pipeline` `false_delist_share` — per portal, the share of `flipped`
+  ledger rows (7 d) active again; warn ≥5%, fail ≥20%, under 50 flips unscored, nothing scored =
+  unmeasured warn; 6 h lane + bell, not in the hourly `--only` list yet (soak, then promote).
+- **Next:** C2-2 (below) deletes the last legacy flip caller; one-off heal — re-verify the rows a
   single pre-594 verdict closed (sreality 10.7k, idnes 9.5k, bezrealitky 0.9k, remax 0.4k,
   mmreality 0.6k over 14 d) at VERIFY priority, pilot 25/portal then release.
 

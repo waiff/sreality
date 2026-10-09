@@ -264,7 +264,7 @@ walk that REACHED THE PORTAL'S END (`portal.walk_reached_end`: every unit walked
 on a portal terminator, no stop of ours) nominates every active row it did not see (`VERIFY cm=…
 candidates=… queued=… deferred=…`); the drain fetches each page; a positive gone signal (404/410, redirect off the listing,
 "no longer active" text → `ListingGoneError`) is recorded (`detail_queue_completions` `gone`) and flips it (`flipped`) only when
-an earlier verdict ≥ `GONE_DWELL` (12 h) stands unrefuted (2026-10-09, portals blink; RUN `pending=`); a live page refreshes it. The COUNT never vetoes — a short walk that reached the end
+an earlier verdict ≥ `GONE_DWELL` (12 h) stands unrefuted (2026-10-09, portals blink; RUN `pending=`; Health `false_delist_share`); a live page refreshes it. The COUNT never vetoes — a short walk that reached the end
 nominates and logs `COVERAGE`. No absence sweep, no staleness rail; `delist_flip_cap` throttles per
 walk ONLY above its 2,000-active-row floor (`VERIFY DEFERRED`, in `delist_flip_refusals`); the page must be the row's OWN (a `detail_ref`
 naming another id is dropped). Stop-reason vocabulary: `references/coverage-and-delisting.md`.
