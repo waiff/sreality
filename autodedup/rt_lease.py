@@ -43,6 +43,10 @@ def release(conn: Any, holder: str) -> None:
         cur.execute(RT_LEASE_RELEASE_SQL, {"name": NAME, "holder": holder})
 
 
+# The outcome a run reports when its lease ended under it (E941).
+LEASE_LOST: str = "lease_lost"
+
+
 class LeaseLost(Exception):
     """The holder's lease ended while its run still ran — released by the worker's shutdown
     (E941) or by a `release_lease=` dispatch that took the holder for dead."""

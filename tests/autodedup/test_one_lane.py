@@ -1586,3 +1586,132 @@ def test_a_shutdown_mid_reconcile_stops_it_before_its_next_group(tmp_path, monke
     run_incremental(lambda: world, stopping=lambda: flag["stopping"])
 
     assert math.isfinite(seen["before"]) and math.isinf(seen["after"])
+
+
+# --------------------------------------------- E941: every writer is fenced, not only the pass
+
+
+def test_a_lease_lost_mid_reconcile_rolls_the_group_back_and_stops() -> None:
+    """Each group merges in its own transaction, and each ends with the lane's lease check:
+    the group whose check finds the lease gone (the worker's shutdown, a `release_lease=`
+    dispatch) rolls back whole and files nothing — no `failed` row without the lease — and
+    nothing after it is attempted."""
+    from autodedup import rt_lease
+
+    db = LaneDb()
+    db.live_scope()
+    for key in (10, 20, 30):
+        _pair_group(db, key, [key, key + 1], [key * 100, key * 100 + 1], gen=RT)
+        _read(db, key, key + 1)
+    calls: list = []
+    checks: list = []
+
+    def fence(conn) -> None:
+        checks.append(conn)
+        if len(checks) >= 2:
+            raise rt_lease.LeaseLost("autodedup.rt_lease is no longer held by 'worker:1:1'")
+
+    out = reconcile.run(db, RT, [], run_id="rt:test", deadline=10 ** 9, blocks=[BLOCK],
+                        merge=db.merge(calls), clock=lambda: 0.0, now=lambda: db.now,
+                        fence=fence)
+
+    assert out["stopped"] == "lease_lost"
+    assert (out["counts"]["applied"], out["counts"]["failed"],
+            out["counts"]["not_attempted"]) == (1, 0, 2)
+    assert db.listings[11]["property_id"] == 1000, "the first group merged under the lease"
+    assert db.listings[21]["property_id"] == 2001, "the second rolled back whole"
+    assert [r["outcome"] for r in db.ledger] == ["applied"], "and filed nothing"
+    assert len(calls) == 2 and len(checks) == 2, "the third was never attempted"
+
+
+def test_a_skip_filed_at_apply_is_fenced_too() -> None:
+    """The re-check's skip row is a write of its own transaction: without the lease it is not
+    filed either, and the run stops."""
+    from autodedup import rt_lease
+
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+
+    def merge_never(*_a, **_k):
+        raise AssertionError("the re-check skips before the chokepoint")
+
+    def gone(conn) -> None:
+        raise rt_lease.LeaseLost("gone")
+
+    scope = AP.effective_scope(db.settings[AP.SCOPE_SETTING], {}, live=True)
+    (planned,) = AP.plan_apply(db, RT, scope).to_apply
+    db.listing(11, 999)                       # moved since the plan: the re-check skips it
+
+    with pytest.raises(rt_lease.LeaseLost):
+        AP.apply_group(db, planned, scope, run_id="rt:test", generation=RT, merge=merge_never,
+                       fence=gone)
+    assert not db.ledger, "no skip row without the lease"
+
+
+def test_the_pass_hands_its_reconcile_and_its_re_cut_the_lease_check(tmp_path,
+                                                                      monkeypatch) -> None:
+    """The fence the reconcile gets is the pass's own: its holder's live row. And the re-cut —
+    the calibration rewritten after the pass committed — ends its transaction with it too."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental import bootstrap_key
+    from autodedup.incremental_lane import run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    world.settings[bootstrap_key()] = False
+    seen: dict = {}
+
+    def reconcile_run(*_a, **kwargs):
+        fence = kwargs["fence"]
+        with world.transaction():
+            fence(world)                                   # held: passes
+        rt_lease.release(world.other_session(), "worker:1:1")
+        with pytest.raises(rt_lease.LeaseLost), world.transaction():
+            fence(world)
+        rt_lease.take(world.other_session(), "worker:1:1", 2_400)   # back, for the re-cut
+        seen["fenced"] = True
+        return {"counts": {"groups": 0}}
+
+    original_cut = incremental_lane.cut_calibration
+
+    def cut_while_the_lease_ends(conn, *args, **kwargs):
+        out = original_cut(conn, *args, **kwargs)
+        rt_lease.release(world.other_session(), "worker:1:1")
+        return out
+
+    monkeypatch.setattr(reconcile, "run", reconcile_run)
+    monkeypatch.setattr(incremental_lane, "cut_calibration", cut_while_the_lease_ends)
+    monkeypatch.setattr(incremental_lane, "COVERAGE_FLOOR", 1.5)     # force the re-cut
+    monkeypatch.setattr(incremental_lane, "RECUT_MIN_IMAGES", 1)
+    monkeypatch.setattr(incremental_lane, "RECUT_MIN_AGE_H", 0.0)
+    digest = world.calibration["rt"]["digest"]
+
+    out = run_incremental(lambda: world, holder="worker:1:1")
+
+    assert seen == {"fenced": True}
+    assert out["recut"]["skipped"].startswith("LeaseLost"), out.get("recut")
+    assert world.calibration["rt"]["digest"] == digest, "the re-cut rolled back"
+
+
+def test_a_reconcile_that_lost_the_lease_ends_the_passs_writes(tmp_path, monkeypatch) -> None:
+    """After a reconcile stopped by its fence the lane is someone else's: no measured rate, no
+    re-cut, no storage watermark — as after the shutdown signal."""
+    from autodedup.incremental import bootstrap_key
+    from autodedup.incremental_lane import STORAGE_WATERMARK, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    world.settings[bootstrap_key()] = False
+    world.settings[pass_rate_key("rt")] = 0.0001       # a measured pass would write "rate"
+    monkeypatch.setattr(reconcile, "run", lambda *a, **k: {
+        "counts": {"groups": 3, "not_attempted": 2}, "stopped": "lease_lost"})
+
+    out = run_incremental(lambda: world, holder="worker:1:1")
+
+    assert out["reconcile"]["stopped"] == "lease_lost"
+    assert not world.settings_by[pass_rate_key("rt")].endswith(":rate")
+    assert STORAGE_WATERMARK not in world.settings

@@ -242,7 +242,7 @@ PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
 SEED_MISMATCH: str = "seed_version"
 # E941: a pass that sees the worker shutting down, and one whose lease ended under it.
 STOPPING: str = "stopping"
-LEASE_LOST: str = "lease_lost"
+LEASE_LOST: str = rt_lease.LEASE_LOST
 STORAGE_WATERMARK: str = "rt_storage_last"
 # THE ONE CLAIM BOUND (E75): how many listings a pass may claim before the time budget cuts it.
 PASS_LIMITS: Limits = Limits(max_listings=500, max_component=400)
@@ -2314,15 +2314,25 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                 conn, generation, result.cluster_keys if result is not None else [],
                 run_id=f"{reconcile.RUN_PREFIX}{holder}", deadline=deadline,
                 blocks=[block.key for block in work.enter_blocks],
-                clock=_pass_clock(shutting_down))
+                clock=_pass_clock(shutting_down),
+                # E941: every group's transaction ends with the pass's lease check, so a lease
+                # released after the pass committed stops the merges at the next group.
+                fence=lambda group_conn: rt_lease.hold(group_conn, holder))
             # What the reconcile cost inside the pass, so G2's rate is read with it in (B3).
             summary["reconcile"]["seconds"] = round(time.perf_counter() - reconcile_started, 3)
         elapsed = time.perf_counter() - started
-        if not stopped and result is not None and not shutting_down():
+        # E941: a reconcile whose fence found the lease gone means the lane is someone else's
+        # now — the pass writes nothing more, as after the shutdown signal.
+        lost = (summary.get("reconcile") or {}).get("stopped") == LEASE_LOST
+
+        def owns_the_lane() -> bool:
+            return not lost and not shutting_down()
+
+        if not stopped and result is not None and owns_the_lane():
             # The pass committed: its measurement replaces the half written ahead, blended
             # with the rate it started from; a pass that claimed too little to measure itself
             # (an idle one) puts that rate back, since nothing about it said to slow down.
-            # Not once the worker is shutting down: the next holder's rows are not its own.
+            # Not once the lane is not its own: the next holder's rows are not its to write.
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
                                      work.claim_bound)
             if measured is not None:
@@ -2345,7 +2355,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         # A10: the population has drifted — re-cut the calibration, atomically, inside what
         # is left of the pass's own time (every statement bounded by it); a cut that runs out
         # rolls back and the next pass re-tries it.
-        if (not stopped and not shutting_down() and coverage is not None
+        if (not stopped and owns_the_lane() and coverage is not None
                 and coverage < COVERAGE_FLOOR
                 and facts.images_with_phash >= RECUT_MIN_IMAGES
                 and (age_h is None or age_h >= RECUT_MIN_AGE_H)
@@ -2354,6 +2364,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                 with _transaction(conn):
                     summary["recut"] = cut_calibration(conn, settings, model.version,
                                                        generation, deadline=deadline)
+                    rt_lease.hold(conn, holder)       # E941: the re-cut is a write too
             except Exception as exc:  # noqa: BLE001 — best effort: the pass already committed
                 summary["recut"] = {"skipped": f"{type(exc).__name__}: {exc}"[:300]}
         summary["fact_reads"] = facts.reads
@@ -2391,7 +2402,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "pass_growth_mb": round(
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
         }
-        if not shutting_down():
+        if owns_the_lane():
             record_storage(conn, generation, after_bytes)
         summary["peak_rss_mb"] = peak_rss_mb()
         return summary
