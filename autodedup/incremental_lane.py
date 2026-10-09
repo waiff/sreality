@@ -2107,25 +2107,29 @@ def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
 
 
 def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
-                 rate_per_s: float, holder: str, original: BaseException) -> None:
+                 rate_per_s: float, holder: str, original: BaseException, *,
+                 halve: bool = True) -> None:
     """What a pass that RAISED still owes, on ONE connection: E913's halving (E930) and its
     lease's release (E931). Through `fresh_conn` when the caller gave one — the pass's own
     connection may be the one the server terminated, and a lease that connection cannot
     release sits until its TTL, skipping every pass of the next ~35 min as "leased" — else on
     `conn`. The release tries the pass's own connection first and the fresh one only when
     that fails, so a live pass releases the way every other end of a run does. Best effort:
-    a failure is noted on `original` rather than replacing it — the raise is the signal."""
+    a failure is noted on `original` rather than replacing it — the raise is the signal.
+    `halve=False` once the worker is shutting down (E941): the release still runs, and the
+    rate row is left as it stands, the half written ahead of the pass."""
     fresh: Any = None
     try:
         try:
             if fresh_conn is not None:
                 fresh = fresh_conn()
-            _write_rate(fresh if fresh is not None else conn, generation, rate_per_s / 2.0,
-                        "halved")
+            if halve:
+                _write_rate(fresh if fresh is not None else conn, generation,
+                            rate_per_s / 2.0, "halved")
         except Exception as exc:  # noqa: BLE001 — best effort
             original.add_note(f"halving {pass_rate_key(generation)} after the raise also "
                               f"failed ({type(exc).__name__}: {exc}); the next pass claims "
-                              "the same size")
+                              "the half written ahead of it")
         rt_lease.release_after(conn, holder, original, fallback=fresh)
     finally:
         close = getattr(fresh, "close", None)
@@ -2158,10 +2162,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     `holder` names the lease the pass takes (`pass_holder()` when the caller names none) and
     `stopping` says the caller is shutting down (E941): the worker's SIGTERM path releases
     THAT holder's lease on a fresh connection at once, so a pass that sees `stopping` takes no
-    lease, gives back one it just took, skips the reconcile (or stops it before its next group)
-    and the re-cut, and writes no rate or watermark row; and the pass's transaction ends with
-    `rt_lease.hold` — a pass whose lease was released under it rolls back instead of committing
-    beside the next holder."""
+    lease, gives back one it just took, stops at its next deadline checkpoint (`PassStopped`,
+    rolled back on its own connection), skips the reconcile (or stops it before its next
+    group) and the re-cut, and writes no rate or watermark row. Every transaction the lane
+    writes in — the pass's, each reconcile group's, the re-cut's — ends with `rt_lease.hold`:
+    one whose lease was released under it rolls back instead of committing beside the next
+    holder. Not fenced: the reconcile's planning writes (its sweep cursor, its skipped-group
+    rows), which a signal landing between the pass's commit and the first group lets through."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2277,7 +2284,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             # The transaction rolled back on the way out: nothing written, no cursor moved. A
             # refusal never halves (E930): it repeats until the operator acts, and halving it
             # every tick would wedge the claim at one advert — so the rate halved ahead goes back.
-            _put_back_rate(conn, generation, rate_per_s, exc)
+            if not shutting_down():
+                _put_back_rate(conn, generation, rate_per_s, exc)
             raise SystemExit(str(exc)) from exc
         except Exception as exc:
             # E930: the pass RAISED (a backend the server terminated, a cancelled statement, a
@@ -2290,7 +2298,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             # the next passes were skipped "leased" for up to ~35 min. Settled here on both
             # counts — attempted on the pass's connection, then the fresh one, and noted on
             # the raise when neither could — so the `finally` releases nothing twice.
-            _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc)
+            _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc,
+                         halve=not shutting_down())
             leased = False
             raise
         if stopped and not shutting_down():

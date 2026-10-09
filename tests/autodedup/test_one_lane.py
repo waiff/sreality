@@ -1841,3 +1841,35 @@ def test_the_fence_reads_the_clock_and_locks_its_row() -> None:
     assert hold.endswith("for update")
     assert "holder = %(holder)s::text" in hold
     assert "holder = %(holder)s::text" in " ".join(RT_LEASE_RELEASE_SQL.lower().split())
+
+
+@pytest.mark.parametrize("raised", ["raise", "refusal"])
+def test_after_the_signal_a_raise_or_a_refusal_writes_no_rate(tmp_path, monkeypatch,
+                                                              raised: str) -> None:
+    """E930's halving after a raise and the refusal's put-back are rate writes too: once the
+    signal came they are skipped — the next holder's row is not this pass's — and the lease
+    is still released."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental_lane import (PASS_RATE_PER_S, RetireRefusal, pass_rate_key,
+                                            run_incremental)
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    flag = {"stopping": False}
+
+    def signal_then_fail(*_a, **_k):
+        flag["stopping"] = True
+        if raised == "raise":
+            raise RuntimeError("canceling statement due to lock timeout")
+        raise RetireRefusal("the sweep wants to retire too much")
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", signal_then_fail)
+    expected = RuntimeError if raised == "raise" else SystemExit
+    with pytest.raises(expected):
+        run_incremental(lambda: world, holder="worker:1:1", fresh_conn=lambda: world,
+                        stopping=lambda: flag["stopping"])
+
+    assert world.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert world.settings_by[pass_rate_key("rt")].endswith(":halved_ahead")
+    assert rt_lease.current(world)["live"] is False, "released all the same"
