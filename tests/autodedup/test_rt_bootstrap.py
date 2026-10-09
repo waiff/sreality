@@ -156,6 +156,17 @@ def _with_public(db: FakePg) -> FakePg:
     return db
 
 
+def test_a_seed_naming_a_quarter_beside_its_town_writes_nothing(tmp_path) -> None:
+    """E941, proved at SEED time as the missing parent is: the refusal comes before the
+    storage guard, the lease and the reset."""
+    db = _with_public(_populated(FakePg()))
+    with pytest.raises(SystemExit, match="cast_obce:490245 beside its own town obec:554782"):
+        run_rt_seed(lambda: db, {"fresh": "true", "rt_scope": "obec:554782 cast_obce:490245",
+                                 **SCORER}, tmp_path)
+    assert (GEN, 11, 12) in db.pairs, "nothing was reset"
+    assert db.lease[LANE_NAME]["holder"] == "someone", "and no lease was taken"
+
+
 def test_a_seeded_generation_is_rebuilt_only_with_fresh(tmp_path) -> None:
     db = _with_public(_populated(FakePg()))
     with pytest.raises(SystemExit, match="fresh=true"):

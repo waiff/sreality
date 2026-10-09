@@ -1627,7 +1627,11 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
     """Each quarter block's parent obec, read once a pass from the RÚIAN register (W9d-3).
 
     A quarter the register cannot place is a hard error rather than a block the entrant sweep
-    quietly never walks — silent partial coverage is the defect this feed exists to close."""
+    quietly never walks — silent partial coverage is the defect this feed exists to close. So
+    is a quarter beside its own town (E941): the town's block already holds every advert of
+    the quarter, so the snapshot would carry them twice, and the reconcile, which waits for
+    every block holding a group's adverts to be read whole (`block_not_fully_read`), would tie
+    the quarter's merges to the whole town's walk."""
     codes = [int(code) for code in scope.cast_obce_codes]
     if scope.whole_corpus or not codes:
         return {}
@@ -1638,6 +1642,16 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
         raise ScopeError(
             f"rt_scope names cast_obce {missing} which public.ruian_admin_units has no obec "
             "parent for — refusing to run a scope the entrant sweep cannot walk")
+    towns = set(scope.obec_codes)
+    beside = [code for code in codes if found[code] in towns]
+    if beside:
+        raise ScopeError(
+            "rt_scope names " + ", ".join(f"cast_obce:{code}" for code in beside)
+            + " beside its own town " + ", ".join(sorted({f"obec:{found[code]}"
+                                                          for code in beside}))
+            + " — the town's block already holds every advert of the quarter, so they would "
+            "be snapshotted twice and the quarter's merges would wait on the whole town's "
+            "walk. Name the town or the quarter, not both")
     return found
 
 
