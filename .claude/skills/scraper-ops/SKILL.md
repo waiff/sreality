@@ -393,7 +393,7 @@ Per-lane notes:
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 - **Autodedup lane** (AUTODEDUP §7.3/E914, mig 557) — THE engine's one real-time pass (`run_incremental`); one integer
   `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running) is cadence AND brake, claim = engine rate × half a 1050 s deadline, rate
-  halved per trip; `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share its `autodedup.rt_lease`; no GH schedule.
+  halved BEFORE every pass, re-measured or restored after it (E941: a killed pass still halves); `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share its `autodedup.rt_lease`; no GH schedule. A deploy's SIGTERM releases the in-flight pass's lease at once on a fresh connection (`railway.worker.json` `drainingSeconds` 30; the pass's fence `rt_lease.hold` rolls it back, `last.aborted = lease_lost`); `last.peak_rss_mb` = the process's peak memory (E941).
 
 ## Pipeline verification (migration 274)
 
