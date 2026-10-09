@@ -2165,14 +2165,17 @@ def run_incremental(conn_factory: Callable[[], Any], *,
 
     `holder` names the lease the pass takes (`pass_holder()` when the caller names none) and
     `stopping` says the caller is shutting down (E941): the worker's SIGTERM path releases
-    THAT holder's lease on a fresh connection at once, so a pass that sees `stopping` takes no
-    lease, gives back one it just took, stops at its next deadline checkpoint (`PassStopped`,
-    rolled back on its own connection), skips the reconcile (or stops it before its next
-    group) and the re-cut, and writes no rate or watermark row. Every transaction the lane
-    writes in — the pass's, each reconcile group's, the re-cut's — ends with `rt_lease.hold`:
-    one whose lease was released under it rolls back instead of committing beside the next
-    holder. Not fenced: the reconcile's planning writes (its sweep cursor, its skipped-group
-    rows), which a signal landing between the pass's commit and the first group lets through."""
+    THAT holder's lease on a fresh connection at once (after cancelling a statement the pass is
+    running), so a pass that sees `stopping` takes no lease, gives back one it just took, stops
+    at its next deadline checkpoint (`PassStopped`, rolled back on its own connection) and
+    returns at once so the `finally` releases its lease, skips the reconcile (or stops it
+    before its next group) and the re-cut (or stops it at its next checkpoint), and writes no
+    rate or watermark row — nor after a reconcile or re-cut its fence stopped. Every
+    transaction the lane writes in — the pass's, each reconcile group's, the re-cut's — ends
+    with `rt_lease.hold`: one whose lease was released under it rolls back instead of
+    committing beside the next holder. Not fenced: the reconcile's planning writes (its sweep
+    cursor, its skipped-group rows), which a signal landing between the pass's commit and the
+    first group lets through."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
