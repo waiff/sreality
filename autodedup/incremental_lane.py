@@ -32,14 +32,21 @@ lane calls no provider; `spent_usd` is reported as a measured 0, not as a foreca
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
+import sys
 import time
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Iterator, Mapping, Sequence
+
+try:
+    import resource
+except ImportError:  # pragma: no cover — no getrusage outside Unix
+    resource = None  # type: ignore[assignment]
 
 from autodedup import reconcile, rt_lease
 from autodedup.dataset import Image, Listing
@@ -82,6 +89,7 @@ from autodedup.incremental import (
     Limits,
     PairRow,
     PassDeadline,
+    PassStopped,
     SET_CAP,
     WorkItem,
     _in_time,
@@ -233,6 +241,9 @@ SCOPE_SETTING: str = "rt_scope"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
 # The reconcile's skip over a generation no seed of this design built.
 SEED_MISMATCH: str = "seed_version"
+# E941: a pass that sees the worker shutting down, and one whose lease ended under it.
+STOPPING: str = "stopping"
+LEASE_LOST: str = rt_lease.LEASE_LOST
 STORAGE_WATERMARK: str = "rt_storage_last"
 # THE ONE CLAIM BOUND (E75): how many listings a pass may claim before the time budget cuts it.
 PASS_LIMITS: Limits = Limits(max_listings=500, max_component=400)
@@ -326,7 +337,9 @@ BOOTSTRAP_MIN_CLAIM: int = 1
 # `rt_pass_rate_per_s:<generation>`, and the next pass claims at most `budget x rate`. The
 # budget is half the deadline, so a pass may run twice as slow as its measured rate before the
 # deadline stops it. The default rate is the one measurement taken before any was recorded — a
-# conservative start the second pass corrects.
+# conservative start the second pass corrects. The row is halved BEFORE every pass, put back as
+# soon as the pass commits and then overwritten by its measurement (E941), so a pass the system
+# kills mid-way has already halved the next claim.
 PASS_BUDGET_S: float = PASS_DEADLINE_S / 2
 PASS_RATE_PER_S: float = 0.1
 # A rate is only recorded when the pass actually claimed enough for the quotient to mean
@@ -350,22 +363,31 @@ MAX_RETIRE_FRACTION: float = 0.05
 # double it. `rt_scope = all` is gated by `CORPUS_PROJECTION_MB` (17,000) through
 # `guard_agrees`, and this budget stays far below it, so raising it never enables the corpus.
 #
-# 800 MB since E916 (was 400, set when the schema was ~148 MB). Measured and recorded:
-#   * the schema reads 442.9 MB (2026-09-26); `rt_storage_last` = 403,996,672 B = 385.3 MB is
-#     the WHOLE schema at the last pass (`record_storage` writes `schema_bytes`), not rt's own;
-#   * rt's live rows, last full trial build (W9m artefacts: 4,985 rt_fp, 87,624 fp_key, 13,759
-#     pairs) at the measured 2,869 B a pair and 236.8 B an index row: ~59 MB, ~12 kB a listing
-#     — the per-listing cost CORPUS_PROJECTION_MB is built on (~11-12 kB); arrivals add ~12 MB
-#     a month (E79's 20 %/month on 4,985 listings);
-#   * one batch generation: ~40 MB on the trial cohort (score_sql, measured 2026-09-20).
-# The trial's working set is rt twice over (a fresh rebuild writes before VACUUM frees what the
-# reset deleted) plus five batch generations (`keep_generations=4` and the one written before
-# its prune): 2 x 59 + 5 x 40 = ~320 MB. Today's 442.9 MB is above that because a DELETE never
-# shrinks a file: pruned and re-scored generations leave space Postgres reuses but does not
-# return, so the size is a high-water mark. 800 MB holds that mark plus the whole working set
-# written once more with none of it reused (442.9 + 320 = ~763 MB) and is still under double
-# today's schema (886 MB).
-MAX_SCHEMA_MB: float = 800.0
+# 1,500 MB since E941 (2026-10-09; 800 since E916, 400 before that; MB here are MiB, as the
+# guard computes them), sized for the S1 scope the operator widened on 2026-10-09: the trial
+# blocks plus Praha-Nusle, Praha-Libeň and six towns (Beroun, Pardubice, Hradec Králové,
+# Jihlava, Humpolec, Havlíčkův Brod), ~38,000 located adverts against 7,298 in the store.
+# Measured and recorded (2026-10-09, read-only):
+#   * the schema reads 464.3 MB; generation `rt` holds 129.2 MB of it (`generation_bytes`, the
+#     share a fresh reset frees);
+#   * the walk and the cut add ~60 MB at that scope (the snapshot and the pHash population,
+#     scaled from today's 2.2 and 9.4 MB for 7,295 adverts);
+#   * the build writes BUILD_BYTES_PER_LISTING an advert, ~668 MB for 38,000.
+# So the seed's second check (E941) projects 464 + 60 - 129 + 668 = ~1,063 MB (~1,190 MB were
+# none of the reset's space reused), and 1,500 leaves ~310-440 MB: about three months of the
+# widened scope's arrivals (~95-135 MB a month: E939's Prague rate scaled to 38,000 adverts, or
+# E79's ~20 % of the store a month at 18 KiB), not a second widening. The whole town is
+# E946's (5,000 MB, once the operator has read the database's disk, D907). 800 rested on
+# E916's trial measurements; a DELETE never shrinks a file, so the schema's size is a
+# high-water mark that pruned generations leave behind.
+MAX_SCHEMA_MB: float = 1500.0
+# What the build writes for ONE in-scope advert — its rt_fp row, its fp_key rows, its share of
+# the stored pairs and of the groups — at what the live store costs, not at E916's row bytes:
+# on 2026-10-09 generation `rt` held 129.2 MB for 7,298 adverts, 18.1 KiB an advert (its
+# 25,609 pairs 100.8 MB, 14.1 KiB an advert: 3.5 pairs an advert at ~4.1 kB each on disk with
+# their indexes, TOAST and reused dead space apportioned; fp_key 2.8 KiB). E916's ~12 kB was
+# the trial build's row cost (2.76 pairs an advert at 2,869 B).
+BUILD_BYTES_PER_LISTING: int = 18 * 1024
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
@@ -927,14 +949,17 @@ class SqlFacts:
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
                  population: Mapping[int, int] | None = None,
-                 deadline: float | None = None) -> None:
+                 deadline: float | None = None,
+                 stopping: Callable[[], bool] | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
         # The pass's own deadline (a `time.perf_counter()` instant, E913), read between the
         # FACT_CHUNK slices of every read (E931): a slow read is four statement sets of up to
         # STATEMENT_TIMEOUT_MS a slice, and the pass reads its clock nowhere else until the
-        # step after. The cut bounds its own reads (`_cut_bound`) and leaves this unset.
+        # step after. The cut bounds its own reads (`_cut_bound`) and leaves this unset. The
+        # worker's shutdown is read at the same place (E941: `PassStopped`).
         self.deadline = deadline
+        self.stopping = stopping
         # A population handed in INSTEAD of the table, for the one caller that is about to
         # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
         # builds the fingerprints it is cut from on exactly those counts. The pass never
@@ -964,7 +989,7 @@ class SqlFacts:
         it the read stops at a slice boundary and raises `PassDeadline` for the pass's
         transaction to roll back, as the pass's own between-step checks do."""
         for start in range(0, len(ids), FACT_CHUNK):
-            _in_time(self.deadline)
+            _in_time(self.deadline, self.stopping)
             yield list(ids[start:start + FACT_CHUNK])
 
     def _dicts_over(self, sql: str, ids: Sequence[int], **params: Any) -> list[dict[str, Any]]:
@@ -1618,7 +1643,11 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
     """Each quarter block's parent obec, read once a pass from the RÚIAN register (W9d-3).
 
     A quarter the register cannot place is a hard error rather than a block the entrant sweep
-    quietly never walks — silent partial coverage is the defect this feed exists to close."""
+    quietly never walks — silent partial coverage is the defect this feed exists to close. So
+    is a quarter beside its own town (E941): the town's block already holds every advert of
+    the quarter, so the snapshot would carry them twice, and the reconcile, which waits for
+    every block holding a group's adverts to be read whole (`block_not_fully_read`), would tie
+    the quarter's merges to the whole town's walk."""
     codes = [int(code) for code in scope.cast_obce_codes]
     if scope.whole_corpus or not codes:
         return {}
@@ -1629,6 +1658,16 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
         raise ScopeError(
             f"rt_scope names cast_obce {missing} which public.ruian_admin_units has no obec "
             "parent for — refusing to run a scope the entrant sweep cannot walk")
+    towns = set(scope.obec_codes)
+    beside = [code for code in codes if found[code] in towns]
+    if beside:
+        raise ScopeError(
+            "rt_scope names " + ", ".join(f"cast_obce:{code}" for code in beside)
+            + " beside its own town " + ", ".join(sorted({f"obec:{found[code]}"
+                                                          for code in beside}))
+            + " — the town's block already holds every advert of the quarter, so they would "
+            "be snapshotted twice and the quarter's merges would wait on the whole town's "
+            "walk. Name the town or the quarter, not both")
     return found
 
 
@@ -1711,7 +1750,8 @@ def generation_bytes(conn: Any, generation: str) -> dict[str, dict[str, int]]:
 
 def storage_guard(conn: Any, generation: str, scope: Scope,
                   max_schema_mb: float = MAX_SCHEMA_MB, *,
-                  replacing: bool = False) -> dict[str, Any]:
+                  replacing: bool = False, replaced_bytes: int | None = None,
+                  build_listings: int | None = None) -> dict[str, Any]:
     """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
     budget (E79) — non-zero, cursor unmoved, nothing written, never a warning in a log line.
     It also holds the second half of the whole-corpus gate: `all` is a scope only when the
@@ -1722,7 +1762,13 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
     (`generation_bytes`) — because the seed deletes exactly those rows before it writes one.
     A fresh seed can therefore never be refused by the generation it is about to drop, and is
     still refused when what REMAINS is over budget. A pass and a non-fresh seed check the
-    schema as it stands."""
+    schema as it stands.
+
+    `build_listings` is the seed's SECOND check (E941), inside its transaction after the walk
+    and the cut: the schema as it now stands — the snapshot and the pHash population the seed
+    just wrote included — plus what the build will write, `BUILD_BYTES_PER_LISTING` for every
+    listing in scope. A fresh seed hands in the first check's `replaced_bytes`: its reset's
+    DELETE shrank no file, and the generation's share of each table now reads as nothing."""
     bytes_now = schema_bytes(conn)
     mb = bytes_now / 1_048_576.0
     previous = lane_settings(conn, [STORAGE_WATERMARK]).get(STORAGE_WATERMARK) or {}
@@ -1736,16 +1782,38 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
         "scope": scope.as_json(),
     }
     checked_mb = mb
+    replaced: int | None = None
     if replacing:
         held = generation_bytes(conn, generation)
         replaced = sum(table["generation_bytes"] for table in held.values())
-        checked_mb = max(bytes_now - replaced, 0) / 1_048_576.0
-        report["replaced_mb"] = round(replaced / 1_048_576.0, 2)
-        report["projected_mb"] = round(checked_mb, 2)
         report["replaced_by_table_mb"] = {
             name: round(table["generation_bytes"] / 1_048_576.0, 3)
             for name, table in sorted(held.items())}
+    elif replaced_bytes is not None:
+        replaced = max(int(replaced_bytes), 0)
+    if replaced is not None:
+        checked_mb = max(bytes_now - replaced, 0) / 1_048_576.0
+        report["replaced_mb"] = round(replaced / 1_048_576.0, 2)
+        report["replaced_bytes"] = int(replaced)       # carried raw into the second check
+    if build_listings is not None:
+        build = max(int(build_listings), 0) * BUILD_BYTES_PER_LISTING
+        checked_mb += build / 1_048_576.0
+        report["build_listings"] = max(int(build_listings), 0)
+        report["build_mb"] = round(build / 1_048_576.0, 2)
+    if replaced is not None or build_listings is not None:
+        report["projected_mb"] = round(checked_mb, 2)
     if checked_mb > float(max_schema_mb):
+        if build_listings is not None:
+            freed = (f", less the {report['replaced_mb']:.1f} MB of generation {generation!r} "
+                     "its reset deleted" if replaced is not None else "")
+            raise StorageRefusal(
+                f"after the seed's walk and cut, schema autodedup is {mb:.1f} MB{freed}; the "
+                f"build of the {report['build_listings']:,} listings in scope adds "
+                f"~{report['build_mb']:.1f} MB ({BUILD_BYTES_PER_LISTING // 1024} kB a "
+                f"listing), so the projected {checked_mb:.1f} MB is over the "
+                f"{float(max_schema_mb):.0f} MB MAX_SCHEMA_MB budget — refusing: the seed's "
+                "transaction rolls back and nothing was written. Narrow rt_scope, prune a "
+                "batch generation (score keep_generations=<n>) or raise the constant.")
         if replacing:
             raise StorageRefusal(
                 f"schema autodedup is {mb:.1f} MB and {report['replaced_mb']:.1f} MB of it is "
@@ -1907,11 +1975,14 @@ class CalibrationRefusal(Exception):
     """The scope holds nothing the cut could be taken over."""
 
 
-def _cut_bound(conn: Any, deadline: float | None) -> None:
+def _cut_bound(conn: Any, deadline: float | None,
+               stopping: Callable[[], bool] | None = None) -> None:
     """The cut's statement timeout: the export's own (CUT_STATEMENT_TIMEOUT_MS) at a seed, and
     never past the pass's deadline inside a pass (review A5/B6) — the pHash aggregate is a
     sequential scan of `public.images`, and an unbounded one could outlive the worker's stall
-    warning. Past the deadline the cut stops between chunks and its transaction rolls back."""
+    warning. Past the deadline the cut stops between chunks and its transaction rolls back; so
+    it does once the worker is `stopping` (E941: `PassStopped`)."""
+    _in_time(None, stopping)
     if deadline is None:
         timeout_ms = CUT_STATEMENT_TIMEOUT_MS
     else:
@@ -1924,7 +1995,8 @@ def _cut_bound(conn: Any, deadline: float | None) -> None:
 
 def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
                     generation: str = GENERATION, *, chunk: int = CUT_CHUNK,
-                    deadline: float | None = None) -> dict[str, Any]:
+                    deadline: float | None = None,
+                    stopping: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Cut the generation's calibration from the database, over what its scope snapshot holds.
 
     Only the cohort statistics are cut (E70's price deciles, exploded keys, token and attribute
@@ -1946,18 +2018,18 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     hashes: set[int] = set()
     for start in range(0, len(ids), chunk):
         if deadline is not None:
-            _cut_bound(conn, deadline)
+            _cut_bound(conn, deadline, stopping)
         hashes |= {int(row[0]) for row in _rows(conn, RT_CUT_HASHES_SQL,
                                                 {"ids": ids[start:start + chunk]})}
-    _cut_bound(conn, deadline)
+    _cut_bound(conn, deadline, stopping)
     population = ({int(row[0]): int(row[1]) for row in _rows(
         conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
-    facts = SqlFacts(conn, population=population)
+    facts = SqlFacts(conn, population=population, stopping=stopping)
     listings: dict[int, Listing] = {}
     fps: dict[int, Any] = {}
     for start in range(0, len(ids), chunk):
         if deadline is not None:
-            _cut_bound(conn, deadline)
+            _cut_bound(conn, deadline, stopping)
         # Fingerprints read no CLIP vector, so the cut skips the read that would move ~2 kB per
         # photograph for nothing.
         for listing_id, (listing, images) in facts.facts(ids[start:start + chunk],
@@ -2003,26 +2075,65 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def pass_holder() -> str:
+    """The name a pass takes the lease under: host, process, second. The worker makes it
+    before the pass so its SIGTERM path can release exactly that row (E941)."""
+    return f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
+
+
+def _pass_clock(stopping: Callable[[], bool]) -> Callable[[], float]:
+    """The reconcile's clock (E941): the real one, and +inf once the worker is shutting down,
+    so the reconcile stops before its next group as it does when the pass's time is spent."""
+    return lambda: math.inf if stopping() else time.perf_counter()
+
+
+def peak_rss_mb() -> float | None:
+    """The process's peak resident memory in MiB, read at the end of a pass (E941):
+    `getrusage(RUSAGE_SELF).ru_maxrss`, which Linux reports in KiB (macOS in bytes). It is a
+    high-water mark of the WHOLE process since it started — on the worker, every lane's — so
+    a pass that grew it shows, and one that did not repeats the last reading. None where the
+    platform has no getrusage."""
+    if resource is None:
+        return None
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return round(peak / (1_048_576.0 if sys.platform == "darwin" else 1024.0), 1)
+
+
+def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
+                   original: BaseException) -> None:
+    """The rate a refused pass halved ahead (E941), back as it was: a refusal is not the
+    claim's size. Best effort — a failure is noted on `original`, never raised in its place."""
+    try:
+        _write_rate(conn, generation, rate_per_s, "restored")
+    except Exception as exc:  # noqa: BLE001 — the refusal is the signal
+        original.add_note(f"restoring {pass_rate_key(generation)} after the refusal failed "
+                          f"({type(exc).__name__}: {exc}); the next pass claims half")
+
+
 def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
-                 rate_per_s: float, holder: str, original: BaseException) -> None:
+                 rate_per_s: float, holder: str, original: BaseException, *,
+                 halve: bool = True) -> None:
     """What a pass that RAISED still owes, on ONE connection: E913's halving (E930) and its
     lease's release (E931). Through `fresh_conn` when the caller gave one — the pass's own
     connection may be the one the server terminated, and a lease that connection cannot
     release sits until its TTL, skipping every pass of the next ~35 min as "leased" — else on
     `conn`. The release tries the pass's own connection first and the fresh one only when
     that fails, so a live pass releases the way every other end of a run does. Best effort:
-    a failure is noted on `original` rather than replacing it — the raise is the signal."""
+    a failure is noted on `original` rather than replacing it — the raise is the signal.
+    `halve=False` once the worker is shutting down (E941): the release still runs, and the
+    rate row is left as it stands, the half written ahead of the pass."""
     fresh: Any = None
     try:
         try:
             if fresh_conn is not None:
                 fresh = fresh_conn()
-            _write_rate(fresh if fresh is not None else conn, generation, rate_per_s / 2.0,
-                        "halved")
+            if halve:
+                _write_rate(fresh if fresh is not None else conn, generation,
+                            rate_per_s / 2.0, "halved")
         except Exception as exc:  # noqa: BLE001 — best effort
             original.add_note(f"halving {pass_rate_key(generation)} after the raise also "
                               f"failed ({type(exc).__name__}: {exc}); the next pass claims "
-                              "the same size")
+                              "the half written ahead of it")
         rt_lease.release_after(conn, holder, original, fallback=fresh)
     finally:
         close = getattr(fresh, "close", None)
@@ -2033,21 +2144,44 @@ def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: st
 
 def run_incremental(conn_factory: Callable[[], Any], *,
                     deadline_s: float | None = None,
-                    fresh_conn: Callable[[], Any] | None = None) -> dict[str, Any]:
+                    fresh_conn: Callable[[], Any] | None = None,
+                    holder: str | None = None,
+                    stopping: Callable[[], bool] | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
     above 0. The pass decides, groups and commits; then, outside the bootstrap phase and inside
     what is left of its time, the reconcile turns the groups it re-clustered into production
     merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
-    is re-cut. A pass past its deadline rolls back and halves its rate (E913); so does a pass
-    that RAISED, written through `fresh_conn` — a factory for a NEW connection, since its own
-    may be dead — or on its own connection when the caller gives none (E930)."""
+    is re-cut. The rate is halved BEFORE the pass (E941), in a write of its own that commits
+    before the pass's transaction opens, so a pass the system kills — a deploy, a restart, the
+    kernel's OOM killer — has already slowed the next claim; a pass that committed puts the
+    previous rate back before its reconcile and overwrites it with its measurement after it
+    (an idle pass, too small to measure, leaves the previous rate), and a refused one puts the
+    previous rate back too. A pass past its deadline rolls back and
+    keeps the halving (E913); so does a pass that RAISED, which writes it again through
+    `fresh_conn` — a factory for a NEW connection, since its own may be dead — or on its own
+    connection when the caller gives none (E930).
+
+    `holder` names the lease the pass takes (`pass_holder()` when the caller names none) and
+    `stopping` says the caller is shutting down (E941): the worker's SIGTERM path releases
+    THAT holder's lease on a fresh connection at once (after cancelling a statement the pass is
+    running), so a pass that sees `stopping` takes no lease, gives back one it just took, stops
+    at its next deadline checkpoint (`PassStopped`, rolled back on its own connection) and
+    returns at once so the `finally` releases its lease, skips the reconcile (or stops it
+    before its next group) and the re-cut (or stops it at its next checkpoint), and writes no
+    rate or watermark row — nor after a reconcile or re-cut its fence stopped. Every
+    transaction the lane writes in — the pass's, each reconcile group's, the re-cut's — ends
+    with `rt_lease.hold`: one whose lease was released under it rolls back instead of
+    committing beside the next holder. Not fenced: the reconcile's planning writes (its sweep
+    cursor, its skipped-group rows), which a signal landing between the pass's commit and the
+    first group lets through."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
     generation = GENERATION
-    holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
+    holder = holder or pass_holder()
+    shutting_down: Callable[[], bool] = stopping or (lambda: False)
     conn = conn_factory()
     leased = False
     original: BaseException | None = None
@@ -2076,11 +2210,21 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
+        if shutting_down():
+            return {"skipped": STOPPING, "reason": "the worker is shutting down",
+                    "spent_usd": 0.0}
         if not take_lease(conn, holder):
             return {"skipped": "leased",
                     "reason": f"another writer holds autodedup.rt_lease: {rt_lease.describe(conn)}",
                     "spent_usd": 0.0}
         leased = True
+        if shutting_down():
+            # The shutdown began while the lease was being taken: its release may have run
+            # before the take, so nothing else would end this one before the process does.
+            release_lease(conn, holder)
+            leased = False
+            return {"skipped": STOPPING, "reason": "the worker is shutting down",
+                    "spent_usd": 0.0}
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(f"no calibration for generation {generation!r} — seed it")
@@ -2091,11 +2235,16 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
-        facts = SqlFacts(conn, deadline=deadline)
+        facts = SqlFacts(conn, deadline=deadline, stopping=stopping)
         work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
                        pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
         result = None
         stopped = ""
+        # E941: halved AHEAD, outside the transaction (`db.connect` is autocommit), so it stands
+        # whatever ends this pass. E930 halved only on a raise the pass lived to see; a pass the
+        # system killed (a deploy, a restart, OOM) wrote nothing, and once its lease expired the
+        # next pass claimed the identical batch at the identical size.
+        _write_rate(conn, generation, rate_per_s / 2.0, "halved_ahead")
         try:
             with _transaction(conn):
                 # The three bounds are the transaction's first statements and LOCAL to it
@@ -2110,7 +2259,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     store, facts, work, settings, model, calibration, limits=PASS_LIMITS,
                     generation=generation, now=pass_now,
                     hold=EvidenceHold(pass_now, EVIDENCE_HORIZON_HOURS * 3600.0),
-                    deadline=deadline)
+                    deadline=deadline, stopping=stopping)
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
@@ -2119,29 +2268,63 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     _exec(conn, RT_SETTING_WRITE_SQL, {
                         "key": bootstrap_setting_key(generation), "value": json.dumps(False),
                         "updated_by": f"{LANE_NAME}:bootstrap_done"})
+                # E941, the fence: the last statement before the commit. A lease released
+                # under the pass (the worker's shutdown) ends it here, rolled back.
+                rt_lease.hold(conn, holder)
+        except rt_lease.LeaseLost as exc:
+            # The transaction rolled back: nothing written, no cursor moved. Someone else may
+            # hold the lease by now, so the pass writes nothing more — no rate (the half
+            # written ahead stands), no watermark, no release of a row that is not its own.
+            leased = False
+            return {"counts": {}, "aborted": LEASE_LOST, "reason": str(exc)[:300],
+                    "reconcile": {"skipped": f"pass_{LEASE_LOST}"}, "generation": generation,
+                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
         except _Refused:
             stopped = result.aborted if result is not None else "refused"
+        except PassStopped:
+            # E941: the worker is shutting down — the pass stopped at a checkpoint and rolled
+            # back on its own live connection, so its row locks are free now, not at SIGKILL.
+            stopped = STOPPING
         except PassDeadline:
             stopped = "deadline"
         except RetireRefusal as exc:
-            # The transaction rolled back on the way out: nothing written, no cursor moved.
+            # The transaction rolled back on the way out: nothing written, no cursor moved. A
+            # refusal never halves (E930): it repeats until the operator acts, and halving it
+            # every tick would wedge the claim at one advert — so the rate halved ahead goes back.
+            if not shutting_down():
+                _put_back_rate(conn, generation, rate_per_s, exc)
             raise SystemExit(str(exc)) from exc
         except Exception as exc:
             # E930: the pass RAISED (a backend the server terminated, a cancelled statement, a
             # Python error). It rolled back and moved no cursor, so the next pass would claim
             # the IDENTICAL batch at the identical size and fail the same way for ever
-            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does,
-            # and release the lease there too (E931): on a dead connection the `finally`
-            # below could not, and the lease then sat until its TTL (2,400 s), so the next
-            # passes were skipped "leased" for up to ~35 min. Settled here on both counts —
-            # attempted on the pass's connection, then the fresh one, and noted on the raise
-            # when neither could — so the `finally` releases nothing twice.
-            _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc)
+            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does —
+            # E941 already wrote the same half ahead of the pass; this is that write again, on
+            # a live connection — and release the lease there too (E931): on a dead connection
+            # the `finally` below could not, and the lease then sat until its TTL (2,400 s), so
+            # the next passes were skipped "leased" for up to ~35 min. Settled here on both
+            # counts — attempted on the pass's connection, then the fresh one, and noted on
+            # the raise when neither could — so the `finally` releases nothing twice.
+            _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc,
+                         halve=not shutting_down())
             leased = False
             raise
-        if stopped:
-            # E913: the next pass claims half as much.
+        if stopped == STOPPING:
+            # E941: rolled back for the shutdown — return at once, so the `finally` releases
+            # the lease on the pass's own connection with no reads in between.
+            return {"counts": {}, "aborted": STOPPING,
+                    "reconcile": {"skipped": f"pass_{STOPPING}"}, "generation": generation,
+                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
+        if stopped and not shutting_down():
+            # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
+        if not stopped and result is not None and not shutting_down():
+            # E941: the pass committed, so its claim did not kill it — the half written ahead
+            # goes back NOW, before the reconcile, whose planning runs outside the pass's
+            # statement guards: a raise there would otherwise leave the half standing, and
+            # eight such passes take the claim to one advert. The measurement below, once the
+            # reconcile has run, still overwrites it.
+            _write_rate(conn, generation, rate_per_s, "restored")
         summary: dict[str, Any] = (result.to_json() if result is not None
                                    else {"counts": {}, "aborted": stopped})
         summary["aborted"] = stopped
@@ -2151,6 +2334,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         # its groups are not the ones this build would draw).
         if stopped:
             summary["reconcile"] = {"skipped": f"pass_{stopped}"}
+        elif shutting_down():
+            # E941: the shutdown may have released the lease already; merges wait for the
+            # next worker's pass, which re-plans them.
+            summary["reconcile"] = {"skipped": STOPPING}
         elif not seed_current(control, generation):
             summary["reconcile"] = {
                 "skipped": SEED_MISMATCH,
@@ -2165,11 +2352,26 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             summary["reconcile"] = reconcile.run(
                 conn, generation, result.cluster_keys if result is not None else [],
                 run_id=f"{reconcile.RUN_PREFIX}{holder}", deadline=deadline,
-                blocks=[block.key for block in work.enter_blocks])
+                blocks=[block.key for block in work.enter_blocks],
+                clock=_pass_clock(shutting_down),
+                # E941: every group's transaction ends with the pass's lease check, so a lease
+                # released after the pass committed stops the merges at the next group.
+                fence=lambda group_conn: rt_lease.hold(group_conn, holder))
             # What the reconcile cost inside the pass, so G2's rate is read with it in (B3).
             summary["reconcile"]["seconds"] = round(time.perf_counter() - reconcile_started, 3)
         elapsed = time.perf_counter() - started
-        if not stopped and result is not None:
+        # E941: a reconcile whose fence found the lease gone means the lane is someone else's
+        # now — the pass writes nothing more, as after the shutdown signal.
+        lost = (summary.get("reconcile") or {}).get("stopped") == LEASE_LOST
+
+        def owns_the_lane() -> bool:
+            return not lost and not shutting_down()
+
+        if not stopped and result is not None and owns_the_lane():
+            # The pass's measurement, reconcile included, blended with the rate it started
+            # from, replaces the rate put back above; a pass that claimed too little to measure
+            # itself (an idle one) leaves that rate. Not once the lane is not its own: the next
+            # holder's rows are not its to write.
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
                                      work.claim_bound)
             if measured is not None:
@@ -2190,14 +2392,17 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         # A10: the population has drifted — re-cut the calibration, atomically, inside what
         # is left of the pass's own time (every statement bounded by it); a cut that runs out
         # rolls back and the next pass re-tries it.
-        if (not stopped and coverage is not None and coverage < COVERAGE_FLOOR
+        if (not stopped and owns_the_lane() and coverage is not None
+                and coverage < COVERAGE_FLOOR
                 and facts.images_with_phash >= RECUT_MIN_IMAGES
                 and (age_h is None or age_h >= RECUT_MIN_AGE_H)
                 and deadline - time.perf_counter() >= RECUT_RESERVE_S):
             try:
                 with _transaction(conn):
                     summary["recut"] = cut_calibration(conn, settings, model.version,
-                                                       generation, deadline=deadline)
+                                                       generation, deadline=deadline,
+                                                       stopping=stopping)
+                    rt_lease.hold(conn, holder)       # E941: the re-cut is a write too
             except Exception as exc:  # noqa: BLE001 — best effort: the pass already committed
                 summary["recut"] = {"skipped": f"{type(exc).__name__}: {exc}"[:300]}
         summary["fact_reads"] = facts.reads
@@ -2235,7 +2440,12 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "pass_growth_mb": round(
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
         }
-        record_storage(conn, generation, after_bytes)
+        # A re-cut its fence stopped means the same as a reconcile it stopped (E941).
+        lost = lost or str((summary.get("recut") or {}).get("skipped", "")).startswith(
+            "LeaseLost")
+        if owns_the_lane():
+            record_storage(conn, generation, after_bytes)
+        summary["peak_rss_mb"] = peak_rss_mb()
         return summary
     except BaseException as exc:
         original = exc
@@ -2280,8 +2490,10 @@ def run_rt_seed(
       3. release a named stale lease, if asked;
       4. take the lease (refuse while a pass holds it);
       5. ONE transaction: the reset (fresh only), the block walk, the calibration cut, the
-         cursors and the control rows. A refusal inside it rolls every row back, the reset's
-         included."""
+         SECOND storage check (E941: the schema as it now stands, less what a fresh reset
+         freed, plus `BUILD_BYTES_PER_LISTING` for every listing in scope — what the build
+         writes), the cursors and the control rows. A refusal inside it rolls every row back,
+         the reset's included."""
     unknown = sorted(set(args) - RT_SEED_ARGS)
     if unknown:
         raise SystemExit(f"unknown arg(s) {', '.join(unknown)}; allowed: "
@@ -2340,6 +2552,16 @@ def run_rt_seed(
                 cut = cut_calibration(conn, settings, model.version, generation)
             except CalibrationRefusal as exc:
                 raise SystemExit(f"{scope.label()!r}: {exc}") from exc
+            # E941: the first check saw the schema before this seed wrote a row. The walk and
+            # the cut have now written the snapshot and the pHash population, and the build
+            # will write BUILD_BYTES_PER_LISTING for every listing they put in scope: refuse
+            # here, inside the transaction, so the reset, the walk and the cut roll back.
+            try:
+                build_storage = storage_guard(
+                    conn, generation, scope, build_listings=int(cut["scope_listings"]),
+                    replaced_bytes=int(storage["replaced_bytes"]) if fresh else None)
+            except StorageRefusal as exc:
+                raise SystemExit(str(exc)) from exc
             seeded = _rows(conn, RT_SEED_CURSORS_SQL)[0]
             _exec(conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_NEW, "last_listing_id": int(seeded[0]),
@@ -2384,6 +2606,7 @@ def run_rt_seed(
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,
+            "storage_build": build_storage,
             "lease_released": released,
             "spent_usd": 0.0,
         }

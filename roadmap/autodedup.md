@@ -50,6 +50,11 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   (`obec:554782`, 5,000 MB, E946), a 3–6-day build with merging paused everywhere → S5 the apply
   scope widens a batch of quarters at a time, `town:554782` last. Brake: interval 0, the area out
   of the apply scope, then `unapply blocks=`. Open: D905–D910 (the operator's).
+- **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
+  walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
+  before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
+  once (every lane write fenced, 30 s drain). Owed: the cgroup memory limit, the revive cap,
+  `verify_pipeline`'s heartbeat check.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
