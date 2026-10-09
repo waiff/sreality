@@ -254,17 +254,17 @@ from the slow "download each ad" write:
   upsert, images/videos, failure clear, snapshot-on-change, dirty marks). sreality uses the **session pooler**
   (`connect_session()`, prepared statements), the crawlers `connect()`. New listings land `property_id` NULL and become
   **singletons** via `recompute_property_stats`'s bounded straggler-attach (the write carries no matching at all;
-  grouping is out-of-band and operator-ordered, rule #15). A gone fetch flips that listing inactive +
-  dequeues it; a transient error bumps the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
+  grouping is out-of-band and operator-ordered, rule #15). A gone fetch records its verdict + dequeues it (flips only
+  under rule #3's hysteresis); a transient error bumps the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a SIGKILLed
   claim is recovered by the next run's `reclaim_stale_claims`.
 
 **Delisting is presence-verified (rule #3, 2026-09-07); the gate is STRUCTURAL (2026-09-08).** A
 walk that REACHED THE PORTAL'S END (`portal.walk_reached_end`: every unit walked, each page loop out
 on a portal terminator, no stop of ours) nominates every active row it did not see (`VERIFY cm=…
-candidates=… queued=… deferred=…`); the drain fetches each page and only a positive gone signal
-(404/410, a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`)
-flips it; a live page refreshes it. The COUNT never vetoes — a short walk that reached the end
+candidates=… queued=… deferred=…`); the drain fetches each page; a positive gone signal (404/410, redirect off the listing,
+"no longer active" text → `ListingGoneError`) is recorded (`detail_queue_completions` `gone`) and flips it (`flipped`) only when
+an earlier verdict ≥ `GONE_DWELL` (12 h) stands unrefuted (2026-10-09, portals blink; RUN `pending=`); a live page refreshes it. The COUNT never vetoes — a short walk that reached the end
 nominates and logs `COVERAGE`. No absence sweep, no staleness rail; `delist_flip_cap` throttles per
 walk ONLY above its 2,000-active-row floor (`VERIFY DEFERRED`, in `delist_flip_refusals`); the page must be the row's OWN (a `detail_ref`
 naming another id is dropped). Stop-reason vocabulary: `references/coverage-and-delisting.md`.

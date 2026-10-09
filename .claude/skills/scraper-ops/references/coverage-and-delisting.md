@@ -459,7 +459,9 @@ same rows and is now the standing rail on the count.
 2. **The ledger** — coverage accumulates across runs instead of restarting.
 3. **Nomination, not deletion** — a finished walk queues the rows it did not
    see for a page check; the drain fetches each page and only a positive gone
-   signal flips it. A wrong nomination costs one fetch, never a live listing.
+   signal, confirmed by a second one at least `GONE_DWELL` (12 h) later with
+   no sighting between, flips it (*Hysteresis* below). A wrong nomination
+   costs one fetch, never a live listing; a wrong verdict costs one more.
 4. **The throttle** — `delist_flip_cap` bounds how many checks one walk may
    queue (oldest-unseen first, the rest deferred and recorded), so a broken
    walk cannot flood the drain and a real backlog drains in a few walks. Mind
@@ -479,3 +481,48 @@ The gate still runs and re-earns `supports_complete_walk` from the ledger, but
 as a posture signal for Health: nothing reads it to decide a deletion any more.
 The retired pieces — the staleness rail, the national cross-check, the latching
 refusal — all existed to make absence safe; presence does not need them.
+
+## Hysteresis: one verdict records, the second flips (2026-10-09)
+
+**The finding.** Property 892034 (sreality 1169301580) showed inactive while live.
+The 22:44 UTC walk's komerční/prodej slice reached sreality's end with 5,009 of
+our 5,087 active rows and nominated the 78 it did not see; the worker's drain
+fetched the ad at 23:02, sreality answered 404, the drain flipped it. In the same
+minutes the same worker completed 1,732 ingest fetches, so the transport was fine:
+854 of 855 nominated pages read gone because sreality itself had them down. At
+08:17 the ad was back on both the API and the index. Over the ledger's week
+(2026-10-02..09) 35% of sreality's 18,105 gone verdicts were active again already,
+and a live re-probe of ads still inactive put 62% of the 23:00 batch and 20% of a
+32-hour-old batch back on the portal. Night batches are the worst: sreality takes
+an ad down — index AND detail — for hours around its nightly expiry/renewal and
+brings it back under the same id. Other portals: idnes 5.9%, bezrealitky 7.4%,
+remax 10.7%, mmreality 15.4%, bazos / ceskereality / realitymix under 2%.
+
+**The rule.** A gone verdict is recorded, never acted on alone. The drain's gone
+branch reads `db.gone_evidence(source, native_id)`: (row exists, earliest gone
+verdict newer than `last_seen_at`). No such verdict, or one younger than
+`delist_policy.GONE_DWELL` (12 h): the queue row completes with outcome `gone`,
+the listing stays active, the next complete walk re-nominates it — the walk
+cadence is the retry timer, so there is no column, no timer and no re-enqueue.
+An unrefuted verdict the dwell old: `db.mark_listing_inactive`, outcome `flipped`.
+The EARLIEST verdict is the anchor so consecutive provisional verdicts cannot
+reset the clock; a sighting (touch or detail write bumps `last_seen_at`) refutes
+every verdict before it. sreality's ~5 h walk gap closes a true removal on the
+fourth walk after the first verdict (~16 h); the ~7 h portals on the third.
+
+**What to read in the logs.** `DETAIL id=… gone (first verdict recorded, not
+flipped; a second one 12h+ later flips)` is the provisional branch; `DETAIL id=…
+gone (is_active=false)` the flip; `gone (already inactive)` a confirmed verdict
+on a row something else closed. `DRAIN progress` and `RUN done` carry `pending=`
+beside `gone=`; `scrape_runs.listings_inactive` counts flips only.
+
+**What was deleted.** `sreality_client._is_not_found_body`: the live listing
+page carries "tato stránka neexistuje" inside its JavaScript bundle, so the scan
+would read ANY HTML answer (a consent wall, an edge error) as a removal; the API
+answers a real removal with a JSON 404 (62 of 62 re-probed removals did), and an
+HTML body is now a parse error, retried. `freshness._record_gone` no longer flips;
+it nominates at `QUEUE_PRIORITY_VERIFY` so the drain's one decider rules.
+
+**Health.** `verify_pipeline`'s `false_delist_share`: per portal, the share of
+`flipped` ledger rows (7 d) whose ad is active again — the false-flip rate the
+rule is meant to hold near the blink tail beyond the dwell.

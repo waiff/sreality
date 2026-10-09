@@ -33,6 +33,37 @@ def _b(setting: object, nominated: int, active: int, **scope: Any) -> delist_pol
 # --- the calibration --------------------------------------------------------
 
 
+# --- gone hysteresis: one verdict records, a second one GONE_DWELL later flips -----
+
+
+_NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def test_no_earlier_verdict_does_not_confirm() -> None:
+    assert delist_policy.gone_confirmed(None, _NOW) is False
+
+
+@pytest.mark.parametrize(("age", "confirmed"), [
+    (timedelta(0), False),
+    (delist_policy.GONE_DWELL - timedelta(seconds=1), False),
+    (delist_policy.GONE_DWELL, True),
+    (timedelta(days=6), True),
+])
+def test_the_dwell_edge_is_inclusive(age: timedelta, confirmed: bool) -> None:
+    assert delist_policy.gone_confirmed(_NOW - age, _NOW) is confirmed
+
+
+def test_the_dwell_is_twelve_hours() -> None:
+    """The operator's ruling (2026-10-09): 12 h, not 24 -- sreality's walk gap is ~5 h, so a
+    true removal closes on the fourth walk after the first verdict (~16 h)."""
+    assert delist_policy.GONE_DWELL == timedelta(hours=12)
+
+
+def test_a_naive_verdict_timestamp_is_read_as_utc() -> None:
+    naive = (_NOW - delist_policy.GONE_DWELL).replace(tzinfo=None)
+    assert delist_policy.gone_confirmed(naive, _NOW) is True
+
+
 @pytest.mark.parametrize(("nominated", "active", "queue", "deferred"), [
     (100, 10_000, 100, 0),            # routine
     (29_400, 78_718, 7_871, 21_529),  # the mass flip a repaired ceskereality walk unblocked

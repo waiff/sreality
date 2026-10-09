@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from datetime import datetime, timedelta, timezone
 import requests
 
 from scraper import main as scraper_main
@@ -1185,6 +1186,10 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
 
     monkeypatch.setattr(scraper_main.db, "connect_session", lambda: _Conn())
     monkeypatch.setattr(scraper_main.db, "reclaim_stale_claims", lambda _c, _src, **k: 0)
+    # rule #3 hysteresis: the ledger already confirms every gone verdict in these tests
+    monkeypatch.setattr(
+        scraper_main.db, "gone_evidence",
+        lambda _c, _src, _nid: (True, datetime.now(timezone.utc) - timedelta(days=1)))
     it = iter(list(claim_batches) + [[]])
 
     def _claim(_c, _source, n):
