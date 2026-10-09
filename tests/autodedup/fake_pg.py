@@ -58,6 +58,9 @@ class FakePg:
         self.calibration: dict[str, dict[str, Any]] = {}
         self.lease: dict[str, dict[str, Any]] = {}
         self.settings: dict[str, Any] = {}
+        # `autodedup.settings.updated_by`, by key: WHO wrote a row last — the rate row says which
+        # of a pass's writes stood (E941: halved_ahead, rate, restored, halved).
+        self.settings_by: dict[str, str] = {}
         self.mnl: set[tuple[int, int]] = set()
         self.ml: set[tuple[int, int]] = set()
         # `autodedup.verdicts` as the G4 read sees it: (decided_at, the listings the row names).
@@ -131,6 +134,7 @@ class FakePg:
             "phash_pop": dict(self.phash_pop),
             "calibration": {k: dict(v) for k, v in self.calibration.items()},
             "settings": dict(self.settings),
+            "settings_by": dict(self.settings_by),
         }
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -149,6 +153,7 @@ class FakePg:
         self.phash_pop = state["phash_pop"]
         self.calibration = state["calibration"]
         self.settings = state["settings"]
+        self.settings_by = state["settings_by"]
 
 
 class _Tx:
@@ -249,6 +254,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(key, db.settings[key]) for key in p["keys"] if key in db.settings]
     if sql == S.RT_SETTING_WRITE_SQL:
         db.settings[str(p["key"])] = _jsonb(p["value"])
+        db.settings_by[str(p["key"])] = str(p.get("updated_by") or "")
         return []
     if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_LOCK_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
         return [("set",)]

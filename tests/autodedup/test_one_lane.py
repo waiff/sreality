@@ -1060,7 +1060,11 @@ def test_a_raised_pass_halves_its_rate_on_a_fresh_connection(tmp_path, monkeypat
 
     assert opened == [fresh]
     assert fresh.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
-    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S, "nothing on the pass's own"
+    assert fresh.settings_by[pass_rate_key("rt")].endswith(":halved")
+    # E941: the pass's own connection carries the same half, written AHEAD of the pass while
+    # that connection was known to be alive — and nothing after the raise.
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
+    assert conn.settings_by[pass_rate_key("rt")].endswith(":halved_ahead")
     assert conn.rolled_back >= 1
 
 
@@ -1098,7 +1102,8 @@ def test_a_failed_halving_write_keeps_the_original_raise(tmp_path, monkeypatch) 
 
     notes = getattr(raised.value, "__notes__", [])
     assert any("halving" in note and "pooler down" in note for note in notes)
-    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+    # E941: the halving stands anyway — it was written ahead of the pass.
+    assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S / 2.0
     # E931: no fresh connection to fall back on, and none needed — the pass's own is live.
     from autodedup import rt_lease
 
@@ -1123,6 +1128,76 @@ def test_a_refusal_never_halves_the_rate(tmp_path, monkeypatch) -> None:
 
     assert not opened
     assert conn.settings[pass_rate_key("rt")] == PASS_RATE_PER_S
+    assert conn.settings_by[pass_rate_key("rt")].endswith(":restored"), "the half went back"
+
+
+# ------------------------------------------------------------ E941: the rate, halved AHEAD
+
+
+class _Killed(BaseException):
+    """What the system does to a pass (a deploy's SIGKILL, a restart, the OOM killer): no
+    `except Exception` sees it, so nothing the pass meant to write after it is written."""
+
+
+def test_a_pass_the_system_kills_has_already_halved_the_next_claim(tmp_path,
+                                                                   monkeypatch) -> None:
+    """E930 halved only on a raise the pass lived to see. The half is now written before the
+    pass's transaction opens, committed on its own, so it stands when the pass is killed —
+    and the next claim, once the lease is gone, is half the one that was killed."""
+    from autodedup import incremental_lane
+    from autodedup.incremental_lane import PASS_RATE_PER_S, pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    key = pass_rate_key("rt")
+    seen: dict = {}
+
+    def killed_inside_the_transaction(*_args, **_kwargs):
+        seen.update(in_tx=conn.in_transaction, rate=conn.settings[key])
+        raise _Killed()
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", killed_inside_the_transaction)
+    opened: list = []
+    with pytest.raises(_Killed):
+        run_incremental(lambda: conn, fresh_conn=lambda: opened.append(1) or FakePg())
+
+    assert seen == {"in_tx": True, "rate": PASS_RATE_PER_S / 2.0}, "halved BEFORE the pass"
+    # The pass's transaction rolled back to what it opened on, so a half written inside it
+    # would be gone: it stands because it committed first.
+    assert conn.rolled_back >= 1
+    assert conn.settings[key] == PASS_RATE_PER_S / 2.0
+    assert conn.settings_by[key].endswith(":halved_ahead")
+    assert not opened, "no write after the kill"
+
+
+def test_a_pass_that_cannot_measure_itself_puts_the_rate_back(tmp_path) -> None:
+    """An idle pass (or one that claimed too few to measure) said nothing about the claim's
+    size, so the rate it started from goes back over the half written ahead."""
+    from autodedup.incremental_lane import pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    key = pass_rate_key("rt")
+    conn.settings[key] = 0.3
+    first = run_incremental(lambda: conn)
+    bound = first["claim_bound"]
+    assert 0 < first["counts"]["claimed"] < min(20, int(bound["limit"])), "too few to measure"
+    assert conn.settings[key] == 0.3 and conn.settings_by[key].endswith(":restored")
+
+
+def test_a_pass_that_measured_itself_overwrites_the_half(tmp_path) -> None:
+    from autodedup.incremental_lane import pass_rate_key, run_incremental
+    from tests.autodedup import lane_world
+
+    conn = lane_world.world()
+    lane_world.seed_lane(conn, tmp_path)
+    key = pass_rate_key("rt")
+    conn.settings[key] = 0.0001          # a claim the time budget cuts is a measurement
+    out = run_incremental(lambda: conn)
+    assert out["claim_bound"]["bound_by"] == "time"
+    assert conn.settings[key] > 0.0001 / 2 and conn.settings_by[key].endswith(":rate")
 
 
 def test_the_fact_reads_are_sliced_by_whole_listings(tmp_path, monkeypatch) -> None:

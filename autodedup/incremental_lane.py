@@ -326,7 +326,9 @@ BOOTSTRAP_MIN_CLAIM: int = 1
 # `rt_pass_rate_per_s:<generation>`, and the next pass claims at most `budget x rate`. The
 # budget is half the deadline, so a pass may run twice as slow as its measured rate before the
 # deadline stops it. The default rate is the one measurement taken before any was recorded — a
-# conservative start the second pass corrects.
+# conservative start the second pass corrects. The row is halved BEFORE every pass and
+# rewritten after it (E941: measured, or put back when the pass could not measure itself), so a
+# pass the system kills mid-way has already halved the next claim.
 PASS_BUDGET_S: float = PASS_DEADLINE_S / 2
 PASS_RATE_PER_S: float = 0.1
 # A rate is only recorded when the pass actually claimed enough for the quotient to mean
@@ -2054,6 +2056,17 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
+                   original: BaseException) -> None:
+    """The rate a refused pass halved ahead (E941), back as it was: a refusal is not the
+    claim's size. Best effort — a failure is noted on `original`, never raised in its place."""
+    try:
+        _write_rate(conn, generation, rate_per_s, "restored")
+    except Exception as exc:  # noqa: BLE001 — the refusal is the signal
+        original.add_note(f"restoring {pass_rate_key(generation)} after the refusal failed "
+                          f"({type(exc).__name__}: {exc}); the next pass claims half")
+
+
 def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: str,
                  rate_per_s: float, holder: str, original: BaseException) -> None:
     """What a pass that RAISED still owes, on ONE connection: E913's halving (E930) and its
@@ -2091,9 +2104,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     above 0. The pass decides, groups and commits; then, outside the bootstrap phase and inside
     what is left of its time, the reconcile turns the groups it re-clustered into production
     merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
-    is re-cut. A pass past its deadline rolls back and halves its rate (E913); so does a pass
-    that RAISED, written through `fresh_conn` — a factory for a NEW connection, since its own
-    may be dead — or on its own connection when the caller gives none (E930)."""
+    is re-cut. The rate is halved BEFORE the pass (E941), in a write of its own that commits
+    before the pass's transaction opens, so a pass the system kills — a deploy, a restart, the
+    kernel's OOM killer — has already slowed the next claim; a pass that measured itself
+    overwrites it with the measurement, and one that claimed too little to measure (an idle
+    pass) or was refused puts the previous rate back. A pass past its deadline rolls back and
+    keeps the halving (E913); so does a pass that RAISED, which writes it again through
+    `fresh_conn` — a factory for a NEW connection, since its own may be dead — or on its own
+    connection when the caller gives none (E930)."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2147,6 +2165,11 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                        pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
         result = None
         stopped = ""
+        # E941: halved AHEAD, outside the transaction (`db.connect` is autocommit), so it stands
+        # whatever ends this pass. E930 halved only on a raise the pass lived to see; a pass the
+        # system killed (a deploy, a restart, OOM) wrote nothing, and once its lease expired the
+        # next pass claimed the identical batch at the identical size.
+        _write_rate(conn, generation, rate_per_s / 2.0, "halved_ahead")
         try:
             with _transaction(conn):
                 # The three bounds are the transaction's first statements and LOCAL to it
@@ -2175,23 +2198,27 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         except PassDeadline:
             stopped = "deadline"
         except RetireRefusal as exc:
-            # The transaction rolled back on the way out: nothing written, no cursor moved.
+            # The transaction rolled back on the way out: nothing written, no cursor moved. A
+            # refusal never halves (E930): it repeats until the operator acts, and halving it
+            # every tick would wedge the claim at one advert — so the rate halved ahead goes back.
+            _put_back_rate(conn, generation, rate_per_s, exc)
             raise SystemExit(str(exc)) from exc
         except Exception as exc:
             # E930: the pass RAISED (a backend the server terminated, a cancelled statement, a
             # Python error). It rolled back and moved no cursor, so the next pass would claim
             # the IDENTICAL batch at the identical size and fail the same way for ever
-            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does,
-            # and release the lease there too (E931): on a dead connection the `finally`
-            # below could not, and the lease then sat until its TTL (2,400 s), so the next
-            # passes were skipped "leased" for up to ~35 min. Settled here on both counts —
-            # attempted on the pass's connection, then the fresh one, and noted on the raise
-            # when neither could — so the `finally` releases nothing twice.
+            # (2026-10-02: six passes, the same 500 adverts). Halve the rate as E913 does —
+            # E941 already wrote the same half ahead of the pass; this is that write again, on
+            # a live connection — and release the lease there too (E931): on a dead connection
+            # the `finally` below could not, and the lease then sat until its TTL (2,400 s), so
+            # the next passes were skipped "leased" for up to ~35 min. Settled here on both
+            # counts — attempted on the pass's connection, then the fresh one, and noted on
+            # the raise when neither could — so the `finally` releases nothing twice.
             _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc)
             leased = False
             raise
         if stopped:
-            # E913: the next pass claims half as much.
+            # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
         summary: dict[str, Any] = (result.to_json() if result is not None
                                    else {"counts": {}, "aborted": stopped})
@@ -2221,10 +2248,15 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             summary["reconcile"]["seconds"] = round(time.perf_counter() - reconcile_started, 3)
         elapsed = time.perf_counter() - started
         if not stopped and result is not None:
+            # The pass committed: its measurement replaces the half written ahead, blended
+            # with the rate it started from; a pass that claimed too little to measure itself
+            # (an idle one) puts that rate back, since nothing about it said to slow down.
             measured = _measure_rate(len(result.claimed), elapsed, rate_per_s,
                                      work.claim_bound)
             if measured is not None:
                 _write_rate(conn, generation, measured, "rate")
+            else:
+                _write_rate(conn, generation, rate_per_s, "restored")
         coverage = (None if not facts.images_with_phash else round(
             1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6))
         summary["population"] = {
