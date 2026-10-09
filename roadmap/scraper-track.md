@@ -5,6 +5,21 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### Delisting hysteresis — portals blink (2026-10-09, shipped)
+- **Found:** a gone verdict flipped an ad on one 404; sreality takes ads down (index AND detail)
+  for hours around its nightly expiry/renewal and brings them back under the same id — 35% of
+  18,105 sreality gone verdicts (10-02..09) active again within the week, 62% of one night's
+  batch live nine hours later (idnes 6%, remax 11%, mmreality 15%). Rationale + numbers:
+  `references/coverage-and-delisting.md` § Hysteresis; `docs/architecture.md` rule #3.
+- **Done:** `db.gone_evidence` + `delist_policy.GONE_DWELL` (12 h, operator's ruling) +
+  `gone_confirmed`; the drain records the first verdict (`detail_queue_completions` `gone`) and
+  flips on a second unrefuted one the dwell later (`flipped`, migration 594). Deleted: sreality's
+  HTML not-found body scan, `freshness._record_gone`'s own flip (nominates at VERIFY instead).
+- **Next:** `verify_pipeline` `false_delist_share` (the `flipped`-rows-active-again share per
+  portal); C2-2 (below) deletes the last legacy flip caller; one-off heal — re-verify the rows a
+  single pre-594 verdict closed (sreality 10.7k, idnes 9.5k, bezrealitky 0.9k, remax 0.4k,
+  mmreality 0.6k over 14 d) at VERIFY priority, pilot 25/portal then release.
+
 ### ceskereality hard-403 — Chrome client hints (2026-10-02, recovered)
 - 2026-10-02: every ceskereality request 403'd from 09-29 07:37Z (last 200) until 10-02 — the site's own
   nginx (not Cloudflare) rejects a Chrome UA arriving over HTTP/1.1 without `sec-ch-ua` client hints (a

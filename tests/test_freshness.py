@@ -59,6 +59,9 @@ class _Ctx:
         return None
 
 
+_NOMINATED = ("sreality", [("2836292428", None, None, freshness.db.QUEUE_PRIORITY_VERIFY)])
+
+
 class _Cur:
     def __init__(self, conn: "_FakeConn") -> None:
         self._conn = conn
@@ -88,13 +91,13 @@ def _patch_db(
     new_snap_id: int = 99,
 ) -> dict[str, list]:
     """Stub all DB helpers. Returns a dict of recorded calls."""
-    calls: dict[str, list] = {"log": [], "upsert": [], "flip": []}
+    calls: dict[str, list] = {"log": [], "upsert": [], "nominate": []}
     monkeypatch.setattr(
         freshness.listing_write, "latest_snapshot", lambda c, source, native: prev
     )
     monkeypatch.setattr(
-        freshness.db, "mark_listing_inactive",
-        lambda _c, source, nid: calls["flip"].append((source, nid)) or True,
+        freshness.db, "enqueue_detail",
+        lambda _c, source, entries: calls["nominate"].append((source, list(entries))) or 1,
     )
 
     def _write_listings(_c: Any, writes: list[Any]) -> list[WriteOutcome]:
@@ -182,8 +185,9 @@ def test_404_marks_inactive_and_logs_gone(monkeypatch):
     assert res["snapshot_id"] is None
     assert res["new_hash"] is None
     assert calls["upsert"] == []
-    # the one guarded flip writer: inactive_at once, dirty mark, failure row cleared
-    assert calls["flip"] == [("sreality", "2836292428")]
+    # never flipped here: the observation nominates a page check and the drain's one
+    # decider (rule #3 hysteresis) rules on it
+    assert calls["nominate"] == [_NOMINATED]
     assert calls["log"][0]["outcome"] == "gone"
 
 
@@ -199,14 +203,13 @@ def test_410_also_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
-    assert calls["flip"] == [("sreality", "2836292428")]
+    assert calls["nominate"] == [_NOMINATED]
     assert calls["log"][0]["outcome"] == "gone"
 
 
 def test_listing_gone_error_treated_as_gone(monkeypatch):
-    """Production path: get_detail raises ListingGoneError (a wrapped
-    404/410 or sreality's 'page does not exist' body). Must flip inactive
-    and log gone, not record a fetch error."""
+    """Production path: get_detail raises ListingGoneError (a wrapped 404/410).
+    Must nominate the page check and log gone, not record a fetch error."""
     from scraper.sreality_client import ListingGoneError
 
     calls = _patch_db(monkeypatch, prev=None)
@@ -217,7 +220,7 @@ def test_listing_gone_error_treated_as_gone(monkeypatch):
     res = freshness.freshness_check(conn, client, sreality_id=2836292428)
 
     assert res["outcome"] == "gone"
-    assert calls["flip"] == [("sreality", "2836292428")]
+    assert calls["nominate"] == [_NOMINATED]
     assert calls["log"][0]["outcome"] == "gone"
 
 

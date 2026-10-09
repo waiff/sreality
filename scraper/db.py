@@ -957,7 +957,8 @@ def presence_candidates(
     Rule #3 since 2026-09-07: index absence NOMINATES, it no longer delists. A
     row the walk did not see is a candidate; the detail drain then visits its
     page, and the page decides -- a positive gone signal (404/410, a redirect
-    off the listing, the portal's own "no longer active" text) flips it, a live
+    off the listing, the portal's own "no longer active" text) flips it once a
+    second verdict confirms it (`delist_policy.gone_confirmed`), a live
     page refreshes it, an error leaves it for the next pass. That is why this
     query carries none of the old sweep's rails (no min_unseen_hours, no refusal):
     a wrong nomination costs one fetch, not a live listing.
@@ -1142,8 +1143,35 @@ def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
     return row[0] if row else None
 
 
+def gone_evidence(
+    conn: psycopg.Connection, source: str, native_id: str,
+) -> tuple[bool, datetime | None]:
+    """What the ledger holds against this listing before a gone verdict may flip it (rule #3
+    hysteresis, `delist_policy.gone_confirmed`): (the row exists, when its EARLIEST unrefuted
+    gone verdict landed). A verdict older than the row's last sighting was refuted by that
+    sighting and does not count; None = no unrefuted verdict yet."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT l.id IS NOT NULL,
+                   (SELECT min(c.completed_at)
+                      FROM detail_queue_completions c
+                     WHERE c.source = %(source)s
+                       AND c.native_id = %(native_id)s
+                       AND c.outcome = 'gone'
+                       AND c.completed_at > COALESCE(l.last_seen_at, '-infinity'::timestamptz))
+            FROM (SELECT 1) AS one
+            LEFT JOIN listings l
+                   ON l.source = %(source)s AND l.source_id_native = %(native_id)s
+            """,
+            {"source": source, "native_id": native_id},
+        )
+        exists, first_gone_at = cur.fetchone()
+    return bool(exists), first_gone_at
+
+
 def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool | None:
-    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call
+    """A CONFIRMED gone verdict flips this one listing (rules #3/#5/#20). True iff this call
     flipped it, False if it was already inactive, None if no listing has this key."""
     exists = True
     with conn.transaction(), conn.cursor() as cur:
@@ -2363,9 +2391,11 @@ def complete_detail(
     native_ids: Iterable[str],
     outcome: str = "written",
 ) -> int:
-    """Remove drained rows from the queue (success or confirmed-gone), logging
-    each into detail_queue_completions (migration 265) in the same transaction
-    so the enqueue->detail-write latency survives the row's deletion."""
+    """Remove drained rows from the queue, logging each into detail_queue_completions
+    (migration 267) in the same transaction so the enqueue->detail-write latency survives
+    the row's deletion. `outcome` is what the drain DID: 'written' (the page was live),
+    'gone' (a gone verdict recorded, the ad left active -- rule #3's hysteresis evidence),
+    'flipped' (a confirming verdict closed the ad; migration 594), 'given_up'."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return 0
