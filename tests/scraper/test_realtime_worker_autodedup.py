@@ -121,6 +121,7 @@ def _summary(**over: Any) -> dict[str, Any]:
         "latency_s": {"n": 12, "p50": 310.2, "p95": 355.0},
         "claim_bound": {"bound_by": "count", "limit": 100},
         "reconcile": {"counts": {"applied": 2}},
+        "peak_rss_mb": 412.5,
     }
     out.update(over)
     return out
@@ -250,6 +251,8 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "must_link_dissolved": 0,
         # the plan's silent outcomes (2026-10-07): settled groups and standing refusals by reason
         "reconcile_settled": 0, "reconcile_skipped_by_reason": {},
+        # E941: the process's peak memory at the pass's end, carried from the engine's summary
+        "peak_rss_mb": 412.5,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -427,6 +430,7 @@ def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> No
 
         assert last["ran"] is True and last["errors"] == 0 and last["skipped"] == 0, last
         assert last["reconcile"] == expected and last["merged"] == 0
+        assert last["peak_rss_mb"] > 0, "the engine measured the process's memory (E941)"
         assert world.cursors, "the pass moved the engine's own watermark"
         assert world.lease[LANE_NAME]["expires_at"] <= world.now, "the lease was released"
         targets = _write_targets(world.statements[before:])
@@ -539,6 +543,27 @@ def test_the_heartbeat_says_what_the_reconcile_did_and_did_not_do(
         rw._autodedup_note(last)
     assert last["reconcile"] == "seed_version" and "re-seed" in last["reconcile_reason"]
     assert any("reconcile: seed_version" in r.getMessage() for r in caplog.records)
+
+
+def test_the_pass_reads_peak_memory_in_mib_from_getrusage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E941: ru_maxrss is KiB on Linux (bytes on macOS); the summary and the heartbeat carry
+    MiB, and the stage gates read it against half the container's limit."""
+    from types import SimpleNamespace
+
+    asked: list[int] = []
+
+    def getrusage(who: int) -> SimpleNamespace:
+        asked.append(who)
+        return SimpleNamespace(ru_maxrss=1_572_864)
+
+    fake = SimpleNamespace(RUSAGE_SELF=0, getrusage=getrusage)
+    monkeypatch.setattr(incremental_lane, "resource", fake)
+    monkeypatch.setattr(incremental_lane.sys, "platform", "linux")
+    assert incremental_lane.peak_rss_mb() == 1536.0 and asked == [0]
+    monkeypatch.setattr(incremental_lane.sys, "platform", "darwin")
+    assert incremental_lane.peak_rss_mb() == 1.5
+    monkeypatch.setattr(incremental_lane, "resource", None)
+    assert incremental_lane.peak_rss_mb() is None
 
 
 def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(

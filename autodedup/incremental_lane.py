@@ -34,12 +34,18 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import time
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Iterator, Mapping, Sequence
+
+try:
+    import resource
+except ImportError:  # pragma: no cover — no getrusage outside Unix
+    resource = None  # type: ignore[assignment]
 
 from autodedup import reconcile, rt_lease
 from autodedup.dataset import Image, Listing
@@ -2056,6 +2062,18 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def peak_rss_mb() -> float | None:
+    """The process's peak resident memory in MiB, read at the end of a pass (E941):
+    `getrusage(RUSAGE_SELF).ru_maxrss`, which Linux reports in KiB (macOS in bytes). It is a
+    high-water mark of the WHOLE process since it started — on the worker, every lane's — so
+    a pass that grew it shows, and one that did not repeats the last reading. None where the
+    platform has no getrusage."""
+    if resource is None:
+        return None
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return round(peak / (1_048_576.0 if sys.platform == "darwin" else 1024.0), 1)
+
+
 def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
                    original: BaseException) -> None:
     """The rate a refused pass halved ahead (E941), back as it was: a refusal is not the
@@ -2319,6 +2337,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                 (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
         }
         record_storage(conn, generation, after_bytes)
+        summary["peak_rss_mb"] = peak_rss_mb()
         return summary
     except BaseException as exc:
         original = exc

@@ -2114,6 +2114,9 @@ def _autodedup_outcome(
             latency_p50_s=latency.get("p50"),
             latency_p95_s=latency.get("p95"),
             bound_by=(summary.get("claim_bound") or {}).get("bound_by"),
+            # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
+            # end — the reading a widened scope's gate holds under half the container's limit.
+            peak_rss_mb=summary.get("peak_rss_mb"),
         )
         if aborted:
             last["aborted"] = aborted[:AUTODEDUP_REASON_CHARS]
