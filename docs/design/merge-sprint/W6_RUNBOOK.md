@@ -59,12 +59,16 @@ TARGETS="property_status_events assets asset_membership_events properties:id,ass
          (select string_agg(holder, '; ') from autodedup.rt_lease where expires_at > now()) live_lease,
          (select string_agg(holder, '; ') from public.property_maintenance_lease where holder like 'full:%' and expires_at > now()) sweep;
   ```
-- **C2, the index gate:** expect the feed index at 43963 scans, last read 2026-10-08 00:53:21.886824+00,
-  both keyset indexes at 0 and null, and `stats_reset` null. After a stats reset the gate proves nothing: write that down.
+- **C2, the index gate:** expect both keyset indexes at 0 scans and null, `stats_reset` null, and
+  `listings_source_id_idx` present. The feed index's own count MOVES and that is expected: since W5 its
+  only scans are the planner's prefix choice for the broker lane's per-portal statements on maxima /
+  bezrealitky / mmreality / remax (hunted 2026-10-08 with the per-minute sampler `w6-feed-watch`);
+  `listings_source_id_idx` (source, id) takes those over, as it already serves the other five portals.
+  After a stats reset the keyset half proves nothing: write that down.
   ```sql
   select indexrelname, idx_scan, last_idx_scan from pg_stat_user_indexes
    where indexrelname in ('listings_portal_feed_idx', 'properties_cat_last_seen_keyset_idx', 'properties_last_seen_keyset_idx');
-  select stats_reset from pg_stat_database where datname = current_database();
+  select to_regclass('public.listings_source_id_idx') as substitute, stats_reset from pg_stat_database where datname = current_database();
   ```
 - **C3, the Watchdog plan:** no `*_last_seen_keyset_idx` in it (2026-10-08: `properties_cat_first_seen_keyset_idx`).
   ```sql
@@ -273,6 +277,8 @@ TARGETS="property_status_events assets asset_membership_events properties:id,ass
     - #1655 rebases.
     - #1634 removes its `listing_feed_public` reads (its 575 pre- and post-conditions) and takes a number above 593.
     Then mark W6 applied in PROGRAM.md §4, §5 and §6 and in `roadmap/merge-sprint.md`.
+19. **The sampler goes.** The reader hunt's per-minute job and its table (2026-10-08) are not part of the
+    schema: `select cron.unschedule('w6-feed-watch'); drop table if exists public.w6_feed_watch;`.
 
 **If it stops halfway.** Every section is its own transaction (the concurrent index drops are their own
 statements), so a stop leaves a consistent partial state that nothing reads. Re-dispatch step 10 later.

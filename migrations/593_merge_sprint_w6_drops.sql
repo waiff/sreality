@@ -17,8 +17,13 @@
 -- every step is idempotent and a step already applied takes no lock on a re-run.
 --
 -- WHAT GOES (live pg_depend, 2026-10-08: nothing outside this list depends on any of it)
---   1. The per-ad lane's listings_portal_feed_idx (140 MB, frozen at 43,963 scans since W5 went live
---      2026-10-08 03:46 UTC), CONCURRENTLY: its own top-level statement, before the column it reads.
+--   1. The per-ad lane's listings_portal_feed_idx (140 MB), CONCURRENTLY: its own top-level statement,
+--      before the column it reads. Nothing reads its expression since W5 (the view and the function go in
+--      section 3); its scans since (2026-10-08, hunted with a per-minute sampler) are the planner's PREFIX
+--      choice for the broker lane's per-portal statements, `l.source = X AND l.id = ANY($1)`
+--      (toolkit/broker_sources.py), on maxima / bezrealitky / mmreality / remax — listings_source_id_idx
+--      (source, id) serves those at least as well, as it already does for the other five portals, and
+--      section 0 refuses the apply if that index is missing.
 --   2. The status log (MS9): trigger properties_log_status_event, log_property_status_event(), the view
 --      property_status_events_public, the table property_status_events (1.7 M rows, 215 MB). Asset links
 --      (0 rows ever): asset_membership_events, properties.asset_id (its FK and partial index go with it),
@@ -113,10 +118,8 @@ begin
               where holder like 'full:%' and expires_at > now()) then
     raise exception '593 refused: the daily recompute holds the maintenance lease';
   end if;
-  if exists (select 1 from pg_stat_user_indexes
-              where indexrelname = 'listings_portal_feed_idx'
-                and last_idx_scan > timestamptz '2026-10-08 03:46:00+00') then
-    raise exception '593 refused: listings_portal_feed_idx was read after W5 went live: find the reader';
+  if to_regclass('public.listings_source_id_idx') is null then
+    raise exception '593 refused: listings_source_id_idx is missing; it takes over the feed index''s prefix readers (the broker lane on four small portals)';
   end if;
   if exists (select 1 from pg_stat_user_indexes
               where indexrelname in ('properties_cat_last_seen_keyset_idx', 'properties_last_seen_keyset_idx')

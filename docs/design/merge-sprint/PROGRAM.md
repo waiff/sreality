@@ -384,7 +384,9 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
 - **W6:** on a day the operator names; each object re-checked that day: no view or function depends
   on it, and no cascade is used; backup to R2 read back; engine paused; 05:20–05:30 UTC; a 5-second
   lock limit with retries; indexes dropped outside the transaction, after a query plan shows the
-  Watchdog does not use them and the feed index's scan count has not moved since W5 went live; the
+  Watchdog does not use them and nothing reads the feed index's expression since W5 (its remaining
+  scans are the planner's prefix choice for the broker lane on four small portals, which
+  `listings_source_id_idx` takes over; hunted 2026-10-08); the
   pipeline note field is skipped if a single pipeline card holds a note, else
   `property_pipeline_public` and `pipeline_board_public`, which reads it, are first re-created
   without it. Built 2026-10-08 as migration 593, whose guards refuse what this gate forbids (a

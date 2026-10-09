@@ -143,8 +143,7 @@ def test_section_0s_production_half_names_what_its_owners_name() -> None:
         "if exists (select 1 from autodedup.rt_lease where expires_at > now())",
         "if exists (select 1 from public.property_maintenance_lease where holder like 'full:%' "
         "and expires_at > now())",
-        "if exists (select 1 from pg_stat_user_indexes where indexrelname = "
-        "'listings_portal_feed_idx' and last_idx_scan > timestamptz '2026-10-08 03:46:00+00')",
+        "if to_regclass('public.listings_source_id_idx') is null",
         "if exists (select 1 from pg_stat_user_indexes where indexrelname in "
         "('properties_cat_last_seen_keyset_idx', 'properties_last_seen_keyset_idx') "
         "and idx_scan > 0)",
