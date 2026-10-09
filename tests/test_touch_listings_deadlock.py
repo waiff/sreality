@@ -14,10 +14,10 @@ Two ways it loses one, both seen in production on 2026-09-05:
 
 The retry is safe by construction: the walk connection is autocommit, so either
 error aborts only the one statement; both statements in a chunk are idempotent
-(SET last_seen_at = now(); INSERT ... ON CONFLICT). These tests pin that BOTH
-touch functions retry on BOTH errors, that they stop retrying, that a lock-wait
-pauses longer than a deadlock, that unrelated errors are not retried, and that
-the count returned is right.
+(SET last_seen_at = now(); INSERT ... ON CONFLICT). These tests pin that the
+touch retries on BOTH errors, that it stops retrying, that a lock-wait pauses
+longer than a deadlock, that unrelated errors are not retried, and that the
+count returned is right.
 """
 
 from __future__ import annotations
@@ -64,41 +64,35 @@ class _Conn:
         return self._cur
 
 
-TOUCHES = [db.touch_listings, db.touch_listings_by_id]
-
-
-@pytest.mark.parametrize("touch", TOUCHES)
 @pytest.mark.parametrize("exc", [DEADLOCK, LOCKWAIT])
-def test_a_single_lock_loss_is_retried_and_the_chunk_still_counts(monkeypatch, touch, exc) -> None:
+def test_a_single_lock_loss_is_retried_and_the_chunk_still_counts(monkeypatch, exc) -> None:
     slept: list[float] = []
     monkeypatch.setattr(db.time, "sleep", slept.append)
     cur = _Cur(fail_times=1, exc=exc)
-    total = touch(_Conn(cur), [1, 2, 3])
+    total = db.touch_listings_by_id(_Conn(cur), [1, 2, 3])
     assert total == 3                       # the retry completed the chunk
     assert len(slept) == 1                  # and paused once before doing so
     # 1 failed execute + 2 successful executes (react CTE + bulk bump)
     assert cur.calls == 3
 
 
-@pytest.mark.parametrize("touch", TOUCHES)
 @pytest.mark.parametrize("exc", [DEADLOCK, LOCKWAIT])
-def test_a_persistent_lock_loss_gives_up_and_raises(monkeypatch, touch, exc) -> None:
+def test_a_persistent_lock_loss_gives_up_and_raises(monkeypatch, exc) -> None:
     """Retrying forever would turn a lock fight into a hung walk. After the
     budgeted attempts the error propagates exactly as before, so the category
     is reported failed rather than silently half-touched."""
     monkeypatch.setattr(db.time, "sleep", lambda _s: None)
     cur = _Cur(fail_times=99, exc=exc)
     with pytest.raises(exc):
-        touch(_Conn(cur), [1, 2, 3])
+        db.touch_listings_by_id(_Conn(cur), [1, 2, 3])
     assert cur.calls == db._TOUCH_DEADLOCK_ATTEMPTS
 
 
-@pytest.mark.parametrize("touch", TOUCHES)
-def test_no_lock_loss_means_no_sleep_and_one_pass(monkeypatch, touch) -> None:
+def test_no_lock_loss_means_no_sleep_and_one_pass(monkeypatch) -> None:
     slept: list[float] = []
     monkeypatch.setattr(db.time, "sleep", slept.append)
     cur = _Cur(fail_times=0)
-    assert touch(_Conn(cur), [7, 8]) == 2
+    assert db.touch_listings_by_id(_Conn(cur), [7, 8]) == 2
     assert slept == []
     assert cur.calls == 2
 
@@ -107,7 +101,7 @@ def test_the_deadlock_backoff_grows_with_the_attempt(monkeypatch) -> None:
     """A double race should wait longer the second time, not hammer the lock."""
     slept: list[float] = []
     monkeypatch.setattr(db.time, "sleep", slept.append)
-    db.touch_listings(_Conn(_Cur(fail_times=2)), [1])
+    db.touch_listings_by_id(_Conn(_Cur(fail_times=2)), [1])
     assert slept == [db._TOUCH_DEADLOCK_DELAY * 1, db._TOUCH_DEADLOCK_DELAY * 2]
 
 
@@ -122,8 +116,7 @@ def test_a_lock_wait_cancel_pauses_longer_than_a_deadlock(monkeypatch) -> None:
     assert db._TOUCH_LOCKWAIT_DELAY > db._TOUCH_DEADLOCK_DELAY
 
 
-@pytest.mark.parametrize("touch", TOUCHES)
-def test_an_unrelated_error_is_not_retried(monkeypatch, touch) -> None:
+def test_an_unrelated_error_is_not_retried(monkeypatch) -> None:
     """Only a lost lock fight is transient. A constraint or syntax error would
     fail identically on every attempt, and retrying it just hides the bug for
     three rounds of sleep."""
@@ -131,6 +124,6 @@ def test_an_unrelated_error_is_not_retried(monkeypatch, touch) -> None:
     monkeypatch.setattr(db.time, "sleep", slept.append)
     cur = _Cur(fail_times=1, exc=psycopg.errors.UniqueViolation)
     with pytest.raises(psycopg.errors.UniqueViolation):
-        touch(_Conn(cur), [1])
+        db.touch_listings_by_id(_Conn(cur), [1])
     assert slept == []
     assert cur.calls == 1

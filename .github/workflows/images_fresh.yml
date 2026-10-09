@@ -13,7 +13,7 @@ name: "Scraping: fresh-listing image fast lane"
 # timeout. The deep + inactive backlog stays with images.yml.
 #
 # Near-continuous: on success WITH work remaining, the run re-dispatches itself
-# (the proven SCRAPE_CHAIN_TOKEN pattern from scrape.yml) so units run back to
+# (the SCRAPE_CHAIN_TOKEN pattern the detail drains use) so units run back to
 # back. When the fresh queue is empty it does NOT chain (no hot loop); the every
 # 15-min cron restarts the chain when new listings arrive. The cron is also the
 # bootstrap — a brand-new workflow_dispatch only resolves once it's on `main`.

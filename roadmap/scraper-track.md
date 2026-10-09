@@ -5,6 +5,23 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### Delisting hysteresis — portals blink (2026-10-09, shipped)
+- **Found:** a gone verdict flipped an ad on one 404; sreality takes ads down (index AND detail)
+  for hours around its nightly expiry/renewal and brings them back under the same id — 35% of
+  18,105 sreality gone verdicts (10-02..09) active again within the week, 62% of one night's
+  batch live nine hours later (idnes 6%, remax 11%, mmreality 15%). Rationale + numbers:
+  `references/coverage-and-delisting.md` § Hysteresis; `docs/architecture.md` rule #3.
+- **Done:** `db.gone_evidence` + `delist_policy.GONE_DWELL` (12 h, operator's ruling) +
+  `gone_confirmed`; the drain records the first verdict (`detail_queue_completions` `gone`) and
+  flips on a second unrefuted one the dwell later (`flipped`, migration 594). Deleted: sreality's
+  HTML not-found body scan, `freshness._record_gone`'s own flip (nominates at VERIFY instead).
+- **Done (same day):** `verify_pipeline` `false_delist_share` — per portal, the share of `flipped`
+  ledger rows (7 d) active again; warn ≥5%, fail ≥20%, under 50 flips unscored, nothing scored =
+  unmeasured warn; 6 h lane + bell, not in the hourly `--only` list yet (soak, then promote).
+- **Next:** C2-2 (below) deletes the last legacy flip caller; one-off heal — re-verify the rows a
+  single pre-594 verdict closed (sreality 10.7k, idnes 9.5k, bezrealitky 0.9k, remax 0.4k,
+  mmreality 0.6k over 14 d) at VERIFY priority, pilot 25/portal then release.
+
 ### ceskereality hard-403 — Chrome client hints (2026-10-02, recovered)
 - 2026-10-02: every ceskereality request 403'd from 09-29 07:37Z (last 200) until 10-02 — the site's own
   nginx (not Cloudflare) rejects a Chrome UA arriving over HTTP/1.1 without `sec-ch-ua` client hints (a
@@ -46,9 +63,13 @@ Independent of the analytical, UI, and map tracks.
 - **Rails:** `test_no_portal_adapter_diffs_its_own_sightings` (`tests/scraper/test_portal.py`) and
   `tests/scraper/test_walk_politeness_census.py` (each portal built with its own limits; walk /
   probe / drain pace with them; the diff makes no HTTP request; every walk client gets the limiter).
-- **Next:** C2-2 delete sreality's dormant `_run_full` + `scrape.yml` (and the rail exemption);
-  C2-5 maxima/remax negative agenda cache; C2-3 uniform `Portal(config)` constructor (drops the
-  two `portal_factory` branches); C2-4 sreality per-page deadline.
+- **Done (2026-10):** C2-2 — sreality's dormant combined path is gone: `_run_full`, `--detail-only`,
+  `scrape.yml`, the legacy gone handler (`_handle_gone`), the coupled half of `_walk_category`,
+  `db.index_summary` / `db.touch_listings` and the batch condition-scoring runner; the rail now
+  scans `_walk_category` too. `scraper.main` keeps `--index-only` / `--drain-only` / `--images-only`.
+- **Next:** C2-5 maxima/remax negative agenda cache; C2-3 uniform `Portal(config)` constructor
+  (drops the two `portal_factory` branches); C2-4 sreality per-page deadline. Owed by C2-2: the
+  now-unread `max_detail_per_category` limit (`PortalLimits`, admin route, Scrapers page).
 
 ### `scraper/db.py` policy and the dead delist sweep (2026-10-01; sweep + throttle done, reserves owed)
 - **Done (2026-10):** the absence sweep (`mark_inactive`, `_native`, `_agenda`, `_delist_flip_allowed`,
@@ -380,7 +401,7 @@ decays back when sreality is quiet. New `--detail-workers` / `--detail-rate`
 knobs (defaults 4 workers @ 2 req/s) are wired into both scrape workflows.
 No new dependency (pure `threading`); the index walk and DB writes stay
 serial by design. `get_detail`'s serial 1.5s self-throttle is retained for
-the no-limiter callers (`freshness`, `--detail-only`).
+the no-limiter callers (`freshness`; `--detail-only` until C2-2 deleted it).
 
 ### Phase 1.8: Single hourly pipeline + decoupled scoring (done)
 Collapsed the two-tier scrape into **one** hourly workflow. The
@@ -422,7 +443,7 @@ First phase of the scaling roadmap
 (`~/.claude/plans/the-health-page-is-functional-moore.md`, the low-risk
 write-throughput quick win). `scraper/db.py` gained `connect_session()`,
 which points the scraper's long-lived detail-write connection
-(`_run_full`) at a new `SUPABASE_DB_SESSION_URL` (Supabase Session-mode
+(`_run_full`, deleted in C2-2) at a new `SUPABASE_DB_SESSION_URL` (Supabase Session-mode
 pooler, port 5432) **without** `prepare_threshold=None`, so the repeated
 upsert + spatial SQL gets server-side prepared once and reused across the
 run instead of re-planned per listing. The session pooler gives each
@@ -547,7 +568,7 @@ combined scrape is split into two cadence-matched jobs joined by a queue:
   set-based. (Phase 3 moved that attach to a `*/5` incremental pass, cutting
   the brand-new-listing Browse read-lag from ≤30 min to ~5 min.)
 - `scrape.yml`'s combined `_run_full` retained as the **dispatch-only revert
-  fallback** (re-add its cron to roll back; no code change).
+  fallback** (re-add its cron to roll back; no code change) — deleted in C2-2 (2026-10).
 - Migration 105 also widens `scrape_runs.run_type` to admit `index`/`detail`
   and redefines `scraper_health_checks()` so liveness/reconciliation stay
   scoped to the index walk while the 24h counters also see the drain's

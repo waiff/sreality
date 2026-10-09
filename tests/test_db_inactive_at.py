@@ -107,9 +107,9 @@ def test_mark_listing_inactive_is_the_only_flip_writer():
 # --- reactivations clear the stamp ------------------------------------------
 
 
-def test_touch_listings_clears_inactive_at_in_both_statements():
+def test_touch_listings_by_id_clears_inactive_at_in_both_statements():
     conn = _FakeConn()
-    db.touch_listings(conn, [1, 2])
+    db.touch_listings_by_id(conn, [1, 2])
     react = _find(conn.executed, "WITH react AS")
     assert react is not None and "inactive_at = NULL" in react[0]
     bulk = _find(conn.executed, "SET last_seen_at = now(), is_active = true")

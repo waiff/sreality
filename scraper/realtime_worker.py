@@ -86,7 +86,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              tick. ceskereality and realitymix geocode an ad AFTER publishing it,
              so a listing fetched at discovery carried no location and nothing
              ever re-read it; the drain does the rest (a bazos category page
-             raises ListingGoneError and delists instead). LIVE by default
+             raises ListingGoneError: a gone verdict, rule #3). LIVE by default
              (`LOCATION_REFETCH_ENABLED=0` idles it).
 - sold_comps: every `realtime_sold_comps_interval_seconds` (DARK: the seeded row is
              0), fetch registered sales from reas.cz for up to 5 obec cells — the
@@ -420,7 +420,7 @@ _INTAKE_FAST_CONTRACTS_PROJECTED = False
 # already exists does the rest — the drain re-fetches and rewrites the page, the
 # location_intake_fast lane mines the new body within a minute, the resolver answers. A
 # bazos dead ad answers with the category page, which raises ListingGoneError, so the same
-# fetch also delists it sooner.
+# fetch also records its gone verdict sooner (rule #3's hysteresis decides the flip).
 #
 # DAILY, AND BOUNDED PER PORTAL. The set is a few hundred rows and a portal's geocoding lag
 # is minutes-to-hours, so once a day is plenty and the cap (500/portal/tick, oldest-fetched

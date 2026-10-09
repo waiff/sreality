@@ -68,25 +68,6 @@ CAP_STATUSES: frozenset[int] = frozenset({422})
 SPLIT_THRESHOLD: int = 10000
 DISTRICT_IDS: tuple[int, ...] = tuple(range(1, 78))
 
-# Substrings of sreality's HTML "this page does not exist" page. Sreality
-# sometimes serves this (HTTP 200, text/html) for a delisted detail URL
-# instead of a 404/410 JSON error, in which case response.json() would
-# otherwise raise a parse error and the listing would be logged as a fetch
-# failure instead of recognised as gone.
-_NOT_FOUND_MARKERS: tuple[str, ...] = (
-    "tato stránka neexistuje",
-    "stránka nebyla nalezena",
-)
-
-
-def _is_not_found_body(response: requests.Response) -> bool:
-    """True when a non-JSON 200 body is sreality's 'page does not exist' page."""
-    if "json" in response.headers.get("Content-Type", "").lower():
-        return False
-    body = response.text.lower()
-    return any(marker in body for marker in _NOT_FOUND_MARKERS)
-
-
 def _unwrap_estate(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the estate object from a detail response.
 
@@ -120,7 +101,7 @@ class SrealityClient(BasePortalClient):
         locality_district_id: int | None = None,
     ) -> None:
         # A shared RateLimiter (when set) paces fetches across worker threads;
-        # serial callers (freshness, --detail-only) pass none and keep the
+        # serial callers (freshness) pass none and keep the
         # per-instance detail_delay_s self-throttle in get_detail.
         super().__init__(
             limiter=limiter,
@@ -377,9 +358,10 @@ class SrealityClient(BasePortalClient):
         # The callers (iter_index / probe / get_detail) already paced via the
         # shared limiter or the detail self-throttle, so skip the base's pace.
         # _request raises ListingGoneError on 404/410 and HTTPError on the 422
-        # deep-pagination cap (caught by iter_index); a 200 body that is really
-        # sreality's HTML "page does not exist" is caught here.
+        # deep-pagination cap (caught by iter_index). A non-JSON 200 body is an
+        # ERROR (json() raises), never a gone signal: the API answers a real
+        # removal with a JSON 404, and sreality's HTML shell carries the "tato
+        # stránka neexistuje" string in its bundle, so a text scan would read
+        # any HTML answer -- a consent wall, an edge error -- as a removal.
         response = self._request(url, params=params, pace=False)
-        if _is_not_found_body(response):
-            raise ListingGoneError(url, response.status_code)
         return response.json()
