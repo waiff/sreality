@@ -109,6 +109,17 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_error_rate_warn": 0.2,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
+    # false_delist_share: of the ads the drain CLOSED (ledger outcome 'flipped', 7 d), the
+    # share active again now -- a revival after a confirmed gone verdict is a flip that was
+    # wrong. Sized 2026-10-09 on the pre-hysteresis ledger (one verdict flipped): sreality
+    # 35%, mmreality 15%, remax 11%, bezrealitky 7%, idnes 6%, the rest under 2%. The dwell
+    # (12 h) is meant to hold every portal under the warn line; 20% is the old sreality
+    # order of magnitude, i.e. the rule stopped working. A portal with fewer than 50 flips in
+    # the window is not scored (a 12-flip share is noise) and a window where NO portal
+    # reached 50 is reported as unmeasured, never ok.
+    "false_delist_share_warn": 0.05,
+    "false_delist_share_fail": 0.20,
+    "false_delist_min_flips": 50,
     # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
     # trailing 3 hours on every tick: called_at defaults to now() = TRANSACTION START,
     # so a call whose transaction opened at 10:59:59 and committed at 11:00:05 lands in
@@ -2913,6 +2924,97 @@ def check_delist_flip_refused(conn: Any, thresholds: dict[str, Any]) -> dict[str
     }
 
 
+# --- a flip that a later sighting reversed was a false delisting -------------
+_FALSE_DELIST_SQL = """
+select c.source,
+       count(*) as flips,
+       count(*) filter (where l.is_active) as active_again
+  from detail_queue_completions c
+  join listings l on l.source = c.source and l.source_id_native = c.native_id
+ where c.outcome = 'flipped'
+   and c.completed_at > now() - interval '7 days'
+ group by c.source
+ order by c.source
+"""
+
+
+def check_false_delist_share(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Of the ads the drain closed in the last 7 days, how many are active again?
+
+    Rule #3's hysteresis (2026-10-09) flips a listing only on a second gone verdict
+    at least GONE_DWELL after the first, so a revival after a flip means the portal
+    kept the ad down longer than the dwell and brought it back -- or the gone signal
+    misfired. Either way the flip was wrong and the operator saw an active ad marked
+    inactive. The ledger row (`detail_queue_completions.outcome = 'flipped'`, migration
+    594) is the only durable trace: reactivation clears `listings.inactive_at`.
+    Measured before the rule: sreality 35%, mmreality 15%, remax 11%.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_FALSE_DELIST_SQL)
+        rows = cur.fetchall()
+
+    warn = float(thresholds["false_delist_share_warn"])
+    fail = float(thresholds["false_delist_share_fail"])
+    min_flips = int(thresholds["false_delist_min_flips"])
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    unscored: list[str] = []
+    status = "ok"
+    worst = 0.0
+    scored = 0
+    for source, flips, active_again in rows:
+        flips = int(flips)
+        active_again = int(active_again)
+        share = active_again / flips if flips else 0.0
+        per_source[source] = {
+            "flips": flips, "active_again": active_again,
+            "share": round(share, 4), "scored": flips >= min_flips,
+        }
+        if flips < min_flips:
+            unscored.append(source)
+            continue
+        scored += 1
+        worst = max(worst, share)
+        if share >= fail:
+            status = "fail"
+            offenders.append(f"{source} {share:.1%} of {flips} flips active again")
+        elif share >= warn:
+            status = _worst_status(status, "warn")
+            offenders.append(f"{source} {share:.1%} of {flips} flips active again")
+
+    details = {"per_source": per_source, "offenders": offenders, "unscored": unscored,
+               "warn": warn, "fail": fail, "min_flips": min_flips}
+    if not scored:
+        return {
+            "check_key": "false_delist_share", "status": "warn", "value": None,
+            "details": details,
+            "message": (
+                f"No portal closed {min_flips}+ ads in 7 days -- the false-delist share "
+                "was verified for nothing (expected right after migration 594 ships; "
+                "a quiet week later it means the drain is not flipping at all)."
+            ),
+        }
+    if offenders:
+        message = (
+            "Ads closed by a confirmed gone verdict are back on the portal: "
+            + "; ".join(offenders[:6])
+            + " -- the portal keeps ads down longer than GONE_DWELL, or its gone "
+            "signal misfires. Read the flipped rows' pages before touching the dwell."
+        )
+    else:
+        message = (
+            f"False-delist share healthy (worst {worst:.1%} across {scored} scored "
+            f"portal(s); {len(unscored)} under {min_flips} flips not scored)."
+        )
+    return {
+        "check_key": "false_delist_share",
+        "status": status,
+        "value": round(worst * 100, 2),
+        "details": details,
+        "message": message,
+    }
+
+
 _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL = f"""
     SELECT source, count(*) AS n, count(*) FILTER (WHERE unexpected) AS unexpected
     FROM (
@@ -3523,6 +3625,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("migration_drift", check_migration_drift),
     ("worker_lane_stall", check_worker_lane_stall),
     ("delist_flip_refused", check_delist_flip_refused),
+    # Rule #3's hysteresis watch (2026-10-09): flipped rows active again. 6h lane +
+    # in-app bell; NOT in llm_health.yml's hourly --only list yet (ship, soak, promote).
+    ("false_delist_share", check_false_delist_share),
     # W4's standing P6 check. 6h lane + in-app bell; NOT in llm_health.yml's hourly
     # --only list yet — ship, soak, then promote (the same ladder as the ppm2 checks).
     ("location_payload_shape_drift", check_location_payload_shape_drift),
