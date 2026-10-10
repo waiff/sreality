@@ -845,8 +845,10 @@ def _sequential_for_price(a: Listing, b: Listing, settings: Settings) -> bool:
     return overlap <= settings.demonstrate_price_colive_fraction * shortest
 
 
-# E282's reading, memoised per advert: (id, text length) -> the engine's own shingle set.
-_SHINGLE_MEMO: dict[tuple[int, int], frozenset[int]] = {}
+# E282's reading, memoised on the body itself: body -> the engine's own shingle set. Under the old
+# (id, text length) key a same-length edit was served the old body's set (E949); the lane empties
+# it when its pass ends.
+_SHINGLE_MEMO: dict[str, frozenset[int]] = {}
 # E282 reads a body only when both say something: the bar `strong_corroboration` keeps.
 TEXT_IDENTITY_MIN_CHARS: int = 200
 
@@ -855,12 +857,11 @@ def _text_shingles(listing: Listing) -> frozenset[int]:
     from autodedup.normalize import fold as engine_fold, normalize_folded, shingles
 
     text = listing.description or ""
-    key = (listing.id, len(text))
-    hit = _SHINGLE_MEMO.get(key)
+    hit = _SHINGLE_MEMO.get(text)
     if hit is None:
         tokens = normalize_folded(engine_fold(text)).split()
         hit = frozenset(shingles(tokens)) if tokens else frozenset()
-        _SHINGLE_MEMO[key] = hit
+        _SHINGLE_MEMO[text] = hit
     return hit
 
 

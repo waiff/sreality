@@ -1,8 +1,8 @@
 """Always-on realtime supervisor (realtime-scrapers Wave C-3).
 
 A SECOND Railway service from the same Docker image (start command
-`python -m scraper.realtime_worker`) that replaces cron quantization for the
-latency-critical path. Settings-paced asyncio lanes (the proven
+`env MALLOC_ARENA_MAX=2 python -m scraper.realtime_worker`, E949) that replaces cron
+quantization for the latency-critical path. Settings-paced asyncio lanes (the proven
 matcher/outbox pattern from api/notifications + api/notification_outbox):
 
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
@@ -109,8 +109,13 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              kill switch; `rt_seed`, `apply` and `unapply` take the same lease, so
              there is one writer at a time, and a restart in place releases the lease
              its dead predecessor left and halves the claim cap, or, at the cap's
-             floor, leaves it to its TTL (E948). An absent autodedup store skips with
-             one warning.
+             floor, leaves it to its TTL (E948); a container whose memory limit grew
+             by at least 25 % resets the cap, and a death it finds at that boot ran
+             under the smaller limit, so it halves nothing (E948b). An absent
+             autodedup store skips with one warning. The engine empties its body and
+             token memos whatever ends a pass, and the worker hands freed heap back
+             to the kernel (gc + glibc malloc_trim) as a pass ends and again before
+             the next begins, which is when a raised pass's memory goes (E949).
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook. It
              runs on the executor every lane shares, so it is that executor's
@@ -137,7 +142,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import faulthandler
+import gc
 import importlib
 import logging
 import os
@@ -514,6 +521,13 @@ AUTODEDUP_RELEASE_RETRY_DELAY_SECONDS = 2.0
 # The cancel of a statement the pass is already running (up to 120 s), sent first: it must not
 # eat the drain the release needs after it.
 AUTODEDUP_CANCEL_TIMEOUT_SECONDS = 5.0
+# glibc by its soname (E949): its malloc keeps what a pass freed in its arenas for reuse, and
+# `malloc_trim(0)` hands those free pages back. Elsewhere (macOS, musl) there is none to load.
+GLIBC_SONAME = "libc.so.6"
+# The hand-back's two calls (E949), bound here so a test replaces them in this module alone,
+# never the process's `gc` or `ctypes`.
+_collect_garbage: Callable[[], int] = gc.collect
+_load_library: Callable[[str], Any] = ctypes.CDLL
 _AUTODEDUP_PASS_LOCK = _PassLock("autodedup")
 # SHUTDOWN (E941). Railway SIGTERMs the old deployment once the new one is online and, by
 # default, SIGKILLs it 0 s later (docs.railway.com/deployments/reference): no handler ran, a
@@ -2105,22 +2119,18 @@ def _memory_limit_mb(root: str = _CGROUP_ROOT) -> float | None:
     return None
 
 
-# Read once, at boot (E948): the heartbeat carries it beside the pass's memory, and nothing
-# decides on it.
-_MEMORY_LIMIT_MB: float | None = _memory_limit_mb()
-
-
 def _autodedup_outcome(
     started: float,
     *,
     summary: dict[str, Any] | None = None,
     skipped: str | None = None,
     refused: str | None = None,
+    memory_limit_mb: float | None = None,
 ) -> dict[str, Any]:
     """The heartbeat's `last` for one tick — the same keys on every path, so a skipping or
     refusing lane never reads as a quiet one: `scored` pairs, `grouped` groups written,
     `merged` production merges the reconcile made, `skipped` 0/1 with its `reason`, `errors`
-    0/1 with the refusal or abort text."""
+    0/1 with the refusal or abort text; a pass that ran adds the memory limit it ran under."""
     last: dict[str, Any] = {
         "ran": False, "claimed": 0, "scored": 0, "grouped": 0, "merged": 0, "skipped": 0,
         "errors": 0, "seconds": round(time.monotonic() - started, 1),
@@ -2186,8 +2196,9 @@ def _autodedup_outcome(
             latency_p50_s=latency.get("p50"),
             latency_p95_s=latency.get("p95"),
             bound_by=(summary.get("claim_bound") or {}).get("bound_by"),
-            # E948: the claim cap a death halves ({cap, reason}), and the lease of a dead
-            # predecessor of this container this pass released (None: there was none).
+            # E948: the claim cap a death halves ({cap, reason, limit_mb}; a bigger container
+            # resets it, E948b), and the lease of a dead predecessor of this container this
+            # pass released (None: there was none).
             claim_cap=summary.get("claim_cap"),
             predecessor_released=summary.get("predecessor_released"),
             # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
@@ -2195,7 +2206,10 @@ def _autodedup_outcome(
             # and E948's two beside it: what it holds now and the container's limit.
             peak_rss_mb=summary.get("peak_rss_mb"),
             rss_mb=summary.get("rss_mb"),
-            memory_limit_mb=_MEMORY_LIMIT_MB,
+            memory_limit_mb=memory_limit_mb,
+            # E949: what the engine's body and token memos held at the pass's end, before it
+            # emptied them.
+            memo_entries=summary.get("memo_entries"),
         )
         if aborted:
             last["aborted"] = aborted[:AUTODEDUP_REASON_CHARS]
@@ -2205,6 +2219,31 @@ def _autodedup_outcome(
 def _autodedup_sync() -> dict[str, Any]:
     """One bounded pass of THE autodedup lane (`autodedup.incremental_lane.run_incremental`).
 
+    One pass at a time (`_AUTODEDUP_PASS_LOCK`). Its thread is any of the executor's and glibc
+    keeps a freed heap for reuse, so under the lock every pass hands freed memory back to the
+    kernel twice (E949, `_return_memory`): before it begins (`rss_at_start_mb`) and as it ends,
+    before the lock is released (`rss_after_trim_mb`). A RAISED pass's own end reaches none of
+    its memory, since the raise is still in flight and its traceback holds every frame of the
+    pass until the lane loop has logged and dropped it: that memory goes at the next pass's start.
+    """
+    started = time.monotonic()
+    if not _AUTODEDUP_PASS_LOCK.try_enter():
+        # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its thread still
+        # holds its connection. The engine's own deadline makes that a short window.
+        return _autodedup_outcome(started, skipped="previous_pass_running")
+    try:
+        rss_at_start_mb = _return_memory()
+        last = _autodedup_run(started)
+    finally:
+        rss_after_trim_mb = _return_memory()
+        _AUTODEDUP_PASS_LOCK.release()
+    last.update(rss_at_start_mb=rss_at_start_mb, rss_after_trim_mb=rss_after_trim_mb)
+    return last
+
+
+def _autodedup_run(started: float) -> dict[str, Any]:
+    """The pass itself, under the lane's lock.
+
     Lazy import keeps autodedup off the worker's startup path and off every dark wake. The
     engine REFUSES by raising SystemExit — a storage budget, a scope it cannot walk, a missing
     migration — and a SystemExit that reached the event loop would stop the whole worker, so a
@@ -2213,47 +2252,58 @@ def _autodedup_sync() -> dict[str, Any]:
     """
     global _AUTODEDUP_STORE_WARNED, _AUTODEDUP_HOLDER, _AUTODEDUP_CONN
 
-    started = time.monotonic()
-    if not _AUTODEDUP_PASS_LOCK.try_enter():
-        # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its thread still
-        # holds its connection. The engine's own deadline makes that a short window.
-        return _autodedup_outcome(started, skipped="previous_pass_running")
-    try:
-        from autodedup import incremental_lane
+    from autodedup import incremental_lane
 
-        conn = db.connect()
+    conn = db.connect()
+    try:
+        if not _autodedup_store_present(conn):
+            if not _AUTODEDUP_STORE_WARNED:
+                _AUTODEDUP_STORE_WARNED = True
+                LOG.warning(
+                    "AUTODEDUP: the autodedup real-time store (migrations 539/540) is "
+                    "absent on this database; the lane skips every tick")
+            return _autodedup_outcome(started, skipped="store_absent")
+        _AUTODEDUP_STORE_WARNED = False
+        # Read every pass (E948b): a resize that reaches a running process is seen by its
+        # next pass, which resets a claim cap halved under a smaller limit.
+        memory_limit_mb = _memory_limit_mb()
+        # Named HERE so the shutdown signal can release exactly this pass's lease (E941).
+        holder = incremental_lane.pass_holder()
+        _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = holder, conn
         try:
-            if not _autodedup_store_present(conn):
-                if not _AUTODEDUP_STORE_WARNED:
-                    _AUTODEDUP_STORE_WARNED = True
-                    LOG.warning(
-                        "AUTODEDUP: the autodedup real-time store (migrations 539/540) is "
-                        "absent on this database; the lane skips every tick")
-                return _autodedup_outcome(started, skipped="store_absent")
-            _AUTODEDUP_STORE_WARNED = False
-            # Named HERE so the shutdown signal can release exactly this pass's lease (E941).
-            holder = incremental_lane.pass_holder()
-            _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = holder, conn
-            try:
-                summary = incremental_lane.run_incremental(
-                    lambda: conn,
-                    fresh_conn=lambda: db.connect(
-                        attempts=1,
-                        connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS),
-                    holder=holder, stopping=_AUTODEDUP_STOPPING.is_set,
-                    booted_epoch=_BOOTED_EPOCH)
-            except SystemExit as exc:
-                return _autodedup_outcome(started, refused=str(exc))
-            finally:
-                _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = None, None
-            return _autodedup_outcome(started, summary=summary)
+            summary = incremental_lane.run_incremental(
+                lambda: conn,
+                fresh_conn=lambda: db.connect(
+                    attempts=1,
+                    connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS),
+                holder=holder, stopping=_AUTODEDUP_STOPPING.is_set,
+                booted_epoch=_BOOTED_EPOCH, memory_limit_mb=memory_limit_mb)
+        except SystemExit as exc:
+            return _autodedup_outcome(started, refused=str(exc))
         finally:
-            # run_incremental closes the connection it was handed; a second close is a
-            # no-op, and this one covers every path that never got that far.
-            with contextlib.suppress(Exception):
-                conn.close()
+            _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = None, None
+        return _autodedup_outcome(started, summary=summary, memory_limit_mb=memory_limit_mb)
     finally:
-        _AUTODEDUP_PASS_LOCK.release()
+        # run_incremental closes the connection it was handed; a second close is a
+        # no-op, and this one covers every path that never got that far.
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _return_memory() -> float | None:
+    """Freed memory, back to the kernel (E949): a full `gc.collect()` for the cycles a pass
+    left, then glibc's `malloc_trim(0)`, which releases the free pages every malloc arena
+    keeps. A no-op without glibc, and never raises: the process's RSS after it, in MiB."""
+    try:
+        _collect_garbage()
+        _load_library(GLIBC_SONAME).malloc_trim(0)
+    except Exception:  # noqa: BLE001 — no glibc to trim: never a failed pass
+        pass
+    try:
+        from autodedup.incremental_lane import rss_mb
+    except Exception:  # noqa: BLE001 — no engine to read the RSS with: None, never a raise
+        return None
+    return rss_mb()
 
 
 def _autodedup_release_lease(holder: str, pass_conn: Any = None) -> bool:
