@@ -392,7 +392,7 @@ Per-lane notes:
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 - **Autodedup lane** (AUTODEDUP §7.3/E914, mig 557) — THE engine's one real-time pass (`run_incremental`); one integer
   `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running) is cadence AND brake, claim = engine rate × half a 1050 s deadline, rate
-  halved per trip; `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share its `autodedup.rt_lease`; no GH schedule.
+  halved BEFORE every pass, restored the moment it commits, then overwritten by its measurement (E941); a killed pass keeps the half; `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share `autodedup.rt_lease`; every lane transaction (pass, each reconcile group, re-cut) ends with `rt_lease.hold` (`lease_lost`). SIGTERM marks the lane stopping: the pass stops at its next checkpoint (`PassStopped`), rolls back and releases; the handler also releases the holder's lease on a fresh connection (2 attempts; `drainingSeconds` 30). `last.peak_rss_mb`; `MAX_SCHEMA_MB` 1,500 (18 KiB an ad); no GH schedule.
 
 ## Pipeline verification (migration 274)
 
