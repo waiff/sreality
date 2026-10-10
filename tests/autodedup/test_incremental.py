@@ -295,9 +295,10 @@ def test_the_worker_interval_is_the_only_switch() -> None:
     # E930: fresh_conn is a connection factory for the halving after a raise, not a switch;
     # E941: `holder` names the lease the worker's shutdown releases, and `stopping` IS that
     # shutdown — a pass that sees it stops, it never opens one; E948: `booted_epoch` is the
-    # worker process's boot second, which names a dead predecessor's lease, never a switch.
+    # worker process's boot second, which names a dead predecessor's lease, never a switch;
+    # E948b: `memory_limit_mb` is the container's memory limit, which the claim cap records.
     assert set(params) == {"conn_factory", "deadline_s", "fresh_conn", "holder", "stopping",
-                           "booted_epoch"}
+                           "booted_epoch", "memory_limit_mb"}
     for gone in ("ENV_FLAG", "DB_FLAG", "env_enabled", "db_enabled", "parity_gate"):
         assert not hasattr(incremental_lane, gone), gone
 

@@ -49,7 +49,7 @@ try:
 except ImportError:  # pragma: no cover — no getrusage outside Unix
     resource = None  # type: ignore[assignment]
 
-from autodedup import reconcile, rt_lease
+from autodedup import indistinguishable, normalize, reconcile, rt_lease
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -206,6 +206,7 @@ from autodedup.store_score import storable
 from autodedup.model import LogisticModel
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
+from autodedup.text_facts import body_cache_entries, clear_body_caches
 
 LOG = logging.getLogger(__name__)
 
@@ -239,7 +240,8 @@ RULINGS_OVERLAP_S: float = 300.0
 # The rows the lane still keeps in `autodedup.settings` are WRITTEN BY IT, never set by hand:
 # the scope the seed cut the generation for, the seed's version and the build phase the seed
 # opens and the pass closes (both named in `incremental`, which the API reads too), the rate
-# each pass measures, the claim cap a death halves (E948) and the storage watermark (E914).
+# each pass measures, the claim cap a death halves (E948) and a bigger container resets
+# (E948b), and the storage watermark (E914).
 SCOPE_SETTING: str = "rt_scope"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
 CLAIM_CAP_SETTING: str = "rt_claim_cap"
@@ -360,9 +362,21 @@ PASS_RATE_ALPHA: float = 0.5
 # the next process of the same container, which releases that lease before its take
 # (`rt_lease.release_predecessor`), halves `rt_claim_cap:<generation>` in the same commit, and
 # the limit every feed's share is cut from is min(max_listings, cap, the time budget's). The
-# death is the signal; nothing reads a memory figure to decide. Nothing raises the cap again
-# but a seed: the store keeps growing under a generation (inactive adverts stay in it), so a
-# size that died dies again, and doubling back to it would kill the whole worker again.
+# death is the signal; no memory reading decides a halving. Nothing raises the cap again but a
+# seed or a bigger container (E948b): the store keeps growing under a generation (inactive
+# adverts stay in it), so a size that died in this container dies again, and doubling back to
+# it would kill the whole worker again.
+#
+# E948b: the row records the limit its cap was halved under (`limit_mb`): the first death since
+# a seed or a reset writes its container's, every later one the bigger of the row's and its
+# own (an unknown limit keeps the row's), so a death in a smaller container never lets the
+# bigger one reset to a size that already died there. A pass whose limit is at least
+# `CLAIM_CAP_LIMIT_GROWTH` above it resets the cap to `max_listings` (a cap already there only
+# takes the new limit); a smaller limit resets nothing, so after a reset a move back down
+# claims the whole `max_listings` again and its deaths walk the cap down from there. Every pass
+# fits the row to its own limit and commits that before its take, so a growth a boot sees
+# proves its dead predecessor ran under the smaller limit: that boot releases the lease and
+# halves nothing, since the death was the smaller container's.
 #
 # Below it a pass's memory is its neighbourhood read, not its claim: a smaller claim would only
 # slow the build. So at the floor a death is no claim's to cure — the neighbourhood read, the
@@ -371,6 +385,15 @@ PASS_RATE_ALPHA: float = 0.5
 # would restart the whole worker as fast as it can boot, and the TTL holds that to one death a
 # lease.
 CLAIM_CAP_FLOOR: int = 25
+# E948b: the share a container's memory limit must grow by, over the `limit_mb` its cap was
+# halved under, to reset the cap to `max_listings`; a limit that merely jitters must not.
+CLAIM_CAP_LIMIT_GROWTH: float = 0.25
+# E948 wrote its rows without a `limit_mb` key, and halved only in the 8 GB container, whose
+# cgroup limit reads 7,629.4 MiB (8,000,000,000 bytes). A halved row without the key grows from
+# it, so the row E948 left resets in a bigger container whether or not a pass ran in the 8 GB
+# one first. E948b always writes the key, so any other row without a limit (a seed's, or one
+# halved while no limit could be read) takes the limit its next pass reads and resets nothing.
+E948_LIMIT_MB: float = 7_629.4
 # The window the retirement rail is measured over (W9e/R2). A slice-sized rail could only fire
 # while one drift slice was itself a twentieth of the store; a rolling day is independent of
 # `drift_slice` and of the store's size.
@@ -1051,10 +1074,15 @@ class SqlFacts:
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
     def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
-        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else."""
+        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else. Each
+        FACT_CHUNK slice is encoded as it arrives and its text dropped before the next is read
+        (E949): the text is ~6 kB a vector, and the slices concatenated were hundreds of MB."""
         wanted = sorted({int(i) for i in image_ids})
-        encoded = {int(row["image_id"]): encode_clip(row["embedding"])
-                   for row in self._dicts_over(COHORT_CLIP_SQL, wanted, model=self.clip_model)}
+        encoded: dict[int, str | None] = {}
+        for ids_slice in self._slices(wanted):
+            encoded.update((int(row["image_id"]), encode_clip(row["embedding"]))
+                           for row in self._dicts(COHORT_CLIP_SQL,
+                                                  {"ids": ids_slice, "model": self.clip_model}))
         return {image_id: clip for image_id, clip in encoded.items() if clip is not None}
 
     def _galleries(self, ids: Sequence[int], clip: bool) -> dict[int, list[Image]]:
@@ -1742,27 +1770,48 @@ def claim_cap_key(generation: str) -> str:
     return f"{CLAIM_CAP_SETTING}:{generation}"
 
 
-def full_claim_cap(reason: str | None = None) -> dict[str, Any]:
-    """The cap a seed starts a build at, and an absent row's: the whole `max_listings` (E948)."""
-    return {"cap": PASS_LIMITS.max_listings, "reason": reason}
+def full_claim_cap(reason: str | None = None, limit_mb: float | None = None) -> dict[str, Any]:
+    """A seed's cap, an absent row's and a bigger container's: all of `max_listings` (E948b)."""
+    return {"cap": PASS_LIMITS.max_listings, "reason": reason, "limit_mb": limit_mb}
+
+
+def _known_limit_mb(value: Any) -> float | None:
+    """A memory limit in MiB, the row's or a reading: None unless a number above 0 (E948b)."""
+    limit_mb = _number(value, 0.0)
+    return limit_mb if limit_mb > 0 else None
 
 
 def read_claim_cap(value: Any) -> dict[str, Any]:
-    """The cap row as {cap, reason}, the cap inside [floor, max_listings] (E948)."""
+    """The cap row as {cap, reason, limit_mb}, the cap inside [floor, max_listings] (E948b)."""
     record = value if isinstance(value, Mapping) else {}
     try:
         cap = int(record["cap"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return full_claim_cap()
     return {"cap": max(CLAIM_CAP_FLOOR, min(PASS_LIMITS.max_listings, cap)),
-            "reason": record.get("reason")}
+            "reason": record.get("reason"), "limit_mb": _known_limit_mb(record.get("limit_mb"))}
 
 
-def halve_claim_cap(record: Mapping[str, Any], died: str, booted_epoch: int) -> dict[str, Any]:
-    """A death halves the cap, never below the floor (E948)."""
-    booted = datetime.fromtimestamp(int(booted_epoch), timezone.utc)
+def _utc_second(epoch: float) -> str:
+    """An epoch second as a cap row's reason spells it: 2026-10-10T07:40:53Z."""
+    return datetime.fromtimestamp(int(epoch), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _halved(record: Mapping[str, Any]) -> bool:
+    """A cap below `max_listings` was halved by a death since the last seed or reset (E948b)."""
+    return int(record["cap"]) < PASS_LIMITS.max_listings
+
+
+def halve_claim_cap(record: Mapping[str, Any], died: str, booted_epoch: int,
+                    limit_mb: float | None) -> dict[str, Any]:
+    """A death halves the cap, never below the floor (E948). The row records this container's
+    limit, or the row's when the row was already halved under a bigger one or this limit is
+    unknown (E948b)."""
+    recorded = record.get("limit_mb")
+    if recorded is not None and (limit_mb is None or (_halved(record) and recorded > limit_mb)):
+        limit_mb = recorded
     return {"cap": max(CLAIM_CAP_FLOOR, int(record["cap"]) // 2),
-            "reason": f"{died} died before {booted.strftime('%Y-%m-%dT%H:%M:%SZ')}"}
+            "reason": f"{died} died before {_utc_second(booted_epoch)}", "limit_mb": limit_mb}
 
 
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
@@ -2141,12 +2190,44 @@ def _write_claim_cap(conn: Any, generation: str, record: Mapping[str, Any], why:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
-def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any], booted_epoch: int
+def _fit_claim_cap(conn: Any, generation: str, stored: Any, limit_mb: float | None
+                   ) -> tuple[dict[str, Any], bool]:
+    """The cap row as stored, fitted to this container's memory limit in a commit of its own,
+    and whether that limit grew by `CLAIM_CAP_LIMIT_GROWTH` over the row's (E948b)."""
+    cap = read_claim_cap(stored)
+    if limit_mb is None:
+        return cap, False
+    stamped = cap["limit_mb"] is None
+    if stamped:
+        # Only E948 wrote rows without the key, and it halved only in the 8 GB container; any
+        # other row without a limit (a seed's, one halved while none was read) takes this one.
+        e948 = _halved(cap) and isinstance(stored, Mapping) and "limit_mb" not in stored
+        cap = {**cap, "limit_mb": E948_LIMIT_MB if e948 else limit_mb}
+    if limit_mb < cap["limit_mb"] * (1.0 + CLAIM_CAP_LIMIT_GROWTH):
+        if stamped:
+            _write_claim_cap(conn, generation, cap, "limit_stamped")
+        return cap, False
+    if not _halved(cap):
+        # Nothing to reset, but the row takes this limit: a death under it must halve.
+        cap = {**cap, "limit_mb": limit_mb}
+        _write_claim_cap(conn, generation, cap, "limit_stamped")
+        return cap, True
+    reset = full_claim_cap(f"memory limit grew {cap['limit_mb']:,.0f} → {limit_mb:,.0f} MB at "
+                           f"{_utc_second(time.time())}", limit_mb)
+    _write_claim_cap(conn, generation, reset, "limit_grew")
+    LOG.warning("AUTODEDUP: %s; the claim cap reset from %s to %s (E948b)",
+                reset["reason"], cap["cap"], reset["cap"])
+    return reset, True
+
+
+def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any], booted_epoch: int,
+                         limit_mb: float | None, *, halve: bool = True
                          ) -> tuple[str | None, str | None, dict[str, Any]]:
     """The live lease a dead predecessor of this process left, released with the cap halved in
     ONE commit of their own and logged at once, before a pass that may die the same way: the
     released holder, None, the halved cap. At the cap's floor it is only named and left to its
-    TTL (`CLAIM_CAP_FLOOR`): None, that holder, the cap as it was."""
+    TTL (`CLAIM_CAP_FLOOR`): None, that holder, the cap as it was. Without `halve` (the limit
+    grew since the predecessor ran, E948b) it is released and logged, and the cap kept."""
     host, pid = socket.gethostname(), os.getpid()
     if int(cap["cap"]) <= CLAIM_CAP_FLOOR:
         return None, rt_lease.predecessor(conn, host, pid, booted_epoch), cap
@@ -2154,12 +2235,15 @@ def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any], booted
         died = rt_lease.release_predecessor(conn, host, pid, booted_epoch)
         if died is None:
             return None, None, cap
-        halved = halve_claim_cap(cap, died, booted_epoch)
-        _write_claim_cap(conn, generation, halved, "halved")
+        before = cap
+        if halve:
+            cap = halve_claim_cap(before, died, booted_epoch, limit_mb)
+            _write_claim_cap(conn, generation, cap, "halved")
     LOG.warning("AUTODEDUP: a predecessor of this container died holding autodedup.rt_lease: "
-                "%s; released, and the claim cap halved from %s to %s (E948)",
-                died, cap["cap"], halved["cap"])
-    return died, None, halved
+                "%s; released, and the claim cap %s", died,
+                f"halved from {before['cap']} to {cap['cap']} (E948)" if halve else
+                f"kept at {cap['cap']}: it ran under a smaller memory limit (E948b)")
+    return died, None, cap
 
 
 def pass_holder() -> str:
@@ -2197,9 +2281,27 @@ def rss_mb(statm: str = "/proc/self/statm") -> float | None:
         return None
 
 
-def pass_memory() -> dict[str, float | None]:
-    """The process's memory at a pass's end: its high-water mark and what it holds now."""
-    return {"peak_rss_mb": peak_rss_mb(), "rss_mb": rss_mb()}
+def memo_entries() -> dict[str, int]:
+    """The entries the engine's process-level memos of what it read hold now (E949): the readers
+    cached on a body, by module, E282's shingle sets, and the token hashes and SimHash lanes."""
+    return {**body_cache_entries(), "shingles": len(indistinguishable._SHINGLE_MEMO),
+            "tokens": len(normalize._token_hashes) + len(normalize._token_lanes)}
+
+
+def forget_bodies() -> None:
+    """Empty every memo `memo_entries` counts (E949), so no reading of a body or a token is
+    carried into the next pass. Each is a pure function of its arguments: emptied, a reading
+    is recomputed to the same value, so no decision changes."""
+    clear_body_caches()
+    indistinguishable._SHINGLE_MEMO.clear()
+    normalize._token_hashes.clear()
+    normalize._token_lanes.clear()
+
+
+def pass_memory() -> dict[str, Any]:
+    """The process's memory at a pass's end: its high-water mark, what it holds now, and what
+    the body memos hold just before the pass's end empties them (E949)."""
+    return {"peak_rss_mb": peak_rss_mb(), "rss_mb": rss_mb(), "memo_entries": memo_entries()}
 
 
 def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
@@ -2250,7 +2352,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     fresh_conn: Callable[[], Any] | None = None,
                     holder: str | None = None,
                     stopping: Callable[[], bool] | None = None,
-                    booted_epoch: int | None = None) -> dict[str, Any]:
+                    booted_epoch: int | None = None,
+                    memory_limit_mb: float | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
@@ -2285,7 +2388,21 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     lease a dead predecessor of this process left (this hostname and pid, an earlier second) is
     released and the claim cap halved, in one commit of their own, and logged; at the cap's
     floor that lease is only named (`predecessor_kept`) and left to its TTL. The limit every
-    feed's share is cut from is at most the cap, and only a seed raises it again."""
+    feed's share is cut from is at most the cap, which only a seed or a bigger container
+    raises again (E948b): `memory_limit_mb` is the container's memory limit (None, or 0 and
+    below: unknown), and right before that release (and the take), in a commit of its own, a
+    cap row whose recorded limit it exceeds by `CLAIM_CAP_LIMIT_GROWTH` is reset to
+    `max_listings` and logged (a cap already there only takes the new limit), and the release
+    then halves nothing: the predecessor fitted the row before its own take, so it ran under
+    the smaller limit. A row that records none is stamped with the limit this pass reads, or
+    measured from `E948_LIMIT_MB` if E948 halved it (no `limit_mb` key at all); a halving
+    records the limit as `halve_claim_cap` says.
+
+    Whatever ends it, the pass empties the process-level memos of what it read (E949,
+    `forget_bodies`), after its lease is released; a summary reads them first (`memo_entries`).
+    A raised pass also lets go of the raise it noted (`original`) before it leaves: the raise's
+    traceback holds this frame, so keeping it made a cycle, and every local of the pass stayed
+    alive after the lane loop dropped the raise, until the next full collection."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2319,7 +2436,6 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
         rate_per_s = max(1e-6, _number(control.get(pass_rate_key(generation)),
                                        PASS_RATE_PER_S))
-        cap = read_claim_cap(control.get(claim_cap_key(generation)))
         try:
             storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
@@ -2327,8 +2443,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         if shutting_down():
             return {"skipped": STOPPING, "reason": "the worker is shutting down",
                     "spent_usd": 0.0}
+        # E948b, before the release: a limit grown since the row was last fitted proves the
+        # dead predecessor ran under the smaller one, so the release then halves nothing.
+        limit_mb = _known_limit_mb(memory_limit_mb)
+        cap, grew = _fit_claim_cap(conn, generation, control.get(claim_cap_key(generation)),
+                                   limit_mb)
         if booted_epoch is not None:
-            predecessor, kept, cap = _release_predecessor(conn, generation, cap, booted_epoch)
+            predecessor, kept, cap = _release_predecessor(conn, generation, cap, booted_epoch,
+                                                          limit_mb, halve=not grew)
         if not take_lease(conn, holder):
             held_by = ("another writer holds autodedup.rt_lease" if kept is None else
                        "a dead predecessor of this container holds autodedup.rt_lease, left to "
@@ -2579,6 +2701,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             if leased:
                 rt_lease.release_after(conn, holder, original)
         finally:
+            # E949: the raise's traceback holds this frame, so `original` made a cycle; and
+            # the memos go after the lease, which the next holder may be waiting on.
+            original = None
+            forget_bodies()
             close = getattr(conn, "close", None)
             if callable(close):
                 close()
@@ -2714,7 +2840,9 @@ def run_rt_seed(
             # A new build measures its own rate from the conservative start (review B3): the
             # 09-21 row still read 0.585503, so G2 would have "passed" before any W5 pass ran.
             _write_rate(conn, generation, PASS_RATE_PER_S, "rt_seed")
-            # E948: and claims the whole `max_listings` until a death of its own halves it.
+            # E948: and claims the whole `max_listings` until a death of its own halves it. No
+            # `limit_mb`: the seed runs outside the worker's container, whose first pass stamps
+            # its limit (E948b).
             _write_claim_cap(conn, generation, full_claim_cap("rt_seed"), "rt_seed")
         summary = {
             "generation": generation,
