@@ -47,6 +47,11 @@ api = [
   # pulls `cryptography`, required to verify the project's asymmetric ES256
   # signing keys via JWKS (Phase 1 auth).
   "pyjwt[crypto]>=2.8",
+  # The property download's PDF sheet (api/property_sheet.py). The stdlib writes no
+  # PDF; reportlab is BSD, pure Python, embeds subsetted TrueType fonts (the
+  # base-14 PDF fonts have no Czech letters) and needs only Pillow + charset-normalizer,
+  # both already installed. fpdf2 is LGPL and adds fonttools; weasyprint needs Pango.
+  "reportlab>=4.4",
 ]
 # Used only by scripts/ingest_boundaries.py; kept out of the default
 # install so the scraper / API images stay slim. Pure-Python combo
@@ -104,6 +109,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["scraper*", "toolkit*", "api*", "scripts*", "location_data*", "autodedup*"]
+
+[tool.setuptools.package-data]
+# The property sheet's embedded fonts (api/property_sheet.py) and their OFL licences.
+api = ["fonts/*.ttf", "fonts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

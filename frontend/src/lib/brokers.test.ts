@@ -456,3 +456,69 @@ describe('fetchBrokerDossier', () => {
     await expect(fetchBrokerDossier(7)).rejects.toThrow(/malformed/);
   });
 });
+
+/* Browse's broker prefilter (MS19): the server judges portal and status over the
+ * broker's own ads, and list, count, map and Stats share ONE lookup per view. The
+ * memo lives in the module, so every test below uses its own broker id. */
+describe('fetchBrokerPropertyIds', () => {
+  it("asks for the broker's properties under the portal rule, on the session JWT", async () => {
+    const calls = stubFetch(() => ({ body: { data: [5, 6], metadata: { capped: false } } }));
+    const b = await loadBrokers();
+    expect(await b.fetchBrokerPropertyIds(901, 'inactive', ['remax', 'idnes'])).toEqual([5, 6]);
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/brokers/901/property-ids');
+    expect(url.searchParams.get('status')).toBe('inactive');
+    expect(url.searchParams.getAll('portal')).toEqual(['remax', 'idnes']);
+    expect(authHeader(calls[0])).toBe('Bearer USER-JWT');
+  });
+
+  it('shares one lookup per view, whatever order the portals come in', async () => {
+    const calls = stubFetch(() => ({ body: { data: [1] } }));
+    const b = await loadBrokers();
+    const reads = await Promise.all([
+      b.fetchBrokerPropertyIds(902, 'any', ['idnes', 'remax']),
+      b.fetchBrokerPropertyIds(902, 'any', ['remax', 'idnes']),
+      b.fetchBrokerPropertyIds(902, 'any', ['idnes', 'remax']),
+    ]);
+    expect(reads).toEqual([[1], [1], [1]]);
+    expect(calls).toHaveLength(1);
+    await b.fetchBrokerPropertyIds(902, 'active', ['idnes', 'remax']);
+    await b.fetchBrokerPropertyIds(902, 'any', ['idnes']);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('asks again once the minute is up', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const b = await loadBrokers();
+    await b.fetchBrokerPropertyIds(903, 'any', []);
+    now.mockReturnValue(1_059_000);
+    await b.fetchBrokerPropertyIds(903, 'any', []);
+    expect(calls).toHaveLength(1);
+    now.mockReturnValue(1_061_000);
+    await b.fetchBrokerPropertyIds(903, 'any', []);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('forgets a failed lookup, so the next read retries', async () => {
+    let fail = true;
+    const calls = stubFetch(() => (fail
+      ? { status: 422, body: { detail: 'unknown portal(s): x' } }
+      : { body: { data: [3] } }));
+    const b = await loadBrokers();
+    await expect(b.fetchBrokerPropertyIds(904, 'any', [])).rejects.toThrow();
+    const failed = calls.length;
+    fail = false;
+    expect(await b.fetchBrokerPropertyIds(904, 'any', [])).toEqual([3]);
+    expect(calls.length).toBe(failed + 1);
+  });
+
+  it('warns when the server capped the allowlist', async () => {
+    stubFetch(() => ({ body: { data: [1], metadata: { capped: true } } }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const b = await loadBrokers();
+    await b.fetchBrokerPropertyIds(905, 'any', []);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('broker 905'));
+  });
+});

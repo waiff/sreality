@@ -26,8 +26,10 @@ on:
     paths:
       - "**/*.py"
       - "migrations/**"
-      # The C4 rows rail executes these fixtures; a fixture-only change must run it.
+      # The C4 rows rail and the portal-rule rail execute these fixtures; a fixture-only
+      # change must run them.
       - "tests/fixtures/filter_compile_*.json"
+      - "tests/fixtures/portal_rule.json"
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
@@ -435,6 +437,17 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_verdicts_ledger_live.py -q
 
+      # E941, EXECUTED: the autodedup lane's lease fence reads the CLOCK. Two sessions: A takes
+      # the lease and opens a transaction, B releases A's lease, and A's fence (RT_LEASE_HOLD_SQL)
+      # must find no live row; against now() (A's transaction start) it would, and A would commit
+      # beside the next holder. A release after A's fence waits for A's commit. The fakes have
+      # one clock and cannot tell the two apart.
+      - name: The autodedup lease fence reads the clock (E941)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_rt_lease_fence_live.py -q
+
       # E926, EXECUTED: a dissolved must-link closure is filed when it differs from the NEWEST
       # record sharing an advert (filed again when it changes back), the rulings page reads it by
       # any member and generation, and the group dialog does not read it. The fakes re-implement
@@ -546,3 +559,15 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_autodedup_control_draw_migration.py -q
+
+      # MS19 (migration 590): portal and broker filters select ADS, rows stay properties. ONE
+      # fixture (tests/fixtures/portal_rule.json, also read by queries.test.ts) through
+      # portal_status_matches, both aggregate RPCs, the Watchdog's compiled clause and the
+      # broker lookup over seeded ads; plus the rebuild's nine per-portal indexes and the
+      # projection's one shape on both read models. Always rolled back.
+      - name: One portal rule on every surface (migration 590)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_portal_rule.py -q

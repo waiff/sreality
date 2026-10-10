@@ -3,7 +3,8 @@
 A column-backed filter compiles from its derived `filter_registry.sql_kind` (the same value
 codegen hands Browse's TS auto-dispatch); an irregular one from ONE entry in `_HOOKS`. A
 `FilterGrain` names the agenda that grants filters on a relation, the spellings that
-relation needs where it lacks a column (rule 23), and the keys its adapter renders itself.
+relation needs where it lacks a column (rule 23), the filters it spells in its own shape
+(the portal rule on properties, MS19), and the keys its adapter renders itself.
 Every relation is aliased `l`. The two adapters keep only what is not a filter:
 `toolkit/comparables._shared_filter_where` (`listings`: the target-relative clauses and the
 cohort invariants) and `api/notifications._build_match_clauses` (`properties_public`: the
@@ -42,11 +43,15 @@ class FilterGrain:
     agenda: Agenda                  # the single grant: a set filter it does not declare raises
     exprs: Mapping[str, str]        # pg_column -> expression where the relation lacks the column (rule 23)
     caller_renders: frozenset[str]  # keys the adapter renders itself; the compiler skips them
+    clauses: Mapping[str, str] = MappingProxyType({})  # filter id -> this relation's whole clause
 
 
 # `listings` has no price_per_m2 column, so the measure is the four-argument call there; the
 # read model PUBLISHES it, so `l.price_per_m2` is the measure on `properties_public`. Neither
-# relation publishes a plot column, so both call plot_area_m2() (migration 534).
+# relation publishes a plot column, so both call plot_area_m2() (migration 534). A portal is
+# each ad's own on `listings` (estimation comparables, the §9 exception) and any of the
+# property's ads on `properties_public` (MS19, the `any` arm of portal_status_matches,
+# migration 590: the Watchdog has no status filter).
 LISTINGS_GRAIN = FilterGrain(
     agenda=Agenda.COMPARABLES,
     exprs=MappingProxyType({"price_per_m2": per_m2_sql("l"), "plot_area_m2": plot_area_sql("l")}),
@@ -57,6 +62,7 @@ PROPERTIES_GRAIN = FilterGrain(
     agenda=Agenda.WATCHDOG,
     exprs=MappingProxyType({"plot_area_m2": plot_area_sql("l")}),
     caller_renders=frozenset({"location", "lat", "lng", "radius_m", "districts"}),
+    clauses=MappingProxyType({"portals": "l.all_sources && %({id})s::text[]"}),
 )
 
 # Kept on the models so an old saved blob still deserialises; any value raises, because a
@@ -277,6 +283,12 @@ def compile_filter_where(
         if f.id in grain.caller_renders or f.id not in values:
             continue
         value = values[f.id]
+        clause = grain.clauses.get(f.id)
+        if clause is not None:
+            if _is_set(value):
+                where.append(clause.format(id=f.id))
+                params[f.id] = list(value)
+            continue
         hook = _HOOKS.get(f.id)
         if hook is not None:
             where.extend(hook(f.id, value, values, params))

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 from fastapi import HTTPException
 
+from api import note_attachments
 from api import schemas as s
 from toolkit.property_identity import (
     resolve_active_property_id,
@@ -307,7 +308,8 @@ _NOTE_PROJECTION = "id, property_id, body, origin_listing_id, created_at, update
 def list_notes(
     conn: "psycopg.Connection", property_id: int,
 ) -> dict[str, Any]:
-    """The property's notes, newest first; a merged-away id reads its survivor's, as writes do."""
+    """The property's notes, newest first, each with its attachments (oldest first); a
+    merged-away id reads its survivor's, as writes do."""
     sql = (
         f"SELECT {_NOTE_PROJECTION} FROM property_notes "
         "WHERE property_id = %s ORDER BY created_at DESC, id DESC"
@@ -316,7 +318,9 @@ def list_notes(
     with conn.cursor() as cur:
         cur.execute(sql, (pid,))
         rows = cur.fetchall()
-    return {"data": [_to_note(r) for r in rows]}
+    notes = [_to_note(r) for r in rows]
+    files = note_attachments.attachments_by_note(conn, [n["id"] for n in notes])
+    return {"data": [{**n, "attachments": files[n["id"]]} for n in notes]}
 
 
 def create_note(

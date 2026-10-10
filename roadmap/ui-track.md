@@ -18,6 +18,13 @@ toolkit work.
   The choice is a per-browser preference (`sreality.browse.cardCoverTag`, like the card image
   size), not part of the URL or a preset. Code: `lib/imageTags.ts` `COVER_TAGS` / `coverIndex`,
   `ImageCarousel` `startIndex`.
+- **Same day, operator ruling: the trained DINOv3 heads decide, CLIP only where they have not
+  scored.** Migration 591 publishes the ACTIVE tag model's per-head scores on `images_public`
+  (`tag_head_scores`, read live). Per photo, a head score ≥ 0.5 is a yes and below it a no that
+  overrules CLIP; a head's yes outranks any CLIP match. Options are keyed to `tag_taxonomy` ids,
+  so a future head (ložnice, WC, balkon, zahrada) takes its option over with no code change.
+  Added Garáž, 3D plán, Katastrální mapa, Letecký snímek. Coverage today: v1 scored ~9% of
+  active listings once (2026-09-27); nothing scores new photos yet — that is the next step.
 
 ### SPA read seam: every PostgREST read through `pgRead` (done, 2026-10-01)
 - `lib/pgRead.ts` is now the one way the SPA awaits a supabase-js read (56 direct awaits plus the

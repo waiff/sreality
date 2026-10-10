@@ -1,7 +1,7 @@
 """Tests for scraper.sreality_client gone-detection.
 
-Hermetic: no network. Exercises the not-found-body detector and the
-get_detail HTTPError -> ListingGoneError wrapping by stubbing _get_json.
+Hermetic: no network. Exercises the get_detail HTTPError -> ListingGoneError
+wrapping by stubbing _get_json, and that a non-JSON body is never a gone signal.
 """
 
 from __future__ import annotations
@@ -13,30 +13,27 @@ from scraper.portal import stop_is_portal_end
 from scraper.sreality_client import (
     ListingGoneError,
     SrealityClient,
-    _is_not_found_body,
 )
 
 
-class _Resp:
-    def __init__(self, status: int, content_type: str, text: str) -> None:
-        self.status_code = status
-        self.headers = {"Content-Type": content_type}
-        self.text = text
+def _html_200(body: str) -> requests.Response:
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp._content = body.encode("utf-8")
+    return resp
 
 
-def test_is_not_found_body_detects_marker():
-    resp = _Resp(200, "text/html; charset=utf-8", "<h1>Tato stránka neexistuje</h1>")
-    assert _is_not_found_body(resp) is True
-
-
-def test_is_not_found_body_ignores_json_payload():
-    resp = _Resp(200, "application/json", '{"_embedded": {}}')
-    assert _is_not_found_body(resp) is False
-
-
-def test_is_not_found_body_ignores_normal_html():
-    resp = _Resp(200, "text/html", "<h1>Pronájem bytu 2+kk</h1>")
-    assert _is_not_found_body(resp) is False
+def test_a_non_json_200_is_an_error_never_a_gone_signal(monkeypatch):
+    """Sreality's HTML shell carries 'tato stránka neexistuje' in its bundle (verified on a
+    live listing page, 2026-10-09), so a text scan read ANY HTML answer -- a consent wall,
+    an edge error -- as a removal. The API answers a real removal with a JSON 404 (_request
+    raises ListingGoneError on the status); an HTML body is a parse error, retried."""
+    client = SrealityClient()
+    shell = '<!doctype html><script>{"notfoundpage":{"notfound":"tato stránka neexistuje"}}</script>'
+    monkeypatch.setattr(client, "_request", lambda *a, **k: _html_200(shell))
+    with pytest.raises(ValueError):  # requests' JSONDecodeError
+        client._get_json("https://www.sreality.cz/api/v1/estates/1")
 
 
 def test_get_detail_wraps_404_as_gone(monkeypatch):

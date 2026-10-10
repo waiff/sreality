@@ -44,7 +44,8 @@ UPDATE` trigger** from the owning parent row (a plain `DEFAULT` can't see a sibl
 column on `NEW`, and a trigger also covers ad-hoc SQL / forgotten code paths that a
 column default would miss): `collection_properties` (parent `collections`),
 `property_tags` (parent `tags`), `notification_dispatches`, `estimation_cohort_entries`,
-`estimation_trace_payloads`, `estimation_feedback`, `building_run_attachments`. Because
+`estimation_trace_payloads`, `estimation_feedback`, `building_run_attachments` (and, later,
+`property_note_attachments`, parent `property_notes`, migration 592). Because
 Postgres evaluates `WITH CHECK` **after** `BEFORE` triggers run, a tenant inserting a
 child row that points at another tenant's parent gets `account_id = NULL` back from the
 RLS-filtered parent lookup (the trigger runs as the invoking role) and the insert **fails

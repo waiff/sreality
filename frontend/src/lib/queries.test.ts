@@ -10,11 +10,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-/* The broker allowlist is the one prefilter resolved over the bearer-gated API,
- * and it THROWS without a session — Stats must never reach it. */
+/* The broker allowlist is the one prefilter resolved over the JWT-gated API. */
 vi.mock('./brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./brokers')>()),
-  fetchBrokerListingIds: vi.fn(async () => [1]),
+  fetchBrokerPropertyIds: vi.fn(async () => [1]),
 }));
 
 import { DEFAULT_FILTERS } from './filters';
@@ -22,6 +21,8 @@ import { ApiError } from './api';
 import { supabase } from './supabase';
 import {
   BROWSE_SELECT_COLUMNS,
+  adScope,
+  applyPortalRule,
   applyPrefilters,
   buildBrowseStatsArgs,
   fetchBrowseCount,
@@ -35,20 +36,19 @@ import {
   districtsFilterClause,
   effectiveBbox,
   effectiveSort,
-  isBrokerScoped,
-  isPortalMirror,
-  keysetTiebreak,
   matchesDistricts,
+  orderPortal,
   parseSort,
   pipelineIdsForScope,
-  portalMirrorSource,
   priceNullTolerantOr,
   DEFAULT_SORT,
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
-import { fetchBrokerListingIds } from './brokers';
-import type { DistrictChip } from './filters';
+import { fetchBrokerPropertyIds } from './brokers';
+import type { DistrictChip, ListingFilters } from './filters';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /* THE PostgREST stand-in for this file: every builder method chains (including
  * the `.retry()` / `.abortSignal()` pgRead sets, and the `.range()` fetchAllRows
@@ -58,6 +58,7 @@ import type { DistrictChip } from './filters';
 const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) => {
   const inIds: number[][] = [];
   const rpcArgs: Array<Record<string, unknown>> = [];
+  const calls: Array<[string, unknown[]]> = [];
   const chain = (relation: string): unknown => {
     const data = rows[relation] ?? [];
     const answer = () =>
@@ -75,7 +76,10 @@ const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) =
             return page;
           };
         }
-        return () => page;
+        return (...args: unknown[]) => {
+          calls.push([String(prop), args]);
+          return page;
+        };
       },
     });
     return page;
@@ -88,6 +92,7 @@ const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) =
     }) as never),
     inIds,
     rpcArgs,
+    calls,
   };
 };
 
@@ -127,7 +132,6 @@ describe('applyPrefilters (prefilter id-spaces)', () => {
   const base: BrowsePrefilters = {
     obecIds: null,
     propertyIds: null,
-    brokerListingIds: null,
     empty: false,
   };
 
@@ -155,19 +159,10 @@ describe('applyPrefilters (prefilter id-spaces)', () => {
     expect(calls).toEqual([]);
   });
 
-  /* The broker scope is listing-grain by construction (see isBrokerScoped), so
-   * its allowlist ANDs onto the cohort on `listing_id` — the only listing-grain
-   * `.in()` left once the legacy city-quality slot went (W3 S4). */
-  it('filters the broker allowlist on listing_id, on its own field', () => {
+  it('applies an EMPTY allowlist — "scope on, nothing matched" is not "no constraint"', () => {
     const { q, calls } = record();
-    applyPrefilters(q, { ...base, brokerListingIds: [40, 41] });
-    expect(calls).toEqual([{ col: 'listing_id', vals: [40, 41] }]);
-  });
-
-  it('applies an EMPTY broker allowlist — "scope on, nothing mappable" is not "no constraint"', () => {
-    const { q, calls } = record();
-    applyPrefilters(q, { ...base, brokerListingIds: [] });
-    expect(calls).toEqual([{ col: 'listing_id', vals: [] }]);
+    applyPrefilters(q, { ...base, propertyIds: [] });
+    expect(calls).toEqual([{ col: 'property_id', vals: [] }]);
   });
 });
 
@@ -344,122 +339,181 @@ describe('matchesDistricts, re-exported by queries.ts', () => {
 });
 
 /* ---------------------------------------------------------------------- */
-/* Portal-mirror mode selection (docs/design/portal-order-fidelity.md).    */
-/*                                                                        */
-/* These pin the THREE things that have to move together, because getting */
-/* any one of them wrong is silent rather than loud: the relation read,    */
-/* the keyset tiebreaker, and the sort key. A property_id tiebreaker on    */
-/* the listing-grain feed does not error — it just drops rows at page      */
-/* boundaries, which looks like ordinary infinite-scroll behaviour.        */
+/* THE portal rule (MS19), against the table tests/test_portal_rule.py     */
+/* runs through portal_status_matches, the RPCs and the Watchdog. Pure      */
+/* semantics: every recorded predicate is evaluated against the case row.   */
 /* ---------------------------------------------------------------------- */
 
-describe('portal-mirror mode selection', () => {
-  const withPortals = (portals: string[]) => ({ ...DEFAULT_FILTERS, portals });
+type RuleRow = Record<string, unknown>;
+interface RuleCase {
+  name: string;
+  is_active: boolean;
+  all_sources: string[];
+  active_sources: string[];
+  portals: string[];
+  status: 'any' | 'active' | 'inactive';
+  expected: boolean;
+}
+interface BrokerCase {
+  name: string;
+  ads: Array<{ broker: string; source: string; is_active: boolean }>;
+  broker: string;
+  portals: string[];
+  status: 'any' | 'active' | 'inactive';
+  expected: boolean;
+}
 
-  it('engages on exactly one portal', () => {
-    expect(isPortalMirror(withPortals(['bazos']))).toBe(true);
-    expect(portalMirrorSource(withPortals(['bazos']))).toBe('bazos');
-  });
+/* Records what applyPortalRule asks PostgREST for, as predicates over a row. */
+const PORTAL_RULE = JSON.parse(
+  readFileSync(join(process.cwd(), '..', 'tests', 'fixtures', 'portal_rule.json'), 'utf-8'),
+) as { cases: RuleCase[]; broker_cases: BrokerCase[] };
 
-  it('stays off for no portal filter — the deduped market view is the default', () => {
-    expect(isPortalMirror(DEFAULT_FILTERS)).toBe(false);
-    expect(portalMirrorSource(DEFAULT_FILTERS)).toBeNull();
-  });
-
-  it('stays off for two or more portals — that is what dedup is for', () => {
-    expect(isPortalMirror(withPortals(['bazos', 'sreality']))).toBe(false);
-    expect(portalMirrorSource(withPortals(['bazos', 'sreality']))).toBeNull();
-  });
-
-  it('anchors the cursor on listing_id in mirror mode, property_id otherwise', () => {
-    expect(keysetTiebreak(withPortals(['idnes']))).toBe('listing_id');
-    expect(keysetTiebreak(DEFAULT_FILTERS)).toBe('property_id');
-    expect(keysetTiebreak(withPortals(['idnes', 'remax']))).toBe('property_id');
-  });
-
-  it('remaps only "newest/oldest first" onto the portal order key', () => {
-    const mirror = withPortals(['bazos']);
-    expect(effectiveSort(mirror, { field: 'first_seen_at', direction: 'desc' })).toEqual({
-      field: 'portal_sort_key',
-      direction: 'desc',
-    });
-    /* Direction is preserved: "oldest first" mirrors the portal's oldest. */
-    expect(effectiveSort(mirror, { field: 'first_seen_at', direction: 'asc' })).toEqual({
-      field: 'portal_sort_key',
-      direction: 'asc',
-    });
-  });
-
-  it('passes every other sort field straight through — they all exist on the feed', () => {
-    const mirror = withPortals(['bazos']);
-    for (const field of ['price_czk', 'price_per_m2', 'area_m2', 'last_seen_at',
-                         'display_label', 'mf_gross_yield_pct'] as const) {
-      expect(effectiveSort(mirror, { field, direction: 'desc' })).toEqual({
-        field, direction: 'desc',
-      });
+class RuleRecorder {
+  preds: Array<(row: RuleRow) => boolean> = [];
+  ops: string[] = [];
+  eq(c: string, v: unknown) {
+    this.ops.push(`${c}.eq`);
+    this.preds.push((row) => row[c] === v);
+    return this;
+  }
+  overlaps(c: string, v: readonly string[]) {
+    this.ops.push(`${c}.ov`);
+    this.preds.push((row) => (row[c] as string[]).some((x) => v.includes(x)));
+    return this;
+  }
+  not(c: string, op: string, v: unknown) {
+    this.ops.push(`${c}.not.${op}`);
+    if (op === 'ov') {
+      const vals = String(v).replace(/^\{|\}$/g, '').split(',');
+      this.preds.push((row) => !(row[c] as string[]).some((x) => vals.includes(x)));
+    } else if (op === 'is' && v === null) {
+      this.preds.push((row) => row[c] != null);
+    } else {
+      throw new Error(`unexpected not.${op}`);
     }
+    return this;
+  }
+}
+
+/* A browse_list row as the rollup stores it: listed <=> dated, per portal. */
+const ruleRow = (c: Pick<RuleCase, 'is_active' | 'all_sources' | 'active_sources'>): RuleRow => {
+  const row: RuleRow = { ...c };
+  for (const p of ['sreality', 'bazos', 'idnes', 'maxima', 'ceskereality', 'bezrealitky',
+    'mmreality', 'remax', 'realitymix']) {
+    row[`newest_ad_at_${p}`] = c.all_sources.includes(p) ? '2026-09-01T00:00:00+00:00' : null;
+  }
+  return row;
+};
+
+const ruleMatches = (f: ListingFilters, row: RuleRow): boolean =>
+  applyPortalRule(new RuleRecorder(), f).preds.every((p) => p(row));
+
+describe('the portal rule (MS19)', () => {
+  const filtersFor = (c: { portals: string[]; status: RuleCase['status'] }): ListingFilters => ({
+    ...DEFAULT_FILTERS, portals: c.portals, status: c.status,
   });
 
-  /* Migration 425 put `listing_feed_public.price_per_m2` on the ROUNDED measure
-   * for exactly this lane: mirror mode passes price_per_m2 through untouched, so
-   * the keyset cursor sends `price_per_m2.eq.<float64>` as its equal-value
-   * tiebreaker at the page seam. An unrounded numeric does not round-trip
-   * through a JS Number, the equality never matches, and rows are silently
-   * skipped between pages. Pinned here because remapping it (the way
-   * first_seen_at is remapped) would move the sort onto a column the cursor is
-   * not built from. */
-  it('passes price_per_m2 through in mirror mode — the keyset cursor depends on it', () => {
-    const mirror = withPortals(['bazos']);
-    expect(effectiveSort(mirror, { field: 'price_per_m2', direction: 'desc' })).toEqual({
-      field: 'price_per_m2', direction: 'desc',
+  for (const c of PORTAL_RULE.cases) {
+    it(c.name, () => {
+      expect(ruleMatches(filtersFor(c), ruleRow(c))).toBe(c.expected);
     });
-    expect(effectiveSort(mirror, { field: 'price_per_m2', direction: 'asc' })).toEqual({
-      field: 'price_per_m2', direction: 'asc',
+  }
+
+  /* The broker lookup answers the same rule over ONE broker's ads (portal and broker =
+   * one ad): the same rendering over the aggregate of the broker's ads agrees with it. */
+  for (const c of PORTAL_RULE.broker_cases) {
+    it(`broker: ${c.name}`, () => {
+      const own = c.ads.filter((ad) => ad.broker === c.broker);
+      const sources = (ads: typeof own) => [...new Set(ads.map((ad) => ad.source))].sort();
+      const row = ruleRow({
+        is_active: own.some((ad) => ad.is_active),
+        all_sources: sources(own),
+        active_sources: sources(own.filter((ad) => ad.is_active)),
+      });
+      expect(ruleMatches(filtersFor(c), row)).toBe(c.expected);
     });
+  }
+
+  it('steps aside under a broker: the server judged portal and status on its ads', () => {
+    const f = { ...DEFAULT_FILTERS, brokerId: 527, portals: ['idnes', 'remax'], status: 'inactive' as const };
+    expect(adScope(f)).toEqual({ portals: [], status: 'any' });
+    expect(applyPortalRule(new RuleRecorder(), f).ops).toEqual([]);
   });
 
-  it('never remaps the sort when the mirror is off', () => {
-    expect(effectiveSort(DEFAULT_FILTERS, { field: 'first_seen_at', direction: 'desc' }))
-      .toEqual({ field: 'first_seen_at', direction: 'desc' });
-    expect(effectiveSort(withPortals(['a', 'b']), { field: 'first_seen_at', direction: 'desc' }))
-      .toEqual({ field: 'first_seen_at', direction: 'desc' });
+  it('keeps the one-portal conjunct under a broker, so the order stays indexable', () => {
+    const f = { ...DEFAULT_FILTERS, brokerId: 527, portals: ['idnes'], status: 'active' as const };
+    expect(applyPortalRule(new RuleRecorder(), f).ops).toEqual(['newest_ad_at_idnes.not.is']);
   });
 
-  it('keeps portal_sort_key out of the user-selectable sorts, so no URL can pin it', () => {
-    /* It is derived from the filter state, never round-tripped through ?sort=. */
-    expect(parseSort('-portal_sort_key')).toEqual(DEFAULT_SORT);
+  it('adds the conjunct for exactly one portal, and it narrows nothing', () => {
+    const one = applyPortalRule(new RuleRecorder(), { ...DEFAULT_FILTERS, portals: ['maxima'] });
+    expect(one.ops).toEqual(['all_sources.ov', 'newest_ad_at_maxima.not.is']);
+    const two = applyPortalRule(new RuleRecorder(), { ...DEFAULT_FILTERS, portals: ['maxima', 'remax'] });
+    expect(two.ops).toEqual(['all_sources.ov']);
+    expect(applyPortalRule(new RuleRecorder(), DEFAULT_FILTERS).ops).toEqual([]);
   });
 });
 
-/* The broker scope ("Explore this broker's listings") forces the SAME
- * listing-grain relation swap as a single portal, for the same reason: a merged
- * property can carry listings from two brokers with no tiebreak, so a
- * property-grain row can't represent "only this broker's listings". It is its
- * own named condition rather than a widening of isPortalMirror, so the
- * portal-only behaviours (the portal_sort_key remap) don't leak onto it. */
-describe('broker scope (listing-grain)', () => {
-  const withBroker = (brokerId: number | null) => ({ ...DEFAULT_FILTERS, brokerId });
+/* One portal's "Newest first" (MS19, Q49 b). */
+describe('the one-portal order', () => {
+  const withPortals = (portals: string[]) => ({ ...DEFAULT_FILTERS, portals });
 
-  it('engages on a broker id and stays off otherwise', () => {
-    expect(isBrokerScoped(withBroker(527))).toBe(true);
-    expect(isBrokerScoped(withBroker(null))).toBe(false);
-    expect(isBrokerScoped(DEFAULT_FILTERS)).toBe(false);
+  it('orders "newest/oldest first" by the portal\'s newest ad, both directions', () => {
+    expect(orderPortal(withPortals(['idnes']), DEFAULT_SORT)).toBe('idnes');
+    expect(effectiveSort(withPortals(['idnes']), { field: 'first_seen_at', direction: 'desc' }))
+      .toEqual({ field: 'newest_ad_at_idnes', direction: 'desc' });
+    expect(effectiveSort(withPortals(['maxima']), { field: 'first_seen_at', direction: 'asc' }))
+      .toEqual({ field: 'newest_ad_at_maxima', direction: 'asc' });
   });
 
-  it('is not a portal mirror — the two scopes are independent conditions', () => {
-    expect(isPortalMirror(withBroker(527))).toBe(false);
-    expect(portalMirrorSource(withBroker(527))).toBeNull();
+  it('falls back to the property\'s first seen with no portal or several', () => {
+    for (const f of [DEFAULT_FILTERS, withPortals(['idnes', 'remax'])]) {
+      expect(orderPortal(f, DEFAULT_SORT)).toBeNull();
+      expect(effectiveSort(f, DEFAULT_SORT)).toEqual(DEFAULT_SORT);
+    }
   });
 
-  it('anchors the keyset cursor on listing_id, like the portal mirror does', () => {
-    expect(keysetTiebreak(withBroker(527))).toBe('listing_id');
-    /* Both scopes together are still listing-grain. */
-    expect(keysetTiebreak({ ...withBroker(527), portals: ['idnes'] })).toBe('listing_id');
+  it('passes every other sort straight through', () => {
+    for (const field of ['price_czk', 'price_per_m2', 'area_m2', 'last_seen_at',
+                         'display_label', 'mf_gross_yield_pct'] as const) {
+      expect(orderPortal(withPortals(['idnes']), { field, direction: 'desc' })).toBeNull();
+      expect(effectiveSort(withPortals(['idnes']), { field, direction: 'desc' }))
+        .toEqual({ field, direction: 'desc' });
+    }
   });
 
-  it('does NOT remap "newest first" onto portal_sort_key — that key is a portal-feed concept', () => {
-    expect(effectiveSort(withBroker(527), { field: 'first_seen_at', direction: 'desc' }))
-      .toEqual({ field: 'first_seen_at', direction: 'desc' });
+  it('is not changed by a broker filter', () => {
+    expect(effectiveSort({ ...withPortals(['idnes']), brokerId: 527 }, DEFAULT_SORT))
+      .toEqual({ field: 'newest_ad_at_idnes', direction: 'desc' });
+    expect(effectiveSort({ ...DEFAULT_FILTERS, brokerId: 527 }, DEFAULT_SORT)).toEqual(DEFAULT_SORT);
+  });
+
+  it('never reaches a URL: no ?sort= can pin it', () => {
+    expect(parseSort('-newest_ad_at_idnes')).toEqual(DEFAULT_SORT);
+  });
+
+  it('pages the cards on the portal\'s column, with the rule and the conjunct on the chain', async () => {
+    const s = stubReads();
+    await fetchListingsForCards(withPortals(['idnes']), DEFAULT_SORT, null);
+    const select = s.calls.find(([m]) => m === 'select')![1][0] as string;
+    expect(select.split(',')).toEqual(expect.arrayContaining(
+      ['newest_ad_at_idnes', 'property_id', 'all_sources', 'active_sources']));
+    expect(s.calls).toContainEqual(['overlaps', ['all_sources', ['idnes']]]);
+    expect(s.calls).toContainEqual(['not', ['newest_ad_at_idnes', 'is', null]]);
+    expect(s.calls.filter(([m]) => m === 'order').map(([, a]) => a)).toEqual([
+      ['newest_ad_at_idnes', { ascending: false, nullsFirst: undefined }],
+      ['property_id', { ascending: false }],
+    ]);
+    vi.restoreAllMocks();
+  });
+
+  it('counts with the same chain the list pages with', async () => {
+    const s = stubReads();
+    await fetchBrowseCount({ ...withPortals(['idnes']), status: 'active' });
+    expect(s.calls).toContainEqual(['overlaps', ['active_sources', ['idnes']]]);
+    expect(s.calls).toContainEqual(['not', ['newest_ad_at_idnes', 'is', null]]);
+    expect(s.calls.some(([m, a]) => m === 'eq' && a[0] === 'is_active')).toBe(false);
+    vi.restoreAllMocks();
   });
 });
 
@@ -482,6 +536,14 @@ describe('Browse select-lists carry the measure with its published basis', () =>
       expect(c, `${lane}: category_main`).toContain('category_main');
       expect(c, `${lane}: category_type`).toContain('category_type');
     }
+  });
+
+  /* Not the measure, but the same failure shape: the card's "N inzeráty" badge
+   * reads `source_count` off the row (migration 590), and every component test
+   * feeds the row directly, so dropping the column here would delete the badge
+   * from Browse with all of them green. */
+  it('selects the ad count the card badge reads', () => {
+    expect(cols(BROWSE_SELECT_COLUMNS.cards)).toContain('source_count');
   });
 });
 
@@ -556,11 +618,14 @@ describe('the Browse cohort total is always a number', () => {
     expect(fetch.mock.calls[0][1]?.method).toBe('HEAD');
   });
 
-  it('estimates the listing-grain feed from its plain view too', async () => {
-    const { planned } = stubPostgrest('15');
+  it('estimates a one-portal cohort from the plain list, with the rule and its conjunct', async () => {
+    const { planned, fetch } = stubPostgrest('15');
     const total = await fetchBrowseCount({ ...DEFAULT_FILTERS, portals: ['bazos'] });
     expect(total).toEqual({ value: 15, precise: false });
-    expect(planned).toEqual(['/rest/v1/listing_feed_public']);
+    expect(planned).toEqual(['/rest/v1/browse_list']);
+    const url = new URL(String(fetch.mock.calls.at(-1)![0]));
+    expect(url.searchParams.get('all_sources')).toBe('ov.{bazos}');
+    expect(url.searchParams.get('newest_ad_at_bazos')).toBe('not.is.null');
   });
 
   it('fails the count, which the header shows as an error, when there is no number at all', async () => {
@@ -606,7 +671,7 @@ describe('dismissed properties are hidden at the source', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const revealed = { ...DEFAULT_FILTERS, showDismissed: true };
-  const mirror = { ...DEFAULT_FILTERS, portals: ['bazos'] };
+  const onePortal = { ...DEFAULT_FILTERS, portals: ['bazos'] };
 
   it('reads the visible twins by default, for cards, table and count', async () => {
     const s = stubReads();
@@ -629,12 +694,12 @@ describe('dismissed properties are hidden at the source', () => {
     expect(s.rpc).not.toHaveBeenCalled();
   });
 
-  it('hides them on the listing-grain feed too', async () => {
+  it('reads the same twin under one portal: there is no second relation', async () => {
     const s = stubReads();
-    await fetchListingsForCards(mirror, DEFAULT_SORT, null);
-    expect(s.rpc.mock.calls.map((c) => c[0])).toEqual(['listing_feed_visible']);
-    await fetchListingsForCards({ ...mirror, showDismissed: true }, DEFAULT_SORT, null);
-    expect(s.from.mock.calls.map((c) => c[0])).toEqual(['listing_feed_public']);
+    await fetchListingsForCards(onePortal, DEFAULT_SORT, null);
+    expect(s.rpc.mock.calls.map((c) => c[0])).toEqual(['browse_list_visible']);
+    await fetchListingsForCards({ ...onePortal, showDismissed: true }, DEFAULT_SORT, null);
+    expect(s.from.mock.calls.map((c) => c[0])).toEqual(['browse_list']);
   });
 
   it('tells the map cells and reads the map pins through the same twin', async () => {
@@ -795,10 +860,31 @@ describe('Browse Stats resolves through the one prefilter path', () => {
     expect(rpcArgs[0].with_estimates).toBe(false);
   });
 
-  it('never resolves the broker allowlist: Stats has no parameter to carry it', async () => {
-    const { rpcArgs } = stubReads({ collection_properties_public: MEMBERS });
-    await fetchBrowseStats({ ...DEFAULT_FILTERS, brokerId: 527 });
-    expect(fetchBrokerListingIds).not.toHaveBeenCalled();
-    expect(rpcArgs[0].property_ids_filter).toBeNull();
+  it('carries the broker in property_ids_filter; the server judged its portal and status', async () => {
+    const { rpcArgs } = stubReads();
+    await fetchBrowseStats({
+      ...DEFAULT_FILTERS, brokerId: 527, portals: ['idnes'], status: 'active',
+    });
+    expect(fetchBrokerPropertyIds).toHaveBeenCalledWith(527, 'active', ['idnes']);
+    expect(rpcArgs[0].property_ids_filter).toEqual([1]);
+    expect(rpcArgs[0].portal_filter).toBeNull();
+    expect(rpcArgs[0].active_only_filter).toBe(false);
+  });
+
+  it('sends the portal rule\'s two inputs without a broker', () => {
+    const args = buildBrowseStatsArgs(
+      { ...DEFAULT_FILTERS, portals: ['idnes'], status: 'inactive' },
+      { obec_ids_filter: null, property_ids_filter: null },
+    );
+    expect(args.portal_filter).toEqual(['idnes']);
+    expect([args.active_only_filter, args.inactive_only_filter]).toEqual([false, true]);
+  });
+
+  it('never names the retired listing_ids_filter on the map, and carries the broker', async () => {
+    const { rpcArgs } = stubReads();
+    await fetchListingsForMap({ ...DEFAULT_FILTERS, brokerId: 527 });
+    expect(rpcArgs[0]).not.toHaveProperty('listing_ids_filter');
+    expect(rpcArgs[0].property_ids_filter).toEqual([1]);
+    expect(rpcArgs[0].point_budget).toBe(2000);
   });
 });

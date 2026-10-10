@@ -4,7 +4,7 @@
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
  *    Collections list, Pipeline, Watchdog subscriptions, /estimations (incl.
- *    trace payload + feedback since 2026-10-02),
+ *    trace payload + feedback since 2026-10-02), the property download zip,
  *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
@@ -39,6 +39,7 @@ import type {
   CreateManualEstimateIn,
   UpdateManualEstimateIn,
   Note,
+  NoteAttachment,
   ParseResult,
   PipelineStage,
   SkillRefinement,
@@ -685,6 +686,12 @@ export const fetchBuildingAttachmentBlob = (
   attachmentId: number,
 ): Promise<Blob> =>
   requestBlob(`/buildings/${buildingId}/attachments/${attachmentId}/raw`);
+
+/* The property page's download: a PDF of the ad plus the canonical ad's stored
+ * photos, zipped by the API — R2 sends no CORS header, so the SPA cannot read the
+ * bytes behind /images/{key} and zip them itself. */
+export const fetchPropertyDownload = (propertyId: number): Promise<Blob> =>
+  requestBlob(`/properties/${propertyId}/download.zip`, { jwt: true });
 
 /* ----- admin / Settings page --------------------------------------------
  *
@@ -2698,6 +2705,41 @@ export const deletePropertyNote = (
     method: 'DELETE',
     jwt: true,
   });
+
+/* A note's files (migration 592): one file per request; the bytes come back through the API
+ * because the bucket is private and sends no CORS header. */
+export const uploadNoteAttachment = (
+  property_id: number,
+  note_id: number,
+  file: File,
+): Promise<NoteAttachment> => {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  return request<NoteAttachment>(`/properties/${property_id}/notes/${note_id}/attachments`, {
+    method: 'POST',
+    form,
+    jwt: true,
+  });
+};
+
+export const fetchNoteAttachmentBlob = (
+  property_id: number,
+  note_id: number,
+  attachment_id: number,
+): Promise<Blob> =>
+  requestBlob(`/properties/${property_id}/notes/${note_id}/attachments/${attachment_id}`, {
+    jwt: true,
+  });
+
+export const deleteNoteAttachment = (
+  property_id: number,
+  note_id: number,
+  attachment_id: number,
+): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(
+    `/properties/${property_id}/notes/${note_id}/attachments/${attachment_id}`,
+    { method: 'DELETE', jwt: true },
+  );
 
 /* Dismissals (migration 536) — "never show me this property again", and its
  * undo. State is read via property_dismissals_public. */

@@ -14,6 +14,7 @@ Read-only — no toolkit write exception (rule #5) is added.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -330,34 +331,40 @@ def broker_listings(conn: Any, broker_id: int, *, limit: int = 500) -> dict[str,
                      len(rows), _iso(fresh))
 
 
-def broker_listing_ids(conn: Any, broker_id: int, *, limit: int = 50_000) -> dict[str, Any]:
-    """A broker's mappable listing ids only (id, no other columns) — cheap, PII-free,
-    and complete up to `limit`, not a 500/2000-row page.
+# MS19 over the broker's own ads only, so "broker + portal" means ONE ad satisfies both: a
+# property matches when one of THIS broker's ads is on a selected portal, and the status is
+# judged on those ads. No listing_location join: browse_list serves a property only when its
+# canonical ad is placed (rule 25), and that is the read this allowlist narrows.
+_BROKER_PROPERTY_IDS_SQL = """
+    SELECT l.property_id FROM listings l
+    JOIN broker_identities bi ON bi.id = l.broker_identity_id
+    WHERE bi.broker_id = %(broker_id)s AND l.property_id IS NOT NULL
+    GROUP BY l.property_id
+    HAVING public.portal_status_matches(
+        bool_or(l.is_active), array_agg(DISTINCT l.source),
+        coalesce(array_agg(DISTINCT l.source) FILTER (WHERE l.is_active), '{}'::text[]),
+        %(portals)s::text[], %(status)s)
+    ORDER BY l.property_id LIMIT %(limit)s
+"""
 
-    Feeds Browse's `brokerId` cohort prefilter (frontend/src/lib/queries.ts
-    `resolveBrokerPrefilter`): a prefilter allowlist that silently truncated would
-    silently under-plot the map (the fail-open-filter class of bug), so this is
-    deliberately NOT `broker_listings()`'s cap. `ll.geom IS NOT NULL` — a listing the resolver
-    has not placed can never appear on a map; it stays visible in the Inventory table via
-    the separate, unfiltered `broker_listings()` call, so nothing is hidden overall.
-    `limit + 1` detects an actual overflow without a second COUNT query.
-    """
+
+def broker_property_ids(conn: Any, broker_id: int, *, status: str = "any",
+                        portals: Sequence[str] = (), limit: int = 50_000) -> dict[str, Any]:
+    """The properties a broker's ads stand on, under the portal rule (MS19): Browse's `brokerId`
+    allowlist (frontend/src/lib/queries.ts `resolveBrokerPrefilter`), complete up to `limit`,
+    because a silently truncated allowlist under-plots the map; `limit + 1` detects an overflow."""
     limit = max(1, min(int(limit), 50_000))
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT l.id FROM listings l "
-            "JOIN broker_identities bi ON bi.id = l.broker_identity_id "
-            # W4-a: mappable == the resolver placed it (listing_location), not
-            # the legacy listings.geom the map stopped reading in W3.
-            "JOIN listing_location ll ON ll.listing_id = l.id "
-            "WHERE bi.broker_id = %s AND ll.geom IS NOT NULL "
-            "ORDER BY l.id LIMIT %s",
-            (broker_id, limit + 1))
-        ids = [r["id"] for r in cur.fetchall()]
+        cur.execute(_BROKER_PROPERTY_IDS_SQL, {
+            "broker_id": broker_id, "portals": list(portals), "status": status,
+            "limit": limit + 1})
+        ids = [r["property_id"] for r in cur.fetchall()]
     capped = len(ids) > limit
     if capped:
         ids = ids[:limit]
-    envelope = _envelope("broker_listing_ids", ids, {"broker_id": broker_id}, len(ids), None)
+    envelope = _envelope("broker_property_ids", ids,
+                         {"broker_id": broker_id, "status": status, "portals": list(portals)},
+                         len(ids), None)
     envelope["metadata"]["capped"] = capped
     return envelope
 

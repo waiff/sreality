@@ -121,34 +121,52 @@ def test_batch_reads_are_bounded() -> None:
     assert len(conn.cur.seen[0][1][0]) == 1000
 
 
-def test_broker_listing_ids_selects_bare_ids_excluding_null_geom() -> None:
-    conn = _Conn([{"id": 10}, {"id": 11}])
-    out = brokers.broker_listing_ids(conn, 4, limit=100)
+def test_broker_property_ids_judges_the_portal_rule_over_the_brokers_own_ads() -> None:
+    """MS19: one ad satisfies broker AND portal, so the rule's inputs are aggregated over
+    this broker's ads only, never the property's; no listing_location join (the read model
+    serves a property by its canonical ad's place)."""
+    conn = _Conn([{"property_id": 10}, {"property_id": 11}])
+    out = brokers.broker_property_ids(conn, 4, status="active", portals=("idnes",), limit=100)
     sql, params = conn.cur.seen[0]
-    assert "geom IS NOT NULL" in sql
-    assert params == (4, 101)  # limit+1, to detect overflow without a second COUNT
+    flat = " ".join(sql.split())
+    assert "WHERE bi.broker_id = %(broker_id)s AND l.property_id IS NOT NULL" in flat
+    assert "GROUP BY l.property_id" in flat
+    assert ("HAVING public.portal_status_matches( bool_or(l.is_active), "
+            "array_agg(DISTINCT l.source), coalesce(array_agg(DISTINCT l.source) "
+            "FILTER (WHERE l.is_active), '{}'::text[]), %(portals)s::text[], %(status)s)") in flat
+    assert "listing_location" not in flat
+    assert params == {"broker_id": 4, "portals": ["idnes"], "status": "active", "limit": 101}
     assert out["data"] == [10, 11]
     assert out["metadata"]["capped"] is False
     assert out["metadata"]["result_count"] == 2
+    assert out["metadata"]["filters_used"] == {"broker_id": 4, "status": "active",
+                                               "portals": ["idnes"]}
 
 
-def test_broker_listing_ids_reports_and_trims_an_overflow() -> None:
+def test_broker_property_ids_defaults_to_every_ad_of_the_broker() -> None:
+    conn = _Conn([])
+    brokers.broker_property_ids(conn, 4)
+    _, params = conn.cur.seen[0]
+    assert params == {"broker_id": 4, "portals": [], "status": "any", "limit": 50_001}
+
+
+def test_broker_property_ids_reports_and_trims_an_overflow() -> None:
     """The limit+1 fetch is how `capped` is detected without a second COUNT query.
 
     RED by: fetching exactly `limit` rows and always reporting capped=False — a
     truly-oversized broker would then silently under-plot the map with no signal.
     """
-    conn = _Conn([{"id": 1}, {"id": 2}, {"id": 3}])
-    out = brokers.broker_listing_ids(conn, 4, limit=2)
+    conn = _Conn([{"property_id": 1}, {"property_id": 2}, {"property_id": 3}])
+    out = brokers.broker_property_ids(conn, 4, limit=2)
     assert out["data"] == [1, 2]
     assert out["metadata"]["capped"] is True
 
 
-def test_broker_listing_ids_clamps_limit() -> None:
+def test_broker_property_ids_clamps_limit() -> None:
     conn = _Conn([])
-    brokers.broker_listing_ids(conn, 4, limit=999_999)
+    brokers.broker_property_ids(conn, 4, limit=999_999)
     _, params = conn.cur.seen[0]
-    assert params == (4, 50_001)
+    assert params["limit"] == 50_001
 
 
 def test_geo_options_rejects_an_unknown_level() -> None:

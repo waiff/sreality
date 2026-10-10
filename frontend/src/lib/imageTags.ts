@@ -63,42 +63,68 @@ export const FINE_TAG_KEYS = Object.keys(IMAGE_TAG_LABELS).filter(
   (k) => !COLLAPSE_ONLY_TAGS.has(k),
 );
 
-/** The photo a Browse card opens on: 'default' is the ad's own first photo,
- * anything else is a LOGICAL tag, so "situační plán" also finds a cadastral map
- * or an aerial shot. The list leaves out the tags nobody wants as a cover
- * (chodba is CLIP's catch-all, schodiště, dokument, ostatní). */
-export const COVER_TAGS = [
-  'default',
-  'exterior_facade',
-  'kitchen',
-  'living_room',
-  'bedroom',
-  'bathroom',
-  'toilet',
-  'balcony_terrace',
-  'garden',
-  'floor_plan',
-  'site_plan',
+/** The photos a Browse card can open on. Each option names the trained DINOv3
+ * head that decides it (`headTagId`, a tag_taxonomy id) and the CLIP fine tag
+ * that decides it where that head has not scored the photo. An option whose
+ * head the active model lacks (ložnice, WC, …) is CLIP's until a model with that
+ * head is activated — then it is the head's, with no change here. Left out:
+ * tags nobody wants as a cover (chodba, schodiště, documents, technical rooms). */
+export const COVER_OPTIONS = [
+  { key: 'default', label: 'Default', headTagId: null, clipTag: null },
+  { key: 'exterior_facade', label: 'Fasáda', headTagId: 3, clipTag: 'exterior_facade' },
+  { key: 'kitchen', label: 'Kuchyně', headTagId: 25, clipTag: 'kitchen' },
+  { key: 'living_room', label: 'Obývací pokoj', headTagId: 28, clipTag: 'living_room' },
+  { key: 'bedroom', label: 'Ložnice', headTagId: 26, clipTag: 'bedroom' },
+  { key: 'bathroom', label: 'Koupelna', headTagId: 22, clipTag: 'bathroom' },
+  { key: 'toilet', label: 'WC', headTagId: 36, clipTag: 'toilet' },
+  { key: 'balcony_terrace', label: 'Balkon/terasa', headTagId: 1, clipTag: 'balcony_terrace' },
+  { key: 'garden', label: 'Zahrada', headTagId: 8, clipTag: 'garden' },
+  { key: 'garage', label: 'Garáž', headTagId: 17, clipTag: null },
+  { key: 'floor_plan', label: 'Půdorys', headTagId: 46, clipTag: 'floor_plan' },
+  { key: 'plan_3d', label: '3D plán', headTagId: 39, clipTag: null },
+  { key: 'site_plan', label: 'Situační plán', headTagId: null, clipTag: 'situation_plan' },
+  { key: 'cadastral_map', label: 'Katastrální mapa', headTagId: 42, clipTag: 'cadastral_map' },
+  { key: 'aerial_plot', label: 'Letecký snímek', headTagId: 43, clipTag: 'aerial_plot' },
 ] as const;
-export type CoverTag = (typeof COVER_TAGS)[number];
+export type CoverTag = (typeof COVER_OPTIONS)[number]['key'];
+export const COVER_TAGS: readonly CoverTag[] = COVER_OPTIONS.map((o) => o.key);
 
-/** Index of the cover photo for `tag`: the photo CLIP is most sure carries it
- * (the earlier one on a tie), else 0 — an ad without that photo keeps its own
- * first photo. No confidence floor, so the cover agrees with the tag badge
- * drawn on it. */
-export function coverIndex(
-  photos: ReadonlyArray<{ clip_logical_tag: string | null; clip_confidence: number | null }>,
-  tag: CoverTag,
-): number {
-  if (tag === 'default') return 0;
+/** A head's yes: the threshold every v1 head was trained at. */
+export const HEAD_SCORE_FLOOR = 0.5;
+
+/** The fields of an images_public row the cover choice reads. */
+export interface CoverPhoto {
+  clip_fine_tag: string | null;
+  clip_confidence: number | null;
+  /** The active tag model's per-head scores (migration 591); null = not scored. */
+  tag_head_scores?: Record<string, number> | null;
+}
+
+/** Index of the cover photo for `tag`, else 0 — an ad without that photo keeps
+ * its own first photo. Per photo, the trained head decides wherever the active
+ * model scored it (a yes at HEAD_SCORE_FLOOR, a no below it, whatever CLIP
+ * says); CLIP decides only where the head has not. A head's yes outranks any
+ * CLIP match; within each, the higher score wins, the earlier photo on a tie. */
+export function coverIndex(photos: ReadonlyArray<CoverPhoto>, tag: CoverTag): number {
+  const option = COVER_OPTIONS.find((o) => o.key === tag);
+  if (option == null || option.key === 'default') return 0;
   let best = 0;
-  let bestConfidence = -1;
+  let bestRank = -1;
   photos.forEach((p, i) => {
-    if (p.clip_logical_tag !== tag) return;
-    const confidence = p.clip_confidence ?? 0;
-    if (confidence > bestConfidence) {
+    const headScore =
+      option.headTagId == null ? undefined : p.tag_head_scores?.[String(option.headTagId)];
+    let rank: number;
+    if (headScore != null) {
+      if (headScore < HEAD_SCORE_FLOOR) return;
+      rank = 1 + headScore;
+    } else if (option.clipTag != null && p.clip_fine_tag === option.clipTag) {
+      rank = p.clip_confidence ?? 0;
+    } else {
+      return;
+    }
+    if (rank > bestRank) {
       best = i;
-      bestConfidence = confidence;
+      bestRank = rank;
     }
   });
   return best;

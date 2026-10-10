@@ -35,6 +35,7 @@ import { expectNoNestedInteractive } from '@/test/a11y';
 import * as api from '@/lib/api';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
+import { fmtShortDate } from '@/lib/format';
 import type { CardRow, TableRow } from '@/lib/queries';
 import type { ImagePublic, ListingEstimate } from '@/lib/types';
 import type { CoverTag } from '@/lib/imageTags';
@@ -45,8 +46,6 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     ...actual,
     fetchImagesForListingIds: vi.fn(async () => new Map()),
     fetchListingCovers: vi.fn(async () => new Map()),
-    /* The ad-count badge's read (via the hydration layer). */
-    fetchPropertySourcesByPropertyIds: vi.fn(async () => new Map()),
     fetchPropertyCollectionMemberSet: vi.fn(async () => new Map()),
     /* The card's pipeline funnel reads these two shared queries. Unmocked they
        reach the network, so every role assertion below would depend on it. */
@@ -88,6 +87,9 @@ const ROW = {
   mf_gross_yield_pct: null,
   total_price_change_pct: null,
   price_change_count: null,
+  all_sources: ['sreality'],
+  active_sources: ['sreality'],
+  source_count: 1,
 } as unknown as CardRow;
 
 /* The card's own title, and therefore the accessible name its ONE link must
@@ -137,6 +139,8 @@ function renderGrid(
     merge?: { selected: boolean };
     onToggleSelect?: (propertyId: number) => void;
     estimates?: Record<number, ListingEstimate>;
+    row?: CardRow;
+    orderPortal?: string | null;
     coverTag?: CoverTag;
     onCoverTag?: (next: CoverTag) => void;
   } = {},
@@ -150,9 +154,10 @@ function renderGrid(
         <LocationProbe />
         <CardHydrationProvider listingIds={[111]} renders={{ photos: 50 }}>
           <ListingCards
-            rows={[ROW]}
+            rows={[opts.row ?? ROW]}
             total={1}
             sort={{ field: 'last_seen_at', dir: 'desc' } as never}
+            orderPortal={opts.orderPortal}
             imageLarge={false}
             coverTag={opts.coverTag ?? 'default'}
             onCoverTag={opts.onCoverTag ?? (() => {})}
@@ -286,8 +291,8 @@ describe('<ListingCards> photo hydration', () => {
 
 /* The Cover dropdown: which tagged photo every card opens on. */
 describe('<ListingCards> the cover photo', () => {
-  const tagged = (id: number, clip_logical_tag: string | null) =>
-    ({ ...photo(id), clip_logical_tag, clip_confidence: 0.9 }) as unknown as ImagePublic;
+  const tagged = (id: number, clip_fine_tag: string | null, tag_head_scores: Record<string, number> | null = null) =>
+    ({ ...photo(id), clip_fine_tag, clip_confidence: 0.9, tag_head_scores }) as unknown as ImagePublic;
   const kitchenThird = () =>
     vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
       new Map([[111, [tagged(1, 'exterior_facade'), tagged(2, 'hallway'), tagged(3, 'kitchen'), tagged(4, 'bedroom')]]]),
@@ -307,132 +312,60 @@ describe('<ListingCards> the cover photo', () => {
     expect(document.querySelector('img')!.getAttribute('src')).toBe('https://img/1.jpg');
   });
 
+  it('lets the trained head overrule CLIP where it scored the photos', async () => {
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(
+      new Map([[111, [
+        tagged(1, 'exterior_facade', { '25': 0.02 }),
+        tagged(2, 'kitchen', { '25': 0.1 }),
+        tagged(3, 'hallway', { '25': 0.91 }),
+      ]]]),
+    );
+    renderGrid({ coverTag: 'kitchen' });
+    expect(await screen.findByText(counterIs('3 / 3'))).toBeInTheDocument();
+  });
+
   it('reports the operator\'s pick from the dropdown beside Sort', async () => {
     const onCoverTag = vi.fn();
     renderGrid({ onCoverTag });
     fireEvent.change(await screen.findByRole('combobox', { name: /Cover/ }), {
-      target: { value: 'exterior_facade' },
+      target: { value: 'garage' },
     });
-    expect(onCoverTag).toHaveBeenCalledWith('exterior_facade');
+    expect(onCoverTag).toHaveBeenCalledWith('garage');
     expect(screen.getByRole('option', { name: 'Fasáda' })).toBeInTheDocument();
   });
 });
 
-/* How many ads the card's property holds: a decoration like the photos, since
- * browse_projection carries no `source_count`. Two ads or more only — most
- * properties are one ad, and a badge on each would be noise. */
+/* How many ads the card's property holds, every ad active or not: read off the
+ * row (`source_count`, migration 590), so the badge paints with the card. Two
+ * ads or more only — most properties are one ad, and a badge on each would be
+ * noise. */
 describe('<ListingCards> the ad-count badge', () => {
-  const SECOND = { ...ROW, property_id: 43, listing_id: 112, sreality_id: 901 } as CardRow;
   const BADGE = /^Nemovitost spojuje/;
+  const withAds = (n: number) => ({ ...ROW, source_count: n }) as CardRow;
 
-  /* Each property's ads, as the read answers them: N rows per property id. */
-  const adsPerProperty = (counts: Record<number, number>) =>
-    vi.mocked(queries.fetchPropertySourcesByPropertyIds).mockResolvedValue(
-      new Map(
-        Object.entries(counts).map(([id, n]) => [
-          Number(id),
-          Array.from({ length: n }, (_, i) => ({ id: i + 1, property_id: Number(id) })),
-        ]),
-      ) as never,
-    );
+  it('labels a property of three ads "3 inzeráty", the sentence in its title', () => {
+    renderGrid({ row: withAds(3) });
 
-  /* Its own harness: the badge needs `adCounts` in the provider, which
-     renderGrid leaves off on purpose (the last test below). */
-  function renderCards(rows: CardRow[]) {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    return render(
-      <QueryClientProvider client={qc}>
-        <MemoryRouter>
-          <CardHydrationProvider
-            listingIds={rows.map((r) => r.listing_id)}
-            renders={{ photos: 50, adCounts: rows.map((r) => r.property_id) }}
-          >
-            <ListingCards
-              rows={rows}
-              total={rows.length}
-              sort={{ field: 'last_seen_at', dir: 'desc' } as never}
-              imageLarge={false}
-              coverTag="default"
-              onCoverTag={() => {}}
-              isLoading={false}
-              isFetchingNextPage={false}
-              hasNextPage={false}
-              onReachEnd={() => {}}
-              restorationKey="test"
-              hasFilters={false}
-              hasBounds={false}
-              hoveredIds={new Set()}
-              onHover={() => {}}
-              onSort={() => {}}
-              onClearFilters={() => {}}
-              onClearBounds={() => {}}
-              mergeMode={false}
-              selectedPropertyIds={new Set()}
-              onToggleSelect={() => {}}
-              pipelineScoped={false}
-              collectionScoped={false}
-              estimates={undefined}
-              estimatingIds={new Set()}
-              onEstimate={() => {}}
-            />
-          </CardHydrationProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-  }
-
-  beforeEach(() => {
-    vi.mocked(queries.fetchPropertySourcesByPropertyIds).mockReset();
-    adsPerProperty({});
-  });
-
-  it('labels a property of three ads "3 inzeráty", the sentence in its title', async () => {
-    adsPerProperty({ 42: 3 });
-    renderCards([ROW]);
-
-    const badge = await screen.findByTitle('Nemovitost spojuje 3 inzeráty (počítají se i neaktivní)');
+    const badge = screen.getByTitle('Nemovitost spojuje 3 inzeráty (počítají se i neaktivní)');
     expect(badge).toHaveTextContent(/^3\s*inzeráty$/);
   });
 
-  it('says "inzerátů" from five ads on', async () => {
-    adsPerProperty({ 42: 5 });
-    renderCards([ROW]);
+  it('says "inzerátů" from five ads on', () => {
+    renderGrid({ row: withAds(5) });
 
-    const badge = await screen.findByTitle('Nemovitost spojuje 5 inzerátů (počítají se i neaktivní)');
+    const badge = screen.getByTitle('Nemovitost spojuje 5 inzerátů (počítají se i neaktivní)');
     expect(badge).toHaveTextContent(/^5\s*inzerátů$/);
   });
 
-  /* Both sides of the threshold: one ad draws nothing, two ads draw the badge.
-     The second card's badge also proves the counts have landed before the
-     absence on the first is asserted. */
-  it('draws nothing for a property of one ad, "2 inzeráty" for two', async () => {
-    adsPerProperty({ 42: 1, 43: 2 });
-    renderCards([ROW, SECOND]);
-
-    expect(await screen.findByTitle(BADGE)).toHaveTextContent(/^2\s*inzeráty$/);
-    expect(screen.getAllByTitle(BADGE)).toHaveLength(1);
-  });
-
-  it('reads the counts once for the grid, keyed on the property ids', async () => {
-    adsPerProperty({ 42: 2, 43: 2 });
-    renderCards([ROW, SECOND]);
-
-    expect(await screen.findAllByTitle(BADGE)).toHaveLength(2);
-    expect(queries.fetchPropertySourcesByPropertyIds).toHaveBeenCalledTimes(1);
-    expect(queries.fetchPropertySourcesByPropertyIds).toHaveBeenCalledWith(
-      [42, 43],
-      expect.anything(),
-    );
-  });
-
-  /* Opt-in like every decoration: a provider that renders photos alone (the
-     grid harness above) must not pay for the counts. */
-  it('is not read by a surface that does not ask for it', async () => {
-    renderGrid();
-
-    expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
-    expect(queries.fetchPropertySourcesByPropertyIds).not.toHaveBeenCalled();
+  /* Both sides of the threshold: one ad draws nothing, two draw the badge. */
+  it('draws nothing for a property of one ad, "2 inzeráty" for two', () => {
+    const one = renderGrid({ row: withAds(1) });
+    expect(screen.getByText(/Sadová/)).toBeInTheDocument();
     expect(screen.queryByTitle(BADGE)).toBeNull();
+    one.unmount();
+
+    renderGrid({ row: withAds(2) });
+    expect(screen.getByTitle(BADGE)).toHaveTextContent(/^2\s*inzeráty$/);
   });
 });
 
@@ -722,5 +655,50 @@ describe('<ListingCards> merge mode with a multi-photo card', () => {
       fireEvent.click(next);
       expect(onToggleSelect).not.toHaveBeenCalled();
     }
+  });
+});
+
+/* MS19: a card is a property. Its badge names the portals where it has an active ad
+ * (or, with none active, every portal it had, marked inactive), and under one
+ * portal's "Newest first" a card whose date there is not its own first seen says so. */
+describe('<ListingCards> the portal badge and the order date', () => {
+  const badge = () => screen.getByTitle(/^Portály/);
+
+  it('lists every portal with an active ad', () => {
+    renderGrid({ row: { ...ROW, all_sources: ['idnes', 'sreality'], active_sources: ['idnes', 'sreality'] } });
+    expect(badge().textContent).toBe('portáliDNES Reality · Sreality');
+  });
+
+  it('lists only the live portals while one is live', () => {
+    renderGrid({ row: { ...ROW, all_sources: ['bazos', 'idnes'], active_sources: ['idnes'] } });
+    expect(badge().textContent).toBe('portáliDNES Reality');
+  });
+
+  it('marks every portal inactive when no ad is live', () => {
+    renderGrid({ row: { ...ROW, is_active: false, all_sources: ['bazos', 'idnes'], active_sources: [] } });
+    expect(badge().textContent).toBe('neaktivníBazoš · iDNES Reality');
+  });
+
+  const lifespan = () => screen.getByTitle(/^Aktivní/).textContent;
+
+  it("shows the portal's date beside the card's own when the two days differ", () => {
+    renderGrid({
+      orderPortal: 'idnes',
+      row: { ...ROW, newest_ad_at_idnes: '2026-03-05T10:00:00Z' } as CardRow,
+    });
+    expect(lifespan()).toContain(`·iDNESod${fmtShortDate('2026-03-05T10:00:00Z')}`);
+  });
+
+  it('shows one date when the newest ad there is the first seen', () => {
+    renderGrid({
+      orderPortal: 'idnes',
+      row: { ...ROW, newest_ad_at_idnes: '2026-01-01T09:00:00Z' } as CardRow,
+    });
+    expect(lifespan()).not.toContain('iDNES');
+  });
+
+  it('shows no portal date without the one-portal order', () => {
+    renderGrid({ row: { ...ROW, newest_ad_at_idnes: '2026-03-05T10:00:00Z' } as CardRow });
+    expect(lifespan()).not.toContain('iDNES');
   });
 });

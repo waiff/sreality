@@ -38,7 +38,6 @@ describe('hydration key namespace', () => {
     hydrationKeys.brokers([1, 2, 3]),
     hydrationKeys.propertyBrokers([{ property_id: 1, listing_id: 2 }]),
     hydrationKeys.photos([1, 2, 3], 6),
-    hydrationKeys.adCounts([1, 2, 3]),
   ];
 
   it('is disjoint from every write sweep prefix', () => {
@@ -116,24 +115,6 @@ describe('hydration key namespace', () => {
       hydrationKeys.photos([1, 2, 3, 3], 6),
     );
   });
-
-  /* The ad counts are PROPERTY-grain, so they sit apart from the per-listing
-     decorations over the same numbers. A merge or a split re-reads them by
-     their root (refreshAfterSplit), and that root reaches no other decoration. */
-  it('keys the ad counts apart, and their root reaches them alone', () => {
-    const counts = hydrationKeys.adCounts([1]);
-    expect(hydrationKeys.adCounts([3, 1, 2])).toEqual(hydrationKeys.adCounts([1, 2, 3, 3]));
-    expect(matchesPrefix(counts, hydrationKeys.adCountsAll)).toBe(true);
-    for (const other of [
-      hydrationKeys.covers([1]),
-      hydrationKeys.brokers([1]),
-      hydrationKeys.propertyBrokers([{ property_id: 1, listing_id: 1 }]),
-      hydrationKeys.photos([1], 50),
-    ]) {
-      expect(other).not.toEqual(counts);
-      expect(matchesPrefix(other, hydrationKeys.adCountsAll)).toBe(false);
-    }
-  });
 });
 
 describe('makeHydration lookup', () => {
@@ -198,13 +179,6 @@ describe('makeHydration lookup', () => {
     expect(h.photosFor(999)).toEqual([]);
     expect(h.photosFor(null)).toEqual([]);
     expect(h.photosFor(999)).toBe(h.photosFor(null));
-  });
-
-  it('resolves the ad count by the property id, null when unread', () => {
-    const h = makeHydration(covers, brokers, photos, {}, new Map([[42, 3]]));
-    expect(h.adCountFor(42)).toBe(3);
-    expect(h.adCountFor(7)).toBeNull();
-    expect(makeHydration(covers, brokers).adCountFor(42)).toBeNull();
   });
 
   it('projects raw rows to the carousel shape without losing the CLIP tag', () => {

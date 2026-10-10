@@ -19,6 +19,7 @@ from scripts.verify_pipeline import (
     DEFAULT_THRESHOLDS,
     _SAFE_IDENT,
     check_acquisition_lag,
+    check_false_delist_share,
     check_migration_drift,
     check_worker_lane_stall,
     check_walk_coverage,
@@ -1070,6 +1071,19 @@ def test_notification_dispatches_skips_system_health_rows() -> None:
     assert carrier["skip"] == "t.source_kind = 'system_health'"
     sql = _parity_carrier_sql(carrier)
     assert sql.count("not (t.source_kind = 'system_health')") == 3
+
+
+def test_properties_skips_a_property_reset_to_no_ads() -> None:
+    """The recompute resets a property whose ads all moved away: both ids NULL and a count of 0,
+    which only that reset writes. Counted as an orphan it would read as a writer's gap."""
+    from scripts.recompute_property_stats import _NO_ADS
+    from scripts.verify_pipeline import _parity_carrier_sql
+    from toolkit.listing_identity import R2_CARRIERS_BY_TABLE
+
+    carrier = R2_CARRIERS_BY_TABLE["properties"]
+    assert _NO_ADS["repr_listing_id"] == _NO_ADS["repr_listing_ref_id"] == "NULL"
+    assert carrier["skip"] == f"t.source_count = {_NO_ADS['source_count']}"
+    assert _parity_carrier_sql(carrier).count("not (t.source_count = 0)") == 3
 
 
 def test_carrier_skip_is_applied_by_counting_and_by_updating() -> None:
@@ -3019,3 +3033,52 @@ def test_text_extraction_lag_names_the_open_scope() -> None:
         _text_lane_conn(waiting=0, oldest_hours=0.0, claimed=0), T)
     assert out["status"] == "ok"
     assert out["details"]["scope"] == {"bazos": ["floor", "has_lift"]}
+
+
+# --- false_delist_share: a flip a later sighting reversed was a false delisting ---------
+
+
+def test_false_delist_share_ok_when_revivals_stay_under_the_warn_line() -> None:
+    conn = _RowsConn([("sreality", 400, 8), ("bazos", 120, 0)])
+    out = check_false_delist_share(conn, T)
+    assert out["status"] == "ok"
+    assert out["value"] == 2.0  # worst scored share, in percent
+    assert out["details"]["offenders"] == []
+    assert out["details"]["per_source"]["sreality"]["share"] == 0.02
+
+
+def test_false_delist_share_fails_on_the_pre_hysteresis_sreality_signature() -> None:
+    """The 2026-10-09 numbers: a third of sreality's flips were back within the week."""
+    conn = _RowsConn([("sreality", 18105, 6367), ("idnes", 11297, 670), ("bazos", 9218, 7)])
+    out = check_false_delist_share(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 35.17
+    assert any(o.startswith("sreality 35.2%") for o in out["details"]["offenders"])
+    assert any(o.startswith("idnes 5.9%") for o in out["details"]["offenders"])
+    assert not any("bazos" in o for o in out["details"]["offenders"])
+
+
+def test_false_delist_share_warns_between_the_tiers() -> None:
+    conn = _RowsConn([("remax", 60, 6)])
+    assert check_false_delist_share(conn, T)["status"] == "warn"
+
+
+def test_false_delist_share_skips_a_small_portal_rather_than_scoring_it_clean() -> None:
+    """12 flips, 6 back: noise, not a 50% alarm -- but it must not read as ok either when
+    nothing else was scored."""
+    conn = _RowsConn([("maxima", 12, 6)])
+    out = check_false_delist_share(conn, T)
+    assert out["status"] == "warn" and out["value"] is None
+    assert out["details"]["unscored"] == ["maxima"]
+    assert out["details"]["per_source"]["maxima"]["scored"] is False
+    assert "verified for nothing" in out["message"]
+
+
+def test_false_delist_share_reads_flipped_rows_only() -> None:
+    """Provisional verdicts (outcome 'gone') are EXPECTED to revive -- that is the dwell
+    working. Only a confirmed flip that came back is a false delisting."""
+    conn = _RowsConn([])
+    check_false_delist_share(conn, T)
+    sql, _params = conn.executed[0]
+    assert "outcome = 'flipped'" in sql and "detail_queue_completions" in sql
+    assert "'gone'" not in sql

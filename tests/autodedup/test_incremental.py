@@ -292,8 +292,10 @@ def test_the_worker_interval_is_the_only_switch() -> None:
 
     assert "incremental" not in lane.MODES and "rt_parity" not in lane.MODES
     params = inspect.signature(incremental_lane.run_incremental).parameters
-    # E930: fresh_conn is a connection factory for the halving after a raise, not a switch.
-    assert set(params) == {"conn_factory", "deadline_s", "fresh_conn"}
+    # E930: fresh_conn is a connection factory for the halving after a raise, not a switch;
+    # E941: `holder` names the lease the worker's shutdown releases, and `stopping` IS that
+    # shutdown — a pass that sees it stops, it never opens one.
+    assert set(params) == {"conn_factory", "deadline_s", "fresh_conn", "holder", "stopping"}
     for gone in ("ENV_FLAG", "DB_FLAG", "env_enabled", "db_enabled", "parity_gate"):
         assert not hasattr(incremental_lane, gone), gone
 

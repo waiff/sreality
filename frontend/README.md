@@ -64,6 +64,10 @@ Node 20+ required.
   `tests/fixtures/sreality_transform_probes.json`, which `imageUrl.test.ts` runs
   through this module and the Python suite runs through `with_transform` — so a
   drift in either copy's LOGIC, not just its constants, reds a suite.
+- The R2 bucket sends **no CORS header**: an `<img>` displays a photo, but
+  `fetch()` cannot read its bytes. So the property page's "Stáhnout" button
+  asks the API for `GET /properties/{id}/download.zip` (JWT), which reads the
+  stored photos from R2 and zips them server-side with a PDF of the ad.
 
 ## Project layout
 

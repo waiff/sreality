@@ -12,6 +12,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from scraper import delist_policy, portal_runner
 from scraper.portal_runner import DrainItem
@@ -425,12 +426,22 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
 # --- run_detail_drain -------------------------------------------------------
 
 
-def _patch_queue(monkeypatch, claim_batches):
+# A gone verdict the ledger already confirms (an earlier verdict older than the dwell): the
+# tests' default, so "a confirmed gone flips" reads as before; the hysteresis tests below
+# swap in a younger / absent / refuted prior.
+_CONFIRMING_PRIOR = (True, datetime.now(timezone.utc) - delist_policy.GONE_DWELL - timedelta(hours=1))
+
+
+def _patch_queue(monkeypatch, claim_batches, evidence=_CONFIRMING_PRIOR):
     cap = {"complete": [], "complete_outcomes": [], "fail": [], "claim_n": [], "reclaim": 0,
-           "flip": []}
+           "flip": [], "evidence": []}
     monkeypatch.setattr(
         portal_runner.db, "mark_listing_inactive",
         lambda _c, src, nid: cap["flip"].append((src, nid)) or True,
+    )
+    monkeypatch.setattr(
+        portal_runner.db, "gone_evidence",
+        lambda _c, src, nid: cap["evidence"].append((src, nid)) or evidence,
     )
     it = iter(list(claim_batches) + [[]])
     monkeypatch.setattr(
@@ -458,7 +469,7 @@ def _patch_queue(monkeypatch, claim_batches):
 
 
 def test_detail_drain_batches_and_completes(monkeypatch):
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]])
     p = _FakePortal()
     rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert rc == 0
@@ -469,7 +480,7 @@ def test_detail_drain_batches_and_completes(monkeypatch):
 
 
 def test_detail_drain_routes_gone_and_error(monkeypatch):
-    cap = _patch_queue(monkeypatch, [[("10", None, None, None, None), ("11", None, None, None, None), ("12", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("10", None, None, None), ("11", None, None, None), ("12", None, None, None)]])
     p = _FakePortal(fetch_kinds={"11": "gone", "12": "error"})
     rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert cap["flip"] == [(p.source, "11")]
@@ -477,21 +488,21 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     assert cap["fail"] == [["12"]]
     assert sorted(x for b in p.calls["write"] for x in b) == ["10"]
     completions = list(zip(cap["complete"], cap["complete_outcomes"]))
-    assert (["11"], "gone") in completions
+    assert (["11"], "flipped") in completions
     assert (["10"], "written") in completions
     assert sorted(x for b in cap["complete"] for x in b) == ["10", "11"]
     assert agg["errors"] == 1 and agg["listings_inactive"] == 1
 
 
 def test_detail_drain_respects_max_claims(monkeypatch):
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]])
     p = _FakePortal()
     portal_runner.run_detail_drain(p, 2, False, detail_workers=1, detail_rate=1.0)
     assert cap["claim_n"] == [2]
 
 
 def test_detail_drain_dry_run_does_not_claim(monkeypatch):
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None)]])
     p = _FakePortal()
     rc, agg = portal_runner.run_detail_drain(p, 50, True, detail_workers=1, detail_rate=1.0)
     assert rc == 0 and agg == {}
@@ -504,8 +515,8 @@ def test_detail_drain_bumps_counts_per_chunk_without_double_count(monkeypatch):
     # them). A small batch size forces both in-loop and post-loop flushes.
     monkeypatch.setattr(portal_runner, "DETAIL_BATCH_SIZE", 2)
     cap = _patch_queue(monkeypatch, [
-        [("1", None, None, None, None), ("2", None, None, None, None), ("3", None, None, None, None)],
-        [("4", None, None, None, None), ("5", None, None, None, None)],
+        [("1", None, None, None), ("2", None, None, None), ("3", None, None, None)],
+        [("4", None, None, None), ("5", None, None, None)],
     ])
     bumps: list[dict[str, int]] = []
     monkeypatch.setattr(
@@ -523,7 +534,7 @@ def test_detail_drain_bumps_counts_per_chunk_without_double_count(monkeypatch):
 
 
 def test_detail_drain_does_not_bump_without_run_id(monkeypatch):
-    _patch_queue(monkeypatch, [[("1", None, None, None, None)]])
+    _patch_queue(monkeypatch, [[("1", None, None, None)]])
     bumps: list = []
     monkeypatch.setattr(
         portal_runner.db, "bump_scrape_run_counts",
@@ -538,7 +549,7 @@ def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
     # A wall-clock budget makes the drain stop + finalize rather than overrun the
     # job timeout (which would leave a 'stuck' scrape_run). monotonic() jumps far
     # past the tiny budget on the first loop check, so it stops before claiming.
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None)]])
     seq = iter(range(0, 1_000_000, 1000))
     monkeypatch.setattr(portal_runner.time, "monotonic", lambda: float(next(seq)))
     p = _FakePortal()
@@ -564,9 +575,9 @@ def test_detail_drain_hands_back_what_the_ledger_refused_and_stops(
     # worker drain that runs out of time mid-chunk stops the same way, but that is a
     # healthy pass with a backlog, not a blocked portal, and is counted apart.
     cap = _patch_queue(monkeypatch, [
-        [("1", None, None, None, None), ("2", None, None, None, None),
-         ("3", None, None, None, None)],
-        [("4", None, None, None, None)],
+        [("1", None, None, None), ("2", None, None, None),
+         ("3", None, None, None)],
+        [("4", None, None, None)],
     ])
     released: list[list[str]] = []
     monkeypatch.setattr(
@@ -632,7 +643,7 @@ def test_detail_drain_swallows_teardown_close_failure(monkeypatch):
     # conn.close() then raises OperationalError. Every batch already committed and
     # the caller finalizes the scrape_run on a SEPARATE connection, so a teardown
     # failure must NOT red the run (the historical ~1% false-red on detail_drain).
-    _patch_queue(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]])
+    _patch_queue(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]])
     p = _FakePortal(conn_close_error=OSError("server closed the connection unexpectedly"))
     rc, agg = portal_runner.run_detail_drain(
         p, None, False, detail_workers=1, detail_rate=1.0)
@@ -645,7 +656,7 @@ def test_detail_drain_swallows_teardown_close_failure(monkeypatch):
 def test_detail_drain_swallows_counts_bump_failure(monkeypatch):
     # Counts are post-commit bookkeeping; a transient pooler reset on the bump
     # must not red a drain whose listing data already committed.
-    _patch_queue(monkeypatch, [[("1", None, None, None, None)]])
+    _patch_queue(monkeypatch, [[("1", None, None, None)]])
 
     def _boom(*a, **k):
         raise OSError("connection reset by peer")
@@ -667,7 +678,7 @@ def test_detail_drain_retries_flush_deadlock_on_same_conn(monkeypatch):
     # flush is retried on the SAME connection (no reconnect) and the run stays
     # green. The batch write is idempotent, so the replay re-commits identically.
     monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]])
     p = _FakePortal(write_errors=[psycopg.errors.DeadlockDetected("deadlock detected"), None])
     rc, agg = portal_runner.run_detail_drain(
         p, None, False, detail_workers=1, detail_rate=1.0)
@@ -684,7 +695,7 @@ def test_detail_drain_reconnects_on_dropped_flush(monkeypatch):
     # 'SSL error: unexpected eof while reading'): run_resilient reconnects and
     # retries on a fresh connection, and the run stays green instead of reding.
     monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
-    cap = _patch_queue(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]])
     drop = psycopg.OperationalError("SSL error: unexpected eof while reading")
     p = _FakePortal(write_errors=[drop, None], reconnect_conns=True)
     rc, agg = portal_runner.run_detail_drain(
@@ -701,7 +712,7 @@ def test_detail_drain_reds_on_persistent_db_outage(monkeypatch):
     # A genuine sustained outage must still surface (not spin forever): the flush
     # exhausts its retry budget and the exception propagates -> the run reds.
     monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
-    _patch_queue(monkeypatch, [[("1", None, None, None, None)]])
+    _patch_queue(monkeypatch, [[("1", None, None, None)]])
     drop = psycopg.OperationalError("connection refused")
     p = _FakePortal(write_errors=[drop] * 8, reconnect_conns=True)
     with pytest.raises(psycopg.OperationalError):
@@ -716,7 +727,7 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
     cap = {"complete": [], "calls": 0}
     monkeypatch.setattr(
         portal_runner.db, "reclaim_stale_claims", lambda *a, **k: 0)
-    batches = iter([[("9", None, None, None, None)], []])
+    batches = iter([[("9", None, None, None)], []])
     monkeypatch.setattr(
         portal_runner.db, "claim_detail_batch", lambda *a, **k: next(batches, []))
 
@@ -732,6 +743,7 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
     monkeypatch.setattr(
         portal_runner.db, "mark_listing_inactive",
         lambda _c, src, nid: flips.append((src, nid)) or True)
+    monkeypatch.setattr(portal_runner.db, "gone_evidence", lambda *_a: _CONFIRMING_PRIOR)
     p = _FakePortal(fetch_kinds={"9": "gone"}, reconnect_conns=True)
     rc, agg = portal_runner.run_detail_drain(
         p, None, False, detail_workers=1, detail_rate=1.0)
@@ -746,7 +758,7 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
 def test_a_failed_flip_is_retried_not_completed_as_gone(monkeypatch, caplog):
     """A flip that raised used to be logged and then COMPLETED as gone: the queue
     row vanished while the listing stayed active. Now it is a failure, retried."""
-    cap = _patch_queue(monkeypatch, [[("9", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]])
 
     def _broken(_c, _src, _nid):
         raise psycopg.errors.UndefinedColumn("x")
@@ -764,7 +776,7 @@ def test_a_failed_flip_is_retried_not_completed_as_gone(monkeypatch, caplog):
 
 def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
     monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
-    cap = _patch_queue(monkeypatch, [[("9", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]])
     calls = {"n": 0}
 
     def _flaky(_c, _src, _nid):
@@ -777,7 +789,7 @@ def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
     p = _FakePortal(fetch_kinds={"9": "gone"})
     _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert calls["n"] == 2
-    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "flipped")]
     assert cap["fail"] == []
     assert agg["listings_inactive"] == 1 and agg["errors"] == 0
 
@@ -790,8 +802,7 @@ def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
 def test_a_gone_flip_matching_no_listing_warns_only_for_a_row_we_held(monkeypatch, caplog, priority, level):
     """A NEW id has no listings row until its first write, so a gone first fetch
     matching nothing is routine; any other priority means the natural key broke."""
-    cap = _patch_queue(monkeypatch, [[("9", None, None, None, None)]])
-    monkeypatch.setattr(portal_runner.db, "mark_listing_inactive", lambda _c, _s, _n: None)
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=(False, None))
     monkeypatch.setattr(portal_runner.db, "queue_priorities",
                         lambda _c, _s, nids: {n: priority for n in nids})
     p = _FakePortal(fetch_kinds={"9": "gone"})
@@ -799,18 +810,61 @@ def test_a_gone_flip_matching_no_listing_warns_only_for_a_row_we_held(monkeypatc
         _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     hits = [r for r in caplog.records if r.getMessage() == "gone flip matched no listing source=fake id=9"]
     assert [r.levelname for r in hits] == [level]
+    assert cap["flip"] == []  # nothing to flip, so the writer is not even asked
     assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
     assert agg["listings_inactive"] == 1 and agg["errors"] == 0
 
 
 def test_a_flip_or_an_already_inactive_row_logs_no_match(monkeypatch, caplog):
-    cap = _patch_queue(monkeypatch, [[("8", None, None, None, None), ("9", None, None, None, None)]])
+    cap = _patch_queue(monkeypatch, [[("8", None, None, None), ("9", None, None, None)]])
     monkeypatch.setattr(portal_runner.db, "mark_listing_inactive", lambda _c, _s, nid: nid == "8")
     p = _FakePortal(fetch_kinds={"8": "gone", "9": "gone"})
     with caplog.at_level("INFO", logger="scraper.portal_runner"):
         portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert sorted(x for b in cap["complete"] for x in b) == ["8", "9"]
     assert not any("matched no listing" in m for m in caplog.messages)
+
+
+# --- rule #3's hysteresis: one verdict records, the second (dwell later) flips ----------
+
+
+def test_a_first_gone_verdict_is_recorded_not_flipped(monkeypatch, caplog):
+    """The ledger holds no earlier verdict: the queue row completes as gone (the ledger row
+    IS the evidence), the listing stays active for the next walk to re-nominate, and the
+    run counts it as pending, not inactive."""
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=(True, None))
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert cap["evidence"] == [(p.source, "9")]
+    assert cap["flip"] == []
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert cap["fail"] == []
+    assert agg["listings_inactive"] == 0 and agg["errors"] == 0
+    assert any(m.startswith("DETAIL id=9 gone (first verdict recorded, not flipped") for m in caplog.messages)
+    assert any("gone=0 pending=1" in m for m in caplog.messages)
+
+
+def test_a_second_verdict_inside_the_dwell_is_still_pending(monkeypatch):
+    young = (True, datetime.now(timezone.utc) - delist_policy.GONE_DWELL + timedelta(minutes=5))
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=young)
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert cap["flip"] == []
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert agg["listings_inactive"] == 0
+
+
+def test_a_verdict_the_dwell_after_the_first_flips(monkeypatch, caplog):
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]])  # the confirming default
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert cap["flip"] == [(p.source, "9")]
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "flipped")]
+    assert agg["listings_inactive"] == 1
+    assert "DETAIL id=9 gone (is_active=false)" in caplog.messages
 
 
 def test_drain_record_failure_drop_on_queue_bump_does_not_replay_ledger(monkeypatch):
@@ -1157,7 +1211,7 @@ def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monke
     once a majority of them read gone the run stops flipping and records the
     rest as failures to retry later."""
     ids = [str(i) for i in range(1, 26)]
-    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    cap = _patch_queue(monkeypatch, [[(i, None, None, None) for i in ids]])
     p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
     with caplog.at_level("ERROR", logger="scraper.portal_runner"):
         rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
@@ -1182,7 +1236,7 @@ def test_drain_breaker_exempts_presence_checks(monkeypatch):
     the runner must hand the breaker the VERIFY exemption, or every later gone
     verdict that run would become a failure and the listings would stay active."""
     ids = [str(i) for i in range(1, 26)]
-    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    cap = _patch_queue(monkeypatch, [[(i, None, None, None) for i in ids]])
     monkeypatch.setattr(portal_runner.db, "queue_priorities",
                         lambda _c, _s, nids: {n: portal_runner.db.QUEUE_PRIORITY_VERIFY for n in nids})
     p = _FakePortal(fetch_kinds={i: "gone" for i in ids})

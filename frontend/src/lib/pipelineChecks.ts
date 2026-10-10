@@ -28,6 +28,7 @@ const CHECK_LABELS: Record<string, string> = {
   outbound_url_parity: 'Portal URL parity',
   outbound_url_conformance: 'Portal URL conformance',
   sreality_image_template: 'Sreality image template',
+  false_delist_share: 'False delist share',
 };
 
 /* The four per-m² plausibility checks emit a share or a ratio, and the number is
@@ -43,6 +44,7 @@ const CHECK_VALUE_UNIT: Record<string, string> = {
   ppm2_measure_coverage: '%',
   location_payload_shape_drift: '%',
   outbound_url_conformance: '%',
+  false_delist_share: '%',
 };
 
 export function pipelineCheckLabel(key: string): string {

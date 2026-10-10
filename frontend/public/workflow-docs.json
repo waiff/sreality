@@ -2983,7 +2983,8 @@
         "migrations/**",
         "pyproject.toml",
         "scripts/ci_db_bootstrap.sql",
-        "tests/fixtures/filter_compile_*.json"
+        "tests/fixtures/filter_compile_*.json",
+        "tests/fixtures/portal_rule.json"
       ],
       "inputs": [],
       "secrets": [],
@@ -3862,116 +3863,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/runpod_reap.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/runpod_reap.yml"
-    },
-    {
-      "filename": "scrape.yml",
-      "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
-      "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
-      "portal": "sreality",
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "limit",
-          "description": "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. A capped run records run_type='delta' and skips mark_inactive.",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Don't write to the database",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "detail_only",
-          "description": "Refetch a single listing by id (skips index)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "no_image_downloads",
-          "description": "Skip image download phase",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "max_detail_refetches",
-          "description": "Override global detail-refetches-per-run cap (blank = 4000)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "max_detail_refetches_per_category",
-          "description": "Override per-category detail-refetches cap (blank = 1200)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "max_image_downloads",
-          "description": "Override images-per-run cap (blank = 0 = drain active to empty / suspicious-stop)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "image_workers",
-          "description": "Override concurrent image workers (blank = 16)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "detail_workers",
-          "description": "Override concurrent detail-fetch workers (blank = 8)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        },
-        {
-          "name": "detail_rate",
-          "description": "Override global detail-fetch rate cap, req/s (blank = 6.0)",
-          "required": false,
-          "type": "string",
-          "default": null,
-          "options": null
-        }
-      ],
-      "secrets": [
-        "R2_ACCESS_KEY_ID",
-        "R2_ACCOUNT_ID",
-        "R2_BUCKET_NAME",
-        "R2_SECRET_ACCESS_KEY",
-        "SCRAPE_CHAIN_TOKEN",
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "SUPABASE_URL"
-      ],
-      "concurrencyGroup": "sreality-scrape",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": null,
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"
     },
     {
       "filename": "scrape_bezrealitky.yml",

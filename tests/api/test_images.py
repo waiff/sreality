@@ -1,6 +1,6 @@
 """Tests for GET /images/{key} — the public presigned-R2 redirect.
 
-The endpoint is unauthenticated (like /health), redirects a listing-image key
+The redirect is unauthenticated (like /health), redirects a listing-image key
 to a presigned R2 URL, and refuses any key that isn't the listing-image shape
 so it can never presign the operator-private `custom-attachments/` uploads that
 share the bucket.
@@ -113,3 +113,4 @@ def test_unconfigured_storage_returns_503(client, monkeypatch):
     images_route._client = None
     res = client.get("/images/2872083276/0001.jpg", follow_redirects=False)
     assert res.status_code == 503
+

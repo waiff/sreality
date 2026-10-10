@@ -44,12 +44,11 @@ def _outcome(result: str, images: int = 0) -> WriteOutcome:
 
 def test_from_scraped_maps_every_listing_column_and_hashes_the_parsed_document() -> None:
     listing = _scraped()
-    w = listing_write.from_scraped(listing, discovery_seq=5)
+    w = listing_write.from_scraped(listing)
     assert set(w.row) == set(db.LISTING_COLUMNS)
     assert "sreality_id" not in w.row
     assert w.row["disposition"] == "2+kk" and w.row["price_czk"] == 5_499_000
     assert (w.source, w.source_id_native, w.sreality_id) == ("bazos", "219122924", None)
-    assert w.discovery_seq == 5
     assert w.content_hash == hashing.digest(listing.hash_doc())
     assert set(listing.hash_doc()) == set(_HASH_FIELDS)
 

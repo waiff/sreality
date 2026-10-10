@@ -996,9 +996,9 @@ def enqueue_full_sweep(
 
 def open_connection() -> psycopg.Connection:
     """The hot loop wants a SESSION-mode connection so its recurring statements get
-    server-side prepared (`scraper/main.py:_run_full` is the same pattern). The transaction
-    pooler still WORKS — `connect_session()` falls back to it — it is just several times
-    slower per listing, so the fallback is announced rather than silent."""
+    server-side prepared (sreality's `SrealityPortal.connect_drain` is the same pattern). The
+    transaction pooler still WORKS — `connect_session()` falls back to it — it is just several
+    times slower per listing, so the fallback is announced rather than silent."""
     if not os.environ.get("SUPABASE_DB_SESSION_URL"):
         LOG.warning(
             "SUPABASE_DB_SESSION_URL unset: falling back to the TRANSACTION pooler, where "

@@ -53,6 +53,7 @@ _TENANT_TABLES = frozenset({
     "estimation_trace_payloads", "estimation_feedback", "building_run_attachments",
     "estimation_runs", "building_runs", "property_pipeline", "pipeline_stages",
     "property_pipeline_events", "entitlements", "property_dismissals",
+    "property_note_attachments",
 })
 
 # Amendment A6: these broker-directory PII surfaces stay dark to browser roles;
@@ -351,8 +352,10 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "dedup_sim.tag_head_bakeoff_metrics",
     # The versioned tag model (migration 490, PUBLIC schema — it must survive
     # Wave 8's drop of dedup_sim): the model registry, its per-tag artifacts, and
-    # the per-image winner store. Backend-only, NO `_public` view; the SPA reads
-    # them through the admin-gated API (/new-dedup/tags/*).
+    # the per-image winner store. Locked to the service role; the admin pages
+    # read them through the admin-gated API (/new-dedup/tags/*). One deliberate
+    # exception: images_public.tag_head_scores (migration 591, ci-allow-ungated)
+    # publishes the ACTIVE model's per-photo scores for the Browse card cover.
     "tag_head_models", "tag_head_model_heads", "image_tag_scores",
     # The Level-0 candidate store (migration 492, schema dedup_sim): parameter
     # sets, generation runs and the listing-pair evidence rows. Backend-only, NO

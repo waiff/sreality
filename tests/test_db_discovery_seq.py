@@ -1,14 +1,12 @@
-"""The write-path wiring of listings.discovery_seq / listing_detail_queue.discovery_seq
-(migration 368 — docs/design/portal-order-fidelity.md, Phase 1).
+"""The write-path wiring of listings.discovered_at (migration 444), and the end of
+listings.discovery_seq (migration 368): since W5 (MS19) no code writes it; the column, the
+queue's `nextval` default and the sequence stay until W6 drops them (Rule 0).
 
-Unlike published_at (a parsed portal field, in LISTING_COLUMNS, preserve-if-null),
-discovery_seq is a PIPELINE-assigned value carried from the claimed queue row — never
-parsed from portal content, so it stays out of LISTING_COLUMNS and out of ScrapedListing's
-contract entirely; `listing_write.from_scraped` / `from_sreality` take it as an explicit
-keyword, carried from the claimed queue row. Its semantics are SET-ONCE
-(COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq) — favor the STORED value), not
-preserve-if-null (which favors the INCOMING value) — a listing's discovery position is a
-first-discovery fact, not something a later fetch should ever be allowed to correct."""
+discovered_at is a PIPELINE-assigned value carried from the claimed queue row — never parsed
+from portal content, so it stays out of LISTING_COLUMNS and out of ScrapedListing's contract
+entirely; `listing_write.from_scraped` / `from_sreality` take it as an explicit keyword. Its
+semantics are SET-ONCE (COALESCE(listings.discovered_at, EXCLUDED.discovered_at) — favor the
+STORED value), not preserve-if-null: a first sighting is a fact a later fetch never corrects."""
 
 from __future__ import annotations
 
@@ -21,32 +19,30 @@ from scraper.portal import _DEFAULTS
 from scraper.scraped_listing import ScrapedListing
 
 
-def test_discovery_seq_is_not_a_listing_column() -> None:
-    # Deliberately NOT parsed from portal content -- it must never round-trip
-    # through the generic preserve-if-null / hash machinery LISTING_COLUMNS drives.
-    assert "discovery_seq" not in db.LISTING_COLUMNS
-    assert "discovery_seq" not in db._PRESERVE_IF_NULL_COLUMNS
-
-
 def test_discovered_at_is_not_a_listing_column() -> None:
-    """Pipeline-assigned, never parsed from portal content — so it stays out of
-    LISTING_COLUMNS exactly like discovery_seq (published_at, which IS parsed
-    from the page, is the deliberate contrast)."""
+    """Pipeline-assigned, never parsed from portal content (published_at, which IS
+    parsed from the page, is the deliberate contrast)."""
     assert "discovered_at" not in db.LISTING_COLUMNS
     assert "published_at" in db.LISTING_COLUMNS
 
 
 @pytest.mark.parametrize("portal", sorted(_DEFAULTS))
-def test_the_one_writer_keeps_both_discovery_fields_set_once(portal: str) -> None:
+def test_the_one_writer_keeps_discovered_at_set_once_and_never_names_discovery_seq(
+    portal: str,
+) -> None:
     sql = listing_write._upsert_sql(portal)
-    for col in ("discovery_seq", "discovered_at"):
-        assert f"{col} = COALESCE(listings.{col}, EXCLUDED.{col})" in sql
+    assert "discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)" in sql
+    assert "discovery_seq" not in sql
 
 
-def test_the_adapters_thread_the_claims_discovery_fields() -> None:
+def test_the_claim_never_returns_discovery_seq() -> None:
+    import inspect
+
+    assert "discovery_seq" not in inspect.getsource(db.claim_detail_batch)
+
+
+def test_the_adapters_thread_the_claims_discovered_at() -> None:
     at = datetime(2026, 9, 1, tzinfo=timezone.utc)
     listing = ScrapedListing(source="bazos", source_id_native="1", source_url="https://x/1")
-    w = listing_write.from_scraped(listing, discovery_seq=42, discovered_at=at)
-    assert (w.discovery_seq, w.discovered_at) == (42, at)
-    s = listing_write.from_sreality({"hash_id": 7}, {"sreality_id": 7}, [])
-    assert (s.discovery_seq, s.discovered_at) == (None, None)
+    assert listing_write.from_scraped(listing, discovered_at=at).discovered_at == at
+    assert listing_write.from_sreality({"hash_id": 7}, {"sreality_id": 7}, []).discovered_at is None

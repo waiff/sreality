@@ -34,7 +34,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from scraper import db, delist_policy, listing_write, portal_factory, vocabulary
@@ -74,15 +74,11 @@ class DrainItem:
     kind: str  # "ok" | "gone" | "error"
     payload: Any = None
     error: str | None = None
-    # The claimed queue row's enqueue-time sequence value (migration 368),
-    # attached below in run_detail_drain (not by fetch_detail, which is a
-    # portal-specific network+parse step that has nothing to do with the queue).
-    # Threaded into each portal's write_details so listings.discovery_seq can be
-    # stamped independent of fetch/claim/write order.
-    discovery_seq: int | None = None
-    # The same claimed row's enqueued_at (migration 444) — when the walk first SAW
-    # this id, as distinct from when this fetch is written. Carried for the same
-    # reason and by the same route as discovery_seq.
+    # The claimed queue row's enqueued_at (migration 444): when the walk first SAW this
+    # id, as distinct from when this fetch is written. Attached in run_detail_drain (not
+    # by fetch_detail, a portal-specific network+parse step that knows nothing of the
+    # queue) and threaded into each portal's write_details, so listings.discovered_at
+    # is stamped independent of fetch/claim/write order.
     discovered_at: datetime | None = None
     # W2a-0 churn instrument (migration 402): the identity of this FETCH, minted
     # once when the item is created and carried through every replay of the
@@ -208,9 +204,7 @@ class PortalDefaults:
             for it in items
         ]
         outcomes = listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
+            listing_write.from_scraped(it.payload["listing"], discovered_at=it.discovered_at)
             for it in items
         ])
         for page_id in pages:
@@ -766,27 +760,50 @@ def _flush_drain_batch(
 
 def _drain_mark_gone(
     portal: Portal, conn: Any, native_id: str, priority: int, reconnect: Any,
-) -> tuple[Any, str | None]:
-    """Flip a gone listing inactive + dequeue it, transient-drop resilient.
-    Returns (live conn, None), or (conn, error) when the flip failed non-transiently."""
-    def _op(c: Any) -> bool | None:
-        flipped = db.mark_listing_inactive(c, portal.source, native_id)
-        db.complete_detail(c, portal.source, [native_id], outcome="gone")
-        return flipped
+) -> tuple[Any, str | None, str | None]:
+    """Record a gone verdict + dequeue it; flip the listing only when the ledger already
+    holds an earlier unrefuted verdict GONE_DWELL old (rule #3 hysteresis, `delist_policy.
+    gone_confirmed`). Transient-drop resilient. Returns (live conn, verdict, None) with
+    verdict in flipped / closed (already inactive) / pending / no_row, or (conn, None, error)
+    when the op failed."""
+    now = datetime.now(timezone.utc)
+
+    def _op(c: Any) -> str:
+        exists, first_gone_at = db.gone_evidence(c, portal.source, native_id)
+        if not exists:
+            verdict = "no_row"
+        elif delist_policy.gone_confirmed(first_gone_at, now):
+            flipped = db.mark_listing_inactive(c, portal.source, native_id)
+            verdict = "flipped" if flipped else "closed"
+        else:
+            verdict = "pending"
+        # The ledger says what the drain DID: 'flipped' closed the ad, 'gone' only recorded
+        # the verdict (the evidence a later one confirms, or a sighting refutes).
+        db.complete_detail(c, portal.source, [native_id],
+                           outcome="flipped" if verdict == "flipped" else "gone")
+        return verdict
 
     try:
-        flipped, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
+        verdict, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
     except Exception as exc:  # noqa: BLE001 - one listing must not red the run
         if db.is_transient_db_error(exc):
             raise  # retries exhausted: a real outage reds the run, as before
         LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
-        return conn, str(exc)
-    if flipped is None:
+        return conn, None, str(exc)
+    if verdict == "no_row":
         # A never-fetched (NEW) id has no listings row until the drain writes one, so
         # a gone first fetch matches nothing routinely; for any other row the key broke.
         LOG.log(logging.INFO if priority == db.QUEUE_PRIORITY_NEW else logging.WARNING,
                 "gone flip matched no listing source=%s id=%s", portal.source, native_id)
-    return conn, None
+    elif verdict == "pending":
+        LOG.info("DETAIL id=%s gone (first verdict recorded, not flipped; a second one "
+                 "%dh+ later flips)", native_id,
+                 delist_policy.GONE_DWELL.total_seconds() // 3600)
+    elif verdict == "closed":
+        LOG.info("DETAIL id=%s gone (already inactive)", native_id)
+    else:
+        LOG.info("DETAIL id=%s gone (is_active=false)", native_id)
+    return conn, verdict, None
 
 
 def _drain_record_failure(
@@ -845,7 +862,7 @@ def run_detail_drain(
     portal, `deadline_stopped` for a time budget reached mid-chunk).
     """
     counts: dict[str, int] = {
-        "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
+        "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "gone_pending": 0, "errors": 0,
         "images_discovered": 0,
     }
     breaker = delist_policy.GoneRateBreaker(
@@ -931,19 +948,18 @@ def run_detail_drain(
             if not claimed:
                 break
             total_claimed += len(claimed)
-            # discovery_seq is a property of the CLAIM (when this id was originally
+            # discovered_at is a property of the CLAIM (when this id was originally
             # enqueued), not of the fetch — looked up by native_id after the fetch
             # completes rather than threaded through fetch_detail, which is a
             # portal-specific network+parse seam that shouldn't need to know about
             # the queue's internals.
-            dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq, _enq in claimed}
-            enq_by_nid = {nid: enq for nid, _ref, _price, _dseq, enq in claimed}
+            enq_by_nid = {nid: enq for nid, _ref, _price, enq in claimed}
             prio_by_nid = db.queue_priorities(
                 conn, portal.source, [nid for nid, *_ in claimed]) if conn is not None else {}
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
                 futures = {
                     pool.submit(portal.fetch_detail, client, nid, ref): nid
-                    for nid, ref, _price, _dseq, _enq in claimed
+                    for nid, ref, _price, _enq in claimed
                 }
                 for future in as_completed(futures):
                     item = future.result()  # never raises
@@ -954,7 +970,6 @@ def run_detail_drain(
                         # deferred too -- the safe direction: a retry, never an attempt).
                         deferred.append(item.native_id)
                         continue
-                    item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
                     prio = prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW)
                     if breaker.observe(prio, item.kind):
@@ -976,11 +991,10 @@ def run_detail_drain(
                         conn = _drain_record_failure(
                             portal, conn, item.native_id, breaker.reason, portal.connect_drain)
                     elif item.kind == "gone":
-                        LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
-                        conn, flip_error = _drain_mark_gone(
+                        conn, verdict, flip_error = _drain_mark_gone(
                             portal, conn, item.native_id, prio, portal.connect_drain)
                         if flip_error is None:
-                            counts["gone"] += 1
+                            counts["gone_pending" if verdict == "pending" else "gone"] += 1
                         else:  # the queue row stays and is retried
                             counts["errors"] += 1
                             conn = _drain_record_failure(
@@ -994,9 +1008,9 @@ def run_detail_drain(
                         counts["errors"] += 1
             LOG.info(
                 "DRAIN progress claimed=%d new=%d updated=%d unchanged=%d "
-                "gone=%d errors=%d buffered=%d",
-                total_claimed, counts["new"], counts["updated"],
-                counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
+                "gone=%d pending=%d errors=%d buffered=%d",
+                total_claimed, counts["new"], counts["updated"], counts["unchanged"],
+                counts["gone"], counts["gone_pending"], counts["errors"], len(buffer),
             )
             _persist_counts()
             if limiter.refused:
@@ -1035,10 +1049,10 @@ def run_detail_drain(
 
     unmapped = vocabulary.take_unmapped()
     LOG.info(
-        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d "
-        "unmapped=%d",
+        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d pending=%d errors=%d "
+        "claimed=%d unmapped=%d",
         counts["new"], counts["updated"], counts["unchanged"],
-        counts["gone"], counts["errors"], total_claimed,
+        counts["gone"], counts["gone_pending"], counts["errors"], total_claimed,
         sum(n for _, n in unmapped),
     )
     if unmapped:

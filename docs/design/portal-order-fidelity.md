@@ -1,6 +1,7 @@
 # Per-portal listing order fidelity
 
-> **Status: APPROVED (2026-08-04), implementation in progress.** Written after a 6-agent research
+> **Status: Phases 1–3 superseded by MS19 (merge sprint W5, 2026-10); Phase 4 is live (the sreality
+> probe); Phase 5 still open.** Originally APPROVED 2026-08-04. Written after a 6-agent research
 > pass across the schema, the sreality client/parser, the shared portal framework, the other 8
 > portals' parsers, the frontend/Browse read path, and prior art (ROADMAP, `docs/design/`, git
 > history), then a follow-up verification pass that reshaped Phase 4. Every claim below is
@@ -154,171 +155,15 @@ field exists anywhere (zero hits across `scraper/`, `toolkit/`, `api/`, `migrati
 Four causes, four independent fixes. All but Phase 4 are shared-framework, portal-agnostic
 changes (rule #21-compliant — no per-portal branching in shared code).
 
-### Phase 1 — true discovery-order capture (schema + shared framework)
+### Phases 1–3 — superseded by MS19 (merge sprint W5, migration 590)
 
-Add a **dedicated monotonic sequence**, assigned once at true enqueue time, immune to every
-reordering in Root cause 2 because it's fixed *before* any of that batching/concurrency happens:
-
-- New migration: `listing_detail_queue.discovery_seq bigint not null default nextval(...)` on a
-  new dedicated sequence. Unlike `now()`, `nextval()` is called once *per row* even inside one
-  multi-row INSERT, so it gives a true relative order even for the 1000-row enqueue chunks.
-- New migration: `listings.discovery_seq bigint` (nullable; NULL for pre-existing rows). Carried
-  from the claimed queue row through `claim_detail_batch` → `write_detail_batch`, written **only
-  on first insert** (same `_PRESERVE_IF_NULL_COLUMNS`-style set-once semantics already used for
-  `street`/`house_number`/`published_at`, `scraper/db.py:169-174` — never touched by `ON CONFLICT
-  DO UPDATE`, exactly like `first_seen_at` today).
-- Mirror the existing "keep the original `enqueued_at` on re-enqueue" rule
-  (`scraper/db.py:2429-2431`) for `discovery_seq` too — a listing's sequence value is a
-  first-discovery fact, never regenerated on retry.
-- Excluded from `_HASH_FIELDS`, same as `published_at` — no snapshot noise (rule #2 intact).
-
-This is a pure schema + shared-framework change. No per-portal code changes. It neutralizes
-reorderings #2–#5 from Root cause 2 entirely (batch ties, completion-order fetch, cross-process
-interleaving) because the value is fixed at enqueue, not write. Priority-bucketing (#1) doesn't
-actually disturb it: `discovery_seq` values for the "new" bucket are still assigned in the true
-page-walk sub-order — priority only affects *when* a row gets claimed/processed, not the sequence
-value stamped at its original enqueue.
-
-### Phase 2+3 — SHIPPED (backend): `listing_feed_public` + a per-portal-safe sort key
-
-**Status: backend shipped in PR (migration 369, branch `feature/browse-portal-mirror`, stacked on
-#945 since it depends on `discovery_seq`). Frontend wiring NOT shipped — see the follow-up spec
-below.** These turned out to be one coherent piece, not two: `published_at` promotion (Phase 2)
-only matters in the context of the new listing-grain view (Phase 3), so they shipped together.
-
-**The read contract:** a new `listing_feed_public` view (migration 369) — listing-grain, never
-touching `properties`/`browse_list`, so Root cause 3's golden-record leakage (trust-blended
-`area_m2`/`district`/etc. from a *different* portal's sibling listing) cannot happen: every
-column is unambiguously the filtered listing's own row. Identity is `id` (surrogate PK) +
-`source_id_native` — not `sreality_id`, which is legacy/NULL post-Gate-2 for non-sreality rows.
-
-**The sort key resolved a subtlety the original plan glossed over.** `published_at` and
-`discovery_seq` live in different domains (a timestamp vs. a bigint sequence) and can't be
-naively COALESCEd into one global ordering — a 3-month-old bazos `published_at` would then
-outrank a listing discovered 2 minutes ago on a portal with no date signal. The fix only works
-*because* this view is always queried scoped to one portal (Phase 3's whole premise): a plain
-
-```sql
-order by portal_date desc nulls last, discovery_seq desc nulls last, id desc
-```
-
-self-selects the right effective key per portal with **no per-portal branching in the reader** —
-`portal_date` is a view-level `CASE WHEN source IN ('bazos','ceskereality') THEN published_at END`
-(the only two sources where it's a reliable signal today; sreality's is deliberately excluded
-despite being non-NULL — its ~40%-populated day-granular `published_at` would rank a
-stale-dated row above a same-day discovery within sreality's own result set, the same
-domain-mixing problem one level down). For every other source `portal_date` is NULL for the
-whole filtered result set, so `discovery_seq` becomes the *functional* primary key — a pure
-data-driven fallback, not a code branch. Adding bezrealitky once its `timeActivated` actually
-populates (migration 266 — wired but NULL today) is a one-line `create or replace view`.
-
-A covering index (`listings_feed_sort_idx`, same migration) mirrors `browse_list`'s proven
-pattern — filter columns first (`source, is_active, category_main, category_type`), then the
-same two-column sort expression, then `id` for the keyset tiebreak — chosen defensively (matching
-this codebase's established answer to this exact class of problem) since this session couldn't
-run a live EXPLAIN to confirm a plain indexed `listings` scan would hold the anon 3s budget without it.
-
-#### Frontend — SHIPPED (migration 370 + Browse wiring)
-
-Operator direction (2026-08-04), which overrode two of the open questions this section
-originally raised: **the filter engine does not change and neither do the "mechanics" per
-surface.** One portal selected means Browse shows that portal — rows, count and map together —
-rather than a special mode with per-surface rules. That collapsed decisions 4 and 5 into one
-answer: every cohort surface switches together, or none does.
-
-**What the mode is.** `portals.length === 1` → the Cards, Table, Count and Map fetchers read
-`listing_feed_public` instead of `browse_list` / `properties_map_mv`. 0 or ≥2 portals keeps the
-deduped property view unchanged, which is precisely what dedup exists for. A `mirroring <portal>`
-chip in the Browse header states when it is active — the count changes meaning, so it is said out
-loud rather than left to be inferred.
-
-**Root cause 3 was worse than this doc originally recorded.** It documented the golden-record
-field leakage; it did not notice that the portal filter also drops rows outright. `properties.source`
-is the *representative* child's portal, so a property whose repr is sreality is invisible under
-`portal = idnes` even with a perfectly good active idnes listing. Measured live 2026-08-04:
-
-| Portal | Properties with an active listing there | Hidden by today's filter |
-|---|---|---|
-| idnes | 109,034 | **23,429 (21%)** |
-| ceskereality | 63,898 | 11,913 (19%) |
-| realitymix | 47,250 | 9,132 (19%) |
-| bazos | 29,741 | 2,939 (10%) |
-| sreality | 99,272 | 1 |
-
-The listing-grain feed has no representative to pick, so the mode fixes this as a side effect.
-
-**Migration 370 made the view serviceable.** 369 shipped a bare projection; three gaps blocked the
-swap. (a) Seven filter columns Browse dispatches don't exist on `listings` at all
-(`place_search_text`, `tom_days`, `last_change_at`, `home_obec_pop` + the eight `near_*`, the four
-`price_change_count*`, `total_price_change_pct`) — against 369's view each is a PostgREST 42703, a
-hard 400, not a silent no-op. 370 derives the listing-grain ones and joins `properties` for the
-genuinely property-grain ones (none is displayed, so no leakage path). (b) 369 had **no publication
-gate**, so single-portal mode would have surfaced the 12,784 active-but-unpublished properties
-Browse deliberately hides; 370 reproduces `browse_projection`'s gate verbatim. (c) The sort key —
-below.
-
-**The three-column ORDER BY became one column.** `portal_sort_key` = 12-digit UTC-epoch
-`portal_date` ‖ 19-digit `discovery_seq`, NOT NULL, `COLLATE "C"`. Byte order is identical to
-`portal_date desc nulls last, discovery_seq desc nulls last` (verified against a synthetic matrix
-covering NULL date, NULL seq, bigint max and same-day ties: 0 positional differences for every
-input at or after the epoch; pre-1970 dates deliberately clamp into the sorts-last bucket, and
-there are 0 such rows). The point is the reader, not the database: keyset pagination anchors each
-page on the previous page's sort value, and PostgREST can only express that as an `or=()`
-disjunction — two nullable sort columns plus a tiebreak means a nested six-disjunct tree with four
-NULL phases. One NOT NULL column keeps `applyKeyset`'s existing, proven single-column machinery.
-`to_char` cannot be used here at all (both timestamp overloads are STABLE, so the expression index
-is rejected); the epoch form is the immutable equivalent.
-
-**`property_id` is not a legal tiebreaker at this grain** — the correctness trap in this work.
-7,951 properties carry more than one active listing on a single portal (18,521 rows, live). A
-keyset tiebreaker must impose a total order, and a React row key must be unique, so the mirror lane
-anchors both on `listing_id`. `applyKeyset` / `nextCursorFrom` / `withKeysetColumns` take the
-tiebreak as an argument so the two can never be mixed.
-
-**Verified live, not just reviewed.** Keyset paging was simulated in SQL against the real view —
-the exact predicate PostgREST emits, 10 pages deep, per portal — and compared row-for-row against
-the straight `ORDER BY … LIMIT`: **0 mismatches** on bazos, idnes, ceskereality, realitymix and
-sreality, including the pathological ties this file's own frontend spec worried about (237 of
-bazos's top 240 rows share one key; idnes 213; realitymix 210). Card page: 11.6 ms, index scan on
-`listings_portal_feed_idx`, no sort node. Map at the full 50k cap on the largest portal: 6.86s →
-**1.52s** after adding `properties_gate_cover_idx` (the gate probe becomes index-only instead of
-52k random heap reads). Worst-case exact count (idnes, no other filter) is 2.88s, which trips
-`fetchBrowseCount`'s existing 2.5s budget and degrades to the planner estimate rendered as "~N" —
-the designed fallback, not a regression.
-
-**Day-one behaviour, and why it improves on its own.** `discovery_seq` is NULL for every row
-written before migration 368 (a stated non-goal — no retrofit). For the two portals with a
-trustworthy `portal_date` (bazos, ceskereality) that changes nothing: the date half of the key
-dominates and the order is right immediately. For the other seven the legacy rows all share the
-identical all-zeros key, so the mirror currently falls back to the `listing_id` tiebreak —
-surrogate-PK order, a reasonable proxy for "newest in our archive" but not portal order. The
-useful part is that this self-corrects in the right direction: any row WITH a `discovery_seq`
-sorts above every zero-key row, so newly discovered listings float to the top from the first
-drain onward, and the resolution of the ordering deepens as the sequence accumulates. Measured
-~40 minutes after 368 was applied: 1,782 sreality rows already carried a sequence, plus
-bezrealitky, realitymix, idnes, bazos, remax and ceskereality. maxima and mmreality were still at
-zero — expected for maxima (tiny catalogue) and worth a look for mmreality, whose drain is
-disabled via `realtime_drain_disabled_sources`.
-
-**Deliberately not changed — the Stats tab.** It is a property-grain RPC
-(`browse_stats_properties`); mirroring it needs a listing-grain twin, which is a separate piece of
-work rather than something to half-do here. In single-portal mode Stats therefore still describes
-the deduped property cohort while the list describes the portal's listings.
-
-**The grain is stated in the UI, not inferred.** One portal and several portals produce rows that
-count differently, and nothing on screen said so — the `mirroring {portal}` chip named the mode but
-not its consequence. `RowGrainNotice` (below the cohort count) carries the two explanations: with
-one portal, each row is one of that portal's listings, so a property posted twice there appears
-twice; otherwise one row per property, with the merged record's provenance spelled out (price /
-disposition from the representative child, every other field from the golden-record CTEs, so a card
-can mix portals and match none of them exactly — 9.4% of multi-portal active properties disagree on
-price outright, median spread 7.4%). Dismissal is per variant and per browser: the two say opposite
-things, so dismissing the everyday one must not suppress the other's first appearance.
-
-**Follow-up this surfaced:** the ≥2-portal case still filters on `properties.source`, so it keeps
-the row-hiding bug above and the count can *drop* when a second portal is added. Fixing it properly
-means a property-grain "has a child on portal X" predicate (a `sources` array or an EXISTS on
-`browse_projection`) — worth doing, out of scope for this PR.
+The per-ad lane they built (`discovery_seq`, `listing_feed_public`, `portal_sort_key`, the
+single-portal mirror) is replaced by `docs/design/merge-sprint/PROGRAM.md` MS19: a portal filter
+selects ads and rows stay properties, and with one portal "Newest first" orders by that portal's
+newest ad (`newest_ad_at_<portal>`). The finding that retired it: inside one enqueue statement
+`discovery_seq` agreed with the portal's own order on only 3.3–20.7 % of pairs (0 % mmreality),
+because a walk numbers the newest ad first, so the "mirror" showed each walk batch oldest-first.
+W6 drops the lane's objects.
 
 ### Phase 4 — sreality: separate discovery from completeness, drop the district-split for discovery
 
@@ -443,7 +288,8 @@ natural fallback to revisit — but only as a targeted follow-up, not a prerequi
    portal like everything else; the original "near-duplicate pins" worry doesn't apply, because
    dedup collapses ACROSS portals and the mirror is scoped to one. The real constraint turned out
    to be latency, fixed by `properties_gate_cover_idx`.
-6. **New:** the ≥2-portal case still filters on `properties.source` and so keeps the 10–21%
-   row-hiding measured above. Fix with a property-grain "has a child on portal X" predicate?
+6. ~~The ≥2-portal case still filters on `properties.source` and so keeps the 10–21%
+   row-hiding measured above.~~ **Resolved by MS19 (W5):** the property-grain "has an ad on
+   portal X" predicate, `all_sources` / `active_sources`, on every surface.
 4. Phase 5 (verified sort params + ceskereality main-walk sort slug) — bundle into this program or
    track separately as its own hardening PR? Still open.

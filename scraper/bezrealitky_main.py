@@ -320,9 +320,7 @@ class BezrealitkyPortal(portal_runner.PortalDefaults):
                     content_type="application/json",
                 )
         return listing_write.tally(listing_write.write_listings(conn, [
-            listing_write.from_scraped(it.payload["listing"],
-                                       discovery_seq=it.discovery_seq,
-                                       discovered_at=it.discovered_at)
+            listing_write.from_scraped(it.payload["listing"], discovered_at=it.discovered_at)
             for it in items
         ]))
 

@@ -87,6 +87,19 @@ update autodedup.rt_lease
    and holder = %(holder)s::text
 """
 
+# The pass's FENCE (E941), its transaction's last statement before the commit: this holder's
+# lease row, still live by the CLOCK (`now()` is the transaction's start, which a release the
+# worker's shutdown wrote mid-pass is later than), locked until the commit. A release that
+# landed first leaves no row and the pass rolls back; one that comes after waits for the commit.
+RT_LEASE_HOLD_SQL = """
+select holder
+  from autodedup.rt_lease
+ where name = %(name)s::text
+   and holder = %(holder)s::text
+   and expires_at > clock_timestamp()
+   for update
+"""
+
 # Who holds it, for a refusal that names the holder (`autodedup/rt_lease.py`).
 RT_LEASE_READ_SQL = """
 select l.holder, l.taken_at, l.expires_at, l.expires_at > now() as live

@@ -144,8 +144,10 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "dedup_sim.tag_head_bakeoff_metrics",
     # The versioned tag model (migration 490, PUBLIC schema — it must survive
     # Wave 8's drop of dedup_sim): the model registry, its per-tag artifacts, and
-    # the per-image winner store. Backend-only, NO `_public` view; the SPA reads
-    # them through the admin-gated API (/new-dedup/tags/*).
+    # the per-image winner store. Locked to the service role; the admin pages
+    # read them through the admin-gated API (/new-dedup/tags/*). One deliberate
+    # exception: images_public.tag_head_scores (migration 591, ci-allow-ungated)
+    # publishes the ACTIVE model's per-photo scores for the Browse card cover.
     "tag_head_models", "tag_head_model_heads", "image_tag_scores",
     # The Level-0 candidate store (migration 492, schema dedup_sim): parameter
     # sets, generation runs and the listing-pair evidence rows. Backend-only, NO
@@ -233,10 +235,18 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     # containing that point out. It never returns a cell list, a bbox, our `error` text
     # or `pages`, so it cannot be walked to enumerate which towns are being worked.
     "sold_coverage",
+    # images_public (migration 591) reads image_tag_scores + tag_head_models and IS
+    # readable by `authenticated`, deliberately and without the admin gate: every
+    # signed-in Browse user's card cover is chosen by the active tag model's scores
+    # (operator ruling 2026-10-07). It publishes only a photo's per-head scores and,
+    # implicitly, which model is active — market facts about a photo, the same class
+    # as the CLIP tag columns this view has carried since migration 236. It never
+    # exposes a label, a labeller, model artifacts or metrics.
+    "images_public",
 ]
 
-# The 20 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
-# 536) scope per account.
+# The 21 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
+# 536, property_note_attachments 592) scope per account.
 _TENANT_TABLES: list[str] = [
     "collections",
     "tags",
@@ -258,6 +268,7 @@ _TENANT_TABLES: list[str] = [
     "property_pipeline_events",
     "entitlements",
     "property_dismissals",
+    "property_note_attachments",
 ]
 
 # Amendment A6 (Phase 0): the broker-directory PII surfaces stay dark to BOTH

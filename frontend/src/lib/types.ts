@@ -165,6 +165,10 @@ export interface ImagePublic {
   /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint —
    * a display value for image-audit surfaces. NULL until hashed. */
   phash: number | null;
+  /* The ACTIVE DINOv3 tag model's per-head scores, {"<tag_taxonomy.id>": 0..1}
+   * (migration 591). Only fetchImagesForListingIds selects it (the Browse card
+   * cover); NULL when the active model has not scored the photo. */
+  tag_head_scores?: Record<string, number> | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by
@@ -880,6 +884,17 @@ export interface Note {
   created_at: string;
   /* Null until the operator edits the note; stamped on every PATCH. */
   updated_at: string | null;
+  /* Its files, oldest first (migration 592). Only the list read carries them. */
+  attachments?: NoteAttachment[];
+}
+
+export interface NoteAttachment {
+  id: number;
+  note_id: number;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  created_at: string;
 }
 
 

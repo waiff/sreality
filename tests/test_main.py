@@ -1,9 +1,8 @@
-"""Tests for scraper.main._run_full — focused on the nomination guard (rule #3).
+"""Tests for scraper.main — sreality's index walk (the rule #3 nomination guard),
+its detail fetch, and the module's CLI dispatch.
 
 Hermetic: monkeypatches db.* functions and the SrealityClient builder so
-no network is touched. Asserts that nomination happens only when
-the index walk is complete (limit is None) and that it is scoped per
-category pair so a rental walk doesn't clobber sale listings.
+no network is touched.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from datetime import datetime, timedelta, timezone
 import requests
 
 from scraper import main as scraper_main
@@ -155,11 +155,9 @@ _FakeClient.total_entries = 5  # type: ignore[attr-defined]
 
 @pytest.fixture()
 def patched_db(monkeypatch):
-    """Patch every db.* helper used by _run_full + the per-category client."""
+    """Patch every db.* helper used by the index walk + the per-category client."""
     calls: dict[str, list] = {
         "nominated": [],
-        "touch_listings": [],
-        "index_summary": [],
         "enqueue": [],
         "seen_key": [],
     }
@@ -169,7 +167,6 @@ def patched_db(monkeypatch):
             pass
 
     monkeypatch.setattr(scraper_main.db, "connect", _FakeConn)
-    monkeypatch.setattr(scraper_main.db, "connect_session", _FakeConn)
 
     def _fake_enqueue(_conn, source, entries):
         e = list(entries)
@@ -178,27 +175,15 @@ def patched_db(monkeypatch):
 
     monkeypatch.setattr(scraper_main.db, "enqueue_detail", _fake_enqueue)
     monkeypatch.setattr(
-        scraper_main.db, "index_summary",
-        lambda _conn, _ids: (calls["index_summary"].append(set(_ids)) or {}),
+        scraper_main.db, "index_summary_native", lambda _conn, _src, _ids: {},
     )
-    monkeypatch.setattr(
-        scraper_main.db, "touch_listings",
-        lambda _conn, _ids: (calls["touch_listings"].append(list(_ids)) or 0),
-    )
-    monkeypatch.setattr(
-        scraper_main.db, "index_summary_native",
-        lambda _conn, _src, _ids: (calls["index_summary"].append(set(_ids)) or {}),
-    )
-    monkeypatch.setattr(
-        scraper_main.db, "touch_listings_by_id",
-        lambda _conn, _ids: (calls["touch_listings"].append(list(_ids)) or 0),
-    )
+    monkeypatch.setattr(scraper_main.db, "touch_listings_by_id", lambda _conn, _ids: 0)
     monkeypatch.setattr(
         scraper_main.db, "active_failure_ids", lambda _conn, _ids: set(),
     )
-    # Rule #3 (2026-09-07): the combined run nominates unseen rows for a page
-    # check instead of sweeping; record the nominations the way the old sweep
-    # calls were recorded so every guard test keeps its meaning.
+    # Rule #3 (2026-09-07): the walk nominates unseen rows for a page check
+    # instead of sweeping; record the nominations the way the old sweep calls
+    # were recorded so every guard test keeps its meaning.
     monkeypatch.setattr(
         scraper_main.db, "presence_candidates",
         lambda _conn, source, cm, ct, ids, *, seen_key="native", **kw: (
@@ -214,81 +199,9 @@ def patched_db(monkeypatch):
         scraper_main.db, "active_count",
         lambda _conn, _cm, _ct, *, source="sreality": 0,
     )
-    # The pooled walk calls _fetch_detail (worker) then _write_result
-    # (main thread); stub both so _run_full exercises planning + the pool
-    # without real network or DB writes.
-    monkeypatch.setattr(
-        scraper_main, "_fetch_detail",
-        lambda _client, sid: scraper_main.FetchResult(sid, "ok"),
-    )
-    monkeypatch.setattr(
-        scraper_main, "_write_result",
-        lambda _conn, _fr, _dry: ("unchanged", 0),
-    )
     # Intercept SrealityClient construction in _build_client.
     monkeypatch.setattr(scraper_main, "SrealityClient", _FakeClient)
     return calls
-
-
-def test_run_full_nominates_per_category_when_no_limit(patched_db, caplog):
-    with caplog.at_level("INFO", logger="scraper.portal_runner"):
-        rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    # One nomination per category in CATEGORIES, through the runner's own step.
-    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
-    assert set(patched_db["seen_key"]) == {"sreality_id"}
-    assert "VERIFY cm=byt ct=pronajem subtype=None candidates=0 queued=0 deferred=0 active=0" in (
-        caplog.messages)
-
-    # Each call is scoped to its own (cm_text, ct_text) and carries the
-    # ids that came from that category's index walk only. Expected labels
-    # derive from the parser maps so the set tracks CATEGORIES (the full
-    # cross product) instead of rotting on every coverage expansion.
-    expected_pairs = {
-        (scraper_main.parser.CATEGORY_MAIN[cm], scraper_main.parser.CATEGORY_TYPE[ct])
-        for cm, ct in scraper_main.CATEGORIES
-    }
-    actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["nominated"]}
-    assert actual_pairs == expected_pairs
-
-    # Spot-check that ids are category-scoped: byt/pronajem (1, 2) base = 12000.
-    by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["nominated"]}
-    assert by_pair[("byt", "pronajem")] == {12000, 12001, 12002, 12003, 12004}
-    assert by_pair[("byt", "prodej")] == {11000, 11001, 11002, 11003, 11004}
-
-
-def test_legacy_nomination_failure_is_isolated(patched_db, monkeypatch, caplog):
-    """A nomination that raises costs that category one round of page checks;
-    the next category still walks and nominates."""
-    calls = {"n": 0}
-
-    def _enqueue(_conn, source, cm, ct, cands, *, active_rows, subtype=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("pooler said no")
-        return 0, 0
-
-    monkeypatch.setattr(scraper_main.db, "enqueue_presence_checks", _enqueue)
-    with caplog.at_level("ERROR"):
-        rc, agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    assert calls["n"] == len(scraper_main.CATEGORIES)
-    assert len(agg["by_category"]) == len(scraper_main.CATEGORIES)
-    failed = [m for m in caplog.messages if m.startswith("VERIFY failed cm=")]
-    assert len(failed) == 1 and "nothing nominated this walk" in failed[0]
-
-
-def test_run_full_skips_nomination_when_limit_set(patched_db):
-    rc, _agg = scraper_main._run_full(limit=3, dry_run=False)
-    assert rc == 0
-    assert patched_db["nominated"] == []
-
-
-def test_run_full_skips_nomination_when_limit_zero(patched_db):
-    """limit=0 still means partial view, even if no listings were seen."""
-    rc, _agg = scraper_main._run_full(limit=0, dry_run=False)
-    assert rc == 0
-    assert patched_db["nominated"] == []
 
 
 def test_sreality_portal_nominates_on_its_integer_ids():
@@ -312,50 +225,6 @@ def test_walk_complete_tolerates_half_percent_short_walk():
     # fail-open was the DEFECT, not the spec: rule #3 delists only from a proven
     # walk, and a failed probe proves nothing.
     assert walk_is_complete(10, None) is False
-
-
-def test_dry_run_never_nominates(patched_db, monkeypatch):
-    """dry_run skips the connection altogether, so nomination can't run."""
-    monkeypatch.setattr(scraper_main.db, "connect", lambda: None)
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=True)
-    assert rc == 0
-    assert patched_db["nominated"] == []
-
-
-def test_run_full_isolates_one_crashing_category_nominates_the_rest(
-    patched_db, monkeypatch
-):
-    """A single category crashing mid-walk must neither propagate (taking the
-    whole run down) nor discard the other categories' work: the crash is
-    caught, that category's nomination is skipped, and every other category still
-    walks and nominates.
-    """
-    # Make dum/pronajem (2, 2) raise mid-iteration; its position in the walk
-    # order is irrelevant (the run rotates CATEGORIES by hour), so assert on the
-    # pairs below by membership, not index.
-    def crashing_iter_index(self, on_page=None):
-        if (self.category_main, self.category_type) == (2, 2):
-            yield {"hash_id": 99999, "price_czk": 1}
-            raise RuntimeError("simulated outage mid-iteration")
-        base = self.category_main * 10000 + self.category_type * 1000
-        for i in range(_FakeClient.total_entries):
-            yield {"hash_id": base + i, "price_czk": 10000 + i}
-        self.stop_reason = "declared_total_reached"
-
-    monkeypatch.setattr(_FakeClient, "iter_index", crashing_iter_index)
-
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0  # the crash did NOT propagate
-
-    marked = {(cm, ct) for cm, ct, _ in patched_db["nominated"]}
-    # Only the crashing category is skipped; all others (before AND after it)
-    # still get swept.
-    assert ("dum", "pronajem") not in marked
-    assert ("byt", "pronajem") in marked
-    assert ("byt", "prodej") in marked
-    assert ("dum", "prodej") in marked
-    assert ("komercni", "pronajem") in marked
-    assert ("komercni", "prodej") in marked
 
 
 # --- completeness guard -----------------------------------------------------
@@ -389,51 +258,6 @@ def test_walk_complete_thresholds():
     assert walk_is_complete(10, 100) is False
 
 
-def test_run_full_nominates_when_the_count_falls_short_of_the_total(
-    patched_db, monkeypatch
-):
-    """Rule #3 is STRUCTURAL since 2026-09-08. A walk whose page loop ended on
-    sreality's own signal nominates even though it collected 5 of a declared
-    1000 — the count is a coverage warning, never a veto. This test asserted the
-    opposite while the gate was numeric, and that gate is what left a whole
-    category (ceskereality's 20,964 houses) nominating nothing for two days
-    because one region was one row short."""
-    monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
-
-
-def test_run_full_skips_nomination_when_our_own_stop_ended_the_walk(
-    patched_db, monkeypatch
-):
-    """...and the count matching proves nothing on its own: a walk that ended on
-    a stop of OURS nominates nothing even when it collected exactly the declared
-    total. Here the loop ends on an uncorroborated blank page (`barren`) — the
-    soft-block shape the numeric gate used to catch by accident."""
-    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-
-    def barren_iter_index(self, on_page=None):
-        base = self.category_main * 10000 + self.category_type * 1000
-        for i in range(_FakeClient.total_entries):
-            yield {"hash_id": base + i, "price_czk": 10000 + i}
-        self.stop_reason = "barren"
-
-    monkeypatch.setattr(_FakeClient, "iter_index", barren_iter_index)
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    assert patched_db["nominated"] == []
-
-
-def test_run_full_nominates_when_walk_complete(patched_db, monkeypatch):
-    """The happy path: sreality's declared total was consumed, so the walk
-    reached the end and every category nominates."""
-    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
-
-
 # --- category coverage (delisting depends on a complete walk per pair) ------
 
 
@@ -461,7 +285,7 @@ def test_categories_include_pozemek_and_ostatni_sale():
     assert (5, 1) in scraper_main.CATEGORIES  # ostatni / prodej
 
 
-# --- category-order rotation (detail-budget fairness) -----------------------
+# --- category-order rotation (deadline fairness) ----------------------------
 
 
 def test_rotated_categories_is_a_pure_rotation():
@@ -486,7 +310,7 @@ def test_rotated_categories_preserves_membership_and_handles_empty():
 
 def test_rotation_gives_each_category_the_front_across_a_full_cycle():
     """Over len(CATEGORIES) consecutive offsets every category leads once, so
-    the per-run detail budget isn't permanently biased toward a fixed prefix."""
+    a walk the deadline cuts short isn't permanently biased toward a fixed prefix."""
     leaders = {
         scraper_main._rotated_categories(scraper_main.CATEGORIES, off)[0]
         for off in range(len(scraper_main.CATEGORIES))
@@ -494,23 +318,7 @@ def test_rotation_gives_each_category_the_front_across_a_full_cycle():
     assert leaders == set(scraper_main.CATEGORIES)
 
 
-# --- gone detection: _fetch_detail -> _write_result ------------------------
-
-
-def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
-    calls: dict[str, list] = {"inactive": [], "failed": [], "source": []}
-
-    def _flip(_c, source, nid):
-        calls["source"].append(source)
-        calls["inactive"].append(nid)
-        return True
-
-    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _flip)
-    monkeypatch.setattr(
-        scraper_main.db, "record_fetch_failure",
-        lambda _c, sid, msg: calls["failed"].append(sid),
-    )
-    return calls
+# --- gone detection: _fetch_detail ----------------------------------------
 
 
 class _RaisingClient:
@@ -521,165 +329,25 @@ class _RaisingClient:
         raise self._exc
 
 
-def test_listing_gone_flips_inactive_not_failure(monkeypatch):
-    calls = _patch_failure_helpers(monkeypatch)
+def test_listing_gone_is_gone_not_failure():
     client = _RaisingClient(ListingGoneError("https://x/estates/1", 200))
-    outcome, imgs = scraper_main._write_result(
-        object(), scraper_main._fetch_detail(client, 12345), False
-    )
-    assert outcome == "gone"
-    assert imgs == 0
-    assert calls["inactive"] == ["12345"]
-    assert calls["source"] == ["sreality"]
-    assert calls["failed"] == []  # a delisting is not a fetch failure
+    assert scraper_main._fetch_detail(client, 12345).kind == "gone"
 
 
-def test_404_http_error_is_gone(monkeypatch):
-    calls = _patch_failure_helpers(monkeypatch)
+def test_404_http_error_is_gone():
     resp = requests.Response()
     resp.status_code = 404
     client = _RaisingClient(requests.HTTPError("404", response=resp))
-    outcome, _imgs = scraper_main._write_result(
-        object(), scraper_main._fetch_detail(client, 777), False
-    )
-    assert outcome == "gone"
-    assert calls["inactive"] == ["777"]
-    assert calls["failed"] == []
+    assert scraper_main._fetch_detail(client, 777).kind == "gone"
 
 
-def test_handle_gone_flip_failure_is_an_error_not_gone(monkeypatch):
-    """A flip that raised is not a delisting: the listing is still active, so it
-    counts as an error and keeps a failure row to be fetched again."""
-    calls = _patch_failure_helpers(monkeypatch)
-
-    def _broken(_c, _source, _nid):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(scraper_main.db, "mark_listing_inactive", _broken)
-    outcome = scraper_main._write_result(
-        object(), scraper_main.FetchResult(12345, "gone"), False)
-    assert outcome == ("errors", 0)
-    assert calls["failed"] == [12345]
-
-
-def test_500_http_error_is_failure(monkeypatch):
-    calls = _patch_failure_helpers(monkeypatch)
+def test_500_http_error_is_failure():
     resp = requests.Response()
     resp.status_code = 500
     client = _RaisingClient(requests.HTTPError("500", response=resp))
-    outcome, _imgs = scraper_main._write_result(
-        object(), scraper_main._fetch_detail(client, 888), False
-    )
-    assert outcome == "errors"
-    assert calls["failed"] == [888]
-    assert calls["inactive"] == []
-
-
-# --- pooled detail fetch in _walk_category ---------------------------------
-
-
-class _IdxClient:
-    pages_fetched = 1
-    result_size = None
-
-    def __init__(self, ids: list[int]) -> None:
-        self._ids = ids
-
-    def iter_index(self, on_page=None):
-        for i in self._ids:
-            yield {"hash_id": i, "price_czk": 1}
-
-
-def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
-    """The thread pool processes every queued listing (a worker 'error' does
-    NOT abort the loop), outcomes tally correctly, DB writes go only through
-    _write_result, and the global refetch budget decrements once per listing."""
-    monkeypatch.setattr(scraper_main.db, "index_summary", lambda _c, _ids: {})
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, _ids: 0)
-    monkeypatch.setattr(scraper_main.db, "active_failure_ids", lambda _c, _ids: set())
-
-    writes: dict[str, list] = {"upsert": [], "gone": [], "fail": []}
-
-    def _write_listings(_c, ws):
-        writes["upsert"].extend(w.content_hash for w in ws)
-        return [_outcome(w, "new") for w in ws]
-
-    monkeypatch.setattr(scraper_main.listing_write, "write_listings", _write_listings)
-    monkeypatch.setattr(
-        scraper_main.db, "mark_listing_inactive",
-        lambda _c, source, nid: writes["gone"].append(nid),
-    )
-    monkeypatch.setattr(
-        scraper_main.db, "record_fetch_failure",
-        lambda _c, sid, msg: writes["fail"].append(sid),
-    )
-
-    def fake_fetch(_client, sid):
-        if sid == 11:
-            return scraper_main.FetchResult(sid, "gone")
-        if sid == 13:
-            return scraper_main.FetchResult(
-                sid, "error", error=RuntimeError("boom"), source="fetch"
-            )
-        return scraper_main.FetchResult(
-            sid, "ok", row={"sreality_id": sid, "price_czk": 1}, raw={}, images=[]
-        )
-
-    monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
-
-    budget: list[int | None] = [10]
-    seen, counts = scraper_main._walk_category(
-        _IdxClient([10, 11, 12, 13]),
-        object(),
-        cat_limit=None,
-        dry_run=False,
-        refetch_budget=budget,
-        detail_workers=3,
-    )
-
-    assert seen == {10, 11, 12, 13}
-    assert counts["new"] == 2      # 10, 12 upserted
-    assert counts["gone"] == 1     # 11
-    assert counts["errors"] == 1   # 13 — error did not abort the pool
-    assert writes["gone"] == ["11"]
-    assert writes["fail"] == [13]
-    assert budget[0] == 6          # 10 - 4 processed
-
-
-def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
-    """Under the per-run cap, new listings get a reserved share of the budget
-    so a large failure-retry backlog can't starve new-listing intake."""
-    # 100-103 already exist with a stored price differing from the index price
-    # (so they qualify for refetch) AND are flagged as active failures (so they
-    # take retry priority). 1-4 are genuinely new.
-    existing = {s: {"price_czk": 2, "last_seen_at": None} for s in (100, 101, 102, 103)}
-    monkeypatch.setattr(scraper_main.db, "index_summary", lambda _c, _ids: existing)
-    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, _ids: 0)
-    monkeypatch.setattr(
-        scraper_main.db, "active_failure_ids", lambda _c, ids: {s for s in ids if s >= 100}
-    )
-    monkeypatch.setattr(
-        scraper_main.listing_write, "write_listings",
-        lambda _c, ws: [_outcome(w, "updated") for w in ws],
-    )
-
-    fetched: list[int] = []
-
-    def fake_fetch(_client, sid):
-        fetched.append(sid)
-        return scraper_main.FetchResult(
-            sid, "ok", row={"sreality_id": sid, "price_czk": 9}, raw={}, images=[]
-        )
-
-    monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
-
-    _seen, _counts = scraper_main._walk_category(
-        _IdxClient([1, 2, 3, 4, 100, 101, 102, 103]),
-        object(), cat_limit=None, dry_run=False,
-        refetch_budget=[4], detail_workers=2,
-    )
-    assert len(fetched) == 4            # cap respected
-    assert {1, 2}.issubset(set(fetched))  # new listings kept their reserved slots
+    fr = scraper_main._fetch_detail(client, 888)
+    assert fr.kind == "error"
+    assert fr.source == "fetch"
 
 
 # --- region-split walk (_walk_category_split) ------------------------------
@@ -689,11 +357,7 @@ def _split_args(conn=None):
     return dict(
         limiter=None,
         conn=conn if conn is not None else object(),
-        cat_limit=None,
         dry_run=False,
-        refetch_budget=[None],
-        cat_refetch_cap=None,
-        detail_workers=2,
     )
 
 
@@ -850,43 +514,6 @@ def test_walk_category_split_national_fallback_closes_gap(patched_db, monkeypatc
     assert complete is True        # union now == national result_size (full walk)
 
 
-def test_split_cap_counts_only_fetches_not_unchanged(monkeypatch):
-    """The per-category refetch cap must count only ACTUAL fetches, never the
-    bulk-touched 'unchanged' listings. Otherwise unchanged touches in the first
-    districts exhaust the per-category cap and every genuinely-new listing in
-    later districts is deferred forever — which silently starved the detail
-    backlog of the big split categories."""
-    caps_seen: list[int | None] = []
-
-    class _FC:
-        result_size = 500
-        pages_fetched = 1
-        def probe_result_size(self):
-            return 50000  # over SPLIT_THRESHOLD → force the per-district split
-
-    monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _FC())
-
-    def fake_walk_category(
-        client, conn, cat_limit, dry_run, budget, district_cap, workers,
-        enqueue_only=False, **_kw,
-    ):
-        caps_seen.append(district_cap)
-        # Each district: 300 unchanged (touched, NOT fetched) + 10 real fetches.
-        return (set(), {"unchanged": 300, "new": 10, "found_new": 10})
-
-    monkeypatch.setattr(scraper_main, "_walk_category", fake_walk_category)
-
-    scraper_main._walk_category_split(
-        1, 2, limiter=None, conn=object(), cat_limit=None, dry_run=False,
-        refetch_budget=[100000], cat_refetch_cap=700, detail_workers=1,
-    )
-    # Only the 10 fetches/district count: after 10 districts cat_refetched=100,
-    # so the 11th district still gets 700-100=600. With the bug (counting the
-    # 310 unchanged+fetches), the cap would hit 0 after ~3 districts.
-    assert caps_seen[0] == 700
-    assert caps_seen[10] == 600
-
-
 def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     """Below the threshold there's a single unfiltered walk; district config
     is never consulted."""
@@ -903,21 +530,6 @@ def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     assert complete is True
 
 
-def test_walk_category_with_a_limit_never_reaches_the_end(patched_db, monkeypatch):
-    """--limit is a partial view by definition. It stays OUR stop even when the
-    capped walk happens to run out before the cap bites, so a --limit run can
-    never nominate."""
-    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-    args = _split_args()
-    args["cat_limit"] = 3
-
-    seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
-        1, 2, **args
-    )
-    assert len(seen) == 3
-    assert complete is False
-
-
 def test_slice_stop_reason_fails_closed_when_nothing_stamped_one():
     """An abandoned generator leaves no stop reason. "I cannot classify this
     stop" is not evidence that sreality ended the walk, so it reads as ours."""
@@ -928,34 +540,6 @@ def test_slice_stop_reason_fails_closed_when_nothing_stamped_one():
     assert scraper_main.stop_is_portal_end(
         scraper_main._slice_stop_reason(_NoReason())
     ) is False
-
-
-def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
-    """A category whose walk raises must not crash the whole run — it's logged,
-    its sweep skipped, and the remaining categories still walk + finalize."""
-    def _boom(*_a, **_kw):
-        raise RuntimeError("simulated sreality outage")
-
-    monkeypatch.setattr(scraper_main, "_walk_category_split", _boom)
-    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0                          # run completed, did not propagate
-    assert patched_db["nominated"] == []  # no sweep on a failed walk
-
-
-def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
-    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-    monkeypatch.setattr(
-        scraper_main.db, "active_count", lambda _c, _cm, _ct, *, source="sreality": 42
-    )
-
-    rc, agg = scraper_main._run_full(limit=None, dry_run=False)
-    assert rc == 0
-    cats = agg["by_category"]
-    assert cats
-    for c in cats:
-        assert c["sreality_result_size"] == 5
-        assert c["collected"] == 5
-        assert c["active_db"] == 42
 
 
 # --- images-only runs are not scrape runs ----------------------------------
@@ -1030,7 +614,7 @@ def test_images_only_passes_shard_and_sources_through(monkeypatch):
     assert captured["sources"] == ("idnes", "bazos")
 
 
-def test_main_finalizes_run_even_when_scrape_crashes(monkeypatch):
+def test_main_finalizes_run_even_when_the_walk_crashes(monkeypatch):
     """If the scrape work raises, main() must still finalize the run row in its
     `finally` — otherwise the row is orphaned ('stuck') and freezes Health."""
     calls = {"start": 0, "finalize": 0}
@@ -1047,9 +631,9 @@ def test_main_finalizes_run_even_when_scrape_crashes(monkeypatch):
     def _boom(**_k):
         raise RuntimeError("simulated scrape crash")
 
-    monkeypatch.setattr(scraper_main, "_run_full", _boom)
+    monkeypatch.setattr(scraper_main, "_run_index_walk", _boom)
     with pytest.raises(RuntimeError):
-        scraper_main.main(["--no-image-downloads", "--no-condition-scoring"])
+        scraper_main.main(["--index-only"])
     assert calls["start"] == 1
     assert calls["finalize"] == 1   # finalized despite the crash — no stuck row
 
@@ -1116,8 +700,8 @@ def test_index_walk_dry_run_writes_nothing(patched_db):
 
 def test_index_walk_skips_inactive_when_incomplete(patched_db, monkeypatch):
     """A walk stopped by one of OUR stops (here the 422 deep-pagination wall)
-    still enqueues but must NOT nominate — same structural guard as the legacy
-    full run. Note what no longer suppresses it: collected << result_size."""
+    still enqueues but must NOT nominate. Note what no longer suppresses it:
+    collected << result_size."""
     monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
 
     def capped_iter_index(self, on_page=None):
@@ -1154,15 +738,12 @@ def test_walk_category_enqueue_assigns_priorities(monkeypatch):
         ),
     )
     client = _FakeClient(category_main=1, category_type=2)
-    seen, counts = scraper_main._walk_category(
-        client, object(), None, False, [None], None, 1, enqueue_only=True,
-    )
+    seen, counts = scraper_main._walk_category(client, object(), False)
     by_prio = {int(nid): prio for nid, _ref, _p, prio in captured["e"]}
     assert by_prio[12001] == scraper_main.db.QUEUE_PRIORITY_FAILURE  # changed AND failed -> failure
     assert by_prio[12002] == scraper_main.db.QUEUE_PRIORITY_NEW
     assert 12000 not in by_prio   # unchanged -> not enqueued
     assert counts["enqueued"] == 4
-    assert counts["new"] == 0 and counts["updated"] == 0   # no detail outcomes
 
 
 def _make_fr(sid: int, kind: str):
@@ -1185,6 +766,10 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
 
     monkeypatch.setattr(scraper_main.db, "connect_session", lambda: _Conn())
     monkeypatch.setattr(scraper_main.db, "reclaim_stale_claims", lambda _c, _src, **k: 0)
+    # rule #3 hysteresis: the ledger already confirms every gone verdict in these tests
+    monkeypatch.setattr(
+        scraper_main.db, "gone_evidence",
+        lambda _c, _src, _nid: (True, datetime.now(timezone.utc) - timedelta(days=1)))
     it = iter(list(claim_batches) + [[]])
 
     def _claim(_c, _source, n):
@@ -1225,7 +810,7 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
 def test_detail_drain_batches_and_completes(monkeypatch):
     cap = _drain_patches(
         monkeypatch,
-        [[("1", None, None, None, None), ("2", None, None, None, None), ("3", None, None, None, None)]],
+        [[("1", None, None, None), ("2", None, None, None), ("3", None, None, None)]],
         lambda s: "ok",
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
@@ -1239,7 +824,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     kinds = {10: "ok", 11: "gone", 12: "error"}
     cap = _drain_patches(
         monkeypatch,
-        [[("10", None, None, None, None), ("11", None, None, None, None), ("12", None, None, None, None)]],
+        [[("10", None, None, None), ("11", None, None, None), ("12", None, None, None)]],
         lambda s: kinds[s],
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
@@ -1254,7 +839,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
 
 
 def test_detail_drain_respects_max_claims_cap(monkeypatch):
-    cap = _drain_patches(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]], lambda s: "ok")
+    cap = _drain_patches(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]], lambda s: "ok")
     scraper_main._run_detail_drain(max_claims=2, dry_run=False, detail_workers=1)
     # First claim is sized to the cap and, once met, the loop stops (one claim).
     assert cap["claim_n"] == [2]
@@ -1320,9 +905,5 @@ def test_drain_only_dispatches_detail_drain_with_detail_run_type(monkeypatch):
 
 def test_index_and_drain_only_mutually_exclusive(monkeypatch):
     _dispatch_patches(monkeypatch)
-    assert scraper_main.main(["--index-only", "--drain-only"]) == 2
-
-
-def test_index_only_rejects_limit(monkeypatch):
-    _dispatch_patches(monkeypatch)
-    assert scraper_main.main(["--index-only", "--limit", "5"]) == 2
+    with pytest.raises(SystemExit):
+        scraper_main.main(["--index-only", "--drain-only"])

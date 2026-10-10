@@ -84,7 +84,7 @@ class _LateFacts:
         self.delivered: set[int] = set()
         self.reads = 0
 
-    def facts(self, ids):
+    def facts(self, ids, *, clip=True):
         out = {}
         for listing_id in ids:
             listing = self.ds.listings.get(listing_id)
@@ -92,9 +92,18 @@ class _LateFacts:
                 continue
             self.reads += 1
             images = self.ds.images(listing_id)
-            out[listing_id] = (listing, images if listing_id in self.delivered
-                               else _blind(images))
+            if listing_id not in self.delivered:
+                images = _blind(images)
+            elif not clip:
+                images = [replace(image, clip=None) for image in images]
+            out[listing_id] = (listing, images)
         return out
+
+    def vectors(self, image_ids):
+        wanted = set(image_ids)
+        return {image.image_id: image.clip for listing_id in self.delivered
+                for image in self.ds.images(listing_id)
+                if image.image_id in wanted and image.clip is not None}
 
 
 def _calibrated(ds: Any, settings: Settings) -> Calibration:

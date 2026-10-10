@@ -448,7 +448,7 @@ _INSERT_SQL: dict[str, str] = {
         "INSERT INTO property_notes (property_id, body, origin_listing_id, origin_listing_ref_id, "
         "  created_at, updated_at, account_id) "
         "SELECT %(to)s, body, origin_listing_id, origin_listing_ref_id, created_at, updated_at, "
-        "  account_id FROM property_notes WHERE id = %(key)s"),
+        "  account_id FROM property_notes WHERE id = %(key)s RETURNING id"),
     "property_pipeline": (
         "INSERT INTO property_pipeline (property_id, stage_id, board_position, account_id) "
         "SELECT %(to)s::bigint, %(stage)s::bigint, coalesce(max(board_position), 0) + 1, "
@@ -466,13 +466,24 @@ _INSERT_SQL: dict[str, str] = {
         "ON CONFLICT (property_id, account_id) WHERE lifted_at IS NULL DO NOTHING"),
 }
 
+# What a copy brings with it, keyed on the copy's new id: a note's attachments, pointing at the
+# same stored bytes (never deleted); each takes its account from the new note (migration 592).
+_AFTER_COPY_SQL: dict[str, str] = {
+    "property_notes": (
+        "INSERT INTO property_note_attachments (note_id, storage_key, filename, mime_type, "
+        "  byte_size, sha256_hex, created_at) "
+        "SELECT %(copy)s, storage_key, filename, mime_type, byte_size, sha256_hex, created_at "
+        "FROM property_note_attachments WHERE note_id = %(key)s ORDER BY id"),
+}
+
 _STAMP_SQL = (
     "UPDATE property_merge_carries SET undone_at = now() "
     "WHERE id = ANY(%(ids)s::bigint[]) AND undone_at IS NULL"
 )
 
 # Every routing statement (the PREPARE corpus reads the tuple); none deletes anything.
-ROUTE_SQL = (_ROUTES_SQL, *_MOVE_SQL.values(), *_INSERT_SQL.values(), _STAMP_SQL)
+ROUTE_SQL = (_ROUTES_SQL, *_MOVE_SQL.values(), *_INSERT_SQL.values(), *_AFTER_COPY_SQL.values(),
+             _STAMP_SQL)
 
 # Cards first, so a dismissal is settled against where each account's live card ends; within a
 # table the user's copies before the folds re-created by default.
@@ -603,12 +614,12 @@ def route_curation(
     cur: psycopg.Cursor, routes: Sequence[Route], *, left: int, landed: Mapping[int, int],
 ) -> dict[str, int]:
     """Make `curation_plan`'s answer true once the ads moved (`landed`: each ad that moved -> where
-    it is now): the moves, the copies (a note copy reads its row wherever it went, and a copy to
-    the property left lands once its source has gone), the re-created folds, the carry stamp,
-    then the live-deal lift on `left` and on every property an ad landed on (rule 22, the
-    dismissal carrier's own statement). A route whose anchor did not move routes nothing; one
-    is counted where its write changed a row: a move onto an item its account already holds there
-    (an origin active again) leaves it, and its carry rows."""
+    it is now): the moves, the copies (a note copy reads its row wherever it went and takes its
+    attachments, and a copy to the property left lands once its source has gone), the re-created
+    folds, the carry stamp, then the live-deal lift on `left` and on every property an ad landed
+    on (rule 22, the dismissal carrier's own statement). A route whose anchor did not move routes
+    nothing; one is counted where its write changed a row: a move onto an item its account already
+    holds there (an origin active again) leaves it, and its carry rows."""
     wrote: list[Route] = []
     for action in ("move", "copy", "recreate"):
         for r in routes:
@@ -620,6 +631,8 @@ def route_curation(
                 "key": r.key, "account": r.account_id, "stage": r.stage_id})
             if cur.rowcount:
                 wrote.append(r)
+                if action == "copy" and (follow := _AFTER_COPY_SQL.get(r.table)):
+                    cur.execute(follow, {"copy": cur.fetchone()[0], "key": r.key})
 
     def spent(r: Route) -> bool:
         # a move consumes its carry rows where it moved (or was chosen to stay); a fold is

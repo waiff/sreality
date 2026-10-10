@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import curation
+from api import note_attachments
 from api import dismissals as dismissals_module
 from api import pipeline as pipeline_module
 from api import price_stats as price_stats_module
@@ -71,6 +72,7 @@ from api.routes.broker_review import router as broker_review_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
+from api.routes.property_download import router as property_download_router
 from api.new_dedup_bakeoff import router as new_dedup_bakeoff_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
 from api.new_dedup_tags import router as new_dedup_tags_router
@@ -322,6 +324,10 @@ app.include_router(filter_presets_router)
 # /health) — an <img> tag can't send a bearer header and these are public
 # photos; the key regex keeps it scoped to listing images only.
 app.include_router(images_router)
+# /properties/{id}/download.zip — the property page's download: a PDF of the ad plus the
+# canonical ad's photos, zipped server-side (R2 sends no CORS header, so the SPA can't).
+# JWT-gated: it proxies bytes through us, and broker contacts follow the PII policy.
+app.include_router(property_download_router)
 # /new-dedup/settings/* (simulation-engine settings registry: list + per-key
 # update/reset) — operator config, admin-gated (require_admin). See
 # toolkit/dedup_sim_settings.py and docs/design/new-dedup/PROGRAM.md (Wave 1).
@@ -1582,6 +1588,49 @@ def delete_property_note(
     conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     return curation.delete_note(conn, property_id, note_id)
+
+
+@app.post("/properties/{property_id}/notes/{note_id}/attachments")
+def post_note_attachment(
+    property_id: int,
+    note_id: int,
+    file: UploadFile = File(...),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> dict[str, Any]:
+    return note_attachments.add_attachment(conn, property_id, note_id, file)
+
+
+@app.get("/properties/{property_id}/notes/{note_id}/attachments/{attachment_id}")
+def get_note_attachment(
+    property_id: int,
+    note_id: int,
+    attachment_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> Response:
+    """The file's bytes, typed as stored (an allowlisted, inactive type) and never sniffed. An
+    attachment id never changes its bytes, so the caller's browser may keep them."""
+    data, mime, filename = note_attachments.read_attachment(
+        conn, property_id, note_id, attachment_id,
+    )
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "Cache-Control": "private, max-age=86400, immutable",
+            "Content-Disposition": note_attachments.content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.delete("/properties/{property_id}/notes/{note_id}/attachments/{attachment_id}")
+def delete_note_attachment(
+    property_id: int,
+    note_id: int,
+    attachment_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> dict[str, Any]:
+    return note_attachments.delete_attachment(conn, property_id, note_id, attachment_id)
 
 
 @app.get("/tags")

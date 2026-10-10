@@ -58,7 +58,7 @@ def _anchor_seconds() -> int:
     return min(int(raw), _PRESIGN_TTL // 2)
 
 
-def _r2() -> image_storage.R2Client | None:
+def r2_client() -> image_storage.R2Client | None:
     global _client
     if _client is None and image_storage.is_configured():
         _client = image_storage.R2Client.from_env()
@@ -69,7 +69,7 @@ def _r2() -> image_storage.R2Client | None:
 def get_image(key: str) -> RedirectResponse:
     if not _KEY_RE.match(key):
         raise HTTPException(status_code=404, detail="Not found")
-    client = _r2()
+    client = r2_client()
     if client is None:
         raise HTTPException(status_code=503, detail="Image storage not configured")
     url = client.presigned_get(
@@ -80,3 +80,4 @@ def get_image(key: str) -> RedirectResponse:
         status_code=302,
         headers={"Cache-Control": f"public, max-age={_REDIRECT_MAX_AGE}"},
     )
+

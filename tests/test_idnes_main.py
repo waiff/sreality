@@ -5,6 +5,7 @@ recording an 'index' + a 'detail' scrape_runs row tagged source='idnes'.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -469,6 +470,9 @@ def test_fetch_detail_error():
     assert item.kind == "error" and item.error
 
 
+_DISCOVERED_AT = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
 def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
     from scraper import listing_write
     from scraper.listing_write import WriteOutcome
@@ -479,7 +483,7 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
                              raw={"image_urls": ["u1", "u2"]})
     items = [DrainItem("a", "ok", payload={
         "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"},
-        discovery_seq=5)]
+        discovered_at=_DISCOVERED_AT)]
     monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
     parsed: list[Any] = []
     monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed",
@@ -495,7 +499,7 @@ def test_write_details_writes_the_flush_once_and_counts(monkeypatch):
     counts = _portal().write_details(object(), items)
     assert counts == {"new": 1, "updated": 0, "unchanged": 0, "images_discovered": 2}
     [[w]] = calls
-    assert (w.source, w.source_id_native, w.discovery_seq) == ("idnes", "a", 5)
+    assert (w.source, w.source_id_native, w.discovered_at) == ("idnes", "a", _DISCOVERED_AT)
     assert parsed == [9]
 
 

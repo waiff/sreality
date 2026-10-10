@@ -47,6 +47,20 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   its 44-ad iDNES property), none on trial / c18 / c17; M1–M3 and every ruling equal. Still dark:
   1,212 ads in four Vysočany keys over 200. Release after C2 with E929's re-seed (required: keys move; `SEED_VERSION` is bumped, so nothing
   merges between the deploy and the re-seed).
+- **Prague, in stages (2026-10-07, E939):** the operator wants all of Prague (157,284 located ads,
+  ~48.4k online) beside Jablonec and Turnov. Storage is affordable (~2.7 GiB, +0.4 GiB a month); the
+  per-pass read is not: on main a 157k build takes 27–58 days and never catches up (M913, M917).
+  S0 rails (#1692, E940 the paged walk, E941) → S1 Nusle + Libeň scanned with #1709's re-seed
+  (~15.2k ads, shadow) → S2 they merge under E942's brakes → S3 facts only for scored pairs, the
+  re-cut out of the pass, street keys for the 36k no-quarter ads (E943–E945) → S4 one Prague block
+  (`obec:554782`, 5,000 MB, E946), a 3–6-day build with merging paused everywhere → S5 the apply
+  scope widens a batch of quarters at a time, `town:554782` last. Brake: interval 0, the area out
+  of the apply scope, then `unapply blocks=`. Open: D905–D910 (the operator's).
+- **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
+  walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
+  before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
+  once (every lane write fenced, 30 s drain). Owed: the cgroup memory limit, the revive cap,
+  `verify_pipeline`'s heartbeat check.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
