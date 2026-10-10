@@ -248,6 +248,36 @@ def _names_holder(sql: str) -> bool:
     return re.search(r"\bholder\s*=\s*%\(holder\)s", where) is not None
 
 
+# E948's limbs as `RT_LEASE_RELEASE_PREDECESSOR_SQL` spells them, each READ from the statement
+# as `_names_holder` reads the release's: a statement that dropped or bent one releases here
+# what it would release in Postgres, so the tests that pin "never that holder" see it.
+_PREDECESSOR_SHAPE = "holder ~ '^[^:]+:[0-9]+:[0-9]{1,18}$'"
+_PREDECESSOR_LIVE = "expires_at > now()"
+_PREDECESSOR_HOST = "split_part(holder, ':', 1) = %(host)s::text"
+_PREDECESSOR_OLDER = "split_part(holder, ':', 3)::bigint < %(booted)s::bigint"
+
+
+def _a_predecessor(sql: str, held: Mapping[str, Any], p: Mapping[str, Any],
+                   now: datetime) -> bool:
+    """Whether the predecessor release ends this row, by the limbs its text carries."""
+    text = " ".join(sql.split())
+    holder = str(held.get("holder") or "")
+    fields = holder.split(":")
+    if _PREDECESSOR_SHAPE in text and not re.fullmatch(r"[^:]+:[0-9]+:[0-9]{1,18}", holder):
+        return False
+    if _PREDECESSOR_LIVE in text and not held["expires_at"] > now:
+        return False
+    if _PREDECESSOR_HOST in text and fields[0] != p["host"]:
+        return False
+    if _PREDECESSOR_OLDER in text:
+        second = fields[2] if len(fields) > 2 else ""
+        if not second.isdigit():
+            # What Postgres raises once no shape guard keeps the cast off this holder.
+            raise ValueError(f'invalid input syntax for type bigint: "{second}"')
+        return int(second) < int(p["booted"])
+    return True
+
+
 def _aliases(sql: str) -> list[str]:
     return re.findall(r"\bAS\s+(\w+)", sql, re.I)
 
@@ -324,6 +354,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         held = db.lease.get(p["name"])
         return ([(held["holder"], held.get("taken_at"), held["expires_at"],
                   held["expires_at"] > db.now)] if held else [])
+    if sql == S.RT_LEASE_RELEASE_PREDECESSOR_SQL:
+        held = db.lease.get(p["name"])
+        if not held or not _a_predecessor(sql, held, p, db.now):
+            return []
+        held["expires_at"] = db.now
+        return [(held["holder"],)]
     if sql == S.RT_LEASE_HOLD_SQL:
         # The fake has one clock, so `now()` against `clock_timestamp()` is the live test's to
         # pin (tests/test_rt_lease_fence_live.py); the holder predicate is read from the text.

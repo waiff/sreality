@@ -17,8 +17,12 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
+import socket
+import sys
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +131,9 @@ def _summary(**over: Any) -> dict[str, Any]:
         "claim_bound": {"bound_by": "count", "limit": 100},
         "reconcile": {"counts": {"applied": 2}},
         "peak_rss_mb": 412.5,
+        "rss_mb": 388.0,
+        "claim_cap": {"cap": 500, "clean": 0, "reason": "rt_seed"},
+        "predecessor_released": None,
     }
     out.update(over)
     return out
@@ -231,20 +238,25 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
     """No switch, no wrapper: the pass runs under the scope and scorer its generation was
     seeded with, and under the engine's own deadline (E913, E914). Handed in beside the
     connection: a factory for a FRESH, bounded connect (E930: the halving a RAISED pass writes
-    may not have a live connection of its own), and E941's two — the holder the pass takes its
+    may not have a live connection of its own), E941's two — the holder the pass takes its
     lease under, named by the worker so its shutdown can release that row, and the shutdown
-    itself as `stopping`."""
+    itself as `stopping` — and E948's boot second, which names a dead predecessor's lease."""
     conn = _Conn()
     connects: list[dict[str, Any]] = []
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
+    monkeypatch.setattr(rw, "_MEMORY_LIMIT_MB", 8192.0)
     _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _summary())
 
     last = rw._autodedup_sync()
 
-    assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping"} and seen["conn"] is conn
+    assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping", "booted_epoch"}
+    assert seen["conn"] is conn
     assert isinstance(seen["kwargs"]["holder"], str) and seen["kwargs"]["holder"]
     assert seen["kwargs"]["stopping"] == rw._AUTODEDUP_STOPPING.is_set
+    assert seen["kwargs"]["booted_epoch"] == rw._BOOTED_EPOCH
+    assert int(seen["kwargs"]["holder"].rsplit(":", 1)[1]) >= rw._BOOTED_EPOCH, (
+        "this process's own holder is never older than its boot")
     assert rw._AUTODEDUP_HOLDER is None and rw._AUTODEDUP_CONN is None, "cleared after"
     seen["kwargs"]["fresh_conn"]()
     assert connects == [{}, {"attempts": 1,
@@ -263,6 +275,11 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "reconcile_settled": 0, "reconcile_skipped_by_reason": {},
         # E941: the process's peak memory at the pass's end, carried from the engine's summary
         "peak_rss_mb": 412.5,
+        # E948: what it holds now, the container's limit read at boot, the claim cap, and the
+        # lease of a dead predecessor this pass released (none)
+        "rss_mb": 388.0, "memory_limit_mb": 8192.0,
+        "claim_cap": {"cap": 500, "clean": 0, "reason": "rt_seed"},
+        "predecessor_released": None,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -441,6 +458,10 @@ def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> No
         assert last["ran"] is True and last["errors"] == 0 and last["skipped"] == 0, last
         assert last["reconcile"] == expected and last["merged"] == 0
         assert last["peak_rss_mb"] > 0, "the engine measured the process's memory (E941)"
+        if sys.platform.startswith("linux"):
+            assert last["rss_mb"] > 0, "and what it holds now (E948)"
+        assert last["memory_limit_mb"] == rw._MEMORY_LIMIT_MB
+        assert last["predecessor_released"] is None and last["claim_cap"]["cap"] == 500
         assert world.cursors, "the pass moved the engine's own watermark"
         assert world.lease[LANE_NAME]["expires_at"] <= world.now, "the lease was released"
         targets = _write_targets(world.statements[before:])
@@ -574,6 +595,76 @@ def test_the_pass_reads_peak_memory_in_mib_from_getrusage(monkeypatch: pytest.Mo
     assert incremental_lane.peak_rss_mb() == 1.5
     monkeypatch.setattr(incremental_lane, "resource", None)
     assert incremental_lane.peak_rss_mb() is None
+
+
+# ------------------------------------------- E948: a dead predecessor, and the memory beside it
+
+
+def test_a_restart_in_place_frees_the_lane_its_dead_predecessor_stranded(
+        world, tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """2026-10-10: the process died holding the lease and Railway restarted it in place, so
+    every pass of the new process skipped "leased" until the TTL. Now the first pass releases
+    that lease, says so once, claims under half the cap, and the lane is its own again."""
+    seed_lane(world, tmp_path)
+    dead = f"{socket.gethostname()}:1:{rw._BOOTED_EPOCH - 106}"
+    world.lease[LANE_NAME] = {"holder": dead, "expires_at": world.now + timedelta(minutes=38)}
+    _worker_on(monkeypatch, world)
+
+    with caplog.at_level(logging.WARNING, logger=rw.LOG.name):
+        last = rw._autodedup_sync()
+        again = rw._autodedup_sync()
+
+    assert (last["ran"], last["skipped"], last["errors"]) == (True, 0, 0), last
+    assert last["predecessor_released"] == dead
+    assert last["claim_cap"]["cap"] == 250 and dead in last["claim_cap"]["reason"]
+    assert again["predecessor_released"] is None and again["claim_cap"]["cap"] == 250
+    assert sum(f"a predecessor of this container died holding autodedup.rt_lease: {dead}; "
+               "released" in record.getMessage() for record in caplog.records) == 1
+
+
+def test_a_skip_after_the_release_still_names_the_predecessor(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, {"skipped": "leased", "reason": "a seed took it",
+                               "predecessor_released": "host:1:1", "spent_usd": 0.0})
+
+    with caplog.at_level(logging.WARNING, logger=rw.LOG.name):
+        last = rw._autodedup_sync()
+
+    assert (last["skipped"], last["reason"], last["predecessor_released"]) == (
+        1, "leased", "host:1:1")
+    assert any("host:1:1; released" in record.getMessage() for record in caplog.records)
+
+
+def test_the_containers_memory_limit_is_read_from_its_cgroup(tmp_path: Path) -> None:
+    """E948 (S0's owed reading): cgroup v2 `memory.max`, else v1's file; unlimited or unread is
+    None, never a number nobody set, and the read never raises."""
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "memory.max").write_text("3221225472\n")
+    assert rw._memory_limit_mb(str(v2)) == 3072.0
+    (v2 / "memory.max").write_text("max\n")
+    assert rw._memory_limit_mb(str(v2)) is None
+    v1 = tmp_path / "v1"
+    (v1 / "memory").mkdir(parents=True)
+    (v1 / "memory" / "memory.limit_in_bytes").write_text("1073741824\n")
+    assert rw._memory_limit_mb(str(v1)) == 1024.0
+    (v1 / "memory" / "memory.limit_in_bytes").write_text("9223372036854771712\n")
+    assert rw._memory_limit_mb(str(v1)) is None, "v1's unlimited"
+    assert rw._memory_limit_mb(str(tmp_path / "absent")) is None
+    (tmp_path / "unreadable" / "memory.max").mkdir(parents=True)
+    assert rw._memory_limit_mb(str(tmp_path / "unreadable")) is None
+
+
+def test_the_pass_reads_its_resident_memory_from_statm(tmp_path: Path) -> None:
+    statm = tmp_path / "statm"
+    statm.write_text("250000 131072 2000 300 0 140000 0\n")
+    page = os.sysconf("SC_PAGE_SIZE")
+    assert incremental_lane.rss_mb(str(statm)) == round(131072 * page / 1_048_576.0, 1)
+    statm.write_text("garbage\n")
+    assert incremental_lane.rss_mb(str(statm)) is None
+    assert incremental_lane.rss_mb(str(tmp_path / "absent")) is None
 
 
 def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(

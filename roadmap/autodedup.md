@@ -61,6 +61,10 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
   once (every lane write fenced, 30 s drain). Owed: the cgroup memory limit, the revive cap,
   `verify_pipeline`'s heartbeat check.
+- **E948 (2026-10-10, a worker that died holding the lease):** its restart in place releases that
+  lease before its take and halves the claim cap in the same commit (floor 25, doubled after 20
+  clean full-cap passes, reset by a seed); the heartbeat adds `claim_cap`, `predecessor_released`,
+  `rss_mb` and the cgroup `memory_limit_mb` (E941's owed reading).
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
