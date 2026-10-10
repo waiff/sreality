@@ -59,8 +59,10 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
-  once (every lane write fenced, 30 s drain). Owed: the cgroup memory limit, the revive cap,
-  `verify_pipeline`'s heartbeat check.
+  once (every lane write fenced, 30 s drain). Follow-up 2026-10-10: a pass whose connections a
+  database restart took retries the lease's release on new ones, every 20 s for up to 180 s,
+  before falling back to its TTL.
+  Owed: the cgroup memory limit, the revive cap, `verify_pipeline`'s heartbeat check.
 - **E948 (2026-10-10, a worker that died holding the lease):** its restart in place (same hostname
   and pid) releases that lease before its take and halves the claim cap in the same commit (floor
   25; only a seed or, E948b, a bigger container raises it); at the floor the lease waits out its

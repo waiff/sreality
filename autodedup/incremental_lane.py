@@ -2322,8 +2322,9 @@ def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: st
     lease's release (E931). Through `fresh_conn` when the caller gave one — the pass's own
     connection may be the one the server terminated, and a lease that connection cannot
     release sits until its TTL, skipping every pass of the next ~35 min as "leased" — else on
-    `conn`. The release tries the pass's own connection first and the fresh one only when
-    that fails, so a live pass releases the way every other end of a run does. Best effort:
+    `conn`. The release tries the pass's own connection first, the fresh one only when that
+    fails and new ones from `fresh_conn` only when a database restart took both, so a live pass
+    releases the way every other end of a run does. Best effort:
     a failure is noted on `original` rather than replacing it — the raise is the signal.
     `halve=False` once the worker is shutting down (E941): the release still runs, and the
     rate row is left as it stands, the half written ahead of the pass."""
@@ -2339,7 +2340,7 @@ def _after_raise(fresh_conn: Callable[[], Any] | None, conn: Any, generation: st
             original.add_note(f"halving {pass_rate_key(generation)} after the raise also "
                               f"failed ({type(exc).__name__}: {exc}); the next pass claims "
                               "the half written ahead of it")
-        rt_lease.release_after(conn, holder, original, fallback=fresh)
+        rt_lease.release_after(conn, holder, original, fallback=fresh, connect=fresh_conn)
     finally:
         close = getattr(fresh, "close", None)
         if callable(close):
@@ -2368,7 +2369,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     previous rate back too. A pass past its deadline rolls back and
     keeps the halving (E913); so does a pass that RAISED, which writes it again through
     `fresh_conn` — a factory for a NEW connection, since its own may be dead — or on its own
-    connection when the caller gives none (E930).
+    connection when the caller gives none (E930). Every release of the pass's lease falls back
+    to new connections from it too, when a database restart took the pass's own.
 
     `holder` names the lease the pass takes (`pass_holder()` when the caller names none) and
     `stopping` says the caller is shutting down (E941): the worker's SIGTERM path releases
@@ -2546,8 +2548,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             # a live connection — and release the lease there too (E931): on a dead connection
             # the `finally` below could not, and the lease then sat until its TTL (2,400 s), so
             # the next passes were skipped "leased" for up to ~35 min. Settled here on both
-            # counts — attempted on the pass's connection, then the fresh one, and noted on
-            # the raise when neither could — so the `finally` releases nothing twice.
+            # counts — attempted on the pass's connection, then the fresh one, then new ones,
+            # and noted on the raise when none could — so the `finally` releases nothing twice.
             _after_raise(fresh_conn, conn, generation, rate_per_s, holder, exc,
                          halve=not shutting_down())
             leased = False
@@ -2699,7 +2701,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     finally:
         try:
             if leased:
-                rt_lease.release_after(conn, holder, original)
+                rt_lease.release_after(conn, holder, original, connect=fresh_conn)
         finally:
             # E949: the raise's traceback holds this frame, so `original` made a cycle; and
             # the memos go after the lease, which the next holder may be waiting on.
@@ -2875,7 +2877,7 @@ def run_rt_seed(
     finally:
         try:
             if leased:
-                rt_lease.release_after(conn, holder, original)
+                rt_lease.release_after(conn, holder, original, connect=conn_factory)
         finally:
             close = getattr(conn, "close", None)
             if callable(close):
