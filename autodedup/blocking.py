@@ -18,6 +18,8 @@ E300 (W30) adds a seventh, the `town` probe, behind `attr_probe_town_grain`: the
 probes key on the resolver's finest grain (a cast obce where one was found), so an advert
 located only to the town never met one located to a cast. The home keys are left as they are;
 the town probe is appended after them, keyed town + disposition + area band (path C's C1).
+E936 adds the eighth under the same dial, `quarter`: the same key at a split city's quarter, for
+the ads that do not probe the town key, so one whose two home keys explode is not dark.
 """
 
 from __future__ import annotations
@@ -39,14 +41,19 @@ _DECILES: int = 10
 # E300 (W30): the operator's location grain (docs/design/new-dedup/PROGRAM.md, 2026-09-10 (d)):
 # quarters split the town ONLY in Praha, Brno and Ostrava; elsewhere the grain is the town.
 SPLIT_CITY_OBEC_KODS: frozenset[int] = frozenset({554782, 582786, 554821})
-# The town probe is the WEAKEST evidence class, so it fills after every other probe and the
-# fan-out cap (E17) can only ever discard it, never a candidate today's probes reach.
+# The town and quarter probes are the WEAKEST evidence classes, so they fill after every other
+# probe and the fan-out cap (E17) can only ever discard them, never a candidate today's probes
+# reach.
 TOWN_PROBE: str = "town"
+QUARTER_PROBE: str = "quarter"
 
 
 def probe_priority(settings: Settings) -> tuple[str, ...]:
-    """The fill order this settings row blocks with: E300 appends the town probe."""
-    return PROBE_PRIORITY + (TOWN_PROBE,) if settings.attr_probe_town_grain else PROBE_PRIORITY
+    """The fill order this settings row blocks with: E300 appends the town probe, E936 the
+    quarter probe after it."""
+    if not settings.attr_probe_town_grain:
+        return PROBE_PRIORITY
+    return PROBE_PRIORITY + (TOWN_PROBE, QUARTER_PROBE)
 
 
 def probes_town_key(fp: Fingerprint) -> bool:
@@ -150,10 +157,13 @@ class BlockIndex:
                                     fp.area_band)))
         # E300: path C's C1 — town + disposition + area band. An advert with no area states
         # nothing the key could bound; the disposition may be unknown and then keys as such.
-        if (self.settings.attr_probe_town_grain and fp.obec_kod is not None
-                and fp.area_band is not None):
-            out.append((TOWN_PROBE, (fp.obec_kod, fp.cat_group, fp.category_type,
-                                     fp.disposition, fp.area_band)))
+        # E936: an ad that does not probe the town key keys the same at its quarter.
+        if self.settings.attr_probe_town_grain and fp.area_band is not None:
+            composite = (fp.cat_group, fp.category_type, fp.disposition, fp.area_band)
+            if fp.obec_kod is not None:
+                out.append((TOWN_PROBE, (fp.obec_kod, *composite)))
+            if not probes_town_key(fp):
+                out.append((QUARTER_PROBE, (fp.block_key, *composite)))
         return out
 
     def probe_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
@@ -164,12 +174,12 @@ class BlockIndex:
                 block_key, cat_group, category_type, band = key
                 for offset in (-1, 0, 1):
                     out.append((probe, (block_key, cat_group, category_type, band + offset)))
-            elif probe == TOWN_PROBE:
-                if not probes_town_key(fp):
+            elif probe in (TOWN_PROBE, QUARTER_PROBE):
+                if probe == TOWN_PROBE and not probes_town_key(fp):
                     continue
-                obec_kod, cat_group, category_type, disposition, band = key
+                grain, cat_group, category_type, disposition, band = key
                 for offset in (-1, 0, 1):
-                    out.append((probe, (obec_kod, cat_group, category_type, disposition,
+                    out.append((probe, (grain, cat_group, category_type, disposition,
                                         band + offset)))
             elif probe == "broker" and key[3] is not None:
                 broker_key, cat_group, category_type, decile = key

@@ -1042,7 +1042,9 @@ class Settings:
     # E300: the operator's location grain (path C, 2026-09-10): quarters split the town only in
     # Praha, Brno and Ostrava, and an advert whose quarter is unknown reaches the whole town. A
     # `town` probe (town + disposition + area band) is ADDED after every other probe; the home
-    # attribute probes keep today's key.
+    # attribute probes keep today's key. E936: an ad with a known quarter of those three
+    # cities, which does not probe the town key, gets the same key at its quarter (`quarter`,
+    # added last), so it still has an attribute path when both its home keys explode.
     attr_probe_town_grain: bool = False
     # E301: floor and total_floors both stated on both sides and shifted by the SAME offset of
     # one are one storey-counting camp, not two facts. E301b (prepared, awaiting a ruling): the

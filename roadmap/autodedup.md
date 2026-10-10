@@ -41,6 +41,12 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   ways), M1–M3 and every ruling equal. Release after C2 with E929's re-seed. Open: the chokepoint
   reads a property by its canonical category, so a merged byt + komerční property can still meet a
   dům by hand.
+- **Quarter probe (2026-10-04, E936):** an ad in a known quarter of Praha / Brno / Ostrava whose two
+  attribute keys hold over 200 ads had no attribute path (1,670 Vysočany flats live, 268863 among them);
+  it now keys disposition + area band at its quarter. Offline: live +13 merge-zone pairs (268863 joins
+  its 44-ad iDNES property), none on trial / c18 / c17; M1–M3 and every ruling equal. Still dark:
+  1,212 ads in four Vysočany keys over 200. Release after C2 with E929's re-seed (required: keys move; `SEED_VERSION` is bumped, so nothing
+  merges between the deploy and the re-seed).
 - **Prague, in stages (2026-10-07, E939):** the operator wants all of Prague (157,284 located ads,
   ~48.4k online) beside Jablonec and Turnov. Storage is affordable (~2.7 GiB, +0.4 GiB a month); the
   per-pass read is not: on main a 157k build takes 27–58 days and never catches up (M913, M917).

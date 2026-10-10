@@ -83,8 +83,10 @@ GENERATION: str = "rt"
 # false. The 09-21 `rt` was seeded before F2 and carries no version row, so it is never
 # reconciled from and never shown as the default. A key in `autodedup.settings`, not a column
 # of the calibration row, because the calibration re-cuts itself (A10) and the version must
-# survive that. Bump it when a change makes an existing `rt` unfit to merge from.
-SEED_VERSION: str = "w5"
+# survive that. Bump it when a change makes an existing `rt` unfit to merge from: E936's
+# quarter probe moved the keys, and a store seeded before it holds no quarter posting and no
+# quarter explosion set.
+SEED_VERSION: str = "e936"
 SEED_VERSION_SETTING: str = "rt_seed_version"
 BOOTSTRAP_SETTING: str = "rt_bootstrap"
 
@@ -612,7 +614,8 @@ def retrieve(
     listing id, exactly as the cohort pass fills it, so the cap can only ever discard the
     weakest evidence class (E17). `tests/autodedup/test_incremental.py` asserts this against
     `BlockIndex.candidates` over the whole cohort rather than trusting the restatement."""
-    # `index.probes` is `PROBE_PRIORITY`, plus E300's town probe last when the row asks for it.
+    # `index.probes` is `PROBE_PRIORITY`, plus E300's town and E936's quarter probes last when
+    # the row asks for them.
     probes = keyer.index.probes
     by_probe: dict[str, list[str]] = {probe: [] for probe in probes}
     wanted: list[tuple[str, str]] = []
