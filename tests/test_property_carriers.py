@@ -216,17 +216,11 @@ def test_every_carrier_meets_the_protocol():
         assert why.strip(), f"NOT_CARRIED[{key}] needs its reason"
 
 
-def test_the_status_log_stays_with_its_own_property():
-    """Migration 559: a survivor holding two properties' activity logs charts false gaps."""
-    assert ("property_status_events", "property_id") in NOT_CARRIED
-    assert not any(t == "property_status_events" for t, _c in carried_columns())
-
-
 def test_no_carrier_deletes_history():
     """The sanctioned deletes are a SET table's collision collapse and the losing pipeline card,
     each folded into the carry record with its snapshot; never a ledger or log row."""
     history = ("property_dismissals", "property_pipeline_events", "property_merge_carries",
-               "property_merge_events", "property_status_events", "properties")
+               "property_merge_events", "properties")
     for statement in CARRIER_SQL:
         deleted = re.findall(r"\bDELETE\s+FROM\s+(\w+)", statement, re.I)
         assert not set(deleted) & set(history), f"a carrier deletes history: {_n(statement)[:120]}"

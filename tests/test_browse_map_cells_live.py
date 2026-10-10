@@ -113,7 +113,6 @@ _CASTS = {
     "bbox_south": "double precision",
     "bbox_north": "double precision",
     "point_budget": "integer",
-    "listing_ids_filter": "bigint[]",
     "obec_ids_filter": "bigint[]",
     "property_ids_filter": "bigint[]",
 }
@@ -221,26 +220,25 @@ def test_the_point_budget_is_a_strict_threshold(conn):
         assert over_budget["cells"] and sum(c["n"] for c in over_budget["cells"]) == 5
 
 
-def test_all_three_prefilter_id_spaces_are_applied(conn):
-    """listing_id, obec_id AND property_id each narrow the cohort.
+def test_both_prefilter_id_spaces_are_applied(conn):
+    """obec_id AND property_id each narrow the cohort.
 
-    The SPA's applyPrefilters emits `.in()` on all three; browse_stats_properties carries
-    only two (the legacy city-quality path reaches it as city_index_rules instead), so an
-    RPC modelled on its parameter list alone would drop the listing_id allowlist SILENTLY
-    — the map would show the unfiltered market while Cards/Table/Count show the filtered
-    one. Live whenever ?cityQualityLegacy=1 is remembered in localStorage.
+    The SPA's applyPrefilters emits `.in()` on both (the broker allowlist is a
+    property_id list since W5), and the RPC read has no `.in()` to inherit, so a
+    dropped predicate would show the unfiltered market on the map while Cards/Table/Count
+    show the filtered one. The third space, listing_id, left with W6 (migration 593).
 
-    RED by: deleting any of the three `= any(...)` predicates from migration 439 — the
+    RED by: deleting either `= any(...)` predicate from the map's body — the
     corresponding call below then returns 3 instead of 1.
     """
     with conn.cursor() as cur:
         _park(cur)
         _seed(cur, [(50.0, 14.0), (50.5, 14.5), (51.0, 15.0)])
 
-        for param in ("listing_ids_filter", "obec_ids_filter", "property_ids_filter"):
+        for param in ("obec_ids_filter", "property_ids_filter"):
             r = _call(cur, point_budget=0, **{param: [2]})
             assert r["total"] == 1, (
-                f"{param} did not narrow the cohort (total={r['total']}) — migration 439 "
+                f"{param} did not narrow the cohort (total={r['total']}) — browse_map_cells "
                 "is ignoring an allowlist the read it replaces applies."
             )
 

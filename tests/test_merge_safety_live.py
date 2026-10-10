@@ -1,9 +1,8 @@
 """Merge safety, executed (migrations 559, 560, 561 and 588): a price step never spans two adverts,
-a merge writes no status row and a detach restores the absorbed property's own state, merging
-then detaching every advert a merge moved gives back every original property, an advert named in
-`new` is born a record the one way, the operator's merge and split land as rulings the apply
-adapter reads, an operator merge takes back every "different" between what it joins (MS12), the
-one-time copy rules only what the operator judged, and a merged property speaks with ONE
+merging then detaching every advert a merge moved gives back every original property, an advert
+named in `new` is born a record the one way, the operator's merge and split land as rulings the
+apply adapter reads, an operator merge takes back every "different" between what it joins (MS12),
+the one-time copy rules only what the operator judged, and a merged property speaks with ONE
 canonical advert everywhere (decisions 13 and 18), chosen and built by the merge sprint's rules
 (docs/design/merge-sprint/PROGRAM.md MS5, MS6, MS10, MS19), and rule 15's merge gate reads the
 set's ads (hand-over addendum 14). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test
@@ -129,13 +128,6 @@ def test_a_step_never_spans_two_adverts(cur):
     assert drops == [(pid, cut, 4_900_000, 5_000_000)]
 
 
-def _events(cur: Any, pid: int) -> list[bool]:
-    cur.execute(
-        "SELECT is_active FROM property_status_events WHERE property_id = %s ORDER BY id",
-        (pid,))
-    return [bool(r[0]) for r in cur.fetchall()]
-
-
 def _pair(x: int, y: int) -> tuple[int, int]:
     return (min(x, y), max(x, y))
 
@@ -164,37 +156,6 @@ def _placed(cur: Any, ids: list[int]) -> dict[int, int]:
     return {int(lid): int(pid) for lid, pid in cur.fetchall()}
 
 
-def test_a_merge_writes_no_status_row_and_the_absorbed_history_stays_its_own(cur):
-    survivor, absorbed, moved = _merged_pair(cur)
-    before_s, before_a = _events(cur, survivor), _events(cur, absorbed)
-
-    assert _merge(cur, [survivor, absorbed])["survivor_id"] == survivor
-    assert _events(cur, absorbed) == before_a, "a merge wrote or moved the absorbed history"
-    assert _events(cur, survivor) == before_s
-    assert _detach(cur, moved)["restored_property_id"] == absorbed
-    cur.execute("SELECT status, is_active FROM properties WHERE id = %s", (absorbed,))
-    assert cur.fetchone() == ("active", True)
-    assert _events(cur, absorbed) == before_a, "its own history already reads active"
-
-    # Its next real deactivation closes the window its own history opened (no blank chart).
-    cur.execute("UPDATE properties SET is_active = false WHERE id = %s", (absorbed,))
-    assert _events(cur, absorbed) == [True, False]
-
-
-def test_a_detach_gives_a_property_ending_on_inactive_its_active_state_back(cur):
-    """Every merge before 559 left the absorbed property on a false 'inactive' (211,026 rows
-    today). Its undo must log 'active', or the chart reads a live property as delisted."""
-    survivor, absorbed, moved = _merged_pair(cur)
-    cur.execute(
-        "INSERT INTO property_status_events (property_id, is_active, event_at) "
-        "VALUES (%s, false, now())", (absorbed,))
-    _merge(cur, [survivor, absorbed])
-    assert _events(cur, absorbed) == [True, False]
-
-    _detach(cur, moved)
-    assert _events(cur, absorbed) == [True, False, True]
-
-
 def test_merging_then_detaching_every_advert_restores_every_original_property(cur):
     """W3's gate, executed: three set merges, one built on another, then a detach of every
     advert a merge moved; every original property_id is back, every property active, no ledger
@@ -214,8 +175,8 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     for lid in sorted(listing_origins(cur.connection, adverts)):
         _detach(cur, lid)
     assert _placed(cur, adverts) == original
-    cur.execute("SELECT count(*) FROM properties WHERE id = ANY(%s) AND status = 'active'",
-                (props,))
+    cur.execute("SELECT count(*) FROM properties WHERE id = ANY(%s) AND status = 'active' "
+                "AND is_active", (props,))
     assert cur.fetchone()[0] == len(props)
     cur.execute("SELECT count(*) FROM property_merge_events "
                 "WHERE listing_ref_id = ANY(%s) AND undone_at IS NULL", (adverts,))

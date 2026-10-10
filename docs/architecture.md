@@ -1467,14 +1467,11 @@ renumber.** Navigate by area:
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
     back every original property in any order (tests/test_detach_listing.py, executed in
     tests/test_merge_safety_live.py). Callers serialize per-property on the row locks.
-    **A merge writes no status event (migration 559).** The status-history trigger
-    (migration 392) skips the retirement (`is_active = false` set with `merged_away`), and
-    `property_status_events` is NOT carried onto the survivor. Nothing reads the log since merge
-    sprint W2b (the chart draws every advert's own line instead); the trigger, function, view and
-    table stay until W6 drops them. A detach restores
-    `is_active` in the statement that clears `merged_away`, and the trigger logs that only
-    where the property's own last row disagrees (a pre-559 absorbed property ends on the old
-    merge's false 'inactive' and gets its 'active' back). **Apply 559 before its code merges**
+    **There is no status log.** Merge sprint W6 dropped migration 392's per-property status
+    history (`property_status_events`, its view, trigger and function; migration 593): nothing
+    read it after W2b, where the chart started drawing every advert's own line. A detach restores
+    `is_active` in the statement that clears `merged_away` (active exactly when one of its ads
+    is). **Apply 559 before its code merges**
     — the rollup and both notification producers read `listing_price_steps` with no fallback.
     **Category compatibility is enforced at the chokepoint** via the single
     `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
@@ -2110,9 +2107,9 @@ renumber.** Navigate by area:
     **Browse hides dismissed properties by default, server-side (migration 537).** Every other
     Browse prefilter is an id ALLOWLIST sent as `.in(...)` in the GET URL; a dismissed set is an
     exclusion that grows without bound, so it never leaves the database. Each Browse relation has
-    a dismissal-aware twin — `browse_list_visible()`, `properties_map_visible()`,
-    `listing_feed_visible()` — an inlinable SECURITY INVOKER SQL function (`NOT EXISTS` against
-    `property_dismissals_public`); functions rather than views because `browse_list` and
+    a dismissal-aware twin — `browse_list_visible()`, `properties_map_visible()` — an
+    inlinable SECURITY INVOKER SQL function (`NOT EXISTS` against `property_dismissals_public`);
+    functions rather than views because `browse_list` and
     `properties_map_mv` are blue-green rebuilt (a view or policy on them would block the DROP or
     vanish with it), and they return `browse_projection`'s row type, never the rebuilt
     relation's. `browse_stats_properties` / `browse_map_cells` take one trailing
@@ -2208,8 +2205,8 @@ renumber.** Navigate by area:
     independent drain processes racing the same queue all reorder a listing between discovery and
     write (full analysis: `docs/design/portal-order-fidelity.md`). `listing_detail_queue.discovery_seq`
     / `listings.discovery_seq` (migration 368) carried a sequence value from enqueue to write for
-    the per-ad Browse lane; since W5 (merge sprint, MS19) nothing writes it, and W6 drops both
-    columns and the sequence (the queue keeps its `nextval` default until then).
+    the per-ad Browse lane until W5 (merge sprint, MS19); W6 dropped both columns and the
+    sequence (migration 593).
     **`listings.discovered_at` (migration 444) is the claim's time** — the claimed row's
     `enqueued_at`, carried through `claim_detail_batch` → `listing_write.write_listings` and
     written **once**, never on a later re-fetch (`COALESCE(listings.discovered_at,
@@ -2694,15 +2691,15 @@ renumber.** Navigate by area:
     komercni, PLOT area for pozemek (the "Option A" fork; `listings.area_basis`, migration 423,
     records which). Bounds: a NULL price, a NULL or non-positive area, an undecidable basis, or a
     price below its per-basis floor (sale 100 000 CZK, rent 1 000 CZK, land deliberately
-    unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
+    unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all five
     publishing relations return byte-identical figures.
 
     **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
     `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
     published range or a reason (six codes, notes only in that migration), rendered by its shape.
     Estimations call it; after 567 applies the serving views call it too, with the stored
-    `katastr_kod` (the feed reads the property's yield from `browse_list`); until then they read
-    the stored, writer-less `mf_*` columns. Rules: the `llm-pipelines` skill.
+    `katastr_kod`; until then they read the stored, writer-less `mf_*` columns. Rules: the
+    `llm-pipelines` skill.
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
@@ -2917,9 +2914,9 @@ renumber.** Navigate by area:
     `pg_column` too. It also broke rule 16 the other way round — the watchdog matching on the
     measure while Browse matched on nothing. So `plot_area_m2` is now a COLUMN of the read
     model, computed by the same function inside `browse_projection` (→ `browse_list`,
-    `properties_map_mv`) and `listing_feed_public` — the three relations Browse filters
-    against — and `pg_column` points at it. One definition, two spellings: a function call
-    over `listings`, a published column over the read model.
+    `properties_map_mv`, the two relations Browse filters against) and `pg_column` points at
+    it. One definition, two spellings: a function call over `listings`, a published column over
+    the read model.
     `test_frontend_read_contract_subset_of_projection` already demands the projection publish
     every browse filter's `pg_column`, so the two ends cannot drift apart again, and a null
     `pg_column` on a browse filter is now itself a test failure unless it is declared in
@@ -3708,7 +3705,7 @@ it. Its KÚ arm (MF PR-B) is the same kind of zero: a Czech address-grain row wr
 **ONE LABEL, ONE CODE PREDICATE.** Every surface renders `location_display_label(...)` (migration
 503, one IMMUTABLE SQL function over seven columns): foreign country code, else street + čp/čo +
 obec, else část obce + obec, else obec, else NULL. It is published by `browse_projection`,
-`listing_feed_public`, `listings_public`, `broker_listings_public` and `properties_public`
+`listings_public`, `broker_listings_public` and `properties_public`
 (`pipeline_board_public` reads it back off `properties_public`, because it is `security_invoker`
 while `listing_location` is revoked from `authenticated`), and the API's raw-SQL surfaces call the
 same function with the same columns — where eleven sites used to compose a place string out of five
@@ -3735,8 +3732,9 @@ popup is open, and the popup names the rung and the radius. (W3-3 first drew tha
 such pin at once — with ~87 % of active pins below building level it buried the map, 2026-09-22.)
 Clusters and server-side grid cells carry no per-pin radius, so all of this exists only in point mode.
 Migration 584 (operator ruling 2026-10-02) appends `ulice_id` (= `ll.ulice_kod`) last to
-`browse_projection`, `properties_public`, `pipeline_board_public` and `listing_feed_public`, and so to
-both read models — served for the street chip level, read by no filter until its RPC arm lands.
+`browse_projection`, `properties_public`, `pipeline_board_public` and `listing_feed_public` (gone
+since 593), and so to both read models — served for the street chip level, read by no filter
+until its RPC arm lands.
 **Appending is the only legal edit here** — `browse_list` and `properties_map_mv` materialize
 `select * from browse_projection` and `toolkit/browse_read_model.sync_browse_list` re-inserts
 POSITIONALLY, so anything computed outside the view, or any reordering, writes NULLs into the wrong
@@ -3752,10 +3750,10 @@ everything else stays invisible until the lane resolves it. It is not a flag and
 predicate over the store itself — `location_data.claims_common.SERVED_LOCATION_PREDICATE`, ONE text
 rendered onto each surface's own listing-id expression — so it covers the 36,981-row migration-510
 audit set, every future listing whose page carries no location, and nothing else; a row returns the
-moment it has a geom, with no backfill and nothing to re-stamp. It is carried by the two LIST
-surfaces — `browse_projection` (keyed on the property's display listing, so `browse_list`,
-`properties_map_mv`, `browse_stats_properties` and `browse_map_cells` all inherit it) and
-`listing_feed_public` — plus, in code, the watchdog matcher (`api/notifications._build_match_clauses`,
+moment it has a geom, with no backfill and nothing to re-stamp. It is carried by the one LIST
+surface, `browse_projection` (keyed on the property's display listing, so `browse_list`,
+`properties_map_mv`, `browse_stats_properties` and `browse_map_cells` all inherit it), plus,
+in code, the watchdog matcher (`api/notifications._build_match_clauses`,
 which reads `properties_public` and so cannot inherit) and path C candidate generation
 (`toolkit/dedup_candidates_sql`); `toolkit/comparables._shared_filter_where` needs no clause because
 its `ll.geom IS NOT NULL` is the same rule minus the foreign arm. **DETAIL STAYS REACHABLE**:

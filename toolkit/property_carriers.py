@@ -250,15 +250,12 @@ _ENGINE_HISTORY = "history of the removed decision engine, never consulted (rule
 _AUTODEDUP_HISTORY = "an engine or operator ledger: history (D7)"
 _MERGE_LEDGER = "the chokepoint's own ledger: history, replayed by a detach"
 _CARRY_RECORD = "the carry record itself (migration 589): history a split reads (MS14)"
-_ASSET_LINKS_REMOVED = "dropped in W6; the asset-link feature was removed in W1b"
 
 NOT_CARRIED: dict[tuple[str, str], str] = {
     ("listings", "property_id"):
         "the identity link itself: the writers move it (merge re-point, detach move)",
     ("properties", "merged_into"):
         "the merge's own pointer: set by the retire, cleared by the reactivation",
-    ("properties", "asset_id"): _ASSET_LINKS_REMOVED,
-    ("asset_membership_events", "property_id"): _ASSET_LINKS_REMOVED,
     ("property_merge_events", "survivor_property_id"): _MERGE_LEDGER,
     ("property_merge_events", "retired_property_id"): _MERGE_LEDGER,
     ("property_merge_events", "prev_property_id"): _MERGE_LEDGER,
@@ -267,9 +264,6 @@ NOT_CARRIED: dict[tuple[str, str], str] = {
     ("property_pipeline_events", "property_id"):
         "the pipeline's move log: history naming the property at the time; merges no longer "
         "write it (W3)",
-    ("property_status_events", "property_id"):
-        "each property's own activity log (migration 559): a survivor holding two logs charts "
-        "false gaps",
     ("dirty_properties", "property_id"):
         "a work queue: a retired id left queued recomputes to nothing",
     ("tag_candidates", "property_id"): "a draw-time snapshot (migration 450)",

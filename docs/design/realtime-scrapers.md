@@ -21,7 +21,7 @@ WRITE time, and five independent mechanisms (priority-bucketed claiming, transac
 `enqueued_at`, thread-pool completion-order fetch, batch-constant `now()`, concurrent drain
 processes) reorder a listing between discovery and that write. See
 `docs/design/portal-order-fidelity.md` for the full analysis and the fix
-(`listings.discovery_seq`, migration 368). The latency claim in this doc is unaffected — cron
+(`listings.discovery_seq`, migration 368; dropped with the per-ad lane by 593). The latency claim in this doc is unaffected — cron
 quantization is real and independent of ordering fidelity — but the queue was never actually
 order-preserving the way this sentence implied. The latency is **cron quantization on GitHub
 Actions**:

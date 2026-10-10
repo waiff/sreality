@@ -1,6 +1,6 @@
 """The write-path wiring of listings.discovered_at (migration 444), and the end of
-listings.discovery_seq (migration 368): since W5 (MS19) no code writes it; the column, the
-queue's `nextval` default and the sequence stay until W6 drops them (Rule 0).
+listings.discovery_seq (migration 368): since W5 (MS19) no code wrote it, and W6 dropped the
+column, the queue's `nextval` default and the sequence (migration 593).
 
 discovered_at is a PIPELINE-assigned value carried from the claimed queue row — never parsed
 from portal content, so it stays out of LISTING_COLUMNS and out of ScrapedListing's contract
