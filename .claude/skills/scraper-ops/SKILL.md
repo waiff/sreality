@@ -205,7 +205,7 @@ supersession cancel is distinguished from a real failure; cursor + timeout-kill 
 — verify_pipeline's acute lane: `llm_errors`, `llm_burn_rate`, `db_saturation`,
 `worker_liveness`, `property_maintenance`, `broker_resolution_freshness`, with
 `--exit-nonzero-on-fail` so any `fail` goes red and emails). A credit-balance error alarms
-immediately, and the LLM failure probe is INDEPENDENT of pending work (a quiet-queue blind spot
+immediately and PER PROVIDER (each its own account: one provider's success never clears another's credit error; the alert names that provider, its failing models and jobs, where 2026-10-02..10 it named every paid job and no provider), and the LLM failure probe is INDEPENDENT of pending work (a quiet-queue blind spot
 once kept a credit-exhausted account green ~8h); `LLMClient` records the failure row on every
 provider exception, so the check needs no key of its own.
 `llm_burn_rate` watches daily LLM spend for the recurring credit-depletion pattern (warn threshold
@@ -389,7 +389,7 @@ Per-lane notes:
   post-publication read of the facts a prose-only advert states only in its text. CONSTANT 300 s
   interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope =
   the open-R7-gate `text` cells ∪ portals declaring `llm_text`; its readings are mined by the claim lane.
-  Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
+  Needs `OPENAI_API_KEY`; a pass the provider stopped (`last.fatal`: credit, quota, key) is a FAILED pass (`failed_passes`, `last_failure_at`, same interval; `aborted` with no `fatal` = its own $/time ceiling, not a failure); rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 - **Autodedup lane** (AUTODEDUP §7.3/E914, mig 557) — THE engine's one real-time pass (`run_incremental`); one integer
   `realtime_autodedup_interval_seconds` (seeded 0 = stopped; 60 running) is cadence AND brake, claim = engine rate × half a 1050 s deadline, rate
   halved BEFORE every pass, restored the moment it commits, then overwritten by its measurement (E941); a killed pass keeps the half; `SystemExit`/trip = a failed pass. Decides + groups `rt`, then RECONCILES production: re-clustered groups merge via `merge_property_set` inside `app_settings.autodedup_apply_scope`, never a split (`mode=unapply` undoes). `rt_seed`/`apply`/`unapply` share `autodedup.rt_lease`; every lane transaction (pass, each reconcile group, re-cut) ends with `rt_lease.hold` (`lease_lost`). SIGTERM marks the lane stopping: the pass stops at its next checkpoint (`PassStopped`), rolls back and releases; the handler also releases the holder's lease on a fresh connection (2 attempts; `drainingSeconds` 30). `last.peak_rss_mb`; `MAX_SCHEMA_MB` 1,500 (18 KiB an ad); no GH schedule.
@@ -420,7 +420,7 @@ once a transaction outlives it), and the per-m² program's four plausibility che
 are ratios that skip a cell with no inputs and would read clean on a corpus gone dark. **`acquisition_lag` + `walk_coverage`
 (2026-08-27)** close the ingestion blind spot: until then every scraper health signal compared our
 data to our own data and rendered as a dot on a page, so sreality ingested ZERO new listings for
-nine days without anything leaving the database. `acquisition_lag` reads the oldest unclaimed never-fetched `listing_detail_queue` row per portal — deliberately the QUEUE and not `listings.first_seen_at`, because a "no new rows in N hours" check needs a baseline that the outage itself erodes (nine days of zeros makes zero the expected value). **`text_extraction_lag`** (field capture W7) is its twin one layer later — oldest ELIGIBLE-unextracted advert + waiting count per portal, plus a wedge arm (rows eligible, lane claiming none, or the lane absent from the heartbeat) — and it is computed from the text lane's OWN selector predicate, because the outage it replaces was a lane and its three monitors disagreeing about who was eligible. `walk_coverage` is the only
+nine days without anything leaving the database. `acquisition_lag` reads the oldest unclaimed never-fetched `listing_detail_queue` row per portal — deliberately the QUEUE and not `listings.first_seen_at`, because a "no new rows in N hours" check needs a baseline that the outage itself erodes (nine days of zeros makes zero the expected value). **`text_extraction_lag`** (field capture W7) is its twin one layer later — oldest ELIGIBLE-unextracted advert + waiting count per portal, plus a wedge arm (rows eligible, lane claiming none, or the lane absent from the heartbeat) and an abort arm (the provider stopped the last pass: `fail` quoting its `fatal`, whatever the backlog's age or `claimed`; 2026-10-02..10 the lane claimed 500 a pass for eight days and wrote nothing) — and it is computed from the text lane's OWN selector predicate, because the outage it replaces was a lane and its three monitors disagreeing about who was eligible. `walk_coverage` is the only
 comparison against EXTERNAL truth: collected vs the portal's advertised total from the latest
 COMPLETED index run's `by_category`, plus a truncation arm (categories walked vs that portal's own
 7-day best) because a budget-stopped walk leaves no entry for the categories it never reached and
