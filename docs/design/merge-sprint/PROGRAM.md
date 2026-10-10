@@ -391,7 +391,7 @@ rule-18 sentence. W5 adds the portal rule to rule 16; the one-portal
   `property_pipeline_public` and `pipeline_board_public`, which reads it, are first re-created
   without it. Built 2026-10-08 as migration 593, whose guards refuse what this gate forbids (a
   dependant view, function, index or wider constraint, an engine not braked or a lease held, a read
-  of the three indexes since W5); `W6_RUNBOOK.md` holds the day's order, checks C1–C10 and their SQL.
+  of the three indexes since W5); `W6_RUNBOOK.md` holds the day's order, checks C1–C11 and their SQL.
 - **Migrations** are numbered 588–599 (600 up are the dedup session's).
 
 ## 6. The destructive window (W6)
