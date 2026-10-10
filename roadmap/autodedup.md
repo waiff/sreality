@@ -63,10 +63,16 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   `verify_pipeline`'s heartbeat check.
 - **E948 (2026-10-10, a worker that died holding the lease):** its restart in place (same hostname
   and pid) releases that lease before its take and halves the claim cap in the same commit (floor
-  25; only a seed raises it again); at the floor the lease waits out its TTL as before, so a death
-  no claim can cure never loops the worker. The heartbeat adds `claim_cap`, `predecessor_released`
-  / `predecessor_kept`, `rss_mb` and the cgroup `memory_limit_mb` (E941's owed reading). Still
-  owed (E941): the revive cap, since the revived feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
+  25; only a seed or, E948b, a bigger container raises it); at the floor the lease waits out its
+  TTL as before, so a death no claim can cure never loops the worker. The heartbeat adds
+  `claim_cap`, `predecessor_released` / `predecessor_kept`, `rss_mb` and the cgroup
+  `memory_limit_mb` (E941's owed reading). Still owed (E941): the revive cap, since the revived
+  feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
+  **E948b:** the cap row records the memory limit its deaths happened under (`limit_mb`, read
+  each pass), and a container limit grown ≥ 25 % resets the cap to 500 before the next pass,
+  without a seed; a boot that also finds a dead predecessor releases its lease without halving
+  (it died under the smaller limit). Today's row, which records none, grows from the 8 GB limit
+  (`E948_LIMIT_MB`), so the deploy and the 24 GB move may come in either order.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
