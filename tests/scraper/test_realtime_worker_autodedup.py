@@ -14,7 +14,9 @@ inspection. No network, no DB.
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
+import io
 import json
 import logging
 import os
@@ -22,6 +24,7 @@ import re
 import socket
 import sys
 import threading
+import weakref
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -132,6 +135,7 @@ def _summary(**over: Any) -> dict[str, Any]:
         "reconcile": {"counts": {"applied": 2}},
         "peak_rss_mb": 412.5,
         "rss_mb": 388.0,
+        "memo_entries": {"text_facts": 812, "body_align": 64, "shingles": 30, "tokens": 2048},
         "claim_cap": {"cap": 500, "reason": "rt_seed"},
         "predecessor_released": None,
     }
@@ -245,6 +249,8 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
     connects: list[dict[str, Any]] = []
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
     monkeypatch.setattr(rw, "_MEMORY_LIMIT_MB", 8192.0)
+    readings = iter([290.0, 301.5])
+    monkeypatch.setattr(rw, "_return_memory", lambda: next(readings))
     _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _summary())
 
@@ -280,6 +286,10 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "rss_mb": 388.0, "memory_limit_mb": 8192.0,
         "claim_cap": {"cap": 500, "reason": "rt_seed"},
         "predecessor_released": None,
+        # E949: the engine's body and token memos at the pass's end, and the RSS once freed
+        # memory was handed back, before the pass began and as it ended
+        "memo_entries": {"text_facts": 812, "body_align": 64, "shingles": 30, "tokens": 2048},
+        "rss_at_start_mb": 290.0, "rss_after_trim_mb": 301.5,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -391,14 +401,18 @@ def test_any_other_failure_is_the_lanes_failed_pass_and_closes_the_connection(
 
 
 def test_an_abandoned_pass_is_never_overlapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E949: the skip hands nothing back and reads no RSS; the pass still running on its own
+    thread does both."""
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail(
         "a second pass must not open a connection while the first still holds the lock"))
+    order = _hand_back(monkeypatch)
     assert rw._AUTODEDUP_PASS_LOCK.try_enter()
     try:
         last = rw._autodedup_sync()
     finally:
         rw._AUTODEDUP_PASS_LOCK.release()
     assert last["skipped"] == 1 and last["reason"] == "previous_pass_running"
+    assert order == [] and not {"rss_at_start_mb", "rss_after_trim_mb"} & set(last)
 
 
 def test_a_stopping_worker_opens_no_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -414,7 +428,8 @@ def test_the_worker_merges_only_through_the_engine() -> None:
     """The lane's merges are the engine's reconcile (A9), which merges through THE chokepoint;
     the worker itself never names it."""
     src = "".join(inspect.getsource(fn) for fn in (
-        rw._autodedup_sync, rw._autodedup_pass, rw._autodedup_outcome))
+        rw._autodedup_sync, rw._autodedup_run, rw._return_memory, rw._autodedup_pass,
+        rw._autodedup_outcome))
     for forbidden in ("property_identity", "property_carriers", "_merge_pair"):
         assert forbidden not in src
 
@@ -722,6 +737,8 @@ def test_the_heartbeat_counts_the_same_rulings_the_engine_cannot_honour(
 
 
 RAILWAY_WORKER = Path(__file__).resolve().parents[2] / "railway.worker.json"
+# E949: `env` sets the arena cap and execs python, which stays the container's PID 1.
+WORKER_START_COMMAND = "env MALLOC_ARENA_MAX=2 python -m scraper.realtime_worker"
 
 
 def test_the_shutdown_signal_is_the_one_path_that_releases(monkeypatch) -> None:
@@ -748,7 +765,7 @@ def test_the_drain_window_fits_the_release_and_ends_before_the_watchdog() -> Non
     assert attempts >= 2, "one dropped handshake must not cost the release"
     assert worst < draining, "the cancel and both attempts fit the drain (one address)"
     assert draining < rw.LIVENESS_BOUND_SECONDS
-    assert deploy["startCommand"] == "python -m scraper.realtime_worker"
+    assert deploy["startCommand"] == WORKER_START_COMMAND
 
 
 def test_a_shutdown_releases_the_lease_of_the_pass_in_flight_on_a_fresh_connection(
@@ -1000,3 +1017,253 @@ def test_a_statement_running_at_the_signal_is_cancelled_and_the_pass_rolls_back(
     assert rt_lease.current(world)["live"] is False
     rate = incremental_lane.pass_rate_key(incremental_lane.GENERATION)
     assert world.settings_by[rate].endswith(":halved_ahead"), "no halving after the signal"
+
+
+# ------------------------------------ E949: what a pass frees goes back before the next pass
+
+
+class _Glibc:
+    """glibc as the worker loads it: the trim, and whether the pass lock was held during it."""
+
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    def malloc_trim(self, pad: int) -> int:
+        held = rw._AUTODEDUP_PASS_LOCK._lock.locked()
+        self.order.extend([f"malloc_trim({pad})", "locked" if held else "unlocked"])
+        return 1
+
+
+def _hand_back(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The worker's two calls replaced in its own module (`_collect_garbage`, `_load_library`),
+    never the process's `gc` or `ctypes`."""
+    order: list[str] = []
+
+    def load(name: str) -> _Glibc:
+        order.append(f"CDLL({name})")
+        return _Glibc(order)
+
+    monkeypatch.setattr(rw, "_collect_garbage", lambda *_a: order.append("gc.collect") or 0)
+    monkeypatch.setattr(rw, "_load_library", load)
+    monkeypatch.setattr(incremental_lane, "rss_mb", lambda *_a: order.append("rss") or 301.5)
+    return order
+
+
+HAND_BACK = ["gc.collect", "CDLL(libc.so.6)", "malloc_trim(0)", "locked", "rss"]
+
+
+@pytest.mark.parametrize("outcome", ["ran", "refused", "leased", "store_absent", "raised"])
+def test_every_pass_hands_back_freed_memory_as_it_begins_and_before_its_lock_is_released(
+        monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    """The pass ran on any of the executor's 32 threads and glibc kept what it freed in that
+    thread's arena (three passes on three threads: 234, 456, 678 MiB). So every pass that holds
+    the lock collects, trims and reads its RSS twice: before the engine is called, and as it
+    ends, before the next pass may enter. A raised pass's end runs it too, but with the raise
+    still in flight, its traceback holding the pass's frames: that memory goes at the next
+    pass's start (`test_a_raised_pass_is_handed_back_before_the_next_pass_reaches_the_engine`)."""
+    order = _hand_back(monkeypatch)
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn(
+        present=None if outcome == "store_absent" else True))
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, {
+        "ran": _summary(), "refused": SystemExit("STORAGE: over the budget"),
+        "leased": {"skipped": "leased", "reason": "a seed", "spent_usd": 0.0},
+        "store_absent": _summary(), "raised": RuntimeError("pooler went away")}[outcome])
+    engine = incremental_lane.run_incremental
+
+    def entered(*args: Any, **kwargs: Any) -> Any:
+        order.append("engine")
+        return engine(*args, **kwargs)
+
+    monkeypatch.setattr(incremental_lane, "run_incremental", entered)
+
+    if outcome == "raised":
+        with pytest.raises(RuntimeError):
+            rw._autodedup_sync()
+    else:
+        last = rw._autodedup_sync()
+        assert (last["rss_at_start_mb"], last["rss_after_trim_mb"]) == (301.5, 301.5)
+
+    called = [] if outcome == "store_absent" else ["engine"]
+    assert order == HAND_BACK + called + HAND_BACK
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter(), "the lock was released after the trim"
+    rw._AUTODEDUP_PASS_LOCK.release()
+
+
+class _WorkingSet:
+    """What a pass holds when a statement of it times out: facts, fingerprints, pairs."""
+
+    def __init__(self) -> None:
+        self.rows = ["w" * 700 + str(i) for i in range(1000)]
+
+
+class _StatementTimeout(Exception):
+    pass
+
+
+@pytest.mark.parametrize("kept_by_its_frame", [False, True], ids=["no-cycle", "own-cycle"])
+def test_a_raised_pass_is_handed_back_before_the_next_pass_reaches_the_engine(
+        world, tmp_path, monkeypatch, kept_by_its_frame: bool) -> None:
+    """E930's path (a statement timeout, a terminated backend) END TO END, through the lane
+    loop: the raise reaches it with a traceback holding every frame of the pass, so the
+    hand-back at that pass's end, which runs while the raise is in flight, reaches none of it.
+    Automatic collection is off, as on CPython 3.12 when no full collection is due, and the
+    lane logs to a stream, as in production: pytest's own capture would keep the record, and
+    with it the raise. `no-cycle`: the engine no longer keeps the raise it noted (`original`),
+    so the loop's drop of the raise frees the pass at once. `own-cycle`: a frame that keeps its
+    own raise outlives the drop, and the next pass's first hand-back is the collection that
+    frees it. Either way nothing of the raised pass is alive when the next pass reaches the
+    engine."""
+    seed_lane(world, tmp_path)
+    _worker_on(monkeypatch, world)
+    logged = io.StringIO()
+    monkeypatch.setattr(rw.LOG, "handlers", [logging.StreamHandler(logged)])
+    monkeypatch.setattr(rw.LOG, "propagate", False)
+    held: list[weakref.ref[_WorkingSet]] = []
+    alive_after_drop: list[bool] = []
+    alive_at_next: list[bool] = []
+    engine, scoring = incremental_lane.run_incremental, incremental_lane.run_pass_bounded
+    stop = asyncio.Event()
+    state = rw._new_state()
+
+    def times_out(*args: Any, **kwargs: Any) -> Any:
+        if held:
+            return scoring(*args, **kwargs)
+        working = _WorkingSet()
+        held.append(weakref.ref(working))
+        try:
+            raise _StatementTimeout("canceling statement due to statement timeout")
+        except _StatementTimeout as exc:
+            # kept: this frame -> the raise -> its traceback -> this frame
+            kept = exc if kept_by_its_frame else None  # noqa: F841
+            raise
+
+    def interval() -> float:
+        if held:  # the loop has logged the raised pass and dropped its raise
+            alive_after_drop.append(held[0]() is not None)
+        return 0.01
+
+    async def lane() -> None:
+        loop = asyncio.get_running_loop()
+
+        def entered(*args: Any, **kwargs: Any) -> Any:
+            if held:
+                alive_at_next.append(held[0]() is not None)
+                loop.call_soon_threadsafe(stop.set)
+            return engine(*args, **kwargs)
+
+        monkeypatch.setattr(incremental_lane, "run_incremental", entered)
+        await rw._lane_loop("autodedup", stop, interval,
+                            lambda: rw._autodedup_pass(stop, state), state,
+                            default_interval=0.01)
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", times_out)
+    gc.collect()
+    gc.disable()
+    try:
+        asyncio.run(lane())
+    finally:
+        gc.enable()
+
+    assert "autodedup lane pass failed" in logged.getvalue() and "_StatementTimeout" in (
+        logged.getvalue())
+    assert state["lanes"]["autodedup"]["failed_passes"] == 1
+    assert alive_after_drop == [kept_by_its_frame]
+    assert alive_at_next == [False], "the raised pass's working set reached the next pass"
+    assert state["lanes"]["autodedup"]["last"]["ran"] is True
+
+
+def _no_glibc(name: str) -> Any:
+    raise OSError(f"{name}: cannot open shared object file")
+
+
+class _NoTrim:
+    """A C library without glibc's `malloc_trim`."""
+
+
+@pytest.mark.parametrize("load", [_no_glibc, lambda name: _NoTrim()],
+                         ids=["no-glibc", "no-malloc_trim"])
+def test_without_glibc_the_hand_back_is_a_no_op_and_never_raises(
+        monkeypatch: pytest.MonkeyPatch, load: Any) -> None:
+    monkeypatch.setattr(rw, "_load_library", load)
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, _summary())
+
+    last = rw._autodedup_sync()
+
+    assert last["ran"] is True and last["errors"] == 0
+    if sys.platform.startswith("linux"):
+        assert last["rss_at_start_mb"] > 0 and last["rss_after_trim_mb"] > 0, (
+            "the RSS is read all the same")
+    assert rw._AUTODEDUP_PASS_LOCK.try_enter()
+    rw._AUTODEDUP_PASS_LOCK.release()
+    monkeypatch.setitem(sys.modules, "autodedup.incremental_lane", None)
+    assert rw._return_memory() is None, "no engine to read it from: None, never a raise"
+
+
+def test_the_heartbeat_carries_both_hand_backs_beside_the_memos_before_the_end(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    readings = iter([290.0, 301.5])
+    monkeypatch.setattr(rw, "_return_memory", lambda: next(readings))
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, _summary())
+    state = rw._new_state()
+
+    asyncio.run(rw._autodedup_pass(asyncio.Event(), state))
+
+    last = state["lanes"]["autodedup"]["last"]
+    assert (last["rss_at_start_mb"], last["rss_mb"], last["rss_after_trim_mb"]) == (
+        290.0, 388.0, 301.5)
+    assert last["memo_entries"] == {
+        "text_facts": 812, "body_align": 64, "shingles": 30, "tokens": 2048}
+    Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+def test_a_real_pass_leaves_no_body_behind_and_reads_its_rss_after_the_trim(
+        world, tmp_path, monkeypatch) -> None:
+    """END TO END through the engine: what the pass read of a body, and the tokens it hashed,
+    are reported, then gone; the RSS is read once each hand-back ran."""
+    from autodedup import body_align, text_facts
+    from tests.autodedup.lane_world import DESCRIPTION
+
+    seed_lane(world, tmp_path)
+    _worker_on(monkeypatch, world)
+    original = incremental_lane.run_pass_bounded
+
+    def reads_a_body(*args: Any, **kwargs: Any) -> Any:
+        text_facts.printed_floors(DESCRIPTION, True)
+        body_align.tokens(DESCRIPTION)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", reads_a_body)
+
+    last = rw._autodedup_sync()
+
+    assert last["ran"] is True and last["errors"] == 0, last
+    assert set(last["memo_entries"]) == {"text_facts", "body_align", "shingles", "tokens"}
+    assert last["memo_entries"]["text_facts"] >= 1 and last["memo_entries"]["body_align"] >= 1
+    assert last["memo_entries"]["tokens"] >= 1
+    assert incremental_lane.memo_entries() == dict.fromkeys(last["memo_entries"], 0)
+    if sys.platform.startswith("linux"):
+        assert last["rss_at_start_mb"] > 0 and last["rss_after_trim_mb"] > 0
+
+
+def test_the_worker_starts_with_two_malloc_arenas_and_python_as_its_pid_1() -> None:
+    """Every thread of the worker allocates from one of two glibc arenas, so what one pass
+    freed is the next pass's to reuse whichever thread runs it (three passes on three threads:
+    230, 449, 451 MiB capped, against 230, 449, 668 uncapped). Railway runs a Dockerfile
+    service's start command in exec form, with no shell, so a bare `MALLOC_ARENA_MAX=2 python
+    ...` would be taken for the program and the worker would never start: `env` sets the
+    variable and execs python, which stays PID 1 for E941's SIGTERM handler. The API's image
+    and its start are untouched."""
+    command = json.loads(RAILWAY_WORKER.read_text(encoding="utf-8"))["deploy"]["startCommand"]
+    assert command == WORKER_START_COMMAND
+    words = command.split()
+    assert words[0] == "env" and words[1] == "MALLOC_ARENA_MAX=2"
+    assert words[2:] == ["python", "-m", "scraper.realtime_worker"], "env execs python itself"
+    assert not set(words) & {"sh", "bash", "-c", "&&", ";", "|"}, "no shell before python"
+    for name in ("railway.json", "Dockerfile"):
+        assert "MALLOC_ARENA_MAX" not in (RAILWAY_WORKER.parent / name).read_text(
+            encoding="utf-8"), name
