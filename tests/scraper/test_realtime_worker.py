@@ -2019,6 +2019,79 @@ def test_text_extract_is_free_while_its_scope_is_empty(
     assert rw._text_extract_sync() == {"claimed": 0, "reason": "empty_scope"}
 
 
+_PROVIDER_STOPPED = {
+    "claimed": 500, "extracted": 0, "written": 0, "errors": 8, "spent_usd": 0.0,
+    "aborted": True, "model": "gpt-5-mini",
+    "fatal": "openai call failed: HTTP 429 You have no credits remaining",
+}
+
+
+def test_a_pass_the_provider_stopped_is_a_failed_pass(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """2026-10-02..10: OpenAI out of credit, every pass claimed 500 and aborted, and each
+    was booked as a success (`failed_passes: 0`): the heartbeat showed eight days that
+    wrote nothing as clean passes. It is a failed pass now, its summary kept, with no
+    traceback, and the lane still waits its interval before the next one."""
+    from toolkit import description_extraction
+
+    passes: list[int] = []
+
+    def stopped(conn: Any) -> dict[str, Any]:
+        passes.append(1)
+        return dict(_PROVIDER_STOPPED)
+
+    monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(description_extraction, "run_pass", stopped)
+    state = rw._new_state()
+
+    def booked() -> bool:
+        entry = state["lanes"].get("text_extract", {})
+        return bool(entry.get("passes") or entry.get("failed_passes"))
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        lane = asyncio.create_task(rw._lane_loop(
+            "text_extract", stop, lambda: 60.0,
+            lambda: rw._text_extract_pass(stop, state), state, default_interval=60.0))
+        while not booked():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)  # a lane that retried at once would pass again here
+        stop.set()
+        await lane
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=10))
+
+    lane = state["lanes"]["text_extract"]
+    assert passes == [1], "the failed pass was retried before the lane's interval"
+    assert lane["failed_passes"] == 1 and lane["last_failure_at"]
+    assert lane.get("passes", 0) == 0, "a pass the provider stopped is not a completed one"
+    assert lane["started_at"] is None
+    assert lane["last"]["aborted"] is True
+    assert lane["last"]["fatal"] == _PROVIDER_STOPPED["fatal"]
+    assert not [r for r in caplog.records if r.exc_info], "a traceback on every pass"
+    Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+@pytest.mark.parametrize("last", [
+    {"claimed": 2, "extracted": 2, "written": 3, "errors": 0, "spent_usd": 0.0045,
+     "aborted": False, "fatal": None, "model": "gpt-5-mini"},
+    # The pass's own $/time ceiling: it wrote, and what it left waits for the next pass.
+    {"claimed": 500, "extracted": 350, "written": 410, "errors": 0, "spent_usd": 2.5,
+     "aborted": True, "fatal": None, "model": "gpt-5-mini"},
+], ids=["ran", "ceiling"])
+def test_a_pass_that_ran_or_met_its_ceiling_is_not_a_failed_one(
+        monkeypatch: pytest.MonkeyPatch, last: dict[str, Any]) -> None:
+    monkeypatch.setattr(rw, "_text_extract_sync", lambda: dict(last))
+    state = rw._new_state()
+
+    asyncio.run(rw._text_extract_pass(asyncio.Event(), state))
+
+    lane = state["lanes"]["text_extract"]
+    assert lane["passes"] == 1
+    assert lane["failed_passes"] == 0 and lane["last_failure_at"] is None
+    assert lane["last"] == last
+
+
 # --- liveness: the 2026-09-29 freeze ----------------------------------------------------
 #
 # ceskereality answered 403 to everything; the shared rate ledger parked every caller up

@@ -183,3 +183,13 @@ after a 403 leases one slot and a drain's lease is sized to its claims. Detail: 
 - **Next:** a per-portal circuit breaker (stop re-probing a portal that 403s everything), Health
   alerts on `budget_refused` / `portal_rate_state.next_slot_at` running ahead, and a standing
   `faulthandler` timer for a GIL-holding stall the watchdog thread cannot see.
+
+## 2026-10-10 — a text-lane pass the provider refused is a failed pass, and the checks name the provider (shipped with this PR)
+
+OpenAI ran out of credit on 2026-10-02; the alarms fired but pointed the wrong way (no provider or model named, Anthropic jobs listed as down, the heartbeat booking every refused pass as a success) and nothing left the app (`system_health_channels` is `[]`). Fixed here: the refused pass is a failed pass; `text_extraction_lag` fails on the provider's refusal and names the model; `llm_errors` judges credit per provider and names the provider and model.
+
+Next:
+- `verify_pipeline`: a timed-out warn counts as "not failing", closes the incident and sends a false "Recovered" (`text_extraction_lag` did it 6 times since 10-02); a timeout must keep the incident open.
+- `llm_errors` rate arm: `currently_failing` still reads the newest call of ANY provider; for ~24 h after a top-up a stray error can turn the check red again.
+- `worker_lane_stall` reports `failed_passes` but never alarms on it.
+- Delivery: `system_health_channels` is `[]` and no transport is configured, so no system alert has ever left the app (operator: email key + recipient + channel).

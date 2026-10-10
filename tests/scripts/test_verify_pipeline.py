@@ -659,12 +659,14 @@ def test_live_state_errors_but_never_a_success_is_failing() -> None:
 
 
 class _LlmErrorsConn:
-    """Three-query fake for check_llm_errors: rates, credit count, liveness."""
+    """Two-query fake for check_llm_errors: per-called_for rates, per-provider state rows
+    (provider, last_err_at, last_ok_at, last_credit_err_at, credit_errors, models, jobs)."""
 
-    def __init__(self, rates: list[tuple[Any, ...]], credit_count: int,
-                 live_row: tuple[Any, ...]) -> None:
-        self._rates, self._credit, self._live = rates, credit_count, live_row
+    def __init__(self, rates: list[tuple[Any, ...]],
+                 providers: list[tuple[Any, ...]]) -> None:
+        self._rates, self._providers = rates, providers
         self._last = ""
+        self.provider_params: Any = None
 
     def cursor(self) -> "_LlmErrorsConn":
         return self
@@ -680,15 +682,13 @@ class _LlmErrorsConn:
 
     def execute(self, sql: str, params: Any = None) -> None:
         self._last = sql
+        if "group by provider" in sql:
+            self.provider_params = params
 
     def fetchall(self) -> Any:
-        return self._rates
+        return self._providers if "group by provider" in self._last else self._rates
 
     def fetchone(self) -> Any:
-        if "last_err_at" in self._last:
-            return self._live
-        if "count(*)" in self._last:
-            return (self._credit,)
         return None
 
 
@@ -699,16 +699,17 @@ def test_check_llm_errors_reds_on_a_days_old_credit_outage() -> None:
 
     conn = _LlmErrorsConn(
         rates=[("extract_location_claims", 500, 500)],
-        credit_count=63547,
-        live_row=(_t(hours=-30), _t(hours=-40), _t(hours=-30)),
+        providers=[("openai", _t(hours=-30), _t(hours=-40), _t(hours=-30), 63547,
+                    ["gpt-5-mini"], ["extract_location_claims"])],
     )
     out = check_llm_errors(conn, T)
     assert out["status"] == "fail"
     assert out["details"]["currently_failing"] is True
     assert out["details"]["credit_live"] is True
-    # Operator copy must not name a provider we may not be on, nor a subsystem that
+    # Operator copy names the provider the rows name and no other, nor a subsystem that
     # was deleted 2026-08-06 (rule 15).
-    assert "Anthropic" not in out["message"]
+    assert "openai" in out["message"]
+    assert "anthropic" not in out["message"].lower()
     assert "dedup vision" not in out["message"]
 
 
@@ -717,12 +718,60 @@ def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
 
     conn = _LlmErrorsConn(
         rates=[("extract_location_claims", 500, 400)],
-        credit_count=63547,          # still in the 24h window, but superseded
-        live_row=(_t(hours=-30), _t(minutes=-2), None),
+        # Credit errors still in the 24h window, superseded by the SAME provider's success.
+        providers=[("openai", _t(hours=-30), _t(minutes=-2), _t(hours=-30), 63547,
+                    ["gpt-5-mini"], ["extract_location_claims"])],
     )
     out = check_llm_errors(conn, T)
     assert out["status"] == "ok"
     assert out["details"]["currently_failing"] is False
+    assert out["details"]["credit_live"] is False
+
+
+def _openai_out_of_credit_anthropic_answering() -> Any:
+    """OpenAI out of credit as on 2026-10-02..10 (the text lane), and an Anthropic success
+    after its newest credit error."""
+    return _LlmErrorsConn(
+        rates=[("enrich_listing_description", 96, 96), ("agent_estimation", 12, 0)],
+        providers=[
+            ("anthropic", None, _t(minutes=-1), None, 0, None, None),
+            ("openai", _t(minutes=-5), None, _t(minutes=-5), 96, ["gpt-5.6-luna"],
+             ["enrich_listing_description"]),
+        ],
+    )
+
+
+def test_one_providers_success_never_clears_anothers_credit_outage() -> None:
+    """Credit is one account's state. Read across all providers, as before, Anthropic's
+    success a minute ago superseded OpenAI's credit error and the check read healthy."""
+    from scripts.verify_pipeline import _CREDIT_ERROR_PATTERNS, check_llm_errors
+
+    conn = _openai_out_of_credit_anthropic_answering()
+    out = check_llm_errors(conn, T)
+
+    assert out["status"] == "fail"
+    assert out["details"]["credit_live"] is True
+    per = {p["provider"]: p for p in out["details"]["per_provider"]}
+    assert per["openai"]["credit_live"] is True
+    assert per["anthropic"]["credit_live"] is False
+    # The rate arm's gate still reads the newest call of any provider: Anthropic's success.
+    assert out["details"]["currently_failing"] is False
+    # Patterns bound as values (psycopg-%-safe), and details stay JSON for write_results.
+    assert conn.provider_params == _CREDIT_ERROR_PATTERNS
+    json.dumps(out["details"])
+
+
+def test_the_credit_alert_names_the_provider_and_model_that_failed() -> None:
+    """The onset alert is the check's message. It names what failed, from the rows, and no
+    job that runs on another provider's account."""
+    from scripts.verify_pipeline import check_llm_errors
+
+    msg = check_llm_errors(_openai_out_of_credit_anthropic_answering(), T)["message"]
+
+    assert "openai" in msg and "gpt-5.6-luna" in msg
+    assert "enrich_listing_description" in msg
+    for elsewhere in ("anthropic", "estimation", "summar", "url parsing", "labelling"):
+        assert elsewhere not in msg.lower()
 
 
 # --- W0.3: llm_burn_rate starvation arm ------------------------------------
@@ -2969,8 +3018,9 @@ class _ScriptedConn:
         return rows[0] if rows else None
 
 
-def _text_lane_conn(*, waiting: int, oldest_hours: float, claimed: int | None) -> Any:
-    lane = None if claimed is None else {"last": {"claimed": claimed}}
+def _text_lane_conn(*, waiting: int, oldest_hours: float, claimed: int | None,
+                    **last: Any) -> Any:
+    lane = None if claimed is None else {"last": {"claimed": claimed, **last}}
     return _ScriptedConn({
         "FROM app_settings": [("gpt-5-mini",)],
         "GROUP BY l.source": ([("bazos", waiting, oldest_hours, oldest_hours / 2)]
@@ -3033,6 +3083,43 @@ def test_text_extraction_lag_names_the_open_scope() -> None:
         _text_lane_conn(waiting=0, oldest_hours=0.0, claimed=0), T)
     assert out["status"] == "ok"
     assert out["details"]["scope"] == {"bazos": ["floor", "has_lift"]}
+
+
+def test_text_extraction_lag_fails_on_a_pass_the_provider_stopped(
+        monkeypatch: Any) -> None:
+    """2026-10-02..10: OpenAI out of credit, and the lane claimed 500 a pass and wrote
+    nothing. The wedge arm needs `claimed == 0`, so it never fired, and the check blamed
+    backlog age, never the provider. The provider's own words are the alarm, at any age."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    # The heartbeat's `fatal`, as it read on 2026-10-10.
+    fatal = ('openai call failed: HTTP 429 {\n    "error": {\n        "message": "You have '
+             'no credits remaining. Add credits to continue using the API at '
+             'https://platform.openai.com/settings/organization/billing/.",\n')
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=500, oldest_hours=0.05, claimed=500, written=0,
+                        aborted=True, fatal=fatal, model="gpt-5.6-luna"), T)
+    assert out["status"] == "fail"
+    assert '"message": "You have no credits remaining.' in out["message"]
+    assert "\n" not in out["message"]
+    # The model the provider refused (not today's setting), and both remedies: four of
+    # vision_batch.FATAL_MARKERS are key errors, fixed on the worker's Railway service.
+    assert "refused gpt-5.6-luna" in out["message"]
+    assert "credit or quota" in out["message"] and "OPENAI_API_KEY" in out["message"]
+
+
+def test_text_extraction_lag_reads_a_pass_at_its_ceiling_as_bounded(
+        monkeypatch: Any) -> None:
+    """`aborted` with no `fatal` is the pass's own $/time ceiling: it wrote, and a backlog
+    it leaves behind is what the age arms are for."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=500, oldest_hours=0.05, claimed=500, written=410,
+                        aborted=True, fatal=None), T)
+    assert out["status"] == "ok"
 
 
 # --- false_delist_share: a flip a later sighting reversed was a false delisting ---------

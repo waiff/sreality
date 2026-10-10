@@ -107,7 +107,7 @@ calls an LLM must do the same.
   `false` needs an explicit negation in the evidence quote, every value needs a quote verbatim in
   the advert text, and `floor` comes back as the advert's own words for `scraper/floor.py` to
   convert. Health: `verify_pipeline`'s `text_extraction_lag`, built from the lane's OWN selector
-  (R8). `app_settings.enrichment_model` is the one switch. `docs/design/field-capture/PROGRAM.md`.
+  (R8), red too when the provider stopped the last pass (`last.fatal`, a failed pass in the heartbeat). `app_settings.enrichment_model` is the one switch. `docs/design/field-capture/PROGRAM.md`.
 
 **Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
 tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`

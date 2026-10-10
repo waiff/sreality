@@ -27,9 +27,10 @@ against a healthy pipeline. A fixed hours threshold over an on-demand workload i
 false-red generator, and the fix is not a bigger number — it is a per-lane instrument
 with its own baseline. That is `text_extraction_lag` (field-capture R8, W7): oldest
 ELIGIBLE-unextracted age and waiting count per source, computed from the text lane's own
-selector predicate, plus the wedge arm — rows eligible and the lane claiming none. It
-covers the one recurring producer; `llm_errors` still catches "calls are failing" (state,
-not recency) and `llm_burn_rate`'s starvation arm "attempting and never succeeding". The
+selector predicate, plus the wedge arm — rows eligible and the lane claiming none — and the
+abort arm — the provider stopped the lane's last pass. It covers the one recurring producer;
+`llm_errors` still catches "calls are failing" (state, not recency; credit per provider)
+and `llm_burn_rate`'s starvation arm "attempting and never succeeding". The
 residual, stated plainly: both of those derive from rows that EXIST, so a total stop on a
 lane R8 does not cover — every remaining producer is dispatch-driven — still reads `ok`.
 
@@ -979,22 +980,27 @@ group by called_for
 order by total desc
 """
 
-_LLM_CREDIT_SQL = """
-select count(*) from llm_calls
-where called_at > now() - interval '24 hours' and (error ilike %s or error ilike %s)
-"""
-
-# Liveness: is the provider failing RIGHT NOW? Compares the newest failure vs the newest
-# success — a success after the last error means recovered, and nothing else does. The
-# `min_live_at` staleness column this used to select was removed in W0.3: see
-# _llm_live_state for why bounding "live" by elapsed time made a total outage read `ok`.
-_LLM_LIVENESS_SQL = """
-select
-  max(called_at) filter (where error is not null) as last_err_at,
-  max(called_at) filter (where error is null) as last_ok_at,
-  max(called_at) filter (where error ilike %s or error ilike %s) as last_credit_err_at
-from llm_calls
-where called_at > now() - interval '24 hours'
+# Liveness, PER PROVIDER: is a provider failing RIGHT NOW? Its newest failure vs ITS newest
+# success — a success after the last error means recovered, and nothing else does. Per
+# provider because credit is one account's state: the text lane calls OpenAI up to every
+# 5 minutes, so one comparison across all providers would let those successes clear an empty
+# Anthropic account (summaries, URL parsing, condition scoring) within minutes, and one
+# Anthropic success clear an OpenAI outage. The `min_live_at` staleness column was removed
+# in W0.3: see _llm_live_state for why bounding "live" by elapsed time made a total outage
+# read `ok`.
+_LLM_PROVIDER_STATE_SQL = """
+select provider,
+       max(called_at) filter (where error is not null) as last_err_at,
+       max(called_at) filter (where error is null) as last_ok_at,
+       max(called_at) filter (where credit) as last_credit_err_at,
+       count(*) filter (where credit) as credit_errors,
+       array_agg(distinct model) filter (where credit) as credit_models,
+       array_agg(distinct called_for) filter (where credit) as credit_jobs
+  from (select provider, model, called_for, called_at, error,
+               (error ilike %s or error ilike %s) as credit
+          from llm_calls
+         where called_at > now() - interval '24 hours') calls
+ group by provider
 """
 
 # Two providers, two wordings for the same outage: OpenAI's 429 says "You have no credits
@@ -1003,17 +1009,32 @@ where called_at > now() - interval '24 hours'
 _CREDIT_ERROR_PATTERNS = ("%credit balance%", "%no credits remaining%")
 
 
+def _llm_provider_states(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    """One JSON-ready live state per provider, from _LLM_PROVIDER_STATE_SQL's rows."""
+    states: list[dict[str, Any]] = []
+    for provider, last_err, last_ok, last_credit, credit_errors, models, jobs in rows:
+        failing, credit_live = _llm_live_state(last_err, last_ok, last_credit)
+        states.append({
+            "provider": provider, "currently_failing": failing, "credit_live": credit_live,
+            "credit_errors": int(credit_errors or 0),
+            "credit_models": sorted(models or []), "credit_jobs": sorted(jobs or []),
+            "last_error_at": str(last_err) if last_err else None,
+            "last_success_at": str(last_ok) if last_ok else None,
+        })
+    return states
+
+
 def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     rows = _fetchall(conn, _LLM_ERRORS_SQL)
-    credit_row = _fetchone(conn, _LLM_CREDIT_SQL, _CREDIT_ERROR_PATTERNS)
-    credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
-
-    live = _fetchone(conn, _LLM_LIVENESS_SQL, _CREDIT_ERROR_PATTERNS)
-    last_err_at, last_ok_at, last_credit_err_at = (
-        (live[0], live[1], live[2]) if live else (None, None, None)
-    )
-    currently_failing, credit_live = _llm_live_state(
-        last_err_at, last_ok_at, last_credit_err_at)
+    state_rows = _fetchall(conn, _LLM_PROVIDER_STATE_SQL, _CREDIT_ERROR_PATTERNS)
+    providers = _llm_provider_states(state_rows)
+    credit_errors = sum(p["credit_errors"] for p in providers)
+    dead = [p for p in providers if p["credit_live"]]
+    credit_live = bool(dead)
+    # The rate arm still reads the newest call of ANY provider; only credit is per account.
+    last_err_at = max((r[1] for r in state_rows if r[1] is not None), default=None)
+    last_ok_at = max((r[2] for r in state_rows if r[2] is not None), default=None)
+    currently_failing = _llm_live_state(last_err_at, last_ok_at, None)[0]
 
     per_called_for: list[dict[str, Any]] = []
     tot = err = 0
@@ -1031,12 +1052,14 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     )
 
     if credit_live:
-        message = (
-            "LLM calls are failing with credit-balance errors right now — the provider "
-            "account is out of credit. Every paid LLM path (estimations, summaries, "
-            "autodedup judging, image labelling, location claims, URL parsing) is down "
-            f"({credit_errors} credit errors in 24h, no successful call since)."
-        )
+        # Names what failed, from the rows. The fixed list it replaces named every paid job and
+        # no provider: 2026-10-02..10 that took in Anthropic's (summaries, URL parsing), though
+        # no Anthropic call had failed.
+        message = "Out of LLM credit right now — " + "; ".join(
+            f"{p['provider']}: {p['credit_errors']} credit-balance errors in 24h on "
+            f"{', '.join(p['credit_models'])} ({', '.join(p['credit_jobs'])}) and no "
+            f"successful {p['provider']} call since" for p in dead
+        ) + (". Top up that account." if len(dead) == 1 else ". Top up those accounts.")
     elif offenders:
         message = (
             f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} and is still "
@@ -1058,6 +1081,7 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
             "warn_rate": thresholds["llm_error_rate_warn"],
             "offending_called_for": offenders,
             "per_called_for": per_called_for,
+            "per_provider": providers,
         },
         "message": message,
     }
@@ -2387,13 +2411,26 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
             + ("nothing — it is not in the heartbeat at all" if lane is None
                else f"{claimed} on its last pass")
         )
+    # The abort arm, needing neither an old row nor `claimed == 0`: the provider stopped the
+    # last pass (credit, quota, key) and will stop the next alike. 2026-10-02..10 the lane
+    # claimed 500 a pass and wrote nothing: the wedge arm never fired, and the check blamed
+    # backlog age, never the provider. (Its "Recovered" flaps then were its own statement
+    # timeouts, which never reach this arm.)
+    fatal = " ".join(str(lane_last.get("fatal") or "").split())[:200]
+    if fatal:
+        status = "fail"
+        offenders.insert(0, f"the provider stopped the lane's last pass ({fatal})")
 
     p99 = float(latency[1]) if latency and latency[1] is not None else None
     if offenders:
         message = (
             "Prose facts are not being extracted: " + "; ".join(offenders)
-            + " — check the realtime worker's text_extract lane and OPENAI_API_KEY on "
-            "that Railway service."
+            + (f" — the provider refused {lane_last.get('model') or model}: fix that "
+               f"account's credit or quota (app_settings.{text_lane.MODEL_SETTING} picks the "
+               "model) or, for a key error, OPENAI_API_KEY on the realtime worker's Railway "
+               "service." if fatal else
+               " — check the realtime worker's text_extract lane and OPENAI_API_KEY on "
+               "that Railway service.")
         )
     else:
         message = (

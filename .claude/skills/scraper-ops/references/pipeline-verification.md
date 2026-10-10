@@ -277,7 +277,19 @@ credit-exhausted for 11 days (63,547 error rows, **zero** successful calls) and 
 alerting is edge-triggered, that produced **114 alerts alternating onset with a literal
 "✓ Recovered: llm_errors is healthy again"** for an outage that never recovered. Any
 recency-window detector downstream of a circuit breaker is sampling a duty cycle, not a state.
-Generalise it: a failure is superseded only by a newer success.
+Generalise it: a failure is superseded only by a newer success — of the SAME account. Credit
+(`credit_live`) is judged per provider: the text lane calls OpenAI up to every 5 minutes, so
+one comparison across providers would let it clear an empty Anthropic account within minutes.
+The alert names the provider and the models and jobs that failed: through OpenAI's
+2026-10-02..10 credit outage it said every paid LLM path was down and named no provider,
+Anthropic-backed jobs included. The rate arm's `currently_failing` still reads the newest call
+of any provider. The worker side of the same incident: a text-lane pass the provider stopped
+was booked as a success (`failed_passes: 0`) — it is now a failed pass, and
+`text_extraction_lag` fails on its `fatal` whatever `claimed` says (it had blamed backlog age).
+Still open, and the same rule broken: a timed-out check is `warn`, which `emit_transition_alerts`
+reads as not failing, so 6 of `text_extraction_lag`'s 7 timeouts in that outage closed its
+incident with a false "✓ Recovered" (each came 6.4-9.6 h after the last `fail`, past the 6 h
+flap cooldown).
 
 The symmetric pathology from the same edge-triggered rule: `property_maintenance` was `fail`
 continuously from 2026-08-20 13:08 UTC with its last alert at 11:37 UTC — six days red, six
