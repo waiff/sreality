@@ -8,8 +8,9 @@ commit beside the next holder: the fake has one clock and cannot tell the two ap
 runs on Postgres. And a release that comes AFTER A's fence waits for A's commit (the row lock).
 
 E948, EXECUTED too: `RT_LEASE_RELEASE_PREDECESSOR_SQL` ends a dead predecessor's live lease
-(this hostname, a second before this boot) and nothing else, and its cast never reaches a
-holder of another shape, which the fake can only model.
+(this hostname and pid, a second before this boot) and nothing else, its read-only twin
+`RT_LEASE_PREDECESSOR_SQL` names the same row and ends nothing, and the cast of either never
+reaches a holder of another shape, which the fake can only model.
 
 Both run in CI's migrations job (`TEST_DATABASE_URL`), each test on a lease name of its own,
 deleted after.
@@ -94,20 +95,25 @@ def test_a_live_lease_passes_the_fence_and_holds_a_later_release(
 def test_a_dead_predecessors_live_lease_is_released_once(sessions: tuple[Any, Any]) -> None:
     a, _b = sessions
     assert rt_lease.take(a, "host-a:1:100", 600)
-    assert rt_lease.release_predecessor(a, "host-a", 200) == "host-a:1:100"
+    assert rt_lease.predecessor(a, "host-a", 1, 200) == "host-a:1:100"
+    assert rt_lease.current(a)["live"] is True, "the read twin ends nothing"
+    assert rt_lease.release_predecessor(a, "host-a", 1, 200) == "host-a:1:100"
     assert rt_lease.current(a)["live"] is False
-    assert rt_lease.release_predecessor(a, "host-a", 200) is None, "an ended lease is no death"
+    assert rt_lease.release_predecessor(a, "host-a", 1, 200) is None, "an ended lease is no death"
+    assert rt_lease.predecessor(a, "host-a", 1, 200) is None
     assert rt_lease.take(a, "host-a:1:250", 600), "the lane is free at once"
 
 
 @pytest.mark.parametrize("holder", [
-    "host-a:1:200", "host-a:1:300", "host-b:1:100", "rt_seed:host-a:1:100",
+    "host-a:1:200", "host-a:1:300", "host-a:7:100", "host-b:1:100", "rt_seed:host-a:1:100",
     "dispatch:gh-123", "host-a:1:abc", "host-a:1:100:7",
+    "host-a:123456789012345678901:100",
 ])
-def test_no_other_lease_is_released_and_no_cast_fails(sessions: tuple[Any, Any],
-                                                      holder: str) -> None:
+def test_no_other_lease_is_named_or_released_and_no_cast_fails(sessions: tuple[Any, Any],
+                                                               holder: str) -> None:
     a, _b = sessions
     assert rt_lease.take(a, holder, 600)
-    assert rt_lease.release_predecessor(a, "host-a", 200) is None
+    assert rt_lease.predecessor(a, "host-a", 1, 200) is None
+    assert rt_lease.release_predecessor(a, "host-a", 1, 200) is None
     row = rt_lease.current(a)
     assert (row["holder"], row["live"]) == (holder, True)

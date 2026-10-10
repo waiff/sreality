@@ -372,13 +372,19 @@ nothing else.
   120 s statement stays under the 1,200 s stall warn and `LANE_PASS_TIMEOUT_SECONDS`; the 2,400 s
   lease also covers the reconcile's last group and a calibration re-cut.
 - **A dead predecessor's lease, and the claim cap (E948).** One worker process runs per container
-  and a restart in place keeps the hostname, so right before every take a pass releases the LIVE
-  lease whose holder (`<hostname>:<pid>:<second>`) names this hostname and a second before this
-  process booted: that process died holding it (no SIGTERM, so no E941 release; most likely the
-  OOM killer), and the lane used to skip "leased" until the TTL. In the same commit it halves
-  `rt_claim_cap:<generation>` (floor 25): a claim is min(`max_listings`, cap, the time budget's),
-  `bound_by` `cap` when the cap binds; 20 consecutive committed passes that claimed the whole cap
-  double it, up to `max_listings`, and a seed resets it. A deploy is a new container, so a new
+  and a restart in place keeps the hostname and the pid, so right before every take a pass
+  releases the LIVE lease whose holder (`<hostname>:<pid>:<second>`) names this hostname and pid
+  and a second before this process booted: that process died holding it (no SIGTERM, so no E941
+  release; most likely the OOM killer), and the lane used to skip "leased" until the TTL. The
+  engine logs the release as it happens and, in the same commit, halves
+  `rt_claim_cap:<generation>` (floor 25). The cap lowers the limit the feeds' shares are cut
+  from, min(`max_listings`, cap, the time budget's), `bound_by` `cap` when it binds: in the build
+  the entered feed takes the whole limit and the others a fifth each on top; only the revived
+  feed takes every revived id of its 20,000-row slice, whatever the limit. Only a seed raises the
+  cap again: the store keeps growing, so a size that died would die again. At the floor the lease
+  is only named (`predecessor_kept`, first in the skip's reason) and left to its TTL, as before
+  E948: a death the floor's claim did not prevent is no claim's to cure, and a release at every
+  boot would restart the whole worker as fast as it boots. A deploy is a new container, so a new
   hostname: it releases at SIGTERM (E941) and halves nothing.
 - **Its calibration follows the corpus (A10).** `rt_seed` cuts it from the database (no export)
   and resets the measured rate; a pass whose pHash population coverage falls below 0.85 re-cuts
@@ -396,10 +402,11 @@ nothing else.
   reconcile_deferred (the run cap), must_link_dissolved (operator `same` closures the pass
   dissolved, E926), skipped (0/1) + reason, errors (0/1) + refused/aborted,
   deadline_exceeded, seconds, held, retired, latency_p50_s, latency_p95_s, bound_by, claim_cap
-  ({cap, clean, reason}) + predecessor_released (E948), peak_rss_mb (E941) + rss_mb +
+  ({cap, reason}) + predecessor_released (E948; a skip carries it only when set, or instead
+  predecessor_kept, the lease the cap's floor left to its TTL), peak_rss_mb (E941) + rss_mb +
   memory_limit_mb (the container's cgroup limit, read at boot; E948)}`; an absent
   store (migrations 539/540) = `skipped: store_absent` + one warning. A change of the reconcile
-  state is logged once, and a released predecessor's lease each time.
+  state is logged once, and the engine logs each release of a dead predecessor's lease.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,
   E73), and a photo-dependent merge waits until every photograph carries its pHash, CLIP vector
   and tags (E908; CLIP p50 2.5 h). So a text-certified duplicate merges in ~6–7 minutes and a

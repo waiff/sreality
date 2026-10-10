@@ -108,8 +108,9 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              rate); a refusal counts as a failed pass. One integer is cadence AND
              kill switch; `rt_seed`, `apply` and `unapply` take the same lease, so
              there is one writer at a time, and a restart in place releases the lease
-             its dead predecessor left and halves the claim cap (E948). An absent
-             autodedup store skips with one warning.
+             its dead predecessor left and halves the claim cap, or, at the cap's
+             floor, leaves it to its TTL (E948). An absent autodedup store skips with
+             one warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook. It
              runs on the executor every lane shares, so it is that executor's
@@ -548,9 +549,10 @@ _AUTODEDUP_STORE_WARNED = False
 # standing refusal would otherwise write the same line 1,440 times a day.
 _AUTODEDUP_LAST_OUTCOME: str | None = None
 # This process's boot second (E948). One worker process runs per container and a restart in
-# place keeps the hostname, so a live `autodedup.rt_lease` whose holder names this hostname and
-# an earlier second was taken by a predecessor that died holding it (2026-10-10: most likely the
-# OOM killer, which sends no SIGTERM): every pass releases it before its take.
+# place keeps the hostname and the pid, so a live `autodedup.rt_lease` whose holder names both
+# and an earlier second was taken by a predecessor that died holding it (2026-10-10: most likely
+# the OOM killer, which sends no SIGTERM): a pass releases it before its take, and the engine
+# logs it, unless the claim cap is at its floor.
 _BOOTED_EPOCH: int = int(time.time())
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
@@ -2132,8 +2134,10 @@ def _autodedup_outcome(
         # `unseeded` (no generation to pass over yet).
         last.update(skipped=1, reason=str(summary["skipped"]),
                     detail=str(summary.get("reason") or "")[:AUTODEDUP_REASON_CHARS])
-        if summary.get("predecessor_released"):
-            last["predecessor_released"] = str(summary["predecessor_released"])
+        # E948: a dead predecessor's lease this skip released first, or left to its TTL.
+        for key in ("predecessor_released", "predecessor_kept"):
+            if summary.get(key):
+                last[key] = str(summary[key])
     elif summary is not None:
         counts = summary.get("counts") or {}
         latency = summary.get("latency_s") or {}
@@ -2182,8 +2186,8 @@ def _autodedup_outcome(
             latency_p50_s=latency.get("p50"),
             latency_p95_s=latency.get("p95"),
             bound_by=(summary.get("claim_bound") or {}).get("bound_by"),
-            # E948: the claim cap a death halves ({cap, clean, reason}), and the lease of a
-            # dead predecessor of this container this pass released (None: there was none).
+            # E948: the claim cap a death halves ({cap, reason}), and the lease of a dead
+            # predecessor of this container this pass released (None: there was none).
             claim_cap=summary.get("claim_cap"),
             predecessor_released=summary.get("predecessor_released"),
             # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
@@ -2242,10 +2246,6 @@ def _autodedup_sync() -> dict[str, Any]:
                 return _autodedup_outcome(started, refused=str(exc))
             finally:
                 _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = None, None
-            if summary.get("predecessor_released"):
-                LOG.warning(
-                    "AUTODEDUP: a predecessor of this container died holding "
-                    "autodedup.rt_lease: %s; released", summary["predecessor_released"])
             return _autodedup_outcome(started, summary=summary)
         finally:
             # run_incremental closes the connection it was handed; a second close is a

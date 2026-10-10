@@ -109,23 +109,31 @@ select l.holder, l.taken_at, l.expires_at, l.expires_at > now() as live
 
 # E948: the LIVE lease a dead predecessor of this container left. A worker pass's holder is
 # `<hostname>:<pid>:<the second its pass started>` (`incremental_lane.pass_holder`). One worker
-# process runs per container and a restart in place keeps the hostname, so a live row naming
-# THIS hostname and a second before this process booted belongs to a process that is gone. Only
-# that three-field shape can match — `rt_seed:<host>:<pid>:<second>` and `dispatch:<run>` never
-# do — and the CASE keeps the cast off every other shape. An expired row is no predecessor's
-# death: a pass that ended released its lease.
-RT_LEASE_RELEASE_PREDECESSOR_SQL = """
-update autodedup.rt_lease
-   set expires_at = now()
+# process runs per container, and a restart in place keeps the hostname and, under the same
+# entrypoint, the pid (1 on Railway), so a live row naming THIS hostname and pid and a second
+# before this process booted belongs to a process that is gone; a second worker on one host has
+# a pid of its own and never ends the first one's lease. Only that three-field shape can match
+# — `rt_seed:<host>:<pid>:<second>` and `dispatch:<run>` never do — the pid is compared as text,
+# and the CASE keeps the cast off every other shape. An expired row is no predecessor's death: a
+# pass that ended released its lease. ONE predicate, two statements: the release, and the read
+# that names the lease a pass at the claim cap's floor leaves to its TTL.
+_RT_LEASE_PREDECESSOR_WHERE = """
  where name = %(name)s::text
    and expires_at > now()
    and case when holder ~ '^[^:]+:[0-9]+:[0-9]{1,18}$'
             then split_part(holder, ':', 1) = %(host)s::text
+                 and split_part(holder, ':', 2) = %(pid)s::text
                  and split_part(holder, ':', 3)::bigint < %(booted)s::bigint
             else false
        end
-returning holder
 """
+RT_LEASE_RELEASE_PREDECESSOR_SQL = ("""
+update autodedup.rt_lease
+   set expires_at = now()""" + _RT_LEASE_PREDECESSOR_WHERE + """returning holder
+""")
+RT_LEASE_PREDECESSOR_SQL = ("""
+select holder
+  from autodedup.rt_lease""" + _RT_LEASE_PREDECESSOR_WHERE)
 
 # ------------------------------------------------------------------ the watermark feeds
 #

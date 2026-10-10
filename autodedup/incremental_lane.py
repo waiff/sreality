@@ -32,6 +32,7 @@ lane calls no provider; `spent_usd` is reported as a measured 0, not as a foreca
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import socket
@@ -206,6 +207,8 @@ from autodedup.model import LogisticModel
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
 
+LOG = logging.getLogger(__name__)
+
 LANE_NAME: str = rt_lease.NAME
 # THE PASS'S OWN DEADLINE (E913), in seconds of wall clock from the moment it starts. The
 # worker used to wrap the connection in a statement-refusing deadline and back off in process;
@@ -356,15 +359,18 @@ PASS_RATE_ALPHA: float = 0.5
 # release: most likely the kernel's OOM killer) took on more than its container could hold, so
 # the next process of the same container, which releases that lease before its take
 # (`rt_lease.release_predecessor`), halves `rt_claim_cap:<generation>` in the same commit, and
-# a claim is min(max_listings, cap, the time budget's). The death is the signal; nothing reads
-# a memory figure to decide.
+# the limit every feed's share is cut from is min(max_listings, cap, the time budget's). The
+# death is the signal; nothing reads a memory figure to decide. Nothing raises the cap again
+# but a seed: the store keeps growing under a generation (inactive adverts stay in it), so a
+# size that died dies again, and doubling back to it would kill the whole worker again.
 #
 # Below it a pass's memory is its neighbourhood read, not its claim: a smaller claim would only
-# slow the build.
+# slow the build. So at the floor a death is no claim's to cure — the neighbourhood read, the
+# revived feed (every revived id of a `REVIVE_SLICE` scan), a re-cut under the same lease, one
+# bad advert — and its lease is left to its TTL, as before E948: releasing it at every boot
+# would restart the whole worker as fast as it can boot, and the TTL holds that to one death a
+# lease.
 CLAIM_CAP_FLOOR: int = 25
-# How many consecutive committed passes must claim the whole cap, with no death between, before
-# it doubles: the store grows under a build, so a size has to hold for hours, not minutes.
-CLAIM_CAP_RECOVER_PASSES: int = 20
 # The window the retirement rail is measured over (W9e/R2). A slice-sized rail could only fire
 # while one drift slice was itself a twentieth of the store; a rolling day is independent of
 # `drift_slice` and of the store's size.
@@ -1186,7 +1192,10 @@ class SqlWork:
         # is applied here — before a statement is issued — because an aborted pass has spent
         # its time whether or not it wrote anything.
         by_time = max(BOOTSTRAP_MIN_CLAIM, int(self.pass_budget_s * self.rate_per_s))
-        # E948: the size this container survived, which every feed's share below inherits.
+        # E948: the size this container survived. It lowers the limit below, so the build's
+        # entered feed (the whole limit) and every other feed's fifth shrink with it; only the
+        # revived feed takes every revived id of its `revive_slice` scan, whatever the limit
+        # (owed since E941).
         cap = int(limit) if self.claim_cap is None else max(1, int(self.claim_cap))
         effective = max(1, min(int(limit), cap, by_time))
         self.claim_bound = {"max_listings": int(limit), "cap": cap,
@@ -1735,37 +1744,25 @@ def claim_cap_key(generation: str) -> str:
 
 def full_claim_cap(reason: str | None = None) -> dict[str, Any]:
     """The cap a seed starts a build at, and an absent row's: the whole `max_listings` (E948)."""
-    return {"cap": PASS_LIMITS.max_listings, "clean": 0, "reason": reason}
+    return {"cap": PASS_LIMITS.max_listings, "reason": reason}
 
 
 def read_claim_cap(value: Any) -> dict[str, Any]:
-    """The cap row as {cap, clean, reason}, the cap inside [floor, max_listings] (E948)."""
+    """The cap row as {cap, reason}, the cap inside [floor, max_listings] (E948)."""
     record = value if isinstance(value, Mapping) else {}
     try:
-        cap, clean = int(record["cap"]), int(record.get("clean") or 0)
+        cap = int(record["cap"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return full_claim_cap()
     return {"cap": max(CLAIM_CAP_FLOOR, min(PASS_LIMITS.max_listings, cap)),
-            "clean": max(0, clean), "reason": record.get("reason")}
+            "reason": record.get("reason")}
 
 
 def halve_claim_cap(record: Mapping[str, Any], died: str, booted_epoch: int) -> dict[str, Any]:
-    """A death halves the cap, never below the floor, and restarts the count to a doubling."""
+    """A death halves the cap, never below the floor (E948)."""
     booted = datetime.fromtimestamp(int(booted_epoch), timezone.utc)
-    return {"cap": max(CLAIM_CAP_FLOOR, int(record["cap"]) // 2), "clean": 0,
+    return {"cap": max(CLAIM_CAP_FLOOR, int(record["cap"]) // 2),
             "reason": f"{died} died before {booted.strftime('%Y-%m-%dT%H:%M:%SZ')}"}
-
-
-def claim_cap_after_pass(record: Mapping[str, Any], claimed: int) -> dict[str, Any] | None:
-    """The cap a committed pass leaves, or None when the pass does not count (E948)."""
-    cap = int(record["cap"])
-    if cap >= PASS_LIMITS.max_listings or claimed < cap:
-        return None
-    clean = int(record["clean"]) + 1
-    if clean < CLAIM_CAP_RECOVER_PASSES:
-        return {**record, "clean": clean}
-    return {"cap": min(PASS_LIMITS.max_listings, cap * 2), "clean": 0,
-            "reason": f"{clean} clean passes at {cap}"}
 
 
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
@@ -2144,21 +2141,31 @@ def _write_claim_cap(conn: Any, generation: str, record: Mapping[str, Any], why:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
-def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any],
-                         booted_epoch: int) -> tuple[str | None, dict[str, Any]]:
-    """A dead predecessor's lease released and the cap halved, in ONE commit of their own."""
+def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any], booted_epoch: int
+                         ) -> tuple[str | None, str | None, dict[str, Any]]:
+    """The live lease a dead predecessor of this process left, released with the cap halved in
+    ONE commit of their own and logged at once, before a pass that may die the same way: the
+    released holder, None, the halved cap. At the cap's floor it is only named and left to its
+    TTL (`CLAIM_CAP_FLOOR`): None, that holder, the cap as it was."""
+    host, pid = socket.gethostname(), os.getpid()
+    if int(cap["cap"]) <= CLAIM_CAP_FLOOR:
+        return None, rt_lease.predecessor(conn, host, pid, booted_epoch), cap
     with _transaction(conn):
-        died = rt_lease.release_predecessor(conn, socket.gethostname(), booted_epoch)
-        if died is not None:
-            cap = halve_claim_cap(cap, died, booted_epoch)
-            _write_claim_cap(conn, generation, cap, "halved")
-    return died, cap
+        died = rt_lease.release_predecessor(conn, host, pid, booted_epoch)
+        if died is None:
+            return None, None, cap
+        halved = halve_claim_cap(cap, died, booted_epoch)
+        _write_claim_cap(conn, generation, halved, "halved")
+    LOG.warning("AUTODEDUP: a predecessor of this container died holding autodedup.rt_lease: "
+                "%s; released, and the claim cap halved from %s to %s (E948)",
+                died, cap["cap"], halved["cap"])
+    return died, None, halved
 
 
 def pass_holder() -> str:
     """The name a pass takes the lease under: host, process, second. The worker makes it
     before the pass so its SIGTERM path can release exactly that row (E941), and the next
-    process of the same container reads the host and the second back (E948)."""
+    process of the same container reads all three back (E948)."""
     return f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
 
 
@@ -2275,9 +2282,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     first group lets through.
 
     `booted_epoch` is the worker process's boot second (E948): right before the take, the live
-    lease a dead predecessor of this container left is released and the claim cap halved, in
-    one commit of their own; a claim is at most the cap, and a pass that committed a claim of
-    the whole cap counts, in its own transaction, toward the cap's doubling."""
+    lease a dead predecessor of this process left (this hostname and pid, an earlier second) is
+    released and the claim cap halved, in one commit of their own, and logged; at the cap's
+    floor that lease is only named (`predecessor_kept`) and left to its TTL. The limit every
+    feed's share is cut from is at most the cap, and only a seed raises it again."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2287,6 +2295,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     conn = conn_factory()
     leased = False
     predecessor: str | None = None
+    kept: str | None = None
     original: BaseException | None = None
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
@@ -2319,11 +2328,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             return {"skipped": STOPPING, "reason": "the worker is shutting down",
                     "spent_usd": 0.0}
         if booted_epoch is not None:
-            predecessor, cap = _release_predecessor(conn, generation, cap, booted_epoch)
+            predecessor, kept, cap = _release_predecessor(conn, generation, cap, booted_epoch)
         if not take_lease(conn, holder):
-            return {"skipped": "leased",
-                    "reason": f"another writer holds autodedup.rt_lease: {rt_lease.describe(conn)}",
-                    "predecessor_released": predecessor, "spent_usd": 0.0}
+            held_by = ("another writer holds autodedup.rt_lease" if kept is None else
+                       "a dead predecessor of this container holds autodedup.rt_lease, left to "
+                       f"its TTL at the claim cap's floor ({CLAIM_CAP_FLOOR}; E948)")
+            return {"skipped": "leased", "reason": f"{held_by}: {rt_lease.describe(conn)}",
+                    "predecessor_released": predecessor, "predecessor_kept": kept,
+                    "spent_usd": 0.0}
         leased = True
         if shutting_down():
             # The shutdown began while the lease was being taken: its release may have run
@@ -2348,7 +2360,6 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                        claim_cap=int(cap["cap"]))
         result = None
         stopped = ""
-        counted: dict[str, Any] | None = None
         # E941: halved AHEAD, outside the transaction (`db.connect` is autocommit), so it stands
         # whatever ends this pass. E930 halved only on a raise the pass lived to see; a pass the
         # system killed (a deploy, a restart, OOM) wrote nothing, and once its lease expired the
@@ -2377,10 +2388,6 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     _exec(conn, RT_SETTING_WRITE_SQL, {
                         "key": bootstrap_setting_key(generation), "value": json.dumps(False),
                         "updated_by": f"{LANE_NAME}:bootstrap_done"})
-                # E948: in the pass's own commit, so a pass that rolls back counts for nothing.
-                counted = claim_cap_after_pass(cap, len(result.claimed))
-                if counted is not None:
-                    _write_claim_cap(conn, generation, counted, "counted")
                 # E941, the fence: the last statement before the commit. A lease released
                 # under the pass (the worker's shutdown) ends it here, rolled back.
                 rt_lease.hold(conn, holder)
@@ -2430,8 +2437,6 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     "reconcile": {"skipped": f"pass_{STOPPING}"}, "generation": generation,
                     "predecessor_released": predecessor, "claim_cap": cap,
                     "spent_usd": 0.0, **pass_memory()}
-        if counted is not None:
-            cap = counted
         if stopped and not shutting_down():
             # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
@@ -2568,9 +2573,6 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         return summary
     except BaseException as exc:
         original = exc
-        if predecessor is not None:
-            exc.add_note(f"this pass released autodedup.rt_lease from {predecessor!r}, a dead "
-                         "predecessor of this container (E948)")
         raise
     finally:
         try:

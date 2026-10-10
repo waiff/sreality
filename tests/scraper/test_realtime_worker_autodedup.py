@@ -132,7 +132,7 @@ def _summary(**over: Any) -> dict[str, Any]:
         "reconcile": {"counts": {"applied": 2}},
         "peak_rss_mb": 412.5,
         "rss_mb": 388.0,
-        "claim_cap": {"cap": 500, "clean": 0, "reason": "rt_seed"},
+        "claim_cap": {"cap": 500, "reason": "rt_seed"},
         "predecessor_released": None,
     }
     out.update(over)
@@ -278,7 +278,7 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         # E948: what it holds now, the container's limit read at boot, the claim cap, and the
         # lease of a dead predecessor this pass released (none)
         "rss_mb": 388.0, "memory_limit_mb": 8192.0,
-        "claim_cap": {"cap": 500, "clean": 0, "reason": "rt_seed"},
+        "claim_cap": {"cap": 500, "reason": "rt_seed"},
         "predecessor_released": None,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
@@ -600,17 +600,28 @@ def test_the_pass_reads_peak_memory_in_mib_from_getrusage(monkeypatch: pytest.Mo
 # ------------------------------------------- E948: a dead predecessor, and the memory beside it
 
 
+def _stranded_by_my_predecessor(world: FakePg) -> str:
+    """The 10-10 row: a live lease of this hostname and pid, from a second before this boot."""
+    dead = f"{socket.gethostname()}:{os.getpid()}:{rw._BOOTED_EPOCH - 106}"
+    world.lease[LANE_NAME] = {"holder": dead, "expires_at": world.now + timedelta(minutes=38)}
+    return dead
+
+
+def _released_lines(caplog: pytest.LogCaptureFixture, dead: str) -> int:
+    return sum(f"a predecessor of this container died holding autodedup.rt_lease: {dead}; "
+               "released" in record.getMessage() for record in caplog.records)
+
+
 def test_a_restart_in_place_frees_the_lane_its_dead_predecessor_stranded(
         world, tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
     """2026-10-10: the process died holding the lease and Railway restarted it in place, so
     every pass of the new process skipped "leased" until the TTL. Now the first pass releases
     that lease, says so once, claims under half the cap, and the lane is its own again."""
     seed_lane(world, tmp_path)
-    dead = f"{socket.gethostname()}:1:{rw._BOOTED_EPOCH - 106}"
-    world.lease[LANE_NAME] = {"holder": dead, "expires_at": world.now + timedelta(minutes=38)}
+    dead = _stranded_by_my_predecessor(world)
     _worker_on(monkeypatch, world)
 
-    with caplog.at_level(logging.WARNING, logger=rw.LOG.name):
+    with caplog.at_level(logging.WARNING):
         last = rw._autodedup_sync()
         again = rw._autodedup_sync()
 
@@ -618,23 +629,50 @@ def test_a_restart_in_place_frees_the_lane_its_dead_predecessor_stranded(
     assert last["predecessor_released"] == dead
     assert last["claim_cap"]["cap"] == 250 and dead in last["claim_cap"]["reason"]
     assert again["predecessor_released"] is None and again["claim_cap"]["cap"] == 250
-    assert sum(f"a predecessor of this container died holding autodedup.rt_lease: {dead}; "
-               "released" in record.getMessage() for record in caplog.records) == 1
+    assert _released_lines(caplog, dead) == 1
 
 
-def test_a_skip_after_the_release_still_names_the_predecessor(
-        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_pass_that_refuses_after_the_release_still_logs_it(
+        world, tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A refusal reaches the worker as SystemExit, whose text is all the heartbeat keeps: the
+    release is logged by the engine when it happens, so it is on record on this path too."""
+    seed_lane(world, tmp_path)
+    dead = _stranded_by_my_predecessor(world)
+    _worker_on(monkeypatch, world)
+
+    def refuses(*_args: Any, **_kwargs: Any) -> Any:
+        raise incremental_lane.RetireRefusal("the drift sweep would retire too much")
+
+    monkeypatch.setattr(incremental_lane, "run_pass_bounded", refuses)
+    with caplog.at_level(logging.WARNING):
+        last = rw._autodedup_sync()
+
+    assert (last["errors"], last["refused"]) == (1, "the drift sweep would retire too much")
+    assert _released_lines(caplog, dead) == 1
+    assert world.lease[LANE_NAME]["expires_at"] <= world.now, "and the pass gave its own back"
+
+
+def test_a_skip_names_the_predecessor_it_released_or_left_to_its_ttl(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
     _settings(monkeypatch)
     _stub_engine(monkeypatch, {"skipped": "leased", "reason": "a seed took it",
-                               "predecessor_released": "host:1:1", "spent_usd": 0.0})
+                               "predecessor_released": "host:1:1", "predecessor_kept": None,
+                               "spent_usd": 0.0})
 
-    with caplog.at_level(logging.WARNING, logger=rw.LOG.name):
-        last = rw._autodedup_sync()
+    last = rw._autodedup_sync()
 
     assert (last["skipped"], last["reason"], last["predecessor_released"]) == (
         1, "leased", "host:1:1")
-    assert any("host:1:1; released" in record.getMessage() for record in caplog.records)
+    assert "predecessor_kept" not in last
+
+    _stub_engine(monkeypatch, {"skipped": "leased", "reason": "at the floor",
+                               "predecessor_released": None, "predecessor_kept": "host:1:2",
+                               "spent_usd": 0.0})
+    last = rw._autodedup_sync()
+
+    assert (last["detail"], last["predecessor_kept"]) == ("at the floor", "host:1:2")
+    assert "predecessor_released" not in last
 
 
 def test_the_containers_memory_limit_is_read_from_its_cgroup(tmp_path: Path) -> None:

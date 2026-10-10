@@ -248,18 +248,20 @@ def _names_holder(sql: str) -> bool:
     return re.search(r"\bholder\s*=\s*%\(holder\)s", where) is not None
 
 
-# E948's limbs as `RT_LEASE_RELEASE_PREDECESSOR_SQL` spells them, each READ from the statement
-# as `_names_holder` reads the release's: a statement that dropped or bent one releases here
-# what it would release in Postgres, so the tests that pin "never that holder" see it.
+# E948's limbs as the predecessor statements spell them (one WHERE, two statements), each READ
+# from the statement as `_names_holder` reads the release's: a statement that dropped or bent
+# one matches here what it would match in Postgres, so the tests that pin "never that holder"
+# see it.
 _PREDECESSOR_SHAPE = "holder ~ '^[^:]+:[0-9]+:[0-9]{1,18}$'"
 _PREDECESSOR_LIVE = "expires_at > now()"
 _PREDECESSOR_HOST = "split_part(holder, ':', 1) = %(host)s::text"
+_PREDECESSOR_PID = "split_part(holder, ':', 2) = %(pid)s::text"
 _PREDECESSOR_OLDER = "split_part(holder, ':', 3)::bigint < %(booted)s::bigint"
 
 
 def _a_predecessor(sql: str, held: Mapping[str, Any], p: Mapping[str, Any],
                    now: datetime) -> bool:
-    """Whether the predecessor release ends this row, by the limbs its text carries."""
+    """Whether a predecessor statement matches this row, by the limbs its text carries."""
     text = " ".join(sql.split())
     holder = str(held.get("holder") or "")
     fields = holder.split(":")
@@ -268,6 +270,8 @@ def _a_predecessor(sql: str, held: Mapping[str, Any], p: Mapping[str, Any],
     if _PREDECESSOR_LIVE in text and not held["expires_at"] > now:
         return False
     if _PREDECESSOR_HOST in text and fields[0] != p["host"]:
+        return False
+    if _PREDECESSOR_PID in text and (len(fields) < 2 or fields[1] != str(p["pid"])):
         return False
     if _PREDECESSOR_OLDER in text:
         second = fields[2] if len(fields) > 2 else ""
@@ -354,11 +358,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         held = db.lease.get(p["name"])
         return ([(held["holder"], held.get("taken_at"), held["expires_at"],
                   held["expires_at"] > db.now)] if held else [])
-    if sql == S.RT_LEASE_RELEASE_PREDECESSOR_SQL:
+    if sql in (S.RT_LEASE_RELEASE_PREDECESSOR_SQL, S.RT_LEASE_PREDECESSOR_SQL):
         held = db.lease.get(p["name"])
         if not held or not _a_predecessor(sql, held, p, db.now):
             return []
-        held["expires_at"] = db.now
+        if sql == S.RT_LEASE_RELEASE_PREDECESSOR_SQL:
+            held["expires_at"] = db.now
         return [(held["holder"],)]
     if sql == S.RT_LEASE_HOLD_SQL:
         # The fake has one clock, so `now()` against `clock_timestamp()` is the live test's to
