@@ -19,7 +19,7 @@ import re
 import unicodedata
 from functools import lru_cache
 from html import unescape
-from typing import Iterable, Mapping, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING, TypeVar
 
 from autodedup.normalize import fact_text
 
@@ -34,6 +34,36 @@ MAX_CODE_POPULATION: int = 8
 # The cluster invariant asks the same advert's facts once per PAIR, so a 256-member group would
 # re-scan one body 255 times. Keyed on the body text, which is what the readers actually parse.
 BODY_CACHE: int = 65536
+# Every reader cached on a body (`body_cached`, here and in `body_align`), so the lane can empty
+# them when its pass ends (E949): a long-lived worker otherwise kept up to BODY_CACHE readings in
+# each, across every pass.
+BODY_READERS: list[Any] = []
+
+_Reading = TypeVar("_Reading")
+
+
+def body_cached(reader: Callable[..., _Reading]) -> Callable[..., _Reading]:
+    """`lru_cache` at BODY_CACHE, registered in BODY_READERS."""
+    cached = lru_cache(maxsize=BODY_CACHE)(reader)
+    BODY_READERS.append(cached)
+    return cached
+
+
+def body_cache_entries() -> dict[str, int]:
+    """The readings the registered readers hold now, summed by module."""
+    out: dict[str, int] = {}
+    for reader in BODY_READERS:
+        module = reader.__module__.rsplit(".", 1)[-1]
+        out[module] = out.get(module, 0) + reader.cache_info().currsize
+    return out
+
+
+def clear_body_caches() -> None:
+    """Empty every registered reader: a reading depends on its arguments alone, so once emptied a
+    reading is recomputed to the value a fresh process computes."""
+    for reader in BODY_READERS:
+        reader.cache_clear()
+
 
 CODE_MASK: str = "[KOD]"
 
@@ -202,7 +232,7 @@ def printed_unit_codes(text: str | None, wide: bool = False) -> frozenset[str]:
     return _printed_unit_codes(text, wide) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_unit_codes(text: str, wide: bool) -> frozenset[str]:
     folded = fold(text)
     out: set[str] = {
@@ -264,7 +294,7 @@ def printed_floors_by_form(text: str | None, words: bool = False
     return dict(_printed_floors_by_form(text, words)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_floors_by_form(text: str, words: bool) -> tuple[tuple[str, frozenset[int]], ...]:
     folded = fold(text)
     np_side = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
@@ -335,7 +365,7 @@ def subject_floors_by_form(text: str | None, words: bool = False
     return dict(_subject_floors_by_form(text, words)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _subject_floors_by_form(text: str, words: bool) -> tuple[tuple[str, frozenset[int]], ...]:
     folded = fold(text)
     np_side: set[int] = set()
@@ -397,7 +427,7 @@ def ground_or_upper(text: str | None, words: bool = False) -> frozenset[str]:
     return _ground_or_upper(text, words) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _ground_or_upper(text: str, words: bool = False) -> frozenset[str]:
     folded = fold(text)
     out: set[str] = set()
@@ -434,7 +464,7 @@ def stated_unit_counts(text: str | None) -> frozenset[int]:
     return _stated_unit_counts(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _stated_unit_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -502,7 +532,7 @@ def parcel_numbers(text: str | None, wide: bool = False) -> set[str]:
     return set(_parcel_numbers(text, wide)) if text else set()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _parcel_numbers(text: str, wide: bool = False) -> frozenset[str]:
     folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
     out: set[str] = set()
@@ -560,7 +590,7 @@ def parcel_table(text: str | None) -> tuple[tuple[frozenset[str], float, float],
     return _parcel_table(text) if text else ()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _parcel_table(text: str) -> tuple[tuple[frozenset[str], float, float], ...]:
     folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
     rows: list[tuple[frozenset[str], float, float]] = []
@@ -576,7 +606,7 @@ def parcel_numbers_wider(text: str | None) -> set[str]:
     return set(_parcel_numbers_wider(text)) if text else set()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _parcel_numbers_wider(text: str) -> frozenset[str]:
     folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
     out: set[str] = set()
@@ -610,7 +640,7 @@ ACCESSORY_KINDS: tuple[str, ...] = ("stani", "sklep", "garaz")
 ACCESSORY_MAX_PER_KIND: int = 6
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _accessory_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(unescape(text))
     found: dict[str, set[str]] = {}
@@ -647,7 +677,7 @@ def capacity_counts(text: str | None) -> set[int]:
     return set(_capacity_counts(text)) if text else set()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _capacity_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -672,7 +702,7 @@ def offered_room_counts(text: str | None) -> set[int]:
     return set(_offered_room_counts(text)) if text else set()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _offered_room_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -768,7 +798,7 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
     return set(_stated_areas(text, stored_area_m2)) if text else set()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _stated_areas(text: str, stored_area_m2: float | None) -> frozenset[float]:
     folded = fact_text(text)
     mentions: list[tuple[int, int, float]] = []
@@ -845,7 +875,7 @@ def printed_areas(text: str | None) -> frozenset[tuple[float, int, str]]:
     return _printed_areas(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_areas(text: str) -> frozenset[tuple[float, int, str]]:
     folded = fact_text(text)
     mentions: list[tuple[int, int, float]] = []
@@ -890,7 +920,7 @@ def leading_area(text: str | None, scopes: frozenset[str]) -> tuple[float, int] 
     return _leading_area(text, scopes) if text else None
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _leading_area(text: str, scopes: frozenset[str]) -> tuple[float, int] | None:
     folded = fact_text(text)
     best: tuple[int, float, int] | None = None
@@ -959,7 +989,7 @@ def prose_streets(text: str | None) -> frozenset[str]:
     return _prose_streets(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _prose_streets(text: str) -> frozenset[str]:
     out: set[str] = set()
     for match in _PROSE_STREET.finditer(text):
@@ -1040,7 +1070,7 @@ def stated_charges(text: str | None) -> dict[str, frozenset[float]]:
     return dict(_stated_charges(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _stated_charges(text: str) -> tuple[tuple[str, frozenset[float]], ...]:
     folded = fold(text)
     found: dict[str, set[float]] = {}
@@ -1076,7 +1106,7 @@ def prose_plot_areas(text: str | None) -> frozenset[float]:
     return _prose_plot_areas(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _prose_plot_areas(text: str) -> frozenset[float]:
     out: set[float] = set()
     for match in _PROSE_PLOT.finditer(fact_text(text)):
@@ -1103,7 +1133,7 @@ def parcel_divisions(text: str | None) -> frozenset[float]:
     return _parcel_divisions(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _parcel_divisions(text: str) -> frozenset[float]:
     out: set[float] = set()
     for match in _PARCEL_DIVISION.finditer(fact_text(text)):
@@ -1165,7 +1195,7 @@ def offered_storeys(text: str | None) -> frozenset[int]:
     return _offered_storeys(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _offered_storeys(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -1199,7 +1229,7 @@ def labelled_unit_ids(text: str | None) -> frozenset[str]:
     return _labelled_unit_ids(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _labelled_unit_ids(text: str) -> frozenset[str]:
     out: set[str] = set()
     for match in _LABELLED_UNIT_ID.finditer(fact_text(unescape(text))):
@@ -1232,7 +1262,7 @@ def accessory_areas(text: str | None) -> frozenset[float]:
     return _accessory_areas(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _accessory_areas(text: str) -> frozenset[float]:
     out: set[float] = set()
     for match in _ACCESSORY_AREA.finditer(fact_text(text)):
@@ -1253,7 +1283,7 @@ _CAPACITY_EN = re.compile(
 )
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _capacity_counts_en(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -1289,7 +1319,7 @@ def stated_bed_counts(text: str | None) -> frozenset[int]:
     return _stated_bed_counts(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _stated_bed_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
@@ -1326,7 +1356,7 @@ def body_localities(text: str | None) -> frozenset[str]:
     return _body_localities(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _body_localities(text: str) -> frozenset[str]:
     out = {fact_text(match.group(1)) for match in _BODY_PLACE.finditer(unescape(text))}
     out.discard("")
@@ -1371,7 +1401,7 @@ def priced_land_rows(text: str | None) -> tuple[tuple[float, float], ...]:
     return _priced_land_rows(text) if text else ()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _priced_land_rows(text: str) -> tuple[tuple[float, float], ...]:
     folded = fact_text(text)
     areas = [(match.start(), _area_value(match.group(1)))
@@ -1407,7 +1437,7 @@ def prose_plot_areas_wide(text: str | None) -> frozenset[float]:
     return prose_plot_areas(text) | _prose_plot_areas_wide(text)
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _prose_plot_areas_wide(text: str) -> frozenset[float]:
     out: set[float] = set()
     for match in _PROSE_PLOT_WIDE.finditer(fact_text(text)):
@@ -1441,7 +1471,7 @@ def states_second_plot(text: str | None) -> bool:
     return _states_second_plot(text)
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _states_second_plot(text: str) -> bool:
     folded = fact_text(text)
     for match in _SECOND_PLOT.finditer(folded):
@@ -1487,7 +1517,7 @@ def offered_extent_menu(text: str | None) -> frozenset[float]:
     return _offered_extent_menu(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _offered_extent_menu(text: str) -> frozenset[float]:
     folded = fact_text(text)
     if not _EXTENT_CHOICE.search(folded):
@@ -1551,7 +1581,7 @@ def stated_charges_wide(text: str | None) -> dict[str, frozenset[float]]:
     return {kind: frozenset(values) for kind, values in sorted(out.items())}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _stated_charges_wide(text: str) -> tuple[tuple[str, frozenset[float]], ...]:
     folded = fold(text)
     found: dict[str, set[float]] = {}
@@ -1588,7 +1618,7 @@ def sanitary_arrangement(text: str | None) -> frozenset[str]:
     return _sanitary_arrangement(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _sanitary_arrangement(text: str) -> frozenset[str]:
     folded = fact_text(text)
     out: set[str] = set()
@@ -1616,7 +1646,7 @@ def renovation_state(text: str | None) -> frozenset[str]:
     return _renovation_state(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _renovation_state(text: str) -> frozenset[str]:
     folded = fact_text(text)
     out: set[str] = set()
@@ -1643,7 +1673,7 @@ def floor_coverings(text: str | None) -> frozenset[str]:
     return _floor_coverings(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _floor_coverings(text: str) -> frozenset[str]:
     folded = fact_text(text)
     return frozenset(name for name, pattern in _FLOORING if pattern.search(folded))
@@ -1663,7 +1693,7 @@ def furnished_state(text: str | None) -> frozenset[str]:
     return _furnished_state(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _furnished_state(text: str) -> frozenset[str]:
     folded = fact_text(text)
     out: set[str] = set()
@@ -1694,7 +1724,7 @@ def english_unit_codes(text: str | None) -> dict[str, frozenset[str]]:
     return dict(_english_unit_codes(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _english_unit_codes(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(text)
     out: list[tuple[str, frozenset[str]]] = []
@@ -1723,7 +1753,7 @@ def slug_unit_codes(url: str | None) -> frozenset[str]:
     return _slug_unit_codes(url) if url else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _slug_unit_codes(url: str) -> frozenset[str]:
     slug = _slug_of(url)
     found = {match.group(1).upper() for match in _SLUG_BUILDING.finditer(slug)}
@@ -1735,7 +1765,7 @@ def slug_areas(url: str | None) -> frozenset[float]:
     return _slug_areas(url) if url else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _slug_areas(url: str) -> frozenset[float]:
     out = {float(match.group(1)) for match in _SLUG_AREA.finditer(_slug_of(url))}
     return frozenset(v for v in out if 1.0 <= v <= STATED_AREA_MAX_M2)
@@ -1780,7 +1810,7 @@ def plot_attributes(text: str | None) -> dict[str, frozenset[str]]:
     return dict(_plot_attributes(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _plot_attributes(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(text)
     out: list[tuple[str, frozenset[str]]] = []
@@ -1822,7 +1852,7 @@ def commercial_product_class(text: str | None) -> frozenset[str]:
     return _commercial_product_class(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _commercial_product_class(text: str) -> frozenset[str]:
     lead = re.split(r"(?<=[.!?])\s", fact_text(text)[:PRODUCT_LEAD_CHARS], maxsplit=1)[0]
     return frozenset(name for name, pattern in _PRODUCT_CLASSES if pattern.search(lead))
@@ -1841,7 +1871,7 @@ def parking_level(text: str | None) -> frozenset[str]:
     return _parking_level(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _parking_level(text: str) -> frozenset[str]:
     folded = fact_text(text)
     return frozenset(name for name, pattern in _PARKING_LEVELS if pattern.search(folded))
@@ -1878,7 +1908,7 @@ def offered_use(text: str | None) -> frozenset[str]:
     return _offered_use(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _offered_use(text: str) -> frozenset[str]:
     folded = fact_text(text)
     out: set[str] = set()
@@ -1924,7 +1954,7 @@ def printed_space_numbers(text: str | None) -> frozenset[str]:
     return _printed_space_numbers(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_space_numbers(text: str) -> frozenset[str]:
     folded = fact_text(unescape(text))
     out = {re.sub(r"\s+", "", match.group(1)).upper().strip("./")
@@ -1954,7 +1984,7 @@ def further_areas(text: str | None) -> frozenset[float]:
     return _further_areas(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _further_areas(text: str) -> frozenset[float]:
     out: set[float] = set()
     for match in _FURTHER_AREA.finditer(fact_text(unescape(text))):
@@ -2003,7 +2033,7 @@ def printed_house_numbers(text: str | None, street_key: str | None = None
     return _printed_house_numbers(text, street_key or "")
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_house_numbers(text: str, street_key: str) -> frozenset[frozenset[str]]:
     folded = fact_text(unescape(text))
     found: set[frozenset[str]] = set()
@@ -2076,7 +2106,7 @@ def priced_letting_plan(text: str | None) -> dict[str, tuple[float, float]]:
     return dict(_priced_letting_plan(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _priced_letting_plan(text: str) -> tuple[tuple[str, tuple[float, float]], ...]:
     folded = fact_text(unescape(text))
     rows: dict[str, tuple[float, float]] = {}
@@ -2152,7 +2182,7 @@ def printed_designators(text: str | None) -> dict[str, frozenset[str]]:
     return dict(_printed_designators(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fold(unescape(text))
     out: list[tuple[str, frozenset[str]]] = []
@@ -2189,7 +2219,7 @@ def facility_tenure(text: str | None) -> frozenset[str]:
     return _facility_tenure(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _facility_tenure(text: str) -> frozenset[str]:
     folded = fact_text(unescape(text))
     out: set[str] = set()
@@ -2227,7 +2257,7 @@ def furnished_state_wide(text: str | None, column: str | None = None) -> frozens
     return frozenset({stated}) if stated else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _furnished_state_wide(text: str) -> frozenset[str]:
     folded = fact_text(unescape(text))
     out: set[str] = set()
@@ -2315,7 +2345,7 @@ def printed_lot_labels(text: str | None, land_only: bool = False) -> dict[str, f
     return dict(_printed_lot_labels(text, land_only)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _printed_lot_labels(text: str, land_only: bool) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(unescape(text))
     found: dict[str, set[str]] = {}
@@ -2374,7 +2404,7 @@ def block_plot_area(text: str | None) -> float | None:
     return _block_plot_area(text) if text else None
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _block_plot_area(text: str) -> float | None:
     found = {value for value in (_area_value(match.group(1))
                                  for match in _BLOCK_PLOT.finditer(fact_text(text)))
@@ -2439,7 +2469,7 @@ def _decimals_of(raw: str) -> int:
     return len(cleaned.split(".", 1)[1]) if "." in cleaned else 0
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _outdoor_accessory_areas(text: str) -> frozenset[tuple[str, float, int]]:
     folded = fact_text(unescape(text))
     if _OUTDOOR_PLURAL.search(folded):
@@ -2494,7 +2524,7 @@ def cellar_areas(text: str | None) -> frozenset[tuple[float, int]]:
     return _cellar_areas(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _cellar_areas(text: str) -> frozenset[tuple[float, int]]:
     folded = fact_text(unescape(text))
     if _CELLAR_PLURAL.search(folded):
@@ -2559,7 +2589,7 @@ def position_designators(text: str | None) -> dict[str, frozenset[str]]:
     return dict(_position_designators(text)) if text else {}
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _position_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(unescape(text))
     found: dict[str, set[str]] = {}
@@ -2596,7 +2626,7 @@ def named_villa_units(text: str | None) -> frozenset[str]:
     return _named_villa_units(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _named_villa_units(text: str) -> frozenset[str]:
     folded = fact_text(unescape(text))
     return frozenset(f"{m.group(1)}/{m.group(2).upper()}" for m in _NAMED_VILLA.finditer(folded))
@@ -2607,7 +2637,7 @@ def residence_codes(text: str | None) -> frozenset[str]:
     return _residence_codes(text) if text else frozenset()
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def _residence_codes(text: str) -> frozenset[str]:
     folded = fact_text(unescape(text))
     return frozenset(m.group(1).upper() for m in _RESIDENCE_CODE.finditer(folded))

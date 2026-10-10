@@ -49,7 +49,7 @@ try:
 except ImportError:  # pragma: no cover — no getrusage outside Unix
     resource = None  # type: ignore[assignment]
 
-from autodedup import reconcile, rt_lease
+from autodedup import indistinguishable, normalize, reconcile, rt_lease
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -206,6 +206,7 @@ from autodedup.store_score import storable
 from autodedup.model import LogisticModel
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
+from autodedup.text_facts import body_cache_entries, clear_body_caches
 
 LOG = logging.getLogger(__name__)
 
@@ -1073,10 +1074,15 @@ class SqlFacts:
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
     def vectors(self, image_ids: Iterable[int]) -> dict[int, str]:
-        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else."""
+        """The CLIP vectors of a gallery `facts` read without them (E933), and nothing else. Each
+        FACT_CHUNK slice is encoded as it arrives and its text dropped before the next is read
+        (E949): the text is ~6 kB a vector, and the slices concatenated were hundreds of MB."""
         wanted = sorted({int(i) for i in image_ids})
-        encoded = {int(row["image_id"]): encode_clip(row["embedding"])
-                   for row in self._dicts_over(COHORT_CLIP_SQL, wanted, model=self.clip_model)}
+        encoded: dict[int, str | None] = {}
+        for ids_slice in self._slices(wanted):
+            encoded.update((int(row["image_id"]), encode_clip(row["embedding"]))
+                           for row in self._dicts(COHORT_CLIP_SQL,
+                                                  {"ids": ids_slice, "model": self.clip_model}))
         return {image_id: clip for image_id, clip in encoded.items() if clip is not None}
 
     def _galleries(self, ids: Sequence[int], clip: bool) -> dict[int, list[Image]]:
@@ -2275,9 +2281,27 @@ def rss_mb(statm: str = "/proc/self/statm") -> float | None:
         return None
 
 
-def pass_memory() -> dict[str, float | None]:
-    """The process's memory at a pass's end: its high-water mark and what it holds now."""
-    return {"peak_rss_mb": peak_rss_mb(), "rss_mb": rss_mb()}
+def memo_entries() -> dict[str, int]:
+    """The entries the engine's process-level memos of what it read hold now (E949): the readers
+    cached on a body, by module, E282's shingle sets, and the token hashes and SimHash lanes."""
+    return {**body_cache_entries(), "shingles": len(indistinguishable._SHINGLE_MEMO),
+            "tokens": len(normalize._token_hashes) + len(normalize._token_lanes)}
+
+
+def forget_bodies() -> None:
+    """Empty every memo `memo_entries` counts (E949), so no reading of a body or a token is
+    carried into the next pass. Each is a pure function of its arguments: emptied, a reading
+    is recomputed to the same value, so no decision changes."""
+    clear_body_caches()
+    indistinguishable._SHINGLE_MEMO.clear()
+    normalize._token_hashes.clear()
+    normalize._token_lanes.clear()
+
+
+def pass_memory() -> dict[str, Any]:
+    """The process's memory at a pass's end: its high-water mark, what it holds now, and what
+    the body memos hold just before the pass's end empties them (E949)."""
+    return {"peak_rss_mb": peak_rss_mb(), "rss_mb": rss_mb(), "memo_entries": memo_entries()}
 
 
 def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
@@ -2372,7 +2396,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     then halves nothing: the predecessor fitted the row before its own take, so it ran under
     the smaller limit. A row that records none is stamped with the limit this pass reads, or
     measured from `E948_LIMIT_MB` if E948 halved it (no `limit_mb` key at all); a halving
-    records the limit as `halve_claim_cap` says."""
+    records the limit as `halve_claim_cap` says.
+
+    Whatever ends it, the pass empties the process-level memos of what it read (E949,
+    `forget_bodies`), after its lease is released; a summary reads them first (`memo_entries`).
+    A raised pass also lets go of the raise it noted (`original`) before it leaves: the raise's
+    traceback holds this frame, so keeping it made a cycle, and every local of the pass stayed
+    alive after the lane loop dropped the raise, until the next full collection."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2671,6 +2701,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             if leased:
                 rt_lease.release_after(conn, holder, original)
         finally:
+            # E949: the raise's traceback holds this frame, so `original` made a cycle; and
+            # the memos go after the lease, which the next holder may be waiting on.
+            original = None
+            forget_bodies()
             close = getattr(conn, "close", None)
             if callable(close):
                 close()

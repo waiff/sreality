@@ -397,6 +397,21 @@ nothing else.
   E948: a death the floor's claim did not prevent is no claim's to cure, and a release at every
   boot would restart the whole worker as fast as it boots. A deploy is a new container, so a new
   hostname: it releases at SIGTERM (E941) and halves nothing.
+- **What a pass frees goes back before the next pass (E949).** A pass runs on whichever executor
+  thread is free and glibc keeps what it frees in that thread's malloc arena, so the process grew by
+  a pass's worth on each new thread (2026-10-10: seven deaths, each process on about its sixth pass
+  whatever it claimed). The start command caps the process at two arenas (`env MALLOC_ARENA_MAX=2
+  python -m scraper.realtime_worker`: Railway runs a Dockerfile start command in exec form, with no
+  shell, and `env` execs python, which stays PID 1). Under the lane's lock every pass begins and
+  ends with `gc.collect()` and glibc's `malloc_trim(0)` (a no-op without glibc). A raised pass's own
+  end runs while its raise is in flight, the traceback holding the pass's frames, so its memory goes
+  back when the next pass begins; the engine no longer keeps the raise it notes for its lease, a
+  cycle that outlived the lane's drop of it until the next full collection. The engine counts its
+  process-level memos of what it read and empties them whatever ends the pass, once its lease is
+  released: every reader cached on a body (`text_facts.BODY_READERS`), E282's shingle sets (now
+  keyed on the body itself) and `normalize`'s token hashes and SimHash lanes. The CLIP top-up
+  encodes each 500-image slice as it arrives. Decisions stay a fresh process's; `SEED_VERSION` is
+  unchanged.
 - **Its calibration follows the corpus (A10).** `rt_seed` cuts it from the database (no export)
   and resets the measured rate; a pass whose pHash population coverage falls below 0.85 re-cuts
   it (at most every 6 h) inside its own remaining time — every statement bounded by it, a cut
@@ -415,9 +430,14 @@ nothing else.
   deadline_exceeded, seconds, held, retired, latency_p50_s, latency_p95_s, bound_by, claim_cap
   ({cap, reason, limit_mb}) + predecessor_released (E948; a skip carries it only when set, or
   instead predecessor_kept, the lease the cap's floor left to its TTL), peak_rss_mb (E941) +
-  rss_mb + memory_limit_mb (the container's cgroup limit, read each pass; E948, E948b)}`; an absent
-  store (migrations 539/540) = `skipped: store_absent` + one warning. A change of the reconcile
-  state is logged once, and the engine logs each release of a dead predecessor's lease.
+  rss_mb + memory_limit_mb (the container's cgroup limit, read each pass; E948, E948b),
+  memo_entries (the body readers by module, the shingle sets and the tokens, before the pass's end
+  empties them) + rss_at_start_mb and rss_after_trim_mb (the RSS once freed memory went back,
+  before the pass and at its end; E949: on every path but `previous_pass_running`, and a raised
+  pass writes no `last`, so the heartbeat keeps the previous pass's until the next pass's
+  rss_at_start_mb shows what the raised one left)}`; an absent store (migrations 539/540) =
+  `skipped: store_absent` + one warning. A change of the reconcile state is logged once, and the
+  engine logs each release of a dead predecessor's lease.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,
   E73), and a photo-dependent merge waits until every photograph carries its pHash, CLIP vector
   and tags (E908; CLIP p50 2.5 h). So a text-certified duplicate merges in ~6–7 minutes and a
@@ -471,8 +491,9 @@ Four changes, each closing one link:
 - **The heartbeat is the executor's canary.** It stays on the default executor every lane shares,
   pinned at 32 threads (`LANE_EXECUTOR_THREADS`; fourteen lanes hold at most one each in normal
   running), so anything that fills it (leaked threads from the lanes without a pass lock, say)
-  stops the beats. A beat connects once with a 10 s timeout, so a slow connect cannot outlast
-  the watchdog's bound in the middle of a beat.
+  stops the beats. Those threads share two glibc malloc arenas (`MALLOC_ARENA_MAX=2`, E949). A
+  beat connects once with a 10 s timeout, so a slow connect cannot outlast the watchdog's bound
+  in the middle of a beat.
 - **A watchdog that exits.** A daemon thread, independent of the loop and of the executor, compares
   now with the last FINISHED beat (written or not: a database that refuses the write is not
   something a restart fixes, and a heartbeat-only fault must not restart every lane every five
@@ -489,9 +510,10 @@ Four changes, each closing one link:
   `faulthandler.dump_traceback_later(15, exit=True)`: its timer runs on a C thread that takes no
   GIL and calls `_exit(1)` itself, so a process still alive then ends, and Railway's restartPolicy
   ALWAYS restarts it. Not a signal: the worker is its container's PID 1 (`python -m
-  scraper.realtime_worker`, no init), and the kernel drops a default-action signal sent to PID 1,
-  so a `signal.alarm` backstop kills nothing. The timer dumps to /dev/null: it fires only when the
-  dump into stderr is stuck, and its own write into that pipe would block it too.
+  scraper.realtime_worker`, exec'd by `env MALLOC_ARENA_MAX=2`, no init), and the kernel drops a
+  default-action signal sent to PID 1, so a `signal.alarm` backstop kills nothing. The timer
+  dumps to /dev/null: it fires only when the dump into stderr is stuck, and its own write into
+  that pipe would block it too.
 Not done here, follow-ups: a per-portal circuit breaker (trip a portal that 403s everything
 instead of re-probing it each pass), Health alerts on `budget_refused` / `portal_rate_state`
 running ahead, handing unused leased slots back when a run ends, and a standing `faulthandler`
