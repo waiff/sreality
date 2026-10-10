@@ -380,8 +380,19 @@ nothing else.
   `rt_claim_cap:<generation>` (floor 25). The cap lowers the limit the feeds' shares are cut
   from, min(`max_listings`, cap, the time budget's), `bound_by` `cap` when it binds: in the build
   the entered feed takes the whole limit and the others a fifth each on top; only the revived
-  feed takes every revived id of its 20,000-row slice, whatever the limit. Only a seed raises the
-  cap again: the store keeps growing, so a size that died would die again. At the floor the lease
+  feed takes every revived id of its 20,000-row slice, whatever the limit. Only a seed or a
+  bigger container raises the cap again, since the store keeps growing and a size that died in
+  this container would die again (E948b): the row records the biggest memory limit its deaths
+  since the last seed or reset happened under (`limit_mb`, the cgroup limit read each pass; an
+  unknown one, or 0, keeps the row's), and a pass whose limit is at least 25 % above it resets
+  the cap to `max_listings`, logged, before the take (a cap already there only takes the new
+  limit); a smaller growth is jitter. Every pass fits the row before its take, so a boot that
+  sees such a growth and a dead predecessor at once releases the lease and halves nothing: the
+  predecessor ran under the smaller limit. A row without a limit takes the one its next pass
+  reads, except the row E948 left (no `limit_mb` key at all), which is measured from the 8 GB
+  container's 7,629.4 MiB, so it resets under 24 GB whether the deploy or the resize comes
+  first. After a reset, a move back to a smaller container claims all of `max_listings` there
+  and walks the cap down again. At the floor the lease
   is only named (`predecessor_kept`, first in the skip's reason) and left to its TTL, as before
   E948: a death the floor's claim did not prevent is no claim's to cure, and a release at every
   boot would restart the whole worker as fast as it boots. A deploy is a new container, so a new
@@ -417,16 +428,16 @@ nothing else.
   reconcile_deferred (the run cap), must_link_dissolved (operator `same` closures the pass
   dissolved, E926), skipped (0/1) + reason, errors (0/1) + refused/aborted,
   deadline_exceeded, seconds, held, retired, latency_p50_s, latency_p95_s, bound_by, claim_cap
-  ({cap, reason}) + predecessor_released (E948; a skip carries it only when set, or instead
-  predecessor_kept, the lease the cap's floor left to its TTL), peak_rss_mb (E941) + rss_mb +
-  memory_limit_mb (the container's cgroup limit, read at boot; E948), memo_entries (the body
-  readers by module, the shingle sets and the tokens, before the pass's end empties them) +
-  rss_at_start_mb and rss_after_trim_mb (the RSS once freed memory went back, before the pass
-  and at its end; E949: on every path but `previous_pass_running`, and a raised pass writes no
-  `last`, so the heartbeat keeps the previous pass's until the next pass's rss_at_start_mb shows
-  what the raised one left)}`; an absent store (migrations 539/540) = `skipped: store_absent` +
-  one warning. A change of the reconcile state is logged once, and the engine logs each release
-  of a dead predecessor's lease.
+  ({cap, reason, limit_mb}) + predecessor_released (E948; a skip carries it only when set, or
+  instead predecessor_kept, the lease the cap's floor left to its TTL), peak_rss_mb (E941) +
+  rss_mb + memory_limit_mb (the container's cgroup limit, read each pass; E948, E948b),
+  memo_entries (the body readers by module, the shingle sets and the tokens, before the pass's end
+  empties them) + rss_at_start_mb and rss_after_trim_mb (the RSS once freed memory went back,
+  before the pass and at its end; E949: on every path but `previous_pass_running`, and a raised
+  pass writes no `last`, so the heartbeat keeps the previous pass's until the next pass's
+  rss_at_start_mb shows what the raised one left)}`; an absent store (migrations 539/540) =
+  `skipped: store_absent` + one warning. A change of the reconcile state is logged once, and the
+  engine logs each release of a dead predecessor's lease.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,
   E73), and a photo-dependent merge waits until every photograph carries its pHash, CLIP vector
   and tags (E908; CLIP p50 2.5 h). So a text-certified duplicate merges in ~6–7 minutes and a

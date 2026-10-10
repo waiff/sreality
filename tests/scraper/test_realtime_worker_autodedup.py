@@ -136,7 +136,7 @@ def _summary(**over: Any) -> dict[str, Any]:
         "peak_rss_mb": 412.5,
         "rss_mb": 388.0,
         "memo_entries": {"text_facts": 812, "body_align": 64, "shingles": 30, "tokens": 2048},
-        "claim_cap": {"cap": 500, "reason": "rt_seed"},
+        "claim_cap": {"cap": 500, "reason": "rt_seed", "limit_mb": 8192.0},
         "predecessor_released": None,
     }
     out.update(over)
@@ -244,11 +244,13 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
     connection: a factory for a FRESH, bounded connect (E930: the halving a RAISED pass writes
     may not have a live connection of its own), E941's two — the holder the pass takes its
     lease under, named by the worker so its shutdown can release that row, and the shutdown
-    itself as `stopping` — and E948's boot second, which names a dead predecessor's lease."""
+    itself as `stopping` — E948's boot second, which names a dead predecessor's lease, and the
+    container's memory limit, read for this pass, which resets a claim cap halved under a
+    smaller one (E948b)."""
     conn = _Conn()
     connects: list[dict[str, Any]] = []
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: connects.append(dict(k)) or conn)
-    monkeypatch.setattr(rw, "_MEMORY_LIMIT_MB", 8192.0)
+    monkeypatch.setattr(rw, "_memory_limit_mb", lambda *_a, **_k: 8192.0)
     readings = iter([290.0, 301.5])
     monkeypatch.setattr(rw, "_return_memory", lambda: next(readings))
     _settings(monkeypatch)
@@ -256,11 +258,13 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
 
     last = rw._autodedup_sync()
 
-    assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping", "booted_epoch"}
+    assert set(seen["kwargs"]) == {"fresh_conn", "holder", "stopping", "booted_epoch",
+                                   "memory_limit_mb"}
     assert seen["conn"] is conn
     assert isinstance(seen["kwargs"]["holder"], str) and seen["kwargs"]["holder"]
     assert seen["kwargs"]["stopping"] == rw._AUTODEDUP_STOPPING.is_set
     assert seen["kwargs"]["booted_epoch"] == rw._BOOTED_EPOCH
+    assert seen["kwargs"]["memory_limit_mb"] == 8192.0
     assert int(seen["kwargs"]["holder"].rsplit(":", 1)[1]) >= rw._BOOTED_EPOCH, (
         "this process's own holder is never older than its boot")
     assert rw._AUTODEDUP_HOLDER is None and rw._AUTODEDUP_CONN is None, "cleared after"
@@ -281,10 +285,11 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "reconcile_settled": 0, "reconcile_skipped_by_reason": {},
         # E941: the process's peak memory at the pass's end, carried from the engine's summary
         "peak_rss_mb": 412.5,
-        # E948: what it holds now, the container's limit read at boot, the claim cap, and the
-        # lease of a dead predecessor this pass released (none)
+        # E948: what it holds now, the container's limit (read for this pass, E948b), the
+        # claim cap (and, E948b, the limit it records), and the lease of a dead predecessor it
+        # released (none)
         "rss_mb": 388.0, "memory_limit_mb": 8192.0,
-        "claim_cap": {"cap": 500, "reason": "rt_seed"},
+        "claim_cap": {"cap": 500, "reason": "rt_seed", "limit_mb": 8192.0},
         "predecessor_released": None,
         # E949: the engine's body and token memos at the pass's end, and the RSS once freed
         # memory was handed back, before the pass began and as it ended
@@ -475,7 +480,7 @@ def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> No
         assert last["peak_rss_mb"] > 0, "the engine measured the process's memory (E941)"
         if sys.platform.startswith("linux"):
             assert last["rss_mb"] > 0, "and what it holds now (E948)"
-        assert last["memory_limit_mb"] == rw._MEMORY_LIMIT_MB
+        assert last["memory_limit_mb"] == rw._memory_limit_mb()
         assert last["predecessor_released"] is None and last["claim_cap"]["cap"] == 500
         assert world.cursors, "the pass moved the engine's own watermark"
         assert world.lease[LANE_NAME]["expires_at"] <= world.now, "the lease was released"
@@ -665,6 +670,39 @@ def test_a_pass_that_refuses_after_the_release_still_logs_it(
     assert (last["errors"], last["refused"]) == (1, "the drift sweep would retire too much")
     assert _released_lines(caplog, dead) == 1
     assert world.lease[LANE_NAME]["expires_at"] <= world.now, "and the pass gave its own back"
+
+
+@pytest.mark.parametrize("readings", [[22_888.2, 22_888.2], [7_629.4, 22_888.2, 22_888.2]])
+def test_a_bigger_container_resets_the_claim_cap_and_the_heartbeat_says_why(
+        world, tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture,
+        readings: list[float]) -> None:
+    """E948b: the worker reads its container's limit every pass and hands it to the engine.
+    2026-10-10's row, as E948 left it at the floor under the 8 GB container (no limit), meets
+    the 24 GB one, with or without a pass under 8 GB first and with no restart in between: the
+    first pass under 24 GB claims under the whole `max_listings` again, the heartbeat's
+    `claim_cap` says why, and the line is logged once."""
+    seed_lane(world, tmp_path)
+    key = incremental_lane.claim_cap_key("rt")
+    left_by_e948 = {"cap": 25,
+                    "reason": "e320caaea376:1:1791637542 died before 2026-10-10T13:08:24Z"}
+    world.settings[key] = dict(left_by_e948)
+    _worker_on(monkeypatch, world)
+    pending = list(readings)
+    monkeypatch.setattr(rw, "_memory_limit_mb", lambda *_a, **_k: pending.pop(0))
+
+    with caplog.at_level(logging.WARNING):
+        beats = [rw._autodedup_sync() for _ in readings]
+
+    *before, last, again = beats
+    for beat in before:
+        assert beat["memory_limit_mb"] == 7_629.4
+        assert beat["claim_cap"] == {**left_by_e948, "limit_mb": 7_629.4}, "stamped, kept"
+    assert (last["ran"], last["errors"], last["memory_limit_mb"]) == (True, 0, 22_888.2), last
+    assert (last["claim_cap"]["cap"], last["claim_cap"]["limit_mb"]) == (500, 22_888.2)
+    assert last["claim_cap"]["reason"].startswith("memory limit grew 7,629 → 22,888 MB at ")
+    assert again["claim_cap"] == last["claim_cap"] == world.settings[key]
+    assert sum("the claim cap reset from 25 to 500 (E948b)" in record.getMessage()
+               for record in caplog.records) == 1
 
 
 def test_a_skip_names_the_predecessor_it_released_or_left_to_its_ttl(

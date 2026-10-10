@@ -109,11 +109,13 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              kill switch; `rt_seed`, `apply` and `unapply` take the same lease, so
              there is one writer at a time, and a restart in place releases the lease
              its dead predecessor left and halves the claim cap, or, at the cap's
-             floor, leaves it to its TTL (E948). An absent autodedup store skips with
-             one warning. The engine empties its body and token memos whatever ends a
-             pass, and the worker hands freed heap back to the kernel (gc + glibc
-             malloc_trim) as a pass ends and again before the next begins, which is
-             when a raised pass's memory goes (E949).
+             floor, leaves it to its TTL (E948); a container whose memory limit grew
+             by at least 25 % resets the cap, and a death it finds at that boot ran
+             under the smaller limit, so it halves nothing (E948b). An absent
+             autodedup store skips with one warning. The engine empties its body and
+             token memos whatever ends a pass, and the worker hands freed heap back
+             to the kernel (gc + glibc malloc_trim) as a pass ends and again before
+             the next begins, which is when a raised pass's memory goes (E949).
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook. It
              runs on the executor every lane shares, so it is that executor's
@@ -2117,22 +2119,18 @@ def _memory_limit_mb(root: str = _CGROUP_ROOT) -> float | None:
     return None
 
 
-# Read once, at boot (E948): the heartbeat carries it beside the pass's memory, and nothing
-# decides on it.
-_MEMORY_LIMIT_MB: float | None = _memory_limit_mb()
-
-
 def _autodedup_outcome(
     started: float,
     *,
     summary: dict[str, Any] | None = None,
     skipped: str | None = None,
     refused: str | None = None,
+    memory_limit_mb: float | None = None,
 ) -> dict[str, Any]:
     """The heartbeat's `last` for one tick — the same keys on every path, so a skipping or
     refusing lane never reads as a quiet one: `scored` pairs, `grouped` groups written,
     `merged` production merges the reconcile made, `skipped` 0/1 with its `reason`, `errors`
-    0/1 with the refusal or abort text."""
+    0/1 with the refusal or abort text; a pass that ran adds the memory limit it ran under."""
     last: dict[str, Any] = {
         "ran": False, "claimed": 0, "scored": 0, "grouped": 0, "merged": 0, "skipped": 0,
         "errors": 0, "seconds": round(time.monotonic() - started, 1),
@@ -2198,8 +2196,9 @@ def _autodedup_outcome(
             latency_p50_s=latency.get("p50"),
             latency_p95_s=latency.get("p95"),
             bound_by=(summary.get("claim_bound") or {}).get("bound_by"),
-            # E948: the claim cap a death halves ({cap, reason}), and the lease of a dead
-            # predecessor of this container this pass released (None: there was none).
+            # E948: the claim cap a death halves ({cap, reason, limit_mb}; a bigger container
+            # resets it, E948b), and the lease of a dead predecessor of this container this
+            # pass released (None: there was none).
             claim_cap=summary.get("claim_cap"),
             predecessor_released=summary.get("predecessor_released"),
             # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
@@ -2207,7 +2206,7 @@ def _autodedup_outcome(
             # and E948's two beside it: what it holds now and the container's limit.
             peak_rss_mb=summary.get("peak_rss_mb"),
             rss_mb=summary.get("rss_mb"),
-            memory_limit_mb=_MEMORY_LIMIT_MB,
+            memory_limit_mb=memory_limit_mb,
             # E949: what the engine's body and token memos held at the pass's end, before it
             # emptied them.
             memo_entries=summary.get("memo_entries"),
@@ -2265,6 +2264,9 @@ def _autodedup_run(started: float) -> dict[str, Any]:
                     "absent on this database; the lane skips every tick")
             return _autodedup_outcome(started, skipped="store_absent")
         _AUTODEDUP_STORE_WARNED = False
+        # Read every pass (E948b): a resize that reaches a running process is seen by its
+        # next pass, which resets a claim cap halved under a smaller limit.
+        memory_limit_mb = _memory_limit_mb()
         # Named HERE so the shutdown signal can release exactly this pass's lease (E941).
         holder = incremental_lane.pass_holder()
         _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = holder, conn
@@ -2275,12 +2277,12 @@ def _autodedup_run(started: float) -> dict[str, Any]:
                     attempts=1,
                     connect_timeout=AUTODEDUP_RESCUE_CONNECT_TIMEOUT_SECONDS),
                 holder=holder, stopping=_AUTODEDUP_STOPPING.is_set,
-                booted_epoch=_BOOTED_EPOCH)
+                booted_epoch=_BOOTED_EPOCH, memory_limit_mb=memory_limit_mb)
         except SystemExit as exc:
             return _autodedup_outcome(started, refused=str(exc))
         finally:
             _AUTODEDUP_HOLDER, _AUTODEDUP_CONN = None, None
-        return _autodedup_outcome(started, summary=summary)
+        return _autodedup_outcome(started, summary=summary, memory_limit_mb=memory_limit_mb)
     finally:
         # run_incremental closes the connection it was handed; a second close is a
         # no-op, and this one covers every path that never got that far.

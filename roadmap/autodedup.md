@@ -63,10 +63,16 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   `verify_pipeline`'s heartbeat check.
 - **E948 (2026-10-10, a worker that died holding the lease):** its restart in place (same hostname
   and pid) releases that lease before its take and halves the claim cap in the same commit (floor
-  25; only a seed raises it again); at the floor the lease waits out its TTL as before, so a death
-  no claim can cure never loops the worker. The heartbeat adds `claim_cap`, `predecessor_released`
-  / `predecessor_kept`, `rss_mb` and the cgroup `memory_limit_mb` (E941's owed reading). Still
-  owed (E941): the revive cap, since the revived feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
+  25; only a seed or, E948b, a bigger container raises it); at the floor the lease waits out its
+  TTL as before, so a death no claim can cure never loops the worker. The heartbeat adds
+  `claim_cap`, `predecessor_released` / `predecessor_kept`, `rss_mb` and the cgroup
+  `memory_limit_mb` (E941's owed reading). Still owed (E941): the revive cap, since the revived
+  feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
+  **E948b:** the cap row records the memory limit its deaths happened under (`limit_mb`, read
+  each pass), and a container limit grown ≥ 25 % resets the cap to 500 before the next pass,
+  without a seed; a boot that also finds a dead predecessor releases its lease without halving
+  (it died under the smaller limit). Today's row, which records none, grows from the 8 GB limit
+  (`E948_LIMIT_MB`), so the deploy and the 24 GB move may come in either order.
 - **E949 (2026-10-10, the worker carried memory from pass to pass):** seven deaths in the widened build,
   each process on about its sixth pass whatever it claimed. Freed heap now goes back to the kernel as
   every pass begins and ends (`gc.collect` + glibc `malloc_trim(0)`; `rss_at_start_mb`,
@@ -74,8 +80,8 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   arenas (`env MALLOC_ARENA_MAX=2`); the engine counts and empties its body and token memos after
   every pass (`memo_entries`; the shingle memo keyed on the body itself); and the CLIP top-up is
   encoded a slice at a time. Decisions are a fresh process's and `SEED_VERSION` is unchanged; the
-  claim cap stays at 25 until a seed. Next: Part 2, chunked scoring, so the pair budget bounds a
-  pass's memory.
+  claim cap stays at 25 until a seed or, E948b, a bigger container. Next: Part 2, chunked scoring,
+  so the pair budget bounds a pass's memory.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
