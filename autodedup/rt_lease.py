@@ -158,7 +158,7 @@ def release_after(conn: Any, holder: str, original: BaseException | None, *,
                     LOG.warning("AUTODEDUP: %s", landed)
                 return True
             failed = last
-            tried = f"{tries} new connections over {spent:.0f} s, the last with "
+            tried = f"{tries} new connection{'s' if tries != 1 else ''} over {spent:.0f} s, the last with "
         if original is None:
             raise failed
         original.add_note(f"releasing autodedup.rt_lease for {holder!r} also failed "

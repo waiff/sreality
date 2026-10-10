@@ -360,7 +360,7 @@ nothing else.
   `apply` / `unapply` holds it for its run, so a worker pass that fires meanwhile is a green
   `skipped: leased`; every refusal names the holder, and `release_lease=<holder>` ends the lease a
   dead writer left (a pass whose own connection the server terminated releases its lease itself,
-  over the fresh connection it halves its rate on — E931 — or, when a database restart took that
+  over the fresh connection it halves its rate on (E931) or, when a database restart took that
   one too, over new ones, one every 20 s for up to 180 s before falling back to the TTL;
   `release_lease` is for a worker that died with the row). The brake: set the interval to 0,
   then `mode=unapply` (by `run=rt:<holder>` or a `since=` window) — a live `apply` or `unapply`
