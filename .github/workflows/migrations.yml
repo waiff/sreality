@@ -441,8 +441,10 @@ jobs:
       # the lease and opens a transaction, B releases A's lease, and A's fence (RT_LEASE_HOLD_SQL)
       # must find no live row; against now() (A's transaction start) it would, and A would commit
       # beside the next holder. A release after A's fence waits for A's commit. The fakes have
-      # one clock and cannot tell the two apart.
-      - name: The autodedup lease fence reads the clock (E941)
+      # one clock and cannot tell the two apart. E948, EXECUTED too: the predecessor release and
+      # its read twin match only a dead predecessor's live lease (this hostname and pid, a second
+      # before this boot), and their cast never reaches a holder of another shape.
+      - name: The autodedup lease fence reads the clock (E941) and frees only a dead predecessor's lease (E948)
         timeout-minutes: 5
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres

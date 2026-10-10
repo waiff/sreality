@@ -4,8 +4,9 @@ The worker's pass, `rt_seed` and a live `apply` / `unapply` each hold it for the
 of them at a time writes the live stream or production merges (A9). Lease-row CAS, never
 `pg_advisory_lock`: a session lock strands over the transaction pooler. Every refusal names the
 holder and when its lease ends; `release_stale` is the path for a holder that died with it (a
-killed dispatch holds it for its whole TTL), and a release that fails while another error is
-already on its way out never replaces that error.
+killed dispatch holds it for its whole TTL), `release_predecessor` the worker's own for a process
+that died with it (E948, which `predecessor` only names), and a release that fails while another
+error is already on its way out never replaces that error.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from typing import Any, Callable, Mapping
 
 from autodedup.incremental_sql import (
     RT_LEASE_HOLD_SQL,
+    RT_LEASE_PREDECESSOR_SQL,
     RT_LEASE_READ_SQL,
+    RT_LEASE_RELEASE_PREDECESSOR_SQL,
     RT_LEASE_RELEASE_SQL,
     RT_LEASE_TAKE_SQL,
 )
@@ -55,6 +58,23 @@ def take(conn: Any, holder: str, ttl: int) -> bool:
 def release(conn: Any, holder: str) -> None:
     with conn.cursor() as cur:
         cur.execute(RT_LEASE_RELEASE_SQL, {"name": NAME, "holder": holder})
+
+
+def _predecessor(conn: Any, sql: str, hostname: str, pid: int, booted_epoch: int) -> str | None:
+    rows = _rows(conn, sql, {"name": NAME, "host": hostname, "pid": str(int(pid)),
+                             "booted": int(booted_epoch)})
+    return str(rows[0][0]) if rows else None
+
+
+def release_predecessor(conn: Any, hostname: str, pid: int, booted_epoch: int) -> str | None:
+    """End the live lease a dead predecessor of this process (this hostname and pid, a second
+    before `booted_epoch`) left; its holder, or None (E948)."""
+    return _predecessor(conn, RT_LEASE_RELEASE_PREDECESSOR_SQL, hostname, pid, booted_epoch)
+
+
+def predecessor(conn: Any, hostname: str, pid: int, booted_epoch: int) -> str | None:
+    """The holder of that same lease, read and left live (E948)."""
+    return _predecessor(conn, RT_LEASE_PREDECESSOR_SQL, hostname, pid, booted_epoch)
 
 
 # The outcome a run reports when its lease ended under it (E941).

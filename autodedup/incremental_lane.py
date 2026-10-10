@@ -32,6 +32,7 @@ lane calls no provider; `spent_usd` is reported as a measured 0, not as a foreca
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import socket
@@ -206,6 +207,8 @@ from autodedup.model import LogisticModel
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
 
+LOG = logging.getLogger(__name__)
+
 LANE_NAME: str = rt_lease.NAME
 # THE PASS'S OWN DEADLINE (E913), in seconds of wall clock from the moment it starts. The
 # worker used to wrap the connection in a statement-refusing deadline and back off in process;
@@ -236,9 +239,10 @@ RULINGS_OVERLAP_S: float = 300.0
 # The rows the lane still keeps in `autodedup.settings` are WRITTEN BY IT, never set by hand:
 # the scope the seed cut the generation for, the seed's version and the build phase the seed
 # opens and the pass closes (both named in `incremental`, which the API reads too), the rate
-# each pass measures, and the storage watermark (E914).
+# each pass measures, the claim cap a death halves (E948) and the storage watermark (E914).
 SCOPE_SETTING: str = "rt_scope"
 PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
+CLAIM_CAP_SETTING: str = "rt_claim_cap"
 # The reconcile's skip over a generation no seed of this design built.
 SEED_MISMATCH: str = "seed_version"
 # E941: a pass that sees the worker shutting down, and one whose lease ended under it.
@@ -348,6 +352,25 @@ PASS_RATE_MIN_CLAIM: int = 20
 # How much of the new measurement the stored rate takes. A build ramps from the conservative
 # default to the real rate in two passes at 0.5 and cannot be knocked out of it by one slow pass.
 PASS_RATE_ALPHA: float = 0.5
+# --- the claim cap (E948) --------------------------------------------------------------------
+#
+# The rate bounds a pass's TIME, never its MEMORY, and the neighbourhood a pass re-reads grows
+# with the store (E71). A worker process that died holding the lease (no SIGTERM, so no E941
+# release: most likely the kernel's OOM killer) took on more than its container could hold, so
+# the next process of the same container, which releases that lease before its take
+# (`rt_lease.release_predecessor`), halves `rt_claim_cap:<generation>` in the same commit, and
+# the limit every feed's share is cut from is min(max_listings, cap, the time budget's). The
+# death is the signal; nothing reads a memory figure to decide. Nothing raises the cap again
+# but a seed: the store keeps growing under a generation (inactive adverts stay in it), so a
+# size that died dies again, and doubling back to it would kill the whole worker again.
+#
+# Below it a pass's memory is its neighbourhood read, not its claim: a smaller claim would only
+# slow the build. So at the floor a death is no claim's to cure — the neighbourhood read, the
+# revived feed (every revived id of a `REVIVE_SLICE` scan), a re-cut under the same lease, one
+# bad advert — and its lease is left to its TTL, as before E948: releasing it at every boot
+# would restart the whole worker as fast as it can boot, and the TTL holds that to one death a
+# lease.
+CLAIM_CAP_FLOOR: int = 25
 # The window the retirement rail is measured over (W9e/R2). A slice-sized rail could only fire
 # while one drift slice was itself a twentieth of the store; a rolling day is independent of
 # `drift_slice` and of the store's size.
@@ -1111,7 +1134,8 @@ class SqlWork:
                  evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS,
                  bootstrap: bool = False,
                  pass_budget_s: float = PASS_BUDGET_S,
-                 rate_per_s: float = PASS_RATE_PER_S) -> None:
+                 rate_per_s: float = PASS_RATE_PER_S,
+                 claim_cap: int | None = None) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -1129,11 +1153,12 @@ class SqlWork:
         self.bootstrap = bool(bootstrap)
         self.pass_budget_s = float(pass_budget_s)
         self.rate_per_s = float(rate_per_s)
+        self.claim_cap = claim_cap
         # Set by `claim` while the phase is on: the entrant backlog it measured, and whether
         # this pass is the one that empties it (E98).
         self.bootstrap_done = False
         self.bootstrap_backlog: int | None = None
-        # What bound this pass's claim — the count or the clock — for the run summary.
+        # What bound this pass's claim — the count, the cap or the clock — for the run summary.
         self.claim_bound: dict[str, Any] = {}
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
@@ -1167,11 +1192,18 @@ class SqlWork:
         # is applied here — before a statement is issued — because an aborted pass has spent
         # its time whether or not it wrote anything.
         by_time = max(BOOTSTRAP_MIN_CLAIM, int(self.pass_budget_s * self.rate_per_s))
-        effective = max(1, min(int(limit), by_time))
-        self.claim_bound = {"max_listings": int(limit), "pass_budget_s": self.pass_budget_s,
+        # E948: the size this container survived. It lowers the limit below, so the build's
+        # entered feed (the whole limit) and every other feed's fifth shrink with it; only the
+        # revived feed takes every revived id of its `revive_slice` scan, whatever the limit
+        # (owed since E941).
+        cap = int(limit) if self.claim_cap is None else max(1, int(self.claim_cap))
+        effective = max(1, min(int(limit), cap, by_time))
+        self.claim_bound = {"max_listings": int(limit), "cap": cap,
+                            "pass_budget_s": self.pass_budget_s,
                             "rate_per_s": self.rate_per_s, "by_time": by_time,
                             "limit": effective,
-                            "bound_by": "time" if by_time < int(limit) else "count"}
+                            "bound_by": ("time" if by_time < min(int(limit), cap)
+                                         else "cap" if cap < int(limit) else "count")}
         limit = effective
         cursors = self.cursors()
         share = max(1, limit // 5)
@@ -1705,6 +1737,34 @@ def pass_rate_key(generation: str) -> str:
     return f"{PASS_RATE_SETTING}:{generation}"
 
 
+def claim_cap_key(generation: str) -> str:
+    """`rt_claim_cap:<generation>` — the claim size THIS generation's passes survive (E948)."""
+    return f"{CLAIM_CAP_SETTING}:{generation}"
+
+
+def full_claim_cap(reason: str | None = None) -> dict[str, Any]:
+    """The cap a seed starts a build at, and an absent row's: the whole `max_listings` (E948)."""
+    return {"cap": PASS_LIMITS.max_listings, "reason": reason}
+
+
+def read_claim_cap(value: Any) -> dict[str, Any]:
+    """The cap row as {cap, reason}, the cap inside [floor, max_listings] (E948)."""
+    record = value if isinstance(value, Mapping) else {}
+    try:
+        cap = int(record["cap"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return full_claim_cap()
+    return {"cap": max(CLAIM_CAP_FLOOR, min(PASS_LIMITS.max_listings, cap)),
+            "reason": record.get("reason")}
+
+
+def halve_claim_cap(record: Mapping[str, Any], died: str, booted_epoch: int) -> dict[str, Any]:
+    """A death halves the cap, never below the floor (E948)."""
+    booted = datetime.fromtimestamp(int(booted_epoch), timezone.utc)
+    return {"cap": max(CLAIM_CAP_FLOOR, int(record["cap"]) // 2),
+            "reason": f"{died} died before {booted.strftime('%Y-%m-%dT%H:%M:%SZ')}"}
+
+
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
     """The generation's scope row, as the seed wrote it."""
     return control.get(scope_setting_key(generation))
@@ -2075,9 +2135,37 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
         "updated_by": f"{LANE_NAME}:{why}"})
 
 
+def _write_claim_cap(conn: Any, generation: str, record: Mapping[str, Any], why: str) -> None:
+    _exec(conn, RT_SETTING_WRITE_SQL, {
+        "key": claim_cap_key(generation), "value": json.dumps(dict(record)),
+        "updated_by": f"{LANE_NAME}:{why}"})
+
+
+def _release_predecessor(conn: Any, generation: str, cap: dict[str, Any], booted_epoch: int
+                         ) -> tuple[str | None, str | None, dict[str, Any]]:
+    """The live lease a dead predecessor of this process left, released with the cap halved in
+    ONE commit of their own and logged at once, before a pass that may die the same way: the
+    released holder, None, the halved cap. At the cap's floor it is only named and left to its
+    TTL (`CLAIM_CAP_FLOOR`): None, that holder, the cap as it was."""
+    host, pid = socket.gethostname(), os.getpid()
+    if int(cap["cap"]) <= CLAIM_CAP_FLOOR:
+        return None, rt_lease.predecessor(conn, host, pid, booted_epoch), cap
+    with _transaction(conn):
+        died = rt_lease.release_predecessor(conn, host, pid, booted_epoch)
+        if died is None:
+            return None, None, cap
+        halved = halve_claim_cap(cap, died, booted_epoch)
+        _write_claim_cap(conn, generation, halved, "halved")
+    LOG.warning("AUTODEDUP: a predecessor of this container died holding autodedup.rt_lease: "
+                "%s; released, and the claim cap halved from %s to %s (E948)",
+                died, cap["cap"], halved["cap"])
+    return died, None, halved
+
+
 def pass_holder() -> str:
     """The name a pass takes the lease under: host, process, second. The worker makes it
-    before the pass so its SIGTERM path can release exactly that row (E941)."""
+    before the pass so its SIGTERM path can release exactly that row (E941), and the next
+    process of the same container reads all three back (E948)."""
     return f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
 
 
@@ -2097,6 +2185,21 @@ def peak_rss_mb() -> float | None:
         return None
     peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     return round(peak / (1_048_576.0 if sys.platform == "darwin" else 1024.0), 1)
+
+
+def rss_mb(statm: str = "/proc/self/statm") -> float | None:
+    """The process's resident memory now in MiB: resident pages x the page size (E948)."""
+    try:
+        with open(statm, encoding="ascii") as handle:
+            pages = int(handle.read().split()[1])
+        return round(pages * os.sysconf("SC_PAGE_SIZE") / 1_048_576.0, 1)
+    except Exception:  # noqa: BLE001 — observability only: None, never a failed pass
+        return None
+
+
+def pass_memory() -> dict[str, float | None]:
+    """The process's memory at a pass's end: its high-water mark and what it holds now."""
+    return {"peak_rss_mb": peak_rss_mb(), "rss_mb": rss_mb()}
 
 
 def _put_back_rate(conn: Any, generation: str, rate_per_s: float,
@@ -2147,7 +2250,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     deadline_s: float | None = None,
                     fresh_conn: Callable[[], Any] | None = None,
                     holder: str | None = None,
-                    stopping: Callable[[], bool] | None = None) -> dict[str, Any]:
+                    stopping: Callable[[], bool] | None = None,
+                    booted_epoch: int | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
@@ -2177,7 +2281,13 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     with `rt_lease.hold`: one whose lease was released under it rolls back instead of
     committing beside the next holder. Not fenced: the reconcile's planning writes (its sweep
     cursor, its skipped-group rows), which a signal landing between the pass's commit and the
-    first group lets through."""
+    first group lets through.
+
+    `booted_epoch` is the worker process's boot second (E948): right before the take, the live
+    lease a dead predecessor of this process left (this hostname and pid, an earlier second) is
+    released and the claim cap halved, in one commit of their own, and logged; at the cap's
+    floor that lease is only named (`predecessor_kept`) and left to its TTL. The limit every
+    feed's share is cut from is at most the cap, and only a seed raises it again."""
     deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
     deadline = started + deadline_s
@@ -2186,6 +2296,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     shutting_down: Callable[[], bool] = stopping or (lambda: False)
     conn = conn_factory()
     leased = False
+    predecessor: str | None = None
+    kept: str | None = None
     original: BaseException | None = None
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
@@ -2199,7 +2311,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         control = lane_settings(conn, [scope_setting_key(generation),
                                        bootstrap_setting_key(generation),
                                        pass_rate_key(generation),
-                                       seed_version_key(generation)])
+                                       seed_version_key(generation),
+                                       claim_cap_key(generation)])
         try:
             scope = pass_scope(read_scope_setting(control, generation))
             parents = resolve_scope_parents(conn, scope)
@@ -2208,6 +2321,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
         rate_per_s = max(1e-6, _number(control.get(pass_rate_key(generation)),
                                        PASS_RATE_PER_S))
+        cap = read_claim_cap(control.get(claim_cap_key(generation)))
         try:
             storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
@@ -2215,9 +2329,14 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         if shutting_down():
             return {"skipped": STOPPING, "reason": "the worker is shutting down",
                     "spent_usd": 0.0}
+        if booted_epoch is not None:
+            predecessor, kept, cap = _release_predecessor(conn, generation, cap, booted_epoch)
         if not take_lease(conn, holder):
-            return {"skipped": "leased",
-                    "reason": f"another writer holds autodedup.rt_lease: {rt_lease.describe(conn)}",
+            held_by = ("another writer holds autodedup.rt_lease" if kept is None else
+                       "a dead predecessor of this container holds autodedup.rt_lease, left to "
+                       f"its TTL at the claim cap's floor ({CLAIM_CAP_FLOOR}; E948)")
+            return {"skipped": "leased", "reason": f"{held_by}: {rt_lease.describe(conn)}",
+                    "predecessor_released": predecessor, "predecessor_kept": kept,
                     "spent_usd": 0.0}
         leased = True
         if shutting_down():
@@ -2226,7 +2345,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             release_lease(conn, holder)
             leased = False
             return {"skipped": STOPPING, "reason": "the worker is shutting down",
-                    "spent_usd": 0.0}
+                    "predecessor_released": predecessor, "spent_usd": 0.0}
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(f"no calibration for generation {generation!r} — seed it")
@@ -2239,7 +2358,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                          calibration_digest=calibration.digest())
         facts = SqlFacts(conn, deadline=deadline, stopping=stopping)
         work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
-                       pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s)
+                       pass_budget_s=PASS_BUDGET_S, rate_per_s=rate_per_s,
+                       claim_cap=int(cap["cap"]))
         result = None
         stopped = ""
         # E941: halved AHEAD, outside the transaction (`db.connect` is autocommit), so it stands
@@ -2280,7 +2400,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             leased = False
             return {"counts": {}, "aborted": LEASE_LOST, "reason": str(exc)[:300],
                     "reconcile": {"skipped": f"pass_{LEASE_LOST}"}, "generation": generation,
-                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
+                    "predecessor_released": predecessor, "claim_cap": cap,
+                    "spent_usd": 0.0, **pass_memory()}
         except _Refused:
             stopped = result.aborted if result is not None else "refused"
         except PassStopped:
@@ -2316,7 +2437,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             # the lease on the pass's own connection with no reads in between.
             return {"counts": {}, "aborted": STOPPING,
                     "reconcile": {"skipped": f"pass_{STOPPING}"}, "generation": generation,
-                    "spent_usd": 0.0, "peak_rss_mb": peak_rss_mb()}
+                    "predecessor_released": predecessor, "claim_cap": cap,
+                    "spent_usd": 0.0, **pass_memory()}
         if stopped and not shutting_down():
             # E913: the next pass claims half as much (the half E941 wrote ahead, named).
             _write_rate(conn, generation, rate_per_s / 2.0, "halved")
@@ -2447,7 +2569,9 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "LeaseLost")
         if owns_the_lane():
             record_storage(conn, generation, after_bytes)
-        summary["peak_rss_mb"] = peak_rss_mb()
+        summary["predecessor_released"] = predecessor
+        summary["claim_cap"] = cap
+        summary.update(pass_memory())
         return summary
     except BaseException as exc:
         original = exc
@@ -2592,6 +2716,8 @@ def run_rt_seed(
             # A new build measures its own rate from the conservative start (review B3): the
             # 09-21 row still read 0.585503, so G2 would have "passed" before any W5 pass ran.
             _write_rate(conn, generation, PASS_RATE_PER_S, "rt_seed")
+            # E948: and claims the whole `max_listings` until a death of its own halves it.
+            _write_claim_cap(conn, generation, full_claim_cap("rt_seed"), "rt_seed")
         summary = {
             "generation": generation,
             "calibration": cut,
@@ -2605,6 +2731,7 @@ def run_rt_seed(
             "bootstrap": True,
             "seed_version": SEED_VERSION,
             "pass_rate_per_s": PASS_RATE_PER_S,
+            "claim_cap": PASS_LIMITS.max_listings,
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,
