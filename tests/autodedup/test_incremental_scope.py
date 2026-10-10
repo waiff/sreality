@@ -635,6 +635,29 @@ def test_a_quarter_block_needs_its_parent_obec_resolved() -> None:
         resolve_scope_parents(FakePg(), SCOPE)
 
 
+def test_a_quarter_beside_its_own_town_is_refused() -> None:
+    """E941: `obec:554782` already holds every advert of Praha-Vysočany, so beside it the
+    quarter would put them in the snapshot twice and tie Vysočany's merges to the whole town's
+    walk. Refused by name; the grammar is unchanged and a quarter of ANOTHER town resolves."""
+    db = FakePg()
+    db.admin_parents.update({490245: 554782, 490156: 554782})
+    beside = parse_scope("obec:563510 obec:554782 cast_obce:490245")
+    with pytest.raises(ScopeError,
+                       match=r"cast_obce:490245 beside its own town obec:554782"):
+        resolve_scope_parents(db, beside)
+    quarters = parse_scope("obec:563510 cast_obce:490245 cast_obce:490156")
+    assert resolve_scope_parents(db, quarters) == {490245: 554782, 490156: 554782}
+    assert resolve_scope_parents(db, parse_scope("obec:554782 obec:563510")) == {}
+
+
+def test_a_pass_over_a_quarter_beside_its_town_refuses_before_the_lease() -> None:
+    conn = _seeded([{"grain": "obec", "code": 554782}, {"grain": "cast_obce", "code": 490245}])
+    conn.admin_parents[490245] = 554782
+    with pytest.raises(SystemExit, match="beside its own town"):
+        run_incremental(lambda: conn)
+    assert not conn.lease and not conn.cursors and not conn.rt_fp
+
+
 # --------------------------- W9d-4: the session guards belong INSIDE the transaction
 
 

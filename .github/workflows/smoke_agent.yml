@@ -6,7 +6,7 @@ name: "Dev: agent smoke test"
 # spent — typically under $0.10 per run.
 #
 # Required GitHub secrets:
-#   SUPABASE_DB_URL      — same one used by scrape.yml
+#   SUPABASE_DB_URL      — same one the scrape workflows use
 #   ANTHROPIC_API_KEY    — needed when provider=anthropic
 #   GEMINI_API_KEY       — needed when provider=gemini
 #

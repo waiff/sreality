@@ -58,6 +58,9 @@ class FakePg:
         self.calibration: dict[str, dict[str, Any]] = {}
         self.lease: dict[str, dict[str, Any]] = {}
         self.settings: dict[str, Any] = {}
+        # `autodedup.settings.updated_by`, by key: WHO wrote a row last — the rate row says which
+        # of a pass's writes stood (E941: halved_ahead, rate, restored, halved).
+        self.settings_by: dict[str, str] = {}
         self.mnl: set[tuple[int, int]] = set()
         self.ml: set[tuple[int, int]] = set()
         # `autodedup.verdicts` as the G4 read sees it: (decided_at, the listings the row names).
@@ -80,6 +83,9 @@ class FakePg:
         # pooler that is the only place it survives.
         self.statements_in_tx: list[str] = []
         self.in_transaction = False
+        # What the open transaction rolls back to: `other_session` writes into it what a
+        # second session commits while that transaction is open.
+        self.tx_state: dict[str, Any] | None = None
         # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3).
         self.admin_parents: dict[int, int] = {}
         # The scope's membership snapshot and the two ledgers W9e rails the lane with: the
@@ -109,6 +115,12 @@ class FakePg:
     def close(self) -> None:
         return None
 
+    def other_session(self) -> "_OtherSession":
+        """A SECOND session on this database (E941: the worker's shutdown releases the lease
+        on a fresh connection while the pass's transaction is open). What it writes to the
+        lease row commits on its own, so a rollback of this session's transaction keeps it."""
+        return _OtherSession(self)
+
     def snapshot(self) -> dict[str, Any]:
         """Everything a rollback has to put back."""
         return {
@@ -131,6 +143,7 @@ class FakePg:
             "phash_pop": dict(self.phash_pop),
             "calibration": {k: dict(v) for k, v in self.calibration.items()},
             "settings": dict(self.settings),
+            "settings_by": dict(self.settings_by),
         }
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -149,6 +162,7 @@ class FakePg:
         self.phash_pop = state["phash_pop"]
         self.calibration = state["calibration"]
         self.settings = state["settings"]
+        self.settings_by = state["settings_by"]
 
 
 class _Tx:
@@ -160,10 +174,12 @@ class _Tx:
         self.conn.transactions += 1
         self.conn.in_transaction = True
         self.state = self.conn.snapshot()
+        self.conn.tx_state = self.state
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         self.conn.in_transaction = False
+        self.conn.tx_state = None
         if exc_type is not None and self.state is not None:
             self.conn.restore(self.state)
             self.conn.rolled_back += 1
@@ -196,6 +212,74 @@ class _Cursor:
         # psycopg exposes the column names, and the fact source reads rows as dicts through
         # them. Every export statement aliases every column, so the SELECT list IS the names.
         self.description = [(name,) for name in _aliases(sql)]
+
+
+class _OtherSession:
+    def __init__(self, db: FakePg) -> None:
+        self.db = db
+        self.closed = False
+
+    def cursor(self) -> "_OtherCursor":
+        return _OtherCursor(self.db)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _OtherCursor(_Cursor):
+    """A statement of the second session: never part of the first one's transaction, and a
+    lease row it writes is committed — copied into what that transaction would restore."""
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+        in_transaction = self.conn.in_transaction
+        self.conn.in_transaction = False
+        try:
+            super().execute(sql, params)
+        finally:
+            self.conn.in_transaction = in_transaction
+        if self.conn.tx_state is not None and sql in (S.RT_LEASE_RELEASE_SQL,
+                                                      S.RT_LEASE_TAKE_SQL):
+            self.conn.tx_state["lease"] = {k: dict(v) for k, v in self.conn.lease.items()}
+
+
+def _names_holder(sql: str) -> bool:
+    """Whether a lease statement's WHERE keys the row by `holder = %(holder)s`."""
+    where = sql.lower().split("where", 1)[-1]
+    return re.search(r"\bholder\s*=\s*%\(holder\)s", where) is not None
+
+
+# E948's limbs as the predecessor statements spell them (one WHERE, two statements), each READ
+# from the statement as `_names_holder` reads the release's: a statement that dropped or bent
+# one matches here what it would match in Postgres, so the tests that pin "never that holder"
+# see it.
+_PREDECESSOR_SHAPE = "holder ~ '^[^:]+:[0-9]+:[0-9]{1,18}$'"
+_PREDECESSOR_LIVE = "expires_at > now()"
+_PREDECESSOR_HOST = "split_part(holder, ':', 1) = %(host)s::text"
+_PREDECESSOR_PID = "split_part(holder, ':', 2) = %(pid)s::text"
+_PREDECESSOR_OLDER = "split_part(holder, ':', 3)::bigint < %(booted)s::bigint"
+
+
+def _a_predecessor(sql: str, held: Mapping[str, Any], p: Mapping[str, Any],
+                   now: datetime) -> bool:
+    """Whether a predecessor statement matches this row, by the limbs its text carries."""
+    text = " ".join(sql.split())
+    holder = str(held.get("holder") or "")
+    fields = holder.split(":")
+    if _PREDECESSOR_SHAPE in text and not re.fullmatch(r"[^:]+:[0-9]+:[0-9]{1,18}", holder):
+        return False
+    if _PREDECESSOR_LIVE in text and not held["expires_at"] > now:
+        return False
+    if _PREDECESSOR_HOST in text and fields[0] != p["host"]:
+        return False
+    if _PREDECESSOR_PID in text and (len(fields) < 2 or fields[1] != str(p["pid"])):
+        return False
+    if _PREDECESSOR_OLDER in text:
+        second = fields[2] if len(fields) > 2 else ""
+        if not second.isdigit():
+            # What Postgres raises once no shape guard keeps the cast off this holder.
+            raise ValueError(f'invalid input syntax for type bigint: "{second}"')
+        return int(second) < int(p["booted"])
+    return True
 
 
 def _aliases(sql: str) -> list[str]:
@@ -249,6 +333,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(key, db.settings[key]) for key in p["keys"] if key in db.settings]
     if sql == S.RT_SETTING_WRITE_SQL:
         db.settings[str(p["key"])] = _jsonb(p["value"])
+        db.settings_by[str(p["key"])] = str(p.get("updated_by") or "")
         return []
     if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_LOCK_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
         return [("set",)]
@@ -262,14 +347,31 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                                "expires_at": db.now + timedelta(seconds=int(p["ttl"]))}
         return [(p["holder"],)]
     if sql == S.RT_LEASE_RELEASE_SQL:
+        # The holder predicate is READ from the statement, never assumed (E941): a release that
+        # stopped naming its holder would end another writer's lease here as it would in
+        # Postgres, and the tests that pin "never another writer's row" would see it.
         held = db.lease.get(p["name"])
-        if held and held["holder"] == p["holder"]:
+        if held and (held["holder"] == p["holder"] or not _names_holder(sql)):
             held["expires_at"] = db.now
         return []
     if sql == S.RT_LEASE_READ_SQL:
         held = db.lease.get(p["name"])
         return ([(held["holder"], held.get("taken_at"), held["expires_at"],
                   held["expires_at"] > db.now)] if held else [])
+    if sql in (S.RT_LEASE_RELEASE_PREDECESSOR_SQL, S.RT_LEASE_PREDECESSOR_SQL):
+        held = db.lease.get(p["name"])
+        if not held or not _a_predecessor(sql, held, p, db.now):
+            return []
+        if sql == S.RT_LEASE_RELEASE_PREDECESSOR_SQL:
+            held["expires_at"] = db.now
+        return [(held["holder"],)]
+    if sql == S.RT_LEASE_HOLD_SQL:
+        # The fake has one clock, so `now()` against `clock_timestamp()` is the live test's to
+        # pin (tests/test_rt_lease_fence_live.py); the holder predicate is read from the text.
+        held = db.lease.get(p["name"])
+        return ([(held["holder"],)] if held and (held["holder"] == p["holder"]
+                                                 or not _names_holder(sql))
+                and held["expires_at"] > db.now else [])
 
     # ---------------------------------------------------------------- postings
     if sql == S.RT_LOOKUP_MANY_SQL:

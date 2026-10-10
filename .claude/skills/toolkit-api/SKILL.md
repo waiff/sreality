@@ -37,9 +37,9 @@ it (`api/`). They do not apply to the scraper.
 5. **No writes from the toolkit, with ten explicit exceptions.** Read-only by default. The
    exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check` that it wraps), so
-     an agent can confirm a comparable is still valid before relying on it. Every call logs
-     to `listing_freshness_checks` and may also write a new `listing_snapshots` row, flip
-     `listings.is_active`, or both.
+     an agent can confirm a comparable is still valid before relying on it. Every call logs to
+     `listing_freshness_checks` and may write a new `listing_snapshots` row; a gone answer nominates
+     a drain page check (`QUEUE_PRIORITY_VERIFY`), never flips (rule #3 hysteresis, 2026-10-09).
    - `find_anchor_amenities`, which writes the OSM-mirror tables `amenities` /
      `amenity_fetches` on a cache miss.
    - `find_comparables_along_axis`, which writes the OSM-mirror tables `transit_lines` /
@@ -388,8 +388,8 @@ Image storage (Cloudflare R2, S3-compatible):
 - **TWO runtimes need these, set them on BOTH:** (1) the **scraper** (GitHub Actions secrets)
   to *download* image bytes — optional there, a missing var just logs a skip and exits zero;
   (2) the **FastAPI service** (Railway env vars) to *serve* them, since `GET /images/{key}`
-  presigns R2 (the frontend's image path since PR #255) and `GET /listings/{id}/photos.zip`
-  (JWT) zips them server-side — the bucket sends no CORS header. If the **API** lacks them,
+  presigns R2 (the frontend's image path since PR #255) and `GET /properties/{id}/download.zip`
+  (JWT) zips them with a PDF of the ad — the bucket sends no CORS header. If the **API** lacks them,
   every listing photo 503s and the UI looks imageless though the DB reports the bytes "stored"
   — the API logs a boot WARNING and `GET /health` reports `image_storage: "unconfigured"`.
 - `IMAGE_PRESIGN_ANCHOR_SECONDS` (optional, API service, default `86400`) — the width of the

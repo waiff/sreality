@@ -27,6 +27,7 @@ import pytest
 
 from autodedup.blocking import (
     PROBE_PRIORITY,
+    QUARTER_PROBE,
     SPLIT_CITY_OBEC_KODS,
     TOWN_PROBE,
     BlockIndex,
@@ -39,7 +40,14 @@ from autodedup.incremental import (Keyer, Limits, PairRow, PassResult, _recluste
 from autodedup.incremental_store import CohortFacts, MemoryStore
 from autodedup.indistinguishable import CLUSTER, GATE, PROMOTE, distinguishing_facts
 from autodedup.settings import Settings
-from tests.autodedup.test_incremental import _calibration, _drain, arrival_order, invariant_state
+from tests.autodedup.test_incremental import (
+    QUARTER_GRAIN,
+    _calibration,
+    _drain,
+    arrival_order,
+    invariant_state,
+    quarter_grain_dataset,
+)
 from tests.autodedup.whole_cohort import build_all, build_index, generate_pairs
 from tests.autodedup.test_s14_facts import EARLIER_DIGESTS as S14_PINS
 
@@ -144,7 +152,7 @@ def test_E300_the_town_probe_fills_last_so_the_cap_keeps_every_home_candidate() 
     home = [advert(11, JABLONEC, None), advert(12, JABLONEC, None)]
     cast = advert(9, JABLONEC, 408093)
     index = build_index([fingerprint(x, cfg) for x in (probe, *home, cast)], cfg)
-    assert index.probes == PROBE_PRIORITY + (TOWN_PROBE,)
+    assert index.probes == PROBE_PRIORITY + (TOWN_PROBE, QUARTER_PROBE)
     assert set(index.candidates(fingerprint(probe, cfg))) == {11, 12}
     # ...the cast advert still finds it from its own side
     assert 10 in index.candidates(fingerprint(cast, cfg))
@@ -484,6 +492,174 @@ def test_w31_is_w29_plus_its_three_dials_and_E305r_needs_E305() -> None:
     assert not Settings().d43_cellar_area_photo_yield and not S15.d43_cellar_area_photo_yield
     with pytest.raises(ValueError, match="E305r"):
         variant(d43_cellar_area=False, d43_cellar_area_photo_yield=True)
+
+
+# --- E936: the quarter probe ---------------------------------------------------------------------
+# E300 gave a known quarter of a split city no composite key: it posts the town key and probes
+# none, so when its two home keys explode (more than `max_block_size` ads) it is dark — only a
+# shared photo, text, address or broker reaches it. On the live areas (2026-10-03) that is 1,670
+# Praha-Vysočany flats, among them sreality 268863 against the 44-ad iDNES train of 269879.
+VYSOCANY, OTHER_QUARTER = 490245, 490059
+
+
+def w31(**kwargs: object) -> Settings:
+    return Settings.from_dict({**S15B.to_dict(), **kwargs})
+
+
+def test_E936_a_known_quarter_of_a_split_city_keys_the_composite_at_its_quarter() -> None:
+    listings = [advert(1, PRAHA, VYSOCANY), advert(2, PRAHA, None), advert(3, JABLONEC, 408093),
+                advert(4, JABLONEC, None), advert(5, PRAHA, VYSOCANY, area_m2=None)]
+    for cfg, posting in ((S14, set()), (S15B, {1})):
+        index = build_index([fingerprint(x, cfg) for x in listings], cfg)
+        for listing in listings:
+            fp = fingerprint(listing, cfg)
+            posted = [key for probe, key in index.index_keys(fp) if probe == QUARTER_PROBE]
+            probed = [key for probe, key in index.probe_keys(fp) if probe == QUARTER_PROBE]
+            if listing.id not in posting:
+                assert posted == probed == []
+                continue
+            assert posted == [(f"c{VYSOCANY}", "byt", "prodej", "3+1", fp.area_band)]
+            assert probed == [(f"c{VYSOCANY}", "byt", "prodej", "3+1", fp.area_band + offset)
+                              for offset in (-1, 0, 1)]
+
+
+def test_E936_the_quarter_probe_reaches_one_quarter_one_disposition_and_one_band_out() -> None:
+    cfg = w31(max_block_size=1)   # any key two ads share explodes
+    listings = [advert(1, PRAHA, VYSOCANY, area_m2=84.0), advert(2, PRAHA, VYSOCANY, area_m2=88.0),
+                advert(3, PRAHA, OTHER_QUARTER, area_m2=84.0),
+                advert(4, PRAHA, VYSOCANY, area_m2=84.0, disposition="3+kk"),
+                advert(5, PRAHA, VYSOCANY, area_m2=118.0),
+                advert(6, PRAHA, VYSOCANY, area_m2=88.0, disposition="2+kk")]
+    fps = {x.id: fingerprint(x, cfg) for x in listings}
+    assert [fps[i].area_band for i in (1, 2, 5)] == [19, 20, 21]
+    index = build_index(fps.values(), cfg)
+    reached = {other for probe, key in index.probe_keys(fps[1]) if probe == QUARTER_PROBE
+               for other in index.postings[QUARTER_PROBE].get(key, ())}
+    assert reached == {1, 2}
+    assert index.candidates(fps[1]) == {2: {QUARTER_PROBE}}
+
+
+def test_E936_the_quarter_probe_fills_last_so_the_cap_keeps_every_other_candidate() -> None:
+    cfg = w31(max_block_size=4, max_candidates_per_listing=2)
+    address = Location(obec_kod=PRAHA, cast_obce_kod=VYSOCANY, street_key="praha|kolbenova",
+                       house_number_cp="12")
+    subject, *same_address = [advert(n, PRAHA, VYSOCANY, location=address) for n in (1, 2, 3)]
+    elsewhere = advert(4, PRAHA, VYSOCANY)
+    fillers = [advert(5, PRAHA, VYSOCANY, area_m2=30.0),           # the disposition key: 5 > 4
+               advert(6, PRAHA, VYSOCANY, disposition="2+kk")]     # the area key: 5 > 4
+    fps = [fingerprint(x, cfg) for x in (subject, *same_address, elsewhere, *fillers)]
+    index = build_index(fps, cfg)
+    assert index.probes[-2:] == (TOWN_PROBE, QUARTER_PROBE)
+    assert index.candidates(fps[0]) == {2: {"addr", QUARTER_PROBE}, 3: {"addr", QUARTER_PROBE}}
+    # ...and the ad the cap discarded still finds it from its own side
+    assert index.candidates(fps[3]) == {1: {QUARTER_PROBE}, 2: {QUARTER_PROBE}}
+
+
+class _BeforeE936(BlockIndex):
+    """The index as it stood before E936: every key but the quarter key."""
+
+    def index_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
+        return [(probe, key) for probe, key in super().index_keys(fp) if probe != QUARTER_PROBE]
+
+
+@pytest.mark.parametrize("cap", [2, 3, 60])
+def test_E936_is_additive_every_candidate_reached_before_is_reached_as_before(cap: int) -> None:
+    cfg = Settings.from_dict({**QUARTER_GRAIN.to_dict(), "max_candidates_per_listing": cap})
+    fps = build_all(quarter_grain_dataset(), cfg)
+    before, after = _BeforeE936(cfg), BlockIndex(cfg)
+    for index in (before, after):
+        for listing_id in sorted(fps):
+            index.add(fps[listing_id])
+        index.finalize()
+    gained = 0
+    for listing_id in sorted(fps):
+        now = after.candidates(fps[listing_id])
+        kept = {other: probes - {QUARTER_PROBE} for other, probes in now.items()
+                if probes - {QUARTER_PROBE}}
+        assert kept == before.candidates(fps[listing_id]), listing_id
+        gained += len(now) - len(kept)
+    assert gained > 0
+
+
+def test_E936_the_quarter_probe_never_takes_a_slot_a_stronger_probe_holds() -> None:
+    cfg = w31(max_block_size=4, max_candidates_per_listing=2)
+    address = Location(obec_kod=PRAHA, cast_obce_kod=VYSOCANY, street_key="praha|kolbenova",
+                       house_number_cp="12")
+    flats = [advert(n, PRAHA, VYSOCANY, disposition="3+kk", area_m2=84.0) for n in (1, 2, 3)]
+    flats.append(advert(4, PRAHA, VYSOCANY, disposition="2+kk", area_m2=82.0))  # area key: 5 > 4
+    subject = advert(7, PRAHA, VYSOCANY, disposition="3+kk", area_m2=84.0, location=address)
+    # two more of the subject's disposition (its key: 6 > 4), at its address and with no area
+    partners = [advert(n, PRAHA, VYSOCANY, disposition="3+kk", area_m2=None, location=address)
+                for n in (8, 9)]
+    fps = [fingerprint(x, cfg) for x in (*flats, subject, *partners)]
+    before, after = _BeforeE936(cfg), BlockIndex(cfg)
+    for index in (before, after):
+        for fp in fps:
+            index.add(fp)
+        index.finalize()
+    held = {8: {"addr"}, 9: {"addr"}}
+    assert before.candidates(fps[4]) == after.candidates(fps[4]) == held
+    assert after.candidates(fps[0]) == {2: {QUARTER_PROBE}, 3: {QUARTER_PROBE}}
+
+
+def test_E936_an_exploded_quarter_key_is_skipped_like_any_key() -> None:
+    cfg = w31(max_block_size=2)
+    listings = [advert(n, PRAHA, VYSOCANY) for n in (1, 2, 3)]
+    assert pairs_of(listings, cfg) == {}
+    assert set(pairs_of(listings[:2], cfg)) == {(1, 2)}
+
+
+def test_E936_the_268863_shape_is_a_candidate_only_through_the_quarter_key() -> None:
+    """sreality 268863 against the iDNES train of 269879 (live areas, 2026-10-03): one 3+kk of
+    84 m² on the ninth floor of Praha-Vysočany, no shared photo, text, address or broker, and
+    both home keys over the limit (here four), so retrieval returned nothing. Both post the town
+    key and neither probes it (E300); the quarter key reaches the pair."""
+    flat = dict(disposition="3+kk", area_m2=84.0, floor=9)
+    a = advert(268863, PRAHA, VYSOCANY, price=20_000_000.0, **flat)
+    b = advert(269879, PRAHA, VYSOCANY, source="idnes", price=25_000_000.0, **flat)
+    fillers = [advert(n, PRAHA, VYSOCANY, disposition="3+kk", area_m2=area)
+               for n, area in ((11, 30.0), (12, 40.0), (13, 150.0), (14, 200.0))]
+    fillers += [advert(n, PRAHA, VYSOCANY, disposition=disposition, area_m2=area)
+                for n, disposition, area in ((21, "2+kk", 80.0), (22, "4+kk", 82.0),
+                                             (23, "3+1", 78.0), (24, "2+1", 76.0))]
+    listings = [a, b, *fillers]
+    before = Settings.from_dict({**S14.to_dict(), "max_block_size": 4})
+    for cfg, expected in ((before, None), (w31(max_block_size=4), {QUARTER_PROBE})):
+        assert pairs_of(listings, cfg).get((268863, 269879)) == expected
+    cfg = w31(max_block_size=4)
+    index = build_index([fingerprint(x, cfg) for x in listings], cfg)
+    fa = fingerprint(a, cfg)
+    assert {probe for probe, key in index.index_keys(fa) if key in index.exploded[probe]} == {
+        "attr_dispo", "attr_area"}
+    assert TOWN_PROBE in {probe for probe, _ in index.index_keys(fa)}
+    assert TOWN_PROBE not in {probe for probe, _ in index.probe_keys(fa)}
+
+
+def test_E936_the_real_time_lane_retrieves_exactly_what_the_cohort_pass_does() -> None:
+    ds = quarter_grain_dataset()
+    fps = build_all(ds, QUARTER_GRAIN)
+    calibration = _calibration(ds, QUARTER_GRAIN)
+    assert QUARTER_PROBE in calibration.exploded
+    store, _passes = _drain(ds, QUARTER_GRAIN, calibration, arrival_order(ds))
+    index = build_index([fps[i] for i in sorted(fps)], QUARTER_GRAIN)
+    keyer = Keyer(QUARTER_GRAIN, calibration)
+    guards = {i: guard_row(fp) for i, fp in fps.items()}
+    quarter_only = 0
+    for listing_id in sorted(fps):
+        expected = index.candidates(fps[listing_id])
+        assert retrieve(fps[listing_id], keyer, store, guards, QUARTER_GRAIN, {}) == expected
+        quarter_only += sum(1 for probes in expected.values() if probes == {QUARTER_PROBE})
+    assert quarter_only > 0
+
+
+def test_E936_the_real_time_lane_reaches_one_state_in_any_order_and_claim() -> None:
+    """Every ad that probes a quarter key is posted under it (E71): one final state whatever
+    the order or the claim, the quarter-only pairs in it and none across two quarters."""
+    ds = quarter_grain_dataset()
+    pairs, _groups = invariant_state(ds, QUARTER_GRAIN, _calibration(ds, QUARTER_GRAIN))
+    assert any(probes == (QUARTER_PROBE,) for *_rest, probes in pairs.values())
+    other = [i for i, x in ds.listings.items() if x.location.cast_obce_kod == OTHER_QUARTER]
+    assert other and not any(set(key) & set(other) for key in pairs)
 
 
 # --- the table itself ------------------------------------------------------------------------

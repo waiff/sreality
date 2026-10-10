@@ -1041,6 +1041,7 @@ def apply_group(
     merge: Callable[..., dict[str, Any]] = merge_property_set,
     last: tuple[str, str | None] | None = None,
     guards: Sequence[tuple[str, Mapping[str, Any]]] = (),
+    fence: Callable[[Any], None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """ONE planned group through THE chokepoint, in its own transaction, with its ledger rows:
     `applied`, `skipped_at_apply` (the in-transaction re-check refused it),
@@ -1051,7 +1052,10 @@ def apply_group(
     `last` is the member set's newest ledger outcome: a skip or refusal that repeats it files
     nothing (the lane re-tries a group every sweep and would otherwise file
     a row every few minutes). `guards` are statements run first inside the group's transaction
-    (the lane's local statement and lock timeouts)."""
+    (the lane's local statement and lock timeouts). `fence` (the lane's reconcile, E941) runs
+    LAST inside every transaction that writes the group's rows and raises `rt_lease.LeaseLost`
+    when the lane's lease ended under the run: the group rolls back, files nothing, and the
+    LeaseLost reaches the caller, which merges nothing more under someone else's lease."""
     group_id = str(uuid.uuid4())
     markers = {
         "engine": "autodedup", "generation": generation, "cluster_key": group.cluster_key,
@@ -1085,6 +1089,8 @@ def apply_group(
             _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                 run_id, generation, group, dry_run=False, outcome="applied",
                 merge_group_id=group_id, moved=moved))
+            if fence is not None:
+                fence(conn)
     except _SkipAtApply as skip:
         group.reasons = skip.reasons
         group.detail = {**group.detail, **skip.detail, "at_apply": True}
@@ -1093,6 +1099,8 @@ def apply_group(
                 _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                     run_id, generation, group, dry_run=False, outcome="skipped",
                     error=skip.reasons[0]))
+                if fence is not None:
+                    fence(conn)
         return "skipped_at_apply", group_brief(group, reasons=skip.reasons)
     except MergeError as exc:
         outcome = "refused" if _terminal(exc) else "failed"
@@ -1101,13 +1109,20 @@ def apply_group(
                 _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                     run_id, generation, group, dry_run=False, outcome=outcome,
                     error=str(exc)))
+                if fence is not None:
+                    fence(conn)
         return outcome, group_brief(group, error=str(exc))
+    except rt_lease.LeaseLost:
+        # E941: the fence rolled the group back; no `failed` row is filed without the lease.
+        raise
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         try:
             with conn.transaction():
                 _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                     run_id, generation, group, dry_run=False, outcome="failed", error=error))
+                if fence is not None:
+                    fence(conn)
         except Exception:  # noqa: BLE001 — the original error is the one to surface
             pass
         raise

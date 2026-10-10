@@ -372,7 +372,8 @@ total — so the per-AGENDA walk nominates the whole agenda's unseen rows for a 
 scoped by category_type (rule #3). Because that per-category `declared_total` is `len(seen)` by
 construction, the runner's `COVERAGE` warning is blind here and `remax_main.presence_candidates`
 logs its own agenda-grain `COVERAGE agenda …` line instead; a gone detail (404/410 or a
-redirect off the detail path) flips that one listing inactive. Registered as a
+redirect off the detail path) is a gone verdict for that one listing (rule #3's hysteresis
+flips it). Registered as a
 scraper portal by CONVERTING the existing on-demand-parser row (migration 135). NOTE:
 remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
 `source_kind='remax'`) used by the estimation preview — a separate entry point
@@ -875,8 +876,8 @@ renumber.** Navigate by area:
    via the Supabase MCP. See "Database access" for the full flow and the
    additive-vs-destructive policy.
 2. **Snapshots on content change only.** A fetched payload reaches `listings` ONLY via
-   `scraper/listing_write.py` `write_listings` — every portal's detail drain, sreality's
-   `--detail-only` and `_run_full` fallback, the URL parser and the freshness re-check —
+   `scraper/listing_write.py` `write_listings` — every portal's detail drain, the URL
+   parser and the freshness re-check —
    which appends a `listing_snapshots` row iff its content hash differs from the listing's
    latest snapshot under THE one order (`scraped_at DESC, id DESC`), stamped
    `statement_timestamp()` late in its transaction (a brand-new row always gets one). The two
@@ -904,8 +905,11 @@ renumber.** Navigate by area:
    every active row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY`
    (served after new and changed listings); the drain fetches the page and only a POSITIVE gone
    signal — 404/410, a redirect off the listing, the portal's own "no longer active" text,
-   raised as `ListingGoneError` — flips it (the drain calls `db.mark_listing_inactive`);
-   a live page refreshes it, an error leaves it for the next pass. Why: absence-based sweeps
+   raised as `ListingGoneError` — can close it, and since 2026-10-09 not alone: the verdict is
+   recorded (`detail_queue_completions`, outcome `gone`) and the listing flips (outcome `flipped`,
+   `db.mark_listing_inactive`) only when the ledger already holds an earlier unrefuted verdict at
+   least `delist_policy.GONE_DWELL` (12 h) old — **Hysteresis** below; a live page refreshes it,
+   an error leaves it for the next pass. Why: absence-based sweeps
    needed a staleness rail, a national cross-check and a latching cap to be safe, and even so
    parked two portals for weeks (ceskereality's rentals could never reach the national count
    because listings filed under no region are in no regional list). A nomination cannot be
@@ -1012,8 +1016,9 @@ renumber.** Navigate by area:
    true for every row (the whole scope nominated). So the runner drops NULL ids from the seen
    set (`VERIFY dropped N NULL id(s)`, a parser bug to file) and an emptied set takes the
    saw-nothing branch, and the bind site raises on an empty array so any other caller fails
-   closed (`VERIFY failed`). **One flip writer.** Every gone signal — the drain on all nine
-   portals, the legacy `main._handle_gone` and `freshness._record_gone` — goes through
+   closed (`VERIFY failed`). **One flip writer.** Every flip — the drain on all nine portals
+   (`freshness._record_gone` nominates at `QUEUE_PRIORITY_VERIFY` since 2026-10-09 instead of
+   flipping; the legacy `main._handle_gone` went with C2-2) — goes through
    `db.mark_listing_inactive(conn, source, native_id)`: keyed on the natural key (migration
    091's UNIQUE `(source, source_id_native)`), guarded `AND is_active = true` so `inactive_at`
    is stamped once per inactive spell (cleared on reactivation; the delisting-latency health
@@ -1024,6 +1029,30 @@ renumber.** Navigate by area:
    for any other priority (the natural key broke). A flip that raises non-transiently is a
    failure (the queue row stays), never completed as gone. The verify budget (the throttle
    below) and the drain's gone-rate breaker live in the pure `scraper/delist_policy.py`.
+   **Hysteresis (2026-10-09): one verdict records, the second flips.** A portal's "not found"
+   is a point observation, not a state. Measured over 2026-10-02..09: of sreality's 18,105
+   page-check gone verdicts, 35% of the ads were active again within the week, and a live
+   re-probe put 62% of one night's batch (the 23:00 UTC drain of 2026-10-08, 854 of 855
+   nominated pages read gone while 1,732 ingest fetches in the same minutes succeeded) back on
+   the portal nine hours later — sreality takes an ad down, index AND detail, for hours around
+   its nightly expiry/renewal and brings it back under the same id (idnes 6%, remax 11%,
+   mmreality 15%; bazos, ceskereality, realitymix under 2%). So the drain's gone branch
+   (`_drain_mark_gone`) first reads `db.gone_evidence`: does the row exist, and when did its
+   EARLIEST gone verdict newer than `last_seen_at` land (a sighting refutes everything before
+   it; the earliest, not the latest, so consecutive provisional verdicts cannot reset the clock)?
+   No such verdict, or one younger than `delist_policy.GONE_DWELL` (12 h, the operator's ruling
+   over a 24 h proposal): the queue row completes with outcome `gone` — the ledger row IS the
+   evidence — and the listing stays active, so the next complete walk re-nominates it; the walk
+   cadence is the retry timer and nothing else exists for this (no column, no timer, no
+   re-enqueue). An unrefuted verdict at least the dwell old: `db.mark_listing_inactive`, outcome
+   `flipped` (`gone` when the row was already inactive). With sreality's ~5 h walk gap a true
+   removal closes on the fourth walk after its first verdict (~16 h), the 7 h-gap portals on the
+   third (~15 h). The ledger's 7-day retention bounds the evidence; the gone-rate breaker is
+   unchanged (ingest only). `verify_pipeline`'s `false_delist_share` reads the `flipped` rows that
+   are active again. Deleted with it: sreality's HTML "tato stránka neexistuje" body scan (the
+   live listing page carries that string in its bundle, so any HTML answer — a consent wall, an
+   edge error — read as a removal; the API answers a real removal with a JSON 404, and 62 of 62
+   re-probed removals did) and `freshness._record_gone`'s own flip.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
    fetches never touch it.** Every existing listing whose id appears in the run's index
    gets its `last_seen_at` bumped before any detail fetches happen — whatever its index price:
@@ -2165,9 +2194,9 @@ renumber.** Navigate by area:
     anti-join). The index-walk uses the transaction pooler; sreality's drain uses the session
     pooler (`connect_session()`) for prepared statements. The drain inserts with `property_id`
     NULL and `recompute_property_stats`'s straggler-attach births the singleton (rule #15:
-    there is no spatial matcher; grouping is out-of-band). `scrape.yml`'s combined
-    `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
-    back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
+    there is no spatial matcher; grouping is out-of-band). The combined `scrape.yml` /
+    `_run_full` revert fallback was deleted in C2-2 (2026-10). The queue is the needs-detail
+    signal; `listing_fetch_failures` stays
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
     `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
     migration 108), so this same split is how every portal scrapes — sreality is just one
@@ -2200,7 +2229,10 @@ renumber.** Navigate by area:
     to `delist_flip_refusals` (the row now means "deferred") and is alarmed by
     `verify_pipeline`'s `delist_flip_refused` — an Actions log expires, and a signal nothing can
     query is a signal nobody receives. There is no latch: the next walk re-nominates what was
-    deferred, so a real backlog drains in a few walks.
+    deferred, so a real backlog drains in a few walks. Its sibling `false_delist_share`
+    (2026-10-09) watches the hysteresis itself: per portal, the share of `flipped` ledger rows
+    (7 d) whose ad is active again — a revival after a confirmed verdict is a flip that was
+    wrong; warn ≥5%, fail ≥20%, under 50 flips unscored, no scored portal = unmeasured.
     **The threshold is 10% with a 2,000-row category floor, and it is MEASURED (migration 452).**
     Across 60 days and 11,763 flipping sweeps the per-sweep share of a category is p95 = 1.8%,
     p99 = 3.4%, and then the tail jumps straight to 86% — routine churn and genuine incidents are
@@ -2223,7 +2255,7 @@ renumber.** Navigate by area:
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `listing_write.write_listings` (a content
     change, or a revival, or a write under an inactive property), `mark_listing_inactive`
-    (delisting: the drain, the legacy `_handle_gone` and freshness), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
+    (delisting: the drain and freshness), `touch_listings_by_id` (re-sighting reactivation, via `reconcile_sightings`) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is

@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 LOG = logging.getLogger(__name__)
@@ -135,8 +135,34 @@ def _override_permits(
     return None
 
 
+# --- gone hysteresis (2026-10-09) ---------------------------------------------
+#
+# A portal's "not found" is a point observation, not a state. Measured over
+# 2026-10-02..09: of sreality's 18,105 page-check gone verdicts, 35% of the ads
+# were active again within the week, and a live re-probe put 62% of one night's
+# batch back on the portal nine hours later -- sreality takes an ad down (index
+# AND detail) for hours around its nightly expiry/renewal and brings it back
+# under the same id. The other portals blink less (idnes 6%, remax 11%,
+# mmreality 15%) but the rule is one: a single verdict cannot close an ad. Two
+# can -- a second gone verdict at least GONE_DWELL after the first, with no
+# sighting between them (a sighting refutes the first: `db.gone_evidence` reads
+# only verdicts newer than the row's last_seen_at). The walk cadence is the
+# retry timer: a still-active, still-unseen row is re-nominated by the next
+# complete walk, so no column, no timer and no re-enqueue exist for this.
+GONE_DWELL = timedelta(hours=12)
+
+
+def gone_confirmed(first_gone_at: datetime | None, now: datetime) -> bool:
+    """True iff an earlier unrefuted gone verdict is at least GONE_DWELL old."""
+    if first_gone_at is None:
+        return False
+    if first_gone_at.tzinfo is None:
+        first_gone_at = first_gone_at.replace(tzinfo=timezone.utc)
+    return now - first_gone_at >= GONE_DWELL
+
+
 class GoneRateBreaker:
-    """Rule #3's last rail after presence verification: a positive gone signal
+    """Rule #3's last rail after presence verification: a confirmed gone verdict
     flips one listing, and nothing else does -- so the one systemic failure
     left is a portal that answers EVERY page with the gone signal (a consent
     interstitial that redirects off the listing, a WAF serving 404s). Ingest

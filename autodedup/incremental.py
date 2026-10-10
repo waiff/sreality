@@ -46,7 +46,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from autodedup.blocking import BlockIndex
 from autodedup.cluster import cluster_pairs, cluster_rows
@@ -83,8 +83,10 @@ GENERATION: str = "rt"
 # false. The 09-21 `rt` was seeded before F2 and carries no version row, so it is never
 # reconciled from and never shown as the default. A key in `autodedup.settings`, not a column
 # of the calibration row, because the calibration re-cuts itself (A10) and the version must
-# survive that. Bump it when a change makes an existing `rt` unfit to merge from.
-SEED_VERSION: str = "w5"
+# survive that. Bump it when a change makes an existing `rt` unfit to merge from: E936's
+# quarter probe moved the keys, and a store seeded before it holds no quarter posting and no
+# quarter explosion set.
+SEED_VERSION: str = "e936"
 SEED_VERSION_SETTING: str = "rt_seed_version"
 BOOTSTRAP_SETTING: str = "rt_bootstrap"
 
@@ -612,7 +614,8 @@ def retrieve(
     listing id, exactly as the cohort pass fills it, so the cap can only ever discard the
     weakest evidence class (E17). `tests/autodedup/test_incremental.py` asserts this against
     `BlockIndex.candidates` over the whole cohort rather than trusting the restatement."""
-    # `index.probes` is `PROBE_PRIORITY`, plus E300's town probe last when the row asks for it.
+    # `index.probes` is `PROBE_PRIORITY`, plus E300's town and E936's quarter probes last when
+    # the row asks for them.
     probes = keyer.index.probes
     by_probe: dict[str, list[str]] = {probe: [] for probe in probes}
     wanted: list[tuple[str, str]] = []
@@ -676,9 +679,17 @@ class PassDeadline(Exception):
     the next pass claims half as much."""
 
 
-def _in_time(deadline: float | None) -> None:
+class PassStopped(PassDeadline):
+    """The caller is shutting down (E941): raised at the same checkpoints as the deadline, so
+    a pass the deploy is about to kill rolls back on its own live connection and frees its row
+    locks at once instead of holding them until the process dies."""
+
+
+def _in_time(deadline: float | None, stopping: Callable[[], bool] | None = None) -> None:
     if deadline is not None and time.perf_counter() >= deadline:
         raise PassDeadline("the pass ran past its deadline")
+    if stopping is not None and stopping():
+        raise PassStopped("the worker is shutting down")
 
 
 @dataclass(slots=True)
@@ -1006,13 +1017,15 @@ def run_pass(
     now: float | None = None,
     hold: EvidenceHold | None = None,
     deadline: float | None = None,
+    stopping: Callable[[], bool] | None = None,
 ) -> PassResult:
     """One bounded, idempotent incremental pass. Re-running it on an unchanged corpus is a no-op.
 
     `deadline` (a `time.perf_counter()` instant) bounds the pass's own time (E913): it is read
     between steps, every few hundred pair decisions and — in the lane, whose `SqlFacts` holds
     the same instant — between the slices of every fact read (E931), and past it the pass
-    raises `PassDeadline` for its caller's transaction to roll back.
+    raises `PassDeadline` for its caller's transaction to roll back; `stopping` (the worker's
+    shutdown, E941) is read at the same checkpoints and raises `PassStopped`.
 
     The order is the cohort pass's order, restricted: refresh the fingerprints that moved,
     widen to the probe-key neighbourhood (E71), retrieve, score what is new or stale, write the
@@ -1162,7 +1175,7 @@ def run_pass(
         touched_blocks.add(cell[0])
         changed.add(listing_id)
     result.timings["refresh_s"] = time.perf_counter() - clock
-    _in_time(deadline)
+    _in_time(deadline, stopping)
 
     # --- 2. E71: the dirty set is the probe-key neighbourhood ------------------------------
     clock = time.perf_counter()
@@ -1195,7 +1208,7 @@ def run_pass(
             continue
         cand[listing_id] = retrieve(fp, keyer, view, lookup, settings, vetoed)
     result.timings["retrieve_s"] = time.perf_counter() - clock
-    _in_time(deadline)
+    _in_time(deadline, stopping)
 
     # --- 4. the pair set: either side retrieving the other keeps it ------------------------
     clock = time.perf_counter()
@@ -1273,7 +1286,7 @@ def run_pass(
     result.redecided = len(redecide)
     for index, (lo, hi) in enumerate(sorted(wanted)):
         if index % 256 == 255:
-            _in_time(deadline)
+            _in_time(deadline, stopping)
         entry = wanted[(lo, hi)]
         if lo not in working.fps or hi not in working.fps:
             continue
@@ -1349,7 +1362,7 @@ def run_pass(
         previous = stored.get(key)
         if previous is not None and previous.zone == "merge":
             seeds |= set(key)
-    _in_time(deadline)
+    _in_time(deadline, stopping)
     rulings = read_rulings(store)
     seeds |= _ruling_seeds(store, rulings)
     # A retired listing is not a seed: it has no postings, no pairs and no cell any more. Its
@@ -1360,7 +1373,7 @@ def run_pass(
     result.timings["cluster_s"] = time.perf_counter() - clock
 
     # --- 7. E64: a census that has overtaken a stamped promotion re-opens it to the band ---
-    _in_time(deadline)
+    _in_time(deadline, stopping)
     clock = time.perf_counter()
     result.rail = _run_rail(store, facts, settings, working, result, sorted(touched_blocks),
                             rulings)
@@ -1392,6 +1405,7 @@ def run_pass_bounded(
     attempts: int = 5,
     hold: EvidenceHold | None = None,
     deadline: float | None = None,
+    stopping: Callable[[], bool] | None = None,
 ) -> PassResult:
     """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
@@ -1401,12 +1415,12 @@ def run_pass_bounded(
     budget is a block worth an operator's eye, not a number to quietly truncate."""
     caps = limits or Limits()
     result = run_pass(store, facts, work, settings, model, calibration, caps, generation, now,
-                      hold, deadline)
+                      hold, deadline, stopping)
     tries = 1
     while result.aborted and tries < attempts and caps.max_listings > 1:
         caps = replace(caps, max_listings=max(1, caps.max_listings // shrink))
         result = run_pass(store, facts, work, settings, model, calibration, caps, generation,
-                          now, hold, deadline)
+                          now, hold, deadline, stopping)
         tries += 1
     result.attempts = tries
     return result

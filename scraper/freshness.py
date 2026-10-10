@@ -5,8 +5,8 @@ classifies the outcome, and writes an audit row to
 listing_freshness_checks. On 'updated' the payload is written through
 `listing_write.write_listings`, which, as any successful detail fetch, bumps
 `last_seen_at` (rule 4); the `unchanged` arm writes nothing and its signal is
-`listing_freshness_checks.checked_at`. On 'gone' the listing is flipped to
-is_active=false.
+`listing_freshness_checks.checked_at`. On 'gone' the listing is NOMINATED for the
+drain's page check (rule #3 hysteresis lives in one place, the drain); nothing here flips it.
 
 Residual race: a concurrent drain can write the same content between the
 pre-check and the write, so the writer reports `unchanged` while this check
@@ -166,7 +166,8 @@ def _record_gone(
     sreality_id: int,
     prev: listing_write.SnapshotRef | None,
 ) -> FreshnessResult:
-    db.mark_listing_inactive(conn, "sreality", str(sreality_id))
+    db.enqueue_detail(
+        conn, "sreality", [(str(sreality_id), None, None, db.QUEUE_PRIORITY_VERIFY)])
     prev_hash = prev.content_hash if prev else None
     _insert_log(
         conn, sreality_id, "gone",

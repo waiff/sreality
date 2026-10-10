@@ -40,6 +40,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from autodedup import apply as A
 from autodedup import apply_sql as S
+from autodedup import rt_lease
 from autodedup.incremental_sql import (
     RT_CURSOR_READ_SQL,
     RT_CURSOR_SET_SQL,
@@ -154,9 +155,14 @@ def run(
     merge: Callable[..., dict[str, Any]] = merge_property_set,
     clock: Callable[[], float] = time.perf_counter,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    fence: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     """Reconcile the pass's groups onto production. Returns the readout the pass summary and
-    the worker's heartbeat carry; writes only through `apply.apply_group` and the ledger."""
+    the worker's heartbeat carry; writes only through `apply.apply_group` and the ledger.
+
+    `fence` (E941) is the lane's lease check, run last inside every group's transaction: a
+    lease that ended under the reconcile — the worker's shutdown, a `release_lease=` dispatch —
+    rolls that group back and stops the run (`stopped` = `lease_lost`)."""
     scope, closed = read_scope(conn)
     if scope is None:
         return {"skipped": "scope_closed", "reason": closed}
@@ -240,7 +246,12 @@ def run(
         try:
             outcome, brief = A.apply_group(conn, group, scope, run_id=run_id,
                                            generation=generation, merge=merge,
-                                           last=last(group), guards=guards)
+                                           last=last(group), guards=guards, fence=fence)
+        except rt_lease.LeaseLost:
+            # The group rolled back and filed nothing; the lease is someone else's now.
+            out["stopped"] = rt_lease.LEASE_LOST
+            counts["not_attempted"] = len(todo) - index
+            break
         except Exception as exc:  # noqa: BLE001 — recorded by apply_group, counted here
             errors += 1
             counts["failed"] += 1

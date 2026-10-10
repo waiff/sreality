@@ -1,21 +1,21 @@
-/* The Photos header's "download all": it asks the API for THIS listing's zip,
-   hands the browser a file under the given name, owns up when some photos have
-   no stored copy, and says so when the download fails. */
+/* The property header's "Stáhnout": it asks the API for THIS property's zip (a PDF of
+   the ad plus its stored photos), hands the browser a file, owns up when some photos
+   have no stored copy, and says so when the download fails. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import DownloadPhotosButton from './DownloadPhotosButton';
+import DownloadPropertyButton from './DownloadPropertyButton';
 import * as api from '@/lib/api';
 import type { ImagePublic } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
-  return { ...actual, fetchListingPhotosZip: vi.fn() };
+  return { ...actual, fetchPropertyDownload: vi.fn() };
 });
 
-const fetchZip = vi.mocked(api.fetchListingPhotosZip);
+const fetchZip = vi.mocked(api.fetchPropertyDownload);
 
 const photo = (id: number, storage_path: string | null): ImagePublic => ({
   id,
@@ -30,7 +30,7 @@ const photo = (id: number, storage_path: string | null): ImagePublic => ({
   phash: null,
 });
 
-describe('DownloadPhotosButton', () => {
+describe('DownloadPropertyButton', () => {
   let clicked: string[];
 
   beforeEach(() => {
@@ -47,42 +47,41 @@ describe('DownloadPhotosButton', () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it('downloads the listing zip under the given file name', async () => {
+  it("downloads the property's zip", async () => {
     fetchZip.mockResolvedValue(new Blob(['zip']));
     render(
-      <DownloadPhotosButton
-        listingId={42}
+      <DownloadPropertyButton
+        propertyId={7}
         images={[photo(1, '42/0001.jpg'), photo(2, '42/0002.jpg')]}
-        fileName="property-7-photos.zip"
       />,
     );
-    await userEvent.click(screen.getByRole('button', { name: /download all/i }));
-    await waitFor(() => expect(clicked).toEqual(['property-7-photos.zip|blob:zip']));
-    expect(fetchZip).toHaveBeenCalledWith(42);
+    const button = screen.getByRole('button', { name: /stáhnout/i });
+    expect(button.getAttribute('title')).toBe('PDF inzerátu a jeho fotky v jednom .zip');
+    await userEvent.click(button);
+    await waitFor(() => expect(clicked).toEqual(['property-7.zip|blob:zip']));
+    expect(fetchZip).toHaveBeenCalledWith(7);
   });
 
-  it('says how many photos the zip will hold when some are not stored yet', () => {
+  it('says which photos the zip leaves out when some are not stored yet', () => {
     render(
-      <DownloadPhotosButton
-        listingId={42}
+      <DownloadPropertyButton
+        propertyId={7}
         images={[photo(1, '42/0001.jpg'), photo(2, null), photo(3, '42/0003.jpg')]}
-        fileName="x.zip"
       />,
     );
-    const button = screen.getByRole('button', { name: /download 2 of 3/i });
-    expect(button.getAttribute('title')).toMatch(/1 of 3 photos are not stored/);
+    expect(screen.getByRole('button').getAttribute('title')).toMatch(
+      /2 z 3 fotek .* ostatní fotky zatím nejsou uložené/,
+    );
   });
 
-  it('is disabled when no photo is stored', () => {
-    render(<DownloadPhotosButton listingId={42} images={[photo(1, null)]} fileName="x.zip" />);
-    expect(screen.getByRole('button')).toBeDisabled();
+  it('stays enabled without a stored photo: the PDF alone is worth the download', () => {
+    render(<DownloadPropertyButton propertyId={7} images={[photo(1, null)]} />);
+    expect(screen.getByRole('button')).toBeEnabled();
   });
 
   it('reports a failed download instead of failing silently', async () => {
     fetchZip.mockRejectedValue(new Error('A photo could not be read from storage'));
-    render(
-      <DownloadPhotosButton listingId={42} images={[photo(1, '42/0001.jpg')]} fileName="x.zip" />,
-    );
+    render(<DownloadPropertyButton propertyId={7} images={[photo(1, '42/0001.jpg')]} />);
     await userEvent.click(screen.getByRole('button'));
     const alert = await screen.findByRole('alert');
     expect(alert.getAttribute('title')).toBe('A photo could not be read from storage');

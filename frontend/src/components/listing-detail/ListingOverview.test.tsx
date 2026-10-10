@@ -8,7 +8,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ListingOverview } from './ListingOverview';
-import type { ImagePublic, ListingPublic } from '@/lib/types';
+import type { ListingPublic } from '@/lib/types';
 
 const LISTING = {
   id: 1,
@@ -76,29 +76,6 @@ describe('<ListingOverview> section order', () => {
 
     expect(screen.queryByTestId('curation')).not.toBeInTheDocument();
     expect(screen.getByTestId('estimates')).toBeInTheDocument();
-  });
-
-  it('puts the photos action in the Photos header, and only when there are photos', () => {
-    const image = { id: 1, sreality_id: 1, sequence: 1, sreality_url: 'u', storage_path: '1/0001.jpg' };
-    const { rerender } = render(
-      <MemoryRouter>
-        <ListingOverview
-          listing={LISTING}
-          images={[image] as ImagePublic[]}
-          photosAction={<button type="button">zip</button>}
-        />
-      </MemoryRouter>,
-    );
-    expect(screen.getByText('Photos').parentElement).toContainElement(
-      screen.getByRole('button', { name: 'zip' }),
-    );
-
-    rerender(
-      <MemoryRouter>
-        <ListingOverview listing={LISTING} photosAction={<button type="button">zip</button>} />
-      </MemoryRouter>,
-    );
-    expect(screen.queryByRole('button', { name: 'zip' })).not.toBeInTheDocument();
   });
 });
 

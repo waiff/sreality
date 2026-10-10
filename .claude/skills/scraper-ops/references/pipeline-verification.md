@@ -612,3 +612,23 @@ can never starve a database check (the 6-hourly lane used to exhaust a shared 12
 before reaching it; it now owes every check its own budget, and this lane stays the daily guarantee). A CDN 403/429 (sreality's throttle) or a
 5xx is a `warn` that verified nothing — only a 4xx refusal, a non-image body or a downgraded
 frame is a `fail`.
+
+## `false_delist_share` — did a confirmed gone verdict close an ad the portal still shows? (2026-10-09)
+
+Rule #3's hysteresis flips a listing only on a second gone verdict at least `GONE_DWELL`
+(12 h) after the first, with no sighting between. The check reads the only durable trace
+of a flip — `detail_queue_completions.outcome = 'flipped'` (migration 594; reactivation
+clears `listings.inactive_at`) — and reports, per portal, the share of the last 7 days'
+flips whose ad is active again. A revival after a confirmed verdict means the portal kept
+the ad down longer than the dwell and brought it back, or its gone signal misfires; either
+way the operator saw an active ad marked inactive. Sized on the pre-hysteresis ledger
+(one verdict flipped): sreality 35%, mmreality 15%, remax 11%, bezrealitky 7%, idnes 6%,
+the rest under 2% — warn ≥5% (the dwell is meant to hold every portal under it), fail
+≥20% (the old sreality order of magnitude: the rule stopped working). A portal with fewer
+than 50 flips in the window is listed in `details.unscored`, not scored; a window where
+no portal reached 50 is `warn` with `value: None` — verified nothing — which is the
+expected state in the first days after 594 ships. `value` is the worst scored share in
+percent; `details.per_source` carries flips / active_again / share / scored. Registered
+in the 6-hourly lane with the in-app bell; promotion into `llm_health.yml`'s hourly
+`--only` list is a post-soak step. The remedy when it reds: read the flipped rows' pages
+(`detail_queue_completions` → `listings.source_url`) before touching the dwell.

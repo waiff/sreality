@@ -87,12 +87,53 @@ update autodedup.rt_lease
    and holder = %(holder)s::text
 """
 
+# The pass's FENCE (E941), its transaction's last statement before the commit: this holder's
+# lease row, still live by the CLOCK (`now()` is the transaction's start, which a release the
+# worker's shutdown wrote mid-pass is later than), locked until the commit. A release that
+# landed first leaves no row and the pass rolls back; one that comes after waits for the commit.
+RT_LEASE_HOLD_SQL = """
+select holder
+  from autodedup.rt_lease
+ where name = %(name)s::text
+   and holder = %(holder)s::text
+   and expires_at > clock_timestamp()
+   for update
+"""
+
 # Who holds it, for a refusal that names the holder (`autodedup/rt_lease.py`).
 RT_LEASE_READ_SQL = """
 select l.holder, l.taken_at, l.expires_at, l.expires_at > now() as live
   from autodedup.rt_lease l
  where l.name = %(name)s::text
 """
+
+# E948: the LIVE lease a dead predecessor of this container left. A worker pass's holder is
+# `<hostname>:<pid>:<the second its pass started>` (`incremental_lane.pass_holder`). One worker
+# process runs per container, and a restart in place keeps the hostname and, under the same
+# entrypoint, the pid (1 on Railway), so a live row naming THIS hostname and pid and a second
+# before this process booted belongs to a process that is gone; a second worker on one host has
+# a pid of its own and never ends the first one's lease. Only that three-field shape can match
+# — `rt_seed:<host>:<pid>:<second>` and `dispatch:<run>` never do — the pid is compared as text,
+# and the CASE keeps the cast off every other shape. An expired row is no predecessor's death: a
+# pass that ended released its lease. ONE predicate, two statements: the release, and the read
+# that names the lease a pass at the claim cap's floor leaves to its TTL.
+_RT_LEASE_PREDECESSOR_WHERE = """
+ where name = %(name)s::text
+   and expires_at > now()
+   and case when holder ~ '^[^:]+:[0-9]+:[0-9]{1,18}$'
+            then split_part(holder, ':', 1) = %(host)s::text
+                 and split_part(holder, ':', 2) = %(pid)s::text
+                 and split_part(holder, ':', 3)::bigint < %(booted)s::bigint
+            else false
+       end
+"""
+RT_LEASE_RELEASE_PREDECESSOR_SQL = ("""
+update autodedup.rt_lease
+   set expires_at = now()""" + _RT_LEASE_PREDECESSOR_WHERE + """returning holder
+""")
+RT_LEASE_PREDECESSOR_SQL = ("""
+select holder
+  from autodedup.rt_lease""" + _RT_LEASE_PREDECESSOR_WHERE)
 
 # ------------------------------------------------------------------ the watermark feeds
 #

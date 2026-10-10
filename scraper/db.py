@@ -764,7 +764,7 @@ def record_media(
 
 
 TOUCH_CHUNK_SIZE = 250
-# touch_listings deadlock retry: a lock race with a concurrent writer over the
+# touch_listings_by_id deadlock retry: a lock race with a concurrent writer over the
 # same rows. Postgres has already rolled back the victim, so the other side
 # finishes and a short pause suffices; three attempts covers a double race.
 _TOUCH_DEADLOCK_ATTEMPTS = 3
@@ -775,37 +775,7 @@ _TOUCH_DEADLOCK_DELAY = 0.5
 _TOUCH_LOCKWAIT_DELAY = 5.0
 
 
-def touch_listings(
-    conn: psycopg.Connection,
-    sreality_ids: Iterable[int],
-) -> int:
-    """Bump last_seen_at and is_active for listings whose detail we skipped.
-
-    Used when an index entry's price matches what is already stored, so we
-    have evidence the listing is still on the market without paying for
-    another detail fetch.
-
-    Chunked because Supabase's transaction pooler enforces a statement
-    timeout (~2 min) and a single UPDATE over the full id list blows past
-    it. The UPDATE uses unnest+JOIN rather than `sreality_id = ANY(%s)`
-    so the planner always drives off the PK index — large ANY() arrays
-    can fall to a seqscan when stats are off, which is what tipped the
-    20k-listing `dum prodej` category over the timeout.
-    """
-    ids = list(sreality_ids)
-    if not ids:
-        return 0
-    total = 0
-    with conn.cursor() as cur:
-        for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
-            chunk = ids[start : start + TOUCH_CHUNK_SIZE]
-            total += _touch_chunk_with_retry(cur, chunk, _touch_chunk)
-    return total
-
-
-def _touch_chunk_with_retry(
-    cur: Any, chunk: list[int], touch: Callable[[Any, list[int]], int],
-) -> int:
+def _touch_chunk_with_retry(cur: Any, chunk: list[int]) -> int:
     """One touch chunk, retried when it loses a lock fight.
 
     Two ways a touch loses one, both seen in production, both fatal to the
@@ -833,7 +803,7 @@ def _touch_chunk_with_retry(
     """
     for attempt in range(1, _TOUCH_DEADLOCK_ATTEMPTS + 1):
         try:
-            return touch(cur, chunk)
+            return _touch_chunk_by_id(cur, chunk)
         except (psycopg.errors.DeadlockDetected, psycopg.errors.QueryCanceled) as exc:
             if attempt == _TOUCH_DEADLOCK_ATTEMPTS:
                 raise
@@ -848,55 +818,19 @@ def _touch_chunk_with_retry(
     raise AssertionError("unreachable")
 
 
-def _touch_chunk(cur: Any, chunk: list[int]) -> int:
-    # Phase 3: a re-sighting that flips a listing back to active changes
-    # its property's lifecycle rollup with NO snapshot, so it would not
-    # be caught by the snapshot-driven dirty mark. Capture exactly the
-    # reactivated subset (was inactive) and enqueue their properties.
-    # The bulk last_seen bump below covers the active majority.
-    cur.execute(
-        """
-        WITH react AS (
-            UPDATE listings
-            SET is_active = true, inactive_at = NULL, last_seen_at = now()
-            FROM unnest(%s::bigint[]) AS u(sreality_id)
-            WHERE listings.sreality_id = u.sreality_id
-              AND listings.is_active = false
-            RETURNING listings.property_id
-        )
-        INSERT INTO dirty_properties (property_id)
-        SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
-        ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-        """,
-        (chunk,),
-    )
-    cur.execute(
-        """
-        UPDATE listings
-        SET last_seen_at = now(),
-            is_active = true,
-            inactive_at = NULL
-        FROM unnest(%s::bigint[]) AS u(sreality_id)
-        WHERE listings.sreality_id = u.sreality_id
-        """,
-        (chunk,),
-    )
-    return cur.rowcount or 0
-
-
 def touch_listings_by_id(
     conn: psycopg.Connection,
     listing_ids: Iterable[int],
 ) -> int:
-    """Surrogate-id analogue of `touch_listings` for the non-sreality portals.
+    """Bump last_seen_at + is_active on the sighted listings; dirty-mark the revived.
 
-    Same last_seen_at bump + reactivation dirty-mark, but keyed on the surrogate
-    `listings.id`. A portal index walk resolves the surrogate (its sreality_id is
-    a synthetic negative today and NULL once Gate 2 flips), so a sreality_id-keyed
-    touch would match nothing — starving rule #4's last_seen_at signal for every
-    unchanged portal row. Separate function (not a parametrized key column) to
-    mirror the touch_listings split and stay discoverable by
-    the SQL-correctness gate.
+    Keyed on the surrogate `listings.id`. A portal index walk resolves the
+    surrogate (a crawler row's sreality_id is a synthetic negative today and NULL
+    once Gate 2 flips), so a sreality_id-keyed touch would match nothing —
+    starving rule #4's last_seen_at signal for every unchanged portal row.
+    Chunked because the transaction pooler's statement timeout (~2 min) kills one
+    UPDATE over a whole category; unnest+JOIN rather than `= ANY(%s)` keeps the
+    planner on the PK index for a large id list.
     """
     ids = list(listing_ids)
     if not ids:
@@ -905,7 +839,7 @@ def touch_listings_by_id(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
-            total += _touch_chunk_with_retry(cur, chunk, _touch_chunk_by_id)
+            total += _touch_chunk_with_retry(cur, chunk)
     return total
 
 
@@ -957,7 +891,8 @@ def presence_candidates(
     Rule #3 since 2026-09-07: index absence NOMINATES, it no longer delists. A
     row the walk did not see is a candidate; the detail drain then visits its
     page, and the page decides -- a positive gone signal (404/410, a redirect
-    off the listing, the portal's own "no longer active" text) flips it, a live
+    off the listing, the portal's own "no longer active" text) flips it once a
+    second verdict confirms it (`delist_policy.gone_confirmed`), a live
     page refreshes it, an error leaves it for the next pass. That is why this
     query carries none of the old sweep's rails (no min_unseen_hours, no refusal):
     a wrong nomination costs one fetch, not a live listing.
@@ -1142,8 +1077,35 @@ def _delist_cap_setting(conn: psycopg.Connection) -> object | None:
     return row[0] if row else None
 
 
+def gone_evidence(
+    conn: psycopg.Connection, source: str, native_id: str,
+) -> tuple[bool, datetime | None]:
+    """What the ledger holds against this listing before a gone verdict may flip it (rule #3
+    hysteresis, `delist_policy.gone_confirmed`): (the row exists, when its EARLIEST unrefuted
+    gone verdict landed). A verdict older than the row's last sighting was refuted by that
+    sighting and does not count; None = no unrefuted verdict yet."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT l.id IS NOT NULL,
+                   (SELECT min(c.completed_at)
+                      FROM detail_queue_completions c
+                     WHERE c.source = %(source)s
+                       AND c.native_id = %(native_id)s
+                       AND c.outcome = 'gone'
+                       AND c.completed_at > COALESCE(l.last_seen_at, '-infinity'::timestamptz))
+            FROM (SELECT 1) AS one
+            LEFT JOIN listings l
+                   ON l.source = %(source)s AND l.source_id_native = %(native_id)s
+            """,
+            {"source": source, "native_id": native_id},
+        )
+        exists, first_gone_at = cur.fetchone()
+    return bool(exists), first_gone_at
+
+
 def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str) -> bool | None:
-    """A positive gone signal flips this one listing (rules #3/#5/#20). True iff this call
+    """A CONFIRMED gone verdict flips this one listing (rules #3/#5/#20). True iff this call
     flipped it, False if it was already inactive, None if no listing has this key."""
     exists = True
     with conn.transaction(), conn.cursor() as cur:
@@ -1176,34 +1138,6 @@ def mark_listing_inactive(conn: psycopg.Connection, source: str, native_id: str)
     return False if exists else None
 
 
-def index_summary(
-    conn: psycopg.Connection,
-    sreality_ids: Iterable[int],
-) -> dict[int, dict[str, Any]]:
-    """Fetch (price_czk, last_seen_at) for the given ids.
-
-    Used by main.py to decide whether to refetch the detail endpoint
-    based on price changes seen in the index, without burning a detail
-    request when nothing has changed.
-    """
-    ids = list(sreality_ids)
-    if not ids:
-        return {}
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT sreality_id, price_czk, last_seen_at
-            FROM listings
-            WHERE sreality_id = ANY(%s)
-            """,
-            (ids,),
-        )
-        return {
-            sreality_id: {"price_czk": price_czk, "last_seen_at": last_seen_at}
-            for sreality_id, price_czk, last_seen_at in cur.fetchall()
-        }
-
-
 INDEX_SUMMARY_CHUNK = 5000
 
 
@@ -1215,11 +1149,9 @@ def index_summary_native(
     """Fetch (surrogate id, sreality_id, price_czk, last_seen_at) keyed by
     source_id_native for one portal.
 
-    The native-id analogue of `index_summary` (which keys on the bigint PK that
-    sreality's index already carries). The index walk's sighting diff
-    (`portal_runner.reconcile_sightings`) looks rows up by (source,
-    source_id_native) to decide price-change refetch — and to resolve the
-    surrogate `id` set for touch_listings_by_id. The `"id"` value is the identity
+    The index walk's sighting diff (`portal_runner.reconcile_sightings`) looks
+    rows up by (source, source_id_native) to decide price-change refetch — and to
+    resolve the surrogate `id` set for touch_listings_by_id. The `"id"` value is the identity
     to carry forward; `"sreality_id"` is legacy (NULL for post-Gate-2 rows).
     Ids are deduped and looked up INDEX_SUMMARY_CHUNK at a time, so one huge
     category (ceskereality, ~21k) never becomes one statement.
@@ -2363,9 +2295,11 @@ def complete_detail(
     native_ids: Iterable[str],
     outcome: str = "written",
 ) -> int:
-    """Remove drained rows from the queue (success or confirmed-gone), logging
-    each into detail_queue_completions (migration 265) in the same transaction
-    so the enqueue->detail-write latency survives the row's deletion."""
+    """Remove drained rows from the queue, logging each into detail_queue_completions
+    (migration 267) in the same transaction so the enqueue->detail-write latency survives
+    the row's deletion. `outcome` is what the drain DID: 'written' (the page was live),
+    'gone' (a gone verdict recorded, the ad left active -- rule #3's hysteresis evidence),
+    'flipped' (a confirming verdict closed the ad; migration 594), 'given_up'."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return 0

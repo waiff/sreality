@@ -74,7 +74,7 @@ import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import DismissButton from '@/components/DismissButton';
 import CollectionSaveToggle from '@/components/listing-detail/CollectionSaveToggle';
 import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
-import DownloadPhotosButton from '@/components/listing-detail/DownloadPhotosButton';
+import DownloadPropertyButton from '@/components/listing-detail/DownloadPropertyButton';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
 import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
@@ -233,11 +233,13 @@ export default function PropertyDetail() {
         {/* The page-level verbs, grouped top-right, in the same order as the
             controls on a Browse card: track this deal in the pipeline, save the
             property to a collection (monitoring rides on the collection), dismiss
-            it, then run a new estimation. All property-grain (rule #18). */}
-        <div className="flex items-center gap-2">
+            it — all property-grain (rule #18) — then download the ad (a PDF + the
+            gallery's photos) and run a new estimation. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <PipelineToggle property_id={propertyId} />
           <CollectionSaveToggle property_id={propertyId} />
           <DismissButton property_id={propertyId} variant="header" />
+          <DownloadPropertyButton propertyId={propertyId} images={images} />
           <NewEstimationButton prefill={newEstimationPrefill} />
         </div>
       </div>
@@ -283,14 +285,6 @@ export default function PropertyDetail() {
               prefill={newEstimationPrefill}
             />
           </Suspense>
-        }
-        photosAction={
-          /* The canonical advert's photos — the ones the gallery shows. */
-          <DownloadPhotosButton
-            listingId={property.id}
-            images={images}
-            fileName={`property-${propertyId}-photos.zip`}
-          />
         }
       />
       <BrokerList

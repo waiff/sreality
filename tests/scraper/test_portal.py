@@ -383,8 +383,8 @@ def test_no_portal_module_classifies_index_sightings_itself():
 
 
 _SIGHTING_DIFF_CALLS = (
-    "index_summary_native(", "index_summary(", "touch_listings_by_id(",
-    "touch_listings(", "enqueue_detail(", "classify_index_sighting(",
+    "index_summary_native(", "touch_listings_by_id(", "enqueue_detail(",
+    "classify_index_sighting(",
 )
 
 
@@ -395,9 +395,8 @@ def test_no_portal_adapter_diffs_its_own_sightings():
     seven portals, touch-all on two, an unclamped price compare on two, a dropped
     price_change_min_pct on two. An adapter's walk hands what it saw to the
     runner; it never looks up, touches, classifies or enqueues sightings itself.
-    sreality is scanned through SrealityPortal + _walk_category_split; the legacy
-    coupled half of _walk_category (scrape.yml's _run_full) is the one exemption
-    until it is deleted.
+    sreality is scanned through SrealityPortal + _walk_category_split +
+    _walk_category.
     """
     import inspect
     from pathlib import Path
@@ -408,9 +407,10 @@ def test_no_portal_adapter_diffs_its_own_sightings():
     sources = {
         p.name: p.read_text(encoding="utf-8") for p in sorted(scraper_dir.glob("*_main.py"))
     }
-    sources["main.py (SrealityPortal + _walk_category_split)"] = (
+    sources["main.py (SrealityPortal + _walk_category_split + _walk_category)"] = (
         inspect.getsource(sreality_main.SrealityPortal)
         + inspect.getsource(sreality_main._walk_category_split)
+        + inspect.getsource(sreality_main._walk_category)
     )
     offenders = {
         name: [call for call in _SIGHTING_DIFF_CALLS if call in text]

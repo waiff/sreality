@@ -12,6 +12,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from scraper import delist_policy, portal_runner
 from scraper.portal_runner import DrainItem
@@ -425,12 +426,22 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
 # --- run_detail_drain -------------------------------------------------------
 
 
-def _patch_queue(monkeypatch, claim_batches):
+# A gone verdict the ledger already confirms (an earlier verdict older than the dwell): the
+# tests' default, so "a confirmed gone flips" reads as before; the hysteresis tests below
+# swap in a younger / absent / refuted prior.
+_CONFIRMING_PRIOR = (True, datetime.now(timezone.utc) - delist_policy.GONE_DWELL - timedelta(hours=1))
+
+
+def _patch_queue(monkeypatch, claim_batches, evidence=_CONFIRMING_PRIOR):
     cap = {"complete": [], "complete_outcomes": [], "fail": [], "claim_n": [], "reclaim": 0,
-           "flip": []}
+           "flip": [], "evidence": []}
     monkeypatch.setattr(
         portal_runner.db, "mark_listing_inactive",
         lambda _c, src, nid: cap["flip"].append((src, nid)) or True,
+    )
+    monkeypatch.setattr(
+        portal_runner.db, "gone_evidence",
+        lambda _c, src, nid: cap["evidence"].append((src, nid)) or evidence,
     )
     it = iter(list(claim_batches) + [[]])
     monkeypatch.setattr(
@@ -477,7 +488,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     assert cap["fail"] == [["12"]]
     assert sorted(x for b in p.calls["write"] for x in b) == ["10"]
     completions = list(zip(cap["complete"], cap["complete_outcomes"]))
-    assert (["11"], "gone") in completions
+    assert (["11"], "flipped") in completions
     assert (["10"], "written") in completions
     assert sorted(x for b in cap["complete"] for x in b) == ["10", "11"]
     assert agg["errors"] == 1 and agg["listings_inactive"] == 1
@@ -732,6 +743,7 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
     monkeypatch.setattr(
         portal_runner.db, "mark_listing_inactive",
         lambda _c, src, nid: flips.append((src, nid)) or True)
+    monkeypatch.setattr(portal_runner.db, "gone_evidence", lambda *_a: _CONFIRMING_PRIOR)
     p = _FakePortal(fetch_kinds={"9": "gone"}, reconnect_conns=True)
     rc, agg = portal_runner.run_detail_drain(
         p, None, False, detail_workers=1, detail_rate=1.0)
@@ -777,7 +789,7 @@ def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
     p = _FakePortal(fetch_kinds={"9": "gone"})
     _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert calls["n"] == 2
-    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "flipped")]
     assert cap["fail"] == []
     assert agg["listings_inactive"] == 1 and agg["errors"] == 0
 
@@ -790,8 +802,7 @@ def test_a_transient_flip_error_retries_inside_the_op(monkeypatch):
 def test_a_gone_flip_matching_no_listing_warns_only_for_a_row_we_held(monkeypatch, caplog, priority, level):
     """A NEW id has no listings row until its first write, so a gone first fetch
     matching nothing is routine; any other priority means the natural key broke."""
-    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]])
-    monkeypatch.setattr(portal_runner.db, "mark_listing_inactive", lambda _c, _s, _n: None)
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=(False, None))
     monkeypatch.setattr(portal_runner.db, "queue_priorities",
                         lambda _c, _s, nids: {n: priority for n in nids})
     p = _FakePortal(fetch_kinds={"9": "gone"})
@@ -799,6 +810,7 @@ def test_a_gone_flip_matching_no_listing_warns_only_for_a_row_we_held(monkeypatc
         _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     hits = [r for r in caplog.records if r.getMessage() == "gone flip matched no listing source=fake id=9"]
     assert [r.levelname for r in hits] == [level]
+    assert cap["flip"] == []  # nothing to flip, so the writer is not even asked
     assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
     assert agg["listings_inactive"] == 1 and agg["errors"] == 0
 
@@ -811,6 +823,48 @@ def test_a_flip_or_an_already_inactive_row_logs_no_match(monkeypatch, caplog):
         portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
     assert sorted(x for b in cap["complete"] for x in b) == ["8", "9"]
     assert not any("matched no listing" in m for m in caplog.messages)
+
+
+# --- rule #3's hysteresis: one verdict records, the second (dwell later) flips ----------
+
+
+def test_a_first_gone_verdict_is_recorded_not_flipped(monkeypatch, caplog):
+    """The ledger holds no earlier verdict: the queue row completes as gone (the ledger row
+    IS the evidence), the listing stays active for the next walk to re-nominate, and the
+    run counts it as pending, not inactive."""
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=(True, None))
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert cap["evidence"] == [(p.source, "9")]
+    assert cap["flip"] == []
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert cap["fail"] == []
+    assert agg["listings_inactive"] == 0 and agg["errors"] == 0
+    assert any(m.startswith("DETAIL id=9 gone (first verdict recorded, not flipped") for m in caplog.messages)
+    assert any("gone=0 pending=1" in m for m in caplog.messages)
+
+
+def test_a_second_verdict_inside_the_dwell_is_still_pending(monkeypatch):
+    young = (True, datetime.now(timezone.utc) - delist_policy.GONE_DWELL + timedelta(minutes=5))
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]], evidence=young)
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert cap["flip"] == []
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "gone")]
+    assert agg["listings_inactive"] == 0
+
+
+def test_a_verdict_the_dwell_after_the_first_flips(monkeypatch, caplog):
+    cap = _patch_queue(monkeypatch, [[("9", None, None, None)]])  # the confirming default
+    p = _FakePortal(fetch_kinds={"9": "gone"})
+    with caplog.at_level("INFO", logger="scraper.portal_runner"):
+        _rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert cap["flip"] == [(p.source, "9")]
+    assert list(zip(cap["complete"], cap["complete_outcomes"])) == [(["9"], "flipped")]
+    assert agg["listings_inactive"] == 1
+    assert "DETAIL id=9 gone (is_active=false)" in caplog.messages
 
 
 def test_drain_record_failure_drop_on_queue_bump_does_not_replay_ledger(monkeypatch):
