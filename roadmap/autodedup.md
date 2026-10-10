@@ -66,7 +66,7 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   25; only a seed raises it again); at the floor the lease waits out its TTL as before, so a death
   no claim can cure never loops the worker. The heartbeat adds `claim_cap`, `predecessor_released`
   / `predecessor_kept`, `rss_mb` and the cgroup `memory_limit_mb` (E941's owed reading). Still
-  owed (E941): the revive cap, since the revived feed ignores the claim's limit.
+  owed (E941): the revive cap, since the revived feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.
