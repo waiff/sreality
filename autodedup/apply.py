@@ -1579,8 +1579,10 @@ class _Writer:
     it by a pass (review B8); it needs no stopped lane."""
 
     def __init__(self, conn: Any, live: bool, *, lease: bool | None = None,
-                 release: str | None = None) -> None:
+                 release: str | None = None,
+                 connect: Callable[[], Any] | None = None) -> None:
         self.conn = conn
+        self.connect = connect
         self.live = live
         self.lease = live if lease is None else lease
         self.release = (release or "").strip() or None
@@ -1611,7 +1613,7 @@ class _Writer:
 
     def __exit__(self, _type: Any, exc: BaseException | None, _tb: Any) -> None:
         if self.held:
-            rt_lease.release_after(self.conn, self.holder, exc)
+            rt_lease.release_after(self.conn, self.holder, exc, connect=self.connect)
 
 
 def run_apply(
@@ -1632,7 +1634,7 @@ def run_apply(
     conn = conn_factory()
     try:
         with _Writer(conn, live=not dry_run, lease=not dry_run or generation == GENERATION,
-                     release=args.get(rt_lease.RELEASE_ARG)):
+                     release=args.get(rt_lease.RELEASE_ARG), connect=conn_factory):
             return _apply_run(conn, generation, dry_run, retire, override, out_dir)
     finally:
         _close(conn)
@@ -1743,7 +1745,8 @@ def run_unapply(
         raise SystemExit("unapply needs generation=, run=, since= or until= (e.g. generation=g12)")
     conn = conn_factory()
     try:
-        with _Writer(conn, live=not dry_run, release=args.get(rt_lease.RELEASE_ARG)):
+        with _Writer(conn, live=not dry_run, release=args.get(rt_lease.RELEASE_ARG),
+                     connect=conn_factory):
             result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key,
                              run=run, since=since, until=until)
     except BaseException as exc:

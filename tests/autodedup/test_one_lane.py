@@ -1433,6 +1433,199 @@ def test_a_raise_on_a_live_connection_releases_the_lease_the_existing_way(
     assert not any("rt_lease" in note for note in getattr(raised.value, "__notes__", []))
 
 
+# ------------------------------------------- a restart takes both connections (2026-10-10)
+#
+# Postgres restarted under a pass at 05:57:12Z (a Supabase compute change). The pass's own
+# connection and the fresh one its raise opened both died with it, so the lease sat its whole
+# 2,400 s TTL and every pass skipped "leased" meanwhile. `release_after` now opens NEW
+# connections from the caller's factory, a bounded number of times, before it gives up.
+
+
+def _dead(world: FakePg) -> _Session:
+    session = _Session(world)
+    session.dead = True
+    return session
+
+
+def test_a_restart_that_takes_both_connections_releases_on_a_new_one(monkeypatch) -> None:
+    """The release fails on the pass's connection and on the fresh one: a NEW connection from
+    the caller's factory ends the lease and is closed, the note says so, and the statement
+    still ends this holder's row only."""
+    from autodedup import rt_lease
+
+    world = FakePg()
+    monkeypatch.setattr(rt_lease.time, "sleep", lambda _s: pytest.fail("no wait was needed"))
+    opened: list[object] = []
+
+    def connect() -> object:
+        opened.append(world.other_session())
+        return opened[-1]
+
+    assert rt_lease.take(world, "worker:1:1", 2_400)
+    original = RuntimeError("terminating connection due to administrator command")
+    assert rt_lease.release_after(_dead(world), "worker:1:1", original, fallback=_dead(world),
+                                  connect=connect) is True
+    assert rt_lease.current(world)["live"] is False
+    assert len(opened) == 1 and opened[0].closed
+    assert any("released on a new connection (attempt 1/" in note
+               for note in original.__notes__)
+
+    assert rt_lease.take(world, "rt_seed:other", 2_400)
+    assert rt_lease.release_after(_dead(world), "worker:1:1", RuntimeError("x"),
+                                  fallback=_dead(world), connect=connect) is True
+    row = rt_lease.current(world)
+    assert (row["holder"], row["live"]) == ("rt_seed:other", True), "not that holder's row"
+
+
+def test_a_new_connection_the_restart_still_refuses_is_closed_and_the_next_one_tried(
+        monkeypatch) -> None:
+    """The pooler can hand out a connection while the database behind it is still starting:
+    that one is closed, the next comes `NEW_CONNECTION_DELAY_S` later, and the release lands."""
+    from autodedup import rt_lease
+
+    world = FakePg()
+    slept: list[float] = []
+    monkeypatch.setattr(rt_lease.time, "sleep", slept.append)
+    starting, live = _dead(world), _Session(world)
+    queue = [starting, live]
+    assert rt_lease.take(world, "worker:1:1", 2_400)
+    original = RuntimeError("terminating connection due to administrator command")
+
+    assert rt_lease.release_after(_dead(world), "worker:1:1", original,
+                                  connect=lambda: queue.pop(0)) is True
+    assert rt_lease.current(world)["live"] is False
+    assert slept == [rt_lease.NEW_CONNECTION_DELAY_S]
+    assert (starting.closed, live.closed) == (1, 1)
+    assert any("attempt 1/" in note and "server closed" in note for note in original.__notes__)
+    assert any("released on a new connection (attempt 2/" in note
+               for note in original.__notes__)
+
+
+def test_new_connections_that_never_come_leave_the_lease_to_its_ttl(monkeypatch) -> None:
+    """Three attempts, 20 s apart, then the lease expires by itself: every failure is noted on
+    the raise and the last one named, nothing is raised in its place. With no raise to note it
+    on, the last failure is raised, as before."""
+    from autodedup import rt_lease
+
+    slept: list[float] = []
+    monkeypatch.setattr(rt_lease.time, "sleep", slept.append)
+    calls: list[int] = []
+
+    def refused() -> _Session:
+        calls.append(len(calls) + 1)
+        raise ConnectionError(f"connection refused (attempt {calls[-1]})")
+
+    world = FakePg()
+    original = RuntimeError("terminating connection due to administrator command")
+    assert rt_lease.release_after(_dead(world), "worker:1:1", original, fallback=_dead(world),
+                                  connect=refused) is False
+    assert (rt_lease.NEW_CONNECTION_ATTEMPTS, rt_lease.NEW_CONNECTION_DELAY_S) == (3, 20.0)
+    assert calls == [1, 2, 3]
+    assert slept == [20.0, 20.0]
+    notes = original.__notes__
+    assert sum("on a new connection failed" in note for note in notes) == 3
+    assert any("connection refused (attempt 3)" in note and "expires by itself" in note
+               for note in notes)
+
+    calls.clear()
+    with pytest.raises(ConnectionError, match=r"\(attempt 3\)"):
+        rt_lease.release_after(_dead(world), "worker:1:1", None, connect=refused)
+
+
+def test_no_new_connection_while_one_the_run_holds_can_release() -> None:
+    from autodedup import rt_lease
+
+    world = FakePg()
+
+    def never() -> _Session:
+        pytest.fail("a new connection opened while one the run holds could release")
+
+    assert rt_lease.take(world, "worker:1:1", 2_400)
+    assert rt_lease.release_after(world, "worker:1:1", None, connect=never) is True
+    assert rt_lease.take(world, "worker:1:1", 2_400)
+    assert rt_lease.release_after(_dead(world), "worker:1:1", RuntimeError("x"),
+                                  fallback=world, connect=never) is True
+    assert rt_lease.current(world)["live"] is False
+
+
+def test_a_restart_mid_pass_releases_the_lease_on_a_new_connection(tmp_path,
+                                                                    monkeypatch) -> None:
+    """End to end: the restart kills the pass's connection, and the fresh one its raise opens
+    is dead too. The lane's factory then opens new ones until the release lands, so the next
+    pass need not wait out the TTL."""
+    from autodedup import rt_lease
+    from autodedup.incremental_lane import run_incremental
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    slept: list[float] = []
+    monkeypatch.setattr(rt_lease.time, "sleep", slept.append)
+    conn = _Session(world)
+    fresh, starting, live = _dead(world), _dead(world), _Session(world)
+    queue = [fresh, starting, live]
+    _pass_that_kills_its_connection(
+        monkeypatch, conn, RuntimeError("terminating connection due to administrator command"))
+
+    with pytest.raises(RuntimeError, match="administrator command") as raised:
+        run_incremental(lambda: conn, fresh_conn=lambda: queue.pop(0))
+
+    assert not queue and slept == [rt_lease.NEW_CONNECTION_DELAY_S]
+    assert rt_lease.current(world)["live"] is False, "released, not left to its TTL"
+    assert live.issued.count(RT_LEASE_RELEASE_SQL) == 1
+    assert (fresh.closed, starting.closed, live.closed) == (1, 1, 1)
+    assert any("released on a new connection (attempt 2/" in note
+               for note in raised.value.__notes__)
+
+
+def test_a_restart_after_the_commit_releases_the_lease_on_a_new_connection(
+        tmp_path, monkeypatch) -> None:
+    """The restart lands after the pass committed, so no fresh connection was opened for a
+    raise: the `finally` itself turns to the lane's factory."""
+    from autodedup import incremental_lane, rt_lease
+    from autodedup.incremental_lane import run_incremental
+    from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
+    from tests.autodedup import lane_world
+
+    world = lane_world.world()
+    lane_world.seed_lane(world, tmp_path)
+    monkeypatch.setattr(rt_lease.time, "sleep", lambda _s: pytest.fail("no wait was needed"))
+    conn, new = _Session(world), _Session(world)
+
+    def restart(_conn: object) -> int:
+        conn.dead = True
+        raise ConnectionError("terminating connection due to administrator command")
+
+    monkeypatch.setattr(incremental_lane, "phash_pop_rows", restart)
+    with pytest.raises(ConnectionError, match="administrator command") as raised:
+        run_incremental(lambda: conn, fresh_conn=lambda: new)
+
+    assert rt_lease.current(world)["live"] is False, "released, not left to its TTL"
+    assert new.issued.count(RT_LEASE_RELEASE_SQL) == 1 and new.closed == 1
+    assert any("released on a new connection (attempt 1/" in note
+               for note in raised.value.__notes__)
+
+
+def test_every_end_of_a_run_that_holds_the_lease_can_open_a_new_connection() -> None:
+    """The lane's raise and its `finally`, the seed, and a live apply or unapply each hand the
+    release a factory for NEW connections. Read off the source, so a call site added without
+    one fails here."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "autodedup"
+    sites: list[tuple[str, bool]] = []
+    for path in sorted(root.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) in (
+                    "rt_lease.release_after", "_Writer"):
+                sites.append((f"{path.name}:{node.lineno}",
+                              any(keyword.arg == "connect" for keyword in node.keywords)))
+    assert len(sites) == 6, sites
+    assert all(wired for _site, wired in sites), sites
+
+
 # ------------------------------------------------------------- E941: the worker's shutdown
 #
 # Railway SIGTERMs the worker at every deploy and, by default, SIGKILLs it at once: a pass in

@@ -10,7 +10,9 @@ already on its way out never replaces that error.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import time
+from contextlib import suppress
+from typing import Any, Callable, Mapping
 
 from autodedup.incremental_sql import (
     RT_LEASE_HOLD_SQL,
@@ -25,6 +27,10 @@ NAME: str = "autodedup_realtime"
 DISPATCH_TTL_S: int = 300 * 60
 # The dispatch argument that ends a dead holder's lease first (`release_stale`).
 RELEASE_ARG: str = "release_lease"
+# A database restart takes every connection a run holds (2026-10-10 05:57Z: the lease then sat
+# its whole TTL), so `release_after` tries NEW ones this many times, this far apart.
+NEW_CONNECTION_ATTEMPTS: int = 3
+NEW_CONNECTION_DELAY_S: float = 20.0
 
 
 def _rows(conn: Any, sql: str, params: Mapping[str, Any]) -> list[tuple]:
@@ -99,15 +105,19 @@ def release_stale(conn: Any, holder: str) -> dict[str, Any]:
 
 
 def release_after(conn: Any, holder: str, original: BaseException | None, *,
-                  fallback: Any | None = None) -> bool:
+                  fallback: Any | None = None,
+                  connect: Callable[[], Any] | None = None) -> bool:
     """Release at the end of a run. A release that fails while `original` is on its way out
     is noted ON it instead of replacing it: the lease then expires by itself.
 
     `fallback` is a second, live connection the caller already holds — the one a raised pass
     halves its rate on (E930) — and a release that fails on `conn` (the backend the server
     terminated) is retried there (E931): a lease left to its TTL skips every pass of the next
-    ~35 min as "leased". The statement is keyed by holder, so it ends this holder's row and
-    no other's. Returns whether a release ran."""
+    ~35 min as "leased". When that fails too, as a database restart makes it, `connect` (the
+    caller's factory for a NEW connection) is tried up to `NEW_CONNECTION_ATTEMPTS` times,
+    `NEW_CONNECTION_DELAY_S` apart, each connection closed and each failed attempt noted, not
+    raised. The statement is keyed by holder, so it ends this holder's row and no other's.
+    Returns whether a release ran."""
     try:
         release(conn, holder)
         return True
@@ -124,8 +134,41 @@ def release_after(conn: Any, holder: str, original: BaseException | None, *,
                                       f"the pass's connection ({type(exc).__name__}: {exc}); "
                                       "released on the fresh one")
                 return True
+        if connect is not None:
+            before = failed
+            for attempt in range(1, NEW_CONNECTION_ATTEMPTS + 1):
+                if attempt > 1:
+                    time.sleep(NEW_CONNECTION_DELAY_S)
+                try:
+                    _release_on_new(connect, holder)
+                except Exception as again:  # noqa: BLE001 — noted, never raised instead
+                    failed = again
+                    if original is not None:
+                        original.add_note(f"releasing autodedup.rt_lease for {holder!r} on a "
+                                          f"new connection failed (attempt {attempt}/"
+                                          f"{NEW_CONNECTION_ATTEMPTS}: "
+                                          f"{type(again).__name__}: {again})")
+                else:
+                    if original is not None:
+                        original.add_note(f"releasing autodedup.rt_lease for {holder!r} failed "
+                                          f"({type(before).__name__}: {before}); released on a "
+                                          f"new connection (attempt {attempt}/"
+                                          f"{NEW_CONNECTION_ATTEMPTS})")
+                    return True
         if original is None:
             raise failed
         original.add_note(f"releasing autodedup.rt_lease for {holder!r} also failed "
                           f"({type(failed).__name__}: {failed}); it expires by itself")
         return False
+
+
+def _release_on_new(connect: Callable[[], Any], holder: str) -> None:
+    """`release` on a connection `connect` opens, closed whatever the release did."""
+    new_conn = connect()
+    try:
+        release(new_conn, holder)
+    finally:
+        close = getattr(new_conn, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
