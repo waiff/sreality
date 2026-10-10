@@ -67,6 +67,15 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   no claim can cure never loops the worker. The heartbeat adds `claim_cap`, `predecessor_released`
   / `predecessor_kept`, `rss_mb` and the cgroup `memory_limit_mb` (E941's owed reading). Still
   owed (E941): the revive cap, since the revived feed ignores the claim's limit, and the `verify_pipeline` heartbeat check.
+- **E949 (2026-10-10, the worker carried memory from pass to pass):** seven deaths in the widened build,
+  each process on about its sixth pass whatever it claimed. Freed heap now goes back to the kernel as
+  every pass begins and ends (`gc.collect` + glibc `malloc_trim(0)`; `rss_at_start_mb`,
+  `rss_after_trim_mb`), a raised pass's when the next pass begins; the worker runs on two malloc
+  arenas (`env MALLOC_ARENA_MAX=2`); the engine counts and empties its body and token memos after
+  every pass (`memo_entries`; the shingle memo keyed on the body itself); and the CLIP top-up is
+  encoded a slice at a time. Decisions are a fresh process's and `SEED_VERSION` is unchanged; the
+  claim cap stays at 25 until a seed. Next: Part 2, chunked scoring, so the pair budget bounds a
+  pass's memory.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.
 - **Open (operator decision, before the C2 deletion):** the undo path once `mode=unapply` is gone.

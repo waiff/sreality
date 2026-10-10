@@ -54,6 +54,8 @@ _THOUSANDS = re.compile(r"^\d{1,3}(?:\.\d{3})+$")
 _DISPO = re.compile(r"(\d)\s*\+\s*(kk|\d)\b")
 _STUDIO = ("garsonier", "garsonk", "garzon", "studio")
 
+# Pure readings of a token, memoised for a run; the realtime lane empties both when its pass ends
+# (E949), since a long-lived worker kept every token it ever hashed.
 _token_hashes: dict[str, int] = {}
 _token_lanes: dict[str, int] = {}
 
@@ -94,7 +96,7 @@ def tokens(s: str) -> list[str]:
 
 
 def token_hash(token: str) -> int:
-    """Stable unsigned 64-bit hash of one token, memoised across the whole run."""
+    """Stable unsigned 64-bit hash of one token, memoised for the run (the lane's: its pass)."""
     cached = _token_hashes.get(token)
     if cached is not None:
         return cached

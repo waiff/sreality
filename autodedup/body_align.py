@@ -35,9 +35,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from functools import lru_cache
 
-from autodedup.text_facts import BODY_CACHE, mask_codes
+from autodedup.text_facts import body_cached, mask_codes
 
 # Below this many tokens a body is a headline, and two headlines align on nothing meaningful.
 MIN_TOKENS: int = 40
@@ -160,7 +159,7 @@ def mask(text: str, heal: bool = False) -> str:
     return out
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def tokens(text: str, heal: bool = False) -> tuple[Token, ...]:
     """The masked body as tokens, each carrying whether it states a quantity or a code."""
     return tuple(
@@ -249,7 +248,7 @@ def rounding_equal(left: str, right: str) -> bool:
     return rounding_equal_values(a, _decimals(left), b, _decimals(right))
 
 
-@lru_cache(maxsize=BODY_CACHE)
+@body_cached
 def body_numbers(text: str, heal: bool = False) -> tuple[tuple[float, int], ...]:
     """Every number the whole body states, whatever position it sits in."""
     return tuple(sorted({(value, decimals)
