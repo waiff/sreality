@@ -361,10 +361,11 @@ nothing else.
   `skipped: leased`; every refusal names the holder, and `release_lease=<holder>` ends the lease a
   dead writer left (a pass whose own connection the server terminated releases its lease itself,
   over the fresh connection it halves its rate on — E931 — or, when a database restart took that
-  one too, over new ones, 3 attempts 20 s apart; `release_lease` is for a worker that died
-  with the row). The brake: set the interval to 0, then `mode=unapply` (by `run=rt:<holder>` or
-  a `since=` window) — a live `apply` or `unapply` REFUSES while the interval is above 0, because
-  the lane's next sweep would re-merge what it undoes.
+  one too, over new ones, one every 20 s for up to 180 s before falling back to the TTL;
+  `release_lease` is for a worker that died with the row). The brake: set the interval to 0,
+  then `mode=unapply` (by `run=rt:<holder>` or a `since=` window) — a live `apply` or `unapply`
+  REFUSES while the interval is above 0, because the lane's next sweep would re-merge what it
+  undoes.
 - **The engine bounds its own time (E913).** A pass reads its deadline (1,050 s) between steps and
   every 256 pair decisions; past it the one transaction rolls back (nothing written, no cursor
   moved), the lease is freed and the pass records its rate HALVED, so the next claim is half the

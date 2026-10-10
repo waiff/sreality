@@ -59,8 +59,9 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
-  once (every lane write fenced, 30 s drain). Follow-up 2026-10-10: a pass whose connection died in
-  a database restart frees the lease on a new connection (3 attempts, 20 s apart), not at its TTL.
+  once (every lane write fenced, 30 s drain). Follow-up 2026-10-10: a pass whose connections a
+  database restart took retries the lease's release on new ones, every 20 s for up to 180 s,
+  before falling back to its TTL.
   Owed: the cgroup memory limit, the revive cap, `verify_pipeline`'s heartbeat check.
 - **Next:** three live days and checkpoint C2, then the last commit deletes the batch
   `apply`/`unapply` modes; `legacy_retire` goes at W8. Widening the scope is the operator's call.

@@ -10,6 +10,7 @@ already on its way out never replaces that error.
 
 from __future__ import annotations
 
+import logging
 import time
 from contextlib import suppress
 from typing import Any, Callable, Mapping
@@ -27,10 +28,17 @@ NAME: str = "autodedup_realtime"
 DISPATCH_TTL_S: int = 300 * 60
 # The dispatch argument that ends a dead holder's lease first (`release_stale`).
 RELEASE_ARG: str = "release_lease"
-# A database restart takes every connection a run holds (2026-10-10 05:57Z: the lease then sat
-# its whole TTL), so `release_after` tries NEW ones this many times, this far apart.
-NEW_CONNECTION_ATTEMPTS: int = 3
+# A database restart takes every connection a run holds, the fresh one too (2026-10-10:
+# Postgres was down from 05:56:15Z to about 05:57:13Z, 58 s, and the lease then sat its whole
+# TTL), so `release_after` opens NEW ones, one every NEW_CONNECTION_DELAY_S, for up to
+# NEW_CONNECTION_BUDGET_S, three times that outage, before it leaves the lease to its TTL.
+NEW_CONNECTION_BUDGET_S: float = 180.0
 NEW_CONNECTION_DELAY_S: float = 20.0
+# This module's own wait and clock, so a test stubs them here and nowhere else.
+_sleep: Callable[[float], None] = time.sleep
+_clock: Callable[[], float] = time.monotonic
+
+LOG = logging.getLogger(__name__)
 
 
 def _rows(conn: Any, sql: str, params: Mapping[str, Any]) -> list[tuple]:
@@ -114,10 +122,11 @@ def release_after(conn: Any, holder: str, original: BaseException | None, *,
     halves its rate on (E930) — and a release that fails on `conn` (the backend the server
     terminated) is retried there (E931): a lease left to its TTL skips every pass of the next
     ~35 min as "leased". When that fails too, as a database restart makes it, `connect` (the
-    caller's factory for a NEW connection) is tried up to `NEW_CONNECTION_ATTEMPTS` times,
-    `NEW_CONNECTION_DELAY_S` apart, each connection closed and each failed attempt noted, not
-    raised. The statement is keyed by holder, so it ends this holder's row and no other's.
-    Returns whether a release ran."""
+    caller's factory for a NEW connection) is tried, one connection every
+    `NEW_CONNECTION_DELAY_S`, the first one too, for up to `NEW_CONNECTION_BUDGET_S`; each is
+    closed, and ONE note on `original` (with none, one warning) says how it ended. The
+    statement is keyed by holder, so it ends this holder's row and no other's. Returns whether
+    a release ran."""
     try:
         release(conn, holder)
         return True
@@ -134,32 +143,46 @@ def release_after(conn: Any, holder: str, original: BaseException | None, *,
                                       f"the pass's connection ({type(exc).__name__}: {exc}); "
                                       "released on the fresh one")
                 return True
+        tried = ""
         if connect is not None:
-            before = failed
-            for attempt in range(1, NEW_CONNECTION_ATTEMPTS + 1):
-                if attempt > 1:
-                    time.sleep(NEW_CONNECTION_DELAY_S)
-                try:
-                    _release_on_new(connect, holder)
-                except Exception as again:  # noqa: BLE001 — noted, never raised instead
-                    failed = again
-                    if original is not None:
-                        original.add_note(f"releasing autodedup.rt_lease for {holder!r} on a "
-                                          f"new connection failed (attempt {attempt}/"
-                                          f"{NEW_CONNECTION_ATTEMPTS}: "
-                                          f"{type(again).__name__}: {again})")
+            started = _clock()
+            tries, last = _release_on_new_connections(connect, holder)
+            spent = _clock() - started
+            if last is None:
+                landed = (f"releasing autodedup.rt_lease for {holder!r} failed "
+                          f"({type(exc).__name__}: {exc}); released on a new connection "
+                          f"{spent:.0f} s later (try {tries})")
+                if original is not None:
+                    original.add_note(landed)
                 else:
-                    if original is not None:
-                        original.add_note(f"releasing autodedup.rt_lease for {holder!r} failed "
-                                          f"({type(before).__name__}: {before}); released on a "
-                                          f"new connection (attempt {attempt}/"
-                                          f"{NEW_CONNECTION_ATTEMPTS})")
-                    return True
+                    LOG.warning("AUTODEDUP: %s", landed)
+                return True
+            failed = last
+            tried = f"{tries} new connections over {spent:.0f} s, the last with "
         if original is None:
             raise failed
         original.add_note(f"releasing autodedup.rt_lease for {holder!r} also failed "
-                          f"({type(failed).__name__}: {failed}); it expires by itself")
+                          f"({tried}{type(failed).__name__}: {failed}); it expires by itself")
         return False
+
+
+def _release_on_new_connections(connect: Callable[[], Any],
+                                holder: str) -> tuple[int, Exception | None]:
+    """`_release_on_new` once every `NEW_CONNECTION_DELAY_S`, waiting before the first try too
+    (the run's own connections have just failed), until one lands or the next would start past
+    `NEW_CONNECTION_BUDGET_S`. Returns the tries made and the last failure, None once a release
+    ran."""
+    deadline = _clock() + NEW_CONNECTION_BUDGET_S
+    tries = 0
+    while True:
+        _sleep(NEW_CONNECTION_DELAY_S)
+        tries += 1
+        try:
+            _release_on_new(connect, holder)
+            return tries, None
+        except Exception as exc:  # noqa: BLE001 — the caller notes the last one
+            if _clock() + NEW_CONNECTION_DELAY_S > deadline:
+                return tries, exc
 
 
 def _release_on_new(connect: Callable[[], Any], holder: str) -> None:
