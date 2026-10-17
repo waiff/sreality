@@ -528,6 +528,16 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_price_per_m2.py -q
 
+      # Time on market is ONE measure (migration 617): the function answers its documented
+      # cases, listings_public and the Python emitter return what it returns, and it still
+      # INLINES (a `SET` clause would turn every TOM predicate into a per-row call).
+      - name: One time-on-market definition (migration 617)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_measure_tom_days.py -q
+
       # MF reference rent is ONE read-time measure (migration 565), read by the three serving
       # views with the stored KU (566/567, replayed above). Executed over a seeded rent map:
       # every status code, the range for a town-level location, the VK clamp, the

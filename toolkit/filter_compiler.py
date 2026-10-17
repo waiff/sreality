@@ -31,7 +31,7 @@ from toolkit.filter_registry import (
     building_material_values,
     sql_kind,
 )
-from toolkit.measures import per_m2_sql, plot_area_sql
+from toolkit.measures import per_m2_sql, plot_area_sql, tom_days_sql
 
 Hook = Callable[[str, Any, Mapping[str, Any], dict[str, Any]], list[str]]
 # (filter id, its value — may be None, the whole values mapping, params to write) -> fragments
@@ -46,15 +46,19 @@ class FilterGrain:
     clauses: Mapping[str, str] = MappingProxyType({})  # filter id -> this relation's whole clause
 
 
-# `listings` has no price_per_m2 column, so the measure is the four-argument call there; the
-# read model PUBLISHES it, so `l.price_per_m2` is the measure on `properties_public`. Neither
+# `listings` has no price_per_m2 or tom_days column, so each measure is its function call there
+# (tom_days is not in the Watchdog's agenda); the read model PUBLISHES them, so `l.price_per_m2`
+# is the measure on `properties_public`. Neither
 # relation publishes a plot column, so both call plot_area_m2() (migration 534). A portal is
 # the canonical ad's own on `listings` (estimation comparables) and any of the property's ads
 # on `properties_public` (MS19, the `any` arm of portal_status_matches: the Watchdog has no
 # status filter); the exclusion side is `_portals_excluded`.
 LISTINGS_GRAIN = FilterGrain(
     agenda=Agenda.COMPARABLES,
-    exprs=MappingProxyType({"price_per_m2": per_m2_sql("l"), "plot_area_m2": plot_area_sql("l")}),
+    exprs=MappingProxyType({
+        "price_per_m2": per_m2_sql("l"), "plot_area_m2": plot_area_sql("l"),
+        "tom_days": tom_days_sql("l"),
+    }),
     caller_renders=frozenset({"radius_m", "area_band_pct", "disposition_match", "floor_band",
                               "lifecycle", "max_age_days", "include_unreliable"}),
 )
@@ -86,15 +90,6 @@ _KIND_SQL: Mapping[str, str | None] = MappingProxyType({
     "lte": "{expr} <= %({id})s",
     "enum_or_unknown": None,
 })
-
-# Mirrors migration 052's listings_public.tom_days, so SQL and Python agree on what
-# "days on market" means.
-_TOM_EXPR = (
-    "(case when l.is_active "
-    "then greatest(0, floor(extract(epoch from (now() - l.first_seen_at)) / 86400)::int) "
-    "else greatest(0, floor(extract(epoch from (l.last_seen_at - l.first_seen_at)) / 86400)::int) "
-    "end)"
-)
 
 # Days-ago bounds read INVERTED against their affix: `*_max_days` is the oldest allowed, so
 # the timestamp must be at least that recent; `*_min_days` is the most recent allowed.
@@ -152,13 +147,6 @@ def _price_bound(fid: str, v: Any, values: Mapping[str, Any], params: dict[str, 
 def _modifier(fid: str, v: Any, values: Mapping[str, Any], params: dict[str, Any]) -> list[str]:
     """include_no_price / price_change_window_days: read by the hook they modify."""
     return []
-
-
-def _tom(fid: str, v: Any, values: Mapping[str, Any], params: dict[str, Any]) -> list[str]:
-    if v is None:
-        return []
-    params[fid] = v
-    return [f"{_TOM_EXPR} {'>=' if fid.endswith('_min') else '<='} %({fid})s"]
 
 
 def _seen_days(fid: str, v: Any, values: Mapping[str, Any], params: dict[str, Any]) -> list[str]:
@@ -241,8 +229,6 @@ _HOOKS: Mapping[str, Hook] = MappingProxyType({
     "include_no_price": _modifier,
     "price_change_window_days": _modifier,
     "portals_excluded_active_only": _modifier,
-    "tom_days_min": _tom,
-    "tom_days_max": _tom,
     **{fid: _seen_days for fid in _SEEN_DAYS},
     "price_change_count_min": _price_change_count,
     "total_price_change_pct": _total_price_change,

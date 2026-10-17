@@ -12,8 +12,10 @@ not needed today.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal
+
+from toolkit.measures import tom_days_sql
 
 if TYPE_CHECKING:
     import psycopg
@@ -39,19 +41,12 @@ def compare_snapshots(
     from toolkit import _now_iso
 
     snapshots = _fetch_snapshots(conn, sreality_id, since, listing_id=listing_id)
-    first_seen = _fetch_first_seen_at(conn, sreality_id, listing_id=listing_id)
+    tom_days = _fetch_tom_days(conn, sreality_id, listing_id=listing_id)
 
     trajectory = _build_trajectory(snapshots)
     price_change_count, price_change_total = _price_change_stats(trajectory)
     pattern = _classify_pattern(trajectory)
     field_changes = _build_field_changes(snapshots, parser)
-
-    if first_seen is not None:
-        tom_days = (datetime.now(timezone.utc) - first_seen).days
-    elif snapshots:
-        tom_days = (datetime.now(timezone.utc) - snapshots[0]["scraped_at"]).days
-    else:
-        tom_days = 0
 
     data: dict[str, Any] = {
         "sreality_id": sreality_id,
@@ -129,22 +124,22 @@ def _fetch_snapshots(
     ]
 
 
-def _fetch_first_seen_at(
+def _fetch_tom_days(
     conn: "psycopg.Connection",
     sreality_id: int | None,
     *,
     listing_id: int | None = None,
-) -> datetime | None:
+) -> int:
     from toolkit import _listing_id_clause
 
     id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT first_seen_at FROM listings WHERE {id_clause}",
+            f"SELECT {tom_days_sql('listings')} FROM listings WHERE {id_clause}",
             (id_val,),
         )
         row = cur.fetchone()
-    return row[0] if row else None
+    return row[0] if row and row[0] is not None else 0
 
 
 def _build_trajectory(

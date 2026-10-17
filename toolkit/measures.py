@@ -153,6 +153,18 @@ def plot_area_sql(alias: str) -> str:
     )
 
 
+def tom_days_sql(alias: str) -> str:
+    """THE time-on-market measure over a `listings`-shaped alias (migration 617).
+
+    Whole days: now() - first_seen_at for an active row, last_seen_at - first_seen_at for a
+    closed one. Never re-spelled: the views, the compiler and the analytics tools all call
+    `public.measure_tom_days`, so there is one answer to "how long was it on the market".
+    """
+    return (
+        f"measure_tom_days({alias}.is_active, {alias}.first_seen_at, {alias}.last_seen_at)"
+    )
+
+
 # --- the Python mirror ----------------------------------------------------
 
 

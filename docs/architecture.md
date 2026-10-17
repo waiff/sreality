@@ -1870,9 +1870,9 @@ renumber.** Navigate by area:
     `sql_kind` (vitest + `tests/fixtures/filter_sql_kinds.json`). Its hand-coded half and the
     two browse RPCs agree per shared predicate only (place plan, rule-23 measures,
     `curated_cities_matching()`, served predicate). Open divergences: center+radius is a circle
-    in Python and a bounding square in Browse (M3); `tom_days` reaches Stats but not the Browse
-    list (M4); the six amenities are the property's union (MS6) for the Watchdog, Browse and
-    Stats but the canonical advert's own flags in an estimation cohort, until MS20
+    in Python and a bounding square in Browse (M3); the six amenities are the property's union
+    (MS6) for the Watchdog, Browse and Stats but the canonical advert's own flags in an
+    estimation cohort, until MS20
     (`docs/design/merge-sprint/PROGRAM.md` §9). `WatchdogFilterSpec`'s fields EQUAL the
     WATCHDOG agenda (and `ComparableFilters`' the cohort agendas) by an equality test in
     `tests/toolkit/test_filter_registry.py`, because `extra='ignore'` drops a missing field on
@@ -3132,12 +3132,10 @@ renumber.** Navigate by area:
     `test_frontend_read_contract_subset_of_projection` already demands the projection publish
     every browse filter's `pg_column`, so the two ends cannot drift apart again, and a null
     `pg_column` on a browse filter is now itself a test failure unless it is declared in
-    `HAND_CODED_BROWSE_FILTERS` (something applies it by hand) or in the new
-    `BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY` (nothing does, and the reason is recorded). That
-    second set exists because the hardened test found `tom_days_min/max` already in that
-    state: they reach the Stats RPC and no list predicate at all, so Browse's Stats panel and
-    the list beneath it can disagree about the cohort — a pre-existing gap this wave found,
-    named, and deliberately did not fix.
+    `HAND_CODED_BROWSE_FILTERS` (something applies it by hand). The hardened test found one
+    such filter, `tom_days_min/max` (Stats applied it, the list did not); it was closed on
+    2026-10-17 by pointing `pg_column` at the published `tom_days`, and the escape set the
+    test had grown for it was deleted.
 
     **Known residue, named.** Browse's table still SELECTS and SORTS the raw `estate_area`
     column while it now FILTERS the measure, so a bazos/realitymix/mmreality/remax land row can
@@ -3254,6 +3252,20 @@ renumber.** Navigate by area:
     was registered as inert while still EXECUTE-granted to `authenticated`, so migration 428
     revokes that grant (additive) and the drop itself stays with the operator. The whole program
     is written up in `docs/design/ppm2-measure-unification.md`.
+
+    **Sibling measure — time on market (2026-10-17, migration 617).** Same shape, no census (it is
+    not a price over an area): `public.measure_tom_days(is_active, first_seen_at, last_seen_at)` is
+    the one definition; the four views that publish `tom_days` call it, the compiler and the
+    analytics tools render it through `toolkit.measures.tom_days_sql`, and
+    `tests/test_measure_tom_days.py` reds on a view that spells it again, on the two Python spellings
+    the old copies used, and on a known consumer that stops calling the face. Its
+    limits are the doc comment's, stated so a panel does not oversell it: an ACTIVE row is its age
+    so far (a lower bound, right-censored), an INACTIVE row its closed run, so a cohort that mixes
+    both mixes two things; and the anchor is OUR first sighting, because no portal supplies a
+    usable listing date (5 of 9 carry none, sreality's is the last edit, ceskereality's lags a
+    median 26 days), so a listing live before its portal was walked reads younger than it is.
+    `tom_days_min/max` is a column filter on every read model, applied to the Browse list, count,
+    pins, Stats and map counts alike (before 2026-10-17 it reached only the last two).
 
 24. **Folded into 25.** The number is kept because rules are cited by number and never renumbered;
     the two-paths-until-W6 rule it used to state ended when W4-c dropped the legacy store.

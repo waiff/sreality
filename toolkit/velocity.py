@@ -25,6 +25,7 @@ from toolkit.comparables import (
     _lifecycle_where,
     _shared_filter_where,
 )
+from toolkit.measures import tom_days_sql
 
 if TYPE_CHECKING:
     import psycopg
@@ -56,7 +57,8 @@ def build_market_velocity_query(
     params.update(life_params)
 
     sql = (
-        "SELECT l.sreality_id, l.first_seen_at, l.last_seen_at, l.is_active\n"
+        f"SELECT l.sreality_id, l.first_seen_at, l.last_seen_at, l.is_active,\n"
+        f"  {tom_days_sql('l')} AS tom_days\n"
         "FROM listings l\n"
         # W4-a: the radius in _shared_filter_where reads `ll`.
         "JOIN listing_location ll ON ll.listing_id = l.id\n"
@@ -88,7 +90,7 @@ def compute_market_velocity(
             "first_seen_at": r[1],
             "last_seen_at": r[2],
             "is_active": r[3],
-            "tom_days": _tom_days(r[1], r[2], r[3], now=now),
+            "tom_days": r[4],
         }
         for r in rows
     ]
@@ -184,11 +186,7 @@ def compute_listing_velocity(
             queried_at=_now_iso(),
         )
 
-    now = datetime.now(timezone.utc)
-    target_tom = _tom_days(
-        listing["first_seen_at"], listing["last_seen_at"],
-        listing["is_active"], now=now,
-    )
+    target_tom = listing["tom_days"]
 
     if listing["lat"] is None or listing["lng"] is None:
         return _listing_envelope(
@@ -235,11 +233,7 @@ def compute_listing_velocity(
         cur.execute(sql, params)
         peer_rows = cur.fetchall()
 
-    peer_toms = [
-        t for t in (
-            _tom_days(r[1], r[2], r[3], now=now) for r in peer_rows
-        ) if t is not None
-    ]
+    peer_toms = [r[4] for r in peer_rows if r[4] is not None]
 
     percentile = _percentile_rank(target_tom, peer_toms) if (
         target_tom is not None and peer_toms
@@ -288,7 +282,8 @@ def _fetch_listing_for_velocity(
         cur.execute(
             "SELECT l.first_seen_at, l.last_seen_at, l.is_active, l.disposition,\n"
             "  ST_Y(ll.geom) AS lat, ST_X(ll.geom) AS lng,\n"
-            "  l.category_main, l.category_type, l.id\n"
+            "  l.category_main, l.category_type, l.id,\n"
+            f"  {tom_days_sql('l')} AS tom_days\n"
             "FROM listings l\n"
             "LEFT JOIN listing_location ll ON ll.listing_id = l.id\n"
             f"WHERE {id_clause}",
@@ -307,21 +302,8 @@ def _fetch_listing_for_velocity(
         "category_main": row[6],
         "category_type": row[7],
         "id": int(row[8]),
+        "tom_days": row[9],
     }
-
-
-def _tom_days(
-    first_seen: datetime | None,
-    last_seen: datetime | None,
-    is_active: bool | None,
-    *,
-    now: datetime,
-) -> int | None:
-    if first_seen is None:
-        return None
-    end = now if is_active else (last_seen or now)
-    delta = end - first_seen
-    return max(0, delta.days)
 
 
 def _stats(values: list[int]) -> dict[str, Any]:

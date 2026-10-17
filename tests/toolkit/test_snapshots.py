@@ -196,7 +196,7 @@ def test_compare_snapshots_envelope_with_two_snapshots():
         (1, _ts(3), 16900, raw_a),
         (2, _ts(1), 18500, raw_b),
     ]
-    listing_row = [(_ts(10),)]
+    listing_row = [(10,)]  # what measure_tom_days answers for the listing
 
     conn = _FakeConn([snap_rows, listing_row])
     res = compare_snapshots(conn, sreality_id=2836292428)  # type: ignore[arg-type]
@@ -210,7 +210,7 @@ def test_compare_snapshots_envelope_with_two_snapshots():
     assert len(d["price_trajectory"]) == 2
     assert d["price_trajectory"][0]["snapshot_id"] == 1
     assert d["price_trajectory"][1]["snapshot_id"] == 2
-    assert d["time_on_market_days"] >= 9  # listing first_seen_at = 10 days ago
+    assert d["time_on_market_days"] == 10
 
     md = res["metadata"]
     assert md["tool"] == "compare_snapshots"
@@ -236,7 +236,7 @@ def test_compare_snapshots_empty_for_unknown_listing():
 def test_compare_snapshots_since_filter_passes_seconds():
     raw_a = _load_raw()
     snap_rows = [(1, _ts(2), 16900, raw_a)]
-    listing_row = [(_ts(5),)]
+    listing_row = [(5,)]
     conn = _FakeConn([snap_rows, listing_row])
 
     res = compare_snapshots(

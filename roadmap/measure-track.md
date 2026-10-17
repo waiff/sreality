@@ -588,3 +588,16 @@ render its SHAPE.
   PR-A (registry publish-complete) is merged.
 - **Next — PR-F:** drops the stored `mf_*`, the 507 functions and `rent_map_*_public` right
   after the program is verified in production (operator 2026-09-25; explicit OK + `pg_dump` first).
+
+## Time on market — one read-time measure (2026-10-17)
+Found when `tom=5-45` still listed 0–1 day cards: the filter had `pg_column=None`, so Browse's list never
+applied it (Stats and map counts did), and "days on market" had six spellings.
+- **Done — #1849:** `tom_days_min/max` is a column filter on every read model (the 535 pattern); the
+  known-gap set `BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY` and the compiler's `_tom` hook are deleted.
+- **Done — #1850 (migration 617):** `public.measure_tom_days()` is the one definition; four views and
+  `toolkit.measures.tom_days_sql` (compiler, velocity, `compare_snapshots`) call it. `compare_snapshots`
+  no longer ages a closed listing.
+- **Open (semantics, needs an operator ruling before any code):** under `status=all` a TOM bound mixes
+  active ads' age-so-far with closed ads' completed durations (right-censored vs complete), and Stats'
+  median TOM inherits that bias; the anchor is our first sighting, so a listing live before its portal
+  was first walked reads younger (2.5 % of sreality's corpus sits on the first two days).

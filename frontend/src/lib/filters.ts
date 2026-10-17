@@ -183,8 +183,8 @@ export interface ListingFilters {
   recentlyAddedDays: number | null;
   recentlyChangedDays: number | null;
   /* Days on market (= last_seen_at - first_seen_at, or now() -
-   * first_seen_at for active listings). Surfaced as tom_days on
-   * listings_public via migration 052. */
+   * first_seen_at for active listings): the read models' `tom_days` column
+   * (migration 054), which the Browse list, count, map and Stats all filter. */
   tomDaysMin: number | null;
   tomDaysMax: number | null;
   hasBalcony: TriState;

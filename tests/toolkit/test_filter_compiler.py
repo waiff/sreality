@@ -28,7 +28,7 @@ from toolkit.filter_compiler import (
     RETIRED_FILTERS,
     compile_filter_where,
 )
-from toolkit.measures import per_m2_sql, plot_area_sql
+from toolkit.measures import per_m2_sql, plot_area_sql, tom_days_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GRAINS = (LISTINGS_GRAIN, PROPERTIES_GRAIN)
@@ -154,10 +154,15 @@ def test_seen_days_bounds_are_inverted_against_their_affix() -> None:
         "l.first_seen_at <= now() - make_interval(days => %(first_seen_min_days)s)"]
 
 
-def test_tom_bounds_read_the_one_tom_expression() -> None:
-    assert _hook("tom_days_min", 5) == ([f"{fc._TOM_EXPR} >= %(tom_days_min)s"],
-                                        {"tom_days_min": 5})
-    assert _hook("tom_days_max", 9)[0] == [f"{fc._TOM_EXPR} <= %(tom_days_max)s"]
+def test_tom_bounds_read_the_tom_measure_spelled_over_listings() -> None:
+    """`listings` has no tom_days column, so the measure is spelled over it (the same split as
+    plot_area_m2); the Watchdog agenda does not declare the bounds at all."""
+    values = {"tom_days_min": 5, "tom_days_max": 9}
+    assert compile_filter_where(values, LISTINGS_GRAIN) == (
+        [f"{tom_days_sql('l')} >= %(tom_days_min)s", f"{tom_days_sql('l')} <= %(tom_days_max)s"],
+        values)
+    with pytest.raises(ValueError, match="agenda violation"):
+        compile_filter_where(values, PROPERTIES_GRAIN)
 
 
 def test_building_material_expands_buckets_like_the_spa() -> None:

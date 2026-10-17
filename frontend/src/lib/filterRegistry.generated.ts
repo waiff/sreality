@@ -522,9 +522,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     {
       "id": "tom_days_min",
       "type": "int",
-      "pg_column": null,
+      "pg_column": "tom_days",
       "default": null,
-      "description": "Lower bound on time-on-market in days. TOM = (now - first_seen_at) for active rows, (last_seen_at - first_seen_at) for delisted rows. Inclusive.",
+      "description": "Lower bound on time-on-market in days (`measure_tom_days`, migration 617). TOM = (now - first_seen_at) for active rows, (last_seen_at - first_seen_at) for delisted rows. Inclusive.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
@@ -540,12 +540,12 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [],
       "nullable": false,
-      "sql_kind": null
+      "sql_kind": "gte"
     },
     {
       "id": "tom_days_max",
       "type": "int",
-      "pg_column": null,
+      "pg_column": "tom_days",
       "default": null,
       "description": "Upper bound on time-on-market in days. See `tom_days_min` for the TOM definition. Inclusive.",
       "category": "Velocity",
@@ -563,7 +563,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [],
       "nullable": false,
-      "sql_kind": null
+      "sql_kind": "lte"
     },
     {
       "id": "last_seen_min_days",

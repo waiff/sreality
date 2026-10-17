@@ -129,6 +129,9 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         # `estate_area` is NULL on a third of active land. Not on `listings`:
         # the API-side readers call plot_area_m2(...) there (toolkit.measures).
         "plot_area_m2",
+        # Migration 054 — time on market, published by every read model; the compiler spells
+        # it over `listings` (LISTINGS_GRAIN.exprs).
+        "tom_days",
         # Property-grain derived columns (migrations 091/095/173), exposed via
         # properties_public and filtered by the Browse property-grain RPC.
         # Not on `listings` — they aggregate across a property's children.
@@ -482,7 +485,7 @@ def test_sql_kind_snapshot() -> None:
     from collections import Counter
 
     counts = Counter(fr.sql_kind(f) for f in fr.all_filters())
-    assert counts == {"gte": 18, "lte": 10, "eq": 9, "any": 7, "enum_or_unknown": 2, None: 34}
+    assert counts == {"gte": 19, "lte": 11, "eq": 9, "any": 7, "enum_or_unknown": 2, None: 32}
     numeric_eq = {
         f.id for f in fr.all_filters()
         if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT) and fr.sql_kind(f) == "eq"
