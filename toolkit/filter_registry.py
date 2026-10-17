@@ -805,7 +805,7 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="tom_days_min",
             type=FilterType.INT,
-            pg_column=None,  # computed: see listings_public.tom_days (migration 054)
+            pg_column="tom_days",  # a column of every read model; `listings` has none (compiler `exprs`)
             default=None,
             description=(
                 "Lower bound on time-on-market in days. TOM = "
@@ -822,7 +822,7 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="tom_days_max",
             type=FilterType.INT,
-            pg_column=None,
+            pg_column="tom_days",
             default=None,
             description=(
                 "Upper bound on time-on-market in days. See "

@@ -782,7 +782,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               labels={{
                 first_seen_min_days: 'First seen (days ago)',
                 last_seen_min_days: 'Last seen (days ago)',
-                tom_days_min: 'Turned in (days)',
+                tom_days_min: 'Time on market (days)',
               }}
               flat
             />

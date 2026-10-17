@@ -1870,9 +1870,9 @@ renumber.** Navigate by area:
     `sql_kind` (vitest + `tests/fixtures/filter_sql_kinds.json`). Its hand-coded half and the
     two browse RPCs agree per shared predicate only (place plan, rule-23 measures,
     `curated_cities_matching()`, served predicate). Open divergences: center+radius is a circle
-    in Python and a bounding square in Browse (M3); `tom_days` reaches Stats but not the Browse
-    list (M4); the six amenities are the property's union (MS6) for the Watchdog, Browse and
-    Stats but the canonical advert's own flags in an estimation cohort, until MS20
+    in Python and a bounding square in Browse (M3); the six amenities are the property's union
+    (MS6) for the Watchdog, Browse and Stats but the canonical advert's own flags in an
+    estimation cohort, until MS20
     (`docs/design/merge-sprint/PROGRAM.md` §9). `WatchdogFilterSpec`'s fields EQUAL the
     WATCHDOG agenda (and `ComparableFilters`' the cohort agendas) by an equality test in
     `tests/toolkit/test_filter_registry.py`, because `extra='ignore'` drops a missing field on
@@ -3132,12 +3132,10 @@ renumber.** Navigate by area:
     `test_frontend_read_contract_subset_of_projection` already demands the projection publish
     every browse filter's `pg_column`, so the two ends cannot drift apart again, and a null
     `pg_column` on a browse filter is now itself a test failure unless it is declared in
-    `HAND_CODED_BROWSE_FILTERS` (something applies it by hand) or in the new
-    `BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY` (nothing does, and the reason is recorded). That
-    second set exists because the hardened test found `tom_days_min/max` already in that
-    state: they reach the Stats RPC and no list predicate at all, so Browse's Stats panel and
-    the list beneath it can disagree about the cohort — a pre-existing gap this wave found,
-    named, and deliberately did not fix.
+    `HAND_CODED_BROWSE_FILTERS` (something applies it by hand). The hardened test found one
+    such filter, `tom_days_min/max` (Stats applied it, the list did not); it was closed on
+    2026-10-17 by pointing `pg_column` at the published `tom_days`, and the escape set the
+    test had grown for it was deleted.
 
     **Known residue, named.** Browse's table still SELECTS and SORTS the raw `estate_area`
     column while it now FILTERS the measure, so a bazos/realitymix/mmreality/remax land row can

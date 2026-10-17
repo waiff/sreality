@@ -14,7 +14,6 @@ import { describe, expect, it } from 'vitest';
 import { FILTER_REGISTRY, type Agenda, type FilterDef } from './filterRegistry.generated';
 import { DEFAULT_FILTERS, REGISTRY_KEY_MAP } from './filters';
 import {
-  BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY,
   HAND_CODED_BROWSE_FILTERS,
   applyAgendaFilters,
   applyRegistryFilters,
@@ -88,7 +87,6 @@ describe('drift guard', () => {
       if (!filter.agendas.includes('browse')) continue;
       if (filter.pg_column != null) continue;
       if (HAND_CODED_BROWSE_FILTERS.has(filter.id)) continue;
-      if (BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY.has(filter.id)) continue;
       undeclared.push(filter.id);
     }
     if (undeclared.length) {
@@ -98,10 +96,7 @@ describe('drift guard', () => {
         `\nEither give the filter a column the read model PUBLISHES (see ` +
         `migration 535 — a derived measure can be a projection column), or ` +
         `hand-code it in queries.ts:applyFilters and list it in ` +
-        `HAND_CODED_BROWSE_FILTERS, or — if it genuinely reaches no list ` +
-        `predicate — record it in BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY with ` +
-        `the reason. Do NOT use HAND_CODED_BROWSE_FILTERS for the last case: ` +
-        `that set is a claim that something applies the filter.`,
+        `HAND_CODED_BROWSE_FILTERS (a claim that something applies it).`,
       );
     }
   });
@@ -156,6 +151,13 @@ describe('auto-dispatch', () => {
       .map((c) => `${c.col}=${String(c.value)}`);
     expect(cols).toContain('area_m2=100');
     expect(cols).toContain('apartment_condition_level=4');
+  });
+
+  it('time-on-market bounds reach the list query (they once reached only Stats)', () => {
+    const r = new _Recorder();
+    applyRegistryFilters(r, { ...DEFAULT_FILTERS, tomDaysMin: 5, tomDaysMax: 45 });
+    expect(r.calls).toContainEqual({ op: 'gte', col: 'tom_days', value: 5 });
+    expect(r.calls).toContainEqual({ op: 'lte', col: 'tom_days', value: 45 });
   });
 
   it('emits in for string_list filters with values', () => {
