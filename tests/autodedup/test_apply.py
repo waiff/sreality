@@ -39,8 +39,9 @@ from toolkit.room_taxonomy import category_main_compatible
 
 GEN = "g12"
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-# Where an advert IS (listing_location's obec_kod, cast_obce_kod): Jablonec nad Nisou, the town
-# every fake advert sits in unless a test places it elsewhere (or nowhere: `where=None`).
+# Where an advert IS (listing_location's obec_kod, cast_obce_kod[, okres_kod]): Jablonec nad
+# Nisou, the town every fake advert sits in unless a test places it elsewhere (or nowhere:
+# `where=None`). A two-code place has no okres.
 JABLONEC = 563510
 IN_JABLONEC = (JABLONEC, None)
 
@@ -91,7 +92,7 @@ class FakeDb:
         self.clusters: dict[tuple[str, int], dict[str, Any]] = {}
         self.members: list[tuple[str, int, int]] = []
         self.listings: dict[int, dict[str, Any]] = {}
-        self.location: dict[int, tuple[int | None, int | None]] = {}
+        self.location: dict[int, tuple[int | None, ...]] = {}
         self.properties: dict[int, dict[str, Any]] = {}
         self.mnl: list[tuple[int, int, str]] = []
         self.verdicts: list[dict[str, Any]] = []
@@ -131,10 +132,15 @@ class FakeDb:
                                 "first_seen_at": first, "merged_into": None,
                                 "merged_at": None}
 
+    def where(self, lid: int) -> tuple[int | None, int | None, int | None]:
+        """The advert's (obec_kod, cast_obce_kod, okres_kod); all None without a row."""
+        return (*self.location.get(lid, ()), None, None, None)[:3]  # type: ignore[return-value]
+
     def listing(self, lid: int, pid: int | None, *, ct: str | None = "prodej",
                 cm: str | None = "byt",
-                where: tuple[int | None, int | None] | None = IN_JABLONEC) -> None:
-        """`where`: the advert's listing_location (obec_kod, cast_obce_kod); None = no row."""
+                where: tuple[int | None, ...] | None = IN_JABLONEC) -> None:
+        """`where`: the advert's listing_location (obec_kod, cast_obce_kod[, okres_kod]); None =
+        no row."""
         self.listings[lid] = {"property_id": pid, "category_type": ct, "category_main": cm}
         if where is None:
             self.location.pop(lid, None)
@@ -181,7 +187,7 @@ class FakeDb:
                 if g != p["generation"]:
                     continue
                 row = self.listings.get(lid)
-                where = self.location.get(lid, (None, None)) if row else (None, None)
+                where = self.where(lid) if row else (None, None, None)
                 row = row or {}
                 out.append((k, lid, row.get("property_id"), row.get("category_type"),
                             row.get("category_main"), *where))
@@ -198,7 +204,7 @@ class FakeDb:
                     if lid in self.listings]
         if sql in (S.PROPERTY_LISTINGS_SQL, S.LOCK_PROPERTY_LISTINGS_SQL):
             return [(lid, r["property_id"], r["category_type"], r["category_main"],
-                     *self.location.get(lid, (None, None)))
+                     *self.where(lid))
                     for lid, r in sorted(self.listings.items())
                     if r["property_id"] in p["property_ids"]]
         if sql == S.MUST_NOT_LINK_SQL:
@@ -417,7 +423,7 @@ class FakeDb:
 
 
 def _pair_group(db: FakeDb, key: int, lids: list[int], pids: list[int], *,
-                ct: str = "prodej", where: tuple[int | None, int | None] | None = IN_JABLONEC,
+                ct: str = "prodej", where: tuple[int | None, ...] | None = IN_JABLONEC,
                 **kw: Any) -> None:
     for lid, pid in zip(lids, pids):
         if pid not in db.properties:

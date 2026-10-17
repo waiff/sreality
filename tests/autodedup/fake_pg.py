@@ -99,8 +99,10 @@ class FakePg:
         # What the open transaction rolls back to: `other_session` writes into it what a
         # second session commits while that transaction is open.
         self.tx_state: dict[str, Any] | None = None
-        # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3).
+        # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3), and an okres
+        # placed under a kraj -> its obce (E961).
         self.admin_parents: dict[int, int] = {}
+        self.admin_districts: dict[int, list[int]] = {}
         # The scope's membership snapshot and the two ledgers W9e rails the lane with: the
         # entrant cadence's scan log and the rolling-day retirement log.
         self.scope_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
@@ -303,14 +305,16 @@ def _aliases(sql: str) -> list[str]:
 
 def _in_scope(db: FakePg, listing_id: Any, p: Mapping[str, Any]) -> bool:
     """The scope predicate the feeds spell in SQL: `listing_location` by primary key, then the
-    two code lists. `all_scope` holds everything, a location row included or not."""
+    three code lists. `all_scope` holds everything, a location row included or not."""
     if p.get("all_scope"):
         return True
     location = db.locations.get(int(listing_id)) or {}
     obec = location.get("obec_kod")
     cast_obce = location.get("cast_obce_kod")
+    okres = location.get("okres_kod")
     return ((obec is not None and obec in set(p.get("obec") or ()))
-            or (cast_obce is not None and cast_obce in set(p.get("cast_obce") or ())))
+            or (cast_obce is not None and cast_obce in set(p.get("cast_obce") or ()))
+            or (okres is not None and okres in set(p.get("okres") or ())))
 
 
 def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noqa: C901
@@ -995,6 +999,16 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
             if place.get("obec_kod") == obec
             and (cast_obce is None or place.get("cast_obce_kod") == cast_obce))
         return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
+    # E961: an okres through its obce (the index), filtered on its own code, plus the adverts
+    # located to the district alone (no obec, granularity `okres`).
+    if sql == S.RT_SCOPE_OKRES_BLOCK_SQL:
+        obce = set(p["obce"])
+        found = sorted(
+            listing_id for listing_id, place in db.locations.items()
+            if place.get("okres_kod") == p["okres"]
+            and (place.get("obec_kod") in obce
+                 or (place.get("obec_kod") is None and place.get("granularity") == "okres")))
+        return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
     if sql == S.RT_SCOPE_IDS_WRITE_SQL:
         for listing_id, resolved in zip(p["listing_ids"], p["resolved"]):
             # The column is `timestamptz`, so psycopg reads it back as a datetime however the
@@ -1042,6 +1056,14 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 state[1] += 1
         return [(block, (db.now - last).total_seconds(), scans)
                 for block, (last, scans) in sorted(out.items())]
+    # E961: the blocks whose LATEST walk filled the slice.
+    if sql == S.RT_SCOPE_TRUNCATED_SQL:
+        latest: dict[str, dict[str, Any]] = {}
+        for row in sorted((r for r in db.scope_scans if r["generation"] == gen),
+                          key=lambda r: r["scanned_at"]):
+            latest[row["block_key"]] = row
+        return [(block,) for block, row in sorted(latest.items())
+                if row["rows_found"] >= int(p["slice"])]
     if sql == S.RT_SCOPE_SCAN_SEEN_SQL:
         return sorted({(row["block_key"],) for row in db.scope_scans
                        if row["generation"] == gen})
@@ -1068,6 +1090,9 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_SCOPE_PARENT_OBEC_SQL:
         return [(int(code), int(db.admin_parents[int(code)])) for code in p["codes"]
                 if int(code) in db.admin_parents]
+    if sql == S.RT_SCOPE_OKRES_OBCE_SQL:
+        return [(int(code), int(obec)) for code in p["codes"]
+                for obec in db.admin_districts.get(int(code), ())]
     if sql == S.RT_REVIVED_SQL:
         slice_ids = sorted(i for g, i in db.rt_fp
                            if g == gen and not db.rt_fp[(g, i)]["is_active"]

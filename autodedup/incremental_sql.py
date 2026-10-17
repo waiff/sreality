@@ -196,7 +196,8 @@ select coalesce(max(w.id), %(after_id)s::bigint) as window_max,
   left join public.listing_location ll
          on ll.listing_id = w.id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
 """
 
 # The proof rather than the assumption: any id at or below the cursor that this generation has
@@ -222,7 +223,8 @@ select w.id, w.first_seen_at
   left join public.listing_location ll
          on ll.listing_id = w.id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
  where (%(all_scope)s::boolean or ll.listing_id is not null)
    and not exists (
          select 1
@@ -259,7 +261,8 @@ select coalesce(max(w.snapshot_id), %(after_id)s::bigint) as window_max,
   left join public.listing_location ll
          on ll.listing_id = w.listing_id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
 """
 
 # The flip feed pages on the FULL key, so its window END is a pair and not the maximum of
@@ -290,7 +293,8 @@ select (select w2.inactive_at from win w2
   left join public.listing_location ll
          on ll.listing_id = w.id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
 """
 
 # One row back, never the slice: the sweep reads a bounded window of this generation's inactive
@@ -315,7 +319,8 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
   left join public.listing_location ll
          on ll.listing_id = f.listing_id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
 """
 
 # The FIFTH feed, and the one the scope owes (E79): a listing the operator's geocoder MOVES —
@@ -341,7 +346,8 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
   left join public.listing_location ll
          on ll.listing_id = f.listing_id
         and (ll.obec_kod = any(%(obec)s::bigint[])
-             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[])
+             or ll.okres_kod = any(%(okres)s::bigint[]))
 """
 
 # The SIXTH feed, and the one the scope owes in the other direction (W9d-3):
@@ -371,6 +377,18 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
 # arrives is already claimed by the straggler sweep (the last N rows of `listings`, anti-joined
 # on `rt_fp`), so this feed exists for the long tail — an old listing re-geocoded into the
 # scope — which is measured in days rather than in minutes.
+# How many rows one REFRESH of a scope block may snapshot (W9e/R3) — the walks' `limit`. The
+# trial scope's largest block is Praha-Vysočany at 1,439 rows; the cap exists so a mis-typed obec
+# code cannot pull a whole city into `rt_scope_ids`, and it does not reduce the scan's cost — the
+# `limit` is applied after the bitmap heap scan, which is precisely why a smaller `enter_slice`
+# was never the answer to what that scan costs. A walk that FILLS it is TRUNCATED (E961): the
+# walk keeps the block's oldest rows by id, so a block over it is listed short of its newest
+# adverts — silently, since a seed starts the forward feeds at today's newest id. Brno-město
+# (41,097) and Ostrava-město (28,174) are over it on 2026-10-17, Praha-východ (19,812) days from
+# it. A seed refuses such a block and a pass names it and reads it as unread
+# (`RT_SCOPE_TRUNCATED_SQL`), until E940 pages it.
+ENTER_SLICE: int = 20000
+
 RT_SCOPE_BLOCK_SQL = """
 select ll.listing_id  as listing_id,
        ll.resolved_at as resolved_at
@@ -378,6 +396,26 @@ select ll.listing_id  as listing_id,
  where ll.obec_kod = %(obec)s::bigint
    and (%(cast_obce)s::bigint is null
         or ll.cast_obce_kod = %(cast_obce)s::bigint)
+ order by ll.listing_id
+ limit %(limit)s
+"""
+
+# An okres block (E961) is the town index again, not a scan: `okres_kod` has no index either, so
+# the walk reaches the district through ITS obce (`RT_SCOPE_OKRES_OBCE_SQL`) on `(obec_kod,
+# granularity)`, and the same index's `obec_kod is null` range for the adverts located to the
+# district alone (94 in the corpus on 2026-10-17, granularity `okres`). `okres_kod` is the filter
+# that makes the block exactly what the feeds' predicate holds — 19,812 rows for Praha-východ
+# either way. Measured live `EXPLAIN (ANALYZE, BUFFERS)` on Praha-východ (110 obce, the largest
+# of kraj 27): a BitmapOr of the two index scans, **13,935 buffers = 109 MB, 71 ms** warm — half
+# a quarter's 231 MB, because a quarter's bitmap is its whole city and a district's is only its
+# own rows.
+RT_SCOPE_OKRES_BLOCK_SQL = """
+select ll.listing_id  as listing_id,
+       ll.resolved_at as resolved_at
+  from public.listing_location ll
+ where ll.okres_kod = %(okres)s::bigint
+   and (ll.obec_kod = any(%(obce)s::bigint[])
+        or (ll.obec_kod is null and ll.granularity = 'okres'))
  order by ll.listing_id
  limit %(limit)s
 """
@@ -459,6 +497,19 @@ select s.block_key                                                     as block_
  group by s.block_key
 """
 
+# The blocks whose LATEST walk filled the slice (E961): listed short of their newest rows, so
+# read as unread — the reconcile waits on their groups and W8 refuses them — and named in the
+# pass's heartbeat. `rt_scope_scan` holds one row a walk (60 a day at most), so this is a scan
+# of a table that never leaves a few thousand rows.
+RT_SCOPE_TRUNCATED_SQL = """
+select s.block_key
+  from (select distinct on (s.block_key) s.block_key, s.rows_found
+          from autodedup.rt_scope_scan s
+         where s.generation = %(generation)s::text
+         order by s.block_key, s.scanned_at desc) s
+ where s.rows_found >= %(slice)s::int
+"""
+
 RT_SCOPE_SCAN_WRITE_SQL = """
 insert into autodedup.rt_scope_scan (generation, block_key, scanned_at, rows_found,
                                      elapsed_ms)
@@ -501,6 +552,26 @@ select u.code as cast_obce_kod, p.code as obec_kod
  where u.level = 'cast_obce'
    and u.code = any(%(codes)s::bigint[])
    and u.valid_to is null
+"""
+
+# An okres block's obce, and the proof it IS an okres: the register's current okres row under a
+# kraj (all 76 have one), then its obce through the `parent_id` index (the register holds one
+# current row per obec, so there are no versions to choose between). An okres the register
+# cannot place under a kraj, or one with no obec, is a scope the sweep cannot walk.
+# `EXPLAIN (ANALYZE, BUFFERS)` for the 12 okresy of kraj 27: three Index Scans (`(level, code)`,
+# the primary key, `parent_id`), 1,144 obce, 369 buffers, 2.0 ms.
+RT_SCOPE_OKRES_OBCE_SQL = """
+select o.code as okres_kod, c.code as obec_kod
+  from public.ruian_admin_units o
+  join public.ruian_admin_units k
+    on k.id = o.parent_id
+   and k.level = 'kraj'
+  join public.ruian_admin_units c
+    on c.parent_id = o.id
+   and c.level = 'obec'
+ where o.level = 'okres'
+   and o.code = any(%(codes)s::bigint[])
+   and o.valid_to is null
 """
 
 # ------------------------------------------------------------------ the storage budget (E79)

@@ -23,8 +23,8 @@ before EVERY group (E39), so emptying its area on /settings stops a run between 
 a run's own arguments can narrow it and never widen it. A group is inside the area only when
 EVERY advert its merge would move (the members and every other advert on the involved
 properties) is LOCATED in one of its blocks by its live `listing_location` row (`town:` =
-obec_kod, `quarter:` = cast_obce_kod) — never by the engine's own blocking key, which names a
-quarter or nothing where the scope names the town.
+obec_kod, `quarter:` = cast_obce_kod, `district:` = okres_kod) — never by the engine's own
+blocking key, which names a quarter or nothing where the scope names the town.
 
 D7 holds: nothing here reads `property_merge_events`, and only `toolkit.property_identity` writes
 it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detach's undone stamps;
@@ -55,7 +55,7 @@ from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
 from autodedup.incremental import GENERATION
 from autodedup.incremental_scope import GRAIN_OF
-from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL
+from autodedup.incremental_sql import ENTER_SLICE, RT_SCOPE_SCAN_SEEN_SQL, RT_SCOPE_TRUNCATED_SQL
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_carriers import curation_preview
 from toolkit.property_identity import (
@@ -96,8 +96,9 @@ UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since
 UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", rt_lease.RELEASE_ARG, *UNAPPLY_SELECTORS})
 
 # A scope block, spelled as the export lane spells it: `town:<code>` (an advert's
-# listing_location.obec_kod) / `quarter:<code>` (its cast_obce_kod).
-GRAINS: tuple[str, ...] = ("town", "quarter")
+# listing_location.obec_kod) / `quarter:<code>` (its cast_obce_kod) — and `district:<code>`
+# (its okres_kod, E961), which the export lane has no block for: the real-time lane's `okres:`.
+GRAINS: tuple[str, ...] = ("town", "quarter", "district")
 
 # E904 — why a group is outside the scope, counted per reason in the run summary. Order is the
 # order a group's reason is picked in when its members fall outside for several.
@@ -178,15 +179,18 @@ class Scope:
 
     def outside(self, listing: "Member") -> str | None:
         """Why one advert is outside the scope, None when it is inside (E904). Inside the blocks
-        means LOCATED in one: its live obec_kod names a `town:` of the scope or its cast_obce_kod
-        a `quarter:` (legacy_retire.AREA_SQL's area); an advert with neither code is in none."""
+        means LOCATED in one: its live obec_kod names a `town:` of the scope, its cast_obce_kod
+        a `quarter:` or its okres_kod a `district:` (legacy_retire.AREA_SQL's area); an advert
+        with none of the three codes is in none."""
         if self.category_types is not None and listing.category_type not in self.category_types:
             return OUT_CATEGORY
         if self.blocks is not None:
-            if listing.obec_kod is None and listing.cast_obce_kod is None:
+            if (listing.obec_kod is None and listing.cast_obce_kod is None
+                    and listing.okres_kod is None):
                 return OUT_NO_LOCATION
             if (f"town:{listing.obec_kod}" not in self.blocks
-                    and f"quarter:{listing.cast_obce_kod}" not in self.blocks):
+                    and f"quarter:{listing.cast_obce_kod}" not in self.blocks
+                    and f"district:{listing.okres_kod}" not in self.blocks):
                 return OUT_BLOCKS
         if self.listing_ids is not None and listing.listing_id not in self.listing_ids:
             return OUT_LISTING_IDS
@@ -201,10 +205,11 @@ class Scope:
 
 
 def normalize_block(raw: Any) -> str:
-    """`town:563510` / `quarter:490245`, the export lane's spelling; anything else is refused."""
+    """`town:563510` / `quarter:490245` / `district:3209`; anything else is refused."""
     grain, _, code = str(raw).strip().lower().partition(":")
     if grain not in GRAINS or not code.isdigit():
-        raise ValueError(f"block {raw!r}: expected town:<code> or quarter:<code>")
+        raise ValueError(
+            f"block {raw!r}: expected town:<code>, quarter:<code> or district:<code>")
     return f"{grain}:{int(code)}"
 
 
@@ -292,7 +297,7 @@ def _int(value: Any) -> int | None:
 @dataclass(frozen=True)
 class Member:
     """One advert as the plan reads it: its property, deal type and category, and where it IS
-    (its live listing_location codes, both None without a row)."""
+    (its live listing_location codes, all None without a row)."""
 
     listing_id: int
     property_id: int | None
@@ -300,13 +305,14 @@ class Member:
     category_main: str | None
     obec_kod: int | None = None
     cast_obce_kod: int | None = None
+    okres_kod: int | None = None
 
     @classmethod
     def read(cls, row: Sequence[Any]) -> "Member":
         """A row of PROPERTY_LISTINGS_SQL / LOCK_PROPERTY_LISTINGS_SQL, or of MEMBERS_SQL
         after its cluster_key."""
-        lid, pid, ctype, cmain, obec, cast = row
-        return cls(int(lid), _int(pid), ctype, cmain, _int(obec), _int(cast))
+        lid, pid, ctype, cmain, obec, cast, okres = row
+        return cls(int(lid), _int(pid), ctype, cmain, _int(obec), _int(cast), _int(okres))
 
 
 @dataclass
@@ -1732,14 +1738,17 @@ def _retire_legacy(
 
 
 def rt_unread_blocks(conn: Any, generation: str, blocks: Iterable[str]) -> set[str]:
-    """The live stream's blocks it has not fully read (`obec:` / `cast_obce:` keys): one of
-    `blocks` never walked, or any whose snapshot holds an advert with no fingerprint. The
-    reconcile waits on them; the retire step refuses them."""
+    """The live stream's blocks it has not fully read (`obec:` / `cast_obce:` / `okres:` keys):
+    one of `blocks` never walked, any whose snapshot holds an advert with no fingerprint, and any
+    whose latest walk filled the slice (E961: listed short of its newest adverts). The reconcile
+    waits on them; the retire step refuses them."""
     walked = {str(row[0]) for row in _rows(conn, RT_SCOPE_SCAN_SEEN_SQL,
                                            {"generation": generation})}
     unread = {str(row[0]) for row in _rows(conn, S.RC_UNREAD_BLOCKS_SQL,
                                            {"generation": generation})}
-    return unread | {block for block in blocks if block not in walked}
+    short = {str(row[0]) for row in _rows(conn, RT_SCOPE_TRUNCATED_SQL,
+                                          {"generation": generation, "slice": ENTER_SLICE})}
+    return unread | short | {block for block in blocks if block not in walked}
 
 
 def _retire_live_stream(conn: Any, dry_run: bool, override: Mapping[str, Any],

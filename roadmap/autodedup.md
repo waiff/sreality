@@ -56,6 +56,17 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   (the 157 quarters as blocks beside the eight towns, 6,000 MB, E946; the ~36k no-quarter ads a week later, E940 + E945), a 3–6-day build with merging paused everywhere → S5 the apply
   scope widens a batch of quarters at a time, `town:554782` last. Brake: interval 0, the area out
   of the apply scope, then `unapply blocks=`. Open: D905–D910 (the operator's).
+- **S6 — Středočeský kraj by okres (operator, 2026-10-17; E961):** after Prague merges, the whole
+  kraj 27 (130,207 located ads, 1,133 towns) is seeded as its 12 `okres:` blocks, not 1,133 towns
+  (the cap is 60 walks a day); the apply scope and W8 take it a `district:` at a time. The grain is
+  built (6 h walks through each okres's obce; no town or quarter beside its okres, so Beroun's
+  `obec:531057` leaves for `okres:3202`; a walk that fills the 20,000 slice is refused at seed and
+  read as unread by a pass). Prerequisites, E940's (#1728): the paged walk for Praha-východ (19,812
+  rows on 10-17, over the slice in ~2 days; or seed it as its towns), and a seed that walks EVERY
+  block whatever the 60-walk cap — today a Prague + kraj seed walks the 8 towns and 52 quarters
+  and stops, cutting the calibration over no kraj ad and budgeting ~60k ads of a 283,489-ad build
+  (~5.4 GiB against `MAX_SCHEMA_MB` 6,000), so the budget rises too. The seed is `fresh=true`:
+  every live area stops merging until the build ends.
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at

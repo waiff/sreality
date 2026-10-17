@@ -304,6 +304,8 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "rss_mb": 388.0, "memory_limit_mb": 8192.0,
         "claim_cap": {"cap": 500, "reason": "rt_seed", "limit_mb": 8192.0},
         "predecessor_released": None,
+        # E961: no scope block's latest walk filled ENTER_SLICE
+        "scope_truncated": [],
         # E944: the calibration's age (the engine's summary names none here)
         "calibration_built_age_days": None,
         # E949: the engine's body and token memos at the pass's end, and the RSS once freed

@@ -265,7 +265,8 @@ name: "AUTODEDUP: engine lane"
 #             with both sides in it, a group verdict with its whole set in it), mixed deal
 #             types or incompatible categories (the chokepoint's own helper), a listing
 #             outside the scope (inside = LOCATED in a scope block by its live listing_location
-#             obec_kod / cast_obce_kod, never the engine's block key; out-of-scope groups are
+#             obec_kod / cast_obce_kod / okres_kod - `town:` / `quarter:` / `district:`, E961 -
+#             never the engine's block key; out-of-scope groups are
 #             counted per reason in the summary), a property the engine split across two groups,
 #             a property
 #             carrying a listing no group holds (unless this engine already merged it there
@@ -320,16 +321,20 @@ name: "AUTODEDUP: engine lane"
 #             each read's wall time (timings). Writes out/apply/legacy_retire.json and a step
 #             summary section; a dry run writes nothing.
 #             W8 (E953): with `generation=rt,retire_legacy=1,blocks=<area>` (e.g.
-#             `blocks=town:531057`) the step runs ALONE against the live stream's groups - no
-#             plan, no merge, no applied_merges row: the worker's lane re-merges once its interval
+#             `blocks=town:531057`, or `blocks=district:3202` for an okres the lane walks as
+#             one block, E961; name the area at the grain the lane walks it: a town inside a
+#             walked okres reads as never walked and is refused, and so is a district over
+#             towns the lane walks one by one) the step runs ALONE against the live stream's
+#             groups - no plan, no merge, no applied_merges row: the worker's lane re-merges once its interval
 #             is back above 0. No live group is one that run merges, so a legacy group the stream
 #             holds whole is left (engine_agrees, reconciled_by_lane), an operator "same" pair
 #             (a pair ruling, or a group ruling over both) is never parted (E907 does not apply),
 #             and a group holding an advert the lane has not fingerprinted is left
 #             (unread_by_lane: in no snapshot, so in no group). Refused, nothing undone: without blocks=;
 #             live, when the scope row does not name the blocks (add the area there first, the
-#             lane braked); while the lane has not fully read a named block (never walked, or an
-#             advert there with no fingerprint - the reconcile's own wait); with listing_ids.
+#             lane braked); while the lane has not fully read a named block (never walked, an
+#             advert there with no fingerprint, or its latest walk filled ENTER_SLICE and so
+#             listed it short - the reconcile's own wait); with listing_ids.
 #             The live run needs the brake (interval 0) and takes the lease, as above. Recipe:
 #             interval 0 -> the area into the scope row -> dry run -> dry_run=0 -> interval 60.
 #
@@ -417,7 +422,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass (training labels, no merge authority); rt_equivalence = the live store against a harness run; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges, or with generation=rt,retire_legacy=1,blocks=town:<code> only undo the old engine's merges in that area before the lane merges there; unapply = undo them."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass (training labels, no merge authority); rt_equivalence = the live store against a harness run; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges, or with generation=rt,retire_legacy=1,blocks=town:<code> (or district:<okres>, at the grain the lane walks the area) only undo the old engine's merges in that area before the lane merges there; unapply = undo them."
         required: true
         default: "census"
         type: string

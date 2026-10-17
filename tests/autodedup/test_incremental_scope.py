@@ -115,7 +115,7 @@ def test_a_scope_reads_from_a_token_string_a_json_list_or_all() -> None:
     assert parse_scope("all").whole_corpus is True
     assert parse_scope("obec:1 obec:1").blocks == (ScopeBlock("obec", 1),)
     with pytest.raises(ScopeError):
-        parse_scope("okres:1234")
+        parse_scope("kraj:27")                       # E961 added `okres`; there is no kraj grain
     with pytest.raises(ScopeError):
         parse_scope("obec:not-a-number")
 

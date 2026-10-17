@@ -2259,6 +2259,9 @@ def _autodedup_outcome(
             # pass released (None: there was none).
             claim_cap=summary.get("claim_cap"),
             predecessor_released=summary.get("predecessor_released"),
+            # E961: the scope blocks whose latest walk filled ENTER_SLICE — listed short of
+            # their newest adverts, read as unread until E940 pages them.
+            scope_truncated=list(summary.get("scope_truncated") or []),
             # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
             # end — the reading a widened scope's gate holds under half the container's limit —
             # and E948's two beside it: what it holds now and the container's limit.

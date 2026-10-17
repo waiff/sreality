@@ -113,6 +113,7 @@ from autodedup.incremental_scope import (
     resolve_scope,
 )
 from autodedup.incremental_sql import (
+    ENTER_SLICE,
     RT_CALIBRATION_PRESENT_SQL,
     RT_CALIBRATION_READ_SQL,
     RT_CALIBRATION_WRITE_SQL,
@@ -192,10 +193,13 @@ from autodedup.incremental_sql import (
     RT_SCOPE_IDS_PRUNE_BLOCKS_SQL,
     RT_SCOPE_IDS_PRUNE_SQL,
     RT_SCOPE_IDS_WRITE_SQL,
+    RT_SCOPE_OKRES_BLOCK_SQL,
+    RT_SCOPE_OKRES_OBCE_SQL,
     RT_SCOPE_PARENT_OBEC_SQL,
     RT_SCOPE_SCAN_SEEN_SQL,
     RT_SCOPE_SCAN_STATE_SQL,
     RT_SCOPE_SCAN_WRITE_SQL,
+    RT_SCOPE_TRUNCATED_SQL,
     RT_SCOPE_DRIFT_SQL,
     RT_RECUT_PUT_BACK_SQL,
     RT_RETIRE_EVENT_WRITE_SQL,
@@ -309,12 +313,7 @@ FEED_WINDOW: int = 1000
 # One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
 # Under the trial scope (4,969 listings) one slice covers the whole store every pass.
 DRIFT_SLICE: int = 20000
-# How many rows one REFRESH of a scope block may snapshot (W9e/R3). The trial scope's largest
-# block is Praha-Vysočany at 1,439 rows; the cap exists so a mis-typed obec code cannot pull a
-# whole city into `rt_scope_ids`, and it does not reduce the scan's cost — the `limit` is
-# applied after the bitmap heap scan, which is precisely why a smaller `enter_slice` was never
-# the answer to what that scan costs.
-ENTER_SLICE: int = 20000
+# `ENTER_SLICE`, the walk's row cap, lives beside the walks it limits (`incremental_sql`, E961).
 # --- the evidence sweep (E92) ---------------------------------------------------------------
 #
 # One round-robin slice of the SEVENTH feed, over this generation's own `rt_fp` rows. The
@@ -336,12 +335,19 @@ EVIDENCE_HORIZON_HOURS: float = 48.0
 # How often a scope block's membership is re-walked on `public`, by grain and in HOURS. A town
 # block is an index-served bitmap scan of its own obec (Jablonec: 2,745 buffers = 21 MB, 61 ms);
 # a QUARTER has no index of its own at all and costs 29,568 buffers = 231 MB, 6.4 s, cold every
-# time. So they do not deserve the same cadence, and neither is per-pass work.
-ENTER_INTERVAL_HOURS: dict[str, float] = {"obec": 1.0, "cast_obce": 6.0}
+# time. So they do not deserve the same cadence, and neither is per-pass work. An OKRES (E961)
+# is index-served like a town but is a dozen towns' rows: Praha-východ, kraj 27's largest, is
+# 13,935 buffers = 109 MB (0.70 a row; the kraj's 12 ~7,600 at that). At a town's 1 h one would
+# read 334k buffers a day, more than a quarter's 118k; at a quarter's 6 h it reads at most 56k
+# (avg 30k), under what one town (66k) or quarter (118k) block already spends; a kraj-only
+# scope's 12 districts ask 48 walks a day. The walk is the TAIL's feed (an arrival is the
+# forward and straggler feeds'), so 6 h costs latency only where it is measured in days.
+ENTER_INTERVAL_HOURS: dict[str, float] = {"obec": 1.0, "cast_obce": 6.0, "okres": 6.0}
 # The hard ceiling on those walks, per generation and per rolling day (W9e/R3). The cadence
 # above is what the lane INTENDS to spend; this is what it is allowed to spend when an interval
-# is mis-set to zero or the block list grows. Under the trial scope the cadence asks for 52 a
-# day (24 + 24 + 4) against this 60.
+# is mis-set to zero or the block list grows. The trial scope's cadence asked 52 a day (24 + 24
+# + 4); the live scope (8 towns + 112 Prague quarters) asks 640 and Prague + kraj 27's 12 okresy
+# 688, so the cap binds, and it binds the TAIL only: an arrival is the forward feeds' (E961).
 MAX_ENTER_SCANS_PER_DAY: int = 60
 # --- the bootstrap phase (E98) ---------------------------------------------------------------
 #
@@ -1256,6 +1262,7 @@ class SqlWork:
                  revive_slice: int = REVIVE_SLICE, window: int = FEED_WINDOW,
                  drift_slice: int = DRIFT_SLICE, enter_slice: int = ENTER_SLICE,
                  parents: Mapping[int, int] | None = None,
+                 districts: Mapping[int, Sequence[int]] | None = None,
                  max_retire_fraction: float = MAX_RETIRE_FRACTION,
                  enter_interval_hours: Mapping[str, float] | None = None,
                  max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY,
@@ -1300,12 +1307,15 @@ class SqlWork:
         # What bound this pass's claim — the count, the cap or the clock — for the run summary.
         self.claim_bound: dict[str, Any] = {}
         self.parents = dict(parents or {})
-        self.enter_blocks = _enter_blocks(scope, self.parents)
+        self.districts = dict(districts or {})
+        self.enter_blocks = walk_blocks(scope, self.parents, self.districts)
         self.statements = 0
         self.windows: dict[str, int] = {}
         # What this pass spent on `public` for the entrant feed, for the run summary: a block
         # refresh, a refusal against the daily cap, or nothing at all.
         self.enter_scan: dict[str, Any] = {}
+        # E961: the blocks this pass walked that filled `enter_slice` — listed short.
+        self.truncated: list[str] = []
         # What the evidence sweep (E92) cost and found this pass, for the run summary.
         self.evidence: dict[str, Any] = {}
         self._pending: dict[str, Any] = {}
@@ -1608,12 +1618,12 @@ class SqlWork:
             if scans_24h >= self.max_enter_scans_per_day:
                 # A count, not a crash: the pass goes on claiming out of the snapshot it has.
                 self.enter_scan = {"skipped": "daily cap", "scans_24h": scans_24h,
-                                   "cap": self.max_enter_scans_per_day, "blocks": walked}
+                                   "cap": self.max_enter_scans_per_day, "blocks": walked,
+                                   "truncated": list(self.truncated)}
                 return last if walked else start
             block = blocks[index]
             started = time.time()
-            rows = self._query(RT_SCOPE_BLOCK_SQL, {
-                "obec": block.obec, "cast_obce": block.cast_obce, "limit": self.enter_slice})
+            rows = self._query(*block.walk(self.enter_slice))
             elapsed_ms = (time.time() - started) * 1000.0
             listing_ids = [int(row[0]) for row in rows]
             params = {"generation": self.generation, "block_key": block.key,
@@ -1629,11 +1639,17 @@ class SqlWork:
                 "generation": self.generation, "block_key": block.key,
                 "rows_found": len(listing_ids), "elapsed_ms": round(elapsed_ms, 3)})
             scans_24h += 1
+            # E961: a walk that fills the slice kept the block's oldest rows only. A seed
+            # refuses it; a pass names it, and the reconcile and W8 read the block as unread.
+            truncated = len(listing_ids) >= self.enter_slice
+            if truncated:
+                self.truncated.append(block.key)
             walked.append({"block": block.key, "rows": len(listing_ids),
-                           "elapsed_ms": round(elapsed_ms, 3)})
+                           "elapsed_ms": round(elapsed_ms, 3), "truncated": truncated})
             last = (index + 1) % len(blocks)
         self.enter_scan = {**walked[-1], "scans_24h": scans_24h,
-                           "cap": self.max_enter_scans_per_day, "blocks": walked}
+                           "cap": self.max_enter_scans_per_day, "blocks": walked,
+                           "truncated": list(self.truncated)}
         return last
 
     def _walked_ever(self) -> set[str]:
@@ -1789,8 +1805,9 @@ class RetireRefusal(Exception):
 
 @dataclass(frozen=True, slots=True)
 class EnterBlock:
-    """One block of the scope as the entrant sweep reads it: always an obec (the index this
-    schema HAS), plus the quarter code when the block is a quarter (a filter, not an index).
+    """One block of the scope as the entrant sweep reads it: always through obce (the index
+    this schema HAS) — a town's own, a quarter's parent with the quarter code as a filter, or
+    an okres's own obce with the okres code as a filter (E961; neither code is indexed).
 
     `grain` and `code` are the SCOPE's own spelling of the block, because that is what the
     cadence and the scan ledger are keyed by (W9e/R3) — a quarter walked through its parent
@@ -1798,15 +1815,26 @@ class EnterBlock:
 
     grain: str
     code: int
-    obec: int
+    obec: int | None = None
     cast_obce: int | None = None
+    obce: tuple[int, ...] = ()
 
     @property
     def key(self) -> str:
         return f"{self.grain}:{self.code}"
 
+    def walk(self, limit: int) -> tuple[str, dict[str, Any]]:
+        """The statement and parameters that list this block on `public`."""
+        if self.grain == "okres":
+            return RT_SCOPE_OKRES_BLOCK_SQL, {"okres": self.code, "obce": list(self.obce),
+                                              "limit": int(limit)}
+        return RT_SCOPE_BLOCK_SQL, {"obec": self.obec, "cast_obce": self.cast_obce,
+                                    "limit": int(limit)}
 
-def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock, ...]:
+
+def walk_blocks(scope: Scope, parents: Mapping[int, int],
+                districts: Mapping[int, Sequence[int]] | None = None) -> tuple[EnterBlock, ...]:
+    """The scope's blocks as the entrant sweep walks them (and `rt_equivalence` reads them)."""
     if scope.whole_corpus:
         return ()        # nothing can enter a scope that already holds everything
     blocks: list[EnterBlock] = []
@@ -1816,9 +1844,13 @@ def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock,
         parent = parents.get(int(code))
         # A quarter with no parent is refused by `resolve_scope_parents` before a pass is
         # built, so here it can only be a caller that resolved none: sweep what CAN be swept
-        # rather than refusing a second time in the wrong place.
+        # rather than refusing a second time in the wrong place. An okres alike.
         if parent is not None:
             blocks.append(EnterBlock("cast_obce", int(code), int(parent), int(code)))
+    for code in scope.okres_codes:
+        obce = (districts or {}).get(int(code))
+        if obce:
+            blocks.append(EnterBlock("okres", int(code), obce=tuple(sorted(int(o) for o in obce))))
     return tuple(blocks)
 
 
@@ -1852,6 +1884,44 @@ def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
             "be snapshotted twice and the quarter's merges would wait on the whole town's "
             "walk. Name the town or the quarter, not both")
     return found
+
+
+def resolve_scope_districts(conn: Any, scope: Scope,
+                            parents: Mapping[int, int]) -> dict[int, tuple[int, ...]]:
+    """Each okres block's obce, read once a pass from the RÚIAN register (E961) — the index
+    its walk rides, since `okres_kod` has none.
+
+    The quarter's two rules, one grain up: an okres the register cannot place under a kraj
+    with its obce is a hard error, and so is a town or a quarter beside its own okres — the
+    district's block already holds every advert of it, twice in the snapshot and its merges
+    tied to the whole district's walk (E941's reason). A kraj grain would carry the same rule
+    over its okresy; there is none. `parents` is `resolve_scope_parents`' answer, the obec each
+    quarter sits in."""
+    codes = [int(code) for code in scope.okres_codes]
+    if scope.whole_corpus or not codes:
+        return {}
+    found: dict[int, set[int]] = {}
+    for okres, obec in _rows(conn, RT_SCOPE_OKRES_OBCE_SQL, {"codes": codes}):
+        found.setdefault(int(okres), set()).add(int(obec))
+    missing = [code for code in codes if code not in found]
+    if missing:
+        raise ScopeError(
+            f"rt_scope names okres {missing} which public.ruian_admin_units cannot place under "
+            "a kraj with its obce — refusing to run a scope the entrant sweep cannot walk")
+    okres_of = {obec: okres for okres, obce in found.items() for obec in obce}
+    beside = ([(f"obec:{code}", okres_of[code]) for code in scope.obec_codes
+               if code in okres_of]
+              + [(f"cast_obce:{code}", okres_of[parents[code]]) for code in scope.cast_obce_codes
+                 if parents.get(code) in okres_of])
+    if beside:
+        raise ScopeError(
+            "rt_scope names " + ", ".join(block for block, _okres in beside)
+            + " beside its own okres "
+            + ", ".join(sorted({f"okres:{okres}" for _block, okres in beside}))
+            + " — the okres's block already holds every advert of them, so they would be "
+            "snapshotted twice and their merges would wait on the whole okres's walk. Name "
+            "the okres or what lies inside it, not both")
+    return {okres: tuple(sorted(obce)) for okres, obce in found.items()}
 
 
 def lane_settings(conn: Any, keys: Sequence[str]) -> dict[str, Any]:
@@ -2780,6 +2850,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         try:
             scope = pass_scope(read_scope_setting(control, generation))
             parents = resolve_scope_parents(conn, scope)
+            districts = resolve_scope_districts(conn, scope, parents)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
@@ -2851,7 +2922,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         handed = reconcile.handed_groups(control.get(reconcile.redecide_key(generation)))
         stale_claims, stale_waiting, stale_budget = _stale_claims(
             conn, generation, control, handed, bootstrap, store, engine_since)
-        work = SqlWork(conn, scope, generation, parents=parents, bootstrap=bootstrap,
+        work = SqlWork(conn, scope, generation, parents=parents, districts=districts,
+                       bootstrap=bootstrap,
                        pass_budget_s=(BOOTSTRAP_BUDGET_FRACTION * PASS_DEADLINE_S if bootstrap
                                       else PASS_BUDGET_S),
                        rate_per_s=rate_per_s, claim_cap=int(cap["cap"]),
@@ -3048,6 +3120,9 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         summary["scope"] = scope.as_json()
         summary["windows"] = dict(work.windows)
         summary["enter_scan"] = dict(work.enter_scan)
+        # E961: every block whose latest walk filled the slice, walked this pass or before.
+        summary["scope_truncated"] = sorted(str(row[0]) for row in _rows(
+            conn, RT_SCOPE_TRUNCATED_SQL, {"generation": generation, "slice": ENTER_SLICE}))
         # E952: the pair budget beside the clock's and the cap's: a refusal (`aborted`
         # "pair_budget", `counts.attempts`) is read against it.
         summary["claim_bound"] = {**work.claim_bound, "max_pairs": PASS_LIMITS.max_pairs}
@@ -3163,9 +3238,10 @@ def run_rt_seed(
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING),
                                   read_scope_setting(control, generation))
-            # Proved at SEED time: a quarter the register cannot place is a scope whose
-            # entrant sweep could never walk it (W9d-3).
+            # Proved at SEED time: a quarter or an okres the register cannot place is a scope
+            # whose entrant sweep could never walk it (W9d-3, E961).
             parents = resolve_scope_parents(conn, scope)
+            districts = resolve_scope_districts(conn, scope, parents)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         try:
@@ -3188,9 +3264,19 @@ def run_rt_seed(
                 reset = reset_generation(conn, generation, holder=holder)
             # The scope's blocks, walked once now: the cut is taken over what they hold, and
             # the build phase starts with every block already listed.
-            work = SqlWork(conn, scope, generation, parents=parents, bootstrap=True)
+            work = SqlWork(conn, scope, generation, parents=parents, districts=districts,
+                           enter_slice=ENTER_SLICE, bootstrap=True)
             if work.enter_blocks:
                 work.refresh_scope_ids(0)
+            if work.truncated:
+                # E961: the forward feeds start at today's newest id, so a block the walk cut
+                # short would be built without its newest adverts and judged read. E940 pages
+                # it instead of refusing.
+                raise SystemExit(
+                    f"rt_seed refused: the walk of {' '.join(work.truncated)} filled ENTER_SLICE "
+                    f"({ENTER_SLICE:,} rows), so the build would miss its newest adverts "
+                    "silently. Page it (E940) or split it into smaller blocks. Nothing was "
+                    "written.")
             try:
                 cut = cut_calibration(conn, settings, model.version, generation)
             except CalibrationRefusal as exc:

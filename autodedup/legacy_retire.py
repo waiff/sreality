@@ -100,10 +100,11 @@ PARTIAL_ATTR: str = "autodedup_retire_result"
 SUMMARY_ROWS: int = 50
 
 # The area, read ONCE per dispatch: every later read takes these listing ids, so no pass and no
-# per-group re-check scans `listing_location` again. The export lane's per-grain membership
-# (`town:` = obec_kod, `quarter:` = cast_obce_kod). The town arm rides
-# listing_location_obec_granularity (obec_kod, granularity) (migration 501); cast_obce_kod has no
-# index, so the quarter arm is the dispatch's one scan of the table (timed in the summary).
+# per-group re-check scans `listing_location` again. The apply scope's per-grain membership
+# (`town:` = obec_kod, `quarter:` = cast_obce_kod, `district:` = okres_kod, E961). The town arm
+# rides listing_location_obec_granularity (obec_kod, granularity) (migration 501); neither
+# cast_obce_kod nor okres_kod has an index, so the quarter and district arms share the
+# dispatch's one scan of the table (timed in the summary).
 AREA_SQL = """
 select ll.listing_id
   from public.listing_location ll
@@ -112,6 +113,7 @@ union
 select ll.listing_id
   from public.listing_location ll
  where ll.cast_obce_kod = any(%(quarters)s::bigint[])
+    or ll.okres_kod = any(%(districts)s::bigint[])
 """
 
 # Every row, live or undone, of every legacy group with a live row that touches the area through
@@ -258,15 +260,20 @@ class _Refused(Exception):
     """The group changed since it was selected, or one detach may not move its advert."""
 
 
+# The apply scope's grain -> AREA_SQL's parameter.
+AREA_PARAM: dict[str, str] = {"town": "towns", "quarter": "quarters", "district": "districts"}
+
+
 def area_params(blocks: Iterable[str] | None) -> dict[str, list[int]]:
-    """`town:<code>` / `quarter:<code>` (the scope's spelling) into the two grains' codes."""
-    out: dict[str, list[int]] = {"towns": [], "quarters": []}
+    """`town:` / `quarter:` / `district:<code>` (the scope's spelling) into each grain's codes."""
+    out: dict[str, list[int]] = {param: [] for param in AREA_PARAM.values()}
     for block in sorted(blocks or ()):
         grain, _, code = block.partition(":")
-        if grain not in ("town", "quarter") or not code.isdigit():
-            raise ValueError(f"block {block!r}: expected town:<code> or quarter:<code>")
-        out["towns" if grain == "town" else "quarters"].append(int(code))
-    if not out["towns"] and not out["quarters"]:
+        if grain not in AREA_PARAM or not code.isdigit():
+            raise ValueError(
+                f"block {block!r}: expected town:<code>, quarter:<code> or district:<code>")
+        out[AREA_PARAM[grain]].append(int(code))
+    if not any(out.values()):
         raise ValueError("the scope names no blocks; the legacy retire reads blocks only")
     return out
 

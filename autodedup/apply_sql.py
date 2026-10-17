@@ -35,11 +35,12 @@ select c.cluster_key, c.size, c.status, c.min_edge_score, c.model_version, c.fea
 # A member whose listing row is missing, or that has no property yet (rule 19: new rows land
 # with a NULL property_id until maintenance attaches a singleton), comes back with NULLs. Where
 # an advert IS is its live `listing_location` row (primary key listing_id): the scope's blocks
-# are `town:` = obec_kod and `quarter:` = cast_obce_kod, the area legacy_retire.AREA_SQL reads
-# (E904); an advert with no row comes back with both NULL and is inside no block.
+# are `town:` = obec_kod, `quarter:` = cast_obce_kod and `district:` = okres_kod (E961), the
+# area legacy_retire.AREA_SQL reads (E904); an advert with no row comes back with all three
+# NULL and is inside no block.
 MEMBERS_SQL = """
 select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main,
-       ll.obec_kod, ll.cast_obce_kod
+       ll.obec_kod, ll.cast_obce_kod, ll.okres_kod
   from autodedup.cluster_members m
   left join public.listings l on l.id = m.listing_id
   left join public.listing_location ll on ll.listing_id = l.id
@@ -59,7 +60,8 @@ select p.id, p.status, p.category_type, p.category_main, p.first_seen_at
 # included, as MEMBERS_SQL reads it) and the carry-along check read the whole set — at plan time
 # and again inside each group's transaction. Columns in `apply.Member` order.
 PROPERTY_LISTINGS_SQL = """
-select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod
+select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod,
+       ll.okres_kod
   from public.listings l
   left join public.listing_location ll on ll.listing_id = l.id
  where l.property_id = any(%(property_ids)s::bigint[])
@@ -80,7 +82,8 @@ select p.id, p.status, p.category_type, p.category_main
 # `for share of l`: the listings only — a lock may not reach the nullable side of the outer
 # join, and the resolver's writes to listing_location are not held up by a merge.
 LOCK_PROPERTY_LISTINGS_SQL = """
-select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod
+select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod,
+       ll.okres_kod
   from public.listings l
   left join public.listing_location ll on ll.listing_id = l.id
  where l.property_id = any(%(property_ids)s::bigint[])
@@ -278,7 +281,7 @@ select c.cluster_key, c.size, c.status, c.min_edge_score, c.model_version, c.fea
 # MEMBERS_SQL for the groups the reconcile picked, in the same column order (`apply.Member`).
 RC_MEMBERS_SQL = """
 select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main,
-       ll.obec_kod, ll.cast_obce_kod
+       ll.obec_kod, ll.cast_obce_kod, ll.okres_kod
   from autodedup.cluster_members m
   left join public.listings l on l.id = m.listing_id
   left join public.listing_location ll on ll.listing_id = l.id

@@ -40,7 +40,8 @@ def test_the_value_parses_as_a_live_scope_of_sales_in_the_three_trial_blocks() -
     assert scope.listing_ids is None and scope.all_blocks is False
     assert scope.max_clusters_per_run == A.DEFAULT_MAX_CLUSTERS_PER_RUN
     assert scope.live_problems() == []
-    assert L.area_params(scope.blocks) == {"towns": [563510, 577626], "quarters": [490245]}
+    assert L.area_params(scope.blocks) == {"towns": [563510, 577626], "quarters": [490245],
+                                           "districts": []}
 
 
 def test_it_updates_the_one_seeded_row_and_fails_loudly_without_it() -> None:

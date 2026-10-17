@@ -10,21 +10,22 @@ AND fit the storage guard (`incremental_lane.storage_guard`). A PASS goes furthe
 scope is the one `rt_seed` PERSISTED and nothing else (`incremental_lane.pass_scope`, W9d-2);
 moving it is a re-seed.
 
-Two grains, and they are the two the cohort already uses: `obec` is
-`listing_location.obec_kod` (a town) and `cast_obce` is `cast_obce_kod` (a quarter). The
-DEFAULT is derived from `cohort.BLOCKS` rather than retyped, which is also why the assembled
-Praha negative control is absent from it: that block is a RULE evaluated at export time over
-address groups, it has no natural arrival feed, and nothing in the corpus marks a new listing
-as belonging to it.
+Three grains: the two the cohort already uses — `obec` is `listing_location.obec_kod` (a
+town) and `cast_obce` is `cast_obce_kod` (a quarter) — and `okres`, `okres_kod` (a district,
+E961), so a kraj is seeded as its dozen districts rather than its thousand towns. The DEFAULT is
+derived from `cohort.BLOCKS` rather than retyped, which is also why the assembled Praha negative
+control is absent from it: that block is a RULE evaluated at export time over address groups, it
+has no natural arrival feed, and nothing in the corpus marks a new listing as belonging to it.
 
-**Why the predicate is index-served without an index of its own.** `listing_location` carries
-a btree on `(obec_kod, granularity)` and none at all on `cast_obce_kod`, and ruling D8 forbids
-DDL on a shared table — so a feed that filtered the corpus BY the scope would seq-scan 872k
-rows every ten minutes. It doesn't: each feed reads a bounded WINDOW off its own cursor index
-and resolves the scope for that window's ids through `listing_location_pkey` (`EXPLAIN`: Index
-Scan, one probe per window row). The scope is never the driving side, so the plan cannot
-degrade as the scope list grows, and the cursor advances over the WINDOW rather than over the
-survivors — which is what keeps a feed moving through a corpus that is 99.4% out of scope.
+**Why the predicate is index-served without an index of its own.** `listing_location` carries a
+btree on `(obec_kod, granularity)` and none at all on `cast_obce_kod` or `okres_kod`, and
+ruling D8 forbids DDL on a shared table — so a feed that filtered the corpus BY the scope would
+seq-scan 872k rows every ten minutes. It doesn't: each feed reads a bounded WINDOW off its own
+cursor index and resolves the scope for that window's ids through `listing_location_pkey`
+(`EXPLAIN`: Index Scan, one probe per window row). The scope is never the driving side, so the
+plan cannot degrade as the scope list grows, and the cursor advances over the WINDOW rather
+than over the survivors — which is what keeps a feed moving through a corpus that is 99.4% out
+of scope.
 """
 
 from __future__ import annotations
@@ -34,12 +35,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup import cohort
 
-GRAINS: tuple[str, ...] = ("obec", "cast_obce")
+GRAINS: tuple[str, ...] = ("obec", "cast_obce", "okres")
 ALL: str = "all"
 
-# cohort (and apply scope) grain -> scope grain. `assembled` is deliberately unmapped (see the
-# module docstring).
-GRAIN_OF: dict[str, str] = {"town": "obec", "quarter": "cast_obce"}
+# cohort (and apply scope) grain -> scope grain: English there, RÚIAN here (E939). `assembled` is
+# deliberately unmapped (see the module docstring); `district` has no cohort block.
+GRAIN_OF: dict[str, str] = {"town": "obec", "quarter": "cast_obce", "district": "okres"}
 
 
 class ScopeError(ValueError):
@@ -83,12 +84,17 @@ class Scope:
     def cast_obce_codes(self) -> list[int]:
         return sorted({b.code for b in self.blocks if b.grain == "cast_obce"})
 
+    @property
+    def okres_codes(self) -> list[int]:
+        return sorted({b.code for b in self.blocks if b.grain == "okres"})
+
     def params(self) -> dict[str, Any]:
-        """The three parameters every scoped statement takes."""
+        """The four parameters every scoped statement takes."""
         return {
             "all_scope": bool(self.whole_corpus),
             "obec": self.obec_codes,
             "cast_obce": self.cast_obce_codes,
+            "okres": self.okres_codes,
         }
 
     def as_json(self) -> Any:
@@ -98,26 +104,6 @@ class Scope:
         if self.whole_corpus:
             return ALL
         return " ".join(f"{b.grain}:{b.code}" for b in self.blocks)
-
-    def contains(self, obec_kod: Any, cast_obce_kod: Any) -> bool:
-        """The same predicate the SQL spells, for the seed backfill and the replay."""
-        if self.whole_corpus:
-            return True
-        try:
-            obec = int(obec_kod) if obec_kod is not None else None
-        except (TypeError, ValueError):
-            obec = None
-        try:
-            cast_obce = int(cast_obce_kod) if cast_obce_kod is not None else None
-        except (TypeError, ValueError):
-            cast_obce = None
-        return ((obec is not None and obec in set(self.obec_codes))
-                or (cast_obce is not None and cast_obce in set(self.cast_obce_codes)))
-
-    def holds(self, listing: Any) -> bool:
-        location = getattr(listing, "location", None)
-        return self.contains(getattr(location, "obec_kod", None),
-                             getattr(location, "cast_obce_kod", None))
 
 
 # The three trial blocks, derived from the cohort rather than retyped.
@@ -142,7 +128,7 @@ CORPUS_PROJECTION_MB: int = 17000
 
 
 def parse_scope(raw: Any) -> Scope:
-    """`"obec:563510 cast_obce:490245"`, a JSON list of `{grain, code}`, or `"all"`.
+    """`"obec:563510 cast_obce:490245 okres:3209"`, a JSON list of `{grain, code}`, or `"all"`.
 
     Never a default: a caller that has nothing to pass calls `resolve_scope`, which is where
     the default and the hard error live."""

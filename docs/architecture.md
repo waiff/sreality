@@ -1766,8 +1766,11 @@ renumber.** Navigate by area:
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
     categories, a listing outside the scope (inside = LOCATED in a scope block by its live
-    `listing_location` obec_kod / cast_obce_kod, never the engine's blocking key; out-of-scope
-    groups are counted per reason), a non-active property, a
+    `listing_location` code — `town:<obec_kod>`, `quarter:<cast_obce_kod>` or
+    `district:<okres_kod>` (E961), the grammar of `autodedup_apply_scope.blocks` and of W8's
+    `blocks=`; the lane's seeded `rt_scope` spells the same areas `obec:` / `cast_obce:` /
+    `okres:` and never names one beside a block that holds it — never the engine's blocking key;
+    out-of-scope groups are counted per reason), a non-active property, a
     property the engine split across two groups, or a listing no group holds (unless this
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
