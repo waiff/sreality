@@ -101,6 +101,8 @@ class FakePg:
         self.clip_tags: list[dict[str, Any]] = []
         self.clip_vectors: dict[int, str] = {}
         self.phash_pop: dict[int, int] = {}
+        # The population rows an upsert actually WROTE (a new tuple version each).
+        self.phash_pop_writes = 0
         self.statements: list[str] = []
         # Which statements the pass issued INSIDE its transaction. `set_config(..., true)` is
         # only a guard where the transaction can see it (W9d-4), and over the transaction-mode
@@ -767,12 +769,24 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_PHASH_POP_COUNT_SQL:
         return [(len(db.phash_pop),)]
     if sql == S.RT_PHASH_POP_WRITE_SQL:
-        db.phash_pop[int(p["phash"])] = int(p["n_listings"])
+        # The `is distinct from` limb is READ from the statement (E964 review F6): an upsert that
+        # stopped skipping an unmoved count rewrites it here, as it would in Postgres.
+        phash, n = int(p["phash"]), int(p["n_listings"])
+        if db.phash_pop.get(phash) != n or "is distinct from excluded.n_listings" not in sql:
+            db.phash_pop_writes += 1
+        db.phash_pop[phash] = n
         return []
 
     # --------------------------------------------- A10: the calibration cut (E912)
     if sql == S.RT_CUT_SCOPE_IDS_SQL:
         return sorted({(listing_id,) for (g, _block, listing_id) in db.scope_ids if g == gen})
+    # E964: the widening reads what it keeps instead of rebuilding it.
+    if sql == S.RT_SCOPE_IDS_OF_BLOCKS_SQL:
+        keys = set(str(key) for key in p["block_keys"])
+        return sorted({(listing_id,) for (g, block, listing_id) in db.scope_ids
+                       if g == gen and block in keys})
+    if sql == S.RT_FP_HELD_SQL:
+        return [(sum(1 for i in set(int(i) for i in p["ids"]) if (gen, i) in db.rt_fp),)]
     if sql == S.RT_CUT_HASHES_SQL:
         wanted = set(int(i) for i in p["ids"])
         return sorted({(int(row["phash"]),) for row in db.image_rows
@@ -1058,6 +1072,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         db.scope_ids = {key: row for key, row in db.scope_ids.items()
                         if not (key[0] == gen and key[1] not in keep)}
         return []
+    if sql == S.RT_SCOPE_SCAN_PRUNE_BLOCKS_SQL:
+        keep = set(str(b) for b in p["block_keys"])
+        db.scope_scans = [row for row in db.scope_scans
+                          if not (row["generation"] == gen and row["block_key"] not in keep)]
+        return []
     if sql == S.RT_SCOPE_ENTRANTS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
         rows = sorted((listing_id, row["resolved_at"])
@@ -1090,6 +1109,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == A.RC_UNREAD_BLOCKS_SQL:
         return sorted({(block,) for (g, block, listing_id) in db.scope_ids
                        if g == gen and (gen, listing_id) not in db.rt_fp})
+    # Which scope block holds each member (the reconcile's half of "fully read", A9).
+    if sql == A.RC_MEMBER_BLOCKS_SQL:
+        wanted = set(int(i) for i in p["listing_ids"])
+        return sorted((listing_id, block) for (g, block, listing_id) in db.scope_ids
+                      if g == gen and listing_id in wanted)
     if sql == S.RT_SCOPE_BACKLOG_SQL:
         return [(sum(1 for (g, _block, listing_id) in db.scope_ids
                      if g == gen and (gen, listing_id) not in db.rt_fp),)]

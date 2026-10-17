@@ -26,6 +26,7 @@ from autodedup.incremental_lane import SqlStore
 from autodedup.incremental_sql import (
     RT_CURSOR_READ_SQL,
     RT_CURSOR_SET_SQL,
+    RT_KNOWN_SQL,
     RT_LOCK_GUARD_SQL,
     RT_SCOPE_SCAN_SEEN_SQL,
     RT_SETTING_WRITE_SQL,
@@ -548,6 +549,10 @@ class LaneDb(FakeDb):
         if sql in (RT_STATEMENT_GUARD_SQL, RT_LOCK_GUARD_SQL):
             self.guards.append(dict(p))
             return [("set",)]
+        if sql == RT_KNOWN_SQL:
+            # Fingerprinted: a member of one of the generation's groups, or an advert `_read`.
+            held = self.read | {lid for g, _k, lid in self.members if g == p["generation"]}
+            return [(int(i),) for i in p["ids"] if int(i) in held]
         if sql == RT_STALE_SQL:
             # `refreshed` absent: refreshed now; None: no fingerprint row (fail closed).
             bound = self.now - timedelta(seconds=float(p["fresh_s"]))
@@ -613,7 +618,9 @@ def test_the_reconciles_refusals_are_the_batch_applys_refusals() -> None:
     db.listing(42, 800)                                   # carried, grouped by nobody
     db.listing(52, 901, where=(999999, None))             # carried, located outside
     db.listing(61, None)                                  # unattached member
-    _read(db, 10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 60, 61)
+    # 42 is carried, grouped by nobody: the lane has read it (else the group would wait for its
+    # fingerprint, E964 review R2) and refuses it as the batch does.
+    _read(db, 10, 11, 20, 21, 30, 31, 40, 41, 42, 50, 51, 60, 61)
     scope = AP.effective_scope(db.settings[AP.SCOPE_SETTING], {}, live=True)
 
     batch = AP.plan_apply(db, "g12", scope)

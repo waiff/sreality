@@ -428,13 +428,33 @@ def test_w8_reads_a_district_by_its_okres_and_waits_for_the_lanes_okres_walk(
     assert db.statements.count(L.AREA_SQL) == 1
 
 
-def test_w8_names_an_area_at_the_grain_the_lane_walks_it(tmp_path: Path) -> None:
-    """A town inside an okres the lane walks was never walked AS a town, so W8 refuses it as
-    unread — and a district over towns the lane walks one by one, the same way."""
+def test_w8_reads_an_area_as_the_block_the_lane_walks_it_in(tmp_path: Path,
+                                                           monkeypatch: Any) -> None:
+    """E961 (g), amended by E964's review (R1): W8 maps a named area to the scope block that
+    contains it, so a town inside an okres the lane walks is read once the okres is (and a
+    quarter once its town is); an area no scope block contains — a district over towns the lane
+    walks one by one — reads as never walked and is refused."""
     db = LiveStreamDb()
     db.live_scope(blocks=[f"town:{BRANDYS}"])
+    db.rt_scope = [{"grain": "okres", "code": PRAHA_VYCHOD}]
+    db.districts = {PRAHA_VYCHOD: [BRANDYS, CELAKOVICE]}
     db.walked = {f"okres:{PRAHA_VYCHOD}"}
+    db.unread = {f"okres:{PRAHA_VYCHOD}"}
+    inside = (BRANDYS, None, PRAHA_VYCHOD)
+    _intact_pair(db, 100, 200, 1, inside)
+    db.group(10, [1, 30], gen="rt")
+    db.listing(30, 3000, where=inside)
+    monkeypatch.setattr(L, "detach_listings", db.detach_recording([]))
     args = {"generation": "rt", "retire_legacy": "1", "blocks": f"town:{BRANDYS}"}
-    with pytest.raises(SystemExit, match=f"has not fully read town:{BRANDYS} "):
+    with pytest.raises(SystemExit, match=rf"has not fully read town:{BRANDYS} \(walked as "
+                                         rf"okres:{PRAHA_VYCHOD}\)"):
         AP.run_apply(_factory(db), args, tmp_path)
+    db.unread = set()
+    out = AP.run_apply(_factory(db), args, tmp_path)
+    assert out["dry_run"] is True and out["counts"]["outcomes"] == {"would_retire": 1}
+    db.live_scope(blocks=[f"district:{PRAHA_VYCHOD}"])
+    db.rt_scope = [{"grain": "obec", "code": BRANDYS}]
+    db.walked = {f"obec:{BRANDYS}"}
+    with pytest.raises(SystemExit, match=f"has not fully read district:{PRAHA_VYCHOD} "):
+        AP.run_apply(_factory(db), {**args, "blocks": f"district:{PRAHA_VYCHOD}"}, tmp_path)
 

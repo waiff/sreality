@@ -37,7 +37,6 @@ from autodedup import cohort
 
 GRAINS: tuple[str, ...] = ("obec", "cast_obce", "okres")
 ALL: str = "all"
-
 # cohort (and apply scope) grain -> scope grain: English there, RÚIAN here (E939). `assembled` is
 # deliberately unmapped (see the module docstring); `district` has no cohort block.
 GRAIN_OF: dict[str, str] = {"town": "obec", "quarter": "cast_obce", "district": "okres"}
@@ -51,6 +50,11 @@ class ScopeError(ValueError):
 class ScopeBlock:
     grain: str
     code: int
+
+    @property
+    def key(self) -> str:
+        """`grain:code`, the spelling the snapshot, the scan ledger and the walk key a block by."""
+        return f"{self.grain}:{self.code}"
 
     def as_json(self) -> dict[str, Any]:
         return {"grain": self.grain, "code": self.code}
@@ -208,6 +212,65 @@ def resolve_scope(arg: Any = None, setting: Any = None) -> Scope:
     if setting is not None:
         return parse_scope(setting)
     return DEFAULT_SCOPE
+
+
+def contains(outer: ScopeBlock, inner: ScopeBlock, parents: Mapping[int, int],
+             districts: Mapping[int, Sequence[int]]) -> bool:
+    """Whether every advert `inner` lists is one `outer` lists (E964), read off the RÚIAN
+    register the walks ride: a block holds itself, an okres its obce (`districts`) and their
+    quarters, a town its quarters (`parents`: quarter -> its obec). Nothing else holds anything:
+    Praha is no okres, and there is no kraj grain."""
+    if (outer.grain, outer.code) == (inner.grain, inner.code):
+        return True
+    if outer.grain == "okres":
+        obce = {int(code) for code in districts.get(int(outer.code), ())}
+        if inner.grain == "obec":
+            return int(inner.code) in obce
+        if inner.grain == "cast_obce":
+            return parents.get(int(inner.code)) in obce
+        return False
+    return (outer.grain == "obec" and inner.grain == "cast_obce"
+            and parents.get(int(inner.code)) == int(outer.code))
+
+
+@dataclass(frozen=True, slots=True)
+class Widening:
+    """What a seed over a seeded generation would do to its scope (E964): the blocks it keeps,
+    the blocks it adds, each old block a wider one REPLACES (`replaced`: old key -> new key) and
+    the old blocks no new block holds (`dropped`). A widening drops nothing and adds something."""
+
+    kept: tuple[ScopeBlock, ...]
+    added: tuple[ScopeBlock, ...]
+    replaced: dict[str, str]
+    dropped: tuple[ScopeBlock, ...]
+
+
+def widening(old: Scope, new: Scope, parents: Mapping[int, int],
+             districts: Mapping[int, Sequence[int]]) -> Widening:
+    """`new` read against `old` (E964). `parents` holds the quarters of BOTH scopes, `districts`
+    the okresy of the new one. A block of `old` that `new` names again is kept; one a block of
+    `new` contains is replaced by it — its adverts are that block's now, so the walk lists the
+    rest of the wider block and the rows the store holds stay; one no block of `new` contains is
+    dropped, which a widening never does (a dropped block is a narrower scope: a rebuild)."""
+    if old.whole_corpus or new.whole_corpus:
+        raise ScopeError(f"{ALL!r} widens nothing: a whole-corpus generation is a rebuild "
+                         "(and a budget decision, CORPUS_PROJECTION_MB)")
+    old_keys = {block.key for block in old.blocks}
+    new_keys = {block.key for block in new.blocks}
+    kept = tuple(block for block in new.blocks if block.key in old_keys)
+    added = tuple(block for block in new.blocks if block.key not in old_keys)
+    replaced: dict[str, str] = {}
+    dropped: list[ScopeBlock] = []
+    for block in old.blocks:
+        if block.key in new_keys:
+            continue
+        holder = next((outer for outer in added
+                       if contains(outer, block, parents, districts)), None)
+        if holder is None:
+            dropped.append(block)
+        else:
+            replaced[block.key] = holder.key
+    return Widening(kept, added, replaced, tuple(dropped))
 
 
 def guard_agrees(scope: Scope, max_schema_mb: float) -> bool:

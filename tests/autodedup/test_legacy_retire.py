@@ -21,7 +21,12 @@ from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import legacy_retire as L
 from autodedup import rt_lease
-from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL
+from autodedup.incremental_sql import (
+    RT_SCOPE_OKRES_OBCE_SQL,
+    RT_SCOPE_PARENT_OBEC_SQL,
+    RT_SCOPE_SCAN_SEEN_SQL,
+    RT_SETTINGS_MANY_SQL,
+)
 from tests.autodedup.test_apply import GEN, FakeDb
 from tests._property_ledger import _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit.property_identity import (
@@ -1177,6 +1182,11 @@ class LiveStreamDb(RetireDb):
         self.walked: set[str] = set(RT_KEYS)
         self.unread: set[str] = set()
         self.not_fingerprinted: set[int] = set()
+        # `rt_scope:rt` and the register the W8 gate maps a named area through (E964 R1): no
+        # scope row, every area stands for itself.
+        self.rt_scope: Any = None
+        self.parents: dict[int, int] = {}
+        self.districts: dict[int, list[int]] = {}
 
     def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:
         if sql == L.UNREAD_SQL:
@@ -1186,6 +1196,13 @@ class LiveStreamDb(RetireDb):
             return [(block,) for block in sorted(self.walked)]
         if sql == S.RC_UNREAD_BLOCKS_SQL:
             return [(block,) for block in sorted(self.unread)]
+        if sql == RT_SETTINGS_MANY_SQL:
+            return ([("rt_scope:rt", self.rt_scope)]
+                    if self.rt_scope is not None and "rt_scope:rt" in p["keys"] else [])
+        if sql == RT_SCOPE_PARENT_OBEC_SQL:
+            return [(q, self.parents[q]) for q in p["codes"] if q in self.parents]
+        if sql == RT_SCOPE_OKRES_OBCE_SQL:
+            return [(k, o) for k in p["codes"] for o in self.districts.get(k, ())]
         return super().dispatch(sql, p)
 
 

@@ -519,6 +519,14 @@ select s.block_key                                                     as block_
  group by s.block_key
 """
 
+# A block a widening REPLACED (E964) leaves the scan ledger with its snapshot rows, so nothing reads
+# it as walked: the lane walks its adverts under the block that contains it now.
+RT_SCOPE_SCAN_PRUNE_BLOCKS_SQL = """
+delete from autodedup.rt_scope_scan s
+ where s.generation = %(generation)s::text
+   and not (s.block_key = any(%(block_keys)s::text[]))
+"""
+
 RT_SCOPE_SCAN_WRITE_SQL = """
 insert into autodedup.rt_scope_scan (generation, block_key, scanned_at, rows_found,
                                      elapsed_ms)
@@ -795,13 +803,17 @@ select p.phash, p.n_listings
 # the calibration was cut — so the live lane joins against exactly the statistic the batch
 # engine scored with, at zero cost against `public`. Migration 528's prose says "only hashes on
 # >= 3 listings"; that was never true of the table, only of an intention, and a population of 1
-# or 2 is the difference between "this photo is unique" and "nobody measured it".
+# or 2 is the difference between "this photo is unique" and "nobody measured it". A hash whose
+# count did not move is not rewritten (E964 review F6): a re-cut over a 323k scope upserted every
+# one of its ~2.3M hashes, a new tuple version each, where only the hashes the new adverts'
+# photographs add or move change.
 RT_PHASH_POP_WRITE_SQL = """
 insert into autodedup.phash_pop (phash, n_listings, computed_at)
 values (%(phash)s::bigint, %(n_listings)s::integer, now())
 on conflict (phash) do update set
     n_listings  = excluded.n_listings,
     computed_at = now()
+ where autodedup.phash_pop.n_listings is distinct from excluded.n_listings
 """
 
 RT_PHASH_POP_COUNT_SQL = """
@@ -1585,8 +1597,31 @@ select count(*)::bigint
                       and f.listing_id = s.listing_id)
 """
 
+# ------------------------------------------------------------------ the widening seed (E964)
+#
+# A seed that WIDENS a seeded generation keeps every row it holds, so it reads what it keeps
+# instead of rebuilding it: the snapshot's adverts in the blocks it does not walk again (the
+# scope snapshot's primary key, generation and block first), how many of the scope's adverts
+# the store already fingerprints (the build is the rest; `rt_fp`'s primary key, a slice at a
+# time), and the scorer the generation was seeded with (`RT_CALIBRATION_SCORER_SQL` below).
+RT_SCOPE_IDS_OF_BLOCKS_SQL = """
+select distinct s.listing_id
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.block_key = any(%(block_keys)s::text[])
+ order by s.listing_id
+"""
+
+RT_FP_HELD_SQL = """
+select count(*)::bigint
+  from autodedup.rt_fp f
+ where f.generation = %(generation)s::text
+   and f.listing_id = any(%(ids)s::bigint[])
+"""
+
 # The generation's scorer, never its payload: a reader that decides nothing (`rt_equivalence`)
-# leaves the payload to `read_calibration` (E963).
+# leaves the payload to `read_calibration` (E963); the widening seed compares the scorer it is
+# named with against it (E964).
 RT_CALIBRATION_SCORER_SQL = """
 select c.settings, c.model_version
   from autodedup.rt_calibration c

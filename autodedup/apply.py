@@ -54,8 +54,13 @@ from autodedup import apply_sql as S
 from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
 from autodedup.incremental import GENERATION
-from autodedup.incremental_scope import GRAIN_OF
-from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL
+from autodedup.incremental_scope import GRAIN_OF, ScopeError, contains, parse_scope
+from autodedup.incremental_sql import (
+    RT_SCOPE_OKRES_OBCE_SQL,
+    RT_SCOPE_PARENT_OBEC_SQL,
+    RT_SCOPE_SCAN_SEEN_SQL,
+    RT_SETTINGS_MANY_SQL,
+)
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_carriers import curation_preview
 from toolkit.property_identity import (
@@ -1749,6 +1754,38 @@ def rt_unread_blocks(conn: Any, generation: str, blocks: Iterable[str]) -> set[s
     return unread | {block for block in blocks if block not in walked}
 
 
+def rt_walked_as(conn: Any, keys: Iterable[str]) -> dict[str, str]:
+    """Each lane-grain key (`obec:` / `cast_obce:` / `okres:`) as the live stream walks it
+    (E964 review R1): itself when `rt_scope:rt` names it, else the scope block that contains it
+    (`incremental_scope.contains` over the RÚIAN register) — so after a widening replaced
+    `obec:531057` by `okres:3202`, the town is read once the okres is; a key no scope block holds
+    (or no scope row at all) stays itself, and reads as never walked."""
+    keys = list(dict.fromkeys(str(key) for key in keys))
+    out = {key: key for key in keys}
+    rows = _rows(conn, RT_SETTINGS_MANY_SQL, {"keys": [f"rt_scope:{GENERATION}"]})
+    try:
+        lane = parse_scope(rows[0][1]) if rows else None
+        named = parse_scope(" ".join(keys)) if keys else None
+    except ScopeError:
+        return out
+    if lane is None or named is None or lane.whole_corpus:
+        return out
+    held = {block.key for block in lane.blocks}
+    parents = ({int(q): int(o) for q, o in _rows(conn, RT_SCOPE_PARENT_OBEC_SQL,
+                                                 {"codes": named.cast_obce_codes})}
+               if named.cast_obce_codes else {})
+    districts: dict[int, list[int]] = {}
+    if lane.okres_codes:
+        for okres, obec in _rows(conn, RT_SCOPE_OKRES_OBCE_SQL, {"codes": lane.okres_codes}):
+            districts.setdefault(int(okres), []).append(int(obec))
+    for block in named.blocks:
+        if block.key not in held:
+            holder = next((outer for outer in lane.blocks
+                           if contains(outer, block, parents, districts)), None)
+            out[block.key] = holder.key if holder is not None else block.key
+    return out
+
+
 def _retire_live_stream(conn: Any, dry_run: bool, override: Mapping[str, Any],
                         out_dir: Path) -> dict[str, Any]:
     """W8 (E953): `retire_legacy=1` under `generation=rt` - the old engine's merges in the named
@@ -1774,8 +1811,12 @@ def _retire_live_stream(conn: Any, dry_run: bool, override: Mapping[str, Any],
     for block in scope.blocks:
         grain, _, code = block.partition(":")
         keys[block] = f"{GRAIN_OF[grain]}:{code}"
-    unread = rt_unread_blocks(conn, GENERATION, keys.values())
-    waiting = sorted(block for block, key in keys.items() if key in unread)
+    # E964 review R1: an area the lane walks inside a wider block (a quarter of a town block, a
+    # town a widening replaced by its okres) is read once that block is.
+    walked_as = rt_walked_as(conn, keys.values())
+    unread = rt_unread_blocks(conn, GENERATION, set(walked_as.values()))
+    waiting = sorted(block + (f" (walked as {walked_as[key]})" if walked_as[key] != key else "")
+                     for block, key in keys.items() if walked_as[key] in unread)
     if waiting:
         raise SystemExit(
             f"retire_legacy=1: the lane has not fully read {' '.join(waiting)} (never walked, or "

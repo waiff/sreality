@@ -55,7 +55,7 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   re-cut out of the pass, street keys for the 36k no-quarter ads (E943–E945) → S4 one Prague block
   (the 157 quarters as blocks beside the eight towns, 6,000 MB, E946; the no-quarter ads reach a
   scope only as `obec:554782` itself, now one PAGED town block — 167,548 rows, 36,628 with no
-  quarter, 9 pages, E940 done 2026-10-17 — their keys E945), a 3–6-day build with merging paused everywhere → S5 the apply
+  quarter, 9 pages, E940 done 2026-10-17 — their keys E945), a 3–6-day build with merging paused everywhere (since E964 only in the blocks it builds) → S5 the apply
   scope widens a batch of quarters at a time, `town:554782` last. Brake: interval 0, the area out
   of the apply scope, then `unapply blocks=`. Open: D905–D910 (the operator's).
 - **S6 — Středočeský kraj by okres (operator, 2026-10-17; E961):** after Prague merges, the whole
@@ -67,8 +67,12 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   10-17 and over in ~2 days, needs nothing more), the seed walks EVERY block to its end whatever
   the 60-walk cap (the 10-16 seed stopped at 60 of 120 blocks and cut its calibration over them),
   and `MAX_SCHEMA_MB` is 10,000: 7 towns + Praha whole (paged) + the 12 okresy = 323,128 ads,
-  ~7,030 MB projected (the number is the operator's, D907). The seed is `fresh=true`: every live
-  area stops merging until the build ends. Open (E940): the cap binds that scope's cadence 4× (240
+  ~7,030 MB projected (the number is the operator's, D907). That seed no longer has to be
+  `fresh=true` (which stops every live area's merging until the build ends): since E964 it is a
+  WIDENING of today's `rt`
+  (the seven towns kept, the 112 quarters replaced by `obec:554782`, Beroun by `okres:3202`) if
+  the scorer and `SEED_VERSION` stand: the seven towns keep merging through the build; the three
+  live Prague quarters and Beroun wait for their wider blocks. Open (E940): the cap binds that scope's cadence 4× (240
   walks a day asked, 60 allowed), so Praha is read whole every ~3 days. **E962 (done 2026-10-17):**
   the calibration cut streams (a chunk folded and dropped, the calibration byte-identical on the
   trial and c18), ~4-10 kB an advert at its peak by block size (bounded at 12 kB) against ~58 kB,
@@ -93,6 +97,23 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   ~2.9 GB through every pass (resident ~1.6 + `context_for`'s copy ~1.2) and ~4.5–5 GB at a
   digest change — under its 22.9 GB (one row a block of `block_token_df` would let the read
   parse a block at a time; not built).
+  **E964 (built 2026-10-17): the country by widening**, one okres batch at a time (a kraj's
+  okresy, or fewer), each a WIDENING seed — `rt_seed settings=<the generation's>,model=<its
+  model>,rt_scope=<the scope + the batch>`, no `fresh`: every row stays, only the batch is walked
+  and built, the calibration is re-cut over the whole scope (re-keying the reject ledger: 2–4
+  full-price passes; the worker re-reads the moved payload once), the forward cursors are kept,
+  and every area already read keeps merging while the batch builds (the reconcile now runs through
+  a build and waits block by block, A9 amended; a member property's other ads and a not-yet-walked
+  ad count). Then the batch's sample (the S2 reading), and only then the apply scope widens by its
+  `district:` blocks — the operator's, per batch. The adversarial review of #1847 (F2–F8 fixed in
+  it; F1, the vouched-rider rule, is E965 on main) recommends the Prague + kraj step itself be a
+  widening once F1–F3 are deployed. Per batch: `MAX_SCHEMA_MB` raised to its projection (~21 KiB
+  a new ad; the first +130k batch past 323k projects ~9,740 MB against 10,000, the second needs
+  more — D907's disk); past 699,050 ads a cut the 16 GiB runner can hold (owed; the whole-scope
+  cut is ~2.2 h there, ~2.8 h at 872k, inside the 5 h job and lease); a live town replaced by its
+  okres in a batch of its own (its groups wait for the okres's build). A build with a listed
+  backlog ran 5–16k ads an hour (~8–26 h a 130k kraj). `recut=true` re-cuts the same scope
+  (today's `rt` is cut over 39 % of its 155.8k ads).
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at

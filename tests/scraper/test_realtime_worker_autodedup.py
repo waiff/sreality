@@ -604,10 +604,12 @@ def _write_targets(statements: list[str]) -> set[str]:
 def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> None:
     """The worker's interval alone opens a pass, and the pass is the engine's: it claims,
     decides, moves its cursors under the lease, frees the lease, and — during the build and
-    with the scope row closed — every row it writes is in schema autodedup."""
+    with the scope row closed — every row it writes is in schema autodedup. The reconcile runs
+    in the build too (E964: it waits block by block, never for the whole build), so both passes
+    stop at the closed scope row."""
     seed_lane(world, tmp_path)
     _worker_on(monkeypatch, world)
-    for expected in ("bootstrap", "scope_closed"):
+    for expected in ("scope_closed", "scope_closed"):
         before = len(world.statements)
 
         last = rw._autodedup_sync()

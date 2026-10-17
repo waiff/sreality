@@ -1724,9 +1724,19 @@ renumber.** Navigate by area:
     pass re-claims waiting groups whole, oldest first, 100 adverts on its first attempt, each
     group at most once in 6 h, and none while the apply scope is closed or the reject ledger is
     inert. It reconciles only a generation a
-    seed of this version built (`rt_seed_version:rt` = `incremental.SEED_VERSION`) whose build
-    phase ended, and review pages default to `rt` under the same condition (else the newest batch
-    pass). The brake is the interval (0), then `mode=unapply` — a live apply or unapply refuses
+    seed of this version built (`rt_seed_version:rt` = `incremental.SEED_VERSION`) — through its
+    build phase too (E964): a group waits only while an advert its merge would move (a member, or
+    any advert of a member's property; one the snapshot has not listed yet by its live location)
+    sits in a scope block the lane has not read whole, so a re-seed or a widening pauses the
+    groups of the blocks it is still building, never every live area — and review pages
+    default to `rt` once its build ended (else the newest batch pass). A wider scope is a
+    WIDENING, not a rebuild (`rt_seed` without `fresh`; E964): every row stays, a block the old
+    scope named is kept or replaced by one that contains it (`okres:3202` for `obec:531057`,
+    checked to list the town's adverts again), only the blocks not read whole are listed, the
+    calibration is re-cut over the whole scope in the job — its reads each in a short
+    transaction of their own, its writes in the one transaction that also writes the walk —
+    the forward cursors are kept and the build opens for the new adverts only; `recut=true`
+    re-cuts the same scope; a narrower scope or another scorer is a rebuild, `fresh=true`. The brake is the interval (0), then `mode=unapply` — a live apply or unapply refuses
     while the interval is above 0. Its calibration is cut from the database (`rt_seed`, and a
     re-cut, in the tick after a pass found the pHash population drifted, instead of a pass, never
     in a build or while the scope holds more than 50k adverts; E944) and read once a digest; a
@@ -1740,8 +1750,9 @@ renumber.** Navigate by area:
     all sit in the scope's blocks and deal types (or whose merge mixed deal types), unless an
     operator ruling or the engine's own grouping holds one back, stamping
     `undone_by='autodedup-legacy-retire:<run>'`; with `generation=rt` and `blocks=` (W8, E953) it
-    runs alone against the live stream's groups, over blocks the lane has fully read, and the lane
-    re-merges after the brake lifts. Both are group-scoped, so neither can move a
+    runs alone against the live stream's groups, over blocks the lane has fully read (an area
+    inside a walked block — a town in its okres, a quarter in its town — as that block, E964), and
+    the lane re-merges after the brake lifts. Both are group-scoped, so neither can move a
     native advert: only the operator splits one.
     **AUTODEDUP apply path.** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around

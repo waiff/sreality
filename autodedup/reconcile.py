@@ -10,8 +10,11 @@ in one transaction). Nothing here decides a refusal of its own; the reconcile is
 apply's brain run by the lane.
 
 What it adds is WHICH groups and WHEN:
-  * a group waits while any of its adverts sits in a scope block the lane has not fully read
-    (a snapshot row with no fingerprint), because a partly read block can be missing a member;
+  * a group waits while any advert its merge would move — a member, or any advert of a property
+    a member sits on — sits in a scope block the lane has not fully read (never walked, inside
+    its first page cycle, or a snapshot row with no fingerprint), because a partly read block
+    can be missing a member; an advert the snapshot does not hold yet is placed by its live
+    location, and during a build one no scope block holds waits too (E964);
   * a group already on one property is a no-op, and one an operator negative now covers is
     reported (`ruled_different_after_merge`), never undone — the reconcile NEVER splits
     (Decision 9): a grouping the stream no longer supports is a proposal;
@@ -44,12 +47,13 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import rt_lease
 from autodedup.incremental_sql import (
+    RT_KNOWN_SQL,
     RT_SETTING_WRITE_SQL,
     RT_STALE_SQL,
     RT_CURSOR_READ_SQL,
@@ -139,15 +143,60 @@ def read_scope(conn: Any) -> tuple[A.Scope | None, str | None]:
     return (None, "; ".join(problems)) if problems else (scope, None)
 
 
-def _unread(conn: Any, generation: str, listing_ids: Sequence[int],
-            blocks: Sequence[str]) -> set[int]:
-    """The adverts whose scope block the lane has not fully read: a block never walked, or one
-    whose snapshot still holds an advert with no fingerprint."""
-    unread = A.rt_unread_blocks(conn, generation, blocks)
-    if not unread or not listing_ids:
+def _unread(conn: Any, generation: str, adverts: Sequence[A.Member],
+            blocks: Sequence[str], *, building: bool = False,
+            unread_blocks: set[str] | None = None, riders: Iterable[int] = (),
+            scope: A.Scope | None = None) -> set[int]:
+    """The adverts among `adverts` whose scope block the lane has not fully read — a block never
+    walked, inside its first cycle of pages, or whose snapshot still holds an advert with no
+    fingerprint. An advert's block is the snapshot's; one the snapshot does not hold yet (a
+    forward-feed arrival its block's walk has not reached, E964 review F3) is placed by its LIVE
+    location in the scope block that holds it, and during a build one that no scope block holds
+    either reads as unread (fail closed). `unread_blocks` is `apply.rt_unread_blocks`' answer when
+    the caller has it.
+
+    `riders` are the adverts a merge would CARRY along, not members (E964 review R2): one this
+    generation has never fingerprinted is unread whatever its block's state — it may have moved
+    into a block after that block's last walk — when a scope block holds it or the apply `scope`
+    admits it (an apply-scope block outside `rt_scope` lets in no advert the lane never read);
+    one neither holds is the plan's refusal (`carries_out_of_scope`)."""
+    unread = (A.rt_unread_blocks(conn, generation, blocks) if unread_blocks is None
+              else unread_blocks)
+    riders = {int(i) for i in riders}
+    if not adverts or not (unread or building or riders):
         return set()
-    return {int(lid) for lid, block in _rows(conn, S.RC_MEMBER_BLOCKS_SQL, {
-        "generation": generation, "listing_ids": sorted(listing_ids)}) if block in unread}
+    placed: dict[int, set[str]] = {}
+    for lid, block in _rows(conn, S.RC_MEMBER_BLOCKS_SQL, {
+            "generation": generation,
+            "listing_ids": sorted({advert.listing_id for advert in adverts})}):
+        placed.setdefault(int(lid), set()).add(str(block))
+    known = ({int(row[0]) for row in _rows(conn, RT_KNOWN_SQL, {
+        "generation": generation, "ids": sorted(riders)})} if riders else set())
+    keys = set(blocks)
+    out: set[int] = set()
+    for advert in adverts:
+        held = placed.get(advert.listing_id) or (keys & {
+            f"obec:{advert.obec_kod}", f"cast_obce:{advert.cast_obce_kod}",
+            f"okres:{advert.okres_kod}"})
+        if advert.listing_id in riders and advert.listing_id not in known and (
+                held or (scope is not None and scope.outside(advert) is None)):
+            out.add(advert.listing_id)
+        elif (held & unread) if held else building:
+            out.add(advert.listing_id)
+    return out
+
+
+def _carried(conn: Any, members_by: Mapping[int, Sequence[A.Member]]
+             ) -> dict[int, list[A.Member]]:
+    """Every advert of every property a group's members sit on, by property (E964 review F2):
+    a merge moves them all, so an unread one holds the group back as an unread member does."""
+    out: dict[int, list[A.Member]] = {}
+    for chunk in A._chunks({m.property_id for ms in members_by.values() for m in ms
+                            if m.property_id is not None}):
+        for row in _rows(conn, S.PROPERTY_LISTINGS_SQL, {"property_ids": chunk}):
+            advert = A.Member.read(row)
+            out.setdefault(int(row[1]), []).append(advert)
+    return out
 
 
 def redecide_key(generation: str) -> str:
@@ -289,9 +338,13 @@ def run(
     fresh_hours: float = FRESH_DECISION_HOURS,
     engine_since: str | None = None,
     waiting: Sequence[Sequence[int]] = (),
+    building: bool = False,
 ) -> dict[str, Any]:
     """Reconcile the pass's groups onto production. Returns the readout the pass summary and
     the worker's heartbeat carry; writes only through `apply.apply_group` and the ledger.
+
+    `building` says the generation is in its build phase (E964): an advert the snapshot does
+    not place and no scope block holds by its live location then holds its group back.
 
     `fence` (E941) is the lane's lease check, run last inside every group's transaction: a
     lease that ended under the reconcile — the worker's shutdown, a `release_lease=` dispatch —
@@ -334,11 +387,22 @@ def run(
     members_by: dict[int, list[A.Member]] = {}
     for row in _rows(conn, S.RC_MEMBERS_SQL, {"generation": generation, "keys": keys}):
         members_by.setdefault(int(row[0]), []).append(A.Member.read(row[1:]))
-    unread = _unread(conn, generation,
-                     sorted({m.listing_id for ms in members_by.values() for m in ms}), blocks)
+    # A group waits while any advert a merge would move — a member, or any advert of a property
+    # a member sits on (E964 review F2: an unbuilt advert carried along is compared with nothing)
+    # — sits in a block the lane has not fully read, or is carried along and was never
+    # fingerprinted (R2).
+    unread_blocks = A.rt_unread_blocks(conn, generation, blocks)
+    carried = _carried(conn, members_by)
+    adverts = {m.listing_id: m for ms in members_by.values() for m in ms}
+    riders = {c.listing_id for cs in carried.values() for c in cs} - set(adverts)
+    adverts.update((c.listing_id, c) for cs in carried.values() for c in cs)
+    unread = _unread(conn, generation, list(adverts.values()), blocks, building=building,
+                     unread_blocks=unread_blocks, riders=riders, scope=scope)
     if unread:
         waiting = {key for key, ms in members_by.items()
-                   if any(m.listing_id in unread for m in ms)}
+                   if any(m.listing_id in unread
+                          or any(c.listing_id in unread for c in carried.get(m.property_id, ()))
+                          for m in ms)}
         counts[WAITING] = len(waiting)
         cluster_rows = [row for row in cluster_rows if int(row["cluster_key"]) not in waiting]
 

@@ -227,20 +227,30 @@ name: "AUTODEDUP: engine lane"
 #             args: settings and model (BOTH REQUIRED and NAMED, e.g.
 #             settings=w29,model=w6_gold; settings=default,model=prior are the uncalibrated
 #             ones - a generation is scored by one scorer and the lane will not pick it for
-#             you, E90a), rt_scope, fresh. A seeded generation is rebuilt only with
+#             you, E90a), rt_scope, fresh. A seeded generation is REBUILT only with
 #             `fresh=true`, which empties it first inside the same transaction (pairs,
 #             clusters, members, conflicts, fingerprints, postings, census cells, scope
 #             snapshot, scan and retirement ledgers, cursors) - never a verdict, a
-#             must-not-link, another generation, a `public` table or a production merge. The
-#             seed takes the lane's lease (`autodedup.rt_lease`) and refuses, writing nothing,
-#             while a pass holds it: set app_settings.realtime_autodedup_interval_seconds to 0
-#             first. It writes rt_seed_version:rt (the lane reconciles, and the review pages
-#             default to rt, only under the seed version this build carries, once the build
-#             phase ends) and resets the pass rate. The calibration re-cuts ITSELF afterwards,
-#             in a worker tick of its own, whenever the share of photographs whose population
-#             it can measure falls below 0.85 — but never in a build and never over more than
-#             RECUT_MAX_LISTINGS (50,000) adverts (E944): above that the seed's cut stands until
-#             the next seed.
+#             must-not-link, another generation, a `public` table or a production merge.
+#             Without `fresh`, a WIDER rt_scope WIDENS it instead (E964): every row stays, the
+#             blocks it has not read whole are listed (a block the old scope named may be
+#             replaced by one that contains it - `okres:3202` for `obec:531057`), the
+#             calibration is re-cut over the WHOLE scope, the forward cursors are kept and the
+#             build opens for the new adverts only, while every block already read keeps
+#             merging. It reads first - the walk outside any transaction, the cut's reads (hours
+#             at hundreds of thousands of adverts) each in a short transaction of its own - and
+#             writes last, in one transaction. `recut=true` re-cuts the same scope that way (the
+#             lane never re-cuts above 50,000 adverts). A narrower or reshaped scope, the same
+#             scope without `recut=true` and another scorer are refused: those are rebuilds. The seed takes the lane's lease (`autodedup.rt_lease`) and refuses,
+#             writing nothing, while a pass holds it: set
+#             app_settings.realtime_autodedup_interval_seconds to 0 first. A first or fresh
+#             seed writes rt_seed_version:rt (the lane reconciles - through a build too, block
+#             by block - and the review pages default to rt once the build ends, only under the
+#             seed version this build carries) and resets the pass rate; a widening keeps both.
+#             The calibration re-cuts ITSELF afterwards, in a worker tick of its own, whenever
+#             the share of photographs whose population it can measure falls below 0.85 -
+#             but never in a build and never over more than RECUT_MAX_LISTINGS (50,000)
+#             adverts (E944): above that the seed's (or the last widening's) cut stands.
 #
 #             The real-time PASS is not a mode (E914): the always-on worker's `autodedup` lane
 #             runs it, decides, groups and RECONCILES production inside the scope row (A9),
@@ -327,9 +337,10 @@ name: "AUTODEDUP: engine lane"
 #             summary section; a dry run writes nothing.
 #             W8 (E953): with `generation=rt,retire_legacy=1,blocks=<area>` (e.g.
 #             `blocks=town:531057`, or `blocks=district:3202` for an okres the lane walks as
-#             one block, E961; name the area at the grain the lane walks it: a town inside a
-#             walked okres reads as never walked and is refused, and so is a district over
-#             towns the lane walks one by one) the step runs ALONE against the live stream's
+#             one block, E961; an area inside a block the lane walks - a town inside a walked
+#             okres, a quarter inside a walked town - is read once that block is, E964; a
+#             district over towns the lane walks one by one reads as never walked and is
+#             refused) the step runs ALONE against the live stream's
 #             groups - no plan, no merge, no applied_merges row: the worker's lane re-merges once its interval
 #             is back above 0. No live group is one that run merges, so a legacy group the stream
 #             holds whole is left (engine_agrees, reconciled_by_lane), an operator "same" pair
@@ -406,7 +417,7 @@ name: "AUTODEDUP: engine lane"
 # its pairs are skipped rather than flooding the label set, default 12),
 # sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
-# settings (required), model (required), rt_scope, fresh and release_lease; rt_equivalence accepts
+# settings (required), model (required), rt_scope, fresh, recut and release_lease; rt_equivalence accepts
 # generation (default rt), run or score_run (exactly one) and tol (the score tolerance,
 # default 1e-6); apply accepts generation (REQUIRED),
 # dry_run (1, the default, or
