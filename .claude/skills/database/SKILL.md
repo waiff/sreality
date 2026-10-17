@@ -288,12 +288,11 @@ portal lists) and the nine `newest_ad_at_<portal>` dates (MS19), projected since
 
 **Re-signing `browse_stats_properties` / `browse_map_cells`** (one SPA builder, named arguments): a new DEFAULTED parameter may be applied before the SPA ships; REMOVING one the deployed SPA still sends is PGRST202 (Stats + map cells dead) until the next deploy, so the SPA stops sending it, deploys, THEN the migration drops it (597's order). DROP the exact signature + CREATE + restate the ACL in ONE transaction, md5-gated on the live body.
 
-**Three functions depend on `browse_projection`'s row type** (migration 537:
-`browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on
-`listing_feed_public`'s) — the SPA's default Browse sources, minus the caller's dismissed
-properties. A non-CASCADE `drop view browse_projection` now fails; drop and recreate them in
-the same migration. Keep them `language sql stable`, invoker, no `SET`: that is what lets the
-planner inline them, so PostgREST's filters/ORDER BY/LIMIT still reach `browse_list`'s index.
+**Two functions depend on `browse_projection`'s row type** (migration 537: `browse_list_visible()`,
+`properties_map_visible()`) — the SPA's default Browse sources, minus the caller's dismissed
+properties. A non-CASCADE `drop view browse_projection` now fails; drop and recreate them in the
+same migration. Keep them `language sql stable`, invoker, no `SET`: that is what lets the planner
+inline them, so PostgREST's filters/ORDER BY/LIMIT still reach `browse_list`'s index.
 
 **A single-value filter must reach `browse_list` as `=`, never as `= ANY`.** The serving
 index is `(category_main, category_type, first_seen_at DESC, property_id DESC)` and Browse's

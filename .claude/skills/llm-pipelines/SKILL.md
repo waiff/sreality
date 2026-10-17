@@ -153,9 +153,8 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
   and the merge/detach recompute are gone); estimations and `/estimate_yield` call the measure.
 - **Serving, after 567 applies:** `browse_projection` / `properties_public` call the measure in
   their property lateral with the representative's `ll.obec_kod` + `ll.katastr_kod` (566, FILL
-  v5.4: the single KÚ of the bound entity, never a pin); `listing_feed_public` takes the
-  PROPERTY's yield from `browse_list` via `browse_list_mf(property_id)` (Q8 b). Until 567 applies
-  they read the stored, writer-less `properties.mf_*` / `listings.mf_*`; PR-F drops those.
+  v5.4: the single KÚ of the bound entity, never a pin). Until 567 applies they read the
+  stored, writer-less `properties.mf_*` / `listings.mf_*`; PR-F drops those.
 - **Rules:** flats only (else no row). VK = leading integer of the disposition clamped 1..4;
   novostavba = `condition = 'novostavba'` (NULL → older column, adjustments kept); rent =
   round((base + adjustments) × area); yield only for `prodej` with price ≥ 100 000, else the

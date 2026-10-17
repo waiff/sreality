@@ -254,8 +254,8 @@ def test_claim_detail_batch_skip_locked_priority_order():
     assert params["verify_priority"] == db.QUEUE_PRIORITY_VERIFY
     assert "claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
-    # migration 444: the claim carries when the walk first SAW the id (W5: and no
-    # discovery_seq, which nothing writes any more).
+    # migration 444: the claim carries when the walk first SAW the id (no
+    # discovery_seq: W5 stopped writing it, W6 dropped it).
     assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.enqueued_at" in sql
     assert params["source"] == "sreality"
     assert params["limit"] == 50

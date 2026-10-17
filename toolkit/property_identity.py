@@ -130,8 +130,8 @@ VALUES (%(group)s, %(table)s, %(row_key)s, %(row_at)s, %(account_id)s, %(from_pr
         %(survivor)s, %(kind)s, %(snapshot)s)
 """
 
-# One statement touching `status` and `is_active` together, so the status-event trigger
-# (migration 559) sees a retirement, not a plain is_active flip; the last write of a pair.
+# One statement touching `status` and `is_active` together: a retired property is never left
+# active between two writes; the last write of a pair.
 _RETIRE_SQL = """
 UPDATE properties
 SET status = 'merged_away', merged_into = %s,
@@ -219,7 +219,7 @@ WHERE e.listing_ref_id = ANY(%(ids)s::bigint[]) AND e.undone_at IS NULL
 ORDER BY e.listing_ref_id, e.id
 """
 
-# One statement, so the status-event trigger (migration 559) logs only where history disagrees.
+# One statement: the property comes back active exactly when one of its ads is.
 _REACTIVATE_SQL = """
 UPDATE properties p
 SET status = 'active', merged_into = NULL, merged_at = NULL,

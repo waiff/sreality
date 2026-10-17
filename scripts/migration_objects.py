@@ -172,7 +172,10 @@ def parse_objects(sql: str) -> list[MigrationObject]:
     migration itself runs, and it frequently contains CREATE TEMP TABLE and
     similar that exists only for the duration of a call.
     """
-    body = _strip_noise(sql)
+    return _objects_in(_strip_noise(sql))
+
+
+def _objects_in(body: str) -> list[MigrationObject]:
     found: list[MigrationObject] = []
     seen: set[tuple[str, str]] = set()
 
@@ -216,16 +219,18 @@ def parse_objects(sql: str) -> list[MigrationObject]:
 
 
 _RE_DROP_RELATION = re.compile(
-    rf"\bdrop\s+(?:materialized\s+)?(?:table|view|index)\s+(?:concurrently\s+)?(?:if\s+exists\s+)?({_QUALIFIED})",
+    rf"\bdrop\s+(?:materialized\s+view|view|table|index|sequence)\s+(?:concurrently\s+)?"
+    rf"(?:if\s+exists\s+)?({_QUALIFIED}(?:\s*,\s*{_QUALIFIED})*)",
     re.IGNORECASE,
 )
 _RE_DROP_FUNCTION = re.compile(
     rf"\bdrop\s+function\s+(?:if\s+exists\s+)?({_QUALIFIED})", re.IGNORECASE,
 )
-_RE_DROP_COLUMN = re.compile(
-    rf"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({_QUALIFIED})\s+drop\s+column\s+(?:if\s+exists\s+)?({_IDENT})",
+_RE_DROP_COLUMNS = re.compile(
+    rf"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({_QUALIFIED})\s+(drop\s+column\b[^;]*)",
     re.IGNORECASE,
 )
+_RE_DROP_COLUMN = re.compile(rf"\bdrop\s+column\s+(?:if\s+exists\s+)?({_IDENT})", re.IGNORECASE)
 _RE_DROP_POLICY = re.compile(
     rf"\bdrop\s+policy\s+(?:if\s+exists\s+)?({_IDENT})\s+on\s+({_QUALIFIED})", re.IGNORECASE,
 )
@@ -239,12 +244,13 @@ def _key(kind: Kind, ident: str) -> tuple[str, str]:
 def _dropped(sql: str) -> set[tuple[str, str]]:
     """What this SQL drops (the shapes a later migration uses to retire an earlier one's object)."""
     body = _strip_noise(sql)
-    out = {_key("relation", _clean(m.group(1))) for m in _RE_DROP_RELATION.finditer(body)}
+    out = {_key("relation", _clean(name))
+           for m in _RE_DROP_RELATION.finditer(body) for name in m.group(1).split(",")}
     out |= {_key("function", _clean(m.group(1))) for m in _RE_DROP_FUNCTION.finditer(body)}
-    for m in _RE_DROP_COLUMN.finditer(body):
+    for m in _RE_DROP_COLUMNS.finditer(body):
         schema, _, table = _clean(m.group(1)).rpartition(".")
         prefix = f"{schema}.{table}" if schema and schema != "public" else table
-        out.add(_key("column", f"{prefix}.{_clean(m.group(2))}"))
+        out |= {_key("column", f"{prefix}.{_clean(c.group(1))}") for c in _RE_DROP_COLUMN.finditer(m.group(2))}
     for m in _RE_DROP_POLICY.finditer(body):
         out.add(_key("policy", f"{_clean(m.group(2)).split('.')[-1]}.{_clean(m.group(1))}"))
     return out

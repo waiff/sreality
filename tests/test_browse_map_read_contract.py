@@ -142,7 +142,7 @@ def test_the_two_rpcs_take_the_same_cohort_parameters() -> None:
     stats = _sql_params("browse_stats_properties")
     cells = _sql_params("browse_map_cells")
     assert not _MAP_ONLY_PARAMS - cells, (
-        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)}."
+        f"browse_map_cells lost {sorted(_MAP_ONLY_PARAMS - cells)}, which only the map takes."
     )
     assert not cells - stats - _MAP_ONLY_PARAMS, (
         f"browse_map_cells takes {sorted(cells - stats - _MAP_ONLY_PARAMS)} and "

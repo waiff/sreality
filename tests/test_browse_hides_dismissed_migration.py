@@ -1,12 +1,13 @@
 """Source rails for migration 537 — Browse hides the caller's dismissed properties.
 
-The three dismissal-aware sources only perform because the planner INLINES them:
-PostgREST's filters, ORDER BY and LIMIT then reach `browse_list`'s index exactly as
-before (measured: 48.7 ms worst-case card page at 20k dismissals). Inlining silently
-stops if a function becomes SECURITY DEFINER, gains a SET clause, or stops being a
-single-statement SQL body — and a DEFINER would also read the dismissals as the
-owner, not the caller. Returning the RELATION's row type would pin the blue-green
-DROP in `rebuild_browse_list` / `rebuild_properties_map_mv` and wedge every tick.
+The two dismissal-aware sources (a third, over the per-ad feed, left with it in W6) only
+perform because the planner INLINES them: PostgREST's filters, ORDER BY and LIMIT then
+reach `browse_list`'s index exactly as before (measured: 48.7 ms worst-case card page at
+20k dismissals). Inlining silently stops if a function becomes SECURITY DEFINER, gains a
+SET clause, or stops being a single-statement SQL body — and a DEFINER would also read
+the dismissals as the owner, not the caller. Returning the RELATION's row type would pin
+the blue-green DROP in `rebuild_browse_list` / `rebuild_properties_map_mv` and wedge every
+tick.
 
 Offline; the live behaviour is verified on the replayed schema by the DB lane.
 """
@@ -29,7 +30,6 @@ _PREDICATE = "select 1 from public.property_dismissals_public d where d.property
 _SOURCES = {
     "browse_list_visible": ("public.browse_projection", "public.browse_list"),
     "properties_map_visible": ("public.browse_projection", "public.properties_map_mv"),
-    "listing_feed_visible": ("public.listing_feed_public", "public.listing_feed_public"),
 }
 
 

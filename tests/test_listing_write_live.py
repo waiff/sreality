@@ -386,16 +386,14 @@ def test_n_preserve_if_null_follows_the_contract(conn):
     assert _one(conn, "SELECT condition FROM listings WHERE id = %s", (s.listing_id,)) is None
 
 
-def test_o_discovered_at_is_set_once_and_discovery_seq_is_never_written(conn):
-    """MS19 (W5): nothing writes discovery_seq any more; the column stays until W6."""
+def test_o_discovered_at_is_set_once(conn):
     native = f"lw-{uuid.uuid4()}"
     t5 = datetime(2026, 9, 1, 5, tzinfo=timezone.utc)
     t9 = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
     [o] = _write(conn, _scraped("idnes", native, discovered_at=t5))
     _write(conn, _scraped("idnes", native, discovered_at=t9))
 
-    assert _one(conn, "SELECT discovery_seq, discovered_at FROM listings WHERE id = %s",
-                (o.listing_id,)) == (None, t5)
+    assert _one(conn, "SELECT discovered_at FROM listings WHERE id = %s", (o.listing_id,)) == t5
 
 
 def test_p_float_numerics_are_coerced_not_rejected(conn):
