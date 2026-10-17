@@ -55,7 +55,7 @@ from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
 from autodedup.incremental import GENERATION
 from autodedup.incremental_scope import GRAIN_OF
-from autodedup.incremental_sql import ENTER_SLICE, RT_SCOPE_SCAN_SEEN_SQL, RT_SCOPE_TRUNCATED_SQL
+from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_carriers import curation_preview
 from toolkit.property_identity import (
@@ -1739,16 +1739,14 @@ def _retire_legacy(
 
 def rt_unread_blocks(conn: Any, generation: str, blocks: Iterable[str]) -> set[str]:
     """The live stream's blocks it has not fully read (`obec:` / `cast_obce:` / `okres:` keys):
-    one of `blocks` never walked, any whose snapshot holds an advert with no fingerprint, and any
-    whose latest walk filled the slice (E961: listed short of its newest adverts). The reconcile
-    waits on them; the retire step refuses them."""
+    one of `blocks` never read to its end (a block still inside its first cycle of pages, E940,
+    included), or any whose snapshot holds an advert with no fingerprint. The reconcile waits on
+    them; the retire step refuses them."""
     walked = {str(row[0]) for row in _rows(conn, RT_SCOPE_SCAN_SEEN_SQL,
                                            {"generation": generation})}
     unread = {str(row[0]) for row in _rows(conn, S.RC_UNREAD_BLOCKS_SQL,
                                            {"generation": generation})}
-    short = {str(row[0]) for row in _rows(conn, RT_SCOPE_TRUNCATED_SQL,
-                                          {"generation": generation, "slice": ENTER_SLICE})}
-    return unread | short | {block for block in blocks if block not in walked}
+    return unread | {block for block in blocks if block not in walked}
 
 
 def _retire_live_stream(conn: Any, dry_run: bool, override: Mapping[str, Any],

@@ -57,6 +57,7 @@ from autodedup.incremental_lane import (
 )
 from autodedup.incremental_scope import ScopeError, resolve_scope
 from autodedup.incremental_sql import (
+    ENTER_SLICE,
     RT_CALIBRATION_READ_SQL,
     RT_EQUIV_CLOCK_FACTS_SQL,
     RT_EQUIV_HOLDS_SQL,
@@ -238,12 +239,18 @@ def scope_listings(conn: Any, generation: str,
             "empty — there is nothing bounded to compare inside")
     # The one path that reads `public` for membership, and only for a generation no pass has
     # walked yet. Each block is walked exactly as the entrant sweep walks it — a quarter on its
-    # PARENT obec, an okres on its obce — through the same register lookups (W9d-3, E961).
+    # PARENT obec, an okres on its obce — through the same register lookups (W9d-3, E961), and
+    # paged as the seed pages it, every page to the block's end (E940).
     parents = resolve_scope_parents(conn, scope)
+
+    def query(sql: str, params: Mapping[str, Any]) -> list[tuple]:
+        return _rows(conn, sql, params)
+
     for block in walk_blocks(scope, parents, resolve_scope_districts(conn, scope, parents)):
-        for row in _rows(conn, *block.walk(1_000_000)):
-            ids.add(int(row[0]))
-            _keep_latest(resolved, int(row[0]), row[1])
+        for rows, _end in block.pages(query, ENTER_SLICE):
+            for row in rows:
+                ids.add(int(row[0]))
+                _keep_latest(resolved, int(row[0]), row[1])
     return ids, resolved, "listing_location"
 
 

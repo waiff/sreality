@@ -28,7 +28,6 @@ from autodedup.incremental_sql import (
     RT_CURSOR_SET_SQL,
     RT_LOCK_GUARD_SQL,
     RT_SCOPE_SCAN_SEEN_SQL,
-    RT_SCOPE_TRUNCATED_SQL,
     RT_SETTING_WRITE_SQL,
     RT_STALE_SQL,
     RT_STATEMENT_GUARD_SQL,
@@ -497,8 +496,6 @@ class LaneDb(FakeDb):
         super().__init__()
         self.cursors: dict[str, int] = {}
         self.walked: set[str] = {BLOCK}
-        # E961: blocks whose latest walk filled the slice.
-        self.truncated: set[str] = set()
         self.snapshot: dict[int, str] = {}
         self.read: set[int] = set()
         self.guards: list[dict] = []
@@ -525,8 +522,6 @@ class LaneDb(FakeDb):
         if sql == AS.RC_GROUP_OF_SQL:
             return [(lid, k) for g, k, lid in self.members
                     if g == p["generation"] and lid in p["listing_ids"]]
-        if sql == RT_SCOPE_TRUNCATED_SQL:
-            return [(block,) for block in sorted(self.truncated)]
         if sql == RT_SCOPE_SCAN_SEEN_SQL:
             return [(block,) for block in sorted(self.walked)]
         if sql == AS.RC_UNREAD_BLOCKS_SQL:

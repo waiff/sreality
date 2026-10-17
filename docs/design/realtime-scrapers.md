@@ -467,7 +467,15 @@ nothing else.
   ledger_written (the wanted below-floor rejects the reject ledger answered instead of a re-score,
   and the rejects the pass ledgered), dirty + reads (E960: the probe-key neighbourhood the last
   attempt re-retrieved from the store's keys and guard rows, and the adverts whose facts the pass
-  read, by why — claim, order, digest, decided, cluster, rail — summed over its attempts)}`; an
+  read, by why — claim, order, digest, decided, cluster, rail — summed over its attempts),
+  enter_scan (E940: the scope-block walks of `public` — `walks` this pass, `pages` (the walks that
+  came back a full `ENTER_SLICE` page, so the block goes on past them: a page, never a silent
+  truncation), `page_of` (every block inside a cycle of pages, `[page, of]`, `of` null until its
+  first cycle has ended — such a block is unread to the reconcile and W8 until then), `stalled`
+  (a cycle 16 pages long without an end: the cursor is not advancing, logged), `scans_24h`/`cap`,
+  and `skipped: daily cap` + `unfinished` (every due block the pass never reached and every block
+  inside a cycle) when the cap stopped the pass; null when the pass walked
+  nothing and no block is mid-cycle)}`; an
   absent store (migrations 539/540/596/604) = `skipped: store_absent` + one warning. A change of the reconcile state is logged once, and the
   engine logs each release of a dead predecessor's lease.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,

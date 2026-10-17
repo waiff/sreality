@@ -992,11 +992,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                  len(slice_ids), departed)]
     # The sixth feed (W9d-3), as W9e pays for it (R3): the wide block walk on `public` is a
     # cadence-driven REFRESH of the snapshot, and an ordinary pass claims out of the snapshot.
+    # E940: one PAGE, the keyset after the block's cursor.
     if sql == S.RT_SCOPE_BLOCK_SQL:
         obec, cast_obce = p["obec"], p.get("cast_obce")
         found = sorted(
             listing_id for listing_id, place in db.locations.items()
-            if place.get("obec_kod") == obec
+            if place.get("obec_kod") == obec and listing_id > int(p["after_id"])
             and (cast_obce is None or place.get("cast_obce_kod") == cast_obce))
         return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
     # E961: an okres through its obce (the index), filtered on its own code, plus the adverts
@@ -1005,7 +1006,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         obce = set(p["obce"])
         found = sorted(
             listing_id for listing_id, place in db.locations.items()
-            if place.get("okres_kod") == p["okres"]
+            if place.get("okres_kod") == p["okres"] and listing_id > int(p["after_id"])
             and (place.get("obec_kod") in obce
                  or (place.get("obec_kod") is None and place.get("granularity") == "okres")))
         return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
@@ -1019,9 +1020,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 "refreshed_at": db.now}
         return []
     if sql == S.RT_SCOPE_IDS_PRUNE_SQL:
+        # Only the page's own id range: after the cursor, up to its end (None: the block's).
         keep = set(int(i) for i in p["listing_ids"])
+        low, high = int(p["after_id"]), p["page_end"]
         db.scope_ids = {key: row for key, row in db.scope_ids.items()
                         if not (key[0] == gen and key[1] == str(p["block_key"])
+                                and low < key[2] and (high is None or key[2] <= int(high))
                                 and key[2] not in keep)}
         return []
     if sql == S.RT_SCOPE_IDS_DELETE_SQL:
@@ -1056,17 +1060,16 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 state[1] += 1
         return [(block, (db.now - last).total_seconds(), scans)
                 for block, (last, scans) in sorted(out.items())]
-    # E961: the blocks whose LATEST walk filled the slice.
-    if sql == S.RT_SCOPE_TRUNCATED_SQL:
-        latest: dict[str, dict[str, Any]] = {}
-        for row in sorted((r for r in db.scope_scans if r["generation"] == gen),
-                          key=lambda r: r["scanned_at"]):
-            latest[row["block_key"]] = row
-        return [(block,) for block, row in sorted(latest.items())
-                if row["rows_found"] >= int(p["slice"])]
     if sql == S.RT_SCOPE_SCAN_SEEN_SQL:
+        # Walked AND read to its end: not a block whose first cycle of pages is open (E940).
+        pages = db.settings.get(f"rt_scope_pages:{gen}") or {}
         return sorted({(row["block_key"],) for row in db.scope_scans
-                       if row["generation"] == gen})
+                       if row["generation"] == gen
+                       and (pages.get(row["block_key"]) or {}).get("of", 1) != 0})
+    # The reconcile's other half of "fully read": a snapshot row the build has not reached.
+    if sql == A.RC_UNREAD_BLOCKS_SQL:
+        return sorted({(block,) for (g, block, listing_id) in db.scope_ids
+                       if g == gen and (gen, listing_id) not in db.rt_fp})
     if sql == S.RT_SCOPE_BACKLOG_SQL:
         return [(sum(1 for (g, _block, listing_id) in db.scope_ids
                      if g == gen and (gen, listing_id) not in db.rt_fp),)]

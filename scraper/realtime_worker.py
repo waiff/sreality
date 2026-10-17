@@ -2259,9 +2259,6 @@ def _autodedup_outcome(
             # pass released (None: there was none).
             claim_cap=summary.get("claim_cap"),
             predecessor_released=summary.get("predecessor_released"),
-            # E961: the scope blocks whose latest walk filled ENTER_SLICE — listed short of
-            # their newest adverts, read as unread until E940 pages them.
-            scope_truncated=list(summary.get("scope_truncated") or []),
             # E941: the worker process's peak resident memory (MiB, ru_maxrss) at the pass's
             # end — the reading a widened scope's gate holds under half the container's limit —
             # and E948's two beside it: what it holds now and the container's limit.
@@ -2299,6 +2296,9 @@ def _autodedup_outcome(
             reads=counts.get("reads"),
             # E960: the waiting groups' adverts the committed attempt re-claimed.
             stale_claimed=(summary.get("evidence") or {}).get("stale_claimed"),
+            # E940: the entrant sweep's walks of `public` — a full page is a page, never a
+            # silent truncation.
+            enter_scan=_autodedup_enter_scan(summary.get("enter_scan")),
         )
 
     if summary is not None:
@@ -2316,6 +2316,24 @@ def _autodedup_outcome(
             last.setdefault(key, summary.get(key))
         last.setdefault("memory_limit_mb", memory_limit_mb)
     return last
+
+
+def _autodedup_enter_scan(raw: Any) -> dict[str, Any] | None:
+    """The pass's scope-block walks for the heartbeat (E940): `walks` this pass, `pages` (the
+    walks that came back a full page, so the block goes on past them), `page_of` (each block
+    inside a cycle of pages: `[page, of]`, `of` None until its first cycle ends), `stalled` (a
+    cursor that has paged `PAGE_STALL_PAGES` without an end) and, when the daily cap stopped the
+    pass, `skipped` and the blocks it left `unfinished`. None: the pass walked nothing and no
+    block is mid-cycle."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out: dict[str, Any] = {
+        "walks": len(raw.get("blocks") or ()), "pages": int(raw.get("pages") or 0),
+        "page_of": dict(raw.get("page_of") or {}), "stalled": list(raw.get("stalled") or ())}
+    for key in ("scans_24h", "cap", "skipped", "unfinished", "seconds"):
+        if raw.get(key) is not None:
+            out[key] = raw[key]
+    return out
 
 
 def _autodedup_sync() -> dict[str, Any]:

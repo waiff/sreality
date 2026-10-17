@@ -169,17 +169,17 @@ def test_a_seed_naming_a_town_beside_its_okres_writes_nothing(tmp_path: Path) ->
     assert not db.scope_ids and not db.calibration
 
 
-def test_a_seed_whose_walk_fills_the_slice_refuses_and_writes_nothing(
+def test_a_seed_over_an_okres_larger_than_a_page_pages_it_to_its_end(
         tmp_path: Path, monkeypatch: Any) -> None:
-    """The walk keeps a block's oldest rows by id and the forward feeds start at today's newest,
-    so a block over the slice would be built short of its newest adverts and judged read. The
-    seed refuses it inside its transaction (E940 pages it instead)."""
+    """The forward feeds start at today's newest id, so a block the seed listed short of its
+    newest adverts would be built without them and judged read; E961 refused such a seed, E940
+    pages it: every advert listed, the cut taken over all of them, the block read whole."""
     db = _kraj_world()
     monkeypatch.setattr(incremental_lane, "ENTER_SLICE", 5)
-    with pytest.raises(SystemExit, match=r"walk of okres:3504 filled ENTER_SLICE \(5 rows\)"):
-        lane_world.seed_lane(db, tmp_path, rt_scope="okres:3504")
-    assert not db.scope_ids and not db.scope_scans and scope_setting_key(GEN) not in db.settings
-    assert not db.calibration and not db.cursors
+    out = lane_world.seed_lane(db, tmp_path, rt_scope="okres:3504")
+    assert [walk["rows"] for walk in out["enter_scan"]["blocks"]] == [5, 4]
+    assert sorted(lid for _g, _block, lid in db.scope_ids) == sorted(db.locations)
+    assert out["calibration"]["scope_listings"] == 9
 
 
 def test_a_seed_naming_an_okres_the_register_cannot_place_writes_nothing(
@@ -268,39 +268,37 @@ def test_an_okres_block_is_walked_on_the_quarter_cadence_under_the_same_cap() ->
     assert [scan["block_key"] for scan in db.scope_scans] == [f"okres:{PRAHA_VYCHOD}"] * 2
 
 
-def _truncated(db: FakePg, enter_slice: int) -> list[str]:
-    with db.cursor() as cur:
-        cur.execute(S.RT_SCOPE_TRUNCATED_SQL, {"generation": GEN, "slice": enter_slice})
-        return [row[0] for row in cur.fetchall()]
-
-
-def test_a_walk_that_fills_the_slice_is_marked_and_the_pass_names_its_block(
+def test_an_okres_over_a_page_is_paged_and_every_pass_names_it_until_its_end(
         tmp_path: Path) -> None:
-    """Every grain walks under the one cap; a walk that FILLS it kept the block's oldest rows.
-    The walk marks itself, the scan ledger keeps it (its latest walk decides), and every pass
-    and its heartbeat name the block until a walk that does not fill it (E961)."""
+    """Every grain pages under the one page (E940; E961 marked a walk that filled it TRUNCATED,
+    its newest adverts lost): the walk that fills the page names the block mid-cycle and leaves
+    it unread, the next walk reads past it, and every pass and its heartbeat name a block inside
+    a cycle until its end."""
     db = _register(FakePg())
     for lid in (1, 2, 3):
         _place(db, lid, obec=BRANDYS, okres=PRAHA_VYCHOD)
-    work = SqlWork(db, DISTRICT, GEN, districts=resolve_scope_districts(db, DISTRICT, {}),
-                   enter_slice=2)
-    work.refresh_scope_ids(0)
+    districts = resolve_scope_districts(db, DISTRICT, {})
     block = f"okres:{PRAHA_VYCHOD}"
-    assert work.truncated == [block] and work.enter_scan["truncated"] == [block]
-    assert work.enter_scan["blocks"] == [{"block": block, "rows": 2, "truncated": True,
-                                          "elapsed_ms": work.enter_scan["elapsed_ms"]}]
-    assert sorted(lid for _g, _block, lid in db.scope_ids) == [1, 2], "the newest one is lost"
-    assert _truncated(db, 2) == [block] and _truncated(db, 3) == []
+    work = SqlWork(db, DISTRICT, GEN, districts=districts, enter_slice=2)
+    work.refresh_scope_ids(0)
+    assert (work.enter_scan["pages"], work.enter_scan["page_of"]) == (1, {block: [1, None]})
+    assert sorted(lid for _g, _block, lid in db.scope_ids) == [1, 2]
+    assert block not in work._walked_ever(), "unread until its pages complete"
+    db.now += timedelta(hours=6)
+    work = SqlWork(db, DISTRICT, GEN, districts=districts, enter_slice=2)
+    work.refresh_scope_ids(0)
+    assert sorted(lid for _g, _block, lid in db.scope_ids) == [1, 2, 3], "nothing is lost"
+    assert work.enter_scan["page_of"] == {} and block in work._walked_ever()
 
     world = lane_world.world()
     lane_world.seed_lane(world, tmp_path)
-    assert run_incremental(lambda: world)["scope_truncated"] == []
-    world.scope_scans.append({"generation": GEN, "block_key": "obec:563510",
-                              "scanned_at": world.now, "rows_found": S.ENTER_SLICE,
-                              "elapsed_ms": 1.0})
-    out = run_incremental(lambda: world)
-    assert out["scope_truncated"] == ["obec:563510"]
-    assert rw._autodedup_outcome(0.0, summary=out)["scope_truncated"] == ["obec:563510"]
+    run_incremental(lambda: world)                       # the build claims all nine
+    world.settings[incremental_lane.pages_key(GEN)] = {
+        "obec:563510": {"after": 4003, "page": 1, "of": 3}}
+    out = run_incremental(lambda: world)                 # nothing due: the 1 h cadence
+    assert out["enter_scan"]["page_of"] == {"obec:563510": [1, 3]}
+    assert rw._autodedup_outcome(0.0, summary=out)["enter_scan"]["page_of"] == {
+        "obec:563510": [1, 3]}
 
 
 def test_the_okres_walk_rides_the_town_index_and_every_feed_spells_the_okres_arm() -> None:
@@ -396,11 +394,11 @@ def test_the_reconcile_merges_a_group_its_district_holds_and_no_other() -> None:
     assert db.listings[11]["property_id"] == 100 and db.listings[21]["property_id"] == 400
 
 
-def test_the_reconcile_waits_on_a_block_whose_latest_walk_was_truncated() -> None:
-    """A truncated walk listed the block short of its newest adverts, so a group there may be
-    missing a member: it waits, as a block not fully read does (E961)."""
+def test_the_reconcile_waits_on_a_block_whose_pages_have_not_completed() -> None:
+    """A block inside its first cycle of pages may hold a member the group is still missing: it
+    reads as not walked (E940; E961 read a truncated walk the same way), so the group waits."""
     db = _district_lane()
-    db.truncated = {f"okres:{PRAHA_VYCHOD}"}
+    db.walked = set()
     out = _reconcile(db)
     assert out["counts"]["applied"] == 0 and out["counts"][reconcile.WAITING] == 2
     assert db.listings[11]["property_id"] == 200
@@ -425,10 +423,6 @@ def test_w8_reads_a_district_by_its_okres_and_waits_for_the_lanes_okres_walk(
     with pytest.raises(SystemExit, match=f"has not fully read district:{PRAHA_VYCHOD}"):
         AP.run_apply(_factory(db), args, tmp_path)
     db.walked = {f"okres:{PRAHA_VYCHOD}"}
-    db.truncated = {f"okres:{PRAHA_VYCHOD}"}          # ... or walked it short (E961)
-    with pytest.raises(SystemExit, match=f"has not fully read district:{PRAHA_VYCHOD}"):
-        AP.run_apply(_factory(db), args, tmp_path)
-    db.truncated = set()
     out = AP.run_apply(_factory(db), args, tmp_path)
     assert out["dry_run"] is True and out["counts"]["outcomes"] == {"would_retire": 1}
     assert db.statements.count(L.AREA_SQL) == 1

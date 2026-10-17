@@ -216,7 +216,10 @@ name: "AUTODEDUP: engine lane"
 #
 #   rt_seed - READS `public`, WRITES schema `autodedup` only. (Re)builds THE real-time lane's
 #             generation (`rt`) from the database (A10, E912): walks every block of the scope
-#             (`rt_scope`, else the row the last seed wrote, else the trial blocks), cuts the
+#             (`rt_scope`, else the row the last seed wrote, else the trial blocks) to its end,
+#             a page a statement and under no daily cap (E940), refuses before the cut a
+#             scope over MAX_SCHEMA_MB or one whose cut would pass SEED_MEMORY_MB (~150k
+#             adverts on this 16 GiB runner until E962 streams the cut), cuts the
 #             calibration's cohort statistics and the pHash population over what those blocks
 #             hold - read through the lane's own fact reader, and the population is the
 #             export's aggregate over public.images - starts the cursors at TODAY and opens
@@ -234,8 +237,10 @@ name: "AUTODEDUP: engine lane"
 #             first. It writes rt_seed_version:rt (the lane reconciles, and the review pages
 #             default to rt, only under the seed version this build carries, once the build
 #             phase ends) and resets the pass rate. The calibration re-cuts ITSELF afterwards,
-#             in the worker's pass, whenever the share of photographs whose population it can
-#             measure falls below 0.85.
+#             in a worker tick of its own, whenever the share of photographs whose population
+#             it can measure falls below 0.85 — but never in a build and never over more than
+#             RECUT_MAX_LISTINGS (50,000) adverts (E944): above that the seed's cut stands until
+#             the next seed.
 #
 #             The real-time PASS is not a mode (E914): the always-on worker's `autodedup` lane
 #             runs it, decides, groups and RECONCILES production inside the scope row (A9),

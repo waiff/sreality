@@ -377,18 +377,28 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
 # arrives is already claimed by the straggler sweep (the last N rows of `listings`, anti-joined
 # on `rt_fp`), so this feed exists for the long tail — an old listing re-geocoded into the
 # scope — which is measured in days rather than in minutes.
-# How many rows one REFRESH of a scope block may snapshot (W9e/R3) — the walks' `limit`. The
-# trial scope's largest block is Praha-Vysočany at 1,439 rows; the cap exists so a mis-typed obec
-# code cannot pull a whole city into `rt_scope_ids`, and it does not reduce the scan's cost — the
-# `limit` is applied after the bitmap heap scan, which is precisely why a smaller `enter_slice`
-# was never the answer to what that scan costs. A walk that FILLS it is TRUNCATED (E961): the
-# walk keeps the block's oldest rows by id, so a block over it is listed short of its newest
-# adverts — silently, since a seed starts the forward feeds at today's newest id. Brno-město
-# (41,097) and Ostrava-město (28,174) are over it on 2026-10-17, Praha-východ (19,812) days from
-# it. A seed refuses such a block and a pass names it and reads it as unread
-# (`RT_SCOPE_TRUNCATED_SQL`), until E940 pages it.
+#
+# How many rows one WALK of a scope block reads: its PAGE (W9e/R3; E940). A block larger than a
+# page is listed over consecutive walks in listing-id order from its page cursor
+# (`incremental_lane.PAGES_SETTING`), each page one walk for the cadence and the cap, so its
+# snapshot is never cut to its oldest rows (until E940 a walk that filled it kept the block's
+# oldest 20,000 for ever; E961 named such a walk TRUNCATED and refused it at the seed). A page
+# bounds what ONE statement returns and writes, not what the walk costs: a town's or a
+# district's cursor is a filter on the block's own bitmap, and Praha's pages are ordered pkey
+# walks of about one bitmap's buffers each. Over a page on 2026-10-17: Praha (167,548 rows, 9
+# pages), Brno (41,082, 3), Ostrava (26,243, 2), and Praha-východ (19,812, +105 a day) within
+# ~2 days.
 ENTER_SLICE: int = 20000
 
+# One statement lists ONE PAGE of a block (E940): its first `limit` rows after `after_id` in
+# listing-id order — a keyset on the primary key, never an OFFSET — so a block larger than a page
+# is read whole over several walks instead of being cut to its oldest page. Measured live
+# `EXPLAIN (ANALYZE, BUFFERS)`, 2026-10-17, warm, six of Praha's nine pages as a town block
+# (167,548 rows): a full page is an ordered walk of `listing_location_pkey` filtered on the obec,
+# 27,832-74,481 buffers and 80-155 ms, and the short last page a BitmapAnd of the pkey and the
+# town index, 4,622 buffers and 40 ms; a quarter (Vysočany) is its city's bitmap, 36,121
+# buffers and 93 ms, with the cursor a filter. Every plan stays index-served, far inside the
+# pass's 120 s statement timeout.
 RT_SCOPE_BLOCK_SQL = """
 select ll.listing_id  as listing_id,
        ll.resolved_at as resolved_at
@@ -396,6 +406,7 @@ select ll.listing_id  as listing_id,
  where ll.obec_kod = %(obec)s::bigint
    and (%(cast_obce)s::bigint is null
         or ll.cast_obce_kod = %(cast_obce)s::bigint)
+   and ll.listing_id > %(after_id)s::bigint
  order by ll.listing_id
  limit %(limit)s
 """
@@ -409,6 +420,8 @@ select ll.listing_id  as listing_id,
 # of kraj 27): a BitmapOr of the two index scans, **13,935 buffers = 109 MB, 71 ms** warm — half
 # a quarter's 231 MB, because a quarter's bitmap is its whole city and a district's is only its
 # own rows.
+# Paged like a town (E940): the cursor is a heap filter on the same bitmap, so every page of a
+# district costs about its whole bitmap (Praha-východ's first page, 2026-10-17: 13,935 buffers).
 RT_SCOPE_OKRES_BLOCK_SQL = """
 select ll.listing_id  as listing_id,
        ll.resolved_at as resolved_at
@@ -416,13 +429,14 @@ select ll.listing_id  as listing_id,
  where ll.okres_kod = %(okres)s::bigint
    and (ll.obec_kod = any(%(obce)s::bigint[])
         or (ll.obec_kod is null and ll.granularity = 'okres'))
+   and ll.listing_id > %(after_id)s::bigint
  order by ll.listing_id
  limit %(limit)s
 """
 
-# The snapshot write. One block is replaced whole: what the scan found is upserted, and what it
-# no longer finds is pruned — a listing the geocoder moved OUT leaves the snapshot here and is
-# retired by the drift sweep there, which is the other direction and keeps its own rail.
+# The snapshot write. One PAGE is replaced whole: what the walk found is upserted, and what the
+# page's id range no longer holds is pruned — a listing the geocoder moved OUT leaves the snapshot
+# here and is retired by the drift sweep there, which is the other direction and keeps its own rail.
 # `resolved_at` travels as TEXT and is cast per element: a block whose rows all carry a NULL
 # `resolved_at` would otherwise hand psycopg a list with nothing to infer a type from, and
 # Postgres has no cast from `text[]` to `timestamptz[]`.
@@ -438,10 +452,15 @@ on conflict (generation, block_key, listing_id) do update set
     refreshed_at = now()
 """
 
+# A page proves the block's membership for ITS id range only (E940): after the cursor, up to its
+# last row, or to the block's end when the page came back short (`page_end` NULL). So a page never
+# prunes a row the cycle has not reached, and one cycle's pages partition the ids, each pruned once.
 RT_SCOPE_IDS_PRUNE_SQL = """
 delete from autodedup.rt_scope_ids s
  where s.generation = %(generation)s::text
    and s.block_key = %(block_key)s::text
+   and s.listing_id > %(after_id)s::bigint
+   and (%(page_end)s::bigint is null or s.listing_id <= %(page_end)s::bigint)
    and not (s.listing_id = any(%(listing_ids)s::bigint[]))
 """
 
@@ -495,19 +514,6 @@ select s.block_key                                                     as block_
   from autodedup.rt_scope_scan s
  where s.generation = %(generation)s::text
  group by s.block_key
-"""
-
-# The blocks whose LATEST walk filled the slice (E961): listed short of their newest rows, so
-# read as unread — the reconcile waits on their groups and W8 refuses them — and named in the
-# pass's heartbeat. `rt_scope_scan` holds one row a walk (60 a day at most), so this is a scan
-# of a table that never leaves a few thousand rows.
-RT_SCOPE_TRUNCATED_SQL = """
-select s.block_key
-  from (select distinct on (s.block_key) s.block_key, s.rows_found
-          from autodedup.rt_scope_scan s
-         where s.generation = %(generation)s::text
-         order by s.block_key, s.scanned_at desc) s
- where s.rows_found >= %(slice)s::int
 """
 
 RT_SCOPE_SCAN_WRITE_SQL = """
@@ -1548,11 +1554,18 @@ select count(*)::bigint from gone
 # Which blocks this generation has EVER walked, with no 24-hour window on it. The cadence's own
 # state query is windowed (a block last walked two days ago has to read as due), but the
 # bootstrap phase ends on "every block has been walked once", which is a question about all of
-# history and cannot be asked of a rolling day.
+# history and cannot be asked of a rolling day. Walked means READ TO ITS END (E940): a block
+# still inside its first cycle of pages — `of` 0 in the generation's page row
+# (`incremental_lane.PAGES_SETTING`, spelled here too) — is not walked yet; a block with no entry
+# there was read whole by its first walk (every scan before E940 was).
 RT_SCOPE_SCAN_SEEN_SQL = """
 select distinct s.block_key
   from autodedup.rt_scope_scan s
  where s.generation = %(generation)s::text
+   and not exists (select 1
+                     from autodedup.settings p
+                    where p.key = 'rt_scope_pages:' || s.generation
+                      and (p.value -> s.block_key ->> 'of')::int = 0)
 """
 
 # How many in-scope listings this generation has not fingerprinted yet — the bootstrap phase's

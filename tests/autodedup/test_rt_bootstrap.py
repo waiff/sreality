@@ -24,6 +24,7 @@ import pytest
 
 from autodedup.incremental_lane import (
     BUILD_BYTES_PER_LISTING,
+    CUT_BYTES_PER_LISTING,
     CURSOR_ENTER,
     CURSOR_NEW,
     LANE_NAME,
@@ -295,12 +296,14 @@ def test_the_projection_subtracts_exactly_the_tables_the_reset_empties() -> None
 # The first check reads the schema before the seed has written a row. The walk then writes the
 # scope's snapshot, the cut the pHash population of every photograph in it, and the build ~12 kB
 # for every listing the walk put in scope: a scope widened from 7k to 38k adverts was budgeted on
-# none of that.
+# none of that. Since E940 the check runs between the walk and the cut, so a refusal never
+# spends the cut first, and it projects the cut's write (CUT_BYTES_PER_LISTING).
 
 
 def test_the_seed_refuses_when_its_build_would_cross_the_budget(tmp_path) -> None:
     """Under budget as it stands, over it once the build is counted: refused inside the seed's
-    transaction, so nothing the walk or the cut wrote survives, and the lease goes back."""
+    transaction and before the cut, so nothing the walk wrote survives, the cut never ran, and
+    the lease goes back."""
     db = _with_public(FakePg())
     in_scope = len(db.listings)
     build_mb = in_scope * BUILD_BYTES_PER_LISTING / _MB
@@ -312,29 +315,34 @@ def test_the_seed_refuses_when_its_build_would_cross_the_budget(tmp_path) -> Non
     assert "rolls back" in str(raised.value)
     assert db.rolled_back == 1
     assert not db.scope_ids and not db.scope_scans, "the walk rolled back"
-    assert not db.phash_pop, "the cut's pHash population rolled back"
+    assert not db.phash_pop and S.RT_CALIBRATION_WRITE_SQL not in db.statements, "no cut ran"
     assert not db.calibration and not db.cursors
     assert scope_setting_key(GEN) not in db.settings
     assert db.lease[LANE_NAME]["expires_at"] <= db.now, "the lease went back"
     assert S.RT_SCHEMA_SIZE_SQL in db.statements_in_tx, "re-read inside the transaction"
 
 
-def test_the_second_check_reads_the_schema_the_walk_and_the_cut_left(tmp_path,
-                                                                     monkeypatch) -> None:
-    """The schema AS IT NOW STANDS: what the snapshot and the pHash population added counts,
-    so a seed the first check let through is refused by what it wrote itself."""
+def test_the_second_check_reads_the_schema_the_walk_left_and_refuses_before_the_cut(
+        tmp_path, monkeypatch) -> None:
+    """The schema AS IT NOW STANDS: what the walk's snapshot added counts, so a seed the first
+    check let through is refused by what it wrote itself — before the cut, which it never
+    spends (E940)."""
     from autodedup import incremental_lane
 
     db = _with_public(FakePg())
     db.schema_bytes = int((MAX_SCHEMA_MB - 5) * _MB)
-    original = incremental_lane.cut_calibration
+    original = incremental_lane.SqlWork.refresh_scope_ids
 
-    def cut_that_writes(conn: FakePg, *args: Any, **kwargs: Any) -> Any:
-        conn.schema_bytes += 10 * _MB          # the population of a widened scope's photographs
-        return original(conn, *args, **kwargs)
+    def walk_that_writes(self: Any, *args: Any, **kwargs: Any) -> Any:
+        self.conn.schema_bytes += 10 * _MB     # the snapshot of a widened scope
+        return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(incremental_lane, "cut_calibration", cut_that_writes)
-    with pytest.raises(SystemExit, match="after the seed's walk and cut"):
+    def no_cut(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the cut ran before the storage check")
+
+    monkeypatch.setattr(incremental_lane.SqlWork, "refresh_scope_ids", walk_that_writes)
+    monkeypatch.setattr(incremental_lane, "cut_calibration", no_cut)
+    with pytest.raises(SystemExit, match="after the seed's walk, .* refusing before the cut"):
         run_rt_seed(lambda: db, dict(SCORER), tmp_path)
     assert not db.calibration
 
@@ -348,7 +356,9 @@ def test_a_seed_under_budget_reports_its_build_projection(tmp_path) -> None:
     in_scope = out["calibration"]["scope_listings"]
     assert build["build_listings"] == in_scope == len(db.listings)
     assert build["build_mb"] == round(in_scope * BUILD_BYTES_PER_LISTING / _MB, 2)
-    assert build["projected_mb"] == round(300 + in_scope * BUILD_BYTES_PER_LISTING / _MB, 2)
+    assert build["cut_mb"] == round(in_scope * CUT_BYTES_PER_LISTING / _MB, 2)
+    assert build["projected_mb"] == round(
+        300 + in_scope * (BUILD_BYTES_PER_LISTING + CUT_BYTES_PER_LISTING) / _MB, 2)
     assert "replaced_mb" not in build, "a seed that deletes nothing subtracts nothing"
     assert out["storage"]["schema_mb"] == 300.0 and "projected_mb" not in out["storage"]
 
@@ -365,7 +375,8 @@ def test_a_fresh_seeds_second_check_keeps_the_resets_projection(tmp_path) -> Non
     assert build["replaced_mb"] == out["storage"]["replaced_mb"] == 100.0
     # Carried as BYTES, not as the receipt's two-decimal MB.
     assert build["replaced_bytes"] == out["storage"]["replaced_bytes"] == 100 * _MB
-    assert build["projected_mb"] == round(MAX_SCHEMA_MB - 60 + build["build_mb"], 2)
+    assert build["projected_mb"] == round(
+        MAX_SCHEMA_MB - 60 + build["build_mb"] + build["cut_mb"], 2)
     assert S.RT_GENERATION_BYTES_SQL in db.statements
     assert db.statements.count(S.RT_GENERATION_BYTES_SQL) == 1, "measured once, before the reset"
 

@@ -21,7 +21,7 @@ from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import legacy_retire as L
 from autodedup import rt_lease
-from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL, RT_SCOPE_TRUNCATED_SQL
+from autodedup.incremental_sql import RT_SCOPE_SCAN_SEEN_SQL
 from tests.autodedup.test_apply import GEN, FakeDb
 from tests._property_ledger import _Ledger, ledger_carriers  # noqa: F401 — the fixture
 from toolkit.property_identity import (
@@ -1175,7 +1175,6 @@ class LiveStreamDb(RetireDb):
     def __init__(self) -> None:
         super().__init__()
         self.walked: set[str] = set(RT_KEYS)
-        self.truncated: set[str] = set()
         self.unread: set[str] = set()
         self.not_fingerprinted: set[int] = set()
 
@@ -1183,8 +1182,6 @@ class LiveStreamDb(RetireDb):
         if sql == L.UNREAD_SQL:
             assert p["generation"] == "rt"
             return [(lid,) for lid in p["area_ids"] if lid in self.not_fingerprinted]
-        if sql == RT_SCOPE_TRUNCATED_SQL:
-            return [(block,) for block in sorted(self.truncated)]
         if sql == RT_SCOPE_SCAN_SEEN_SQL:
             return [(block,) for block in sorted(self.walked)]
         if sql == S.RC_UNREAD_BLOCKS_SQL:

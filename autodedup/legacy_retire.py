@@ -176,8 +176,8 @@ select l.property_id, l.id, l.category_type,
 # property_merge_events_listing_live_idx (migration 560).
 # Under the live stream: the area's adverts with no fingerprint in it, which the lane has not read
 # (its block-level wait, `apply.rt_unread_blocks`, reads only the block's membership snapshot: an
-# advert re-located into the block since its last walk, or past the walk's `enter_slice` row cap,
-# is in no snapshot). `rt_fp` primary key (generation, listing_id).
+# advert re-located into the block since its last walk, or past the page a cycle has not reached
+# yet (E940), is in no snapshot). `rt_fp` primary key (generation, listing_id).
 UNREAD_SQL = """
 select a.listing_id
   from unnest(%(area_ids)s::bigint[]) as a(listing_id)

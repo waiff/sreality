@@ -304,8 +304,6 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "rss_mb": 388.0, "memory_limit_mb": 8192.0,
         "claim_cap": {"cap": 500, "reason": "rt_seed", "limit_mb": 8192.0},
         "predecessor_released": None,
-        # E961: no scope block's latest walk filled ENTER_SLICE
-        "scope_truncated": [],
         # E944: the calibration's age (the engine's summary names none here)
         "calibration_built_age_days": None,
         # E949: the engine's body and token memos at the pass's end, and the RSS once freed
@@ -323,6 +321,8 @@ def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         "ledger_skipped": 31, "ledger_written": 6,
         # E960: the neighbourhood re-retrieved from the store, and the adverts read, by why
         "dirty": 30, "reads": {"claim": 12, "decided": 9},
+        # E940: the pass walked no scope block and none is mid-cycle
+        "enter_scan": None,
     }
     for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
                  "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
@@ -497,6 +497,35 @@ def test_the_heartbeat_carries_the_pass_s_attempts(monkeypatch: pytest.MonkeyPat
 
     assert (last["attempts"], last["wanted_pairs"], last["wanted_by_attempt"], last["aborted"],
             last["errors"]) == expected
+
+
+def test_the_heartbeat_says_how_the_scope_walk_paged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E940: a walk that came back a full page is a PAGE on the heartbeat — how many this pass,
+    each block inside a cycle as [page, of], a cursor that does not advance, and the blocks the
+    daily cap left unfinished — never a silent truncation; a pass that walked nothing and holds
+    no block mid-cycle carries none."""
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch)
+    walk = {"block": "obec:554782", "rows": 20000, "after_id": 256097, "page": 3, "of": 9,
+            "end": False, "elapsed_ms": 98.1}
+    _stub_engine(monkeypatch, _summary(enter_scan={
+        **walk, "scans_24h": 41, "cap": 60, "blocks": [walk], "pages": 1,
+        "page_of": {"obec:554782": [3, 9], "okres:3209": [1, None]}, "stalled": [],
+        "seconds": 1.4}))
+    assert rw._autodedup_sync()["enter_scan"] == {
+        "walks": 1, "pages": 1, "page_of": {"obec:554782": [3, 9], "okres:3209": [1, None]},
+        "stalled": [], "scans_24h": 41, "cap": 60, "seconds": 1.4}
+
+    _stub_engine(monkeypatch, _summary(enter_scan={
+        "scans_24h": 60, "cap": 60, "blocks": [], "pages": 0,
+        "page_of": {"okres:3209": [1, None]}, "stalled": [], "seconds": 0.01,
+        "skipped": "daily cap", "unfinished": ["okres:3209"]}))
+    capped = rw._autodedup_sync()["enter_scan"]
+    assert (capped["walks"], capped["skipped"], capped["unfinished"]) \
+        == (0, "daily cap", ["okres:3209"])
+
+    _stub_engine(monkeypatch, _summary(enter_scan={}))
+    assert rw._autodedup_sync()["enter_scan"] is None
 
 
 def test_any_other_failure_is_the_lanes_failed_pass_and_closes_the_connection(

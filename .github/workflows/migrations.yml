@@ -475,6 +475,16 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_dissolved_closures_live.py -q
 
+      # E940, EXECUTED: the paged scope walk's three statements on seeded rows — a town's and an
+      # okres's keyset pages to their short end, the prune bounded to one page's id range, and
+      # the "read to its end" gate of RT_SCOPE_SCAN_SEEN_SQL over the page row. The fakes
+      # re-implement each predicate in Python, so a neutralised one passes there.
+      - name: The scope walk pages a block by a keyset and prunes only a page's range (E940)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_rt_scope_paging_live.py -q
+
       # The Judge page (migration 576), EXECUTED: which pairs its population holds (every judged
       # pair, oss excluded, and every sealed sample pair), each pair's headline, what each of the
       # four reasons picks and where the cap of 100 cuts, and that the cursor pages the one
